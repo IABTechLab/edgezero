@@ -7,7 +7,7 @@ use axum::http::{Request, request::Parts};
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::Request as CoreRequest;
-use edgezero_core::http::header::HOST;
+use edgezero_core::http::header::{CONTENT_TYPE, HOST};
 use edgezero_core::http::{HeaderMap, Uri};
 use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
@@ -21,6 +21,7 @@ use tokio::time::timeout;
 
 use crate::context::AxumRequestContext;
 use crate::outbound::AxumOutboundClient;
+use crate::run_options::JsonBodyLimit;
 
 /// Marks the plain HTTP listener owned by this adapter.
 #[derive(Clone, Copy)]
@@ -28,6 +29,8 @@ pub(crate) struct HttpTransport;
 
 /// Convert an Axum/Hyper request into an `EdgeZero` core request while preserving streaming bodies
 /// and exposing connection metadata through `AxumRequestContext`.
+/// Attaches a finite 2 MiB JSON buffering policy without reading ambient configuration.
+/// Taken streams and manual body collection do not enforce this policy.
 ///
 /// # Errors
 /// Returns an error if the outbound client cannot be initialized.
@@ -48,6 +51,7 @@ pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest
         axum_body,
         None,
         HttpClient::with_client(client),
+        JsonBodyLimit::DEFAULT,
     ))
 }
 
@@ -56,7 +60,13 @@ pub(crate) fn into_core_request_parts(
     axum_body: AxumBody,
     read_lifetime: Option<(Deadline, MonotonicClock)>,
     outbound_client: HttpClient,
+    json_body_limit: JsonBodyLimit,
 ) -> CoreRequest {
+    let ingress_is_json = parts
+        .headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_media_type);
     let transport = parts.extensions.remove::<HttpTransport>();
     let ingress = capture_request_ingress(&parts.uri, &parts.headers, transport);
     // A zero size hint can still leave trailers; only the transport's terminal signal is enough.
@@ -71,7 +81,8 @@ pub(crate) fn into_core_request_parts(
         }
     };
 
-    let mut core_request = CoreRequest::from_parts(parts, body);
+    let managed_body = body.with_buffered_json_policy(json_body_limit.get(), ingress_is_json);
+    let mut core_request = CoreRequest::from_parts(parts, managed_body);
     core_request.extensions_mut().insert(ingress);
 
     if let Some(remote_addr) = core_request
@@ -140,6 +151,13 @@ fn inbound_origin(
         }
     }
     Some(origin)
+}
+
+fn is_json_media_type(raw: &str) -> bool {
+    raw.parse::<mime::Mime>().is_ok_and(|media| {
+        media.type_() == mime::APPLICATION
+            && (media.subtype() == mime::JSON || media.suffix() == Some(mime::JSON))
+    })
 }
 
 fn deadline_body(
@@ -296,7 +314,13 @@ mod tests {
             let lifetime =
                 admitted.then(|| (Deadline::at_instant(now), MonotonicClock::new(move || now)));
             let (parts, native) = request.into_parts();
-            let core = into_core_request_parts(parts, native, lifetime, client.clone());
+            let core = into_core_request_parts(
+                parts,
+                native,
+                lifetime,
+                client.clone(),
+                JsonBodyLimit::DEFAULT,
+            );
             assert_eq!(core.body().as_bytes(), Some(b"".as_slice()));
             assert_eq!(polls.load(Ordering::SeqCst), 0);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -416,7 +440,8 @@ mod tests {
             .expect("request");
         let (parts, body) = request.into_parts();
 
-        let core_request = into_core_request_parts(parts, body, None, client);
+        let core_request =
+            into_core_request_parts(parts, body, None, client, JsonBodyLimit::DEFAULT);
         assert!(
             !core_request
                 .extensions()
@@ -438,6 +463,28 @@ mod tests {
             .await
             .expect("request conversion");
         assert!(AxumRequestContext::get(&core_request).is_none());
+    }
+
+    #[test]
+    fn ingress_json_classifier_validates_media_type_syntax() {
+        for raw in [
+            "application/json",
+            "APPLICATION/JSON; charset=utf-8",
+            "application/problem+json",
+            "application/vnd.fixture+json; profile=\"a;b\"",
+        ] {
+            assert!(is_json_media_type(raw), "{raw}");
+        }
+        for raw in [
+            "text/json",
+            "application/jsonp",
+            "application/json; broken",
+            "application/json extra",
+            "application/",
+            "",
+        ] {
+            assert!(!is_json_media_type(raw), "{raw}");
+        }
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::io;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -23,7 +24,35 @@ pub enum BodyPayload {
 /// A buffered or locally streamed HTTP body with optional response-egress ownership.
 pub struct Body {
     egress_owner: Option<Box<OutboundScopeOwner>>,
+    ingress_buffer: Option<IngressBuffer>,
     payload: BodyPayload,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BufferedJsonPolicy {
+    ceiling: NonZeroUsize,
+    ingress_is_json: bool,
+}
+
+impl BufferedJsonPolicy {
+    pub(crate) fn ceiling(self) -> NonZeroUsize {
+        self.ceiling
+    }
+
+    pub(crate) fn ingress_is_json(self) -> bool {
+        self.ingress_is_json
+    }
+}
+
+#[derive(Debug)]
+enum IngressBuffer {
+    Cached(BufferedJsonPolicy),
+    Initial(BufferedJsonPolicy),
+}
+
+pub(crate) enum BodyTransfer {
+    Cached(Bytes),
+    Initial(Body),
 }
 
 struct ManualBodyStream {
@@ -35,7 +64,64 @@ struct ScopedBodyStream {
     source: Option<Revocable<BodyStream>>,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "ingress policy transfer helpers precede the existing body accessors"
+)]
 impl Body {
+    /// Captures the immutable ingress JSON buffering policy without polling or copying.
+    /// Reattaching a policy preserves the original ceiling and classification.
+    #[must_use]
+    #[inline]
+    pub fn with_buffered_json_policy(
+        mut self,
+        ceiling: NonZeroUsize,
+        ingress_is_json: bool,
+    ) -> Self {
+        if self.ingress_buffer.is_none() {
+            self.ingress_buffer = Some(IngressBuffer::Initial(BufferedJsonPolicy {
+                ceiling,
+                ingress_is_json,
+            }));
+        }
+        self
+    }
+
+    pub(crate) fn into_transfer(mut self) -> (Option<BufferedJsonPolicy>, BodyTransfer) {
+        match self.ingress_buffer.take() {
+            Some(IngressBuffer::Cached(policy)) => {
+                let (payload, owner) = self.into_parts();
+                match (payload, owner) {
+                    (BodyPayload::Once(bytes), None) => (Some(policy), BodyTransfer::Cached(bytes)),
+                    (retained_payload, retained_owner) => (
+                        Some(policy),
+                        BodyTransfer::Initial(Self::from_parts(retained_payload, retained_owner)),
+                    ),
+                }
+            }
+            Some(IngressBuffer::Initial(policy)) => (Some(policy), BodyTransfer::Initial(self)),
+            None => (None, BodyTransfer::Initial(self)),
+        }
+    }
+
+    pub(crate) fn from_transfer(
+        policy: Option<BufferedJsonPolicy>,
+        transfer: BodyTransfer,
+    ) -> Self {
+        let (mut body, cached) = match transfer {
+            BodyTransfer::Initial(body) => (body, false),
+            BodyTransfer::Cached(bytes) => (Self::from_bytes(bytes), true),
+        };
+        body.ingress_buffer = policy.map(|selected| {
+            if cached {
+                IngressBuffer::Cached(selected)
+            } else {
+                IngressBuffer::Initial(selected)
+            }
+        });
+        body
+    }
+
     /// Returns the in-memory bytes for a buffered body, or `None` if this is
     /// a streaming body. To consume a streaming body into bytes, use
     /// [`Body::into_bytes_bounded`].
@@ -118,6 +204,7 @@ impl Body {
     ) -> Self {
         Self {
             egress_owner: egress_owner.map(Box::new),
+            ingress_buffer: None,
             payload,
         }
     }
@@ -194,6 +281,8 @@ impl Body {
 
     /// Separates payload and its exact optional egress owner without copying bytes.
     /// The caller must retain the owner through terminal response egress.
+    /// This application-owned/transport boundary discards ingress buffering policy and provenance;
+    /// context reconstruction uses the private body-preserving transfer instead.
     #[must_use]
     #[inline]
     pub fn into_parts(mut self) -> (BodyPayload, Option<OutboundScopeOwner>) {
@@ -373,6 +462,7 @@ impl fmt::Debug for Body {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Body")
+            .field("ingress_buffer", &self.ingress_buffer)
             .field("payload", &self.payload)
             .field("egress_owner", &self.egress_owner.is_some())
             .finish()
@@ -550,6 +640,41 @@ mod tests {
     }
 
     #[test]
+    fn ingress_policy_transfers_keep_the_exact_egress_owner_until_raw_handoff() {
+        for cached in [false, true] {
+            let original = Body::from("payload")
+                .with_buffered_json_policy(NonZeroUsize::new(4).expect("positive cap"), true);
+            let (policy, initial) = original.into_transfer();
+            let transfer = if cached {
+                BodyTransfer::Cached(Bytes::from_static(b"payload"))
+            } else {
+                initial
+            };
+            let owner = OutboundScopeOwner::response_body();
+            let scope = owner.scope();
+            let body = Body::from_transfer(policy, transfer)
+                .attach_egress_owner(owner)
+                .expect("attach exact owner");
+            let (retained_policy, retained) = body.into_transfer();
+            assert_eq!(retained_policy.expect("retained policy").ceiling().get(), 4);
+            scope
+                .check()
+                .expect("internal transfer keeps exact owner live");
+            let reconstructed = Body::from_transfer(retained_policy, retained);
+            let (payload, exact_owner) = reconstructed.into_parts();
+            scope.check().expect("raw split retains owner");
+            let raw = Body::from_parts(payload, exact_owner);
+            let (removed_policy, raw_transfer) = raw.into_transfer();
+            assert!(removed_policy.is_none());
+            scope
+                .check()
+                .expect("raw handoff still owns the same scope");
+            drop(raw_transfer);
+            assert!(scope.check().is_err());
+        }
+    }
+
+    #[test]
     fn manual_stream_conversion_retains_owner_until_consumption() {
         let owner = OutboundScopeOwner::response_body();
         let scope = owner.scope();
@@ -667,14 +792,14 @@ mod tests {
         let buffered_debug = format!("{buffered:?}");
         assert_eq!(
             buffered_debug,
-            "Body { payload: Once { len: 7 }, egress_owner: false }"
+            "Body { ingress_buffer: None, payload: Once { len: 7 }, egress_owner: false }"
         );
 
         let stream = Body::stream(stream::iter(vec![Bytes::from_static(b"chunk")]));
         let stream_debug = format!("{stream:?}");
         assert_eq!(
             stream_debug,
-            "Body { payload: Stream, egress_owner: false }"
+            "Body { ingress_buffer: None, payload: Stream, egress_owner: false }"
         );
     }
 
