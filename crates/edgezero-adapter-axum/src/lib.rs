@@ -11,6 +11,7 @@ mod connection;
 pub mod context;
 #[cfg(feature = "axum")]
 pub mod dev_server;
+pub mod diagnostics;
 #[cfg(feature = "axum")]
 mod header_deadline;
 pub mod ingress_config;
@@ -18,6 +19,8 @@ pub mod ingress_config;
 pub mod key_value_store;
 #[cfg(feature = "axum")]
 pub mod outbound;
+#[cfg(feature = "axum")]
+pub mod proxy;
 #[cfg(feature = "axum")]
 pub mod request;
 #[cfg(feature = "axum")]
