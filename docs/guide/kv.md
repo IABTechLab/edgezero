@@ -175,7 +175,7 @@ Both Fastly and Cloudflare KV stores are **eventually consistent**.
 
 - A value written at one edge location may not be immediately visible at another.
 - `read_modify_write()` is **not atomic**. Concurrent updates to the same key may result in lost writes.
-- **TTL**: `put_with_ttl` enforces a minimum of **60 seconds** and a maximum of **1 year** before delegating to an adapter. Spin KV does not support TTL, so the Spin adapter returns `KvError::Unsupported { operation: "put_bytes_with_ttl" }` without writing the value.
+- **TTL**: `put_with_ttl` enforces a minimum of **60 seconds** and, by default, a maximum of **1 year** before delegating to an adapter. Applications with longer retention windows can raise the cap per handle with `KvHandle::with_max_ttl` (for example `kv.named("events").map(|store| store.with_max_ttl(Duration::from_secs(3 * 365 * 24 * 60 * 60)))`); `max_ttl()` reports the active cap. Spin KV does not support TTL, so the Spin adapter returns `KvError::Unsupported { operation: "put_bytes_with_ttl" }` without writing the value.
 
 ## Limits & Validation
 
@@ -187,7 +187,7 @@ strictest common limits:
 | Key size      | Max **512 bytes** (Cloudflare limit) |
 | Value size    | Max **25 MB**                        |
 | TTL minimum   | **60 seconds**                       |
-| TTL maximum   | **1 year**                           |
+| TTL maximum   | **1 year** (default; `with_max_ttl`) |
 | List page max | **1000 keys**                        |
 | Empty keys    | Rejected                             |
 | Reserved keys | `.` and `..` rejected                |
