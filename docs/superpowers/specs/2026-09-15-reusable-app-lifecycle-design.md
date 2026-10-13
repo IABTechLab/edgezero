@@ -147,16 +147,18 @@ where
 
 1. Capture static `A::stores()` metadata.
 2. Enter the SDK callback before performing host-dependent initialization.
-3. Read runtime configuration for the current request.
-4. Complete first-snapshot logging setup through `Sandbox::setup_once`, honoring `A::owns_logging()`, then initialize with `App::build::<A>(FASTLY_PLATFORM)` through `Sandbox::initialize`.
+3. Resolve immutable logging settings with `A::logging_for("fastly")`.
+4. Complete logging setup through `Sandbox::setup_once`, honoring `A::owns_logging()`, then initialize with `App::build::<A>(FASTLY_PLATFORM)` through `Sandbox::initialize`.
 5. Retain the successfully constructed app for subsequent callbacks.
-6. Use the first runtime configuration read for the first dispatch; do not read it twice.
+6. Open fresh store handles through the deployed logical resource aliases on every dispatch; do not cache them with the application.
 7. On every request, use `request::send_request_with_registries_and_hooks` with fresh registries, admission, and response-egress resources. Preparation borrows the native request before admission; finalization borrows routed responses before egress policy and framing. Detached responses skip finalization.
 8. Return the SDK summary unchanged. Do not hide handler errors or synthesize a guaranteed request count.
 
-The logger's enablement, level, endpoint, and stdout policy are a first-initialization snapshot, even if runtime selectors later change. Store selector reads remain per request. Preserve the existing `FastlyLogging::from(&EnvConfig)` mapping: it derives enablement from endpoint presence and currently fixes `echo_stdout` to true rather than applying the corresponding runtime override. This feature does not change that mapping. `owns_logging` retains its existing meaning: skip adapter logger installation. An application adopting retained construction must arrange its own logger installation before construction if construction needs logging.
-
-**Degraded-first-read policy:** preserve the existing optional-store fallback and freeze the resulting logging decision for this sandbox. `runtime_env_config` does not distinguish an absent optional store from another store-open failure; both produce empty configuration. That disables named-endpoint logging for the sandbox even if a later runtime read succeeds. The `echo_stdout` value does not provide a fallback when no logger is installed. Later reads can restore store selectors but must not silently reconfigure the global logger. Test this explicitly. Applications requiring stricter logging availability must use the custom lifecycle with their own configuration-read and initialization policy. Adding a distinguishable read status, deferred logging initialization, or retry policy would require a separately reviewed API/ordering change; it is not implied by these helpers.
+The logger's enablement, level, endpoint, and stdout policy come from the
+application manifest and are immutable for the binary. `owns_logging` retains
+its existing meaning: skip adapter logger installation. An application adopting
+retained construction must arrange its own logger installation before
+construction if construction needs logging.
 
 Capture preparation and finalization callbacks in the serving closure and pass
 fresh mutable reborrows on every request. Do not move either callback out on the
@@ -197,8 +199,8 @@ response-returning dispatch helper is part of this path.
 
 Applications may capture retained state in a closure or pass it through `run_with_context`. Host-dependent or fallible initialization belongs inside the callback. A lightweight health response may bypass expensive initialization; retaining state must not require eager construction before every callback can run.
 
-Resolve `runtime_env_config` per callback, initialize logging before emitting its
-deferred boot diagnostics, and pass fresh store registries through the canonical
+Resolve baked logging once, initialize it before store-open boot diagnostics,
+and pass fresh logical store registries through the canonical
 send-owning path. Do not manually route a converted request and collect its body;
 that would bypass admission or duplicate response-egress ownership.
 
@@ -360,7 +362,7 @@ Complete required guest-owned post-send work within the Fastly callback. Finishi
 
 Cloning a wrapper or satisfying `Send + Sync` is not proof of host-resource validity or request isolation. Persistent `Arc` interiors are intentionally shared; the framework does not clear their contents between requests. Existing same-type extension overwrite behavior must be tested and documented, not changed here.
 
-Keep runtime configuration reads and store registry construction per request. Retained app state is a separate snapshot and will not automatically follow selector changes. A refresh must publish a coherent snapshot; in-flight requests keep the snapshot they acquired. Applications may choose not to refresh within an instance, but must document the resulting staleness policy.
+Keep store registry construction per request. Cloudflare and Spin resolve their runtime configuration per invocation; Fastly opens immutable deployed logical aliases. Retained app state is a separate snapshot and will not automatically follow configuration changes. A refresh must publish a coherent snapshot; in-flight requests keep the snapshot they acquired. Applications may choose not to refresh within an instance, but must document the resulting staleness policy.
 
 Audit all process-global and thread-local state, including `OnceLock` caches, warning suppression, and recursion guards. Static warning suppression can reduce log volume across requests; warning rate must not be interpreted as failure rate. The current bounded recent-name set can evict entries, so suppression is not an absolute once-per-sandbox guarantee. Verify guard cleanup on supported exit/error paths; the presence of a thread-local guard alone does not demonstrate leakage.
 
@@ -429,13 +431,13 @@ The listed surfaces are implemented; the original design-step authorization chec
 
 The current Fastly crate does not link native host tests when its `fastly` feature is enabled. Verification with `cargo test -p edgezero-adapter-fastly --features fastly --lib --offline` failed on arm64 with unresolved Fastly hostcalls, including `_uri_get`. This is pre-existing: the default workspace test gate omits that feature, while the feature-enabled `cargo check` gate type-checks without linking. Do not require native feature-enabled tests or add fake hostcall symbols to make them pass.
 
-The original private-helper plan is superseded by [the custom serving lifecycle plan](../plans/2026-09-17-custom-serving-lifecycle.md) and PR #275's outbound hard-cut. Public `lifecycle::Sandbox<T>` contains feature-independent retention state with no Fastly SDK types or hostcalls; standard serving uses its independent setup and successful-app guards. The production wrapper supplies fresh runtime configuration, fallible platform-aware assembly, and canonical send-owning dispatch. Host tests must exercise those same transitions, not a duplicate model. Keep these mechanics local to Fastly; no cross-provider lifecycle abstraction is introduced.
+The original private-helper plan is superseded by [the custom serving lifecycle plan](../plans/2026-09-17-custom-serving-lifecycle.md) and PR #275's outbound hard-cut. Public `lifecycle::Sandbox<T>` contains feature-independent retention state with no Fastly SDK types or hostcalls; standard serving uses its independent setup and successful-app guards. The production wrapper supplies baked logging, fresh logical bindings, fallible platform-aware assembly, and canonical send-owning dispatch. Host tests must exercise those same transitions, not a duplicate model. Keep these mechanics local to Fastly; no cross-provider lifecycle abstraction is introduced.
 
 Assign verification explicitly:
 
-- **Default host tests:** retained build/configure counts, first-initialization decisions, logger ownership/order through injected operations, degraded-then-successful configuration inputs preserving the first logging snapshot, terminal initialization errors, and fresh-owner reset. Pure core tests cover extension/state behavior without provider resources. Run `cargo test -p edgezero-adapter-fastly --lib` for the adapter logic.
+- **Default host tests:** retained build/configure counts, baked logger ownership/order through injected operations, terminal initialization errors, and fresh-owner reset. Pure core tests cover extension/state behavior without provider resources. Run `cargo test -p edgezero-adapter-fastly --lib` for the adapter logic.
 - **Feature-enabled checks:** type-check SDK wrapper integration and callback bounds, including target-specific checks. These checks do not prove runtime behavior.
-- **WASM/local provider fixtures (§9.2):** actual callback/build counts in reused instances, runtime-store failure/recovery where supported by controlled fixtures, real named-endpoint log delivery, native metadata/handles, stream completion, SDK summary counts/termination, and all other hostcall behavior. Fault injection proves only the injected case; unavailable provider failure modes must be reported separately.
+- **WASM/local provider fixtures (§9.2):** actual callback/build counts in reused instances, logical binding failure/recovery where supported by controlled fixtures, real named-endpoint log delivery, native metadata/handles, stream completion, SDK summary counts/termination, and all other hostcall behavior. Fault injection proves only the injected case; unavailable provider failure modes must be reported separately.
 
 The requirements below span these layers. They do not require provider calls inside native colocated tests. The warning about feature-disabled no-op stubs excludes claims about provider behavior, not valid tests of shared feature-independent production logic.
 
@@ -443,8 +445,8 @@ The requirements below span these layers. They do not require provider calls ins
 - Prove a concrete cache cannot return another application's router. No generic unkeyed static may appear in production or examples.
 - Verify fresh extensions, route parameters, headers, bodies, request IDs, and native metadata on successive requests.
 - Include same-type app/request extension collisions and intentionally shared `Arc` mutation, distinguishing intended sharing from leakage.
-- Verify store metadata, named/default bindings, runtime selectors, missing-store behavior, and recovery after a request-specific binding failure.
-- Verify logger ownership, ordering, first-initialization policy, and Fastly named-endpoint output on subsequent requests. Include a degraded first runtime-store read followed by a successful read: selectors recover while the logging snapshot remains disabled, as specified in §4.2.
+- Verify store metadata, named/default bindings, deployed logical aliases, missing-store behavior, and recovery after a request-specific binding failure. Verify invocation-scoped selectors separately on targets that support them.
+- Verify logger ownership, ordering, baked initialization policy, and Fastly named-endpoint output on subsequent requests. A binding failure must not change the release's logging policy.
 - Verify standard errors and custom send outcomes; initialization errors, constructor panic, pre-commit errors, post-commit stream errors, and later fresh initialization are separate cases.
 - Keep existing duplicate `Set-Cookie` and body tests. Add actual delayed-chunk/first-byte tests for paths that support progressive client streaming.
 - Compile examples against the locked SDKs on their actual targets. Host tests with feature-disabled no-op stubs do not validate provider behavior.
@@ -478,11 +480,11 @@ A sequential request sequence alone does not prove reuse: observe a stable insta
 
 B's logging qualification is mandatory: blindly wrapping the enabled-logger `run_app` would fail on its second installation and confound the comparison. Test that failure separately as a negative control. Keep dispatch, configuration, lazy delivery, and workloads identical between variants. Do not compare historical buffered helpers against current streamed delivery.
 
-Implement B through `lifecycle::serve_custom`: a successful once-only logging
-decision, per-callback `runtime_env_config` and `App::build::<A>(FASTLY_PLATFORM)`,
+Implement B through `lifecycle::serve_custom`: a successful once-only baked logging
+decision, per-callback `App::build::<A>(FASTLY_PLATFORM)`,
 then `request::send_request_with_registries_and_hooks`. Do not use retaining
-`serve_app` for B. Apply the same first-read logging policy in B and C so degraded
-configuration does not introduce a second experimental variable.
+`serve_app` for B. Apply the same baked logging policy in B and C so configuration
+does not introduce a second experimental variable.
 
 Collect:
 

@@ -62,6 +62,11 @@ impl ResolvedRuntime {
     }
 
     #[inline]
+    pub(crate) fn manifest_loader(&self) -> Option<&ManifestLoader> {
+        self.contract.as_ref().map(|contract| &contract.loader)
+    }
+
+    #[inline]
     pub(crate) fn manifest_path(&self) -> Option<&Path> {
         self.contract.as_ref().map(ResolvedManifest::path)
     }

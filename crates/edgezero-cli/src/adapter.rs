@@ -1,5 +1,7 @@
 use edgezero_adapter::cli_support::validate_spin_outbound_host_contract;
-use edgezero_adapter::registry::{self as adapter_registry, AdapterAction};
+use edgezero_adapter::registry::{
+    self as adapter_registry, AdapterAction, AdapterDeployContext, DeployOwnership,
+};
 use edgezero_core::manifest::{
     CapabilitySupport, Manifest, ManifestContract, ManifestLoader, ResolvedEnvironment,
 };
@@ -128,16 +130,23 @@ pub fn execute(
         );
     }
 
-    let adapter = adapter_registry::get_adapter(adapter_name).ok_or_else(|| {
+    let adapter = require_adapter(adapter_name, manifest_loader.is_some())?;
+
+    adapter.execute(AdapterAction::from(action), adapter_args)
+}
+
+fn require_adapter(
+    adapter_name: &str,
+    has_manifest: bool,
+) -> Result<&'static dyn adapter_registry::Adapter, String> {
+    adapter_registry::get_adapter(adapter_name).ok_or_else(|| {
         let available = adapter_registry::registered_adapters();
         if available.is_empty() {
-            if manifest_loader.is_none() {
-                format!(
-                    "adapter `{adapter_name}` is not registered in this build. Provide an `edgezero.toml` (or set `EDGEZERO_MANIFEST`) so the CLI can load adapters, or rebuild `edgezero-cli` with the `{adapter_name}` adapter feature enabled."
-                )
+            if has_manifest {
+                format!("adapter `{adapter_name}` is not registered (no adapters available)")
             } else {
                 format!(
-                    "adapter `{adapter_name}` is not registered (no adapters available)"
+                    "adapter `{adapter_name}` is not registered in this build. Provide an `edgezero.toml` (or set `EDGEZERO_MANIFEST`) so the CLI can load adapters, or rebuild `edgezero-cli` with the `{adapter_name}` adapter feature enabled."
                 )
             }
         } else {
@@ -147,49 +156,99 @@ pub fn execute(
                 available.join(", ")
             )
         }
-    })?;
-
-    adapter.execute(AdapterAction::from(action), adapter_args)
+    })
 }
 
-/// Same dispatch as [`execute`], but when the action resolves to a
-/// manifest-declared shell command the child's output is echoed AND
-/// captured (see [`run_shell_tee`]) and returned as `Some(text)`.
-///
-/// Returns `Ok(None)` when the action was served by the registered
-/// adapter's built-in `execute` instead — that path writes straight to
-/// the inherited stdio, so there is nothing for us to capture and the
-/// caller must fall back to another source of truth (for Fastly deploy:
-/// the Fastly API).
-#[expect(
-    dead_code,
-    reason = "retained operational dispatcher API; runtime-producing actions use execute_capture_runtime"
-)]
-pub fn execute_capture(
+/// Select deployment ownership through the registered adapter's preflight.
+/// Manifest-owned and fallback deployments invoke the finalizer, while
+/// adapter-managed deployments own the complete lifecycle in `deploy`.
+pub fn deploy(
     adapter_name: &str,
-    action: Action,
+    context: &AdapterDeployContext,
+    adapter_manifest_path_error: Option<&str>,
     manifest_loader: Option<&ManifestLoader>,
     adapter_args: &[String],
-) -> Result<Option<String>, String> {
-    if let Some(loader) = manifest_loader
-        && let Some(command) = manifest_command(loader.manifest(), adapter_name, action)
+) -> Result<(), String> {
+    let registered_adapter = adapter_registry::get_adapter(adapter_name);
+    let ownership = registered_adapter
+        .map_or(Ok(DeployOwnership::ManifestCommand), |registered| {
+            registered.preflight_deploy(context, adapter_args)
+        })?;
+
+    if ownership != DeployOwnership::AdapterManaged && context.application_release_root.is_some() {
+        return Err(format!(
+            "adapter `{adapter_name}` does not support immutable application releases; omit --application-release"
+        ));
+    }
+
+    if ownership == DeployOwnership::AdapterManaged {
+        if let Some(err) = adapter_manifest_path_error {
+            return Err(err.to_owned());
+        }
+        let Some(managed_adapter) = registered_adapter else {
+            return Err(format!(
+                "adapter `{adapter_name}` selected managed deployment without being registered"
+            ));
+        };
+        return managed_adapter.deploy(context, adapter_args);
+    }
+
+    if !context.staging
+        && let Some(loader) = manifest_loader
+        && let Some(command) = manifest_command(loader.manifest(), adapter_name, Action::Deploy)
     {
+        if registered_adapter.is_some()
+            && !context.stores.is_empty()
+            && let Some(err) = adapter_manifest_path_error
+        {
+            return Err(err.to_owned());
+        }
         let root = loader.manifest().root().unwrap_or_else(|| Path::new("."));
         let env = loader.manifest().environment_for(adapter_name);
         let adapter_bind = adapter_bind_from_manifest(loader.manifest(), adapter_name);
-        return run_shell_tee(
+        let mut command_args = Vec::new();
+        if let Some(service_id) = context.service_id.as_deref() {
+            command_args.extend(["--service-id".to_owned(), service_id.to_owned()]);
+        }
+        command_args.extend_from_slice(adapter_args);
+        let output = run_shell_tee(
             command,
             root,
             adapter_name,
-            action,
+            Action::Deploy,
             Some(env),
             adapter_bind,
-            adapter_args,
-        )
-        .map(Some);
+            &command_args,
+        )?;
+        if let Some(finalizer) = registered_adapter {
+            finalizer.finalize_deploy(context, Some(&output))?;
+        }
+        return Ok(());
     }
-    execute(adapter_name, action, manifest_loader, adapter_args)?;
-    Ok(None)
+
+    if let Some(err) = adapter_manifest_path_error {
+        return Err(err.to_owned());
+    }
+    let fallback_adapter = require_adapter(adapter_name, manifest_loader.is_some())?;
+    fallback_adapter.deploy(context, adapter_args)?;
+    fallback_adapter.finalize_deploy(context, None)
+}
+
+/// Check the selected runtime contract before deployment preflight or provider work.
+pub(crate) fn deploy_runtime(
+    runtime: &ResolvedRuntime,
+    context: &AdapterDeployContext,
+    adapter_manifest_path_error: Option<&str>,
+    adapter_args: &[String],
+) -> Result<(), String> {
+    ensure_action_capabilities(runtime)?;
+    deploy(
+        runtime.adapter_name(),
+        context,
+        adapter_manifest_path_error,
+        runtime.manifest_loader(),
+        adapter_args,
+    )
 }
 
 /// Dispatch a runtime-producing action against one pre-resolved target/contract pair.
@@ -199,28 +258,6 @@ pub(crate) fn execute_runtime(
 ) -> Result<(), String> {
     ensure_action_capabilities(runtime)?;
     execute_after_gate(runtime, adapter_args)
-}
-
-/// Capturing variant of [`execute_runtime`] for manifest shell commands.
-pub(crate) fn execute_capture_runtime(
-    runtime: &ResolvedRuntime,
-    adapter_args: &[String],
-) -> Result<Option<String>, String> {
-    ensure_action_capabilities(runtime)?;
-    if let ResolvedAdapterTarget::Shell(shell) = runtime.target() {
-        return run_shell_tee(
-            shell.command(),
-            shell.root(),
-            runtime.adapter_name(),
-            runtime.action(),
-            Some(shell.environment().clone()),
-            (shell.bind_host().map(str::to_owned), shell.bind_port()),
-            adapter_args,
-        )
-        .map(Some);
-    }
-    execute_registered_after_gate(runtime, adapter_args)?;
-    Ok(None)
 }
 
 fn ensure_action_capabilities(runtime: &ResolvedRuntime) -> Result<(), String> {
@@ -309,7 +346,9 @@ fn execute_registered_after_gate(
     )
 }
 
-fn resolve_environment_defaults(environment: &ResolvedEnvironment) -> Vec<(String, String)> {
+pub(crate) fn resolve_environment_defaults(
+    environment: &ResolvedEnvironment,
+) -> Vec<(String, String)> {
     let mut defaults = Vec::new();
     for binding in &environment.variables {
         if let Some(value) = &binding.value
@@ -660,7 +699,10 @@ fn shell_join(args: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedEnvironment, apply_environment, ensure_capabilities, execute_runtime};
+    use super::{
+        AdapterDeployContext, ResolvedEnvironment, apply_environment, deploy, ensure_capabilities,
+        execute_runtime,
+    };
     use crate::adapter::Action;
     use crate::manifest_source::resolve_runtime_from;
     use crate::test_support::manifest_guard;
@@ -674,6 +716,7 @@ mod tests {
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -827,6 +870,21 @@ mod tests {
             let _parent = EnvOverride::set(KEY, value);
             assert!(super::resolve_environment_defaults(&resolved).is_empty());
         }
+    }
+
+    #[test]
+    fn deploy_rejects_application_release_for_non_managed_adapter() {
+        let context = AdapterDeployContext {
+            application_release_root: Some(PathBuf::from("/verified/release")),
+            ..AdapterDeployContext::default()
+        };
+
+        let error = deploy("unregistered", &context, None, None, &[])
+            .expect_err("a manifest-owned adapter must not ignore the release contract");
+        assert_eq!(
+            error,
+            "adapter `unregistered` does not support immutable application releases; omit --application-release"
+        );
     }
 
     #[test]

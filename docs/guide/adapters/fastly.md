@@ -39,12 +39,19 @@ authors = ["you@example.com"]
     url = "https://your-origin.example.com"
 ```
 
-`edgezero provision --adapter fastly` writes `[setup.kv_stores]`,
-`[setup.secret_stores]` and `[setup.config_stores]` entries into `fastly.toml`,
-keyed by each store's env-resolved platform name. It deliberately leaves the
-Viceroy-only `[local_server.*]` tables alone: the config-store stanzas there are
-written by your generated app CLI, `<app-cli> config push --adapter fastly --local` (the bundled `edgezero` binary has no typed app config and exits 2), and KV / secret
-local-server seeding is hand-edited.
+`edgezero provision --adapter fastly` creates each declared store and writes a
+`[setup.kv_stores]`, `[setup.secret_stores]` or `[setup.config_stores]` entry
+into `fastly.toml`, keyed by the store's logical ID. It writes that entry only
+when the physical store name equals the logical ID. A different physical name
+needs a selected service (`service_id` in `fastly.toml` or `FASTLY_SERVICE_ID`),
+and provision leaves `fastly.toml` unchanged for that store. Whenever a service
+is selected, provision prints the `fastly service resource-link create` command
+that links each new store under its logical ID, because an existing service does
+not re-run `[setup]`. Provision leaves the Viceroy-only `[local_server.*]` tables
+alone. The config-store stanzas there are written by your generated app CLI,
+`<app-cli> config push --adapter fastly --local` (the bundled `edgezero` binary
+has no typed app config and exits 2), and KV / secret local-server seeding is
+hand-edited.
 
 ### Entrypoint
 
@@ -61,17 +68,24 @@ pub fn main() -> Result<(), fastly::Error> {
 Do not add Fastly's response-returning entrypoint attribute. EdgeZero initializes the ABI,
 receives the client request, and owns `stream_to_client` through final body-handle close.
 
-`run_app` reads logging and store config at runtime from `EDGEZERO__*`
-environment variables (see
-[the migration guide](../manifest-store-migration.md)) and builds
-per-id `KV` / `Config` / `Secret` registries from the portable store
-metadata baked into `App` by the `app!` macro. No `edgezero.toml` is
-loaded by the runtime.
+`run_app` builds per-id `KV` / `Config` / `Secret` registries from the portable
+store metadata baked into `App` by the `app!` macro. Logging settings are baked
+in at the same time. Managed deployments resolve `EDGEZERO__*` store selectors
+and link each physical resource under its logical ID; neither `edgezero.toml`
+nor the deployment environment is read by the runtime. See
+[the migration guide](../manifest-store-migration.md).
 If `Hooks::configure` fails, `run_app` returns the source-preserving
 `application configuration failed` error before receiving the client request.
 
 For fully manual wiring, build `FastlyService`, attach stores as needed, and call its send-owning
 `send()` method. Prefer `run_app` for manifest-driven store resolution.
+
+Fastly store `__NAME` selectors are deployment inputs. The runtime opens logical
+aliases directly, and Config Stores use the logical ID as the entry key. Remove
+runtime selector-store reads and Fastly `__KEY` overrides when migrating a custom
+entrypoint; use the canonical send-owning helper below. Logging endpoint, level
+and stdout behavior come from `Hooks::logging_for("fastly")` and cannot vary
+between staging and production for the same immutable application release.
 
 ### Capturing raw-request signals (JA4, H2 fingerprint)
 
@@ -115,7 +129,8 @@ response-returning dispatch operation.
 
 ### Owning your own logging
 
-When a log endpoint is configured, `run_app` initializes the Fastly logger. If your app installs
+By default `run_app` initializes the Fastly logger when the baked
+`[adapters.fastly.logging]` table sets an `endpoint`. If your app already installs
 a `log` backend, opt out with the platform-neutral `Hooks::owns_logging()` flag —
 via the `app!` macro:
 
@@ -125,42 +140,8 @@ edgezero_core::app!("edgezero.toml", owns_logging = true);
 
 or on a hand-written `Hooks` impl (`fn owns_logging() -> bool { true }`). Every
 adapter's `run_app` honors it. The app must install its backend **before** entering the runner,
-apply the configured runtime level, and set both backend and facade filters. Use
-`edgezero_core::resolve_logging_level(&env)` for consistent level resolution; raising only
+apply `Hooks::logging_for("fastly").level`, and set both backend and facade filters. Raising only
 `log::set_max_level` does not override `log_fastly`'s internal filter.
-
-### Custom entry points
-
-Compute@Edge has no process environment, so the `EDGEZERO__*` runtime overrides
-(logging settings, per-store platform names, the config-store `__KEY` selector)
-are read from a Fastly Config Store named `edgezero_runtime_env`, exported as
-`RUNTIME_ENV_STORE_NAME`. Entries in that store are service-scoped
-(`EDGEZERO__SERVICES__<SERVICE_ID>__…`, see [Config Store](#config-store));
-`runtime_env_config` translates them back to the canonical unscoped keys the
-rest of the runtime reads. The name is fixed because staging deploys rely on it:
-a staging deploy creates a per-service twin and links it into the staging version
-under that same name. `run_app` and `run_app_with_hooks` read the store for you.
-
-Use `run_app_with_hooks` when custom request preparation or routed-response finalization is needed;
-the adapter retains response ownership and returns finalizer state only after terminal delivery.
-`run_app_with_config` and a hand-built `FastlyService` do **not** apply the env overlay, so staging
-and overridden `__NAME` / `__KEY` selectors fall back to baked-in defaults. A fully manual
-entrypoint must call `runtime_env_config` and use `request::send_with_registries_and_hooks` for parity
-with `run_app`. Inside a serving callback, use `request::send_request_with_registries_and_hooks`
-with the already-received request; the receiving helper would attempt to receive another request.
-A hand-written `Hooks` implementation must also override `stores()` or pass explicit
-`StoresMetadata`; the trait default declares no stores.
-
-`runtime_env_config` returns `FastlyRuntimeConfig`, not `EnvConfig`. It performs no logging:
-use `config.env` for logger and dispatch setup, then call `config.emit_boot_diagnostics()` after
-installing the backend. An unavailable runtime Config Store produces one deferred, fixed-message
-boot warning, consumed at most once. Without an installed backend it is not observable.
-`run_app` and `run_app_with_hooks` do this automatically, including when application configuration
-fails. `run_app_with_config` does not collect the runtime-env diagnostic.
-
-`FastlyLogging::from(&EnvConfig)` derives `use_fastly_logger` from
-`endpoint.is_some()`, which is what keeps a local Viceroy run off the reserved
-`stdout` endpoint when no endpoint is configured.
 
 ## Building
 
@@ -192,15 +173,21 @@ This starts a local server at `http://127.0.0.1:7676`.
 
 ## Deployment
 
-Deploy to Fastly Compute@Edge:
+Deploy a verified application release with the adapter-managed lifecycle:
 
 ```bash
-# Using the CLI
-edgezero deploy --adapter fastly
-
-# Or directly
-fastly compute deploy -C crates/my-app-adapter-fastly
+EDGEZERO_MANIFEST="$RELEASE_ROOT/edgezero.toml" \
+edgezero deploy --adapter fastly \
+  --service-id "$FASTLY_SERVICE_ID" \
+  --application-release "$RELEASE_ROOT"
 ```
+
+The release fixes the package, `edgezero.toml`, and its referenced Fastly
+manifest before deployment selects physical resource links. A bare
+`edgezero deploy --adapter fastly` supports store-free production deployments
+using a manifest command. Staging and any deployment that
+declares a Config, KV, or Secret Store require the verified release-backed
+managed command above.
 
 ## Backends
 
@@ -218,16 +205,14 @@ preempted, so downstream streaming and response-egress guarantees remain BestEff
 
 ## Logging
 
-Fastly uses endpoint-based logging. The runtime reads its logging settings from
-`EDGEZERO__LOGGING__LEVEL` and `EDGEZERO__LOGGING__ENDPOINT` in the
-`edgezero_runtime_env` Config Store (see
-[Custom entry points](#custom-entry-points)), not from `edgezero.toml`. Setting
-`ENDPOINT` is what enables the Fastly logger; with it unset, no platform logger
-is installed. `EDGEZERO__LOGGING__ECHO_STDOUT` and
-`EDGEZERO__LOGGING__USE_FASTLY_LOGGER` are resolved into `EnvConfig` but not
-applied on this path: stdout echo is always on, and logger use is derived from
-`ENDPOINT` alone. An `[adapters.fastly.logging]` table in `edgezero.toml` is
-consumed only by `edgezero new` when scaffolding.
+Fastly uses endpoint-based logging. Configure logging in `edgezero.toml`:
+
+```toml
+[adapters.fastly.logging]
+endpoint = "stdout"
+level = "info"
+echo_stdout = true
+```
 
 Managed Fastly logging keeps the `edgezero::boot` target at `Warn` while ordinary records use
 the configured level. Both the SDK and facade allow boot warnings even at ordinary `Off`;
@@ -246,45 +231,69 @@ fn main() {
 ```
 
 ::: tip Logging status
-Fastly logging is wired when you call `init_logger`, or when `run_app` finds `EDGEZERO__LOGGING__ENDPOINT` set; otherwise no logger is installed.
+Fastly logging is wired when you call `init_logger`, or when `run_app` finds an `endpoint` in the baked `[adapters.fastly.logging]` table and `owns_logging()` is `false`; otherwise no logger is installed.
 :::
 
-## Config Store
+## Store selection and deployment
 
-Fastly uses a native Config Store resource link for runtime configuration. Declare logical config
-ids in `edgezero.toml`; each id opens its own platform store via
-`EDGEZERO__STORES__CONFIG__<ID>__NAME` (default = the logical id):
-
-Because `edgezero_runtime_env` is an account-wide Fastly resource, its stored
-keys are scoped by the current service ID:
+Fastly Compute applications open Config, KV, and Secret Stores by resource-link
+name. EdgeZero bakes the logical IDs declared in `edgezero.toml` into the package.
+A managed deployment resolves these optional deployment selectors:
 
 ```text
-EDGEZERO__SERVICES__<SERVICE_ID>__STORES__CONFIG__<ID>__NAME
-EDGEZERO__SERVICES__<SERVICE_ID>__STORES__CONFIG__<ID>__KEY
+EDGEZERO__STORES__CONFIG__<ID>__NAME
+EDGEZERO__STORES__KV__<ID>__NAME
+EDGEZERO__STORES__SECRETS__<ID>__NAME
 ```
 
-The runtime obtains `<SERVICE_ID>` from Fastly and translates these entries back
-to the portable `EDGEZERO__STORES__*` form. Legacy unscoped entries are ignored
-because they have no safe owner when the Config Store is linked to multiple
-services. Re-run `edgezero provision --adapter fastly` to write scoped `__NAME`
-entries, and rewrite any manually managed adapter, logging, or `__KEY` entries
-under the service prefix. Provision writes only the selected service's
-namespace; a non-default store-name mapping therefore requires top-level
-`service_id` in `fastly.toml` or `FASTLY_SERVICE_ID`. If both are set, they must
-match.
+Each selected physical store is linked to the unpublished target version under
+the stable logical `<ID>` alias. An absent `__NAME` defaults to `<ID>`; a present
+blank or invalid value fails before provider mutation. The same logical ID can be
+used independently by Config, KV, and Secret Stores because link identity is the
+pair `(resource kind, logical ID)`.
 
-Viceroy reports `0000000000000000000000` as its local service ID. Entries in a
-local `[local_server.config_stores.edgezero_runtime_env.contents]` block must
-therefore use `EDGEZERO__SERVICES__0000000000000000000000__...`, not the
-production service ID or the unscoped canonical key.
+Config keys are deterministic on Fastly: production, staging, and local Viceroy
+all read `<ID>`. The selected Environment chooses the physical store through
+`__NAME`; the same name shares config and different names isolate it. A
+conflicting `__KEY` or `--key` fails before a write. Logging is resolved from
+`[adapters.fastly.logging]` when the package is built.
+
+Before publication, EdgeZero:
+
+1. verifies the immutable release package and manifests;
+2. resolves complete Config, KV, and Secret Store inventories;
+3. selects the exact active, staged, or initialized-draft source;
+4. uploads the verified package to an unreachable draft;
+5. replaces declared links whose selected physical resource changed and creates
+   missing declared links under their logical aliases;
+6. preserves links not declared by the application;
+7. re-reads the exact links, source state, draft state, and provider-visible
+   package identity; and
+8. stages or activates the prepared version without another EdgeZero mutation.
+
+Production and staging can select different physical resources while deploying
+identical package bytes. Secret Stores remain optional. Links the application
+does not declare are preserved.
+
+### Declaring and using stores
+
+Declare portable logical IDs in `edgezero.toml`:
 
 ```toml
 [stores.config]
-ids     = ["app_config"]
-# default = "app_config"   # required when ids.len() > 1
+ids = ["app_config"]
+
+[stores.kv]
+ids = ["cache"]
+
+# Optional: omit this table when the app uses no Secret Store.
+[stores.secrets]
+ids = ["credentials"]
 ```
 
-For local Viceroy testing, mirror the platform name in `fastly.toml`:
+For local Viceroy tests, expose the Config Store under its logical ID and
+write the production key under that store. Local Viceroy uses the production
+key because it has no Fastly staging publication state:
 
 ```toml
 [local_server.config_stores.app_config]
@@ -294,11 +303,14 @@ format = "inline-toml"
 greeting = "hello from config store"
 ```
 
-Handlers read values through the `Config` extractor or `ctx.config_store(id)`:
+Handlers read values through the `Config` extractor or
+`ctx.config_store(id)`:
 
 ```rust
 async fn handler(config: Config) -> Result<Response, EdgeError> {
-    let store = config.named("app_config").ok_or_else(|| EdgeError::service_unavailable("no `app_config`"))?;
+    let store = config
+        .named("app_config")
+        .ok_or_else(|| EdgeError::service_unavailable("no `app_config`"))?;
     let greeting = store.get("greeting").await?.unwrap_or_default();
     // …
 }
@@ -309,6 +321,7 @@ and retains a typed failing declared binding, rather than reporting intentional 
 Raw values are shared `ConfigValue` UTF-8 payloads; use `as_str()` to borrow them.
 Migrating from `name`/`adapters.*`?
 See [the migration guide](../manifest-store-migration.md).
+See [the GitHub Actions guide](../deploy-github-actions.md) for the immutable-release workflow.
 
 ## Context Access
 
@@ -392,26 +405,19 @@ finalizer's state after delivery; use the request-level send helper in a custom
 callback when post-send work needs that state.
 
 The first request initializes logging and builds the app through
-`App::build::<MyApp>(FASTLY_PLATFORM) -> Result<App, EdgeError>`. Each request reads
-runtime configuration and constructs new store registries. Successful app construction
+`App::build::<MyApp>(FASTLY_PLATFORM) -> Result<App, EdgeError>`. Each request constructs
+fresh store registries using deployed logical aliases. Successful app construction
 and `configure` execute once per sandbox; explicit work elsewhere still executes
 whenever the application calls it. Both hooks and their captures are retained for
 the whole serving loop; the supplied native request, extensions, and response are
 request-local. Create request-specific mutable data inside the preparation hook
 or store it in those extensions.
 
-Logging takes the first configuration snapshot, unless the app owns logging.
-An unavailable optional runtime configuration store disables logging for that
-sandbox, even if subsequent reads recover store selectors. It does not silently
-retry or reconfigure logging. The current overlay enables logging when an
-endpoint exists and uses `echo_stdout: true`. Applications requiring another
-initialization policy should use `lifecycle::serve_custom` and `setup_once`.
-`runtime_env_config` returns `FastlyRuntimeConfig` with its public `env` and deferred
-diagnostics. The standard helper emits those diagnostics after the logging setup
-decision. Custom callbacks must likewise call `emit_boot_diagnostics()` after
-installing their logger. Each configuration value consumes its pending warning at
-most once; without a backend it is not observable. Absence of a warning does not
-establish a healthy configuration read.
+Logging uses the immutable baked settings, unless the app owns logging. Setup
+completes once per sandbox and does not reconfigure filters on later callbacks.
+Applications requiring another initialization policy should use
+`lifecycle::serve_custom` and `setup_once`. Store-open diagnostics use the bounded
+boot channel after logger setup; an absent warning is not proof of a healthy binding.
 
 SDK 0.13.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
 `with_max_memory`. A value of zero disables the request-count or memory limit;
@@ -450,7 +456,7 @@ application-owned `T`. Initialize lazily so health checks can bypass expensive
 construction.
 
 For an EdgeZero response, call `request::send_request_with_registries_and_hooks`
-with the app, store metadata, received request, `&runtime.env`, preparation hook,
+with the app, store metadata, received request, preparation hook,
 and finalization hook. It runs canonical admission, injects fresh `Kv`, `Config`,
 `Secrets`, and `AppConfig` registries, then owns framing, streaming, deadlines, and
 terminal delivery. Preparation borrows a mutable native request and extension bag;
@@ -488,11 +494,11 @@ response-returning conversion or whole-body compatibility path.
 Follow this order inside a callback:
 
 1. Explicitly send lightweight health responses before expensive initialization.
-2. Read fresh `runtime_env_config(MyApp::stores())` and use `runtime.env` for logger
-   and store setup. Use `sandbox.setup_once` to guard successful logger setup independently from
+2. Resolve baked logging with `FastlyLogging::from(MyApp::logging_for("fastly"))`.
+   Use `sandbox.setup_once` to guard successful logger setup independently from
    app construction. Failed setup leaves the guard unset; partial side effects
-   are not rolled back, so retries must be safe. Emit boot diagnostics after the
-   logger is installed, not while reading configuration.
+   are not rolled back, so retries must be safe. The closed send helper opens fresh
+   logical store bindings after logger setup.
 3. Call `sandbox.initialize` with `App::build::<MyApp>(FASTLY_PLATFORM)` for a core
    app, mapping its typed error at the adapter boundary. Success fills the slot;
    failure leaves it empty and returns the error unchanged. Read the value
@@ -530,7 +536,7 @@ installs `FASTLY_PLATFORM` before application configuration:
 ```rust
 use edgezero_adapter_fastly::lifecycle::{self, Sandbox};
 use edgezero_adapter_fastly::{
-    FASTLY_PLATFORM, FastlyLogging, Serve, init_logger, request, runtime_env_config,
+    FASTLY_PLATFORM, FastlyLogging, Serve, init_logger, request,
 };
 use edgezero_core::app::{App, Hooks};
 use my_app_core::App as MyApp;
@@ -545,9 +551,8 @@ fn handle(req: fastly::Request, sandbox: &mut Sandbox<App>) -> Result<(), fastly
         return Ok(());
     }
     let stores = MyApp::stores();
-    let mut runtime = runtime_env_config(stores);
     sandbox.setup_once(|| {
-        let logging = FastlyLogging::from(&runtime.env);
+        let logging = FastlyLogging::from(MyApp::logging_for("fastly"));
         if logging.use_fastly_logger && !MyApp::owns_logging() {
             init_logger(
                 logging.endpoint.as_deref().expect("configured endpoint"),
@@ -557,14 +562,12 @@ fn handle(req: fastly::Request, sandbox: &mut Sandbox<App>) -> Result<(), fastly
         }
         Ok::<(), fastly::Error>(())
     })?;
-    runtime.emit_boot_diagnostics();
     sandbox.initialize(|| App::build::<MyApp>(FASTLY_PLATFORM).map_err(fastly::Error::from))?;
     let app = sandbox.state().expect("initialized above");
     let _post_send_state = request::send_request_with_registries_and_hooks(
         app,
         stores,
         req,
-        &runtime.env,
         |_raw, _extensions| {},
         |response| response.status(),
     )?;

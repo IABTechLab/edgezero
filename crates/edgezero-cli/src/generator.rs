@@ -765,6 +765,7 @@ fn initialize_git_repo(out_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::path_mutation_guard;
     use edgezero_adapter::cli_support::validate_spin_outbound_host_contract;
     use edgezero_core::Capability;
     use edgezero_core::app_config::app_name_prefix;
@@ -967,6 +968,7 @@ mod tests {
     }
 
     fn with_generated_demo_app(assertions: impl FnOnce(&Path)) {
+        let _process_lock = path_mutation_guard().lock().expect("process env lock");
         let _lock = env_lock().lock().expect("env lock");
         let temp = TempDir::new().expect("temp dir");
         let bin_dir = temp.path().join("bin");
@@ -1053,6 +1055,16 @@ mod tests {
         assert!(project_dir.join(".gitignore").exists());
         assert!(project_dir.join(".tool-versions").exists());
         assert!(project_dir.join("README.md").exists());
+        let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README");
+        assert!(
+            readme.contains("Fastly uses the logical key")
+                && readme.contains("`app_config` for production, staging, and local Viceroy"),
+            "generated README must document the one Fastly logical config key"
+        );
+        assert!(
+            !readme.contains("app_config_staging"),
+            "generated README must not advertise the removed staging key"
+        );
         assert!(project_dir.join("crates/demo-app-core/src/lib.rs").exists());
         assert!(
             project_dir.join("crates/demo-app-cli/Cargo.toml").exists(),

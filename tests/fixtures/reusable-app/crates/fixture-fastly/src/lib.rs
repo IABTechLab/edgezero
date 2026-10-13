@@ -1,9 +1,7 @@
 use edgezero_adapter_fastly::lifecycle::{Sandbox, serve_custom};
 use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
 use edgezero_adapter_fastly::request::send_request_with_registries_and_hooks;
-use edgezero_adapter_fastly::{
-    FASTLY_PLATFORM, FastlyLogging, Serve, ServeSummary, init_logger, runtime_env_config,
-};
+use edgezero_adapter_fastly::{FASTLY_PLATFORM, FastlyLogging, Serve, ServeSummary, init_logger};
 use edgezero_core::app::{App, Hooks};
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
@@ -94,8 +92,7 @@ pub fn finish(summary: ServeSummary<Error>) -> Result<(), Error> {
     );
     summary.into_result()
 }
-fn install_logger(env: &edgezero_core::env_config::EnvConfig) -> Result<(), Error> {
-    let logging = FastlyLogging::from(env);
+fn install_logger(logging: &FastlyLogging) -> Result<(), Error> {
     if logging.use_fastly_logger {
         init_logger(
             logging.endpoint.as_deref().unwrap(),
@@ -114,19 +111,11 @@ fn post_commit_error(obs: &Observation, token: &str, error: &dyn std::fmt::Displ
 pub fn rebuilt() -> Result<(), Error> {
     finish(serve_custom(serving(), |req, setup: &mut Sandbox<()>| {
         let stores = MeasuredApp::stores();
-        let mut runtime = runtime_env_config(stores);
-        setup.setup_once(|| install_logger(&runtime.env))?;
-        runtime.emit_boot_diagnostics();
+        let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
+        setup.setup_once(|| install_logger(&logging))?;
         let app = App::build::<MeasuredApp>(FASTLY_PLATFORM)?;
-        send_request_with_registries_and_hooks(
-            &app,
-            stores,
-            req,
-            &runtime.env,
-            extend,
-            |_response| (),
-        )
-        .map(|_state| ())
+        send_request_with_registries_and_hooks(&app, stores, req, extend, |_response| ())
+            .map(|_state| ())
     }))
 }
 
@@ -134,14 +123,13 @@ pub fn logger_negative() -> Result<(), Error> {
     finish(serve_custom(serving(), |req, _state: &mut Sandbox<()>| {
         let obs = observation(&req);
         let stores = MeasuredApp::stores();
-        let mut runtime = runtime_env_config(stores);
-        if let Err(error) = install_logger(&runtime.env) {
+        let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
+        if let Err(error) = install_logger(&logging) {
             Response::from_status(500)
                 .with_body(error.to_string())
                 .send_to_client();
             return Err(error);
         }
-        runtime.emit_boot_diagnostics();
         let app = App::build::<MeasuredApp>(FASTLY_PLATFORM)?;
         initialized(
             &obs,
@@ -151,7 +139,6 @@ pub fn logger_negative() -> Result<(), Error> {
             &app,
             stores,
             req,
-            &runtime.env,
             |_, extensions| {
                 extensions.insert(obs);
             },
@@ -196,13 +183,12 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
         return Ok(());
     }
     let stores = MeasuredApp::stores();
-    let mut runtime = runtime_env_config(stores);
-    if let Err(error) = sandbox.setup_once(|| install_logger(&runtime.env)) {
+    let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
+    if let Err(error) = sandbox.setup_once(|| install_logger(&logging)) {
         eprintln!("logger setup failed: {error}");
         Response::from_status(503).send_to_client();
         return Ok(());
     }
-    runtime.emit_boot_diagnostics();
     log::info!("fixture request {}", obs.correlation);
     // Only the streaming route schedules post-send work.
     let post_send = req
@@ -237,7 +223,6 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
         app,
         stores,
         req,
-        &runtime.env,
         |raw, extensions| {
             raw.set_header("x-fixture-mutated", "true");
             extensions.insert(obs.clone());
@@ -299,6 +284,17 @@ pub fn custom(reuse_sandbox: bool, reuse_app: bool) -> Result<(), Error> {
 
 pub struct MeasuredApp;
 impl Hooks for MeasuredApp {
+    fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+        if adapter.eq_ignore_ascii_case("fastly") {
+            edgezero_core::manifest::ResolvedLoggingConfig {
+                endpoint: Some("fixture-logs".to_owned()),
+                ..Default::default()
+            }
+        } else {
+            Default::default()
+        }
+    }
+
     fn routes() -> edgezero_core::router::RouterService {
         FixtureApp::routes()
     }
@@ -359,7 +355,7 @@ impl Hooks for MeasuredApp {
 
 /// Controlled fixture inputs exercise real adapter boundaries, not provider outages.
 pub fn faults() -> Result<(), Error> {
-    use edgezero_core::env_config::EnvConfig;
+    use edgezero_core::app::{StoreMetadata, StoresMetadata};
     finish(serve_custom(
         serving(),
         |mut req: Request, retained: &mut Sandbox<App>| {
@@ -380,22 +376,21 @@ pub fn faults() -> Result<(), Error> {
                     Request::get("http://fault-origin/abort").send("fault-origin")?;
                 req.set_body(upstream.take_body());
             }
-            let stores = MeasuredApp::stores();
-            let mut runtime = runtime_env_config(stores);
-            runtime.emit_boot_diagnostics();
-            let env = if path == "/recoverable-store-error" || path == "/terminal-store-error" {
-                EnvConfig::from_vars([(
-                    "EDGEZERO__STORES__KV__FIXTURE_KV__NAME",
-                    "missing_fixture_store",
-                )])
+            let stores = if path == "/recoverable-store-error" || path == "/terminal-store-error" {
+                StoresMetadata {
+                    kv: Some(StoreMetadata {
+                        default: "missing_fixture_store",
+                        ids: &["missing_fixture_store"],
+                    }),
+                    ..MeasuredApp::stores()
+                }
             } else {
-                runtime.env
+                MeasuredApp::stores()
             };
             let result = send_request_with_registries_and_hooks(
                 app,
                 stores,
                 req,
-                &env,
                 |raw, extensions| {
                     if path == "/collect-error" || path == "/inbound-error" {
                         raw.set_url(format!("http://example.com/probe{}", path));

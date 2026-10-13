@@ -9,6 +9,19 @@ implementation and review follow-ups. This is a hard API migration: retired APIs
 are removed rather than retained as compatibility aliases. Provider limitations are published
 separately from the portable API and must be considered when declaring required capabilities.
 
+### Main Integration
+
+- Retain the fallible application assembly, pinned runtime targets and adapter-owned
+  ingress/egress while integrating immutable release deployment from main. Deployment
+  capability checks run before preflight or provider work; fallback dispatch retains
+  the selected target instead of rediscovering source from the working directory.
+  Remove the Fastly direct-deploy wrapper; callers supply `AdapterDeployContext`.
+- Retire Fastly runtime selector-store setup. Applications open stable logical store
+  aliases; deployment selects and reconciles physical resource links. Logging policy
+  comes from baked `Hooks::logging_for("fastly")`, including custom entrypoints.
+- Align bounded Axum secret reads with the prefixed uppercase environment mapping
+  used by unbounded reads, preserving independent byte caps and deadlines.
+
 ### Bounded Local Config Snapshots
 
 - Hard-cut `ConfigStore::{get, get_bounded}` and matching handle APIs from owned `String`

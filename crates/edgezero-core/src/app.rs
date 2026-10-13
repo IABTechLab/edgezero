@@ -10,7 +10,7 @@ use crate::ingress::{
     IngressDispatchOutcome, IngressFraming, IngressHead, IngressHeadAccounting, IngressHeadLimits,
     IngressHeadParts, PreparedIngress, apply_admission_policy, default_admission_policy,
 };
-use crate::manifest::BakedManifest;
+use crate::manifest::{BakedManifest, ResolvedLoggingConfig};
 use crate::platform::PlatformMetadata;
 use crate::response::IntoResponse as _;
 use crate::response_egress::{
@@ -517,8 +517,8 @@ impl App {
 /// Compile-time metadata for one logical store kind, baked by the `app!` macro.
 ///
 /// Carries only the portable facts declared in `[stores.<kind>]`: the logical
-/// store ids and the resolved default. Platform names are resolved at runtime
-/// from `EDGEZERO__STORES__*` environment variables.
+/// store ids and the resolved default. A deployment adapter binds platform
+/// resources to these logical aliases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StoreMetadata {
     /// Resolved default logical store id.
@@ -553,6 +553,17 @@ pub trait Hooks {
     #[inline]
     fn configure(_app: &mut App) -> Result<(), EdgeError> {
         Ok(())
+    }
+
+    /// Logging settings for one adapter, baked from the application manifest.
+    ///
+    /// Macro-generated applications override this with the matching
+    /// `[adapters.<name>.logging]` or `[logging.<name>]` configuration. A
+    /// handwritten implementation receives the portable defaults.
+    #[must_use]
+    #[inline]
+    fn logging_for(_adapter: &str) -> ResolvedLoggingConfig {
+        ResolvedLoggingConfig::default()
     }
 
     /// Parsed and finalized manifest contract baked by `app!`.
@@ -651,7 +662,7 @@ mod tests {
         BufferedIngressResponse, IngressBeginOutcome, IngressDispatchOutcome, IngressFraming,
         IngressGrant, IngressHeadAccounting, IngressHeadParts,
     };
-    use crate::manifest::BakedManifest;
+    use crate::manifest::{BakedManifest, LogLevel};
     use crate::middleware::{Middleware, Next};
     use crate::platform::{
         HostIngressMemoryAccounting, InboundRequestPopulationBound, MemoryCeiling,
@@ -2573,6 +2584,14 @@ mod tests {
     #[test]
     fn default_hooks_do_not_own_logging() {
         assert!(!DefaultHooks::owns_logging());
+    }
+
+    #[test]
+    fn default_hooks_use_default_logging_for_every_adapter() {
+        let logging = DefaultHooks::logging_for("fastly");
+        assert_eq!(logging.level, LogLevel::Info);
+        assert!(logging.endpoint.is_none());
+        assert!(logging.echo_stdout.is_none());
     }
 
     #[test]

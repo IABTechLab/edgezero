@@ -207,9 +207,9 @@ preservation and isolation rather than merely setting a constant header.
   post-send work before returning. Neither wrapper requests a synthetic SDK send;
   `run_custom` returns the callback result directly.
 
-Callbacks that dispatch the app read `runtime_env_config` as a `FastlyRuntimeConfig`, use its
-`env` for logger and registry setup, and emits deferred boot diagnostics after
-the logging setup decision. Native request bodies, extensions, store handles,
+Callbacks that dispatch the app use baked `Hooks::logging_for("fastly")` settings
+for logger setup and reopen stores under their stable logical aliases per request.
+Deployment selectors choose physical links, not runtime configuration. Native request bodies, extensions, store handles,
 and pending work are not retained with the app.
 
 ```sh

@@ -14,11 +14,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: cargo test
+  host-tests:
+    name: ${{ matrix.suite }} tests
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [workspace, cli, axum, app-demo]
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v5
@@ -30,9 +36,9 @@ jobs:
             ~/.cargo/git/db/
             target/
             tests/fixtures/reusable-app/target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-
 
       - name: Retrieve Rust version
         id: rust-version
@@ -45,7 +51,8 @@ jobs:
           components: "clippy, rustfmt"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
 
-      - name: Add wasm targets
+      - name: Install wasm targets for generated-project checks
+        if: matrix.suite == 'cli' || matrix.suite == 'workspace' || matrix.suite == 'app-demo'
         run: rustup target add wasm32-wasip1 wasm32-wasip2 wasm32-unknown-unknown
 
       - name: Fetch dependencies (locked)
@@ -55,9 +62,11 @@ jobs:
           cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
 
       - name: No placeholder pins
+        if: matrix.suite == 'workspace'
         run: ./scripts/check_no_placeholder_pins.sh
 
       - name: No legacy typed reads
+        if: matrix.suite == 'workspace'
         run: ./scripts/check_no_legacy_typed_reads.sh
 
       # These roots are the active API surface. Historical design and plan
@@ -83,24 +92,28 @@ jobs:
         run: node scripts/check_serde_json_map_contract.mjs
 
       - name: Nested AppConfig audit
+        if: matrix.suite == 'cli'
         run: cargo run -q --bin check_no_nested_app_config --features nested-app-config-check -- examples/app-demo crates/edgezero-cli/src/templates
 
-      # The checker's own unit tests live behind `required-features =
-      # ["nested-app-config-check"]`, so the unfeatured
-      # `cargo test --workspace` step below does not compile or run them.
-      # Exercise them explicitly to keep the coverage closure enforced by CI.
       - name: Nested AppConfig checker tests
+        if: matrix.suite == 'cli'
         run: cargo test -p edgezero-cli --features nested-app-config-check --bin check_no_nested_app_config
 
       - name: Lifecycle fixture host tests
+        if: matrix.suite == 'workspace'
         run: |
           cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core --features fixture-core/qualification
           node --test scripts/qualify_response_egress.test.mjs
 
       - name: Check Axum lifecycle fixture
-        run: cargo check --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-axum
+        if: matrix.suite == 'axum'
+        run: >-
+          cargo check --locked
+          --manifest-path tests/fixtures/reusable-app/Cargo.toml
+          -p fixture-axum
 
       - name: Check opt-in lifecycle qualification fixtures
+        if: matrix.suite == 'workspace'
         # These are compile-only identities, never deployed qualification evidence.
         env:
           EDGEZERO_QUALIFICATION_REVISION: "0000000000000000000000000000000000000000"
@@ -112,12 +125,15 @@ jobs:
           cargo check --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-spin --features qualification --target wasm32-wasip2
 
       - name: Run workspace tests
+        if: matrix.suite == 'workspace'
         run: cargo test --workspace --all-targets
 
       - name: Bundled demo logging contract
+        if: matrix.suite == 'cli'
         run: scripts/run_test_nonzero.sh demo_respects_off_without_hiding_terminal_errors cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
 
       - name: Run native outbound adapter contracts
+        if: matrix.suite == 'workspace'
         run: |
           scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --test contract
           scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils --test contract
@@ -128,10 +144,24 @@ jobs:
       # its tests live behind the `cli` feature, which the unfeatured
       # `cargo test --workspace` step above does not enable — so none of those
       # tests compile or run there. Exercise them explicitly.
+      - name: Run EdgeZero CLI tests
+        if: matrix.suite == 'cli'
+        run: cargo test -p edgezero-cli --all-targets
+
       - name: Adapter CLI dispatch tests
-        run: cargo test -p edgezero-adapter-fastly --all-targets --features cli
+        if: matrix.suite == 'cli'
+        run: >-
+          cargo test
+          -p edgezero-adapter-axum
+          -p edgezero-adapter-cloudflare
+          -p edgezero-adapter-fastly
+          -p edgezero-adapter-spin
+          --all-targets
+          --no-default-features
+          --features cli
 
       - name: Verify exact outbound capability matrices
+        if: matrix.suite == 'workspace'
         run: |
           scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
           scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
@@ -139,43 +169,46 @@ jobs:
           scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
 
       - name: Check feature compilation
+        if: matrix.suite == 'workspace'
         run: cargo check --workspace --all-targets --features "fastly cloudflare spin"
 
       - name: Check native adapter feature matrices
+        if: matrix.suite == 'workspace'
         run: |
           for adapter in axum cloudflare fastly spin; do
             bash scripts/check_adapter_feature_matrix.sh "${adapter}" native
           done
 
       - name: Verify a generated project compiles
+        if: matrix.suite == 'cli'
         run: scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds
 
-      # `examples/app-demo` is excluded from the root workspace, so
-      # `cargo test --workspace` above does not cover it. Run its own
-      # workspace tests separately. An end-to-end push →
-      # AxumConfigStore → handler roundtrip in
-      # `app-demo-cli/tests/config_flow.rs` exists to be exercised by
-      # THIS step — without it, a regression in the JSON-file contract
-      # between `config push --adapter axum` and
-      # `AxumConfigStore::from_path` would not be caught by CI.
-      # Axum-only path, no live external calls — intentionally kept
-      # off the wasm matrix.
-      # `--locked`: app-demo is excluded from the root workspace and keeps its own
-      # committed lockfile, which drifts when the edgezero crates' dependencies
-      # change (e.g. a `syn` major bump lands in the root lock but not here).
-      # Without `--locked` CI silently regenerates it and MASKS that drift; with
-      # it, a stale app-demo lockfile fails here instead of at a consumer's
-      # `cargo build --locked`.
+      - name: Run Axum host tests
+        if: matrix.suite == 'axum'
+        run: cargo test -p edgezero-adapter-axum --all-targets --features axum
+
       - name: Run app-demo workspace tests
+        if: matrix.suite == 'app-demo'
         working-directory: examples/app-demo
         run: cargo test --locked --workspace --all-targets
 
       - name: Check app-demo wasm targets
+        if: matrix.suite == 'app-demo'
         working-directory: examples/app-demo
         run: |
           cargo check --locked -p app-demo-adapter-cloudflare --target wasm32-unknown-unknown --no-default-features --features cloudflare
           cargo check --locked -p app-demo-adapter-fastly --target wasm32-wasip1 --no-default-features --features fastly
           cargo check --locked -p app-demo-adapter-spin --target wasm32-wasip2 --no-default-features --features spin
+  cargo-test:
+    name: cargo test
+    needs: host-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every host test suite
+        env:
+          HOST_TESTS_RESULT: ${{ needs.host-tests.result }}
+        run: test "$HOST_TESTS_RESULT" = success
 
   adapter-wasm-tests:
     name: ${{ matrix.adapter }} wasm tests
@@ -201,6 +234,8 @@ jobs:
             sentinel: router_dispatches_get_and_returns_response
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v5
@@ -253,7 +288,9 @@ jobs:
       # by default. Force-overwriting is safe — `--locked` pins the version.
       - name: Install wasm-bindgen test runner
         if: matrix.adapter == 'cloudflare'
-        run: cargo install wasm-bindgen-cli --version "${{ steps.wasm-bindgen-version.outputs.version }}" --locked --force
+        env:
+          WASM_BINDGEN_VERSION: ${{ steps.wasm-bindgen-version.outputs.version }}
+        run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked --force
 
       - name: Resolve Viceroy version
         if: matrix.adapter == 'fastly'
@@ -265,7 +302,9 @@ jobs:
         if: matrix.adapter == 'fastly'
         # Version comes from .tool-versions (single source of truth shared with
         # local dev).
-        run: cargo install viceroy --version "${{ steps.viceroy-version.outputs.version }}" --locked --force
+        env:
+          VICEROY_VERSION: ${{ steps.viceroy-version.outputs.version }}
+        run: cargo install viceroy --version "$VICEROY_VERSION" --locked --force
 
       - name: Resolve Wasmtime version
         if: matrix.adapter == 'spin'
@@ -288,11 +327,13 @@ jobs:
         # explicitly compare `wasmtime --version` against the pin
         # — without that a runner-provided wasmtime or a stale
         # cache hit would silently shadow the pinned version.
+        env:
+          WASMTIME_VERSION: ${{ steps.wasmtime-version.outputs.version }}
         run: |
           install_dir="$HOME/.wasmtime/bin"
           echo "$install_dir" >> "$GITHUB_PATH"
           export PATH="$install_dir:$PATH"
-          version="${{ steps.wasmtime-version.outputs.version }}"
+          version="$WASMTIME_VERSION"
           # Compare exact versions so a pin like `48.0.2` does not silently
           # accept `wasmtime 48.0.20` from a stale cache or runner-provided
           # binary.
@@ -360,7 +401,12 @@ jobs:
           path: tests/fixtures/reusable-app/.runs/
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
 
       - name: Check ${{ matrix.adapter }} lifecycle fixture
-        run: cargo check --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-${{ matrix.adapter }} --target ${{ matrix.target }} --all-targets
+        run: >-
+          cargo check --locked
+          --manifest-path tests/fixtures/reusable-app/Cargo.toml
+          -p fixture-${{ matrix.adapter }}
+          --target ${{ matrix.target }}
+          --all-targets
