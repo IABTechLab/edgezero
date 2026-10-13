@@ -33,26 +33,58 @@ and before its Rust build steps:
 
 ```yaml
 - name: Set up Rust build cache
+  id: rust-cache
   uses: stackpop/edgezero/.github/actions/setup-rust-build-cache@<ref>
   with:
     app-name: example-app
     cache-target: true
+    target-cache-revision: ${{ steps.source.outputs.sha }}
     working-directory: application
 ```
 
-`app-name` is a stable lowercase cache namespace for one application.
+`app-name` is a stable lowercase cache namespace for one application. Do not
+append its source SHA: that would prevent dependency-source reuse across commits.
+Resolve `steps.source.outputs.sha` from the checked-out **application** source,
+for example with `git -C application rev-parse HEAD`. Do not use the deployment
+repository's `github.sha` when the application lives in a separate checkout.
+`target-cache-revision` must be a full lowercase Git SHA and is required when
+`cache-target: true`; missing or invalid values fail without a compatibility
+fallback. An explicitly supplied revision is validated in either mode.
+
 `working-directory` identifies its Cargo workspace containing the committed
 `Cargo.lock`. The action restores application-scoped Cargo registry and Git
 dependency sources, installs a pinned `sccache`, and enables compiler caching
-for every later native or WASM Rust build in the job. With `cache-target: true`,
-it also restores an application-scoped Cargo target directory containing Cargo
-fingerprints, build-script outputs, generated code, libraries, and linking
-inputs. Cargo keeps target triples, profiles, features, and compiler fingerprints
-separate inside that directory. The target cache key is scoped by application,
-runner OS and architecture, and the committed `Cargo.lock`. Cargo fingerprints
-and `sccache` determine which source, toolchain, feature, and build-script outputs
-can be reused safely. Existing build, package, release, adapter, and deployment
-commands remain unchanged.
+for every later native or WASM Rust build in the job.
+
+- Dependency source keys include app, runner OS/architecture, and `Cargo.lock`,
+  but not source revision. A stable restore prefix also permits reuse when the
+  lockfile changes; Cargo fetches missing dependencies.
+- With `cache-target: true`, target artifacts are restored/saved using a new v2
+  key containing the complete source revision and lock digest. There is no
+  cross-revision or legacy-key fallback. The first build of a new revision has
+  a cold target cache; repeating that revision can restore its target artifacts.
+- Compiler results use sccache's compiler/input/environment checks. Unchanged
+  compilations can be reused across revisions, but linking and some crate types
+  are not cacheable. A hit ratio or deployment duration is not guaranteed.
+
+In both modes, the action sets one stable app-specific `CARGO_TARGET_DIR` beneath
+`RUNNER_TEMP`, without a SHA or random invocation directory in the path. Native
+CLI and WASM builds share it; Cargo keeps target triples/profiles separate.
+`cache-target: false` disables only remote target restore/save, not that stable
+directory, dependency caching, or sccache. Call setup once per application/job.
+Reusing the directory for another source revision or workspace fails; repeat
+setup without an explicit revision also fails. Symlinks and unowned target
+contents are rejected rather than deleted.
+
+Outputs `source-cache-hit` and `target-cache-hit` indicate exact primary-key
+matches. A false source hit can still mean prefix reuse after a lockfile change;
+target hits are false when disabled or missing. `source-cache-key`,
+`target-cache-key`, and `cargo-target-dir` expose the selected identities/path,
+and sccache logs compiler statistics at job completion. Branch-scoped GitHub
+cache access still applies; merging a feature branch may require a cold build.
+When migrating, use a stable app-name and add the application SHA input together;
+the new target-key namespace starts cold. Existing CLI build invocation, package,
+release verification, credential isolation, and deployment commands are unchanged.
 
 Build and download the configurable application CLI artifact before assembling
 the release:

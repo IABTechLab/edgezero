@@ -13,6 +13,26 @@ inputs:
     description: Restore and save the application's Cargo target directory in addition to compiler outputs.
     required: false
     default: "false"
+  target-cache-revision:
+    description: Full lowercase application source Git SHA; required when cache-target is true. Never use a deployment repository SHA for different application source.
+    required: false
+
+outputs:
+  source-cache-hit:
+    description: Whether the dependency source cache matched its exact primary key (false also includes prefix reuse).
+    value: ${{ steps.cargo-sources.outputs.cache-hit == 'true' }}
+  target-cache-hit:
+    description: Whether target artifacts matched the revision-specific key; false when target caching is disabled or misses.
+    value: ${{ steps.cargo-target.outputs.cache-hit == 'true' }}
+  source-cache-key:
+    description: Dependency source cache primary key.
+    value: ${{ steps.prepare.outputs['source-cache-key'] }}
+  target-cache-key:
+    description: Revision-specific target cache key; empty if no revision was supplied.
+    value: ${{ steps.prepare.outputs['target-cache-key'] }}
+  cargo-target-dir:
+    description: Stable confined directory used by later native and WASM builds, even when target caching is disabled.
+    value: ${{ steps.prepare.outputs['cargo-target-dir'] }}
 
 runs:
   using: composite
@@ -23,6 +43,7 @@ runs:
       env:
         EDGEZERO__RUST_CACHE__APP_NAME: ${{ inputs['app-name'] }}
         EDGEZERO__RUST_CACHE__CACHE_TARGET: ${{ inputs['cache-target'] }}
+        EDGEZERO__RUST_CACHE__TARGET_CACHE_REVISION: ${{ inputs['target-cache-revision'] }}
         EDGEZERO__RUST_CACHE__WORKING_DIRECTORY: ${{ inputs['working-directory'] }}
         BASH_ENV: ""
         ENV: ""
@@ -36,18 +57,16 @@ runs:
           ~/.cargo/registry/index/
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
-        key: edgezero-app-${{ steps.prepare.outputs['cache-namespace'] }}-rust-sources-${{ runner.os }}-${{ runner.arch }}-${{ steps.prepare.outputs['cargo-lock-sha256'] }}
-        restore-keys: |
-          edgezero-app-${{ steps.prepare.outputs['cache-namespace'] }}-rust-sources-${{ runner.os }}-${{ runner.arch }}-
+        key: ${{ steps.prepare.outputs['source-cache-key'] }}
+        restore-keys: ${{ steps.prepare.outputs['source-cache-restore-prefix'] }}
 
     - name: Restore Cargo target artifacts
+      id: cargo-target
       if: inputs['cache-target'] == 'true'
       uses: actions/cache@v5
       with:
         path: ${{ steps.prepare.outputs['cargo-target-dir'] }}
-        key: edgezero-app-${{ steps.prepare.outputs['cache-namespace'] }}-rust-target-${{ runner.os }}-${{ runner.arch }}-${{ steps.prepare.outputs['cargo-lock-sha256'] }}
-        restore-keys: |
-          edgezero-app-${{ steps.prepare.outputs['cache-namespace'] }}-rust-target-${{ runner.os }}-${{ runner.arch }}-${{ steps.prepare.outputs['cargo-lock-sha256'] }}-
+        key: ${{ steps.prepare.outputs['target-cache-key'] }}
 
     - name: Set up Rust compiler cache
       uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
