@@ -91,7 +91,7 @@ jobs:
           github-token: ${{ secrets.APPLICATION_RELEASE_TOKEN }}
 
       - id: deploy
-        uses: stackpop/edgezero/.github/actions/deploy-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/deploy-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.release.outputs.sha256 }}
@@ -182,7 +182,7 @@ archive:
 
 ```yaml
 - id: stage
-  uses: stackpop/edgezero/.github/actions/deploy-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/deploy-fastly@<ref>
   with:
     app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
     app-release-sha256: ${{ needs.release.outputs.sha256 }}
@@ -193,7 +193,7 @@ archive:
     deploy-to: staging
 
 - id: probe
-  uses: stackpop/edgezero/.github/actions/healthcheck-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/healthcheck-fastly@<ref>
   with:
     app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
     app-release-sha256: ${{ needs.release.outputs.sha256 }}
@@ -207,7 +207,7 @@ archive:
 
 - name: Undo a failed staged release
   if: ${{ (failure() || cancelled()) && steps.stage.outputs.fastly-version != '' }}
-  uses: stackpop/edgezero/.github/actions/rollback-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/rollback-fastly@<ref>
   with:
     app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
     app-release-sha256: ${{ needs.release.outputs.sha256 }}
@@ -230,7 +230,7 @@ For production rollback, capture `previous-version` from deploy and pass it as
 ```yaml
 - name: Roll back production
   if: ${{ (failure() || cancelled()) && steps.deploy.outputs.fastly-version != '' && steps.deploy.outputs.previous-version != '' }}
-  uses: stackpop/edgezero/.github/actions/rollback-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/rollback-fastly@<ref>
   with:
     app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
     app-release-sha256: ${{ needs.release.outputs.sha256 }}
@@ -257,7 +257,7 @@ release. The deployer cannot choose another manifest. Supply exactly one typed
 config source:
 
 ```yaml
-- uses: stackpop/edgezero/.github/actions/config-push-fastly@<ref>
+- uses: IABTechLab/edgezero/.github/actions/config-push-fastly@<ref>
   with:
     app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
     app-release-sha256: ${{ needs.release.outputs.sha256 }}

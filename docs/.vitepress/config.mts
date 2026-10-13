@@ -81,7 +81,7 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/stackpop/edgezero' },
+      { icon: 'github', link: 'https://github.com/IABTechLab/edgezero' },
     ],
 
     footer: {
