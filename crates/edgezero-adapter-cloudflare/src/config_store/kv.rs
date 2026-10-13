@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use edgezero_core::config_store::ConfigStoreError;
 use edgezero_core::time::{Deadline, MonotonicClock};
-use wasm_streams::readable::ReadableStreamBYOBReader;
+use wasm_streams::readable::{ReadableStreamBYOBReader, ReadableStreamDefaultReader};
 use worker::Delay;
 use worker::js_sys::{Function, Object, Promise, Reflect, Uint8Array, global};
 use worker::kv::KvStore as WorkerKvStore;
@@ -14,6 +14,8 @@ use worker::wasm_bindgen::closure::Closure;
 use worker::wasm_bindgen::{JsCast as _, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
 use worker::web_sys::ReadableStream;
+
+use crate::ConfigReadMode;
 
 const CONFIG_READ_CHUNK_BYTES: usize = 0x4000;
 
@@ -29,6 +31,11 @@ struct AcquisitionState {
 struct ConfigReader<'stream> {
     completed: bool,
     reader: ReadableStreamBYOBReader<'stream>,
+}
+
+struct DefaultConfigReader<'stream> {
+    completed: bool,
+    reader: ReadableStreamDefaultReader<'stream>,
 }
 
 pub(super) struct KvBinding {
@@ -51,6 +58,14 @@ impl Drop for Acquisition {
 }
 
 impl Drop for ConfigReader<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            consume_cancellation(&self.reader.as_raw().cancel());
+        }
+    }
+}
+
+impl Drop for DefaultConfigReader<'_> {
     fn drop(&mut self) {
         if !self.completed {
             consume_cancellation(&self.reader.as_raw().cancel());
@@ -90,6 +105,7 @@ impl KvBinding {
         max_bytes: u64,
         clock: &MonotonicClock,
         deadline: Deadline,
+        read_mode: ConfigReadMode,
     ) -> Result<Option<String>, ConfigStoreError> {
         // Transferred callbacks require wasm-bindgen's JS-GC cleanup support.
         // Older/explicitly disabled Workers profiles must fail before dispatch.
@@ -142,7 +158,9 @@ impl KvBinding {
             .stream
             .take()
             .ok_or_else(unavailable)?;
-        drain(raw, max_bytes, clock, deadline).await.map(Some)
+        drain(raw, max_bytes, clock, deadline, read_mode)
+            .await
+            .map(Some)
     }
 }
 
@@ -155,6 +173,19 @@ fn consume_cancellation(promise: &Promise) {
 }
 
 async fn drain(
+    raw: ReadableStream,
+    max_bytes: u64,
+    clock: &MonotonicClock,
+    deadline: Deadline,
+    read_mode: ConfigReadMode,
+) -> Result<String, ConfigStoreError> {
+    match read_mode {
+        ConfigReadMode::Byob => drain_byob(raw, max_bytes, clock, deadline).await,
+        ConfigReadMode::DefaultStream => drain_default(raw, max_bytes, clock, deadline).await,
+    }
+}
+
+async fn drain_byob(
     raw: ReadableStream,
     max_bytes: u64,
     clock: &MonotonicClock,
@@ -214,6 +245,74 @@ async fn drain(
         if pulls == 16 {
             // Workers may freeze its clock within a task. Yield to the task queue,
             // not just the promise microtask queue, so timers can make progress.
+            Delay::from(Duration::ZERO).await;
+            pulls = 0;
+        }
+    }
+    String::from_utf8(bytes).map_err(|_error| unavailable())
+}
+
+async fn drain_default(
+    raw: ReadableStream,
+    max_bytes: u64,
+    clock: &MonotonicClock,
+    deadline: Deadline,
+) -> Result<String, ConfigStoreError> {
+    let mut stream = wasm_streams::ReadableStream::from_raw(raw.clone().unchecked_into());
+    let reader = match stream.try_get_reader() {
+        Ok(reader) => reader,
+        Err(_error) => {
+            consume_cancellation(&raw.cancel());
+            return Err(unavailable());
+        }
+    };
+    let mut guard = DefaultConfigReader {
+        completed: false,
+        reader,
+    };
+    let limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    let mut bytes = Vec::new();
+    let mut pulls = 0_u32;
+    loop {
+        if deadline.is_expired_at(clock.now()) {
+            return Err(ConfigStoreError::DeadlineExceeded);
+        }
+        let next_chunk = guard.reader.read().await.map_err(|_error| unavailable())?;
+        if deadline.is_expired_at(clock.now()) {
+            return Err(ConfigStoreError::DeadlineExceeded);
+        }
+        let Some(chunk_value) = next_chunk else {
+            guard.completed = true;
+            break;
+        };
+        let byte_chunk = chunk_value
+            .dyn_into::<Uint8Array>()
+            .map_err(|_error| unavailable())?;
+        let chunk_len = usize::try_from(byte_chunk.length()).map_err(|_error| unavailable())?;
+        let remaining = limit.saturating_sub(bytes.len());
+        if chunk_len > remaining {
+            return Err(ConfigStoreError::ValueTooLarge);
+        }
+        if deadline.is_expired_at(clock.now()) {
+            return Err(ConfigStoreError::DeadlineExceeded);
+        }
+        let next_len = bytes
+            .len()
+            .checked_add(chunk_len)
+            .ok_or(ConfigStoreError::ValueTooLarge)?;
+        bytes
+            .try_reserve_exact(chunk_len)
+            .map_err(|_error| ConfigStoreError::ValueTooLarge)?;
+        let chunk_offset = bytes.len();
+        bytes.resize(next_len, 0);
+        byte_chunk.copy_to(
+            bytes
+                .get_mut(chunk_offset..next_len)
+                .ok_or_else(unavailable)?,
+        );
+        pulls = pulls.saturating_add(1);
+        if pulls == 16 {
+            // Yield so timers can make progress even when Workers freezes its clock in-task.
             Delay::from(Duration::ZERO).await;
             pulls = 0;
         }

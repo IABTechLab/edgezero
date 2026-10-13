@@ -1,0 +1,15 @@
+#![cfg_attr(target_arch = "wasm32", no_main)]
+
+#[cfg(target_arch = "wasm32")]
+use worker::{Context, Env, Request, Response, Result, event};
+
+/// Entrypoint invoked by the Worker-compatible runtime.
+///
+/// # Errors
+/// Returns an error if EdgeZero application dispatch fails.
+#[cfg(target_arch = "wasm32")]
+#[event(fetch)]
+#[inline]
+pub async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    edgezero_adapter_celld::run_app::<{{proj_core_mod}}::App>(req, env, ctx).await
+}

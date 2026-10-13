@@ -43,6 +43,7 @@ use worker::{
     Context, Delay, Env, Error as WorkerError, Method, Request as CfRequest, Response as CfResponse,
 };
 
+use crate::ConfigReadMode;
 use crate::config_store::CloudflareConfigStore;
 use crate::context::CloudflareRequestContext;
 use crate::key_value_store::CloudflareKvStore;
@@ -134,7 +135,9 @@ impl<'app> CloudflareService<'app> {
     ) -> Result<CfResponse, WorkerError> {
         let request_start = self.app.monotonic_now();
         let config_store = match self.config {
-            ConfigSource::Binding(binding) => Some(open_config_handle(&env, &binding)),
+            ConfigSource::Binding(binding) => {
+                Some(open_config_handle(&env, &binding, ConfigReadMode::Byob))
+            }
             ConfigSource::Handle(handle) => Some(handle),
             ConfigSource::None => None,
         };
@@ -258,6 +261,7 @@ impl<'app> CloudflareService<'app> {
 /// stays under the `too_many_arguments` ceiling.
 pub(crate) struct RegistryInputs<'env> {
     pub config_meta: Option<StoreMetadata>,
+    pub config_read_mode: ConfigReadMode,
     pub env_config: &'env EnvConfig,
     pub kv_meta: Option<StoreMetadata>,
     pub runtime_variables: RuntimeVariables,
@@ -667,7 +671,12 @@ pub(crate) async fn dispatch_with_registries(
 ) -> Result<CfResponse, WorkerError> {
     let request_start = app.monotonic_now();
     let kv_registry = build_kv_registry(&env, inputs.kv_meta, inputs.env_config)?;
-    let config_registry = build_config_registry(&env, inputs.config_meta, inputs.env_config);
+    let config_registry = build_config_registry(
+        &env,
+        inputs.config_meta,
+        inputs.env_config,
+        inputs.config_read_mode,
+    );
     let secret_registry = build_secret_registry(&env, inputs.secret_meta, inputs.env_config);
     dispatch_with_handles(
         app,
@@ -729,6 +738,7 @@ fn build_config_registry(
     env: &Env,
     config_meta: Option<StoreMetadata>,
     env_config: &EnvConfig,
+    config_read_mode: ConfigReadMode,
 ) -> Option<ConfigRegistry> {
     let meta = config_meta?;
     let mut by_id: BTreeMap<String, ConfigStoreBinding> = BTreeMap::new();
@@ -737,7 +747,7 @@ fn build_config_registry(
         by_id.insert(
             (*id).to_owned(),
             ConfigStoreBinding {
-                handle: open_config_handle(env, &binding_name),
+                handle: open_config_handle(env, &binding_name, config_read_mode),
                 default_key: env_config.store_key("config", id),
             },
         );
@@ -842,8 +852,12 @@ fn into_core_method(method: &Method) -> CoreMethod {
     })
 }
 
-fn open_config_handle(env: &Env, binding_name: &str) -> ConfigStoreHandle {
-    match CloudflareConfigStore::from_env(env, binding_name) {
+fn open_config_handle(
+    env: &Env,
+    binding_name: &str,
+    config_read_mode: ConfigReadMode,
+) -> ConfigStoreHandle {
+    match CloudflareConfigStore::from_env_with_read_mode(env, binding_name, config_read_mode) {
         Ok(store) => ConfigStoreHandle::new(Arc::new(store)),
         Err(err) => {
             warn_missing_config_binding_once(binding_name, &err.to_string());

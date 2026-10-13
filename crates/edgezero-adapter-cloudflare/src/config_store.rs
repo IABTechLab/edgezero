@@ -33,6 +33,8 @@ use std::future::Future;
 use std::future::{pending, ready};
 use std::time::Duration;
 
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+use crate::ConfigReadMode;
 use async_trait::async_trait;
 use edgezero_core::config_store::{
     BoundedStoreRead, ConfigStore, ConfigStoreError, finish_bounded_config_read,
@@ -50,6 +52,8 @@ use worker::{Delay, Env};
 /// async KV lookups against that namespace.
 pub struct CloudflareConfigStore {
     inner: CloudflareConfigBackend,
+    #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+    read_mode: ConfigReadMode,
 }
 
 enum CloudflareConfigBackend {
@@ -64,6 +68,8 @@ impl CloudflareConfigStore {
     fn from_entries(entries: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
             inner: CloudflareConfigBackend::InMemory(entries.into_iter().collect()),
+            #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+            read_mode: ConfigReadMode::Byob,
         }
     }
 
@@ -75,9 +81,25 @@ impl CloudflareConfigStore {
     #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
     #[inline]
     pub fn from_env(env: &Env, binding_name: &str) -> Result<Self, ConfigStoreError> {
+        Self::from_env_with_read_mode(env, binding_name, ConfigReadMode::Byob)
+    }
+
+    /// Open the KV namespace with an explicitly selected response-stream reader.
+    ///
+    /// # Errors
+    /// Returns [`ConfigStoreError::Unavailable`] when the binding is missing
+    /// or cannot be opened.
+    #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+    #[inline]
+    pub fn from_env_with_read_mode(
+        env: &Env,
+        binding_name: &str,
+        read_mode: ConfigReadMode,
+    ) -> Result<Self, ConfigStoreError> {
         let store = kv::KvBinding::from_this(env.as_ref(), binding_name)?;
         Ok(Self {
             inner: CloudflareConfigBackend::Kv(store),
+            read_mode,
         })
     }
 
@@ -125,6 +147,7 @@ impl ConfigStore for CloudflareConfigStore {
                         max_backend_bytes.min(max_value_bytes),
                         clock,
                         deadline,
+                        self.read_mode,
                     ),
                     clock,
                     deadline,
@@ -237,10 +260,18 @@ mod tests {
         use worker::wasm_bindgen_futures::JsFuture;
 
         fn streaming_store(length: usize, stalled: bool) -> (CloudflareConfigStore, JsValue) {
-            // An actual KV binding double: text reads fail and the byte source only
-            // fills caller-owned BYOB views, without materializing a complete value.
+            streaming_store_with_mode(length, stalled, ConfigReadMode::Byob)
+        }
+
+        fn streaming_store_with_mode(
+            length: usize,
+            stalled: bool,
+            read_mode: ConfigReadMode,
+        ) -> (CloudflareConfigStore, JsValue) {
+            // An actual KV binding double: text reads fail and the byte source can
+            // exercise either caller-sized BYOB views or ordinary JS chunks.
             let factory = Function::new_with_args(
-                "length, stalled",
+                "length, stalled, defaultReader",
                 "
                 // worker::Delay expects browser numeric handles, not Node objects.
                 if (!globalThis.edgezeroNumericTimers) {
@@ -259,7 +290,7 @@ mod tests {
                         timers.delete(id);
                     };
                 }
-                const stats = { cancels: 0, gets: 0, pulls: 0, maxView: 0 };
+                const stats = { cancels: 0, gets: 0, pulls: 0, maxView: 0, maxChunk: 0 };
                 const kv = {
                     get: async (key, options) => {
                         stats.gets++;
@@ -276,6 +307,21 @@ mod tests {
                             pull(controller) {
                                 stats.pulls++;
                                 if (key === 'source-error') throw new Error('TOKEN-DO-NOT-LEAK');
+                                if (defaultReader || !controller.byobRequest) {
+                                    if (stalled) return new Promise(() => {});
+                                    const count = Math.min(0x4000, length - position);
+                                    if (count === 0) {
+                                        controller.close();
+                                    } else {
+                                        const chunk = new Uint8Array(count);
+                                        chunk.fill(key === 'invalid-utf8' ? 255 : 97);
+                                        stats.maxChunk = Math.max(stats.maxChunk, count);
+                                        position += count;
+                                        controller.enqueue(chunk);
+                                        if (position === length) controller.close();
+                                    }
+                                    return;
+                                }
                                 const view = controller.byobRequest.view;
                                 stats.maxView = Math.max(stats.maxView, view.byteLength);
                                 if (stalled) return new Promise(() => {});
@@ -304,10 +350,11 @@ mod tests {
             );
             let js_length = u32::try_from(length).expect("fixture length fits JS integer");
             let binding = factory
-                .call2(
+                .call3(
                     &JsValue::NULL,
                     &JsValue::from(js_length),
                     &JsValue::from(stalled),
+                    &JsValue::from(read_mode == ConfigReadMode::DefaultStream),
                 )
                 .expect("KV fixture");
             let stats = Reflect::get(&binding, &JsValue::from("stats")).expect("stats");
@@ -315,6 +362,7 @@ mod tests {
             (
                 CloudflareConfigStore {
                     inner: CloudflareConfigBackend::Kv(kv),
+                    read_mode,
                 },
                 stats,
             )
@@ -328,6 +376,40 @@ mod tests {
                 .expect("counter string")
                 .parse()
                 .expect("integer counter")
+        }
+
+        #[wasm_bindgen_test]
+        async fn bounded_default_reader_rejects_an_oversized_host_chunk_before_copy() {
+            let (oversized_store, oversized_stats) =
+                streaming_store_with_mode(151, false, ConfigReadMode::DefaultStream);
+            let error = oversized_store
+                .get_bounded(
+                    "value",
+                    &MonotonicClock::default(),
+                    Deadline::after(Duration::from_secs(1)),
+                    10,
+                    10,
+                )
+                .await
+                .expect_err("oversized host chunk rejected");
+            assert!(matches!(error, ConfigStoreError::ValueTooLarge));
+            assert_eq!(counter(&oversized_stats, "maxChunk"), 151);
+
+            let (exact_store, exact_stats) =
+                streaming_store_with_mode(10, false, ConfigReadMode::DefaultStream);
+            let result = exact_store
+                .get_bounded(
+                    "value",
+                    &MonotonicClock::default(),
+                    Deadline::after(Duration::from_secs(1)),
+                    10,
+                    10,
+                )
+                .await
+                .expect("chunk exactly at both caps is accepted");
+            assert_eq!(result.backend_bytes, 10);
+            assert_eq!(result.value.expect("config value").as_str(), "aaaaaaaaaa");
+            assert_eq!(counter(&exact_stats, "maxChunk"), 10);
         }
 
         #[wasm_bindgen_test]

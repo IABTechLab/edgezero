@@ -420,7 +420,7 @@ pub(crate) fn resolve_runtime_from(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
 
     use tempfile::TempDir;
 
@@ -465,6 +465,29 @@ mod tests {
             Some(expected_path.as_path())
         );
         assert!(matches!(runtime.target(), ResolvedAdapterTarget::Shell(_)));
+    }
+
+    #[test]
+    fn celld_manifest_without_command_overrides_uses_registered_dispatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("celld-app");
+        write_manifest(&root, "celld", "wrangler.json", None);
+
+        let runtime = resolve_runtime_from(
+            "celld",
+            Action::Serve,
+            &root,
+            Some(OsString::from("edgezero.toml")),
+        )
+        .expect("resolve celld runtime");
+
+        let ResolvedAdapterTarget::Registered(target) = runtime.target() else {
+            panic!("celld should use registered dispatch, not a shell override");
+        };
+        assert_eq!(
+            target.platform_manifest().and_then(Path::file_name),
+            Some(OsStr::new("wrangler.json"))
+        );
     }
 
     #[test]
