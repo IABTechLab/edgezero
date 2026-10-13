@@ -10,7 +10,11 @@ inputs:
     required: false
     default: .
   cache-target:
-    description: Restore and save the application's Cargo target directory in addition to compiler outputs.
+    description: Restore the application's revision-specific Cargo target directory in addition to compiler outputs.
+    required: false
+    default: "false"
+  save-target:
+    description: Opt in to saving a missed target cache after a successful job; requires cache-target true. Prefer writes from trusted main workflows.
     required: false
     default: "false"
   target-cache-revision:
@@ -23,7 +27,7 @@ outputs:
     value: ${{ steps.cargo-sources.outputs.cache-hit == 'true' }}
   target-cache-hit:
     description: Whether target artifacts matched the revision-specific key; false when target caching is disabled or misses.
-    value: ${{ steps.cargo-target.outputs.cache-hit == 'true' }}
+    value: ${{ steps.cargo-target.outputs.cache-hit == 'true' || steps.cargo-target-save.outputs.cache-hit == 'true' }}
   source-cache-key:
     description: Dependency source cache primary key.
     value: ${{ steps.prepare.outputs['source-cache-key'] }}
@@ -43,6 +47,7 @@ runs:
       env:
         EDGEZERO__RUST_CACHE__APP_NAME: ${{ inputs['app-name'] }}
         EDGEZERO__RUST_CACHE__CACHE_TARGET: ${{ inputs['cache-target'] }}
+        EDGEZERO__RUST_CACHE__SAVE_TARGET: ${{ inputs['save-target'] }}
         EDGEZERO__RUST_CACHE__TARGET_CACHE_REVISION: ${{ inputs['target-cache-revision'] }}
         EDGEZERO__RUST_CACHE__WORKING_DIRECTORY: ${{ inputs['working-directory'] }}
         BASH_ENV: ""
@@ -51,6 +56,7 @@ runs:
 
     - name: Restore Cargo dependency sources
       id: cargo-sources
+      if: steps.prepare.outputs.already-initialized != 'true'
       uses: actions/cache@v5
       with:
         path: |
@@ -62,13 +68,24 @@ runs:
 
     - name: Restore Cargo target artifacts
       id: cargo-target
-      if: inputs['cache-target'] == 'true'
+      if: inputs['cache-target'] == 'true' && inputs['save-target'] == 'false' && steps.prepare.outputs.already-initialized != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.prepare.outputs['cargo-target-dir'] }}
+        key: ${{ steps.prepare.outputs['target-cache-key'] }}
+
+    # The combined action saves in its success-only post-job hook, after builds.
+    - name: Restore Cargo targets and enable post-job save
+      id: cargo-target-save
+      if: inputs['cache-target'] == 'true' && inputs['save-target'] == 'true' && steps.prepare.outputs.already-initialized != 'true'
       uses: actions/cache@v5
       with:
         path: ${{ steps.prepare.outputs['cargo-target-dir'] }}
         key: ${{ steps.prepare.outputs['target-cache-key'] }}
 
     - name: Set up Rust compiler cache
+      id: sccache
+      if: steps.prepare.outputs.already-initialized != 'true'
       uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       with:
         version: v0.16.0

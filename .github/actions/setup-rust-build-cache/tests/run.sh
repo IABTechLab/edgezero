@@ -10,18 +10,8 @@ ACTION_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/edgezero-rust-cache-test.XXXXXX")
 trap 'rm -rf -- "$WORK_DIR"' EXIT
 
-bash "$ACTION_DIR/tests/revision.sh"
-
-fail() {
-  printf 'setup-rust-build-cache test failed: %s\n' "$*" >&2
-  exit 1
-}
-
-assert_line() {
-  local file="$1" expected="$2"
-  grep -Fqx -- "$expected" "$file" ||
-    fail "expected '$expected' in $file"
-}
+# shellcheck source=common.sh
+source "$ACTION_DIR/tests/common.sh"
 
 workspace="$WORK_DIR/workspace"
 runner_temp="$WORK_DIR/runner"
@@ -46,8 +36,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   expected_sha=$(shasum -a 256 "$workspace/project/Cargo.lock" | awk '{ print $1 }')
 fi
-assert_line "$WORK_DIR/output" "cargo-lock-sha256=$expected_sha"
-assert_line "$WORK_DIR/output" 'cache-namespace=example-app'
+assert_line "$WORK_DIR/output" "source-cache-key=edgezero-app-example-app-rust-sources-Linux-X64-$expected_sha"
 expected_target=$(realpath "$runner_temp/edgezero-rust-cache/example-app/target")
 assert_line "$WORK_DIR/output" "cargo-target-dir=$expected_target"
 assert_line "$WORK_DIR/env" 'RUSTC_WRAPPER=sccache'
@@ -58,8 +47,9 @@ assert_line "$WORK_DIR/env" "EDGEZERO__RUST_CACHE__TARGET_DIR=$expected_target"
 
 : >"$WORK_DIR/output"
 : >"$WORK_DIR/env"
+mkdir -p "$runner_temp/disabled"
 GITHUB_WORKSPACE="$workspace" \
-  RUNNER_TEMP="$runner_temp" \
+  RUNNER_TEMP="$runner_temp/disabled" \
   RUNNER_OS=Linux RUNNER_ARCH=X64 \
   GITHUB_OUTPUT="$WORK_DIR/output" \
   GITHUB_ENV="$WORK_DIR/env" \
@@ -68,7 +58,7 @@ GITHUB_WORKSPACE="$workspace" \
   EDGEZERO__RUST_CACHE__TARGET_CACHE_REVISION=1111111111111111111111111111111111111111 \
   EDGEZERO__RUST_CACHE__WORKING_DIRECTORY=project \
   "$ACTION_DIR/scripts/prepare.sh"
-assert_line "$WORK_DIR/output" 'cache-namespace=example-app'
+expected_target=$(realpath "$runner_temp/disabled/edgezero-rust-cache/example-app/target")
 assert_line "$WORK_DIR/output" "cargo-target-dir=$expected_target"
 assert_line "$WORK_DIR/env" "CARGO_TARGET_DIR=$expected_target"
 
@@ -150,3 +140,6 @@ if grep -Fq "$github_sha_expression" "$action"; then
   fail "cache action must use the explicit application revision, not infer github.sha"
 fi
 printf 'setup-rust-build-cache action tests passed\n'
+bash "$ACTION_DIR/tests/revision.sh"
+bash "$ACTION_DIR/tests/review.sh"
+bash "$ACTION_DIR/tests/fixture.sh"

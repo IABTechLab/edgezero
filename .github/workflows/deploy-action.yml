@@ -112,10 +112,11 @@ jobs:
           npm run build
 
   # Exercise source reuse and revision-isolated target caching across real jobs.
-  # The fixture revision includes this run ID so the new-revision probe is cold.
+  # Run-specific compiler inputs prevent accidental hits from older smoke runs.
   cache-restore-seed:
     runs-on: ubuntu-latest
     outputs:
+      fixture-id: ${{ steps.fixture.outputs.fixture-id }}
       source-cache-key: ${{ steps.cache.outputs.source-cache-key }}
       target-cache-key: ${{ steps.cache.outputs.target-cache-key }}
     steps:
@@ -127,12 +128,16 @@ jobs:
         id: fixture
         run: bash .github/actions/setup-rust-build-cache/tests/make-fixture.sh seed
 
+      - name: Install native and WASM compiler targets
+        run: bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh
+
       - name: Seed the provider-neutral Rust target cache
         id: cache
         uses: ./.github/actions/setup-rust-build-cache
         with:
           app-name: cache-restore-smoke-v2
           cache-target: true
+          save-target: true
           target-cache-revision: ${{ steps.fixture.outputs.revision }}
           working-directory: cache-restore-fixture
 
@@ -141,6 +146,14 @@ jobs:
           printf '%s\n' 'edgezero-cache-restore-smoke-v2' >"$CARGO_TARGET_DIR/restore-marker"
           mkdir -p "$HOME/.cargo/git/db"
           printf '%s\n' 'edgezero-source-cache-smoke-v2' >"$HOME/.cargo/git/db/edgezero-source-cache-smoke-v2"
+
+      - name: Seed native and WASM compiler outputs
+        working-directory: cache-restore-fixture
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          test -n "$host"
+          cargo build --locked --lib --target "$host"
+          cargo build --locked --lib --target wasm32-wasip1
 
   cache-restore-smoke:
     needs: cache-restore-seed
@@ -152,7 +165,12 @@ jobs:
 
       - name: Recreate cache restore fixture
         id: fixture
+        env:
+          CACHE_FIXTURE_ID: ${{ needs.cache-restore-seed.outputs.fixture-id }}
         run: bash .github/actions/setup-rust-build-cache/tests/make-fixture.sh seed
+
+      - name: Install native and WASM compiler targets
+        run: bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh
 
       - name: Restore the provider-neutral Rust target cache
         id: cache
@@ -173,15 +191,17 @@ jobs:
   cache-new-revision-smoke:
     needs: cache-restore-seed
     runs-on: ubuntu-latest
-    env:
-      RUSTUP_TOOLCHAIN: 1.95.0
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Create a different fixture source revision
         id: fixture
+        env:
+          CACHE_FIXTURE_ID: ${{ needs.cache-restore-seed.outputs.fixture-id }}
         run: bash .github/actions/setup-rust-build-cache/tests/make-fixture.sh next
+      - name: Install native and WASM compiler targets
+        run: bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh
       - name: Set up revision-isolated target cache
         id: cache
         uses: ./.github/actions/setup-rust-build-cache
@@ -205,8 +225,6 @@ jobs:
           test "$TARGET_CACHE_KEY" != "$SEED_TARGET_KEY"
           test ! -e "$CARGO_TARGET_DIR/restore-marker"
           grep -Fxq 'edgezero-source-cache-smoke-v2' "$HOME/.cargo/git/db/edgezero-source-cache-smoke-v2"
-      - name: Install native and WASM compiler targets
-        run: rustup toolchain install 1.95.0 --profile minimal --target wasm32-wasip1
       - name: Assert native and WASM compiler cache reuse
         run: bash .github/actions/setup-rust-build-cache/tests/assert-compiler-reuse.sh
 
@@ -243,6 +261,7 @@ jobs:
         with:
           app-name: store-aware-fixture
           cache-target: true
+          save-target: ${{ github.ref == 'refs/heads/main' }}
           target-cache-revision: ${{ steps.fixture.outputs.revision }}
           working-directory: fixture-app
 
@@ -303,6 +322,7 @@ jobs:
         with:
           app-name: store-free-fixture
           cache-target: true
+          save-target: ${{ github.ref == 'refs/heads/main' }}
           target-cache-revision: ${{ steps.fixture.outputs.revision }}
           working-directory: fixture-app
 

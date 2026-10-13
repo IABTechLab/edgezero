@@ -4,15 +4,21 @@ set -euo pipefail
 # Local behavioral and structural contracts; no network or provider credentials.
 ACTION_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/edgezero-cache-revision-test.XXXXXX")
-trap 'rm -rf -- "$WORK_DIR"' EXIT
+cleanup() {
+  [[ -z "${unreadable_target:-}" ]] || chmod 700 "$unreadable_target"
+  rm -rf -- "$WORK_DIR"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 revision_a=1111111111111111111111111111111111111111
 revision_b=2222222222222222222222222222222222222222
 mkdir -p "$WORK_DIR/workspace/app" "$WORK_DIR/workspace/other"
 printf 'version = 3\n' >"$WORK_DIR/workspace/app/Cargo.lock"
 cp "$WORK_DIR/workspace/app/Cargo.lock" "$WORK_DIR/workspace/other/Cargo.lock"
 
-fail() { printf 'cache revision test failed: %s\n' "$*" >&2; exit 1; }
-assert_line() { grep -Fqx -- "$2" "$1" || fail "expected '$2' in $1"; }
+# shellcheck source=common.sh
+source "$ACTION_DIR/tests/common.sh"
 value() { sed -n "s/^$1=//p" "$WORK_DIR/output"; }
 prepare() {
   local runner="$1" mode="$2" revision="$3" project="${4:-app}"

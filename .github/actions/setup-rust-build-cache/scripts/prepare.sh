@@ -18,7 +18,18 @@ fail() {
 
 canonical_path() {
   local path="$1"
-  realpath "$path" 2>/dev/null || fail "could not resolve path '$path'"
+  [[ ! "$path" =~ [[:cntrl:]] ]] || fail 'Rust cache paths must not contain control characters'
+  local resolved
+  # Preserve trailing newlines until validation, including in symlink targets.
+  resolved=$(realpath "$path" 2>/dev/null && printf '.') || fail "could not resolve path '$path'"
+  resolved=${resolved%.}
+  resolved=${resolved%$'\n'}
+  [[ ! "$resolved" =~ [[:cntrl:]] ]] || fail 'Resolved Rust cache paths must not contain control characters'
+  printf '%s' "$resolved"
+}
+
+append_output() {
+  printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT:?}"
 }
 
 is_under() {
@@ -40,10 +51,11 @@ sha256_file() {
 
 main() {
   local workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
-  local output_file="${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+  : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
   local env_file="${GITHUB_ENV:?GITHUB_ENV is required}"
   local app_name="${EDGEZERO__RUST_CACHE__APP_NAME-}"
   local cache_target="${EDGEZERO__RUST_CACHE__CACHE_TARGET-false}"
+  local save_target="${EDGEZERO__RUST_CACHE__SAVE_TARGET-false}"
   local revision="${EDGEZERO__RUST_CACHE__TARGET_CACHE_REVISION-}"
   local working_directory="${EDGEZERO__RUST_CACHE__WORKING_DIRECTORY-}"
 
@@ -53,6 +65,12 @@ main() {
     true | false) ;;
     *) fail "input 'cache-target' must be 'true' or 'false'" ;;
   esac
+  case "$save_target" in
+    true | false) ;;
+    *) fail "input 'save-target' must be 'true' or 'false'" ;;
+  esac
+  [[ "$save_target" != true || "$cache_target" == true ]] ||
+    fail "input 'save-target' requires cache-target true"
   if [[ "$cache_target" == true || -n "$revision" ]]; then
     [[ "$revision" =~ ^[0-9a-f]{40}$ || "$revision" =~ ^[0-9a-f]{64}$ ]] ||
       fail "input 'target-cache-revision' must be a full lowercase Git SHA (required when cache-target is true)"
@@ -97,12 +115,17 @@ main() {
   done
   [[ ! -e "$selection_file" || -f "$selection_file" ]] || fail "Rust cache selection is not a regular file"
 
-  local selection
-  selection=$(printf '%s\n%s\n' "$project_real" "${revision:-uncached}")
+  local ownership_revision="$revision" selection already_initialized=false
+  if [[ -z "$ownership_revision" ]]; then
+    ownership_revision=$(git -C "$project_real" rev-parse --verify HEAD 2>/dev/null || true)
+    [[ "$ownership_revision" =~ ^[0-9a-f]{40}$ || "$ownership_revision" =~ ^[0-9a-f]{64}$ ]] || ownership_revision=''
+  fi
+  selection=$(printf '%s\n' "$project_real" "${ownership_revision:-uncached}" "$lock_sha" "$cache_target" "$save_target")
   if [[ -e "$selection_file" ]]; then
-    [[ -n "$revision" ]] || fail "repeated cache setup requires target-cache-revision"
+    [[ -n "$ownership_revision" ]] || fail "repeated non-Git cache setup requires target-cache-revision"
     [[ "$(<"$selection_file")" == "$selection" ]] ||
-      fail "Rust target directory already belongs to a different workspace or target-cache-revision"
+      fail "Rust target directory already belongs to a different workspace, revision, lockfile or cache settings"
+    already_initialized=true
   elif [[ -d "$target_dir" ]]; then
     local target_contents
     # Quote control characters so newline-only names survive command substitution.
@@ -125,14 +148,11 @@ main() {
     fail "Cargo target cache directory must resolve inside RUNNER_TEMP"
   printf '%s\n' "$selection" >"$selection_file"
 
-  {
-    printf 'cache-namespace=%s\n' "$app_name"
-    printf 'cargo-lock-sha256=%s\n' "$lock_sha"
-    printf 'source-cache-key=%s\n' "$source_key"
-    printf 'source-cache-restore-prefix=%s\n' "$source_prefix"
-    printf 'target-cache-key=%s\n' "$target_key"
-    printf 'cargo-target-dir=%s\n' "$target_dir"
-  } >>"$output_file"
+  append_output already-initialized "$already_initialized"
+  append_output source-cache-key "$source_key"
+  append_output source-cache-restore-prefix "$source_prefix"
+  append_output target-cache-key "$target_key"
+  append_output cargo-target-dir "$target_dir"
   {
     printf 'RUSTC_WRAPPER=sccache\n'
     printf 'SCCACHE_GHA_ENABLED=true\n'
