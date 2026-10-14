@@ -15,9 +15,10 @@
 //! with `env_clear`, empty profile files and HOME, dummy credentials, metadata lookup disabled,
 //! and both `AWS_ENDPOINT_URL_SECRETS_MANAGER` and the global endpoint override pointing to the
 //! Secrets Manager fixture. No AWS account or real credentials, DNS, external socket, image or
-//! IAM action is involved. `EDGEZERO_GENERATED_TEST_TARGET_DIR` may point at a coordinator-selected target
-//! directory; otherwise builds use the generated project's `target/`. Keep this test ignored;
-//! the coordinator owns any Cargo command used to run it.
+//! IAM action is involved. This ignored test runs explicitly in CI. To run it locally, use
+//! `cargo test -p edgezero-cli --test native_store_generated_proof -- --ignored`.
+//! `EDGEZERO_GENERATED_TEST_TARGET_DIR` can select a shared target directory; otherwise builds
+//! use the generated project's `target/`. Serialize builds that share a target directory.
 
 #[cfg(test)]
 #[cfg(unix)]

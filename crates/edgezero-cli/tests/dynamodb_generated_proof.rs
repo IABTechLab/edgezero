@@ -1,9 +1,11 @@
-//! Draft ignored proof for the generated Axum `DynamoDB` KV consumer.
+//! Ignored end-to-end proof for the generated Axum `DynamoDB` KV consumer.
 //!
-//! Coordinator-owned integration target only: do not add this file to the repository or run
-//! Cargo here. The generated child uses the real generated `main`/`run_generated_app`; only its
-//! generated handler/manifest are extended in the temporary project. `DynamoDB` SDK traffic goes
-//! to a literal-loopback JSON-protocol fixture with dummy credentials and a cleared child env.
+//! This test runs explicitly in CI. To run it locally, use
+//! `cargo test -p edgezero-cli --test dynamodb_generated_proof -- --ignored`.
+//! The generated child uses the real generated `main`/`run_generated_app`; only its handler
+//! and manifest are extended in the temporary project. SDK traffic uses a literal-loopback
+//! fixture with dummy credentials and a cleared child environment. Serialize builds that share
+//! `EDGEZERO_GENERATED_TEST_TARGET_DIR`.
 
 #[cfg(test)]
 mod tests {

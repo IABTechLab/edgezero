@@ -59,7 +59,7 @@ use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeS
 use crate::outbound::AxumOutboundClient;
 use crate::response::EgressConnection;
 pub use crate::run_options::AxumRunOptions;
-use crate::run_options::{failure, shutdown_grace};
+use crate::run_options::{failure, shutdown_grace, strip_native_config_prefix};
 use crate::secret_store::EnvSecretStore;
 use crate::service::{
     AxumServiceState, legacy_config_registry, legacy_kv_registry, legacy_secret_registry,
@@ -721,19 +721,8 @@ pub fn run_generated_app<A: Hooks>() -> anyhow::Result<()> {
 }
 
 fn is_store_bindings_locator_key(key: &str) -> bool {
-    let prefix_len = "EDGEZERO__".len();
-    let Some(prefix) = key.get(..prefix_len) else {
-        return false;
-    };
-    let prefix_matches = if cfg!(windows) {
-        prefix.eq_ignore_ascii_case("EDGEZERO__")
-    } else {
-        prefix == "EDGEZERO__"
-    };
-    prefix_matches
-        && key
-            .get(prefix_len..)
-            .is_some_and(|path| path.eq_ignore_ascii_case("STORE_BINDINGS_FILE"))
+    strip_native_config_prefix(key)
+        .is_some_and(|path| path.eq_ignore_ascii_case("STORE_BINDINGS_FILE"))
 }
 
 /// Runs an application with the Axum development server.
@@ -1310,6 +1299,81 @@ mod tests {
         assert!(!is_store_bindings_locator_key(
             "EDGEZERO_STORE_BINDINGS_FILE"
         ));
+        for key in [
+            "edgezero__store_bindings_file",
+            "EdGeZeRo__STORE_BINDINGS_FILE",
+        ] {
+            assert_eq!(is_store_bindings_locator_key(key), cfg!(windows));
+        }
+    }
+
+    #[test]
+    fn generated_bindings_locator_child() {
+        let Ok(expected) = env::var("EDGEZERO_TEST_BINDINGS_ERROR") else {
+            return;
+        };
+        // This hook fails construction even if dispatch incorrectly selects local defaults.
+        let error = run_generated_app::<FailingConfiguration>().expect_err("startup failure");
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.chain().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn generated_locator_casing_and_non_unicode_fail_closed() {
+        use std::ffi::OsString;
+        #[cfg(unix)]
+        use std::os::unix::ffi::OsStringExt as _;
+        #[cfg(windows)]
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let root = tempfile::tempdir().expect("root");
+        let missing = root.path().join("missing.toml");
+        #[cfg(unix)]
+        let non_unicode = OsString::from_vec(vec![0xff]);
+        #[cfg(windows)]
+        let non_unicode = OsString::from_wide(&[0xd800]);
+        for prefix in ["EDGEZERO__", "edgezero__", "EdGeZeRo__"] {
+            for (value, selected_error) in [
+                (
+                    missing.clone().into_os_string(),
+                    "startup settings: bindings: native bindings file unavailable",
+                ),
+                (
+                    non_unicode.clone(),
+                    "startup settings: STORE_BINDINGS_FILE: non-Unicode value",
+                ),
+            ] {
+                let recognized = prefix == "EDGEZERO__" || cfg!(windows);
+                // Non-Unicode rejection belongs to selected strict startup; do not exercise
+                // the unchanged development runner's Unicode-only environment collection.
+                if !recognized && value.to_str().is_none() {
+                    continue;
+                }
+                let expected = if recognized {
+                    selected_error
+                } else {
+                    "application configuration failed"
+                };
+                let output = Command::new(env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "dev_server::tests::generated_bindings_locator_child",
+                    ])
+                    .env_clear()
+                    .env("EDGEZERO_TEST_BINDINGS_ERROR", expected)
+                    .env(format!("{prefix}store_bindings_file"), value)
+                    .output()
+                    .expect("isolated generated entrypoint");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stdout}\n{stderr}");
+                assert!(
+                    stdout.contains("1 passed"),
+                    "child test must execute: {stdout}"
+                );
+            }
+        }
     }
 
     struct FailingConfiguration;

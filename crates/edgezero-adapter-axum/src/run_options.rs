@@ -106,7 +106,7 @@ impl AxumRunOptions {
         let mut non_unicode = Vec::new();
         for (os_key, os_value) in vars_os() {
             let Some(key) = os_key.to_str() else { continue };
-            let Some(rest) = key.strip_prefix("EDGEZERO__") else {
+            let Some(rest) = strip_native_config_prefix(key) else {
                 continue;
             };
             let path: Vec<String> = rest.split("__").map(str::to_ascii_lowercase).collect();
@@ -183,7 +183,7 @@ impl AxumRunOptions {
             .collect();
         let mut seen = BTreeSet::new();
         for (key, _value) in &pairs {
-            if let Some(rest) = key.strip_prefix("EDGEZERO__") {
+            if let Some(rest) = strip_native_config_prefix(key) {
                 let path: Vec<String> = rest.split("__").map(str::to_ascii_lowercase).collect();
                 let segments: Vec<&str> = path.iter().map(String::as_str).collect();
                 if (fixed_setting(&path).is_some()
@@ -523,6 +523,20 @@ pub(crate) fn shutdown_grace(env: &EnvConfig) -> anyhow::Result<Duration> {
     Ok(grace)
 }
 
+/// Match the process environment's key identity, as `EnvConfig` does.
+pub(crate) fn strip_native_config_prefix(key: &str) -> Option<&str> {
+    const PREFIX: &str = "EDGEZERO__";
+    if cfg!(windows) {
+        let prefix = key.get(..PREFIX.len())?;
+        if !prefix.eq_ignore_ascii_case(PREFIX) {
+            return None;
+        }
+        key.get(PREFIX.len()..)
+    } else {
+        key.strip_prefix(PREFIX)
+    }
+}
+
 fn validate_grace(grace: Duration) -> anyhow::Result<()> {
     if grace.is_zero() || grace.subsec_nanos() != 0 || Instant::now().checked_add(grace).is_none() {
         return Err(failure(
@@ -556,6 +570,53 @@ mod tests {
 
     fn explicit() -> AxumRunOptions {
         AxumRunOptions::new(SocketAddr::from(([127, 0, 0, 1], 1234))).expect("explicit options")
+    }
+
+    #[test]
+    fn native_prefix_matching_agrees_with_portable_env_config() {
+        for key in [
+            "EDGEZERO__ADAPTER__PORT",
+            "edgezero__adapter__port",
+            "EdGeZeRo__adapter__port",
+            "EDGEZERO_ADAPTER__PORT",
+            "short",
+            "EDGEZERO\u{e9}__adapter__port",
+        ] {
+            let portable = EnvConfig::from_vars([(key, "9090")]);
+            assert_eq!(
+                strip_native_config_prefix(key).is_some(),
+                portable.adapter_port().is_some(),
+                "prefix identity for {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_case_variants_capture_bindings_and_reject_duplicate_settings() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("bindings.toml");
+        fs::write(&path, BINDINGS).expect("bindings");
+        for prefix in ["EDGEZERO__", "edgezero__", "EdGeZeRo__"] {
+            let options = AxumRunOptions::from_vars([(
+                format!("{prefix}store_bindings_file"),
+                path.to_str().expect("path"),
+            )])
+            .expect("valid locator or unrecognized Unix prefix");
+            assert_eq!(
+                options.bindings().document().is_some(),
+                prefix == "EDGEZERO__" || cfg!(windows)
+            );
+            let duplicate = AxumRunOptions::from_vars([
+                ("EDGEZERO__ADAPTER__PORT".to_owned(), "9090"),
+                (format!("{prefix}adapter__port"), "9091"),
+            ]);
+            if prefix == "EDGEZERO__" || cfg!(windows) {
+                let error = duplicate.err().expect("duplicate normalized setting");
+                assert!(error.to_string().contains("duplicate normalized setting"));
+            } else {
+                assert_eq!(duplicate.expect("Unix prefix ignored").addr.port(), 9090);
+            }
+        }
     }
 
     #[test]
