@@ -74,8 +74,40 @@ elif [[ "$got" != "$WANT" ]]; then
   VIOLATIONS=$((VIOLATIONS + 1))
 fi
 
+# `spin-sdk` is pinned in four places and shares no lockfile across them.
+# A mismatch does not fail at the pin: the fixture resolves a second copy
+# of the SDK and the build dies on `expected IncomingBody<Request>, found
+# a different IncomingBody<Request>`, naming neither crate nor version.
+# Only the major is comparable -- the root spells it `~7.0`, the seeds `7`.
+spin_major_in() {
+  grep -hoE '^[[:space:]]*(\\?")?spin-sdk[[:space:]]*=[^#]*' "$1" 2>/dev/null |
+    head -1 |
+    grep -oE '[0-9]+' |
+    head -1 || true
+}
+
+SPIN_WANT="$(spin_major_in Cargo.toml)"
+if [[ -z "$SPIN_WANT" ]]; then
+  echo "check_shared_dep_pins: no spin-sdk pin in root Cargo.toml" >&2
+  exit 1
+fi
+
+for file in \
+  examples/app-demo/Cargo.toml \
+  tests/fixtures/reusable-app/crates/fixture-spin/Cargo.toml \
+  crates/edgezero-cli/src/generator.rs; do
+  got="$(spin_major_in "$file")"
+  if [[ -z "$got" ]]; then
+    echo "$file: violation: no spin-sdk pin found (expected major $SPIN_WANT)"
+    VIOLATIONS=$((VIOLATIONS + 1))
+  elif [[ "$got" != "$SPIN_WANT" ]]; then
+    echo "$file: violation: spin-sdk major $got, root Cargo.toml has $SPIN_WANT"
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+done
+
 if ((VIOLATIONS > 0)); then
   echo "check_shared_dep_pins: $VIOLATIONS pin(s) out of sync" >&2
   exit 1
 fi
-echo "check_shared_dep_pins: all validator pins agree ($WANT)"
+echo "check_shared_dep_pins: validator pins agree ($WANT); spin-sdk majors agree ($SPIN_WANT)"
