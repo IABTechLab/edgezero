@@ -135,10 +135,10 @@ where
 /// # Errors
 /// Returns conversion or dispatch errors from the existing adapter boundary.
 #[inline]
-pub async fn dispatch_app<A: Hooks>(
-    app: &App,
-    req: SpinRequest,
-) -> anyhow::Result<SpinFullResponse> {
+pub async fn dispatch_app<A>(app: &App, req: SpinRequest) -> anyhow::Result<SpinFullResponse>
+where
+    A: Hooks,
+{
     let stores = A::stores();
     let env = EnvConfig::from_env();
     request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)

@@ -48,7 +48,7 @@ fi
 VIOLATIONS=0
 for file in \
   examples/app-demo/Cargo.toml \
-  .github/actions/deploy-core/tests/make-smoke-fixture.sh; do
+  .github/actions/deploy-fastly/tests/make-smoke-fixture.sh; do
   got="$(pin_in "$file")"
   if [[ -z "$got" ]]; then
     echo "$file: violation: no validator pin found (expected $WANT)"

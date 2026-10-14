@@ -352,7 +352,10 @@ mod retained_app_tests {
 #[cfg(feature = "fastly")]
 #[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
 #[inline]
-pub fn serve_app<A: Hooks>(serve: Serve) -> ServeSummary<fastly::Error> {
+pub fn serve_app<A>(serve: Serve) -> ServeSummary<fastly::Error>
+where
+    A: Hooks,
+{
     serve_app_with_request_extensions::<A, _>(serve, |_request, _extensions| {})
 }
 

@@ -123,12 +123,15 @@ where
 /// # Errors
 /// Returns conversion or dispatch errors from the existing adapter boundary.
 #[inline]
-pub async fn dispatch_app<A: Hooks>(
+pub async fn dispatch_app<A>(
     app: &App,
     req: Request,
     env: Env,
     ctx: Context,
-) -> Result<Response, WorkerError> {
+) -> Result<Response, WorkerError>
+where
+    A: Hooks,
+{
     let stores = A::stores();
     let env_config = env_config_from_worker(&env, stores);
     request::dispatch_with_registries(
