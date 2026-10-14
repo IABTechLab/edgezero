@@ -86,11 +86,13 @@ runs only from `workflow_dispatch` on `refs/heads/main`. Copy it as
 `.github/workflows/release.yml` into the application repository, along with:
 
 - `examples/container-publishing/tools.env`
-- `examples/container-publishing/verify_artifacts.py`
+- `examples/container-publishing/verify_artifacts.mjs`
 - `examples/container-publishing/publish.sh`
 - `scripts/test_axum_container_handoff.sh`
 
-Keep those relative locations. Commit the app's portable dependency manifests,
+Keep those relative locations. The helpers require Node.js 24.12.0 and jq, and the
+workflow installs the declared Node.js version. No npm dependencies are needed.
+Commit the app's portable dependency manifests,
 `Cargo.lock`, `.tool-versions`, digest-pinned Dockerfile and executable
 `.ci/test-container.sh`. The context must contain required assets and workspace
 members. This sample uses a committed repository-root context without source

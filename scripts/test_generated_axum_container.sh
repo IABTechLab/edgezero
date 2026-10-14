@@ -4,7 +4,9 @@ set -euo pipefail
 # Opt-in packaging check for a disposable generated app, NOT a production app.
 # Prepare portable dependencies and the app's own Cargo.lock before calling this.
 # Usage: ./scripts/test_generated_axum_container.sh /path/to/container-probe
-# Requires Docker, Python 3.11+, curl, OpenSSL, readelf and network access for image builds.
+# Requires Docker, Node.js 22+, curl, OpenSSL, readelf and network access for image builds.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HELPERS="$ROOT/scripts/axum_container_helpers.mjs"
 APP_DIR="$(cd "${1:?pass a prepared disposable generated workspace}" && pwd)"
 shift
 BORROWED_IMAGE=""
@@ -26,16 +28,11 @@ if [[ -n "$EVIDENCE" ]]; then
   mkdir -p "$EVIDENCE"
   EVIDENCE="$(cd "$EVIDENCE" && pwd)"
 fi
-for tool in docker python3 curl openssl readelf sha256sum; do
+for tool in docker node curl openssl readelf sha256sum; do
   command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 1; }
 done
 docker info >/dev/null
-NAME="$(python3 - "$APP_DIR/edgezero.toml" <<'PY'
-import sys, tomllib
-with open(sys.argv[1], 'rb') as f:
-    print(tomllib.load(f)['app']['name'])
-PY
-)"
+NAME="$(node "$HELPERS" app-name "$APP_DIR/edgezero.toml")"
 [[ "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Invalid generated app name' >&2; exit 1; }
 for file in Dockerfile .dockerignore Cargo.lock .tool-versions; do
   test -f "$APP_DIR/$file" || { echo "Prepare $file first" >&2; exit 1; }
@@ -83,14 +80,7 @@ PLATFORM="${PLATFORM:-$HOST_PLATFORM}"
 [[ "$PLATFORM" == "$HOST_PLATFORM" ]] || { echo 'Native host/platform mismatch' >&2; exit 1; }
 echo "==> Packaging fixture $NAME; native $PLATFORM"
 sha256sum "$APP_DIR/Cargo.lock" "$APP_DIR/.tool-versions"
-python3 - "$APP_DIR/Cargo.toml" <<'PY'
-import sys, tomllib
-with open(sys.argv[1], 'rb') as f:
-    deps = tomllib.load(f)['workspace']['dependencies']
-for name, dep in deps.items():
-    if name.startswith('edgezero-'):
-        print(name, dep)
-PY
+node "$HELPERS" dependencies "$APP_DIR/Cargo.toml"
 
 # Work on a copy so sentinels never alter the supplied workspace.
 mkdir "$WORK/context"
@@ -140,22 +130,7 @@ docker cp "$ID-export:/usr/local/bin/app" "$WORK/app"
 readelf -h -l -d "$WORK/app" > "$WORK/elf.log"
 grep -E 'Machine:|interpreter|NEEDED' "$WORK/elf.log"
 test -s "$WORK/os-roots.pem"
-python3 - "$WORK/runtime.tar" "$PLATFORM" <<'PY'
-import sys, tarfile
-with tarfile.open(sys.argv[1]) as archive:
-    paths = {m.name.lstrip('./') for m in archive}
-    forbidden = ('build/', 'context/', 'usr/local/cargo/', 'usr/local/rustup/')
-    assert not any(p.startswith(forbidden) or '/.git/' in p or p.endswith('container-sentinel') for p in paths)
-    for path in ('usr/bin/cargo', 'usr/bin/rustc', 'usr/bin/node', 'usr/bin/npm', 'app/Cargo.toml'):
-        assert path not in paths, path
-    assert 'usr/local/bin/app' in paths
-    header = archive.extractfile('usr/local/bin/app').read(20)
-    assert header[:4] == b'\x7fELF', 'not a native ELF executable'
-    machine = int.from_bytes(header[18:20], 'little')
-    assert header[4:6] == bytes((2, 1)), 'expected ELF64 little-endian'
-    assert machine == {'linux/amd64': 62, 'linux/arm64': 183}[sys.argv[2]], 'ELF/platform mismatch'
-    print('ELF class', header[4], 'machine', machine)
-PY
+node "$HELPERS" runtime-tar "$WORK/runtime.tar" "$PLATFORM"
 docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
   --entrypoint sh "$IMAGE" -ec '
     id; test "$(id -u):$(id -g)" = 10001:10001

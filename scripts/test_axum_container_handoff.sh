@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../examples/container-publishing/tools.env
 source "$ROOT/examples/container-publishing/tools.env"
-VERIFY="$ROOT/examples/container-publishing/verify_artifacts.py"
+VERIFY="$ROOT/examples/container-publishing/verify_artifacts.mjs"
 MODE="${1:?build or import}"; INPUT="${2:?input directory}"; OUTPUT="${3:?new output directory}"
 PLATFORM="${4:?linux/amd64 or linux/arm64}"; REVISION="${5:?source SHA}"; RUN_ID="${6:?run identity}"
 [[ $# -eq 6 && ( "$MODE" == build || "$MODE" == import ) ]] || { echo 'Invalid handoff arguments' >&2; exit 2; }
@@ -53,12 +53,12 @@ if [[ "$MODE" == build ]]; then
     --output "type=oci,dest=$OUTPUT/image.tar,name=app" "$INPUT" 2>&1 | tee "$OUTPUT/build.log"
   cp "$INPUT/fixture-inputs.json" "$OUTPUT/inputs.json"
 else
-  python3 "$VERIFY" verify "$INPUT" --revision "$REVISION" --run-id "$RUN_ID" --platform "$PLATFORM" \
+  node "$VERIFY" verify "$INPUT" --revision "$REVISION" --run-id "$RUN_ID" --platform "$PLATFORM" \
     "${VERIFY_ARGS[@]}" > "$OUTPUT/verified.json"
   cp "$INPUT/image.tar" "$OUTPUT/image.tar"
 fi
-python3 "$VERIFY" extract "$OUTPUT/image.tar" "$WORK/oci" --platform "$PLATFORM" > "$OUTPUT/image.json"
-DIGEST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifest_digest"])' "$OUTPUT/image.json")"
+node "$VERIFY" extract "$OUTPUT/image.tar" "$WORK/oci" --platform "$PLATFORM" > "$OUTPUT/image.json"
+DIGEST="$(jq -er '.manifest_digest' "$OUTPUT/image.json")"
 docker run -d --name "$REGISTRY" -p 127.0.0.1::5000 "$REGISTRY_IMAGE" > "$OUTPUT/registry-id"
 PORT="$(docker port "$REGISTRY" 5000/tcp | awk -F: '{print $NF}')"
 REG="127.0.0.1:$PORT"
@@ -79,7 +79,7 @@ curl --fail --silent -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
 IMAGE="$REG/app@$DIGEST"
 docker pull --platform "$PLATFORM" "$IMAGE" > "$OUTPUT/pull.log"
 docker image inspect "$IMAGE" > "$OUTPUT/pulled-image.json"
-python3 "$VERIFY" pulled "$WORK/oci" "$OUTPUT/pulled-image.json" --platform "$PLATFORM" \
+node "$VERIFY" pulled "$WORK/oci" "$OUTPUT/pulled-image.json" --platform "$PLATFORM" \
   --reference "$IMAGE" > "$OUTPUT/pulled-verified.json"
 
 if [[ "$MODE" == build ]]; then
@@ -89,7 +89,7 @@ if [[ "$MODE" == build ]]; then
   else
     "$ROOT/scripts/test_generated_axum_container.sh" "$INPUT" --image "$IMAGE" \
       --platform "$PLATFORM" --evidence-dir "$OUTPUT/smoke"
-    APP_NAME="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["app"]["name"])' "$INPUT/edgezero.toml")"
+    APP_NAME="$(node "$ROOT/scripts/axum_container_helpers.mjs" app-name "$INPUT/edgezero.toml")"
     "$ROOT/scripts/test_axum_container_deployment.sh" "$IMAGE" "$APP_NAME"
   fi
   mkdir "$OUTPUT/scanner-cache"
@@ -103,28 +103,19 @@ if [[ "$MODE" == build ]]; then
     --mount "type=bind,src=$WORK/oci,dst=/oci,readonly" \
     "$TRIVY_IMAGE" image --cache-dir /work/scanner-cache --input /oci \
     --format cyclonedx --output /work/sbom.json
-  python3 - "$OUTPUT" "$DIGEST" "$REVISION" "$RUN_ID" "$BUILDKIT_IMAGE" <<'PY'
-import json, pathlib, sys
-out = pathlib.Path(sys.argv[1])
-inputs = json.loads((out / 'inputs.json').read_text())
-(out / 'provenance.json').write_text(json.dumps({
-    'subject': sys.argv[2], 'revision': sys.argv[3], 'run_id': sys.argv[4],
-    'builder': sys.argv[5], 'inputs': inputs,
-    'note': 'Unsigned build receipt. Trusted publisher authentication is separate.',
-}, indent=2) + '\n')
-PY
-  python3 - "$OUTPUT/scanner.json" "$DIGEST" <<'PY'
-import json, pathlib, sys
-path = pathlib.Path(sys.argv[1])
-metadata = json.loads(path.read_text())
-metadata['SubjectManifestDigest'] = sys.argv[2]
-path.write_text(json.dumps(metadata, indent=2) + '\n')
-PY
+  jq -n --arg subject "$DIGEST" --arg revision "$REVISION" --arg run_id "$RUN_ID" \
+    --arg builder "$BUILDKIT_IMAGE" --slurpfile inputs "$OUTPUT/inputs.json" \
+    '{subject: $subject, revision: $revision, run_id: $run_id, builder: $builder,
+      inputs: $inputs[0], note: "Unsigned build receipt. Trusted publisher authentication is separate."}' \
+    > "$OUTPUT/provenance.json"
+  jq --arg digest "$DIGEST" '.SubjectManifestDigest = $digest' "$OUTPUT/scanner.json" \
+    > "$WORK/scanner.json"
+  mv "$WORK/scanner.json" "$OUTPUT/scanner.json"
   # Seal needs the validated layout, but only the archive/sidecars are transferred.
   ln -s "$WORK/oci" "$OUTPUT/oci"
-  python3 "$VERIFY" seal "$OUTPUT" --revision "$REVISION" --run-id "$RUN_ID" --platform "$PLATFORM" > "$OUTPUT/accepted.json"
+  node "$VERIFY" seal "$OUTPUT" --revision "$REVISION" --run-id "$RUN_ID" --platform "$PLATFORM" > "$OUTPUT/accepted.json"
   rm "$OUTPUT/oci"
-  python3 "$VERIFY" verify "$OUTPUT" --revision "$REVISION" --run-id "$RUN_ID" --platform "$PLATFORM" "${VERIFY_ARGS[@]}" > "$OUTPUT/verified.json"
+  node "$VERIFY" verify "$OUTPUT" --revision "$REVISION" --run-id "$RUN_ID" --platform "$PLATFORM" "${VERIFY_ARGS[@]}" > "$OUTPUT/verified.json"
   rm -rf "$OUTPUT/scanner-cache"
 fi
 # Transfer into a distinct directory and verify/import there in a later job with MODE=import.

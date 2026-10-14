@@ -4,7 +4,8 @@ on:
   pull_request:
     paths:
       - scripts/*axum_container*.sh
-      - scripts/tests/test_axum_container*.py
+      - scripts/axum_container*.mjs
+      - scripts/tests/test_axum_container*.test.mjs
       - examples/container-publishing/**
       - examples/axum-deployment/**
       - docs/guide/*axum-containers.md
@@ -33,7 +34,8 @@ on:
     branches: [main]
     paths:
       - scripts/*axum_container*.sh
-      - scripts/tests/test_axum_container*.py
+      - scripts/axum_container*.mjs
+      - scripts/tests/test_axum_container*.test.mjs
       - examples/container-publishing/**
       - examples/axum-deployment/**
       - docs/guide/*axum-containers.md
@@ -140,8 +142,12 @@ jobs:
             scripts/*axum_container*.sh \
             examples/container-publishing/publish.sh
 
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.12.0"
+
       - name: Container helper unit tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_axum_container*.py' -v
+        run: node --test scripts/tests/test_axum_container*.test.mjs
 
       - name: Bash contract tests
         run: .github/actions/deploy-core/tests/run.sh

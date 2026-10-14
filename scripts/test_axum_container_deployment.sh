@@ -11,6 +11,14 @@ export AXUM_PORT=0
 PROJECT="edgezero-compose-$$-$RANDOM"
 WORK="$(mktemp -d -t edgezero-compose.XXXXXX)"
 compose() { docker compose -p "$PROJECT" -f "$ROOT/examples/axum-deployment/compose.yaml" "$@"; }
+wait_for_http() {
+  for _ in $(seq 1 30); do
+    curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" > "$WORK/body" && break
+    sleep 1
+  done
+  curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" > "$WORK/body"
+  [[ "$(< "$WORK/body")" == "$NAME app" ]]
+}
 cleanup() {
   status=$?
   compose logs > "$WORK/compose.log" 2>&1 || true
@@ -23,12 +31,7 @@ compose config > "$WORK/config.yaml"
 compose up -d --no-build --pull never
 CONTAINER="$(compose ps -q app)"
 PORT="$(compose port app 8787 | awk -F: '{print $NF}')"
-for _ in $(seq 1 30); do
-  curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" > "$WORK/body" && break
-  sleep 1
-done
-curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" > "$WORK/body"
-[[ "$(< "$WORK/body")" == "$NAME app" ]]
+wait_for_http
 [[ "$(docker inspect "$CONTAINER" --format '{{.HostConfig.ReadonlyRootfs}}')" == true ]]
 docker exec "$CONTAINER" sh -ec '
   test "$(id -u):$(id -g)" = 10001:10001
@@ -39,11 +42,6 @@ docker exec "$CONTAINER" sh -ec '
 compose stop
 compose start
 PORT="$(compose port app 8787 | awk -F: '{print $NF}')"
-for _ in $(seq 1 30); do
-  curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" > "$WORK/body" && break
-  sleep 1
-done
-curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" > "$WORK/body"
-[[ "$(< "$WORK/body")" == "$NAME app" ]]
+wait_for_http
 echo 'PASS: no-store Compose config, restricted HTTP startup, stop/start and teardown.'
 echo 'No production readiness, durable state or bounded SIGTERM acceptance is implied.'

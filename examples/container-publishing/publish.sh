@@ -33,37 +33,35 @@ WORK="$(mktemp -d -t axum-publisher.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 VERIFY_ARGS=(--scan-policy "$SCAN_POLICY")
 if [[ -n "${SCAN_EXCEPTIONS:-}" ]]; then VERIFY_ARGS+=(--exceptions "$SCAN_EXCEPTIONS"); fi
-python3 "$HERE/verify_artifacts.py" verify "$AMD" --revision "$REVISION" --run-id "$RUN_ID" \
+node "$HERE/verify_artifacts.mjs" verify "$AMD" --revision "$REVISION" --run-id "$RUN_ID" \
   --platform linux/amd64 "${VERIFY_ARGS[@]}" > "$OUTPUT/amd64.json"
-python3 "$HERE/verify_artifacts.py" verify "$ARM" --revision "$REVISION" --run-id "$RUN_ID" \
+node "$HERE/verify_artifacts.mjs" verify "$ARM" --revision "$REVISION" --run-id "$RUN_ID" \
   --platform linux/arm64 "${VERIFY_ARGS[@]}" > "$OUTPUT/arm64.json"
-python3 "$HERE/verify_artifacts.py" extract "$AMD/image.tar" "$WORK/amd64" --platform linux/amd64 >/dev/null
-python3 "$HERE/verify_artifacts.py" extract "$ARM/image.tar" "$WORK/arm64" --platform linux/arm64 >/dev/null
-python3 "$HERE/verify_artifacts.py" index "$AMD" "$ARM" --revision "$REVISION" --run-id "$RUN_ID" \
+node "$HERE/verify_artifacts.mjs" extract "$AMD/image.tar" "$WORK/amd64" --platform linux/amd64 >/dev/null
+node "$HERE/verify_artifacts.mjs" extract "$ARM/image.tar" "$WORK/arm64" --platform linux/arm64 >/dev/null
+node "$HERE/verify_artifacts.mjs" index "$AMD" "$ARM" --revision "$REVISION" --run-id "$RUN_ID" \
   "${VERIFY_ARGS[@]}" > "$OUTPUT/index.json"
-python3 - "$WORK" "$OUTPUT" <<'PY'
-import hashlib, json, pathlib, shutil, sys
-work, output = map(pathlib.Path, sys.argv[1:])
-merged = work / 'merged'
-(merged / 'blobs/sha256').mkdir(parents=True)
-for arch in ('amd64', 'arm64'):
-    for blob in (work / arch / 'blobs/sha256').iterdir():
-        target = merged / 'blobs/sha256' / blob.name
-        if target.exists():
-            if target.read_bytes() != blob.read_bytes():
-                raise ValueError('Conflicting content-addressed blob')
-        else:
-            shutil.copyfile(blob, target)
-raw = (output / 'index.json').read_bytes()
-digest = hashlib.sha256(raw).hexdigest()
-(merged / 'blobs/sha256' / digest).write_bytes(raw)
-(merged / 'oci-layout').write_text('{"imageLayoutVersion":"1.0.0"}')
-(merged / 'index.json').write_text(json.dumps({'schemaVersion': 2, 'manifests': [{
-    'mediaType': 'application/vnd.oci.image.index.v1+json', 'digest': 'sha256:' + digest, 'size': len(raw),
-    'annotations': {'org.opencontainers.image.ref.name': 'release'},
-}]}))
-(output / 'digest').write_text('sha256:' + digest + '\n')
-PY
+mkdir -p "$WORK/merged/blobs/sha256"
+for arch in amd64 arm64; do
+  for blob in "$WORK/$arch/blobs/sha256/"*; do
+    target="$WORK/merged/blobs/sha256/$(basename "$blob")"
+    if [[ -e "$target" ]]; then
+      cmp "$blob" "$target" || { echo 'Conflicting content-addressed blob' >&2; exit 1; }
+    else
+      cp "$blob" "$target"
+    fi
+  done
+done
+digest="$(sha256sum "$OUTPUT/index.json" | awk '{print $1}')"
+size="$(wc -c < "$OUTPUT/index.json")"
+cp "$OUTPUT/index.json" "$WORK/merged/blobs/sha256/$digest"
+printf '%s' '{"imageLayoutVersion":"1.0.0"}' > "$WORK/merged/oci-layout"
+jq -n --arg digest "sha256:$digest" --argjson size "$size" \
+  '{schemaVersion: 2, manifests: [{
+    mediaType: "application/vnd.oci.image.index.v1+json", digest: $digest, size: $size,
+    annotations: {"org.opencontainers.image.ref.name": "release"}
+  }]}' > "$WORK/merged/index.json"
+printf 'sha256:%s\n' "$digest" > "$OUTPUT/digest"
 AUTH=(); TLS=()
 if "$LOCAL"; then
   TLS=(--dest-tls-verify=false)
@@ -81,7 +79,7 @@ if "$LOCAL"; then INSPECT_TLS=(--tls-verify=false); fi
 # permits creation; all other preflight errors abort before any publication.
 TAG_AUTH=()
 if ! "$LOCAL"; then TAG_AUTH=(--auth-file "$AUTH_FILE"); fi
-python3 "$HERE/verify_artifacts.py" tag-check "$REPO" "$TAG" "$(< "$OUTPUT/digest")" \
+node "$HERE/verify_artifacts.mjs" tag-check "$REPO" "$TAG" "$(< "$OUTPUT/digest")" \
   "${TAG_AUTH[@]}" > "$OUTPUT/prior-tag.json"
 docker run --rm --network host --user "$(id -u):$(id -g)" --cap-drop=ALL \
   --security-opt=no-new-privileges:true --mount "type=bind,src=$WORK,dst=/work,readonly" \
@@ -93,8 +91,8 @@ docker run --rm --network host --user "$(id -u):$(id -g)" --cap-drop=ALL \
 [[ "sha256:$(sha256sum "$OUTPUT/tag.json" | awk '{print $1}')" == "$(< "$OUTPUT/digest")" ]] \
   || { echo 'Version tag moved during publication' >&2; exit 1; }
 for subject in "$(< "$OUTPUT/digest")" \
-  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifest_digest"])' "$OUTPUT/amd64.json")" \
-  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifest_digest"])' "$OUTPUT/arm64.json")"; do
+  "$(jq -er '.manifest_digest' "$OUTPUT/amd64.json")" \
+  "$(jq -er '.manifest_digest' "$OUTPUT/arm64.json")"; do
   raw="$OUTPUT/${subject#sha256:}.json"
   docker run --rm --network host --user "$(id -u):$(id -g)" --cap-drop=ALL \
     --security-opt=no-new-privileges:true "${AUTH[@]}" "$SKOPEO_IMAGE" inspect --raw \

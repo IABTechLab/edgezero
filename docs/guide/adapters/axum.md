@@ -333,7 +333,7 @@ workspace** after the preparation above:
 ./scripts/test_generated_axum_container.sh /path/to/container-probe
 ```
 
-It requires Docker, Python 3.11+, curl, OpenSSL, readelf and preparation network access.
+It requires Docker, Node.js 24.12.0, jq, curl, OpenSSL, readelf and preparation network access.
 It tests actual context exclusions, final filesystem/native libraries, UID,
 read-only root, dropped capabilities, explicit mount permissions, published-port
 HTTP and the real proxy's controlled TLS trust and hostname rejection. It uses

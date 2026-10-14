@@ -21,9 +21,6 @@ target/
 .*.edgezero-lock
 .*.edgezero-*.tmp
 
-# Standard-library container-helper test bytecode.
-__pycache__/
-
 # env
 .env
 
