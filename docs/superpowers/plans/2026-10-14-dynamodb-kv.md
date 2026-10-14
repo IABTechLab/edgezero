@@ -1,6 +1,6 @@
 # Native DynamoDB KV implementation plan
 
-- Status: Implemented and verified on `issue-410-native-store-providers`; publication to existing draft PR #414 is authorized and pending. The eight pre-existing modified files remain preserved outside this change.
+- Status: Implemented, verified and pushed to existing draft [PR #414](https://github.com/stackpop/edgezero/pull/414) on `issue-410-native-store-providers`. The eight pre-existing files' unrelated hunks remain preserved and uncommitted.
 - Requested outcome: Native apps can select DynamoDB independently per declared KV store ID, through the existing portable KV interface.
 - Base: Draft [PR #414](https://github.com/stackpop/edgezero/pull/414), published head `b764a883ce57a323250d9d7a20787dc5937ef90e` at research time. Re-check the published head before implementation.
 - Safety: No AWS calls, ambient credential discovery, infrastructure changes, deployments or image pulls during research or default checks. Literal-loopback SDK fixtures use dummy credentials and cleared environments. Real AWS acceptance requires separate authorization.
@@ -88,7 +88,7 @@ flowchart TD
 - [x] **3. Prove provider behavior.** Run the shared KV contract against the actual provider using deterministic fixtures, not a replacement mock implementation. Drive the real SDK request/response path against a loopback fixture with cleared environments. Cover Unicode NFC/NFD distinction, 512-byte keys, arbitrary/empty binary, overwrite/delete/missing, millisecond expiry and renewal, no-TTL reset, size bounds, malformed records, short/empty pages, 1 MiB continuation shape, cursor scope/progress, denial/missing table, stalls and one-attempt ambiguous writes. Assert no owned diagnostic contains fixture keys/values/credentials.
 - [x] **4. Wire per-ID native selection.** Extend KV binding schema, declared-ID/limit/conflict checks, capability/source resolution, startup session selection and existing KV staging loop. Test local+Dynamo+supplied mixtures, intentional shared namespaces, zero opens/polls on invalid sources, no fallback and no partial registry/initializer/listener on setup failure. All-Dynamo KV must not require or create a local DATA_DIR.
 - [x] **5. Integrate CLI and actual generated consumers.** Add the generated opt-in alias and structural parser coverage. Reuse the generic Cargo normalizer rather than another resolver or shell interceptor. Prove generated default-off rejection and Dynamo-enabled CRUD/list/TTL through the public `Kv` extractor, with real SDK loopback traffic. Restart the generated consumer against the same fixture to prove data is not local process state. Preserve existing config push rules and config/secrets feature combinations.
-- [ ] **6. Document and run affected final gates.** Document schema creation/TTL cleanup/IAM as operator instructions, credentials, cost/hot partitions, smaller values, non-atomic read-modify-write, non-snapshot pages, write ambiguity and dependency logging caveat. Run focused tests after each coherent code unit, then affected workspace/native/feature/WASM, fmt, strict Clippy, SDK graph isolation and generated-consumer gates at a stable checkpoint. Do not repeat unaffected successful checks without input changes. Record commands, checked state and limitations. Commit and push the completed DynamoDB work to existing PR #414 after checks. Merges and infrastructure acceptance remain unauthorized.
+- [x] **6. Document and run affected final gates.** Document schema creation/TTL cleanup/IAM as operator instructions, credentials, cost/hot partitions, smaller values, non-atomic read-modify-write, non-snapshot pages, write ambiguity and dependency logging caveat. Run focused tests after each coherent code unit, then affected workspace/native/feature/WASM, fmt, strict Clippy, SDK graph isolation and generated-consumer gates at a stable checkpoint. Do not repeat unaffected successful checks without input changes. Record commands, checked state and limitations. Commit and push the completed DynamoDB work to existing PR #414 after checks. Merges and infrastructure acceptance remain unauthorized.
 
 ## Likely affected files
 
@@ -121,6 +121,10 @@ The exact staged source tree `2fa76fb26377cf41203c255f924d988d6b657002` was arch
 - Loopback fixtures explicitly configure dummy credentials and endpoints. Put and Delete tests apply the mutation before a scripted 500, then assert `Unavailable`, one attempt and the retained/removed row. SDK GetItemOutput Debug contains a sentinel key and binary hex; owned error assertions remain source-free.
 
 Commands, logs and fingerprints: `/tmp/dynamodb-baseline/final-checks.sh`, `/tmp/dynamodb-baseline/final/`, `snapshot-{before,after}.sha256`. Read-only final provider review: `/tmp/dynamodb-provider-final-review.md`; no confirmed findings, and no execution claims from that review.
+
+## Publication
+
+Implementation commit `883354f98dfd4437eb60faaac12d4469f65aa158` was pushed to the existing branch and verified as PR #414's remote head. Only owned DynamoDB changes were staged, including narrowly projected edits in the two overlapping baseline files. The eight unrelated working-copy modifications remain unstaged; no stash, prerequisite rewrite, merge, deployment or AWS acceptance occurred. This final publication record changes only this Markdown plan, so the passing code gates remain applicable.
 
 ## Sources
 
