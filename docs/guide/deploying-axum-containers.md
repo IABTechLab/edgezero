@@ -127,18 +127,18 @@ The production-runtime draft stack is not accepted integration evidence. Changes
 to runtime behavior require a fresh candidate and repeat acceptance before
 publishing that new digest.
 
-## Kubernetes follow-up
+## Kubernetes
 
-Kubernetes acceptance remains separate. It needs the same index or explicit native
-child digest, correct node architecture, non-root/read-only settings and separate
-startup/readiness/liveness probes. Use HTTP probes or an already accepted probe
-mechanism; do not assume curl exists in the image. Check Service/ingress routing
-and termination timing under load.
+The [Kubernetes guide draft](./deploying-axum-kubernetes.md) selects kind and
+Envoy Gateway for disposable-cluster verification, with plain manifests and
+separate local stateless, AWS-provider and single-writer redb profiles. The planned
+AWS profile includes AppConfig Agent, Secrets Manager and DynamoDB after accepted
+provider integration. No cluster or AWS execution is claimed by the draft.
 
-The persistent example must use single-writer scheduling and storage ownership,
-then prove restart/recovery. Private production secrets/configuration must come
-from approved resources through the existing runtime contract. No Helm chart,
-operator or new deployment CLI is required by this preparation.
+Use the same accepted digest and runtime contract, matching node architecture,
+restricted execution and actual application probes. Kubernetes acceptance still
+needs routed HTTPS/proxy checks, bounded shutdown, restart/recovery, upgrades and
+rollback. Local cluster results do not qualify EKS or real AWS services.
 
 ## First managed target: ECS/Fargate
 
@@ -146,6 +146,11 @@ The selected first managed example is a no-store ECS/Fargate service. Fargate
 provides explicit `X86_64`/`ARM64` task architecture, read-only root settings and a
 configurable stop timeout. This fits the native image and avoids pretending a
 container's local disk is durable redb storage.
+
+The [AWS reference deployment draft](../specs/aws-reference-deployment.md)
+extends this direction with AppConfig Agent, Secrets Manager, an ECR publishing
+option and an optional DynamoDB profile. It defines acceptance checks and open
+design decisions, not verified cloud support.
 
 Before an authorized test, an owner must specify the AWS account, region, cluster,
 network/security groups, execution/task roles, registry credential path, service
