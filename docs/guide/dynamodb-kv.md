@@ -130,9 +130,12 @@ suppression or change global logging. Do not assume `LOG_SENSITIVE_BODIES=false`
 redacts DynamoDB model Debug.
 
 Default verification uses deterministic fixtures and the actual SDK wire path
-with explicit dummy credentials and literal-loopback endpoints. It does not prove
-AWS IAM, capacity, deployed service behavior or global-table correctness. Real
-AWS acceptance requires separate authorization and disposable-resource ownership.
+with explicit dummy credentials and literal-loopback endpoints. CI also runs a
+required [independent local-service suite](./native-aws-stores#account-free-integration-tests)
+against DynamoDB Local, including base-table Query pagination across the 1 MiB
+evaluation boundary. Neither suite proves AWS IAM, capacity, deployed service
+behavior or global-table correctness. Real AWS acceptance requires separate
+authorization and disposable-resource ownership.
 
 See [native AWS stores](./native-aws-stores) for captured bootstrap and startup
 composition.

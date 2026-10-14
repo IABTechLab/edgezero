@@ -6,6 +6,7 @@
 )]
 
 use std::collections::{BTreeMap, btree_map::Entry};
+use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -25,10 +26,7 @@ use edgezero_core::time::MonotonicClock;
     feature = "aws-dynamodb"
 ))]
 use edgezero_store_aws::AwsPreparation;
-use edgezero_store_aws::settings::{
-    AgentAccessToken, AppConfigAgentSettings, AwsPreparationLimits, DynamoDbKvSettings,
-    SecretsManagerSettings,
-};
+use edgezero_store_aws::settings::{AgentAccessToken, AwsPreparationLimits};
 
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::native_bindings::{
@@ -58,39 +56,15 @@ pub enum NativeStorePreparationError {
 pub type NativeStoreFuture<H> =
     Pin<Box<dyn Future<Output = Result<H, NativeStorePreparationError>> + 'static>>;
 
-pub(crate) enum NativeStoreSource<H> {
+/// Supplied inputs have no built-in payload; validated plans select one per kind.
+pub(crate) enum NativeStoreSource<H, B = Infallible> {
     Local,
     Ready(H),
     Prepare(NativeStoreFuture<H>),
-    BuiltIn(NativeBuiltInSource),
+    BuiltIn(B),
 }
 
-pub(crate) enum NativeBuiltInSource {
-    #[cfg_attr(
-        not(feature = "aws-appconfig-agent"),
-        expect(
-            dead_code,
-            reason = "typed settings remain SDK-free; payload is read only by the enabled provider"
-        )
-    )]
-    AppConfigAgent(AppConfigAgentSettings, Option<AgentAccessToken>),
-    #[cfg_attr(
-        not(feature = "aws-secrets-manager"),
-        expect(
-            dead_code,
-            reason = "typed settings remain SDK-free; payload is read only by the enabled provider"
-        )
-    )]
-    SecretsManager(SecretsManagerSettings),
-    #[cfg_attr(
-        not(feature = "aws-dynamodb"),
-        expect(
-            dead_code,
-            reason = "SDK-free settings are read only by the enabled KV provider"
-        )
-    )]
-    DynamoDb(DynamoDbKvSettings),
-}
+pub(crate) type NativeConfigSource = (NativeConfigBinding, Option<AgentAccessToken>);
 
 #[cfg(any(
     feature = "aws-appconfig-agent",
@@ -253,9 +227,9 @@ fn insert<H>(
 pub(crate) struct NativeSourcePlan {
     pub config_limits: ConfigStoreLimits,
     pub aws_limits: AwsPreparationLimits,
-    pub config: BTreeMap<&'static str, NativeStoreSource<ConfigStoreBinding>>,
-    pub kv: BTreeMap<&'static str, NativeStoreSource<KvHandle>>,
-    pub secrets: BTreeMap<&'static str, NativeStoreSource<BoundSecretStore>>,
+    pub config: BTreeMap<&'static str, NativeStoreSource<ConfigStoreBinding, NativeConfigSource>>,
+    pub kv: BTreeMap<&'static str, NativeStoreSource<KvHandle, NativeKvBinding>>,
+    pub secrets: BTreeMap<&'static str, NativeStoreSource<BoundSecretStore, NativeSecretBinding>>,
 }
 
 impl NativeSourcePlan {
@@ -307,21 +281,21 @@ impl NativeSourcePlan {
                     .as_ref()
                     .map(|name| options.agent_token(name))
                     .transpose()?;
-                Ok(NativeBuiltInSource::AppConfigAgent(settings.clone(), token))
+                Ok((NativeConfigBinding::AppConfigAgent(settings.clone()), token))
             })?,
             kv: resolve(selection.kv, overrides.kv, "kv", |id| {
-                let NativeKvBinding::DynamoDb(settings) = bindings
+                bindings
                     .kv()
                     .get(id)
-                    .ok_or_else(|| failure("kv", id, "invalid binding"))?;
-                Ok(NativeBuiltInSource::DynamoDb(settings.clone()))
+                    .cloned()
+                    .ok_or_else(|| failure("kv", id, "invalid binding"))
             })?,
             secrets: resolve(selection.secrets, overrides.secrets, "secrets", |id| {
-                let NativeSecretBinding::SecretsManager(settings) = bindings
+                bindings
                     .secrets()
                     .get(id)
-                    .ok_or_else(|| failure("secrets", id, "invalid binding"))?;
-                Ok(NativeBuiltInSource::SecretsManager(settings.clone()))
+                    .cloned()
+                    .ok_or_else(|| failure("secrets", id, "invalid binding"))
             })?,
         };
         options.validate_local_roots(
@@ -384,20 +358,26 @@ impl NativeSourcePlan {
     }
 }
 
-fn resolve<H, BuiltIn: Fn(&str) -> anyhow::Result<NativeBuiltInSource>>(
+fn resolve<H, B, BuiltIn: Fn(&str) -> anyhow::Result<B>>(
     selection: BTreeMap<&'static str, NativeBindingSource>,
     mut supplied: BTreeMap<String, NativeStoreSource<H>>,
     kind: &str,
     builtin: BuiltIn,
-) -> anyhow::Result<BTreeMap<&'static str, NativeStoreSource<H>>> {
+) -> anyhow::Result<BTreeMap<&'static str, NativeStoreSource<H, B>>> {
     selection
         .into_iter()
         .map(|(id, selected)| {
             let source = match selected {
                 NativeBindingSource::Local => NativeStoreSource::Local,
-                NativeBindingSource::Supplied => supplied
+                NativeBindingSource::Supplied => match supplied
                     .remove(id)
-                    .ok_or_else(|| failure(kind, id, "invalid binding"))?,
+                    .ok_or_else(|| failure(kind, id, "invalid binding"))?
+                {
+                    NativeStoreSource::Local => NativeStoreSource::Local,
+                    NativeStoreSource::Ready(handle) => NativeStoreSource::Ready(handle),
+                    NativeStoreSource::Prepare(future) => NativeStoreSource::Prepare(future),
+                    NativeStoreSource::BuiltIn(never) => match never {},
+                },
                 NativeBindingSource::BuiltIn => NativeStoreSource::BuiltIn(builtin(id)?),
             };
             Ok((id, source))
@@ -405,8 +385,8 @@ fn resolve<H, BuiltIn: Fn(&str) -> anyhow::Result<NativeBuiltInSource>>(
         .collect()
 }
 
-pub(crate) async fn prepare<H, Open>(
-    source: NativeStoreSource<H>,
+pub(crate) async fn prepare<H, B, Open>(
+    source: NativeStoreSource<H, B>,
     kind: &str,
     id: &str,
     local: Open,
@@ -432,33 +412,27 @@ where
     )
 )]
 pub(crate) async fn prepare_aws_config(
-    builtin: NativeBuiltInSource,
+    builtin: NativeConfigSource,
     session: &mut NativeAwsSession,
     id: &str,
 ) -> anyhow::Result<ConfigStoreBinding> {
     #[cfg(feature = "aws-appconfig-agent")]
     {
-        match builtin {
-            NativeBuiltInSource::AppConfigAgent(settings, token) => {
-                let handle = session
-                    .as_mut()
-                    .ok_or_else(|| failure("config", id, "invalid preparation session"))?
-                    .prepare_appconfig(&settings, token.as_ref())
-                    .await
-                    .map_err(|category| failure("config", id, &category.to_string()))?;
-                Ok(ConfigStoreBinding {
-                    default_key: settings.default_key,
-                    handle,
-                })
-            }
-            NativeBuiltInSource::SecretsManager(_) | NativeBuiltInSource::DynamoDb(_) => {
-                Err(failure("config", id, "invalid binding"))
-            }
-        }
+        let (NativeConfigBinding::AppConfigAgent(settings), token) = builtin;
+        let handle = session
+            .as_mut()
+            .ok_or_else(|| failure("config", id, "invalid preparation session"))?
+            .prepare_appconfig(&settings, token.as_ref())
+            .await
+            .map_err(|category| failure("config", id, &category.to_string()))?;
+        Ok(ConfigStoreBinding {
+            default_key: settings.default_key,
+            handle,
+        })
     }
     #[cfg(not(feature = "aws-appconfig-agent"))]
     {
-        let _: (NativeBuiltInSource, &mut NativeAwsSession) = (builtin, session);
+        let _: (NativeConfigSource, &mut NativeAwsSession) = (builtin, session);
         Err(failure("config", id, "provider not compiled"))
     }
 }
@@ -471,30 +445,24 @@ pub(crate) async fn prepare_aws_config(
     )
 )]
 pub(crate) async fn prepare_aws_secrets(
-    builtin: NativeBuiltInSource,
+    builtin: NativeSecretBinding,
     session: &mut NativeAwsSession,
     id: &str,
 ) -> anyhow::Result<BoundSecretStore> {
     #[cfg(feature = "aws-secrets-manager")]
     {
-        match builtin {
-            NativeBuiltInSource::SecretsManager(settings) => {
-                let handle = session
-                    .as_mut()
-                    .ok_or_else(|| failure("secrets", id, "invalid preparation session"))?
-                    .prepare_secrets(&settings, id)
-                    .await
-                    .map_err(|category| failure("secrets", id, &category.to_string()))?;
-                Ok(BoundSecretStore::new(handle, id.to_owned()))
-            }
-            NativeBuiltInSource::AppConfigAgent(_, _) | NativeBuiltInSource::DynamoDb(_) => {
-                Err(failure("secrets", id, "invalid binding"))
-            }
-        }
+        let NativeSecretBinding::SecretsManager(settings) = builtin;
+        let handle = session
+            .as_mut()
+            .ok_or_else(|| failure("secrets", id, "invalid preparation session"))?
+            .prepare_secrets(&settings, id)
+            .await
+            .map_err(|category| failure("secrets", id, &category.to_string()))?;
+        Ok(BoundSecretStore::new(handle, id.to_owned()))
     }
     #[cfg(not(feature = "aws-secrets-manager"))]
     {
-        let _: (NativeBuiltInSource, &mut NativeAwsSession) = (builtin, session);
+        let _: (NativeSecretBinding, &mut NativeAwsSession) = (builtin, session);
         Err(failure("secrets", id, "provider not compiled"))
     }
 }
@@ -507,27 +475,23 @@ pub(crate) async fn prepare_aws_secrets(
     )
 )]
 pub(crate) async fn prepare_aws_kv(
-    builtin: NativeBuiltInSource,
+    builtin: NativeKvBinding,
     session: &mut NativeAwsSession,
     id: &str,
 ) -> anyhow::Result<KvHandle> {
     #[cfg(feature = "aws-dynamodb")]
     {
-        match builtin {
-            NativeBuiltInSource::DynamoDb(settings) => session
-                .as_mut()
-                .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
-                .prepare_dynamodb(&settings)
-                .await
-                .map_err(|category| failure("kv", id, &category.to_string())),
-            NativeBuiltInSource::AppConfigAgent(_, _) | NativeBuiltInSource::SecretsManager(_) => {
-                Err(failure("kv", id, "invalid binding"))
-            }
-        }
+        let NativeKvBinding::DynamoDb(settings) = builtin;
+        session
+            .as_mut()
+            .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
+            .prepare_dynamodb(&settings)
+            .await
+            .map_err(|category| failure("kv", id, &category.to_string()))
     }
     #[cfg(not(feature = "aws-dynamodb"))]
     {
-        let _: (NativeBuiltInSource, &mut NativeAwsSession) = (builtin, session);
+        let _: (NativeKvBinding, &mut NativeAwsSession) = (builtin, session);
         Err(failure("kv", id, "provider not compiled"))
     }
 }
@@ -536,7 +500,7 @@ pub(crate) async fn prepare_aws_kv(
 mod tests {
     use super::{NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
     use crate::{
-        native_bindings::{NativeBindingsLimits, NativeStoreBindings},
+        native_bindings::{NativeBindingsLimits, NativeKvBinding, NativeStoreBindings},
         run_options::AxumRunOptions,
     };
     use edgezero_core::app::{StoreMetadata, StoresMetadata};
@@ -585,7 +549,7 @@ mod tests {
         let validated = NativeSourcePlan::validate(metadata, &options, overrides).unwrap();
         assert!(matches!(
             validated.kv.get("remote"),
-            Some(NativeStoreSource::BuiltIn(_))
+            Some(NativeStoreSource::BuiltIn(NativeKvBinding::DynamoDb(_)))
         ));
         assert!(matches!(
             validated.kv.get("local"),
@@ -623,7 +587,7 @@ mod tests {
             let validated_plan = plan.unwrap();
             assert!(matches!(
                 validated_plan.kv.get("state"),
-                Some(NativeStoreSource::BuiltIn(_))
+                Some(NativeStoreSource::BuiltIn(NativeKvBinding::DynamoDb(_)))
             ));
         } else {
             assert!(plan.is_err());

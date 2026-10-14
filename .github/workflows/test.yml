@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Native-store PRs are currently stacked on the outbound HTTP specification.
+    branches: [main, docs/outbound-http-spec]
 
 permissions:
   contents: read
@@ -167,6 +168,14 @@ jobs:
         env:
           EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
         run: scripts/run_test_nonzero.sh --ignored generated_cli_default_off_and_enabled_dynamodb_crud_list_ttl_restart cargo test --offline --locked -p edgezero-cli --test dynamodb_generated_proof
+
+      - name: Native AWS integration runner tests
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs
+
+      - name: Generated native AWS independent service contracts
+        env:
+          EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
+        run: node scripts/run_native_aws_integration.mjs
 
       - name: Verify a generated project compiles
         run: scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds

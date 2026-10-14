@@ -211,6 +211,47 @@ it can permanently disable an application's tracing-to-log fallback. Keep AWS de
 `DEBUG`/`TRACE` off in production unless operators have reviewed their logger, sinks, and
 sensitive-body settings. This limitation must be called out in reviews of the first version.
 
+## Account-free integration tests
+
+CI runs the existing SDK loopback fixtures and a required independent-service
+suite. Run the latter locally with Docker, Node.js and the repository Rust
+toolchain, after fetching the locked Cargo dependencies:
+
+```sh
+node scripts/run_native_aws_integration.mjs
+```
+
+The Node runner starts digest-pinned DynamoDB Local, Moto and the actual AWS
+AppConfig Agent in local development mode. It creates disposable resources,
+builds one CLI-generated Axum application with all three providers, and removes
+its containers, network and temporary files afterward. Missing Docker, service
+startup failures and zero executed tests are errors, not skips. Fixture
+administration uses a dependency-free Node.js helper against the published
+loopback endpoints. No Python helper or npm installation is needed.
+
+The suite checks exact binary/config/secret bytes, per-ID namespace isolation,
+base-table Query continuation across the 1 MiB evaluation boundary, logically
+expired rows that remain stored, TTL renewal/reset, startup rejection before
+listening, typed initialization, and persistence/snapshot behavior across
+application restarts. It waits until the real Agent independently serves updated
+files before checking that the running app retains its old snapshot.
+
+Image acquisition requires network access, but the suite does not require an AWS
+account. Generated application children use cleared environments, empty AWS
+profile files, dummy credentials, disabled metadata discovery and validated
+literal-loopback endpoints. Published container ports bind only to `127.0.0.1`.
+The Docker bridge is not a hard outbound-network sandbox. These tests do not
+establish deployed IAM/KMS permissions, capacity, production consistency or AWS
+TTL cleanup timing. Agent local development mode does not exercise AWS polling,
+deployment validation or rollback.
+
+Moto 5.2.2 has a verified limitation: manually moving `AWSCURRENT` updates its
+labels but not its no-selector `GetSecretValue` result. The suite therefore tests
+default-version adoption through normal `PutSecretValue`, and independently tests
+explicit named-stage movement and pinned version IDs. It does not change the
+provider to accommodate Moto or claim manual `AWSCURRENT` move parity. Test image
+pins are recorded in the runner; they are not production deployment approval.
+
 ## Credentials and permissions
 
 For the application, use the AWS SDK's supported credential chain. In production, prefer the
