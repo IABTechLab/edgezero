@@ -1506,6 +1506,33 @@ fn reject_target_controls_without_bindings(args: &ConfigValidateArgs) -> Result<
     Ok(())
 }
 
+#[cfg(feature = "edgezero-adapter-axum")]
+fn load_validated_native_bindings(
+    manifest: &Manifest,
+    path: &Path,
+) -> Result<NativeStoreBindings, String> {
+    let limits = NativeBindingsLimits::default();
+    let bindings = NativeStoreBindings::read_with_policy(path, limits, None)
+        .map_err(|_error| "invalid native store bindings".to_owned())?;
+    let declarations = NativeStoreDeclarations::try_from(&manifest.stores)
+        .map_err(|_error| "invalid store declarations for native bindings".to_owned())?;
+    NativeSourceSelection::validate(
+        declarations,
+        &bindings,
+        &NativeSuppliedIds::default(),
+        &EnvConfig::default(),
+        NativeProviderCapabilities {
+            appconfig_agent: true,
+            secrets_manager: true,
+            dynamodb: true,
+        },
+        limits,
+        None,
+    )
+    .map_err(|_error| "native store bindings do not match manifest declarations".to_owned())?;
+    Ok(bindings)
+}
+
 /// Validate only a caller-selected native bindings file. This path intentionally
 /// does not load app TOML, ambient overlays, tokens, credentials, or deployment env.
 #[cfg(feature = "edgezero-adapter-axum")]
@@ -1525,9 +1552,7 @@ fn run_native_bindings_validate(args: &ConfigValidateArgs) -> Result<(), String>
     }
     let manifest = ManifestLoader::from_path(&args.manifest)
         .map_err(|_error| "failed to load application manifest".to_owned())?;
-    let bindings =
-        NativeStoreBindings::read_with_policy(path, NativeBindingsLimits::default(), None)
-            .map_err(|_error| "invalid native store bindings".to_owned())?;
+    load_validated_native_bindings(manifest.manifest(), path)?;
     let mut target_args = Vec::new();
     for feature in &args.target_features {
         target_args.extend(["--features".to_owned(), feature.clone()]);
@@ -1550,22 +1575,6 @@ fn run_native_bindings_validate(args: &ConfigValidateArgs) -> Result<(), String>
             definition.build.features.clone()
         });
     let selection = NativeCargoSelection::normalize_args(&manifest_features, &target_args)?;
-    let declarations = NativeStoreDeclarations::try_from(&manifest.manifest().stores)
-        .map_err(|_error| "invalid store declarations for native bindings".to_owned())?;
-    NativeSourceSelection::validate(
-        declarations,
-        &bindings,
-        &NativeSuppliedIds::default(),
-        &EnvConfig::default(),
-        NativeProviderCapabilities {
-            appconfig_agent: true,
-            secrets_manager: true,
-            dynamodb: true,
-        },
-        NativeBindingsLimits::default(),
-        None,
-    )
-    .map_err(|_error| "native store bindings do not match manifest declarations".to_owned())?;
     log::info!(
         "[edgezero] native store bindings structurally valid; target provider availability unknown (target={}, requested_features={}, all_features={}, no_default_features={})",
         selection.target.as_deref().unwrap_or("host"),
@@ -1595,25 +1604,7 @@ fn reject_aws_bound_config_push(args: &ConfigPushArgs) -> Result<(), String> {
     let manifest = ManifestLoader::from_path(&args.manifest)
         .map_err(|_error| "failed to load application manifest".to_owned())?;
     let logical = resolve_config_store_id(args.store.as_deref(), manifest.manifest())?;
-    let bindings =
-        NativeStoreBindings::read_with_policy(path, NativeBindingsLimits::default(), None)
-            .map_err(|_error| "invalid native store bindings".to_owned())?;
-    let declarations = NativeStoreDeclarations::try_from(&manifest.manifest().stores)
-        .map_err(|_error| "invalid native store declarations".to_owned())?;
-    NativeSourceSelection::validate(
-        declarations,
-        &bindings,
-        &NativeSuppliedIds::default(),
-        &EnvConfig::default(),
-        NativeProviderCapabilities {
-            appconfig_agent: true,
-            secrets_manager: true,
-            dynamodb: true,
-        },
-        NativeBindingsLimits::default(),
-        None,
-    )
-    .map_err(|_error| "native store bindings do not match manifest declarations".to_owned())?;
+    let bindings = load_validated_native_bindings(manifest.manifest(), path)?;
     if matches!(
         bindings.config().get(&logical),
         Some(NativeConfigBinding::AppConfigAgent(_))
@@ -2722,6 +2713,37 @@ default = "remote"
             .expect_err("undeclared bindings are not a valid push selection");
     }
 
+    #[cfg(feature = "edgezero-adapter-axum")]
+    #[test]
+    fn bindings_only_validation_and_push_share_structural_errors() {
+        let (dir, manifest, app_config) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
+        fs::remove_file(app_config).expect("neither path needs app TOML for this rejection");
+        let bindings = dir.path().join("bindings.toml");
+        let mut validate = args_for(&manifest);
+        validate.adapter = Some("axum".to_owned());
+        validate.store_bindings = Some(bindings.clone());
+        let mut push = push_args(&manifest, "axum");
+        push.store_bindings = Some(bindings.clone());
+        for (input, expected) in [
+            ("not valid TOML", "invalid native store bindings"),
+            (
+                AWS_BINDINGS_FIXTURE,
+                "native store bindings do not match manifest declarations",
+            ),
+        ] {
+            fs::write(&bindings, input).expect("write invalid bindings");
+            assert_eq!(
+                run_config_validate(&validate).expect_err("invalid bindings"),
+                expected
+            );
+            assert_eq!(
+                run_config_push_typed::<FixtureConfig>(&push).expect_err("invalid bindings"),
+                expected,
+            );
+            assert!(!dir.path().join(".edgezero").exists());
+        }
+    }
+
     #[test]
     fn raw_validates_a_well_formed_project() {
         let _lock = manifest_guard().lock().expect("manifest guard");
@@ -3637,6 +3659,34 @@ default = "alpha"
             err.contains("spin") && err.contains("Single") && err.contains("secrets"),
             "error names adapter + capability: {err}"
         );
+    }
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    #[test]
+    fn axum_multi_secret_ids_pass_strict_validation_and_typed_push() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let manifest_text = PUSH_MANIFEST.replace(
+            "ids = [\"default\"]",
+            "ids = [\"default\", \"extra\"]\ndefault = \"default\"",
+        );
+        let (dir, manifest, _) = setup_project(&manifest_text, FIXTURE_APP_CONFIG);
+        let mut args = args_for(&manifest);
+        args.strict = true;
+        run_config_validate(&args).expect("Axum accepts multiple secret IDs");
+        run_config_validate_typed::<FixtureConfig>(&args)
+            .expect("typed Axum validation accepts multiple secret IDs");
+
+        let mut push = push_args(&manifest, "axum");
+        push.yes = true;
+        run_config_push_typed::<FixtureConfig>(&push)
+            .expect("Axum push accepts multiple secret IDs");
+        let raw = fs::read_to_string(dir.path().join(".edgezero/local-config-app_config.json"))
+            .expect("push wrote the local snapshot");
+        let entries: BTreeMap<String, String> = serde_json::from_str(&raw).expect("snapshot map");
+        let envelope: BlobEnvelope =
+            serde_json::from_str(&entries["app_config"]).expect("complete envelope");
+        assert_eq!(envelope.data["greeting"], "hello");
+        assert_eq!(envelope.data["api_token"], "demo_api_token");
     }
 
     #[test]
@@ -4569,12 +4619,11 @@ default = "one"
             "spin_manifest_version = 2\n[application]\nname = \"x\"\nversion = \"0\"\n[component.demo]\nsource = \"a.wasm\"\n",
         )
         .expect("write spin.toml");
-        // The selected adapter is Single-capable too, so its capability
-        // check must still reject before any push.
-        let err = run_config_push_typed::<FixtureConfig>(&push_args(&manifest, "axum"))
+        // Only the selected adapter's capability check rejects the push.
+        let err = run_config_push_typed::<FixtureConfig>(&push_args(&manifest, "spin"))
             .expect_err("Single-capable adapter with multi-id store must fail preflight");
         assert!(
-            err.contains("axum") && err.contains("Single") && err.contains("secrets"),
+            err.contains("spin") && err.contains("Single") && err.contains("secrets"),
             "error must come from --strict capability check: {err}"
         );
     }

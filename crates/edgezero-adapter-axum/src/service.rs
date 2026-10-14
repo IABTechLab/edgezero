@@ -201,30 +201,18 @@ impl AxumServiceState {
     ) {
         // Legacy single-handle constructors synthesize only the conventional
         // `default` registry entry; request extensions contain registries only.
-        let config_registry = self.config_registry.clone().or_else(|| {
-            self.config_store_handle.clone().map(|handle| {
-                ConfigRegistry::single_id(
-                    "default".to_owned(),
-                    ConfigStoreBinding {
-                        handle,
-                        default_key: "default".to_owned(),
-                    },
-                )
-            })
-        });
-        let kv_registry = self.kv_registry.clone().or_else(|| {
-            self.kv_handle
-                .clone()
-                .map(|handle| KvRegistry::single_id("default".to_owned(), handle))
-        });
-        let secret_registry = self.secret_registry.clone().or_else(|| {
-            self.secret_handle.clone().map(|handle| {
-                SecretRegistry::single_id(
-                    "default".to_owned(),
-                    BoundSecretStore::new(handle, "default".to_owned()),
-                )
-            })
-        });
+        let config_registry = self
+            .config_registry
+            .clone()
+            .or_else(|| self.config_store_handle.clone().map(legacy_config_registry));
+        let kv_registry = self
+            .kv_registry
+            .clone()
+            .or_else(|| self.kv_handle.clone().map(legacy_kv_registry));
+        let secret_registry = self
+            .secret_registry
+            .clone()
+            .or_else(|| self.secret_handle.clone().map(legacy_secret_registry));
         (config_registry, kv_registry, secret_registry)
     }
 
@@ -389,6 +377,27 @@ impl TowerService<Request<AxumBody>> for AxumServiceState {
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
+}
+
+pub(crate) fn legacy_config_registry(handle: ConfigStoreHandle) -> ConfigRegistry {
+    ConfigRegistry::single_id(
+        "default".to_owned(),
+        ConfigStoreBinding {
+            handle,
+            default_key: "default".to_owned(),
+        },
+    )
+}
+
+pub(crate) fn legacy_kv_registry(handle: KvHandle) -> KvRegistry {
+    KvRegistry::single_id("default".to_owned(), handle)
+}
+
+pub(crate) fn legacy_secret_registry(handle: SecretHandle) -> SecretRegistry {
+    SecretRegistry::single_id(
+        "default".to_owned(),
+        BoundSecretStore::new(handle, "default".to_owned()),
+    )
 }
 
 async fn prepare_detached_ingress_error(
@@ -1570,6 +1579,76 @@ mod tests {
 
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&*body, b"injected");
+    }
+
+    #[test]
+    fn explicit_registries_win_in_both_setter_orders() {
+        use crate::config_store::AxumConfigStore;
+        use crate::config_store_limits::ConfigStoreLimits;
+        use crate::key_value_store::PersistentKvStore;
+        use crate::secret_store::EnvSecretStore;
+
+        let temp = tempfile::tempdir().expect("database directory");
+        let config = ConfigStoreHandle::new(Arc::new(
+            AxumConfigStore::from_map([], ConfigStoreLimits::default()).expect("config store"),
+        ));
+        let kv = KvHandle::new(Arc::new(
+            PersistentKvStore::new(temp.path().join("registry.redb")).expect("KV store"),
+        ));
+        let secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));
+        let with_handles = |service: AxumServiceState| {
+            service
+                .with_config_store_handle(config.clone())
+                .with_kv_handle(kv.clone())
+                .with_secret_handle(secrets.clone())
+        };
+        let with_registries = |service: AxumServiceState| {
+            service
+                .with_config_registry(ConfigRegistry::single_id(
+                    "application".to_owned(),
+                    ConfigStoreBinding {
+                        handle: config.clone(),
+                        default_key: "settings".to_owned(),
+                    },
+                ))
+                .with_kv_registry(KvRegistry::single_id("sessions".to_owned(), kv.clone()))
+                .with_secret_registry(SecretRegistry::single_id(
+                    "runtime".to_owned(),
+                    BoundSecretStore::new(secrets.clone(), "vault".to_owned()),
+                ))
+        };
+        for registry_first in [true, false] {
+            let unwired = AxumServiceState::new(RouterService::builder().build());
+            let service = if registry_first {
+                with_handles(with_registries(unwired))
+            } else {
+                with_registries(with_handles(unwired))
+            };
+            let (config_option, kv_option, secret_option) = service.resolved_store_registries();
+            let config_registry = config_option.expect("config registry");
+            let kv_registry = kv_option.expect("KV registry");
+            let secret_registry = secret_option.expect("secret registry");
+            assert_eq!(config_registry.default_id(), "application");
+            assert_eq!(
+                config_registry
+                    .default_ref()
+                    .expect("config binding")
+                    .default_key,
+                "settings"
+            );
+            assert_eq!(kv_registry.default_id(), "sessions");
+            assert_eq!(secret_registry.default_id(), "runtime");
+            assert_eq!(
+                secret_registry
+                    .default_ref()
+                    .expect("secret binding")
+                    .store_name(),
+                "vault"
+            );
+            assert!(config_registry.named("default").is_none());
+            assert!(kv_registry.named("default").is_none());
+            assert!(secret_registry.named("default").is_none());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

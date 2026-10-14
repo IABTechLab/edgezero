@@ -1,4 +1,3 @@
-use crate::native_build::NativeCargoSelection;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -24,6 +23,8 @@ use edgezero_core::manifest::ManifestLoader;
 use edgezero_core::{Capability, CapabilitySupport, PlatformMetadata};
 use toml::Value;
 use walkdir::WalkDir;
+
+use crate::native_build::NativeCargoSelection;
 
 static AXUM_TEMPLATE_REGISTRATIONS: &[TemplateRegistration] = &[
     TemplateRegistration {
@@ -133,7 +134,7 @@ struct EdgezeroAxumConfig {
 
 #[expect(
     clippy::missing_trait_methods,
-    reason = "axum has no validate_app_config_keys / validate_adapter_manifest / validate_typed_secrets requirements; those three trait defaults are intentionally inherited. `read_config_entry` delegates to `read_config_entry_local` (axum is local-only). `single_store_kinds` IS overridden below (returns `&[\"secrets\"]`)."
+    reason = "axum has no validate_app_config_keys / validate_adapter_manifest / validate_typed_secrets requirements; those three trait defaults are intentionally inherited. `read_config_entry` delegates to `read_config_entry_local` (axum is local-only). `single_store_kinds` explicitly declares Multi support for every store kind."
 )]
 impl Adapter for AxumCliAdapter {
     fn capability(&self, capability: Capability) -> CapabilitySupport {
@@ -411,9 +412,9 @@ impl Adapter for AxumCliAdapter {
     }
 
     fn single_store_kinds(&self) -> &'static [&'static str] {
-        //: axum is Multi for KV (local file dirs) and Config
-        // (local JSON files), Single for Secrets (env vars).
-        &["secrets"]
+        // Every kind supports multiple logical IDs. Local secret bindings may
+        // share the environment backend; that does not restrict their ID count.
+        &[]
     }
 }
 
@@ -813,6 +814,11 @@ mod tests {
     use edgezero_adapter::cli_support::find_manifest_upwards;
     use std::net::Ipv6Addr;
     use tempfile::tempdir;
+
+    #[test]
+    fn all_store_kinds_accept_multiple_logical_ids() {
+        assert!(AXUM_ADAPTER.single_store_kinds().is_empty());
+    }
 
     #[test]
     fn cargo_commands_preserve_ingress_defaults_and_bind_precedence() {

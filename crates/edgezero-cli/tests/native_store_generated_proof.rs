@@ -1,6 +1,5 @@
-//! Ignored end-to-end proof proposal for generated native AWS stores.
+//! Ignored end-to-end proof for generated native AWS stores.
 //!
-//! Copy to `crates/edgezero-cli/tests/native_store_generated_proof.rs` after coordinator review.
 //! It invokes the real `edgezero new` and `edgezero build --adapter axum -- --offline` commands,
 //! builds the generated Axum target with default-off, Agent-only, Secrets-only and combined
 //! manifest feature selections, and launches its binary.

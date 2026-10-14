@@ -1,22 +1,7 @@
-//! Loopback-only production startup test proposal.
+//! Loopback-only production startup tests.
 //!
-//! Proposed Cargo wiring for this file and `fixtures/native_aws_host.rs`:
-//!
-//! ```toml
-//! [[bin]]
-//! name = "edgezero-native-aws-host"
-//! path = "tests/fixtures/native_aws_host.rs"
-//! required-features = ["aws-stores", "test-utils"]
-//! test = false
-//!
-//! [[test]]
-//! name = "native_aws_startup"
-//! path = "tests/native_aws_startup.rs"
-//! required-features = ["aws-stores", "test-utils"]
-//! ```
-//!
-//! It exercises the current public runner and real pinned SDK, not a provider seam. Run only
-//! after the parent integrates this draft and the completed SDK/provider code. No AWS account,
+//! These tests require `aws-stores` and `test-utils` and launch `fixtures/native_aws_host.rs`.
+//! They exercise the public runner and real pinned SDK, not a provider seam. No AWS account,
 //! DNS hostname, external socket, image, or real cloud credential is used.
 
 #[cfg(test)]

@@ -8,51 +8,46 @@
 )]
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::env::vars_os;
 use std::fs;
 use std::future::{self, Future};
+use std::io::ErrorKind;
 #[cfg(test)]
 use std::iter;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crate::run_options::AxumRunOptions;
-use crate::run_options::{failure, shutdown_grace};
 use anyhow::Context as _;
-use edgezero_core::probe::LifecyclePhase;
-use futures_util::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
-use tokio::net::TcpListener as TokioTcpListener;
-use tokio::runtime::Builder as RuntimeBuilder;
-use tokio::signal;
-#[cfg(test)]
-use tokio::sync::oneshot::{Receiver as ShutdownReceiver, Sender as ShutdownSender, channel};
-use tokio::sync::watch;
-use tokio::task::LocalSet;
-#[cfg(test)]
-use tokio::task::spawn_blocking;
-
 use edgezero_core::addr;
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
 use edgezero_core::config_store::{ConfigStoreError, ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET, resolve_logging_level};
+use edgezero_core::probe::LifecyclePhase;
 use edgezero_core::router::RouterService;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
+use futures_util::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
 use log::LevelFilter;
 use simple_logger::SimpleLogger;
-
-use std::collections::BTreeMap;
-use std::io::ErrorKind;
-use std::process;
-use tokio::task::yield_now;
+use tokio::net::TcpListener as TokioTcpListener;
+use tokio::runtime::Builder as RuntimeBuilder;
+use tokio::signal;
+#[cfg(test)]
+use tokio::sync::oneshot::{Receiver as ShutdownReceiver, Sender as ShutdownSender, channel};
+use tokio::sync::watch;
+#[cfg(test)]
+use tokio::task::spawn_blocking;
+use tokio::task::{LocalSet, yield_now};
 use tokio::time::{Instant as NativeInstant, sleep_until};
 
 use crate::config_store::AxumConfigStore;
@@ -63,8 +58,12 @@ use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
 use crate::outbound::AxumOutboundClient;
 use crate::response::EgressConnection;
+pub use crate::run_options::AxumRunOptions;
+use crate::run_options::{failure, shutdown_grace};
 use crate::secret_store::EnvSecretStore;
-use crate::service::AxumServiceState;
+use crate::service::{
+    AxumServiceState, legacy_config_registry, legacy_kv_registry, legacy_secret_registry,
+};
 
 /// Local application-owned startup work, borrowing the unshared App and prepared stores.
 pub type LocalStartupFuture<'startup> =
@@ -337,30 +336,15 @@ impl From<Stores> for PreparedStores {
     #[inline]
     fn from(stores: Stores) -> Self {
         Self {
-            config: stores.config_registry.or_else(|| {
-                stores.config_store.map(|handle| {
-                    ConfigRegistry::single_id(
-                        "default".to_owned(),
-                        ConfigStoreBinding {
-                            handle,
-                            default_key: "default".to_owned(),
-                        },
-                    )
-                })
-            }),
-            kv: stores.kv_registry.or_else(|| {
-                stores
-                    .kv
-                    .map(|handle| KvRegistry::single_id("default".to_owned(), handle))
-            }),
-            secrets: stores.secret_registry.or_else(|| {
-                stores.secrets.map(|handle| {
-                    SecretRegistry::single_id(
-                        "default".to_owned(),
-                        BoundSecretStore::new(handle, "default".to_owned()),
-                    )
-                })
-            }),
+            config: stores
+                .config_registry
+                .or_else(|| stores.config_store.map(legacy_config_registry)),
+            kv: stores
+                .kv_registry
+                .or_else(|| stores.kv.map(legacy_kv_registry)),
+            secrets: stores
+                .secret_registry
+                .or_else(|| stores.secrets.map(legacy_secret_registry)),
         }
     }
 }
@@ -956,8 +940,8 @@ where
         async move {
             let metadata = A::stores();
             let sources = NativeSourcePlan::validate(metadata, &options, overrides)?;
-            let mut app = build_app_for_dispatch::<A>()?;
             init_logging::<A>(options.logging_level())?;
+            let mut app = build_app_for_dispatch::<A>()?;
             let stores = build_production_stores(metadata, &options, sources).await?;
             let transport = AxumOutboundClient::try_transport()
                 .map_err(|_error| failure("transport", "HTTP client", "initialization failed"))?;
@@ -1265,8 +1249,8 @@ fn build_config_registry_at(
     Ok(StoreRegistry::from_parts(by_id, default_id))
 }
 
-/// Build the per-request secret registry. Axum is `Single` for secrets — every
-/// declared id maps to the same env-backed [`EnvSecretStore`]. Each binding
+/// Build the per-request local secret registry. Every declared ID maps to the
+/// shared env-backed [`EnvSecretStore`], without limiting the number of IDs. Each binding
 /// captures the platform store name resolved from
 /// `EDGEZERO__STORES__SECRETS__<ID>__NAME` (defaulting to the logical id);
 /// the axum env-secret backend ignores the name on lookup, so the binding
@@ -1433,12 +1417,44 @@ mod tests {
         format!("{stdout}\n{stderr}")
     }
 
+    fn strict_logging_options() -> AxumRunOptions {
+        AxumRunOptions::from_vars([(
+            "EDGEZERO__LOGGING__LEVEL",
+            env::var("EDGEZERO__LOGGING__LEVEL").expect("probe logging level"),
+        )])
+        .expect("strict probe options")
+    }
+
     #[test]
     fn startup_logging_child() {
         let Ok(scenario) = env::var("EDGEZERO_TEST_LOGGING_SCENARIO") else {
             return;
         };
         let result = match scenario.as_str() {
+            "strict-managed" => run_app_with_options::<LoggingConfiguration, _>(
+                strict_logging_options(),
+                future::pending::<()>(),
+            ),
+            "strict-invalid-sources" => {
+                SimpleLogger::new().init().expect("existing logger");
+                let mut overrides = NativeStoreOverrides::default();
+                overrides
+                    .prepare_config("undeclared", async { panic!("setup must not be polled") })
+                    .expect("deferred source");
+                let result = run_app_with_native_stores::<LoggingConfiguration, _, _>(
+                    strict_logging_options(),
+                    overrides,
+                    future::pending::<()>(),
+                    no_initialize,
+                );
+                assert!(
+                    result
+                        .expect_err("source error must precede logger conflict")
+                        .to_string()
+                        .contains("undeclared binding"),
+                );
+                return;
+            }
             "invalid-ingress" => {
                 let result = run_app_with_preflight::<LoggingConfiguration, _>(|| {
                     panic!(
@@ -1453,30 +1469,50 @@ mod tests {
                 );
                 return;
             }
-            "installed" => {
+            "installed" | "strict-installed" => {
                 SimpleLogger::new()
                     .with_level(LevelFilter::Trace)
                     .init()
                     .expect("existing logger");
-                let result = run_app_with_preflight::<LoggingConfiguration, _>(|| {
-                    log::warn!(target: BOOT_LOG_TARGET, "unexpected-preflight-probe");
-                    Ok(())
-                });
+                let strict = scenario == "strict-installed";
+                let result = if strict {
+                    run_app_with_options::<LoggingConfiguration, _>(
+                        strict_logging_options(),
+                        future::pending::<()>(),
+                    )
+                } else {
+                    run_app_with_preflight::<LoggingConfiguration, _>(|| {
+                        log::warn!(target: BOOT_LOG_TARGET, "unexpected-preflight-probe");
+                        Ok(())
+                    })
+                };
+                let expected = if strict {
+                    "startup logging: application: initialization failed"
+                } else {
+                    "failed to initialize application logger"
+                };
                 assert_eq!(
                     result
                         .expect_err("logger conflict must stop startup")
                         .to_string(),
-                    "failed to initialize application logger"
+                    expected
                 );
                 return;
             }
-            "owned" => {
+            "owned" | "strict-owned" => {
                 SimpleLogger::new()
                     .with_level(LevelFilter::Trace)
                     .init()
                     .expect("owned logger");
                 log::set_max_level(LevelFilter::Debug);
-                let result = run_app::<OwnedLoggingConfiguration>();
+                let result = if scenario == "strict-owned" {
+                    run_app_with_options::<OwnedLoggingConfiguration, _>(
+                        strict_logging_options(),
+                        future::pending::<()>(),
+                    )
+                } else {
+                    run_app::<OwnedLoggingConfiguration>()
+                };
                 assert_eq!(log::max_level(), LevelFilter::Debug);
                 result
             }
@@ -1512,6 +1548,44 @@ mod tests {
                 "{output}"
             );
         }
+    }
+
+    #[test]
+    fn strict_logging_is_ready_before_configure_with_separate_boot_filter() {
+        for level in ["off", "error", "trace"] {
+            let output = logging_probe("strict-managed", level);
+            assert!(output.contains("boot-warning-probe"), "{output}");
+            assert!(!output.contains("boot-info-probe"), "{output}");
+            assert_eq!(
+                output.contains("runtime-warning-probe"),
+                level == "trace",
+                "{output}"
+            );
+            assert_eq!(
+                output.contains("runtime-debug-probe"),
+                level == "trace",
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_logger_conflict_prevents_configuration() {
+        let output = logging_probe("strict-installed", "trace");
+        assert!(!output.contains("boot-warning-probe"), "{output}");
+    }
+
+    #[test]
+    fn strict_owned_logging_preserves_backend_and_facade_filter() {
+        let output = logging_probe("strict-owned", "off");
+        assert!(output.contains("runtime-debug-probe"), "{output}");
+        assert!(output.contains("boot-info-probe"), "{output}");
+    }
+
+    #[test]
+    fn strict_source_validation_precedes_logging_and_configuration() {
+        let output = logging_probe("strict-invalid-sources", "trace");
+        assert!(!output.contains("boot-warning-probe"), "{output}");
     }
 
     #[test]
@@ -1653,6 +1727,87 @@ mod tests {
         let server = AxumDevServer::with_config(router, config);
         assert_eq!(server.config.addr.port(), 9000);
         assert!(!server.config.enable_ctrl_c);
+    }
+
+    #[test]
+    fn prepared_stores_preserve_legacy_defaults_and_explicit_registry_precedence() {
+        let temp = tempfile::tempdir().expect("database directory");
+        let config = ConfigStoreHandle::new(Arc::new(
+            AxumConfigStore::from_map([], ConfigStoreLimits::default()).expect("config store"),
+        ));
+        let kv = KvHandle::new(Arc::new(
+            PersistentKvStore::new(temp.path().join("registry.redb")).expect("KV store"),
+        ));
+        let secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));
+        let with_handles = |server: AxumDevServer| {
+            server
+                .with_config_store(config.clone())
+                .with_kv_handle(kv.clone())
+                .with_secret_handle(secrets.clone())
+        };
+        let legacy: PreparedStores =
+            with_handles(AxumDevServer::new(RouterService::builder().build()))
+                .stores
+                .into();
+        let legacy_config = legacy.config().expect("config registry");
+        let legacy_kv = legacy.kv().expect("KV registry");
+        let legacy_secrets = legacy.secrets().expect("secret registry");
+        assert_eq!(legacy_config.ids().collect::<Vec<_>>(), ["default"]);
+        assert_eq!(legacy_config.default_id(), "default");
+        assert_eq!(
+            legacy_config.default_ref().expect("binding").default_key,
+            "default"
+        );
+        assert_eq!(legacy_kv.ids().collect::<Vec<_>>(), ["default"]);
+        assert_eq!(legacy_kv.default_id(), "default");
+        assert_eq!(legacy_secrets.ids().collect::<Vec<_>>(), ["default"]);
+        assert_eq!(legacy_secrets.default_id(), "default");
+        assert_eq!(
+            legacy_secrets.default_ref().expect("binding").store_name(),
+            "default"
+        );
+
+        let with_registries = |server: AxumDevServer| {
+            server
+                .with_config_registry(ConfigRegistry::single_id(
+                    "application".to_owned(),
+                    ConfigStoreBinding {
+                        handle: config.clone(),
+                        default_key: "settings".to_owned(),
+                    },
+                ))
+                .with_kv_registry(KvRegistry::single_id("sessions".to_owned(), kv.clone()))
+                .with_secret_registry(SecretRegistry::single_id(
+                    "runtime".to_owned(),
+                    BoundSecretStore::new(secrets.clone(), "vault".to_owned()),
+                ))
+        };
+        for registry_first in [true, false] {
+            let unwired = AxumDevServer::new(RouterService::builder().build());
+            let server = if registry_first {
+                with_handles(with_registries(unwired))
+            } else {
+                with_registries(with_handles(unwired))
+            };
+            let prepared: PreparedStores = server.stores.into();
+            let config_registry = prepared.config().expect("config registry");
+            let kv_registry = prepared.kv().expect("KV registry");
+            let secret_registry = prepared.secrets().expect("secret registry");
+            assert_eq!(config_registry.default_id(), "application");
+            assert_eq!(
+                config_registry.default_ref().expect("binding").default_key,
+                "settings"
+            );
+            assert_eq!(kv_registry.default_id(), "sessions");
+            assert_eq!(secret_registry.default_id(), "runtime");
+            assert_eq!(
+                secret_registry.default_ref().expect("binding").store_name(),
+                "vault"
+            );
+            assert!(config_registry.named("default").is_none());
+            assert!(kv_registry.named("default").is_none());
+            assert!(secret_registry.named("default").is_none());
+        }
     }
 
     #[test]

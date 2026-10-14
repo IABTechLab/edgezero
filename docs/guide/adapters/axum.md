@@ -343,7 +343,7 @@ meaning for implicit local bindings; they cannot override an explicitly bound ID
 
 `config push --adapter axum` remains a local-file writer. It does not publish to
 AppConfig. If passed an explicit `--store-bindings` file that binds the selected ID
-to AWS, the proposed guard rejects the operation before writing anything. A push
+to AWS, the guard rejects the operation before writing anything. A push
 without that explicit file still only updates the local snapshot file; it does not
 update an AWS-bound deployment.
 

@@ -189,6 +189,27 @@ mod tests {
         .expect("axum dry-run also exits 0");
     }
 
+    #[cfg(feature = "edgezero-adapter-axum")]
+    #[test]
+    fn axum_multi_secret_ids_pass_provision() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        let manifest = PROVISION_MANIFEST.replace(
+            "ids = [\"default\"]",
+            "ids = [\"default\", \"extra\"]\ndefault = \"default\"",
+        );
+        fs::write(&manifest_path, manifest).expect("write manifest");
+        for dry_run in [true, false] {
+            run_provision(&ProvisionArgs {
+                adapter: "axum".to_owned(),
+                dry_run,
+                manifest: manifest_path.clone(),
+            })
+            .expect("Axum provision accepts multiple secret IDs");
+        }
+    }
+
     #[test]
     fn run_provision_errors_on_unknown_adapter() {
         let _lock = manifest_guard().lock().expect("manifest guard");
