@@ -234,6 +234,11 @@ api_token = { required = true, secret = true }
 api_token = "{{ api_token }}"
 ```
 
+`required = true` blocks `spin up` until the variable is supplied by a provider or
+`SPIN_VARIABLE_<NAME>`. For local development, declare `default = ""` with
+`secret = true` instead so the component starts without one; that is the form the
+demo's `spin.toml` uses.
+
 `config validate` runs a within-secrets canonicalisation check: each
 `#[secret]` field value is lowercased to mirror the runtime
 `SpinSecretStore::get_bytes` lookup, must be a valid Spin variable name
@@ -254,10 +259,107 @@ blocks to `spin.toml`, which requires knowing the component id. Resolution:
 adapter-set checks when `spin` is in the target list, so the failure
 surfaces before `provision` / `config push` run.
 
+## Logging
+
+`edgezero_adapter_spin::init_logger()` is a no-op today because Spin manages its own
+logging internally; `run_app` calls it unless your app sets `owns_logging = true`. An
+`[adapters.spin.logging]` table in `edgezero.toml` is not consumed by the Spin runtime.
+View output through `spin up` or your Spin host's log files.
+
+::: tip Logging status
+Spin logging is handled by the runtime; install your own `log` implementation in the
+entrypoint if you need structured output.
+:::
+
+## Proxy Client
+
+The Spin adapter forwards outbound requests through `spin_sdk::http::send`:
+
+```rust
+use edgezero_adapter_spin::proxy::SpinProxyClient;
+use edgezero_core::proxy::ProxyService;
+
+let response = ProxyService::new(SpinProxyClient).forward(request).await?;
+```
+
+Proxied responses carry `x-edgezero-proxy: spin`. Every upstream host must be listed
+in the component's `allowed_outbound_hosts` in `spin.toml` or the send fails at
+runtime.
+
+## Context Access
+
+Access Spin-specific request metadata via the request context extensions:
+
+```rust
+use edgezero_core::context::RequestContext;
+use edgezero_adapter_spin::context::SpinRequestContext;
+
+async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
+    if let Some(spin_ctx) = SpinRequestContext::get(ctx.request()) {
+        let client_addr = spin_ctx.client_addr;
+        let full_url = spin_ctx.full_url.as_deref();
+        // ...
+    }
+
+    // ...
+}
+```
+
+Spin exposes this data through the `spin-client-addr` and `spin-full-url` headers
+rather than a separate runtime object.
+
+## Testing
+
+Run contract tests for the Spin adapter:
+
+```bash
+rustup target add wasm32-wasip2
+export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run"
+cargo test -p edgezero-adapter-spin --features spin --target wasm32-wasip2 --test contract
+```
+
+The tests execute the adapter's real `wasm32-wasip2` request path under Wasmtime. The
+`wasmtime` version CI uses is pinned in `.tool-versions`.
+
 ## Manifest Configuration
 
 Configure the Spin adapter in `edgezero.toml`. See
 [Configuration](/guide/configuration) for the full manifest reference.
+
+## Retaining an application
+
+Use a concrete application-owned `OnceLock<App>` and call
+`edgezero_adapter_spin::dispatch_app::<MyApp>(app, req).await` on each
+invocation. This resolves fresh request resources from `MyApp::stores()` and does
+not install logging, construct an app, or cache native resources. Initialize any
+application logging before the cache's synchronous app constructor. Do not use a
+generic unkeyed static or hold a lock across an await.
+
+```rust
+use edgezero_core::app::{App, Hooks};
+use spin_sdk::{http::{IntoResponse, Request}, http_service};
+use std::sync::OnceLock;
+
+static APP: OnceLock<App> = OnceLock::new();
+
+#[http_service]
+async fn handle(req: Request) -> anyhow::Result<impl IntoResponse> {
+    let app = APP.get_or_init(MyApp::build_app);
+    edgezero_adapter_spin::dispatch_app::<MyApp>(app, req).await
+}
+```
+
+The pinned SDK 6 macro exports a P3 HTTP interface. The `wasm32-wasip2` Rust target
+name does not establish the component's HTTP lifecycle. Verify the emitted
+interface and host together. spin-sdk 6 requires Spin 3.7 or later. See Spin's
+[instance-reuse documentation](https://spinframework.dev/v4/http-trigger#controlling-instance-reuse)
+for the reuse and concurrency controls your host version supports.
+
+Test both sequential reuse and overlapping invocations in the same instance.
+Different guest instances are not evidence of concurrent isolation. Keep
+request/response bodies and pending operations invocation-local. Existing
+response buffering and stream collection limits still apply. Restore `run_app`
+and remove the cache to roll back; default generated entry points are unchanged.
 
 ## Next Steps
 

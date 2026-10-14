@@ -38,6 +38,7 @@ export default defineConfig({
           { text: 'Middleware', link: '/guide/middleware' },
           { text: 'Streaming', link: '/guide/streaming' },
           { text: 'Proxying', link: '/guide/proxying' },
+          { text: 'KV Storage', link: '/guide/kv' },
         ],
       },
       {
@@ -62,6 +63,10 @@ export default defineConfig({
           {
             text: 'Deploying from GitHub Actions',
             link: '/guide/deploy-github-actions',
+          },
+          {
+            text: 'Adopting Deploy Actions',
+            link: '/guide/deploy-action-adoption',
           },
           {
             text: 'Manifest Store Migration',

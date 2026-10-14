@@ -214,6 +214,37 @@ async fn inspect(ctx: RequestContext) -> Result<Text<String>, EdgeError> {
 | `into_request()` | `Request` - consume context, take request  |
 | `proxy_handle()` | `Option<ProxyHandle>` - adapter proxy hook |
 
+### Store Extractors
+
+Registries for the stores declared in `edgezero.toml` are injected by the adapter
+and extracted by id:
+
+| Extractor      | Gives you                                                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `Kv`           | `.default()` / `.named(id)` → a KV handle. See [KV](/guide/kv).                                                                    |
+| `Config`       | `.default()` / `.named(id)` → a config-store handle (`get(key)`).                                                                  |
+| `Secrets`      | `.default()` / `.named(id)` → a secret-store handle (`require_str(name)`).                                                         |
+| `AppConfig<C>` | Your typed app config, deserialised from the blob and with `#[secret]` fields resolved. See [Configuration](/guide/configuration). |
+
+```rust
+use edgezero_core::extractor::{AppConfig, Kv};
+use edgezero_core::{EdgeError, Text};
+
+#[action]
+async fn handler(
+    AppConfig(cfg): AppConfig<MyAppConfig>,
+    kv: Kv,
+) -> Result<Text<String>, EdgeError> {
+    let store = kv.default().ok_or_else(|| EdgeError::internal(anyhow::anyhow!("no kv")))?;
+    let hits: u64 = store.get_or("hits", 0).await?;
+    Ok(Text::new(format!("{} {hits}", cfg.greeting)))
+}
+```
+
+`AppConfig`, `Kv`, `Config`, and `Secrets` live in `edgezero_core::extractor`.
+`edgezero_core::AppConfig` at the crate root is the derive macro, not the
+extractor.
+
 ## Sharing app state
 
 Request-derived extractors (`Json`, `Query`, `Path`, …) cover per-request data.
@@ -296,7 +327,9 @@ app-state struct and register that.
 > **Make `app_state()` cheap.** The macro emits the `state` expression inside the
 > generated `build_router()`, which each adapter's `run_app` calls through
 > `A::build_app()` — **once at startup** for long-lived runtimes (Axum), but
-> **once per request** on Fastly Compute (each request is a fresh Wasm instance).
+> **once per request** on the default Fastly, Cloudflare and Spin entry points.
+> Fastly starts a fresh Wasm instance by default; Cloudflare and Spin also
+> rebuild the app per request.
 > So the `state` expression runs on that cadence: build heavy state **once** and
 > hand out clones (e.g. a `OnceLock<Arc<AppState>>` as above, or a `static`), and
 > let `T = Arc<AppState>` so each call is just a refcount bump. Do **not** `Arc::new(HeavyThing::build())` directly in the `state` expression.
