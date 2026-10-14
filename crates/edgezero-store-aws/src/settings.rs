@@ -152,6 +152,100 @@ impl fmt::Debug for AgentAccessToken {
     }
 }
 
+/// Independent policy for live `DynamoDB` KV operations, not snapshot retention.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DynamoDbKvLimits {
+    pub max_value_bytes: usize,
+    pub operation_timeout_ms: u64,
+    pub connect_timeout_ms: u64,
+    pub attempt_timeout_ms: u64,
+}
+
+impl Default for DynamoDbKvLimits {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            max_value_bytes: 393_216,
+            operation_timeout_ms: 5_000,
+            connect_timeout_ms: 1_000,
+            attempt_timeout_ms: 2_000,
+        }
+    }
+}
+
+impl DynamoDbKvLimits {
+    /// Checks payload bounds and representable, ordered operation budgets.
+    ///
+    /// # Errors
+    /// Returns a closed category for invalid policy.
+    #[inline]
+    pub fn validate(&self) -> Result<(), PreparationError> {
+        if self.max_value_bytes == 0
+            || self.max_value_bytes > 393_216
+            || self.connect_timeout_ms == 0
+            || self.connect_timeout_ms > self.attempt_timeout_ms
+            || self.attempt_timeout_ms > self.operation_timeout_ms
+            || Instant::now()
+                .checked_add(Duration::from_millis(self.operation_timeout_ms))
+                .is_none()
+        {
+            return Err(PreparationError::InvalidLimits);
+        }
+        Ok(())
+    }
+}
+
+/// Explicit physical `DynamoDB` address. Debug never exposes resource names.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamoDbKvSettings {
+    pub region: String,
+    pub table: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub limits: DynamoDbKvLimits,
+}
+
+impl fmt::Debug for DynamoDbKvSettings {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynamoDbKvSettings").finish_non_exhaustive()
+    }
+}
+
+impl DynamoDbKvSettings {
+    /// Validates an address without credential discovery or service I/O.
+    ///
+    /// # Errors
+    /// Rejects malformed region/table/namespace and invalid limits.
+    #[inline]
+    pub fn validate(&self) -> Result<(), PreparationError> {
+        self.limits.validate()?;
+        let partition = if self.region.starts_with("cn-") {
+            "aws-cn"
+        } else if self.region.starts_with("us-gov-") {
+            "aws-us-gov"
+        } else {
+            "aws"
+        };
+        if self.region.len() > 64
+            || !valid_region(partition, &self.region)
+            || !(3..=255).contains(&self.table.len())
+            || !self
+                .table
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            || self.namespace.is_empty()
+            || self.namespace.len() > 512
+            || self.namespace.chars().any(char::is_control)
+        {
+            return Err(PreparationError::InvalidResource);
+        }
+        Ok(())
+    }
+}
+
 /// Exactly one version selector. Omission means AWSCURRENT at startup.
 /// API lengths count characters; non-control Unicode and embedded spaces retain
 /// their exact meaning. Validation does not assert that a version/stage exists.
@@ -522,6 +616,31 @@ mod tests {
         clippy::assertions_on_result_states,
         reason = "malformed input matrix observes parser acceptance without unwrapping"
     )]
+
+    #[test]
+    fn dynamodb_settings_are_strict_bounded_and_redacted() {
+        let settings: super::DynamoDbKvSettings = toml::from_str(
+            "region='us-east-1'\ntable='edgezero-kv'\nnamespace='private-namespace'",
+        )
+        .unwrap();
+        settings.validate().unwrap();
+        assert!(!format!("{settings:?}").contains("private-namespace"));
+        assert!(toml::from_str::<super::DynamoDbKvSettings>(
+            "region='us-east-1'\ntable='edgezero-kv'\nnamespace='x'\nendpoint='http://example.com'"
+        ).is_err());
+        let mut invalid = settings;
+        invalid.limits.max_value_bytes = 393_217;
+        assert_eq!(
+            invalid.validate(),
+            Err(super::PreparationError::InvalidLimits)
+        );
+        invalid.limits = super::DynamoDbKvLimits::default();
+        invalid.namespace = "\n".to_owned();
+        assert_eq!(
+            invalid.validate(),
+            Err(super::PreparationError::InvalidResource)
+        );
+    }
 
     use std::borrow::Cow;
     use std::collections::BTreeMap;

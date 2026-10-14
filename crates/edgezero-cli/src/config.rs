@@ -1560,6 +1560,7 @@ fn run_native_bindings_validate(args: &ConfigValidateArgs) -> Result<(), String>
         NativeProviderCapabilities {
             appconfig_agent: true,
             secrets_manager: true,
+            dynamodb: true,
         },
         NativeBindingsLimits::default(),
         None,
@@ -1607,6 +1608,7 @@ fn reject_aws_bound_config_push(args: &ConfigPushArgs) -> Result<(), String> {
         NativeProviderCapabilities {
             appconfig_agent: true,
             secrets_manager: true,
+            dynamodb: true,
         },
         NativeBindingsLimits::default(),
         None,

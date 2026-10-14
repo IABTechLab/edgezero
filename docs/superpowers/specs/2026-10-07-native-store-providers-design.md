@@ -6,6 +6,8 @@
 - Audited main: `683202c66948146ec360f490126f1d60f920288b`.
 - Initial host: Axum. The provider implementations must not depend on Axum.
 
+**2026-10-14 scope extension:** the separately approved [DynamoDB KV plan](../plans/2026-10-14-dynamodb-kv.md) adds live ordinary KV through the default-off `aws-dynamodb` feature and binding tag on the same branch/PR. DynamoDB deferral statements below describe the original AppConfig/Secrets snapshot phase, not the extended implementation. DynamoDB configuration, CAS/transactions and deployed AWS acceptance remain excluded.
+
 ## 1. Outcome and invariants
 
 A native application chooses its HTTP runtime and its KV, configuration, and secret providers independently. It can also choose different providers for different logical IDs of the same store kind.

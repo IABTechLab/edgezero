@@ -41,8 +41,10 @@ async-compression = { version = "=0.4.43", default-features = false, features = 
 async-stream = "0.3"
 async-trait = "0.1"
 aws-config = { version = "=1.12.0", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"] }
+aws-sdk-dynamodb = { version = "=1.120.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-secretsmanager = { version = "=1.120.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 axum = { version = "0.8", default-features = true }
+base64 = "=0.22.1"
 brotli = "=8.0.4"
 brotli-decompressor = "=5.0.1"
 bytes = "=1.12.1"

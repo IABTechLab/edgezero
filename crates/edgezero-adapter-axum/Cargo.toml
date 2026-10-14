@@ -29,6 +29,7 @@ native-bindings = ["dep:toml", "dep:edgezero-store-aws"]
 aws-appconfig-agent = ["axum", "edgezero-store-aws/appconfig-agent"]
 aws-secrets-manager = ["axum", "edgezero-store-aws/secrets-manager"]
 aws-stores = ["aws-appconfig-agent", "aws-secrets-manager"]
+aws-dynamodb = ["axum", "edgezero-store-aws/dynamodb-kv"]
 cli = [
     "native-bindings",
     "dep:edgezero-adapter",

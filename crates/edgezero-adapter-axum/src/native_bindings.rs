@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Read as _;
-use std::iter::empty;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -21,7 +20,7 @@ use edgezero_core::env_config::EnvConfig;
 use edgezero_core::manifest::{ManifestStores, StoreDeclaration};
 use edgezero_core::secret_store::MAX_NAME_LEN;
 use edgezero_store_aws::settings::{
-    AppConfigAgentSettings, AwsPreparationLimits, SecretsManagerSettings,
+    AppConfigAgentSettings, AwsPreparationLimits, DynamoDbKvSettings, SecretsManagerSettings,
 };
 use serde::Deserialize;
 
@@ -88,6 +87,7 @@ impl NativeBindingsLimits {
 pub struct NativeProviderCapabilities {
     pub appconfig_agent: bool,
     pub secrets_manager: bool,
+    pub dynamodb: bool,
 }
 
 /// Strict configuration dispatch. Provider-specific fields are validated by AWS settings.
@@ -96,6 +96,14 @@ pub struct NativeProviderCapabilities {
 pub enum NativeConfigBinding {
     #[serde(rename = "aws-appconfig-agent")]
     AppConfigAgent(AppConfigAgentSettings),
+}
+
+/// Strict KV dispatch. The physical namespace is independent of the declared ID.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "provider", deny_unknown_fields)]
+pub enum NativeKvBinding {
+    #[serde(rename = "aws-dynamodb")]
+    DynamoDb(DynamoDbKvSettings),
 }
 
 /// Strict secret dispatch. No arbitrary remote names or per-request discovery.
@@ -121,6 +129,8 @@ pub struct NativeStoreBindings {
     config: BTreeMap<String, NativeConfigBinding>,
     #[serde(default)]
     secrets: BTreeMap<String, NativeSecretBinding>,
+    #[serde(default)]
+    kv: BTreeMap<String, NativeKvBinding>,
     limits: Option<LimitsTable>,
 }
 
@@ -144,6 +154,7 @@ impl NativeStoreBindings {
             version: 1,
             config,
             secrets,
+            kv: BTreeMap::new(),
             limits: None,
         }
     }
@@ -249,6 +260,7 @@ impl NativeStoreBindings {
             .config
             .len()
             .checked_add(self.secrets.len())
+            .and_then(|count| count.checked_add(self.kv.len()))
             .ok_or(NativeBindingsError::SizeLimit)?
             > limits.max_explicit_ids
         {
@@ -263,7 +275,14 @@ impl NativeStoreBindings {
         policy
             .validate()
             .map_err(|_category| NativeBindingsError::Invalid)?;
-        let mut mappings = 0_u64;
+        let mut mappings =
+            u64::try_from(self.kv.len()).map_err(|_error| NativeBindingsError::SizeLimit)?;
+        for binding in self.kv.values() {
+            let NativeKvBinding::DynamoDb(settings) = binding;
+            settings
+                .validate()
+                .map_err(|_category| NativeBindingsError::Invalid)?;
+        }
         for binding in self.config.values() {
             let NativeConfigBinding::AppConfigAgent(settings) = binding;
             settings
@@ -299,6 +318,21 @@ impl NativeStoreBindings {
     #[must_use]
     pub fn config(&self) -> &BTreeMap<String, NativeConfigBinding> {
         &self.config
+    }
+
+    /// Explicit live KV bindings.
+    #[inline]
+    #[must_use]
+    pub fn kv(&self) -> &BTreeMap<String, NativeKvBinding> {
+        &self.kv
+    }
+
+    /// Adds KV bindings without changing the original config/secrets constructor.
+    #[inline]
+    #[must_use]
+    pub fn with_kv(mut self, kv: BTreeMap<String, NativeKvBinding>) -> Self {
+        self.kv = kv;
+        self
     }
 
     /// Explicit secret mappings.
@@ -480,7 +514,7 @@ impl<'declarations> NativeSourceSelection<'declarations> {
                 env,
                 "config",
             )?,
-            kv: resolve(declarations.kv, &supplied.kv, empty(), env, "kv")?,
+            kv: resolve(declarations.kv, &supplied.kv, bindings.kv.keys(), env, "kv")?,
             secrets: resolve(
                 declarations.secrets,
                 &supplied.secrets,
@@ -491,6 +525,7 @@ impl<'declarations> NativeSourceSelection<'declarations> {
         };
         if (!bindings.config.is_empty() && !capabilities.appconfig_agent)
             || (!bindings.secrets.is_empty() && !capabilities.secrets_manager)
+            || (!bindings.kv.is_empty() && !capabilities.dynamodb)
         {
             return Err(NativeBindingsError::UnsupportedProvider);
         }
@@ -621,6 +656,62 @@ mod tests {
     }
 
     #[test]
+    fn dynamodb_binding_source_is_per_id_and_fails_closed() -> Result<(), NativeBindingsError> {
+        let limits = NativeBindingsLimits::default();
+        let bindings = NativeStoreBindings::parse(
+            "version=1\n[kv.state]\nprovider='aws-dynamodb'\nregion='us-east-1'\ntable='edgezero-kv'\nnamespace='private-space'",
+            limits,
+        )?;
+        let capabilities = NativeProviderCapabilities {
+            dynamodb: true,
+            ..Default::default()
+        };
+        let selection = NativeSourceSelection::validate(
+            metadata(),
+            &bindings,
+            &NativeSuppliedIds::default(),
+            &EnvConfig::default(),
+            capabilities,
+            limits,
+            None,
+        )?;
+        assert_eq!(
+            selection.kv.get("state"),
+            Some(&NativeBindingSource::BuiltIn)
+        );
+        assert!(matches!(
+            NativeSourceSelection::validate(
+                metadata(),
+                &bindings,
+                &NativeSuppliedIds::default(),
+                &EnvConfig::default(),
+                NativeProviderCapabilities::default(),
+                limits,
+                None
+            ),
+            Err(NativeBindingsError::UnsupportedProvider)
+        ));
+        let supplied = NativeSuppliedIds {
+            kv: ["state".to_owned()].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            NativeSourceSelection::validate(
+                metadata(),
+                &bindings,
+                &supplied,
+                &EnvConfig::default(),
+                capabilities,
+                limits,
+                None
+            ),
+            Err(NativeBindingsError::Duplicate)
+        ));
+        assert!(!format!("{bindings:?}").contains("private-space"));
+        Ok(())
+    }
+
+    #[test]
     fn manifest_ids_remain_borrowed_and_invalid_declarations_fail() -> Result<(), Box<dyn Error>> {
         let owned: ManifestStores =
             toml::from_str("[config]\nids = ['app', 'local']\ndefault = 'app'\n")?;
@@ -633,6 +724,7 @@ mod tests {
             NativeProviderCapabilities {
                 appconfig_agent: true,
                 secrets_manager: false,
+                dynamodb: false,
             },
             NativeBindingsLimits::default(),
             None,
@@ -773,6 +865,7 @@ mod tests {
         let available = NativeProviderCapabilities {
             appconfig_agent: true,
             secrets_manager: false,
+            dynamodb: false,
         };
         let mut supplied = NativeSuppliedIds::default();
         let env = EnvConfig::default();

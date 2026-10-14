@@ -1079,21 +1079,30 @@ async fn build_production_stores(
         )?;
     }
     for (id, source) in sources.kv {
-        let handle = native_stores::prepare(source, "kv", id, || {
-            let root = options
-                .data_dir()
-                .ok_or_else(|| failure("settings", "DATA_DIR", "required"))?;
-            let name = options.env_config().store_name("kv", id);
-            if let Some(handle) = handles.get(&name) {
-                return Ok(handle.clone());
+        let handle = match source {
+            NativeStoreSource::BuiltIn(builtin) => {
+                native_stores::prepare_aws_kv(builtin, &mut aws, id).await?
             }
-            let store = PersistentKvStore::new(root.join(kv_store_file_name(&name)))
-                .map_err(|_error| failure("kv", id, "database unavailable or locked"))?;
-            let handle = KvHandle::new(Arc::new(store));
-            handles.insert(name, handle.clone());
-            Ok(handle)
-        })
-        .await?;
+            local @ (NativeStoreSource::Local
+            | NativeStoreSource::Ready(_)
+            | NativeStoreSource::Prepare(_)) => {
+                native_stores::prepare(local, "kv", id, || {
+                    let root = options
+                        .data_dir()
+                        .ok_or_else(|| failure("settings", "DATA_DIR", "required"))?;
+                    let name = options.env_config().store_name("kv", id);
+                    if let Some(handle) = handles.get(&name) {
+                        return Ok(handle.clone());
+                    }
+                    let store = PersistentKvStore::new(root.join(kv_store_file_name(&name)))
+                        .map_err(|_error| failure("kv", id, "database unavailable or locked"))?;
+                    let handle = KvHandle::new(Arc::new(store));
+                    handles.insert(name, handle.clone());
+                    Ok(handle)
+                })
+                .await?
+            }
+        };
         kv.insert(id.to_owned(), handle);
     }
     let environment_secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));

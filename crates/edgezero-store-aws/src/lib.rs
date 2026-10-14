@@ -6,7 +6,11 @@
 #![cfg_attr(
     all(
         not(target_arch = "wasm32"),
-        any(feature = "appconfig-agent", feature = "secrets-manager")
+        any(
+            feature = "appconfig-agent",
+            feature = "secrets-manager",
+            feature = "dynamodb-kv"
+        )
     ),
     expect(
         clippy::pub_use,
@@ -21,9 +25,15 @@ pub mod settings;
 #[cfg(feature = "appconfig-agent")]
 mod appconfig_tests;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "dynamodb-kv"))]
+mod dynamodb_kv;
 #[cfg(all(
     not(target_arch = "wasm32"),
-    any(feature = "appconfig-agent", feature = "secrets-manager")
+    any(
+        feature = "appconfig-agent",
+        feature = "secrets-manager",
+        feature = "dynamodb-kv"
+    )
 ))]
 mod preparation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "secrets-manager"))]
@@ -33,7 +43,11 @@ mod secrets_manager;
 mod snapshot_tests;
 #[cfg(all(
     not(target_arch = "wasm32"),
-    any(feature = "appconfig-agent", feature = "secrets-manager")
+    any(
+        feature = "appconfig-agent",
+        feature = "secrets-manager",
+        feature = "dynamodb-kv"
+    )
 ))]
 pub use preparation::{AwsPreparation, PreparationStats};
 

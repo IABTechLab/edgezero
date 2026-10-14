@@ -1443,7 +1443,12 @@ mod tests {
         let axum_cargo =
             fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/Cargo.toml"))
                 .expect("read generated axum Cargo.toml");
-        for feature in ["aws-appconfig-agent", "aws-secrets-manager", "aws-stores"] {
+        for feature in [
+            "aws-appconfig-agent",
+            "aws-secrets-manager",
+            "aws-stores",
+            "aws-dynamodb",
+        ] {
             assert!(
                 axum_cargo.contains(feature),
                 "missing generated native feature {feature}"

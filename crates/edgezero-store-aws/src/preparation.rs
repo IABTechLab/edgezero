@@ -3,12 +3,15 @@
 //! This module is enabled only when at least one native AWS store service is
 //! selected. The session's counters and caches are private to one startup.
 
-use std::collections::{BTreeMap, HashMap};
+#[cfg(any(feature = "appconfig-agent", feature = "secrets-manager"))]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 #[cfg(feature = "appconfig-agent")]
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(any(feature = "appconfig-agent", feature = "secrets-manager"))]
 use edgezero_core::config_store::BoundedStoreRead;
 #[cfg(feature = "appconfig-agent")]
 use edgezero_core::config_store::ConfigStoreHandle;
@@ -33,8 +36,12 @@ use tokio::time::timeout;
 
 use crate::PreparationError;
 use crate::settings::AwsPreparationLimits;
+#[cfg(feature = "dynamodb-kv")]
+use crate::settings::DynamoDbKvLimits;
 #[cfg(feature = "appconfig-agent")]
 use crate::settings::{AgentAccessToken, AppConfigAgentSettings};
+#[cfg(feature = "dynamodb-kv")]
+use aws_sdk_dynamodb::Client as DynamoDbClient;
 
 /// Aggregate startup preparation. Never share this object across startup runs.
 #[expect(
@@ -49,6 +56,8 @@ pub struct AwsPreparation {
     appconfig_client: Option<Client>,
     pub(crate) clock: MonotonicClock,
     pub(crate) deadline: Deadline,
+    #[cfg(feature = "dynamodb-kv")]
+    pub(crate) dynamodb_clients: HashMap<(String, DynamoDbKvLimits), DynamoDbClient>,
     pub(crate) limits: AwsPreparationLimits,
     #[cfg(feature = "secrets-manager")]
     pub(crate) secret_cache: HashMap<SecretTargetKey, bytes::Bytes>,
@@ -96,6 +105,8 @@ impl AwsPreparation {
             deadline,
             limits,
             accounting: Accounting::default(),
+            #[cfg(feature = "dynamodb-kv")]
+            dynamodb_clients: HashMap::new(),
             #[cfg(feature = "appconfig-agent")]
             appconfig_client: None,
             #[cfg(feature = "appconfig-agent")]
@@ -208,7 +219,7 @@ impl AwsPreparation {
     }
 
     /// Charge one logical mapping before cache lookup/deduplication.
-    #[cfg(feature = "secrets-manager")]
+    #[cfg(any(feature = "secrets-manager", feature = "dynamodb-kv"))]
     pub(crate) fn charge_mapping(
         &mut self,
         key_bytes: usize,
@@ -377,6 +388,7 @@ impl Accounting {
         Ok(())
     }
 
+    #[cfg(any(feature = "appconfig-agent", feature = "secrets-manager"))]
     fn charge_retained(
         &mut self,
         limits: &AwsPreparationLimits,

@@ -5,7 +5,11 @@ AppConfig Agent for complete configuration documents and Secrets Manager for com
 values. They can be selected independently per logical store ID. They do not apply to Fastly,
 Cloudflare, or Spin builds, and they do not add write, publish, provision, or rotation commands.
 
-The provider reads at process startup and keeps immutable in-memory snapshots. Restart the
+A separate [DynamoDB KV provider](./dynamodb-kv) adds live mutable KV operations through the
+independent `aws-dynamodb` feature. It does not change either snapshot provider or the
+existing `aws-stores` alias.
+
+These two providers read at process startup and keep immutable in-memory snapshots. Restart the
 application to adopt a new config document, secret value, or moved version stage. A running
 process keeps secrets already loaded even after remote deletion or access revocation.
 
