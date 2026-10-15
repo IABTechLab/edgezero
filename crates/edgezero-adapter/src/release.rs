@@ -1,3 +1,4 @@
+use base16ct::lower::encode_string;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
@@ -353,7 +354,7 @@ fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
         })?;
         digest.update(chunk);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(encode_string(&digest.finalize()))
 }
 
 fn canonical_regular_file(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -498,7 +499,7 @@ mod tests {
             offset: 0,
         })
         .expect("stream digest");
-        assert_eq!(actual, format!("{:x}", Sha256::digest(bytes)));
+        assert_eq!(actual, encode_string(&Sha256::digest(bytes)));
     }
 
     impl ReleaseFixture {
@@ -533,7 +534,7 @@ mod tests {
 
         fn digest(path: &Path) -> String {
             let bytes = fs::read(path).expect("fixture member");
-            format!("{:x}", Sha256::digest(bytes))
+            encode_string(&Sha256::digest(bytes))
         }
 
         fn metadata(&self) -> serde_json::Value {
