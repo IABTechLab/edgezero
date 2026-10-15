@@ -2,17 +2,23 @@
 bin/
 pkg/
 target/
+build/
 
 # local emulator / runtime state -- each adapter's local KV / config
 # store lives under one of these directories:
 #   - Cloudflare local KV  -> .wrangler/state/v3/kv/*/db.sqlite
 #   - Spin local KV        -> .spin/sqlite_key_value.db
 #   - Axum local config    -> .edgezero/local-config-<id>.json
-# All three are populated by `config push --local` (or by the
-# runtime itself on first read) and should not be committed.
+#   - celld local state    -> .celld/dev
+# All local runtime / config state should stay out of generated projects.
 .wrangler/
 .spin/
 .edgezero/
+.celld/
+
+# celld / Wrangler local variables may contain plaintext demo values.
+.dev.vars
+.dev.vars.*
 
 # Fastly local config-push lock and staging temp files (sidecars next to the
 # manifest; the lock serialises concurrent `config push --local` / `provision`,

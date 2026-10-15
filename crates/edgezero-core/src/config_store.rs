@@ -398,9 +398,13 @@ pub trait ConfigStore: Send + Sync {
 
     /// Retrieves one value under an absolute deadline and independent backend/value caps.
     ///
-    /// Implementations must define their deadline and allocation behavior explicitly. There is
-    /// no compatibility default because awaiting an unbounded provider call can hide a
-    /// never-ready future.
+    /// Implementations must define where each byte cap and deadline is enforced. In particular,
+    /// the byte caps constrain backend bytes and the value returned to Rust; they do not by
+    /// themselves guarantee that a provider or host did not allocate an oversized chunk before
+    /// the adapter received it. Implementations must reject an oversized chunk before copying it
+    /// into Rust-owned storage, and adapters without a provider-side allocation guarantee must
+    /// leave allocation-bound capabilities unsupported. There is no compatibility default because
+    /// awaiting an unbounded provider call can hide a never-ready future.
     async fn get_bounded(
         &self,
         key: &str,

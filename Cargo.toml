@@ -2,6 +2,7 @@
 members = [
     "crates/edgezero-adapter-axum",
     "crates/edgezero-adapter-cloudflare",
+    "crates/edgezero-adapter-celld",
     "crates/edgezero-adapter-fastly",
     "crates/edgezero-adapter-spin",
     "crates/edgezero-adapter",
@@ -51,6 +52,7 @@ ctor = "1.0"
 edgezero-adapter = { path = "crates/edgezero-adapter" }
 edgezero-adapter-axum = { path = "crates/edgezero-adapter-axum", default-features = false }
 edgezero-adapter-cloudflare = { path = "crates/edgezero-adapter-cloudflare", default-features = false }
+edgezero-adapter-celld = { path = "crates/edgezero-adapter-celld", default-features = false }
 edgezero-adapter-fastly = { path = "crates/edgezero-adapter-fastly", default-features = false }
 edgezero-adapter-spin = { path = "crates/edgezero-adapter-spin", default-features = false }
 edgezero-core = { path = "crates/edgezero-core", default-features = false }

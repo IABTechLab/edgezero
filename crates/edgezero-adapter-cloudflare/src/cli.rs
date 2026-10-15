@@ -156,6 +156,8 @@ impl Adapter for CloudflareCliAdapter {
             | Capability::OutboundCacheBypass
             | Capability::OutboundFlexiblePhaseBudget
             | Capability::OutboundHttp => CapabilitySupport::Native,
+            // Workers host chunks may be allocated before the bounded Rust drain
+            // sees them; byte caps do not establish provider allocation bounds.
             Capability::ConfigReadAllocationBounds
             | Capability::OutboundCompleteResourceAccounting
             | Capability::RawIngressFramingValidation

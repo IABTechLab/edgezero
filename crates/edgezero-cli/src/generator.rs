@@ -498,11 +498,22 @@ fn render_manifest_section(
         writeln!(out, "features = [{joined}]")?;
     }
     out.push('\n');
-    writeln!(
-        out,
-        "[adapters.{}.commands]\nbuild = \"{}\"\ndeploy = \"{}\"\nserve = \"{}\"\n",
-        blueprint.id, build_cmd, deploy_cmd, serve_cmd,
-    )?;
+    let commands = [
+        ("build", build_cmd),
+        ("deploy", deploy_cmd),
+        ("serve", serve_cmd),
+    ];
+    let configured_commands: Vec<_> = commands
+        .into_iter()
+        .filter(|(_, command)| !command.is_empty())
+        .collect();
+    if !configured_commands.is_empty() {
+        writeln!(out, "[adapters.{}.commands]", blueprint.id)?;
+        for (action, command) in configured_commands {
+            writeln!(out, "{action} = \"{command}\"")?;
+        }
+        out.push('\n');
+    }
 
     out.push('\n');
     writeln!(out, "[adapters.{}.logging]", blueprint.id)?;
@@ -1490,6 +1501,44 @@ mod tests {
         }
     }
 
+    fn assert_generated_celld_entrypoint(project_dir: &Path) {
+        let crate_dir = project_dir.join("crates/demo-app-adapter-celld");
+        let cargo = fs::read_to_string(crate_dir.join("Cargo.toml"))
+            .expect("read generated celld Cargo.toml");
+        assert!(
+            cargo.contains("demo-app-core = { path = \"../demo-app-core\" }"),
+            "generated celld adapter must depend on its app core crate",
+        );
+        let entrypoint =
+            fs::read_to_string(crate_dir.join("src/lib.rs")).expect("read celld lib.rs");
+        assert!(
+            entrypoint.contains(
+                "edgezero_adapter_celld::run_app::<demo_app_core::App>(req, env, ctx).await"
+            ),
+            "generated celld entrypoint must call the shared runtime API",
+        );
+        let raw =
+            fs::read_to_string(crate_dir.join("wrangler.json")).expect("read celld Wrangler JSON");
+        let manifest: serde_json::Value = serde_json::from_str(&raw)
+            .expect("generated celld Wrangler manifest must be valid JSON");
+        assert_eq!(manifest["main"], "build/worker/shim.mjs");
+        assert_eq!(manifest["no_bundle"], false);
+        let app_manifest = fs::read_to_string(project_dir.join("edgezero.toml"))
+            .expect("read generated app manifest");
+        assert!(app_manifest.contains("[adapters.celld.adapter]"));
+        assert!(
+            !app_manifest.contains("[adapters.celld.commands]"),
+            "celld must use registered build/serve dispatch",
+        );
+        let ignore = fs::read_to_string(project_dir.join(".gitignore")).expect("read gitignore");
+        for pattern in ["build/", ".celld/", ".dev.vars", ".dev.vars.*"] {
+            assert!(
+                ignore.contains(pattern),
+                "generated gitignore must include {pattern}"
+            );
+        }
+    }
+
     fn assert_generated_fastly_entrypoint(project_dir: &Path) {
         let entrypoint =
             fs::read_to_string(project_dir.join("crates/demo-app-adapter-fastly/src/main.rs"))
@@ -1690,6 +1739,7 @@ mod tests {
         assert_generated_route_and_provider_manifests(project_dir);
         assert_generated_axum_entrypoint(project_dir);
         assert_generated_cloudflare_entrypoint(project_dir);
+        assert_generated_celld_entrypoint(project_dir);
         assert_generated_fastly_entrypoint(project_dir);
         assert_generated_spin_entrypoint(project_dir);
     }

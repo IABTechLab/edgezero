@@ -1,0 +1,26 @@
+[package]
+name = "{{proj_celld}}"
+description = "Experimental celld Worker entrypoint for {{name}}"
+authors = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+default = ["celld"]
+celld = ["edgezero-adapter-celld/celld"]
+
+[dependencies]
+{{proj_core}} = { path = "../{{proj_core}}" }
+{{{dep_edgezero_adapter_celld}}}
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = { workspace = true }

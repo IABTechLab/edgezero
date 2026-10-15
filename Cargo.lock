@@ -709,6 +709,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "edgezero-adapter-celld"
+version = "0.1.0"
+dependencies = [
+ "ctor",
+ "edgezero-adapter",
+ "edgezero-adapter-cloudflare",
+ "edgezero-core",
+ "serde_json",
+ "tempfile",
+ "worker",
+]
+
+[[package]]
 name = "edgezero-adapter-cloudflare"
 version = "0.1.0"
 dependencies = [
@@ -802,6 +815,7 @@ dependencies = [
  "clap",
  "edgezero-adapter",
  "edgezero-adapter-axum",
+ "edgezero-adapter-celld",
  "edgezero-adapter-cloudflare",
  "edgezero-adapter-fastly",
  "edgezero-adapter-spin",

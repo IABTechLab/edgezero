@@ -27,7 +27,7 @@ pub mod secret_store;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::app::StoresMetadata;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
-use edgezero_core::app::{App, Hooks};
+use edgezero_core::app::{App, Hooks, StoreMetadata};
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::context::RuntimeVariables;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
@@ -36,6 +36,8 @@ use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::manifest::BakedManifest;
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+use edgezero_core::manifest::Manifest;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::manifest::ResolvedEnvironmentBinding;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
@@ -62,17 +64,71 @@ pub const CLOUDFLARE_PLATFORM: edgezero_core::PlatformMetadata =
         ),
     );
 
+/// Policy for attaching a Worker `Env`-backed secret store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecretPolicy {
+    /// Attach `CloudflareSecretStore`, which reads Worker secret bindings.
+    AllowWorkerSecrets,
+    /// Reject applications that declare secret stores.
+    RejectDeclared,
+}
+
+/// Config KV stream consumption strategy selected for the Worker runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigReadMode {
+    /// Use a BYOB reader to fill caller-sized Rust buffers.
+    Byob,
+    /// Use the stream's default reader, checking each host-allocated chunk
+    /// against the caller's byte limits before copying it into Rust memory.
+    /// This bounds Rust-owned value storage but not the host chunk allocation.
+    DefaultStream,
+}
+
+/// Identity and policy for the shared Worker runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerRuntimeOptions {
+    /// Canonical adapter id used for manifest environment and logging selection.
+    pub adapter_key: &'static str,
+    /// Selects how config KV response streams are read.
+    pub config_read_mode: ConfigReadMode,
+    /// Platform metadata supplied before application configuration hooks run.
+    pub platform: edgezero_core::PlatformMetadata,
+    /// Controls whether the Worker secret store can be attached.
+    pub secret_policy: SecretPolicy,
+}
+
+impl WorkerRuntimeOptions {
+    /// Cloudflare's existing runtime behavior.
+    pub const CLOUDFLARE: Self = Self {
+        adapter_key: "cloudflare",
+        config_read_mode: ConfigReadMode::Byob,
+        platform: CLOUDFLARE_PLATFORM,
+        secret_policy: SecretPolicy::AllowWorkerSecrets,
+    };
+}
+
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-fn build_app_for_dispatch<A: Hooks>() -> Result<App, WorkerError> {
-    build_target_app::<A>().map_err(|error| {
+fn build_app_for_dispatch<A: Hooks>(options: WorkerRuntimeOptions) -> Result<App, WorkerError> {
+    build_target_app::<A>(options).map_err(|error| {
         log::error!(target: edgezero_core::BOOT_LOG_TARGET, "application configuration failed: {}", error.kind());
         WorkerError::RustError("application configuration failed".to_owned())
     })
 }
 
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
-fn build_target_app<A: Hooks>() -> Result<App, EdgeError> {
-    App::build::<A>(CLOUDFLARE_PLATFORM)
+fn build_target_app<A: Hooks>(options: WorkerRuntimeOptions) -> Result<App, EdgeError> {
+    App::build::<A>(options.platform)
+}
+
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+fn validate_secret_policy(
+    secrets: Option<StoreMetadata>,
+    policy: SecretPolicy,
+) -> Result<(), &'static str> {
+    if secrets.is_some() && policy == SecretPolicy::RejectDeclared {
+        return Err("celld does not support declared secret stores");
+    }
+    Ok(())
 }
 
 /// Test seam for the production application-assembly error mapping.
@@ -80,7 +136,7 @@ fn build_target_app<A: Hooks>() -> Result<App, EdgeError> {
 #[doc(hidden)]
 #[inline]
 pub fn build_app_for_test<A: Hooks>() -> Result<App, WorkerError> {
-    build_app_for_dispatch::<A>()
+    build_app_for_dispatch::<A>(WorkerRuntimeOptions::CLOUDFLARE)
 }
 
 /// # Errors
@@ -151,6 +207,16 @@ fn collect_worker_variables(
     }))
 }
 
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+fn manifest_runtime_variables(
+    manifest: &Manifest,
+    adapter_key: &str,
+    lookup: impl FnMut(&str) -> Option<String>,
+) -> RuntimeVariables {
+    let resolved = manifest.environment_for(adapter_key);
+    collect_worker_variables(&resolved.variables, lookup)
+}
+
 /// Entry point for a Cloudflare Workers application.
 ///
 /// Portable store config is baked into `A` by the `app!` macro; adapter-specific
@@ -167,11 +233,30 @@ pub async fn run_app<A: Hooks>(
     env: Env,
     ctx: Context,
 ) -> Result<Response, WorkerError> {
+    run_app_with_options::<A>(req, env, ctx, WorkerRuntimeOptions::CLOUDFLARE).await
+}
+
+/// Entry point for an application using the shared Worker transport under another adapter id.
+///
+/// # Errors
+/// Returns [`worker::Error`] if application configuration, secret policy, or dispatch fails.
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+#[inline]
+pub async fn run_app_with_options<A: Hooks>(
+    req: Request,
+    env: Env,
+    ctx: Context,
+    options: WorkerRuntimeOptions,
+) -> Result<Response, WorkerError> {
+    validate_secret_policy(A::stores().secrets, options.secret_policy)
+        .map_err(|message| WorkerError::RustError(message.to_owned()))?;
+    // Worker logging remains the existing no-op initializer. The manifest's
+    // adapter-specific Hooks::logging_for contract has no Worker logger backend.
     if !A::owns_logging() {
         drop(init_logger());
     }
-    let app = build_app_for_dispatch::<A>()?;
-    dispatch_app::<A>(&app, req, env, ctx).await
+    let app = build_app_for_dispatch::<A>(options)?;
+    dispatch_app_with_options::<A>(&app, req, env, ctx, options).await
 }
 
 /// Dispatch a caller-owned app through canonical admission and response egress.
@@ -190,13 +275,32 @@ pub async fn dispatch_app<A: Hooks>(
     env: Env,
     ctx: Context,
 ) -> Result<Response, WorkerError> {
+    dispatch_app_with_options::<A>(app, req, env, ctx, WorkerRuntimeOptions::CLOUDFLARE).await
+}
+
+/// Dispatch with an explicit adapter identity, platform metadata, secret policy, and config
+/// stream reader.
+///
+/// # Errors
+/// Returns a Worker error if bindings cannot be opened, the manifest is invalid, or dispatch
+/// fails.
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+#[inline]
+pub async fn dispatch_app_with_options<A: Hooks>(
+    app: &App,
+    req: Request,
+    env: Env,
+    ctx: Context,
+    options: WorkerRuntimeOptions,
+) -> Result<Response, WorkerError> {
     let stores = A::stores();
+    validate_secret_policy(stores.secrets, options.secret_policy)
+        .map_err(|message| WorkerError::RustError(message.to_owned()))?;
     let env_config = env_config_from_worker(&env, stores);
     let runtime_variables = match A::manifest() {
         BakedManifest::Absent => RuntimeVariables::default(),
         BakedManifest::Present(manifest) => {
-            let resolved = manifest.environment_for("cloudflare");
-            collect_worker_variables(&resolved.variables, |key| {
+            manifest_runtime_variables(manifest, options.adapter_key, |key| {
                 env.var(key).ok().map(|value| value.to_string())
             })
         }
@@ -213,10 +317,11 @@ pub async fn dispatch_app<A: Hooks>(
         ctx,
         request::RegistryInputs {
             config_meta: stores.config,
-            kv_meta: stores.kv,
-            secret_meta: stores.secrets,
+            config_read_mode: options.config_read_mode,
             env_config: &env_config,
+            kv_meta: stores.kv,
             runtime_variables,
+            secret_meta: stores.secrets,
         },
     )
     .await
@@ -224,8 +329,9 @@ pub async fn dispatch_app<A: Hooks>(
 
 #[cfg(test)]
 mod platform_tests {
-    use edgezero_core::app::{App, Hooks};
+    use edgezero_core::app::{App, Hooks, StoreMetadata};
     use edgezero_core::error::EdgeError;
+    use edgezero_core::manifest::ManifestLoader;
     use edgezero_core::manifest::ResolvedEnvironmentBinding;
     use edgezero_core::router::RouterService;
 
@@ -250,11 +356,49 @@ mod platform_tests {
     }
 
     #[test]
+    fn cloudflare_runtime_keeps_byob_config_read_mode() {
+        assert_eq!(
+            super::WorkerRuntimeOptions::CLOUDFLARE.config_read_mode,
+            super::ConfigReadMode::Byob
+        );
+    }
+
+    #[test]
     fn application_configuration_receives_cloudflare_platform_metadata() {
-        let app = super::build_target_app::<PlatformAwareConfiguration>()
-            .expect("configured application");
+        let app = super::build_target_app::<PlatformAwareConfiguration>(
+            super::WorkerRuntimeOptions::CLOUDFLARE,
+        )
+        .expect("configured application");
 
         assert_eq!(app.platform(), crate::CLOUDFLARE_PLATFORM);
+    }
+
+    #[test]
+    fn cloudflare_secret_policy_preserves_worker_secret_support() {
+        let metadata = StoreMetadata {
+            default: "secrets",
+            ids: &["secrets"],
+        };
+        assert_eq!(
+            super::validate_secret_policy(Some(metadata), super::SecretPolicy::AllowWorkerSecrets,),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn celld_secret_policy_rejects_declared_secret_stores() {
+        let metadata = StoreMetadata {
+            default: "secrets",
+            ids: &["secrets"],
+        };
+        assert_eq!(
+            super::validate_secret_policy(Some(metadata), super::SecretPolicy::RejectDeclared,),
+            Err("celld does not support declared secret stores")
+        );
+        assert_eq!(
+            super::validate_secret_policy(None, super::SecretPolicy::RejectDeclared),
+            Ok(())
+        );
     }
 
     #[test]
@@ -284,5 +428,28 @@ mod platform_tests {
             defaulted.get("API_BASE_URL"),
             Some("https://default.example")
         );
+    }
+
+    #[test]
+    fn manifest_environment_selection_uses_the_selected_adapter_key() {
+        let loader = ManifestLoader::load_from_str(
+            r#"
+[[environment.variables]]
+name = "API_BASE_URL"
+value = "https://cf.example"
+adapters = ["cloudflare"]
+
+[[environment.variables]]
+name = "API_BASE_URL"
+value = "https://celld.example"
+adapters = ["celld"]
+"#,
+        );
+        let manifest = loader.manifest();
+
+        let cloudflare = super::manifest_runtime_variables(manifest, "cloudflare", |_| None);
+        let celld = super::manifest_runtime_variables(manifest, "celld", |_| None);
+        assert_eq!(cloudflare.get("API_BASE_URL"), Some("https://cf.example"));
+        assert_eq!(celld.get("API_BASE_URL"), Some("https://celld.example"));
     }
 }
