@@ -1,6 +1,8 @@
 # Native celld store providers
 
-Status: draft. Scoped access, optional application authentication and AWS-style config snapshots are agreed. API placement and detailed protocol contracts remain open.
+Status: implementation started. The first scoped listener runs inside celld itself, with no separately operated gateway or sidecar. Native local KV, authenticated TLS and expiry proofs have executed. EdgeZero provider integration and deployment/fleet acceptance remain unfinished. See the [implementation plan](../plans/2026-10-15-native-celld-store-providers.md) for evidence and remaining gates.
+
+Initial celld implementation checkpoint: `f72ae21a515859570622ac9d6ca9c19cf6870b81` on `feat/scoped-store-api`. This is not a released capability or fleet acceptance claim.
 
 ## Goal and scope
 
@@ -35,31 +37,33 @@ Documentation and source were inspected at celld `90b43017241f81189453d326d05948
 6. A namespace has one owner/writer. Reads reach that owner and are documented not to return stale values. These facts do not provide application-key CAS, conditional create or an atomic multi-call read-modify-write.
 7. Documented limits include 512-byte keys, 25 MiB values, pages of at most 1000 keys and a 60-second minimum expiry. Values above 1 MiB require a fleet bucket. Expired keys become invisible at expiry.
 
-These are source/documentation findings. This planning pass has not executed a native client against celld.
+These findings describe the researched upstream revision. Executed proof for the new embedded listener is recorded in the implementation plan; it does not certify deployment isolation or fleet behavior.
 
 ## Agreed decisions
 
-- Applications use a scoped service API. Do not put the fleet HMAC secret or celld fleet-bucket discovery credentials in the EdgeZero process.
+- Applications use a scoped API implemented inside the existing celld process. Do not add a gateway, sidecar, Worker bridge or other separately operated service. Do not put the fleet HMAC secret or celld fleet-bucket discovery credentials in the EdgeZero process.
 - Support explicit trusted-network and authenticated access modes. Application bearer tokens are optional, not a prerequisite for private deployments. Both modes restrict exposed stores and operations.
 - Config uses startup snapshots, matching the native AWS config provider. Restart to adopt published changes.
 - No celld Worker runtime or celld secret provider is added.
 
 A Worker HTTP bridge is excluded from this proposal. Spawning `celld kv` per application operation and reading or modifying celld's backing SQLite/bucket files are also excluded.
 
-## Proposed scoped API
+## Scoped API inside celld
 
-The scoped API must be implemented. It is not an existing celld feature established by this research. It could live in celld itself or in a small, separately operated native gateway. Prefer upstream support if celld will own this contract. A gateway is an alternative that avoids waiting for an upstream release, but adds another privileged process to deploy and maintain. Placement is not yet agreed.
+Implement the scoped API inside celld itself. It is not an existing feature of the researched release, so this work includes celld source changes and a build containing them. The user explicitly rejected a separate gateway or service. Use a disabled-by-default, separately permissioned listener in the existing celld process; do not expose administrative routes by reusing the internal listener. Reuse celld's existing namespace-owner routing after grant checks, rather than making the application discover nodes or sign internal requests. Authenticated TLS terminates in celld so this feature does not require another proxy process.
 
 ```mermaid
 flowchart TD
-    App[Native application] --> API[Scoped store API]
-    API --> Mode{Configured access mode}
-    Mode --> Network[Trusted network: listener grants]
-    Mode --> Auth[Authenticated: verify credential and select grants]
-    Network --> Policy[Check store alias and allowed operation]
-    Auth --> Policy
-    Policy --> Client[Privileged celld access inside service boundary]
-    Client --> Fleet[celld namespace owner over protected internal network]
+    App[Native application] --> API
+    subgraph Celld[Existing celld process]
+        API[Scoped store listener] --> Mode{Configured access mode}
+        Mode --> Network[Trusted network: listener grants]
+        Mode --> Auth[Authenticated TLS: verify credential and select grants]
+        Network --> Policy[Check store alias and allowed operation]
+        Auth --> Policy
+        Policy --> Dispatch[Existing authorized KV and owner routing]
+    end
+    Dispatch --> Fleet[celld namespace owner over protected internal network]
     Operator[Operator-owned listener policy and optional credentials] --> API
 ```
 
@@ -74,7 +78,7 @@ Configure one explicit access mode per listener. Missing or invalid configuratio
 
 In trusted-network mode, reachability grants access. A private IP alone does not identify an application or isolate it from other workloads. Applications needing different permissions require separate listeners with enforced network isolation, or authenticated access. An application-supplied name or header is not caller identity.
 
-For authenticated mode, the service keeps token verifiers and grants. The application receives only its own token through deployment secret injection, not through remote config or a celld secret store. Credential replacement and revocation must not require changing the application API. Exact reload and rotation behavior still needs a defined contract. No credential-issuance service is proposed initially.
+For authenticated mode, celld keeps SHA-256 token verifiers and grants, compares candidate digests in constant time and terminates TLS on the scoped listener. The application receives only its own random token through deployment secret injection, not through remote config or a celld secret store. Policy is captured once at celld startup. Replacement/revocation requires updating that policy and restarting the node; old grants remain active until the restart. Distinct credential IDs with overlapping grants support a staged token replacement without changing the application API. No credential-issuance service or policy hot reload is included.
 
 For example, a trusted-network listener or an authenticated credential may grant:
 
@@ -85,7 +89,7 @@ For example, a trusted-network listener or an authenticated credential may grant
 
 The client requests a store alias, never an arbitrary celld runtime scope, node address or bucket path. Resolve the alias and check its grant before any backend call in both modes. Start with whole-namespace grants and dedicated config namespaces. Prefix-based authorization is unnecessary for the initial requirement and would add key-normalization and listing risks.
 
-Do not expose fleet discovery, deployments, eviction, shutdown, arbitrary cell calls or an administrative proxy endpoint. Neither trusted-network reachability nor a compromised application token authorizes these actions. A compromised gateway still has fleet authority, so its host and internal network remain security boundaries.
+Do not expose fleet discovery, deployments, eviction, shutdown, arbitrary cell calls or an administrative proxy endpoint. Neither trusted-network reachability nor a compromised application token authorizes these actions. A compromised celld node already has fleet authority, so its host and internal network remain security boundaries. The new listener does not grant its callers that authority.
 
 ### Defaults and transport protection
 
@@ -94,7 +98,7 @@ Do not expose fleet discovery, deployments, eviction, shutdown, arbitrary cell c
 - Authentication failures never fall back to trusted-network access. Do not mix authenticated and anonymous grants on one listener in the initial design.
 - The provider supports tokenless connections without application credential provisioning. If a binding explicitly selects a token source, a missing or empty token is an error, not a request to connect anonymously.
 - Authentication and encryption are separate decisions. Bearer credentials require TLS. Trusted-network mode may use HTTP on loopback or an explicitly accepted protected network. A private network does not inherently provide confidentiality; use TLS or an encrypted overlay where needed.
-- Fleet credentials remain inside celld or the gateway in both modes. Optional application authentication does not disable authentication on celld's internal reserved-cell protocol.
+- Fleet credentials remain inside celld in both modes. Optional application authentication does not disable authentication on celld's internal reserved-cell protocol.
 
 ### Operations
 
@@ -102,7 +106,7 @@ Use a small versioned HTTP contract with raw bytes for values and bounded JSON f
 
 - `GET /v1/stores/{alias}/value?key=...` reads bytes. Missing is distinct from an empty successful body.
 - `HEAD` on the same route checks existence without returning the value body.
-- `PUT` on the same route stores raw bytes, with an explicit relative TTL option. Omitting TTL clears a previous expiry.
+- `PUT` on the same route stores raw bytes. Optional `ttl_seconds` is an integer from 60 through 31,536,000. The provider must round supported fractional `Duration` inputs upward to seconds, never earlier than requested. Omitting TTL clears a previous expiry.
 - `DELETE` on the same route deletes a key, including a missing key.
 - `GET /v1/stores/{alias}/keys?prefix=...&cursor=...&limit=...` returns a bounded page and opaque continuation.
 
@@ -113,6 +117,20 @@ The service and client both enforce finite deadlines and body/page limits. The s
 No automatic replay of ambiguous mutations in the first version. A timeout does not prove that a write failed. Error categories must distinguish authentication, authorization, missing values, invalid input, limits and backend unavailability without returning internal error chains.
 
 Authorization tests must prove out-of-grant store denial and config write denial before backend dispatch in both access modes. Authenticated mode must also prove isolation between credentials. Trusted-network tests must make shared listener permissions explicit. Test disabled and loopback defaults, rejection of implicit remote tokenless exposure, missing selected tokens, and no fallback after authentication failure. Deployment tests must separately prove network restrictions on the scoped listener and that application workloads cannot reach the internal listener or read fleet credentials.
+
+### Embedded listener v1 contract
+
+Enable the listener only with an absolute `--store-api-config` JSON policy path or `CELLD_STORE_API_CONFIG`. Without a selection there is no scoped socket. The policy requires `version = 1`, explicit access mode, store aliases and operation grants. Its default address is `127.0.0.1:7780`; explicit port zero is permitted for disposable tests. Non-loopback tokenless binding requires `allow_remote_trusted_network = true` as well as operator-enforced network restrictions. Authenticated mode requires native TLS certificate/key files and cannot enable the trusted-network opt-in.
+
+Policy accepts at most 128 store aliases, 128 credential IDs and 1,024 grant entries in a file capped at 256 KiB. Aliases/credential IDs are case-sensitive ASCII alphanumerics, underscore or hyphen, at most 64 bytes. Service-side namespace IDs are nonempty, at most 512 UTF-8 bytes and contain no control characters. Application callers never select those namespace IDs directly.
+
+Initial wire limits are 1 MiB raw values, 4 MiB plus 16 KiB encoded backend value responses, 2 MiB encoded key pages, 2 KiB cursors and at most 1,000 keys per page, default 100. TLS/header completion has a five-second budget, each operation a ten-second budget and the scoped listener admits at most 32 simultaneous connections. These are finite feature limits, not an RSS certification. Larger bucket-backed values remain outside the tested scope.
+
+Every scoped response includes `x-celld-store-version: 1`. Value GET returns 200 with raw bytes or 404 for a miss. HEAD returns 200/404 without a body. PUT and DELETE return 204 on success. Key pages return `{ "keys": ["name"], "cursor": null }` or a bounded opaque cursor. The service checks its version, alias/physical-namespace fingerprint, prefix and continuation progress on every page, and reauthorizes the operation. Cursors are not secret, signatures or authority. Invalid/non-progressing backend pages fail rather than triggering an unbounded scan.
+
+Errors use fixed categories `invalid_input`, `unauthenticated`, `forbidden`, `not_found`, `limit_exceeded`, `unsupported_version`, `unavailable` and `deadline`, with statuses 400, 401, 403, 404, 413, 426, 503 and 504 respectively. HEAD errors have no body. Requests reject malformed/duplicate/unknown query parameters, malformed percent escapes, invalid UTF-8 and unsupported content encoding. Invalid authentication never falls back to anonymous access, including a supplied bearer header on a trusted-network listener.
+
+The celld implementation reuses existing reserved KV classes, routing and output gates. A local store-only bootstrap uses celld's built-in KV runtime and a built-in 404 default required by its generation host, not application Worker source or a KV-over-Worker bridge. Enabled KV registration survives deployment generation construction/reload. Calls use an explicit no-replay path through both owner dispatch and the pooled peer tunnel; buffering request bytes alone is not proof that retrying a mutation is safe.
 
 ## Proposed provider design
 
@@ -180,7 +198,7 @@ Initial publication remains operator-owned. Do not add fleet provisioning, deplo
 
 ## Delivery sequence and proof
 
-1. **Specify the scoped API.** Choose upstream integration or a native gateway, then define listener grants, optional credential provisioning/revocation, versioning, network boundaries and operation/error contracts. Scoped access, the two access modes and startup config snapshots are already agreed.
+1. **Specify and implement the scoped API in celld.** Placement is settled: the listener and grant enforcement run inside celld, with no extra service. Finalize listener grants, optional credential provisioning/revocation, versioning, network boundaries and operation/error contracts. Scoped access, the two access modes and startup config snapshots are already agreed.
 2. **Prove scoped native access.** Use a disposable local celld setup and a small native client with no application Worker. Exercise tokenless loopback and authenticated access. Observe binary put/get/delete, missing versus empty values, namespace isolation, pagination and explicit version/authentication failures. Prove config-write and out-of-grant store denial before dispatch, plus no fallback between access modes. Keep all fleet credentials inside the service boundary and record their acquisition. This is a transport and authorization gate, not production acceptance.
 3. **Implement live KV.** Add typed settings, strict offline validation, bounded transport and operation tests. Prove TTL renewal/reset, malformed responses, oversized encoded/decoded payloads, continuation and ambiguous-write behavior. Use provider-specific TTL tests because the shared native contract macro currently expects direct sub-second TTLs that celld rejects.
 4. **Implement config snapshots.** Prove whole-document preservation, missing and invalid UTF-8 failures, per-value/session budgets, bounded snapshot reads and restart-based adoption.
@@ -193,9 +211,8 @@ Fleet failover, encrypted-overlay operation, crash recovery, large-value bucket 
 
 ## Open decisions
 
-- Should the scoped API be implemented upstream in celld or as a separately operated native gateway?
-- Define the exact trusted-network opt-in and listener policy configuration. For optional authenticated mode, finalize the bearer-token method and credential reload, rotation and revocation behavior.
-- Select concrete API limits, error shapes and celld version compatibility policy before implementation.
+- Freeze the embedded v1 contract above against remaining fault, shutdown and deployment-isolation tests before exposing stable EdgeZero provider settings.
+- Record the supported celld implementation revision and upgrade compatibility policy before release. Fleet operation, deployment reload and production persistence need acceptance beyond the executed local proofs.
 
 ## References
 

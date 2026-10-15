@@ -1,11 +1,11 @@
 # Native celld store providers implementation plan
 
-- Status: draft. Planning only; implementation and runtime acceptance have not started.
+- Status: the first embedded celld implementation is running and locally verified. Native KV, restart persistence, authenticated TLS and real 60-second expiry/renewal/reset proofs have executed. The EdgeZero provider has not been added; fault/shutdown, deployment isolation and fleet acceptance remain open.
 - Governing spec: [Native celld store providers](../specs/2026-10-15-native-celld-store-providers-design.md).
 - EdgeZero baseline: `350527e4b7387a86da3f4cdaea0e8459665aa0f6`, with the spec introduced at `32737dd29b8f1fefd6e035be8036780e58b2412c` and the approved structural-only CLI clarification applied afterward.
 - celld research baseline: `90b43017241f81189453d326d05948f388b34652`, version 0.6.2. Recheck the selected source and executable before running proofs.
 - Approved scope clarification: offline CLI validation stays structural-only and reports target provider availability as unknown. Do not add a Cargo feature-graph resolver.
-- Authority: this request authorizes writing the plan, not implementing it, changing celld, deploying services, using fleet credentials, pulling images, publishing commits or opening PRs.
+- Authority: the user requested committing the spec/plan and starting implementation, then explicitly selected implementation inside celld with no separate service. This authorizes scoped celld source changes and EdgeZero integration under this plan. No push, production deployment or real fleet/AWS access is authorized.
 
 ## 1. Outcome and invariants
 
@@ -23,23 +23,23 @@ Required invariants:
 - Errors owned by EdgeZero contain fixed categories and validated logical IDs, not credentials, physical namespaces, URLs, response bodies or arbitrary source chains.
 - Default-generated applications, AWS-only builds and WASM adapters do not acquire celld runtime, V8 or Worker tooling dependencies.
 
-Out of scope: a celld HTTP adapter, Worker bridge or application runtime; celld secrets; fleet provisioning; config publication; secret management; live config refresh; CAS, transactions or counters; dynamic provider registration; extraction of existing local stores; AWS redesign; process-wide memory guarantees; automatic fleet failover acceptance.
+Out of scope: a separate gateway, sidecar or proxy service; a celld HTTP adapter, Worker bridge or application runtime; celld secrets; fleet provisioning; config publication; secret management; live config refresh; CAS, transactions or counters; dynamic provider registration; extraction of existing local stores; AWS redesign; process-wide memory guarantees; automatic fleet failover acceptance.
 
-## 2. Decisions required before implementation
+## 2. Embedded v1 decisions and release gates
 
-The scoped API does not exist in the researched celld version. A provider cannot be completed by adding an HTTP client alone. Resolve the following in the governing spec before implementing the service or freezing public provider settings.
+The scoped API does not exist in the researched upstream celld version. The initial implementation now lives inside celld, not another service. Its listener schema, protocol, limits and restart-based policy adoption are recorded in the governing spec. The table below defines what must stay explicit and what needs release/acceptance evidence; provider settings must not bypass those remaining gates.
 
 | Decision | Required output | Constraint |
 | --- | --- | --- |
-| Service placement and owner | Choose upstream celld integration or one separately operated native gateway, with its repository and release owner | Implement one path, not both. An upstream implementation needs a concrete supported celld revision. A gateway needs its own deployment and compatibility ownership. |
+| API placement | Resolved by the user: inside the existing celld process | No separately operated gateway, sidecar or proxy. Celld implementation worktree: `/home/pav/worktrees/feat-scoped-store-api`, branch `feat/scoped-store-api`, based on the researched pin. Initial implementation revision: `f72ae21a515859570622ac9d6ca9c19cf6870b81`. Release/upgrade acceptance remains open. |
 | Listener policy | Exact configuration schema for mode, bind address, alias mapping and operation grants | Disabled by default; tokenless loopback default; explicit non-loopback opt-in and separately enforced network restrictions. No client-supplied caller identity. |
 | Authenticated access | Token verifier format, secret injection, reload, overlap, revocation and restart policy | Random application bearer tokens over TLS. No issuance service or application fleet credentials. A documented bounded restart-based service policy is acceptable if hot reload is unnecessary. |
 | HTTP protocol | Version, methods, status/error schema, TTL units/rounding, cursor shape, malformed-input and body rules | Missing differs from empty. No mutation replay. An incompatible version fails explicitly. Routes in the spec are proposals until this gate closes. |
-| Transport policy | TLS termination owner, certificate validation, trusted-network HTTP opt-in and internal network protection | Bearer tokens require TLS. A private address is not proof of isolation or encryption. Both the application client and privileged service-to-celld transport disable redirects and ambient proxy discovery unless a specific exception is reviewed here. |
+| Transport policy | Native TLS in the celld scoped listener, certificate validation, trusted-network HTTP opt-in and internal network protection | Bearer tokens require TLS. A private address is not proof of isolation or encryption. Reuse existing in-process owner dispatch rather than a local HTTP proxy. The application client and any retained celld peer transport must not redirect or discover ambient proxies. |
 | Limits and compatibility | Concrete service/client limits, deadlines, preparation quotas and supported celld revision policy | Account separately for raw bytes, backend JSON byte-array/base64 encoding, decoded payloads, key pages, cursors, metadata and retained snapshots. No claim that the portable 25 MiB ceiling is always reachable. |
 | Public settings | Provider tags, feature names, alias/endpoint/access settings and policy ownership | Proposed names below must be reconciled with the chosen service contract. Settings contain references, not credentials. |
 
-Do not hide these decisions in test fixtures or silently treat this plan's examples as approved public contracts. If service ownership cannot be settled, stop after contract research rather than publishing a nonfunctional provider tag.
+Do not hide the remaining contract decisions in test fixtures or silently treat this plan's examples as frozen public contracts. API placement is settled and is not a reason to stop implementation. Start with the embedded listener policy and authorization unit, then prove the real celld path before publishing a provider tag.
 
 ## 3. Delivery order
 
@@ -102,7 +102,7 @@ scripts/
 
 Keep ordinary unit tests colocated. Separate test modules only when fixture size warrants them. Add one shared test-support module if actual repeated fixture code needs it, not a public transport/provider framework.
 
-The scoped service lives in the repository selected at Stage 0, not automatically in EdgeZero. For upstream work, inspect celld's `operator_cell.rs`, `kv_cli.rs`, `peer_auth.rs`, `crates/logic/kv.rs` and `js/services/kv.js` plus the actual listener routing modules. For a gateway, use an independent native package that speaks the pinned backend protocol and owns privileged discovery. Do not depend on the full celld crate or copy its runtime into the application provider. Record exact external files after choosing placement.
+The scoped listener lives inside the celld repository, not in a new EdgeZero service package. Work in `/home/pav/worktrees/feat-scoped-store-api` on branch `feat/scoped-store-api`, based on celld `90b43017241f81189453d326d05948f388b34652`; keep the research checkout unchanged. Inspect celld's `main.rs`, `startup.rs`, `operator_cell.rs`, `kv_cli.rs`, `peer_auth.rs`, `crates/logic/kv.rs` and `js/services/kv.js`. Reuse existing owner dispatch inside the process after authorization. Keep pure policy decisions in `crates/logic` and effectful listener/credential/TLS handling in `crates/celld`. Do not depend on the full celld crate or copy its runtime into the EdgeZero application provider.
 
 Proposed provider interface:
 
@@ -145,34 +145,34 @@ The first alias has read-only grants; the second has the required KV operations.
 
 ### Work
 
-- [ ] Record HEAD, dirty files and governing spec hash. Preserve the current approved spec edits and unrelated work. Recheck local repository instructions.
-- [ ] Inventory the actual core store contracts, native source plan, startup staging, bootstrap token capture and generated feature tests. Confirm that offline validation normalizes controls but does not resolve target capabilities.
-- [ ] Verify the selected celld source, executable version, backend protocol and test tooling. Record whether the scoped API will need an external change or release. At the researched pin, operator values use byte arrays inline and `put-base64`/`valueEncoding` above 1 MiB; listing uses a raw last-key `after`, not a scoped opaque cursor; there is no native `exists` operation. Specify the service's bounded existence implementation and cursor wrapper rather than assuming those HTTP operations map one-to-one.
-- [ ] Resolve every decision in section 2 in the governing spec. Include an operation/error table, limit table and deployment trust-boundary diagram. Link the chosen service repository and immutable source revision when available.
-- [ ] Define a fixture policy using isolated local storage, dummy application tokens, explicit ports and resource ownership. No ambient cloud credentials, production fleet discovery, internet-exposed listeners or real AWS acceptance.
-- [ ] Record a focused baseline for existing source validation, startup, CLI structure and dependency graphs before production edits. Classify pre-existing failures once; do not silently exclude them.
+- [x] Record HEAD, dirty files and governing spec hash. Preserve the current approved spec edits and unrelated work. Recheck local repository instructions.
+- [x] Inventory the actual core store contracts, native source plan, startup staging, bootstrap token capture and generated feature tests. Confirm that offline validation normalizes controls but does not resolve target capabilities.
+- [x] Verify the selected celld source, executable version, backend protocol and test tooling. Record whether the scoped API will need an external change or release. At the researched pin, operator values use byte arrays inline and `put-base64`/`valueEncoding` above 1 MiB; listing uses a raw last-key `after`, not a scoped opaque cursor; there is no native `exists` operation. Specify the service's bounded existence implementation and cursor wrapper rather than assuming those HTTP operations map one-to-one.
+- [ ] Finalize the remaining listener/protocol decisions in section 2 in the governing spec. Placement is resolved: the scoped API runs in celld, with native TLS when authenticated. Include an operation/error table, limit table and deployment trust-boundary diagram. Record implementation files and resulting celld revision.
+- [x] Define a fixture policy using isolated local storage, dummy application tokens, explicit ports and resource ownership. No ambient cloud credentials, production fleet discovery, internet-exposed listeners or real AWS acceptance.
+- [x] Record a focused baseline for existing source validation, startup, CLI structure and dependency graphs before production edits. Classify pre-existing failures once; do not silently exclude them.
 
 ### Exit gate
 
-One service owner and placement, a frozen first-version contract, a safe runnable local setup and explicit permission to start implementation. Contract research alone is not runtime proof.
+An embedded celld implementation, a frozen first-version contract and a safe runnable local setup. The user has selected placement and authorized implementation. Contract research alone is not runtime proof.
 
 ## 6. Stage 1: implement the scoped service boundary
 
 ### Work
 
-- [ ] Implement only the selected placement. Keep alias/grant policy separate from privileged celld transport, with no administrative proxy or arbitrary scope/address input.
-- [ ] Validate all listener policy at startup. Disabled means no listener. Enabled tokenless access defaults to loopback. Missing/invalid mode cannot select trusted-network access.
-- [ ] Resolve aliases and authorize the exact operation before constructing a backend request. Config aliases are read-only. Whole-namespace grants and dedicated config namespaces are sufficient for v1.
-- [ ] Implement authenticated credential verification, TLS ownership and the approved replacement/revocation policy. Never log supplied tokens or verifier material. Trusted-network listeners grant the same configured permissions to every reachable caller.
-- [ ] Implement the approved versioned raw-byte value operations, existence check and bounded JSON key pages. Reject duplicate/malformed parameters and unsupported operations. Return a distinct missing response for reads and body-free existence responses.
+- [x] Implement a disabled-by-default scoped listener inside the existing celld process. Reuse existing owner-routing effects, not a loopback HTTP bridge or separate binary. Keep alias/grant policy separate from dispatch, with no administrative proxy or arbitrary scope/address input.
+- [x] Validate all listener policy at startup. Disabled means no listener. Enabled tokenless access defaults to loopback. Missing/invalid mode cannot select trusted-network access.
+- [x] Resolve aliases and authorize the exact operation before constructing a backend request. Config aliases are read-only. Whole-namespace grants and dedicated config namespaces are sufficient for v1.
+- [x] Implement authenticated credential verification, native TLS on the scoped listener and the defined replacement/revocation policy. Never log supplied tokens or verifier material. Trusted-network listeners grant the same configured permissions to every reachable caller.
+- [x] Implement the approved versioned raw-byte value operations, existence check and bounded JSON key pages. Reject duplicate/malformed parameters and unsupported operations. Return a distinct missing response for reads and body-free existence responses.
 - [ ] Keep discovery, fleet authentication, namespace-to-scope derivation and wire compatibility inside this boundary. Bound privileged encoded requests/responses independently of the public raw-byte budget, including inline byte-array expansion and the pinned base64 form. Reject over-cap writes before backend dispatch and over-cap responses before unbounded decoding, including encoding paths excluded by approved value caps.
-- [ ] Disable redirects and ambient proxy discovery on the privileged backend transport as well as the application client. Constrain discovered destinations to the approved internal-network policy. The pinned `operator_cell::Reachable` helper configures timeouts but is not evidence of these controls or bounded response parsing; do not copy its client unchanged.
-- [ ] Define one retry owner. Permit only explicitly proven pre-dispatch refusals if the approved contract needs them; never replay an ambiguous mutation or add nested client/service retry loops.
+- [x] Dispatch authorized operations through celld's existing in-process owner path. Do not add external operator discovery, a local HTTP client or a new privileged service where existing dispatch suffices. Audit any reused peer transport for redirect/proxy behavior and bounded parsing. The pinned external `operator_cell::Reachable` helper is research material, not the implementation to copy.
+- [x] Define one retry owner. Permit only explicitly proven pre-dispatch refusals if the approved contract needs them; never replay an ambiguous mutation or add nested client/service retry loops.
 - [ ] Apply finite request deadlines and body, page, cursor and concurrency limits. Bound work and memory under slow callers and disconnects. Do not claim dropping a request undoes an applied backend write.
 
 ### Tests and exit gate
 
-Drive public handlers with an instrumented backend. Prove zero backend calls for out-of-grant aliases, config writes, malformed input and denied operations in both modes. Prove credential isolation, missing/revoked-token rejection, no auth fallback, disabled/loopback defaults, remote-tokenless opt-in rejection, body/page limits, deadline termination and redacted error responses. Test both backend encodings and their encoded/decoded budgets, or explicit over-cap rejection where a path is unsupported. Use service-side redirect/proxy sentinels to prove signed backend requests and mutations cannot reach alternate destinations. Test the actual chosen service implementation, not a second policy implementation in EdgeZero fixtures.
+Drive public handlers with an instrumented backend. Prove zero backend calls for out-of-grant aliases, config writes, malformed input and denied operations in both modes. Prove credential isolation, missing/revoked-token rejection, no auth fallback, disabled/loopback defaults, remote-tokenless opt-in rejection, body/page limits, deadline termination and redacted error responses. Test both backend encodings and their encoded/decoded budgets, or explicit over-cap rejection where a path is unsupported. Verify authorized calls reach only the existing owner-dispatch path, and audit/test redirect/proxy restrictions on any network hop that path uses. Test the actual chosen service implementation, not a second policy implementation in EdgeZero fixtures.
 
 Before moving on, document how application workloads are prevented from reaching celld's internal listener or reading fleet credentials. An HTTP authorization test does not establish deployment network isolation.
 
@@ -181,11 +181,11 @@ Before moving on, document how application workloads are prevented from reaching
 ### Work
 
 - [ ] Start one disposable local fleet and the chosen service using the pinned executable/revision. Record commands, environment, acquisition and storage of fixture-only fleet credentials, listener addresses and cleanup.
-- [ ] Use a small native client without an application Worker. Through the service, exercise binary and empty put/get, missing reads, exists, overwrite, idempotent delete, prefix pages and two isolated stores.
-- [ ] Exercise trusted-network loopback and authenticated TLS with valid certificate verification. Use a test CA through test setup, never a production `accept_invalid_certs` switch.
+- [x] Use a small native client without an application Worker. Through the service, exercise binary and empty put/get, missing reads, exists, overwrite, idempotent delete, prefix pages and two isolated stores.
+- [x] Exercise trusted-network loopback and authenticated TLS with valid certificate verification. Use a test CA through test setup, never a production `accept_invalid_certs` switch.
 - [ ] Drive incompatible protocol versions, invalid tokens, out-of-grant stores and config write denial. Observe backend dispatch counts for authorization denials.
-- [ ] Verify real operator-wire TTL set, renewal and plain-put reset, and document how fractional `Duration` values will map to the approved wire units without shortening lifetime. Record the value encodings and size range exercised; a small-value result does not verify the bucket-backed/base64 path.
-- [ ] Exercise a listing larger than one page and record ordering and continuation behavior. Preserve empty/partial pages where the backend can return them; deterministic malformed-page cases belong in later fixtures.
+- [x] Verify real operator-wire TTL set, renewal and plain-put reset, and document how fractional `Duration` values will map to the approved wire units without shortening lifetime. Record the value encodings and size range exercised; a small-value result does not verify the bucket-backed/base64 path.
+- [x] Exercise a listing larger than one page and record ordering and continuation behavior. Preserve empty/partial pages where the backend can return them; deterministic malformed-page cases belong in later fixtures.
 - [ ] Demonstrate network/credential isolation using the actual deployment arrangement selected for the proof. Host loopback success alone does not establish container or multi-host isolation.
 
 ### Exit gate
@@ -312,7 +312,7 @@ The real-service command must fail or report an explicit unverified gate when pr
 
 ### Work
 
-- [ ] Document service placement/version requirements, application bindings, operator-owned aliases/grants and both access modes. Include TLS and network restrictions, token injection, replacement/revocation, fleet credential separation and safe examples.
+- [ ] Document the required celld build/version, embedded listener configuration, application bindings, operator-owned aliases/grants and both access modes. Include TLS and network restrictions, token injection, replacement/revocation, fleet credential separation and safe examples.
 - [ ] Explain startup-only config adoption, non-atomic multi-document releases, optional independent secret providers, service/provider limits, TTL constraints, empty continuation pages, non-snapshot listing and ambiguous mutation outcomes.
 - [ ] Explain that offline CLI validation is structural-only, startup checks compiled capabilities, and config push does not publish remote config. Keep resource provisioning/publication instructions operator-owned.
 - [ ] Extend isolated dependency checks and focused CI commands. Use the nonzero-test wrapper for new ignored/generated suites so a mistaken test filter cannot produce a passing zero-test job.
@@ -370,6 +370,57 @@ The two highest-risk facts need direct executed evidence:
 Stop and revise the plan if safe scoped access cannot be delivered without app fleet authority, a full celld runtime dependency, a Worker bridge, a portable core contract change or an additional unapproved service. Do not conceal that change behind custom overrides or a test-only transport.
 
 Handoff must include changed files, concrete protocol decisions, service/provider versions, completed stages, exact checks and results, known baseline failures, intentionally unexecuted acceptance cases and remaining operational risks. No stage is complete merely because a package compiles or a service starts.
+
+## Stage 0 execution record
+
+The user requested committing the spec/plan and starting implementation. Commit `a12265b52770c50ca7c5384bd1037037b892b0ea` contains both documentation changes. The checkout was clean immediately afterward; no production source changed. Governing spec blob: `6c84a41957fcb56047b2259eb6dd79fc3fd6beb6`.
+
+Executed against the unchanged production source at that revision:
+
+| Command | Outcome |
+| --- | --- |
+| `cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum --lib native_bindings::tests` | 11 passed; 35.9 seconds including initial compilation |
+| `cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum --lib` | 238 passed; native startup, source validation, local stores and bootstrap included |
+| `cargo test --offline --locked -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum --lib bindings_only` | 2 passed; structural validation without app TOML and shared validation/push errors |
+| `bash scripts/check_native_store_dependency_contract.sh` | Passed existing isolated AWS/native/WASM dependency assertions; no celld implementation exists yet |
+
+The last three commands ran sequentially in 20.3 seconds total. Full command output is retained in the implementation conversation. No baseline failures occurred in these scopes. Broader all-provider/generated/runtime suites have not run for this task.
+
+The local celld research checkout is clean at the required pin. `celld` is not on PATH and no executable was found in that checkout's usual debug/release locations or the user Cargo/local bin locations. Docker is available, but no daemon/image/service check, image pull, fleet setup or credential access was performed. Source availability does not satisfy the real-service gate.
+
+The user subsequently resolved placement: implement inside celld with no separate gateway/service. An isolated celld worktree now exists at `/home/pav/worktrees/feat-scoped-store-api`, branch `feat/scoped-store-api`, based on the researched pin. The first embedded implementation and local proof are recorded below. No production deployment, real fleet/AWS access or additional service was used.
+
+## Embedded celld implementation checkpoint
+
+The initial celld implementation is committed as `f72ae21a515859570622ac9d6ca9c19cf6870b81` on `feat/scoped-store-api`; the celld worktree is clean. EdgeZero changes after `a12265b5` remain documentation-only. Do not label the initial listener as a released celld capability. The clean celld repository was moved to `/home/pav/Projects/celld` and its worktree metadata repaired so the implementation branch does not depend on temporary Git storage; `/tmp/edgezero-celld-research` remains a compatibility symlink with unchanged source contents.
+
+Implemented files:
+
+- `crates/logic/scoped_store.rs`, its explicit integration test and module/manifest registration: std-only exact alias/principal/operation policy, validated once, actually called by the HTTP handler.
+- `crates/celld/scoped_store.rs` and library export: strict capped JSON policy capture, token verifier checks, native TLS configuration, closed errors, HTTP operations, binary values and scope-bound key-page cursors.
+- `crates/celld/main/store_api.rs`, `main.rs` and `main/cli.rs`: disabled-by-default third listener, startup file selection, admission accounting, existing owner dispatch/output gates, body/operation/connection budgets and shutdown socket closure.
+- `crates/celld/generation.rs`: required reserved KV registration during enabled generation construction/reload, plus local built-in KV-only bootstrap without application source. The existing generation host requires a default fetch; the built-in 404 is not a KV bridge and scoped traffic never passes through it.
+- `crates/celld/main/peer_tunnel.rs`: explicit no-replay policy, preserving legacy behavior for existing callers. The regression applies a pooled request then loses its reply and proves no fresh attempt in the scoped mode. Outer dispatch also stops after a failed scoped attempt.
+- `crates/celld/tests/scoped_store_startup.rs`: real local binary, cleared environment, isolated storage and owned child processes. Explicit TLS proof uses disposable certificate material; slow expiry proof uses actual elapsed time.
+- `docs/services/scoped-stores.md` and `docs/security.md`: embedded deployment/configuration and protocol, with remaining acceptance limits disclosed.
+
+Two read-only investigations identified the peer-pool replay hazard and missing reserved-runtime registration before edits. The coordinator inspected their evidence. Zellij follow-up delivery failed, so worker assignments were not treated as acknowledged transfers; their processes were released and the coordinator completed the coupled implementation locally, preserving and inspecting the partial HTTP/config scaffold.
+
+Build preparation fetched the exact locked dependencies without changing the lockfile. The initial offline check had failed because the checkout lacked cached packages. All celld checks use installed Rust 1.98.1, not the older global default.
+
+Executed checks:
+
+```sh
+cargo test --offline --locked -p celld-logic --test scoped_store
+cargo test --offline --locked -p celld --all-targets
+cargo test --offline --locked -p celld --test scoped_store_startup -- --ignored --nocapture
+cargo clippy --offline --locked -p celld -p celld-logic --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+The proof inventory is six pure-policy tests, seven actual HTTP-handler/config tests, one pooled replay regression, one ordinary real-binary test, one explicit native TLS test and one explicit real TTL test. All 17 passed. The two ignored acceptance tests were explicitly selected and both passed; they were not counted as passing skips. Strict all-target Clippy and workspace formatting checks passed. The final native/test/lint/format batch took 84.7 seconds, including the 61.4-second real expiry proof. Tested code fingerprint: `e909661efdf160a14ec8f62ffc224ff5fb590d921fc1dd635140dd08585ed55b`, covering 182 tracked/untracked workspace source/manifests. It is SHA-256 of compact JSON containing sorted pairs of repository-relative path and file SHA-256 from `git ls-files --cached --others --exclude-standard crates Cargo.toml Cargo.lock`; documentation-only changes do not alter it. The TLS certificate fixture initially failed certificate validation because it was marked as a CA; the corrected fixture is an end-entity certificate and normal certificate checking remains enabled. An initial KV-only generation without a default fetch also failed; the engine's default-fetch requirement is now explicit in the built-in bootstrap rather than hidden in an application script. The 61-second expiry test observes expiry, renewal beyond the original expiry and plain overwrite removing expiry.
+
+Remaining gates: deployment-level network/credential isolation, multi-node owner forwarding and reload acceptance, production persistence/replication and fault/shutdown/body-budget stress. The local standalone path emits `local reload requires replication`; it has not been claimed as a fleet recovery proof or silently suppressed. Celld's private conformance/simulation harness is not available in this checkout and has not run. No larger-value bucket, failover, upgrade or performance acceptance is claimed. Complete remaining scoped-access gates before treating Stage 2 as fully passed or adding stable EdgeZero provider tags.
 
 ## Related
 
