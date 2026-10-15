@@ -76,6 +76,10 @@ export default defineConfig({
             text: 'Blob App-Config Migration',
             link: '/guide/blob-app-config-migration',
           },
+          {
+            text: 'Dependency Majors Migration',
+            link: '/guide/dependency-majors-migration',
+          },
         ],
       },
     ],
