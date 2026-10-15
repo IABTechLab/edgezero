@@ -302,6 +302,63 @@ it preserves the visible header semantics used by the client.
 The CLI cannot currently prove that entitlement. If disabled, dispatch returns a typed 502
 with the documented enablement diagnostic.
 
+## Outbound Content-Type Provenance
+
+`OutboundResponse::content_type_provenance()` reports original `Content-Type` evidence
+captured before EdgeZero drops non-UTF-8 values or hop-by-hop/connection-nominated fields.
+It is not MIME validation, an acceptance decision, or a debug-safety guarantee.
+
+| Provenance                   | Meaning                                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `SingleTextUnchanged`        | Exactly one original UTF-8 value, retained unchanged, with no later mutable header access.              |
+| `Ineligible(Missing)`        | No original value.                                                                                      |
+| `Ineligible(MultipleValues)` | Multiple original values, even identical values or a textual value plus one later dropped as non-UTF-8. |
+| `Ineligible(NonText)`        | Exactly one original value, not valid UTF-8.                                                            |
+| `Ineligible(Removed)`        | An original textual singleton was stripped, such as by `Connection: content-type`.                      |
+| `Ineligible(Modified)`       | Mutable header access invalidated an originally eligible response.                                      |
+| `Unknown`                    | The adapter cannot recover original bytes or field boundaries; this says nothing about MIME validity.   |
+
+Axum, Fastly, and Spin retain the original normalization metadata on buffered, streamed, and
+bodyless response paths. Cloudflare **always** reports `Unknown`, including for absent or
+apparently single values: Fetch string iteration has already lost original octets and multiplicity.
+Core does not trim, split commas, or MIME-validate. A known single
+`application/json, text/plain` value can be `SingleTextUnchanged`; the application must still
+reject it during MIME validation. A quoted comma does not imply multiple original values.
+
+```rust
+use edgezero_core::{ContentTypeProvenance, OutboundResponse};
+
+fn content_type_candidate(response: &OutboundResponse) -> Option<&str> {
+    if response.content_type_provenance() != ContentTypeProvenance::SingleTextUnchanged {
+        return None;
+    }
+    let value = response.headers().get("content-type")?;
+    let candidate = std::str::from_utf8(value.as_bytes()).ok()?;
+    // Application must MIME-validate and apply acceptance/redaction policy before use.
+    Some(candidate)
+}
+```
+
+`headers_mut()` conservatively marks headers dirty even without an edit or when only an
+unrelated field changes. The private original evidence stays immutable; the accessor returns
+`Ineligible(Modified)` for a previously eligible response. Originally ineligible or unknown
+evidence never upgrades, even if the application inserts a valid singleton or restores old bytes.
+
+For adapter authors, `normalize_response_headers(method, status, &mut headers)` now returns
+`ResponseHeadNormalization { body_disposition, content_type_provenance }`. Use
+`.body_disposition` for body handling. Pass the original `.content_type_provenance` (always
+`Unknown` on Cloudflare) explicitly to the six-argument
+`OutboundResponse::new(method, status, headers, body, clock, content_type_provenance)`;
+never infer it from the normalized header map. `into_parts()` returns the five-tuple
+`(method, status, headers, body, provenance)` without another normalization pass.
+
+`into_response()` performs final defensive normalization and carries effective
+`ContentTypeProvenance` in the resulting response's extensions without upgrading original
+ineligible/unknown evidence. That extension describes the **historical outbound boundary only**;
+it cannot certify later ordinary `http::Response` edits, which remain application-owned.
+Provenance adds only tiny enum metadata, no retained/copied raw headers or body, and no new
+capability or change to the matrix above.
+
 ## Host Declarations
 
 `[capabilities.outbound].hosts` configures platform host plumbing; it is not an application

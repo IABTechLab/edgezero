@@ -1007,7 +1007,8 @@ mod fastly_impl {
         let mut header_limiter =
             ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count);
         header_limiter.observe(&headers)?;
-        let disposition = normalize_response_headers(&request_method, status, &mut headers)?;
+        let normalization = normalize_response_headers(&request_method, status, &mut headers)?;
+        let disposition = normalization.body_disposition;
         insert_proxy_header(
             &mut headers,
             &mut header_limiter,
@@ -1020,6 +1021,7 @@ mod fastly_impl {
                 headers,
                 Body::empty(),
                 response_clock,
+                normalization.content_type_provenance,
             ));
         }
 
@@ -1043,6 +1045,7 @@ mod fastly_impl {
                 headers,
                 Body::empty(),
                 response_clock,
+                normalization.content_type_provenance,
             ));
         }
 
@@ -1071,6 +1074,7 @@ mod fastly_impl {
             headers,
             body,
             response_clock,
+            normalization.content_type_provenance,
         ))
     }
 
@@ -1359,7 +1363,10 @@ mod fastly_impl {
         use std::thread;
 
         use edgezero_core::error::{BudgetSource, ResponseLimitReason};
-        use edgezero_core::http::header::{CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH};
+        use edgezero_core::http::header::{
+            CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
+        };
+        use edgezero_core::outbound::{ContentTypeIneligibility, ContentTypeProvenance};
         use edgezero_core::time::Deadline;
         use flate2::{Compression, write::GzEncoder};
         use futures::executor::block_on;
@@ -1728,6 +1735,118 @@ mod fastly_impl {
                 .expect_err("retained clock reached deadline");
 
             assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+        }
+
+        type ContentTypeCase = (&'static [&'static [u8]], bool, ContentTypeProvenance, usize);
+
+        fn content_type_cases() -> &'static [ContentTypeCase] {
+            use ContentTypeIneligibility::{Missing, MultipleValues, NonText, Removed};
+            use ContentTypeProvenance::{Ineligible, SingleTextUnchanged};
+
+            &[
+                (&[], false, Ineligible(Missing), 0),
+                (&[b"text/plain"], false, SingleTextUnchanged, 1),
+                (
+                    &[b"text/plain; label=caf\xc3\xa9"],
+                    false,
+                    SingleTextUnchanged,
+                    1,
+                ),
+                (
+                    &[b"text/plain", b"text/plain"],
+                    false,
+                    Ineligible(MultipleValues),
+                    2,
+                ),
+                (
+                    &[b"text/plain", b"application/json"],
+                    false,
+                    Ineligible(MultipleValues),
+                    2,
+                ),
+                (
+                    &[b"text/plain", b"\xff"],
+                    false,
+                    Ineligible(MultipleValues),
+                    1,
+                ),
+                (&[b"\xff"], false, Ineligible(NonText), 0),
+                (
+                    &[b"text/plain, application/json"],
+                    false,
+                    SingleTextUnchanged,
+                    1,
+                ),
+                (&[b"not a MIME type"], false, SingleTextUnchanged, 1),
+                (&[b"text/plain"], true, Ineligible(Removed), 0),
+            ]
+        }
+
+        #[test]
+        fn converted_response_preserves_original_content_type_provenance() {
+            use ContentTypeIneligibility::Modified;
+            use ContentTypeProvenance::{Ineligible, SingleTextUnchanged};
+
+            for &(values, nominated, expected, retained_count) in content_type_cases() {
+                for status in [
+                    StatusCode::OK,
+                    StatusCode::NO_CONTENT,
+                    StatusCode::RESET_CONTENT,
+                ] {
+                    for mode in [
+                        ResponseMode::Streamed,
+                        ResponseMode::Buffered { max_bytes: 64 },
+                    ] {
+                        let start = MonotonicInstant::now();
+                        let mut native = FastlyResponse::from_status(status.as_u16());
+                        for value in values {
+                            native.append_header(CONTENT_TYPE, *value);
+                        }
+                        if nominated {
+                            native.set_header(CONNECTION, "content-type");
+                        }
+                        let mut response = block_on(process_response(
+                            native,
+                            Method::GET,
+                            mode,
+                            clock_budget(start, Duration::from_secs(1)),
+                            1024,
+                            24,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            constant_clock(start),
+                        ))
+                        .expect("converted response");
+
+                        assert_eq!(response.content_type_provenance(), expected);
+                        assert_eq!(
+                            response.headers().get_all(CONTENT_TYPE).iter().count(),
+                            retained_count
+                        );
+                        if expected == SingleTextUnchanged {
+                            assert_eq!(
+                                response
+                                    .headers()
+                                    .get(CONTENT_TYPE)
+                                    .map(HeaderValue::as_bytes),
+                                values.first().copied()
+                            );
+                        }
+                        response
+                            .headers_mut()
+                            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                        let after_mutation = if expected == SingleTextUnchanged {
+                            Ineligible(Modified)
+                        } else {
+                            expected
+                        };
+                        assert_eq!(response.content_type_provenance(), after_mutation);
+                    }
+                }
+            }
         }
 
         #[test]

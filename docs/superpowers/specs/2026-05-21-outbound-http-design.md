@@ -1059,8 +1059,9 @@ the pinned compatibility date and SDK. Spin returns `bad_request` before body po
 WASI HTTP exposes one authority field for both routing and HTTP authority; it must never silently
 retarget the connection.
 
-/// Result of the authoritative raw-response metadata pass. Adapters must act on this
-/// before inspecting content encoding/length or constructing `OutboundResponse`.
+/// Body policy from the authoritative raw-response metadata pass. Adapters must act on
+/// `ResponseHeadNormalization::body_disposition` before inspecting content encoding/length
+/// or constructing `OutboundResponse`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBodyDisposition {
     FramingBodyless, // HEAD, 1xx, 204, or 304: settle/drop the platform handle; never decode
@@ -1069,6 +1070,33 @@ pub enum ResponseBodyDisposition {
         // Captured before the helper rewrites the downstream `content-length` to zero.
         declared_body: bool,
     }, // 205: apply the bounded settle/abort protocol in §3.4.1
+}
+
+/// Why original Content-Type evidence cannot certify a retained textual singleton.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentTypeIneligibility {
+    Missing,
+    Modified,
+    MultipleValues,
+    NonText,
+    Removed,
+}
+
+/// Original field multiplicity/UTF-8 evidence, not MIME validation or debug safety.
+/// No trimming, comma splitting, raw-header retention, or body copying.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentTypeProvenance {
+    Ineligible(ContentTypeIneligibility),
+    SingleTextUnchanged,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseHeadNormalization {
+    pub body_disposition: ResponseBodyDisposition,
+    pub content_type_provenance: ContentTypeProvenance,
 }
 
 /// Parse the already-normalized payload-bearing `content-length` and apply every
@@ -1091,11 +1119,13 @@ pub fn normalize_response_headers(
     request_method: &Method,
     status: StatusCode,
     headers: &mut HeaderMap,
-) -> Result<ResponseBodyDisposition, EdgeError>;
+) -> Result<ResponseHeadNormalization, EdgeError>;
 
 pub struct OutboundResponse {
     body: Body,                     // Once in Buffered mode, Stream in Streamed mode
+    content_type_provenance: ContentTypeProvenance, // immutable original evidence
     headers: HeaderMap,
+    headers_mutated: bool,          // separate conservative invalidation flag
     monotonic_clock: MonotonicClock, // paired app/client clock for bounded-until helpers
     request_method: Method,          // retained for HEAD/bodyless response semantics
     status: StatusCode,
@@ -1107,34 +1137,41 @@ impl OutboundResponse {
  /// and only then inspect `content-encoding` / `content-length`, decode, and cap. The headers
  /// supplied here are therefore already safe for app-facing `headers()` / `into_body()`:
  /// hop-by-hop fields and every `connection` nomination are gone; decompression has removed
- /// `content-encoding` / `content-length`; and lossy UTF-8 handling has run. `Body::Once` is
+ /// `content-encoding` / `content-length`; and non-UTF-8 header filtering has run. `Body::Once` is
  /// used in Buffered mode after the adapter has drained and capped; `Body::Stream` is wrapped
  /// with the decoded-output deadline guard in Streamed mode.
  /// The caller must provide the outbound client's retained application clock. There is no
  /// process-default fallback because deferred body operations must remain in that clock domain.
+ /// `content_type_provenance` is mandatory pre-filter evidence from the original normalization
+ /// pass, never inferred from these normalized headers. Use `Unknown` when original bytes or
+ /// field boundaries are unavailable; Cloudflare MUST always supply `Unknown`.
     pub fn new(
         request_method: Method,
         status: StatusCode,
         headers: HeaderMap,
         body: Body,
         monotonic_clock: MonotonicClock,
+        content_type_provenance: ContentTypeProvenance,
     ) -> Self;
 
  /// Adapter-facing destructure. Mirrors `OutboundRequest::into_parts`; the retained
- /// method is required by response converters for HEAD/bodyless normalization. This method
+ /// method is required by response converters for HEAD/bodyless normalization. The
+ /// fifth element carries the effective provenance, including mutation invalidation. This method
  /// does not run the final defensive response-header normalization performed by
  /// `into_response`; application boundaries that need that pass call `into_response`.
-    pub fn into_parts(self) -> (Method, StatusCode, HeaderMap, Body);
+    pub fn into_parts(self) -> (Method, StatusCode, HeaderMap, Body, ContentTypeProvenance);
 
- /// Adapter-facing mutation point — used during construction (e.g. to
- /// strip `content-encoding` after decompression). App code uses the
- /// immutable `headers` accessor instead.
+ /// Adapter-facing mutation point. Merely obtaining this mutable reference marks the headers
+ /// dirty: an originally eligible accessor result becomes `Ineligible(Modified)`, even without
+ /// a Content-Type edit. The private original enum stays immutable; ineligible/unknown evidence
+ /// cannot be upgraded. Apply normal adapter body/header policy before construction instead.
     pub fn headers_mut(&mut self) -> &mut HeaderMap;
 
  // ---- App-facing accessors ----
     pub fn status(&self) -> StatusCode;
     pub fn is_success(&self) -> bool;       // 2xx
     pub fn headers(&self) -> &HeaderMap;
+    pub fn content_type_provenance(&self) -> ContentTypeProvenance;
     pub fn body(&self) -> &Body;
 
  /// **App-facing consuming accessor** for the response body — the orchestration
@@ -1143,7 +1180,7 @@ impl OutboundResponse {
  /// directly (the wrapper installed at response construction time still
  /// enforces `dispatch_budget(req).deadline`) or extract the
  /// `Body::Once` `Bytes` if the adapter buffered. This is distinct from the
- /// adapter-facing `into_parts(self) -> (Method, StatusCode, HeaderMap, Body)`
+ /// adapter-facing `into_parts(self) -> (Method, StatusCode, HeaderMap, Body, ContentTypeProvenance)`
  /// destructure used inside response converters; apps that need just the
  /// body for streaming orchestration call `into_body` and drop the rest.
  /// On `Streamed` mode with single `send`, this is the canonical orchestration
@@ -1247,8 +1284,9 @@ impl OutboundResponse {
  /// read blocks past `until` but within the wrapper's budget, the helper
  /// still fires (post-read check) and the helper's bound is "read
  /// latency + at most one extra check," not zero. There is no shared
- /// "effective deadline" stored on `OutboundResponse`; it retains only the paired clock,
- /// request method, status, headers, and body. There is no `min(..)` computation in the helper.
+ /// "effective deadline" stored on `OutboundResponse`; it retains the paired clock,
+ /// request method, status, headers, body, original Content-Type evidence, and a separate
+ /// header-dirty flag. There is no `min(..)` computation in the helper.
  /// Apps that need a single combined check with **timer-backed
  /// preemption** of the tighter deadline pass
  /// `min(req_deadline, app_inner_deadline)` to `.deadline(..)` on the
@@ -1380,6 +1418,11 @@ impl OutboundResponse {
  /// the strings visible after workerd processing but cannot detect malformed raw bytes or
  /// recover original non-`set-cookie` field boundaries. §5.4 pins both the portable visible
  /// header behavior and the stronger `outbound-header-fidelity` contract.
+ /// Uses `ResponseHeadNormalization::body_disposition` for final body suppression and carries
+ /// effective `ContentTypeProvenance` in the resulting response's extensions. The final pass
+ /// may downgrade an eligible result, but never upgrades original ineligible/unknown evidence.
+ /// This extension is historical evidence at the outbound conversion boundary only; later
+ /// ordinary `http::Response` edits are the application's responsibility.
     pub fn into_response(self) -> Result<Response, EdgeError>;
 }
 ```
@@ -1619,14 +1662,56 @@ EdgeZero outbound for that case.
 public core helper `outbound::normalize_response_headers(..)` immediately after extracting
 the upstream method/status/header fields and **before** bodyless handling, `Content-Encoding`
 selection, early `Content-Length` rejection, decompression, or construction of
-`OutboundResponse`. The helper resolves every visible `connection` line fail-closed, strips
+`OutboundResponse`. Before any lossy filtering, the helper captures original `Content-Type`
+multiplicity and UTF-8 validity. It then resolves every visible `connection` line fail-closed, strips
 the standard hop-by-hop fields plus all valid nominations, applies the response UTF-8 policy,
-and returns the method/status body disposition used by §3.4.1. This order is security-
+and returns `ResponseHeadNormalization { body_disposition, content_type_provenance }`.
+Adapters use `.body_disposition` for §3.4.1 and retain `.content_type_provenance` for the
+sixth constructor argument, except that Cloudflare always supplies `Unknown`. This order is security-
 relevant: `Connection: content-encoding` and `Connection: content-length` must remove those
 fields before either can influence decoding or cap logic. As a result, app-facing
 `OutboundResponse::headers()` and `into_body()` never expose raw hop-by-hop metadata.
 `into_response()` runs the same helper again only as an idempotent defense against later
 adapter-facing mutation.
+
+**Original Content-Type evidence.** `ContentTypeProvenance` is a tiny, non-exhaustive enum,
+not a raw-header snapshot or a body copy. Original evidence is determined before dropping
+non-UTF-8 values or hop-by-hop/connection-nominated fields:
+
+- No original value yields `Ineligible(Missing)`.
+- More than one original value yields `Ineligible(MultipleValues)`, whether identical,
+  conflicting, or a mixture of textual and non-textual values. Dropping an invalid value
+  cannot turn an original duplicate set into an eligible singleton.
+- Exactly one value that is not valid UTF-8 yields `Ineligible(NonText)`.
+- Exactly one valid UTF-8 value yields `SingleTextUnchanged` only if retained unchanged;
+  if stripped (for example by `Connection: content-type`), it yields `Ineligible(Removed)`.
+- When original bytes or field boundaries are unavailable, the adapter must supply `Unknown`.
+  Cloudflare MUST always use `Unknown`, including an absent or apparently single textual
+  value, because Fetch string iteration has already lost original octets and multiplicity.
+  Axum/Fastly/Spin retain the original pass's metadata on every response path.
+
+This is provenance only: core does not MIME-validate, trim, redact, or split commas. A known
+single value `application/json, text/plain` can be `SingleTextUnchanged` even though the
+application's MIME parser must reject it as a media type. A quoted comma likewise does not
+create another original field value. `Unknown` says evidence is unavailable, not that MIME
+is invalid; `SingleTextUnchanged` does not establish MIME validity or debug safety.
+MIME validation, acceptance, and redaction remain application-owned.
+
+`OutboundResponse::new(method, status, headers, body, clock, content_type_provenance)`
+requires explicit metadata from that original pass; it never infers provenance from the
+already-normalized headers. The private original enum is immutable. `headers_mut()` sets a
+separate dirty flag even if the caller makes no edit or changes an unrelated field.
+`content_type_provenance()` then returns `Ineligible(Modified)` for an originally
+`SingleTextUnchanged` response; original `Ineligible(..)` reasons and `Unknown` never upgrade.
+Restoring the old value does not restore eligibility.
+
+`into_parts()` returns `(method, status, headers, body, provenance)` with this effective
+accessor result and without another normalization pass. `into_response()` runs the defensive
+pass and inserts effective `ContentTypeProvenance` into the resulting `Response` extensions;
+it can downgrade eligibility but cannot promote original ineligible/unknown evidence. Once
+converted, the extension describes the historical outbound boundary only. Ordinary later
+`http::Response` header edits are not tracked and must be handled by the application.
+No raw header or body is retained or copied for this enum, and no new capability is added.
 
 For 205, `ResponseBodyDisposition::ResetContent { declared_body }` captures whether a
 still-visible, valid `Content-Length` declared a positive length **after** nomination
@@ -2474,8 +2559,11 @@ timing needs are fully met by the outbound path. Noted as possible future work.
 **Adapter-visible upstream header limits happen first; normalization and no-content handling follow,
 before body decode or body-cap logic.** §3.4.5 measures response headers at the earliest
 adapter-visible boundary, before normalization can remove fields. After those limits
-pass, `normalize_response_headers` strips hop-by-hop fields and `connection`
-nominations (§3.1.4), a response that is bodyless by HTTP framing — the response to a
+pass, `normalize_response_headers` captures pre-filter Content-Type evidence and strips
+hop-by-hop fields and `connection` nominations (§3.1.4). Its returned
+`ResponseHeadNormalization::body_disposition` determines the following handling; its
+`content_type_provenance` is retained separately, with Cloudflare always using `Unknown`.
+A response that is bodyless by HTTP framing — the response to a
 **`HEAD`** request, or any **`1xx`**, **`204`**, or **`304`** status — carries no payload even
 though HEAD/304 MAY legitimately carry `Content-Encoding` and a *representation*
 `Content-Length` (e.g. a `HEAD` echoing what a `GET` would return; a `304` echoing the cached
@@ -6393,7 +6481,9 @@ Required coverage:
   fidelity contract. A non-UTF-8 `Content-Length` remains visible until strict framing parsing
   and is therefore a protocol 502 rather than a silently absent length.
 - `OutboundResponse` construction and `into_parts` round-trip request method, status,
-  normalized headers, and body. Adapters apply bodyless handling for HEAD, every 1xx, 204,
+  normalized headers, body, and effective Content-Type provenance. The six-argument constructor
+  requires the paired clock and explicit original evidence; the five-tuple never reconstructs
+  provenance from normalized headers. Adapters apply bodyless handling for HEAD, every 1xx, 204,
   and 304 before content decoding or streaming. For 205, clean EOF completes normally while
   a positive `Content-Length` or non-empty body bytes abort the remaining native body;
   a visible empty stream item also aborts conservatively without a second read. Byte-read
@@ -6401,6 +6491,20 @@ Required coverage:
   Spin's caller-result protocol never reports false clean completion. Output bodies are
   empty and framing metadata is normalized according to §3.4.1. `into_response` re-runs
   normalization idempotently rather than owning the first pass.
+- `normalize_response_headers` returns `ResponseHeadNormalization` with independently asserted
+  body disposition and pre-filter provenance. Cover missing, one textual value, valid non-ASCII
+  UTF-8, identical/conflicting duplicates, a textual value plus invalid UTF-8, a lone invalid
+  UTF-8 value, and `Connection: content-type` removal. Assert exact retained bytes, no trimming,
+  no MIME validation, and no comma splitting: invalid MIME text, a known single comma-containing
+  value, and a quoted comma can all remain `SingleTextUnchanged`. Dropping bad values never
+  upgrades original multiplicity. No body polling or copying is needed for this metadata.
+- Provenance ownership tests cover the accessor, five-tuple decomposition, and converted
+  `Response` extension. Merely calling `headers_mut()`, an unrelated-field edit, Content-Type
+  replacement, and restoring the original value all invalidate a formerly eligible result as
+  `Ineligible(Modified)` without mutating private original evidence. Originally ineligible
+  reasons and `Unknown` remain unchanged despite a now-valid normalized map. The final
+  normalization cannot upgrade them. The converted extension is historical evidence only;
+  later ordinary `http::Response` edits cannot be certified by it.
 - Content decoding covers gzip, br, stacked/repeated encodings, mixed case, unknown
   encodings, and a repeated field set with one malformed raw value. Native-fidelity
   adapters preserve/pass through a malformed encoding set as specified; Cloudflare asserts
@@ -6487,6 +6591,7 @@ Each adapter crate tests its shipped conversion and classification seams.
 | `start_batch_until` / `send_all_until` on every adapter | Run the production batch orchestration with injected transport/clock seams for Axum, Cloudflare, Fastly, and Spin. Empty input returns empty without dispatch; mixed valid/invalid slots retain exact input indices; preflight failures dispatch no work for that slot and never poll rejected source streams; GET/HEAD body errors precede batch-only errors; transport errors, cap failures, timeouts, and non-2xx responses preserve sibling outcomes without cancelling siblings. Assert every emitted slot carries its own elapsed time from the one method-entry snapshot through that slot's terminal point; advance the injected clock during preflight to prove that time is included. A same-tick terminal result may legitimately report zero. A slow sibling's later completion must not overwrite an earlier slot's elapsed value. Valid one-slot buffered batches match single-send outcome semantics while elapsed is asserted independently. Script reverse completion order on concurrent adapters; assert every eligible exchange is polled before a stalled sibling finishes. Assert cancellation retains already emitted items, reports unresolved indices, and does not consume a ready item when a `next()` future is dropped. Fastly tests dispatch-before-selection, selected-handle identity reassociation, all three reassociation failure diagnostics, exact error-to-driver-event propagation with previously collected slots, bounded groups, and immediate elapsed sampling after each preflight/dispatch/selected-body terminal result while retaining its documented BestEffort timing caveats. Backwards injected time produces zero plus an internal outcome, distinguishable from legitimate zero by outcome. |
 | Streamed fan-out usage | On Axum/Cloudflare/Spin, join per-request tasks containing both `send` and body consumption. Script a fast response whose body can finish before its deadline while a sibling's headers remain pending beyond it. Assert the fast body is consumed and succeeds before those sibling headers arrive. Joining only sends and delaying all body consumption must fail this regression. Fastly is excluded from this non-portable usage pattern. |
 | Response conversion | Every adapter enforces adapter-visible upstream header limits before normalization, including fields normalization later strips, accounts the synthetic proxy marker after normalization, then applies body/decode caps, calls the shared four-state content-encoding classifier, passes the originating method and retained clock into `OutboundResponse`, and settles native body handles for framing-bodyless and 205 responses; repeated `Set-Cookie` survives. HEAD/304 malformed, conflicting, comma-list, and `u64`-overflow `Content-Length` fail as protocol 502 before body polling while valid representation lengths are retained; 1xx/204 remove the field. Effective identity includes absent or exactly one bare `identity`, and its decoded over-cap `Content-Length` rejects before body polling. Encoded, decoded, header-byte/count, and Brotli-window failures preserve typed reasons and cleanup. |
+| Original Content-Type provenance | Drive actual response-conversion paths for buffered and streamed payloads plus HEAD/204/205/304. Axum/Fastly/Spin carry original normalization evidence through all constructor branches. Cover missing, textual, non-ASCII UTF-8, identical/conflicting duplicates, textual plus non-UTF-8, lone non-UTF-8, invalid MIME text, a known single comma-containing value, quoted commas, and connection-nominated removal; assert exact retained bytes and original reasons despite lossy filtering. An Axum local raw-TCP response with one textual and one non-UTF-8 Content-Type must retain `MultipleValues` even when the filtered map has one value. Cloudflare always supplies `Unknown`, even for absent/single/merged values, because its Fetch iterator cannot recover original bytes or field boundaries. Mutable header access never upgrades evidence. These tests establish conversion behavior, not MIME validity, debug safety, or a new capability. |
 | 205 settlement | Test declared-body immediate abort, one in-budget clean EOF, observed non-empty bytes, read failure, and deadline precedence. Where the SDK exposes empty items, one empty item aborts without another read; on Fastly a non-empty read buffer returning zero is EOF. Cloudflare additionally tests null-body host suppression with absent/zero and positive visible lengths without claiming hidden-byte visibility. Assert native-handle cleanup and Spin completion signalling using observable results, never synthetic wire-frame visibility. |
 | Header fidelity | Axum/Fastly/Spin preserve repeated outbound request field lines and exercise raw malformed response nomination/encoding lines. Cloudflare tests request list semantics and the visible response-string baseline without asserting unavailable octets/line boundaries. Cloudflare encoded passthrough uses `EncodeBody::Manual`; its streamed downstream `Content-Length` is asserted only to the documented BestEffort scope. |
 | Decoder integration | Each adapter uses the shared decoder/carrier/deadline pipeline; gzip/deflate/br stalls before output, midstream, and after codec completion but before native EOF produce attributed 504 rather than hanging or degrading to 502/500. Exercise both Buffered and Streamed modes, multi-member gzip/cumulative caps, trailing data, and late typed source/completion errors. No guard disarm or Spin caller-result success occurs solely because a decoder reached its end marker. |
@@ -6717,6 +6822,14 @@ No compatibility shims are introduced for the outbound API rename.
 | `RequestContext::proxy_handle()` | `RequestContext::http_client()` |
 | adapter `*ProxyClient` | adapter `*OutboundClient` |
 
+Current response APIs are a hard cut, including migrations from intermediate PR revisions:
+
+| Retired outbound API                                                           | Required replacement                                                                                                                    |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| four- or five-argument `OutboundResponse::new`                                 | six-argument `new(method, status, headers, body, clock, content_type_provenance)` requiring the application clock and original evidence |
+| four-element `OutboundResponse::into_parts()`                                  | five-tuple `(method, status, headers, body, provenance)` with effective `ContentTypeProvenance`                                         |
+| `normalize_response_headers(..) -> Result<ResponseBodyDisposition, EdgeError>` | `Result<ResponseHeadNormalization, EdgeError>`; use `.body_disposition` and retain original `.content_type_provenance`                  |
+
 Outbound-facing changes:
 
 - `OutboundRequest` and `OutboundResponse` continue to use the unified core `Body`
@@ -6726,7 +6839,12 @@ Outbound-facing changes:
   redesign.
 - `OutboundResponse` carries the originating request method through construction and
   `into_parts` so HEAD and other bodyless-response rules remain enforceable at the final
-  conversion boundary.
+  conversion boundary. Construction now requires six arguments, including the paired clock
+  and explicit `content_type_provenance`; decomposition returns five elements, ending in
+  effective provenance. `normalize_response_headers` returns `ResponseHeadNormalization`,
+  not just `ResponseBodyDisposition`. No compatibility signatures remain. Conversion carries
+  the enum as a historical outbound-boundary response extension, not a guarantee about later
+  ordinary `http::Response` edits.
 - `ProxyHandle::client()`, outbound request/response `body_mut()`, and outbound
   `extensions()` / `extensions_mut()` are removed. `HttpClient` exposes only
   `send` / `send_all_until`; the new request and response values are builder-style and do
@@ -6795,9 +6913,10 @@ the durable anchors.
 **`crates/edgezero-core`**
 
 - `src/lib.rs` exports `body`, `compression`, `outbound`, and `time`, plus root re-exports
-  `BodyStream`, `ContentEncoding`, `Deadline`, `DispatchBudget`, `HttpClient`, `OutboundHttpClient`,
+  `BodyStream`, `ContentEncoding`, `ContentTypeIneligibility`, `ContentTypeProvenance`,
+  `Deadline`, `DispatchBudget`, `HttpClient`, `OutboundHttpClient`,
   `OutboundRequest`, `OutboundResponse`, `OutboundSlotResult`, `ResponseBodyDisposition`,
-  `ResponseHeaderLimiter`, `ResponseMode`, `BROTLI_DECODER_FIXED_CHARGE_BYTES`,
+  `ResponseHeadNormalization`, `ResponseHeaderLimiter`, `ResponseMode`, `BROTLI_DECODER_FIXED_CHARGE_BYTES`,
   `brotli_decoder_memory_charge`, `classify_content_encoding`, `collect_response_stream`,
   `decode_brotli_stream`, `decode_gzip_stream`,
   `dispatch_budget`,
@@ -6809,8 +6928,12 @@ the durable anchors.
   validation, canonical URI accessors, the private `BudgetInputs` accessor consumed by
   `time.rs`, `HttpClient::send` / `send_all_until`, bounded response drains, hop-by-hop
   normalization, response-bodyless rules, and the preserved `PROXY_HEADER`.
-  `OutboundResponse::new` accepts the originating request method and
-  `into_parts` returns it with status, headers, and body.
+  `OutboundResponse::new(method, status, headers, body, clock, content_type_provenance)`
+  requires pre-filter evidence. `content_type_provenance()` accounts for separate header-dirty
+  tracking without changing private original evidence, and `into_parts` returns
+  `(method, status, headers, body, provenance)`. The normalization helper returns both body
+  disposition and original provenance; `into_response` inserts effective provenance as a
+  historical-boundary extension without upgrading original ineligible/unknown evidence.
 - The root workspace and `edgezero-core` manifests add a direct pinned `url` dependency.
   URI construction canonicalizes once through `url::Url`, stores the resulting `http::Uri`,
   and adapters transmit that exact serialization rather than reparsing it.
@@ -6886,7 +7009,10 @@ the durable anchors.
   originating method, response mode, and every response-resource setting in the owned
   response-conversion state; no adapter may reconstruct or default those values after send.
 - Adapter outbound-response builders retain request method, status, headers, and body.
-  They normalize raw upstream headers and settle bodyless responses before content
+  They retain pre-filter Content-Type metadata separately (always `Unknown` on Cloudflare),
+  use `ResponseHeadNormalization::body_disposition`, and pass explicit provenance as the
+  sixth `OutboundResponse::new` argument on every path. They normalize raw upstream headers
+  and settle bodyless responses before content
   decoding/capping and `OutboundResponse` construction, then reapply normalization
   idempotently before final platform conversion.
   Every response-egress coordinator preserves a forwarded `Body::Stream` lazily. Axum and

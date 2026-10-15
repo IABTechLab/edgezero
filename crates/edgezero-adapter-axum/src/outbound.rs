@@ -330,7 +330,8 @@ async fn process_response(
     let mut header_limiter =
         ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count);
     header_limiter.observe(&headers)?;
-    let disposition = normalize_response_headers(&request_method, status, &mut headers)?;
+    let normalization = normalize_response_headers(&request_method, status, &mut headers)?;
+    let disposition = normalization.body_disposition;
     insert_proxy_header(
         &mut headers,
         &mut header_limiter,
@@ -344,6 +345,7 @@ async fn process_response(
             headers,
             Body::empty(),
             response_clock,
+            normalization.content_type_provenance,
         ));
     }
 
@@ -367,6 +369,7 @@ async fn process_response(
             headers,
             Body::empty(),
             response_clock,
+            normalization.content_type_provenance,
         ));
     }
 
@@ -395,6 +398,7 @@ async fn process_response(
         headers,
         body,
         response_clock,
+        normalization.content_type_provenance,
     ))
 }
 
@@ -651,6 +655,157 @@ mod clock_tests {
             .expect_err("retained clock reached deadline");
 
         assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn response_content_type_provenance_observes_raw_tcp_duplicates() {
+        use edgezero_core::{ContentTypeIneligibility, ContentTypeProvenance};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        for opaque_sibling in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback listener");
+            let address = listener.local_addr().expect("local address");
+            let origin = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accepted connection");
+                let mut request = [0_u8; 4096];
+                let read = timeout(Duration::from_secs(5), socket.read(&mut request))
+                    .await
+                    .expect("request deadline")
+                    .expect("request head");
+                assert!(read > 0);
+                let mut head =
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Type: ".to_vec();
+                head.extend_from_slice(if opaque_sibling {
+                    b"\xff"
+                } else {
+                    b"application/json"
+                });
+                head.extend_from_slice(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+                socket.write_all(&head).await.expect("upstream response");
+            });
+            let client = AxumOutboundClient::try_new().expect("outbound client");
+            let request = OutboundRequest::get(format!("http://{address}/"))
+                .expect("request")
+                .timeout(Duration::from_secs(5));
+            let response = client.send(request).await.expect("outbound response");
+            assert_eq!(
+                response.content_type_provenance(),
+                ContentTypeProvenance::Ineligible(ContentTypeIneligibility::MultipleValues)
+            );
+            assert_eq!(
+                response.headers().get_all("content-type").iter().count(),
+                if opaque_sibling { 1 } else { 2 }
+            );
+            assert_eq!(response.body().as_bytes(), Some(b"{}".as_slice()));
+            origin.await.expect("origin task");
+        }
+    }
+
+    #[tokio::test]
+    async fn response_content_type_provenance_survives_native_conversion() {
+        use ContentTypeIneligibility::{Missing, MultipleValues, NonText, Removed};
+        use ContentTypeProvenance::{Ineligible, SingleTextUnchanged};
+        use edgezero_core::{ContentTypeIneligibility, ContentTypeProvenance};
+
+        let cases: &[(&[&[u8]], bool, ContentTypeProvenance)] = &[
+            (&[], false, Ineligible(Missing)),
+            (&[b"application/json"], false, SingleTextUnchanged),
+            (&[b"caf\xc3\xa9"], false, SingleTextUnchanged),
+            (
+                &[b"application/json, text/plain"],
+                false,
+                SingleTextUnchanged,
+            ),
+            (
+                &[b"application/json", b"application/json"],
+                false,
+                Ineligible(MultipleValues),
+            ),
+            (
+                &[b"application/json", b"text/plain"],
+                false,
+                Ineligible(MultipleValues),
+            ),
+            (
+                &[b"application/json", b"\xff"],
+                false,
+                Ineligible(MultipleValues),
+            ),
+            (&[b"\xff"], false, Ineligible(NonText)),
+            (&[b"application/json"], true, Ineligible(Removed)),
+        ];
+        for (method, status, response_mode) in [
+            (
+                Method::GET,
+                StatusCode::OK,
+                ResponseMode::Buffered { max_bytes: 32 },
+            ),
+            (Method::GET, StatusCode::OK, ResponseMode::Streamed),
+            (
+                Method::HEAD,
+                StatusCode::OK,
+                ResponseMode::Buffered { max_bytes: 32 },
+            ),
+            (
+                Method::GET,
+                StatusCode::NO_CONTENT,
+                ResponseMode::Buffered { max_bytes: 32 },
+            ),
+            (
+                Method::GET,
+                StatusCode::RESET_CONTENT,
+                ResponseMode::Buffered { max_bytes: 32 },
+            ),
+            (
+                Method::GET,
+                StatusCode::NOT_MODIFIED,
+                ResponseMode::Buffered { max_bytes: 32 },
+            ),
+        ] {
+            for (values, nominated, expected) in cases {
+                let mut native_headers = HeaderMap::new();
+                for value in *values {
+                    native_headers.append(
+                        "content-type",
+                        HeaderValue::from_bytes(value).expect("header bytes"),
+                    );
+                }
+                if *nominated {
+                    native_headers.insert("connection", HeaderValue::from_static("content-type"));
+                }
+                let mut native = http::Response::builder()
+                    .status(status)
+                    .body(reqwest::Body::from(Bytes::new()))
+                    .expect("native response");
+                *native.headers_mut() = native_headers;
+                let start = MonotonicInstant::now();
+                let response = process_response(
+                    reqwest::Response::from(native),
+                    method.clone(),
+                    response_mode,
+                    test_budget(start, Duration::from_secs(1)),
+                    32 * 1024 * 1024,
+                    24,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    MonotonicClock::new(move || start),
+                )
+                .await
+                .expect("converted response");
+                assert_eq!(response.content_type_provenance(), *expected);
+                let converted = response.into_response().expect("application response");
+                assert_eq!(
+                    converted.extensions().get::<ContentTypeProvenance>(),
+                    Some(expected)
+                );
+            }
+        }
     }
 
     #[tokio::test]

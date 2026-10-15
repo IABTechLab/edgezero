@@ -443,7 +443,9 @@ pub trait OutboundHttpClient: Send + Sync {
 #[derive(Debug)]
 pub struct OutboundResponse {
     body: Body,
+    content_type_provenance: ContentTypeProvenance,
     headers: HeaderMap,
+    headers_mutated: bool,
     monotonic_clock: MonotonicClock,
     request_method: Method,
     status: StatusCode,
@@ -472,6 +474,37 @@ pub enum ResponseBodyDisposition {
     FramingBodyless,
     Payload,
     ResetContent { declared_body: bool },
+}
+
+/// Why the original Content-Type cannot certify a retained textual singleton.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentTypeIneligibility {
+    Missing,
+    Modified,
+    MultipleValues,
+    NonText,
+    Removed,
+}
+
+/// Original Content-Type evidence, captured before `EdgeZero` filters response headers.
+///
+/// This does not validate MIME syntax, split commas, trim, or redact the value. A textual
+/// singleton can still be invalid MIME. `Unknown` is required when the provider hides original
+/// bytes or field boundaries. No raw header value is copied into this metadata.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentTypeProvenance {
+    Ineligible(ContentTypeIneligibility),
+    SingleTextUnchanged,
+    Unknown,
+}
+
+/// Results of one upstream-header normalization pass, including pre-filter evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseHeadNormalization {
+    pub body_disposition: ResponseBodyDisposition,
+    pub content_type_provenance: ContentTypeProvenance,
 }
 
 pub struct ResponseHeaderLimiter {
@@ -588,6 +621,23 @@ impl OutboundResponse {
         &self.body
     }
 
+    /// Returns original-header evidence, never inferred from the filtered header map.
+    ///
+    /// Mutable header access invalidates an originally eligible result conservatively, even
+    /// when only an unrelated field changes. Original ineligible/unknown evidence cannot be
+    /// upgraded by application edits. MIME validation and redaction remain application-owned.
+    #[must_use]
+    #[inline]
+    pub fn content_type_provenance(&self) -> ContentTypeProvenance {
+        if self.headers_mutated
+            && self.content_type_provenance == ContentTypeProvenance::SingleTextUnchanged
+        {
+            ContentTypeProvenance::Ineligible(ContentTypeIneligibility::Modified)
+        } else {
+            self.content_type_provenance
+        }
+    }
+
     #[must_use]
     #[inline]
     pub fn headers(&self) -> &HeaderMap {
@@ -601,6 +651,7 @@ impl OutboundResponse {
     /// [`Self::into_response`], which reapplies the defensive normalization pass.
     #[inline]
     pub fn headers_mut(&mut self) -> &mut HeaderMap {
+        self.headers_mutated = true;
         &mut self.headers
     }
 
@@ -652,8 +703,15 @@ impl OutboundResponse {
     /// normalization. Call [`Self::into_response`] at an application boundary that requires the
     /// final defensive framing pass.
     #[inline]
-    pub fn into_parts(self) -> (Method, StatusCode, HeaderMap, Body) {
-        (self.request_method, self.status, self.headers, self.body)
+    pub fn into_parts(self) -> (Method, StatusCode, HeaderMap, Body, ContentTypeProvenance) {
+        let provenance = self.content_type_provenance();
+        (
+            self.request_method,
+            self.status,
+            self.headers,
+            self.body,
+            provenance,
+        )
     }
 
     /// Converts the outbound value after one final defensive metadata pass.
@@ -663,12 +721,20 @@ impl OutboundResponse {
     /// already-validated response cannot be assembled.
     #[inline]
     pub fn into_response(mut self) -> Result<Response, EdgeError> {
-        let disposition =
+        let provenance = self.content_type_provenance();
+        let normalized =
             normalize_response_headers(&self.request_method, self.status, &mut self.headers)?;
-        if disposition != ResponseBodyDisposition::Payload {
+        if normalized.body_disposition != ResponseBodyDisposition::Payload {
             self.body = Body::empty();
         }
-        let mut builder = response_builder().status(self.status);
+        let effective_provenance = if provenance == ContentTypeProvenance::SingleTextUnchanged {
+            normalized.content_type_provenance
+        } else {
+            provenance
+        };
+        let mut builder = response_builder()
+            .status(self.status)
+            .extension(effective_provenance);
         for (name, value) in &self.headers {
             builder = builder.header(name, value);
         }
@@ -737,6 +803,8 @@ impl OutboundResponse {
     ///
     /// `headers` must already have passed [`normalize_response_headers`], including bodyless
     /// disposition handling, before the response is exposed through app-facing accessors.
+    /// `content_type_provenance` must come from that pre-filter pass, not a second inspection of
+    /// normalized headers. Use `Unknown` if original field boundaries or bytes are unavailable.
     /// The clock must be the same source used for the request and outbound client. This keeps
     /// deferred response-body deadlines in the application's monotonic clock domain.
     #[inline]
@@ -746,10 +814,13 @@ impl OutboundResponse {
         headers: HeaderMap,
         body: Body,
         monotonic_clock: MonotonicClock,
+        content_type_provenance: ContentTypeProvenance,
     ) -> Self {
         Self {
             body,
+            content_type_provenance,
             headers,
+            headers_mutated: false,
             monotonic_clock,
             request_method,
             status,
@@ -1377,29 +1448,56 @@ pub fn normalize_response_headers(
     request_method: &Method,
     status: StatusCode,
     headers: &mut HeaderMap,
-) -> Result<ResponseBodyDisposition, EdgeError> {
+) -> Result<ResponseHeadNormalization, EdgeError> {
+    let original_provenance = original_content_type_provenance(headers);
     let nominated = connection_nominations(headers, true)?;
     retain_utf8_header_values(headers, true);
     strip_hop_by_hop(headers, nominated, false);
 
-    if status.is_informational() || status == StatusCode::NO_CONTENT {
+    let content_type_provenance = if original_provenance
+        == ContentTypeProvenance::SingleTextUnchanged
+        && !headers.contains_key(CONTENT_TYPE)
+    {
+        ContentTypeProvenance::Ineligible(ContentTypeIneligibility::Removed)
+    } else {
+        original_provenance
+    };
+
+    let body_disposition = if status.is_informational() || status == StatusCode::NO_CONTENT {
         headers.remove(CONTENT_LENGTH);
-        return Ok(ResponseBodyDisposition::FramingBodyless);
-    }
-
-    if request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+        ResponseBodyDisposition::FramingBodyless
+    } else if request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
         parse_content_length(headers)?;
-        return Ok(ResponseBodyDisposition::FramingBodyless);
-    }
+        ResponseBodyDisposition::FramingBodyless
+    } else {
+        let content_length = parse_content_length(headers)?;
+        if status == StatusCode::RESET_CONTENT {
+            headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+            ResponseBodyDisposition::ResetContent {
+                declared_body: content_length.is_some_and(|length| length > 0),
+            }
+        } else {
+            ResponseBodyDisposition::Payload
+        }
+    };
+    Ok(ResponseHeadNormalization {
+        body_disposition,
+        content_type_provenance,
+    })
+}
 
-    let content_length = parse_content_length(headers)?;
-    if status == StatusCode::RESET_CONTENT {
-        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
-        return Ok(ResponseBodyDisposition::ResetContent {
-            declared_body: content_length.is_some_and(|length| length > 0),
-        });
+fn original_content_type_provenance(headers: &HeaderMap) -> ContentTypeProvenance {
+    let mut values = headers.get_all(CONTENT_TYPE).iter();
+    let Some(value) = values.next() else {
+        return ContentTypeProvenance::Ineligible(ContentTypeIneligibility::Missing);
+    };
+    if values.next().is_some() {
+        ContentTypeProvenance::Ineligible(ContentTypeIneligibility::MultipleValues)
+    } else if str::from_utf8(value.as_bytes()).is_err() {
+        ContentTypeProvenance::Ineligible(ContentTypeIneligibility::NonText)
+    } else {
+        ContentTypeProvenance::SingleTextUnchanged
     }
-    Ok(ResponseBodyDisposition::Payload)
 }
 
 #[must_use]
@@ -1883,6 +1981,7 @@ mod tests {
                 HeaderMap::new(),
                 Body::from("single"),
                 MonotonicClock::default(),
+                super::ContentTypeProvenance::Unknown,
             ))
         }
 
@@ -1914,6 +2013,7 @@ mod tests {
                                 HeaderMap::new(),
                                 Body::empty(),
                                 MonotonicClock::default(),
+                                super::ContentTypeProvenance::Unknown,
                             ))
                         },
                     },
@@ -2397,6 +2497,7 @@ mod tests {
             HeaderMap::new(),
             body,
             MonotonicClock::default(),
+            super::ContentTypeProvenance::Unknown,
         )
     }
 
@@ -3024,6 +3125,7 @@ mod tests {
             headers,
             Body::from("payload"),
             MonotonicClock::default(),
+            super::ContentTypeProvenance::Unknown,
         );
         assert_eq!(response.status(), StatusCode::CREATED);
         assert!(response.is_success());
@@ -3033,7 +3135,8 @@ mod tests {
             .headers_mut()
             .append("x-adapter", HeaderValue::from_static("yes"));
 
-        let (method, status, headers, body) = response.into_parts();
+        let (method, status, headers, body, provenance) = response.into_parts();
+        assert_eq!(provenance, super::ContentTypeProvenance::Unknown);
         assert_eq!(method, Method::HEAD);
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
@@ -3048,6 +3151,7 @@ mod tests {
             HeaderMap::new(),
             Body::from("owned"),
             MonotonicClock::default(),
+            super::ContentTypeProvenance::Unknown,
         )
         .into_body();
         assert_eq!(body.as_bytes(), Some(b"owned".as_slice()));
@@ -3340,6 +3444,7 @@ mod tests {
             headers,
             body,
             MonotonicClock::default(),
+            super::ContentTypeProvenance::Unknown,
         )
         .into_response()
         .expect("response");
@@ -3376,6 +3481,7 @@ mod tests {
                 HeaderMap::new(),
                 body,
                 MonotonicClock::default(),
+                super::ContentTypeProvenance::Unknown,
             )
             .into_response()
             .expect("bodyless response");
@@ -3462,6 +3568,7 @@ mod tests {
             HeaderMap::new(),
             Body::from("ready"),
             clock,
+            super::ContentTypeProvenance::Unknown,
         );
         *observed.lock().expect("clock lock") = deadline;
 
@@ -3470,6 +3577,140 @@ mod tests {
                 .expect_err("injected clock reached deadline");
 
         assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+    }
+
+    #[test]
+    fn response_content_type_provenance_precedes_filtering() {
+        use super::{ContentTypeIneligibility, ContentTypeProvenance};
+
+        let cases: &[(&[&[u8]], ContentTypeProvenance)] = &[
+            (
+                &[],
+                ContentTypeProvenance::Ineligible(ContentTypeIneligibility::Missing),
+            ),
+            (
+                &[b"application/json"],
+                ContentTypeProvenance::SingleTextUnchanged,
+            ),
+            (
+                &[b"caf\xc3\xa9"],
+                ContentTypeProvenance::SingleTextUnchanged,
+            ),
+            (
+                &[b"not a MIME type"],
+                ContentTypeProvenance::SingleTextUnchanged,
+            ),
+            (
+                &[b"application/json, text/plain"],
+                ContentTypeProvenance::SingleTextUnchanged,
+            ),
+            (
+                &[b"application/json; note=\"x,y\""],
+                ContentTypeProvenance::SingleTextUnchanged,
+            ),
+            (
+                &[b"application/json", b"application/json"],
+                ContentTypeProvenance::Ineligible(ContentTypeIneligibility::MultipleValues),
+            ),
+            (
+                &[b"application/json", b"text/plain"],
+                ContentTypeProvenance::Ineligible(ContentTypeIneligibility::MultipleValues),
+            ),
+            (
+                &[b"application/json", b"\xff"],
+                ContentTypeProvenance::Ineligible(ContentTypeIneligibility::MultipleValues),
+            ),
+            (
+                &[b"\xff"],
+                ContentTypeProvenance::Ineligible(ContentTypeIneligibility::NonText),
+            ),
+        ];
+        for (values, expected) in cases {
+            let mut headers = HeaderMap::new();
+            for value in *values {
+                headers.append(
+                    "content-type",
+                    HeaderValue::from_bytes(value).expect("header bytes"),
+                );
+            }
+            let normalized = normalize_response_headers(&Method::GET, StatusCode::OK, &mut headers)
+                .expect("normalized head");
+            assert_eq!(normalized.content_type_provenance, *expected);
+            if *expected == ContentTypeProvenance::SingleTextUnchanged {
+                assert_eq!(
+                    headers.get("content-type").expect("retained").as_bytes(),
+                    values[0]
+                );
+            }
+            assert!(
+                headers
+                    .get_all("content-type")
+                    .iter()
+                    .all(|value| str::from_utf8(value.as_bytes()).is_ok())
+            );
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert("connection", HeaderValue::from_static("content-type"));
+        let normalized = normalize_response_headers(&Method::HEAD, StatusCode::OK, &mut headers)
+            .expect("bodyless normalized head");
+        assert_eq!(
+            normalized.body_disposition,
+            ResponseBodyDisposition::FramingBodyless
+        );
+        assert_eq!(
+            normalized.content_type_provenance,
+            ContentTypeProvenance::Ineligible(ContentTypeIneligibility::Removed)
+        );
+        assert!(!headers.contains_key("content-type"));
+    }
+
+    #[test]
+    fn response_content_type_provenance_survives_ownership_without_upgrades() {
+        use super::{ContentTypeIneligibility, ContentTypeProvenance};
+
+        for initial in [
+            ContentTypeProvenance::SingleTextUnchanged,
+            ContentTypeProvenance::Ineligible(ContentTypeIneligibility::MultipleValues),
+            ContentTypeProvenance::Unknown,
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", HeaderValue::from_static("application/json"));
+            let mut response = OutboundResponse::new(
+                Method::GET,
+                StatusCode::OK,
+                headers,
+                Body::empty(),
+                MonotonicClock::default(),
+                initial,
+            );
+            assert_eq!(response.content_type_provenance(), initial);
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("text/plain"));
+            let expected = if initial == ContentTypeProvenance::SingleTextUnchanged {
+                ContentTypeProvenance::Ineligible(ContentTypeIneligibility::Modified)
+            } else {
+                initial
+            };
+            assert_eq!(response.content_type_provenance(), expected);
+            let response = response.into_response().expect("converted response");
+            assert_eq!(
+                response.extensions().get::<ContentTypeProvenance>(),
+                Some(&expected)
+            );
+        }
+        let response = OutboundResponse::new(
+            Method::GET,
+            StatusCode::OK,
+            HeaderMap::new(),
+            Body::empty(),
+            MonotonicClock::default(),
+            ContentTypeProvenance::Unknown,
+        );
+        let (_, _, _, _, provenance) = response.into_parts();
+        assert_eq!(provenance, ContentTypeProvenance::Unknown);
     }
 
     #[test]
@@ -3484,7 +3725,8 @@ mod tests {
         nominated.append("keep-alive", HeaderValue::from_static("timeout=5"));
         assert_eq!(
             normalize_response_headers(&Method::GET, StatusCode::OK, &mut nominated)
-                .expect("nominations precede semantics"),
+                .expect("nominations precede semantics")
+                .body_disposition,
             ResponseBodyDisposition::Payload
         );
         assert!(nominated.get("content-encoding").is_none());
@@ -3536,7 +3778,9 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.append("content-length", HeaderValue::from_static("7"));
             assert_eq!(
-                normalize_response_headers(&Method::GET, status, &mut headers).expect("bodyless"),
+                normalize_response_headers(&Method::GET, status, &mut headers)
+                    .expect("bodyless")
+                    .body_disposition,
                 ResponseBodyDisposition::FramingBodyless
             );
             if status == StatusCode::NOT_MODIFIED {
@@ -3556,7 +3800,8 @@ mod tests {
             }
             assert_eq!(
                 normalize_response_headers(&Method::GET, StatusCode::RESET_CONTENT, &mut headers)
-                    .expect("205"),
+                    .expect("205")
+                    .body_disposition,
                 ResponseBodyDisposition::ResetContent { declared_body }
             );
             assert_eq!(headers.get("content-length").expect("normalized"), "0");
@@ -3636,7 +3881,8 @@ mod tests {
             valid.append("content-length", HeaderValue::from_static("4294967296"));
             assert_eq!(
                 normalize_response_headers(&method, status, &mut valid)
-                    .expect("valid bodyless metadata"),
+                    .expect("valid bodyless metadata")
+                    .body_disposition,
                 ResponseBodyDisposition::FramingBodyless
             );
             assert_eq!(valid.get("content-length").expect("length"), "4294967296");

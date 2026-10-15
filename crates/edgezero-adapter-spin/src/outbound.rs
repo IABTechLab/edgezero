@@ -655,7 +655,8 @@ mod spin_impl {
         let mut header_limiter =
             ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count);
         header_limiter.observe(&headers)?;
-        let disposition = normalize_response_headers(&request_method, status, &mut headers)?;
+        let normalization = normalize_response_headers(&request_method, status, &mut headers)?;
+        let disposition = normalization.body_disposition;
         insert_proxy_header(
             &mut headers,
             &mut header_limiter,
@@ -670,6 +671,7 @@ mod spin_impl {
                 headers,
                 Body::empty(),
                 response_clock,
+                normalization.content_type_provenance,
             ));
         }
 
@@ -687,6 +689,7 @@ mod spin_impl {
                 headers,
                 Body::empty(),
                 response_clock,
+                normalization.content_type_provenance,
             ));
         }
 
@@ -715,6 +718,7 @@ mod spin_impl {
             headers,
             body,
             response_clock,
+            normalization.content_type_provenance,
         ))
     }
 
@@ -932,6 +936,16 @@ mod spin_impl {
         )
     }
 
+    /// Exercises original Content-Type evidence through hosted response conversion.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub async fn converted_response_content_type_provenance_holds_for_test() -> bool {
+        content_type_tests::check_converted_response_content_type_provenance()
+            .await
+            .is_ok()
+    }
+
     /// Proves response conversion retains the client clock in the hosted contract binary.
     #[cfg(feature = "test-utils")]
     #[doc(hidden)]
@@ -1145,6 +1159,174 @@ mod spin_impl {
                 converted_response_retains_injected_clock_for_test()
             ));
         }
+
+        #[test]
+        fn converted_response_preserves_original_content_type_provenance() {
+            block_on(super::content_type_tests::check_converted_response_content_type_provenance())
+                .expect("converted content-type provenance");
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    mod content_type_tests {
+        use edgezero_core::error::BudgetSource;
+        use edgezero_core::http::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE};
+        use edgezero_core::outbound::{ContentTypeIneligibility, ContentTypeProvenance};
+        use spin_sdk::wasip3::http::types::HeaderError;
+
+        use super::*;
+
+        type ContentTypeCase = (&'static [&'static [u8]], ContentTypeProvenance, usize);
+
+        fn content_type_cases() -> &'static [ContentTypeCase] {
+            use ContentTypeIneligibility::{Missing, MultipleValues, NonText};
+            use ContentTypeProvenance::{Ineligible, SingleTextUnchanged};
+
+            &[
+                (&[], Ineligible(Missing), 0),
+                (&[b"text/plain"], SingleTextUnchanged, 1),
+                (&[b"text/plain; label=caf\xc3\xa9"], SingleTextUnchanged, 1),
+                (
+                    &[b"text/plain", b"text/plain"],
+                    Ineligible(MultipleValues),
+                    2,
+                ),
+                (
+                    &[b"text/plain", b"application/json"],
+                    Ineligible(MultipleValues),
+                    2,
+                ),
+                (&[b"text/plain", b"\xff"], Ineligible(MultipleValues), 1),
+                (&[b"\xff"], Ineligible(NonText), 0),
+                (&[b"text/plain, application/json"], SingleTextUnchanged, 1),
+                (&[b"not a MIME type"], SingleTextUnchanged, 1),
+            ]
+        }
+
+        async fn convert_response(
+            values: &[&[u8]],
+            status: StatusCode,
+            mode: ResponseMode,
+            expected: ContentTypeProvenance,
+            retained_count: usize,
+        ) -> Result<(), EdgeError> {
+            let start = MonotonicInstant::now();
+            let fields = Fields::new();
+            for value in values {
+                fields
+                    .append(CONTENT_TYPE.as_str(), value)
+                    .map_err(EdgeError::internal)?;
+            }
+            if status == StatusCode::RESET_CONTENT {
+                fields
+                    .append(CONTENT_LENGTH.as_str(), b"1")
+                    .map_err(EdgeError::internal)?;
+            }
+            let (writer, contents, trailers) = BodyWriter::new();
+            let (native, response_done) = Response::new(fields, Some(contents), trailers);
+            native
+                .set_status_code(status.as_u16())
+                .map_err(|()| EdgeError::bad_gateway("invalid test response status"))?;
+            let deadline = start
+                .checked_add(Duration::from_secs(1))
+                .ok_or_else(|| EdgeError::bad_gateway("test deadline overflow"))?;
+            let result = process_response(
+                native,
+                Method::GET,
+                mode,
+                DispatchBudget {
+                    cause: BudgetSource::PerCallTimeout,
+                    deadline: Deadline::at_instant(deadline),
+                    duration: Duration::from_secs(1),
+                },
+                1024,
+                24,
+                None,
+                None,
+                None,
+                None,
+                None,
+                MonotonicClock::new(move || start),
+            )
+            .await;
+            let checked = result
+                .and_then(|response| check_response(response, values, expected, retained_count));
+            drop((writer, response_done));
+            checked
+        }
+
+        fn check_response(
+            mut response: OutboundResponse,
+            values: &[&[u8]],
+            expected: ContentTypeProvenance,
+            retained_count: usize,
+        ) -> Result<(), EdgeError> {
+            use ContentTypeIneligibility::Modified;
+            use ContentTypeProvenance::{Ineligible, SingleTextUnchanged};
+
+            if response.content_type_provenance() != expected
+                || response.headers().get_all(CONTENT_TYPE).iter().count() != retained_count
+            {
+                return Err(EdgeError::bad_gateway(
+                    "converted test response lost original content-type provenance",
+                ));
+            }
+            if expected == SingleTextUnchanged
+                && response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .map(HeaderValue::as_bytes)
+                    != values.first().copied()
+            {
+                return Err(EdgeError::bad_gateway(
+                    "converted test response changed content-type bytes",
+                ));
+            }
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            let after_mutation = if expected == SingleTextUnchanged {
+                Ineligible(Modified)
+            } else {
+                expected
+            };
+            if response.content_type_provenance() != after_mutation {
+                return Err(EdgeError::bad_gateway(
+                    "test response mutation upgraded original provenance",
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) async fn check_converted_response_content_type_provenance()
+        -> Result<(), EdgeError> {
+            if !matches!(
+                Fields::new().append(CONNECTION.as_str(), b"content-type"),
+                Err(HeaderError::Forbidden)
+            ) {
+                return Err(EdgeError::bad_gateway(
+                    "test host must forbid connection fields",
+                ));
+            }
+            for &(values, expected, retained_count) in content_type_cases() {
+                for (status, mode) in [
+                    (StatusCode::OK, ResponseMode::Streamed),
+                    (StatusCode::NO_CONTENT, ResponseMode::Streamed),
+                    (
+                        StatusCode::NO_CONTENT,
+                        ResponseMode::Buffered { max_bytes: 64 },
+                    ),
+                    (StatusCode::RESET_CONTENT, ResponseMode::Streamed),
+                    (
+                        StatusCode::RESET_CONTENT,
+                        ResponseMode::Buffered { max_bytes: 64 },
+                    ),
+                ] {
+                    convert_response(values, status, mode, expected, retained_count).await?;
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1152,6 +1334,7 @@ mod spin_impl {
 pub use spin_impl::SpinOutboundClient;
 #[cfg(all(feature = "spin", target_arch = "wasm32", feature = "test-utils"))]
 pub use spin_impl::{
+    converted_response_content_type_provenance_holds_for_test,
     converted_response_retains_injected_clock_for_test, deferred_clock_paths_hold_for_test,
 };
 

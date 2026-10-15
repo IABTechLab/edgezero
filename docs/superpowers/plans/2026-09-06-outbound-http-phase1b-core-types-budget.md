@@ -5,6 +5,10 @@
 > **Status:** Implemented on PR 275. The unchecked steps below are retained as the original implementation record, not current readiness state.
 > **Superseded batch API:** The 2026-09-15 consumer-alignment plan replaces this plan's
 > `send_all` surface and budget names. Do not use its batch snippets as current API guidance.
+> **Superseded response API:** The Phase 2 Content-Type provenance hardening requires the
+> application clock and original provenance in the six-argument response constructor, and
+> returns provenance as the fifth `into_parts()` element. The response snippets below are
+> historical; use the outbound design's current response contract.
 
 **Goal:** Add the runtime-independent outbound request, response, client, URL, and dispatch-budget value layer specified in §§3.1-3.3 of the outbound design.
 

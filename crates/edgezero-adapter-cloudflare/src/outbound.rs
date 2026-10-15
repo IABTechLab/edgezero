@@ -106,11 +106,11 @@ mod worker_impl {
     use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundCachePolicy, OutboundHttpClient, OutboundRequest,
-        OutboundRequestParts, OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy,
-        ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
-        insert_proxy_header, normalize_for_dispatch, normalize_response_headers,
-        validate_for_dispatch,
+        ContentTypeProvenance, OutboundBatch, OutboundCachePolicy, OutboundHttpClient,
+        OutboundRequest, OutboundRequestParts, OutboundResponse, ResponseBodyDisposition,
+        ResponseBodyPolicy, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
+        collect_response_stream, insert_proxy_header, normalize_for_dispatch,
+        normalize_response_headers, validate_for_dispatch,
     };
     use edgezero_core::time::{
         Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
@@ -513,7 +513,8 @@ mod worker_impl {
         let mut header_limiter =
             ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count);
         header_limiter.observe(&headers)?;
-        let disposition = normalize_response_headers(&request_method, status, &mut headers)?;
+        let normalization = normalize_response_headers(&request_method, status, &mut headers)?;
+        let disposition = normalization.body_disposition;
         insert_proxy_header(
             &mut headers,
             &mut header_limiter,
@@ -527,6 +528,7 @@ mod worker_impl {
                 headers,
                 Body::empty(),
                 response_clock,
+                ContentTypeProvenance::Unknown,
             ));
         }
 
@@ -563,6 +565,7 @@ mod worker_impl {
                 headers,
                 Body::empty(),
                 response_clock,
+                ContentTypeProvenance::Unknown,
             ));
         }
 
@@ -592,6 +595,7 @@ mod worker_impl {
             headers,
             body,
             response_clock,
+            ContentTypeProvenance::Unknown,
         ))
     }
 
@@ -962,11 +966,48 @@ mod worker_impl {
         use std::task::Poll;
 
         use edgezero_core::error::BudgetSource;
+        use edgezero_core::http::header::CONTENT_TYPE;
+        use edgezero_core::outbound::ContentTypeProvenance;
         use edgezero_core::time::Deadline;
         use futures_util::stream;
         use wasm_bindgen_test::wasm_bindgen_test;
 
         use super::*;
+
+        #[derive(Debug)]
+        struct NumericTimeoutGuard {
+            original: JsValue,
+        }
+
+        impl NumericTimeoutGuard {
+            fn install() -> Self {
+                let scope = global();
+                let key = JsValue::from_str("setTimeout");
+                let original = Reflect::get(&scope, &key).expect("original timeout function");
+                // Node timer handles coerce to numeric IDs accepted by both timer APIs.
+                let factory = Function::new_with_args(
+                    "original",
+                    "return (...args) => Number(original.apply(globalThis, args));",
+                );
+                let numeric = factory
+                    .call1(&JsValue::UNDEFINED, &original)
+                    .expect("numeric timeout wrapper");
+                assert!(
+                    Reflect::set(&scope, &key, &numeric).expect("install numeric timeout wrapper")
+                );
+                Self { original }
+            }
+        }
+
+        impl Drop for NumericTimeoutGuard {
+            fn drop(&mut self) {
+                drop(Reflect::set(
+                    &global(),
+                    &JsValue::from_str("setTimeout"),
+                    &self.original,
+                ));
+            }
+        }
 
         fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
             let observations = Arc::new(Mutex::new(VecDeque::from(script)));
@@ -1276,6 +1317,85 @@ mod worker_impl {
                 .expect_err("retained clock reached deadline");
 
             assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+        }
+
+        #[wasm_bindgen_test]
+        async fn converted_response_content_type_provenance_is_always_unknown() {
+            let _timer_guard = NumericTimeoutGuard::install();
+            let cases: &[&[&str]] = &[
+                &[],
+                &["text/plain"],
+                &["text/plain", "text/plain"],
+                &["text/plain", "application/json"],
+                &["text/plain, application/json"],
+            ];
+            for values in cases {
+                for status in [
+                    StatusCode::OK,
+                    StatusCode::NO_CONTENT,
+                    StatusCode::RESET_CONTENT,
+                ] {
+                    for mode in [
+                        ResponseMode::Streamed,
+                        ResponseMode::Buffered { max_bytes: 64 },
+                    ] {
+                        let start = MonotonicInstant::now();
+                        let headers = Headers::new();
+                        for value in *values {
+                            headers
+                                .append(CONTENT_TYPE.as_str(), value)
+                                .expect("content-type field");
+                        }
+                        let native = WorkerResponse::from_stream(stream::empty::<
+                            Result<Vec<u8>, worker::Error>,
+                        >())
+                        .expect("streaming response")
+                        .with_status(status.as_u16())
+                        .with_headers(headers);
+                        let bridged = response_headers(&native).expect("bridged headers");
+                        assert_eq!(
+                            bridged.get_all(CONTENT_TYPE).iter().count(),
+                            usize::from(!values.is_empty())
+                        );
+                        if values.len() > 1 {
+                            assert_eq!(
+                                bridged.get(CONTENT_TYPE).map(HeaderValue::as_bytes),
+                                Some(values.join(", ").as_bytes())
+                            );
+                        }
+                        let controller = web_sys::AbortController::new().expect("abort controller");
+                        let mut response = process_response(
+                            native,
+                            AbortGuard::new(controller),
+                            Method::GET,
+                            mode,
+                            test_budget(start, Duration::from_secs(1)),
+                            1024,
+                            24,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            constant_clock(start),
+                        )
+                        .await
+                        .expect("converted response");
+
+                        assert_eq!(
+                            response.content_type_provenance(),
+                            ContentTypeProvenance::Unknown
+                        );
+                        response
+                            .headers_mut()
+                            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                        assert_eq!(
+                            response.content_type_provenance(),
+                            ContentTypeProvenance::Unknown
+                        );
+                    }
+                }
+            }
         }
 
         #[wasm_bindgen_test]

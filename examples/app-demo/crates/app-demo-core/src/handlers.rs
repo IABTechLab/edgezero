@@ -821,6 +821,7 @@ mod tests {
             headers,
             body,
             clock,
+            edgezero_core::ContentTypeProvenance::Unknown,
         ))
     }
 

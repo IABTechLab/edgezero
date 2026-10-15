@@ -766,6 +766,7 @@ mod tests {
                 HeaderMap::new(),
                 Body::empty(),
                 crate::MonotonicClock::default(),
+                crate::ContentTypeProvenance::Unknown,
             ))
         }
 

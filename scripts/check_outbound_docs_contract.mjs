@@ -1732,23 +1732,30 @@ if (outboundCoreSource.includes(retiredClockConstructor)) {
   fail('OutboundResponse must not retain the hidden clock-paired constructor')
 }
 const outboundResponseConstructor =
-  /impl OutboundResponse \{[\s\S]*?pub fn new\(\s*request_method: Method,\s*status: StatusCode,\s*headers: HeaderMap,\s*body: Body,\s*monotonic_clock: MonotonicClock,\s*\) -> Self \{/u
+  /impl OutboundResponse \{[\s\S]*?pub fn new\(\s*request_method: Method,\s*status: StatusCode,\s*headers: HeaderMap,\s*body: Body,\s*monotonic_clock: MonotonicClock,\s*content_type_provenance: ContentTypeProvenance,\s*\) -> Self \{/u
 if (!outboundResponseConstructor.test(outboundCoreSource)) {
-  fail('OutboundResponse::new must require the application monotonic clock')
+  fail(
+    'OutboundResponse::new must require the application clock and original Content-Type provenance',
+  )
 }
 for (const adapterPath of outboundAdapterPaths) {
   const adapterSource = readFileSync(adapterPath, 'utf8')
   const constructorCount =
     adapterSource.match(/OutboundResponse::new\(/gu)?.length ?? 0
+  const provenance = adapterPath.includes('cloudflare')
+    ? 'ContentTypeProvenance::Unknown'
+    : 'normalization\\.content_type_provenance'
   const pairedClockCount =
-    adapterSource.match(/response_clock,\s*\)\)/gu)?.length ?? 0
+    adapterSource.match(
+      new RegExp(`response_clock,\\s*${provenance},\\s*\\)\\)`, 'gu'),
+    )?.length ?? 0
   if (
     constructorCount === 0 ||
     constructorCount !== pairedClockCount ||
     !adapterSource.includes('let response_clock = clock.clone();')
   ) {
     fail(
-      `${adapterPath} must clone the client clock and pass it to every outbound response`,
+      `${adapterPath} must pass the paired client clock and original Content-Type provenance (Unknown on Cloudflare) to every outbound response`,
     )
   }
   if (!adapterSource.includes('converted_response_retains_injected_clock')) {

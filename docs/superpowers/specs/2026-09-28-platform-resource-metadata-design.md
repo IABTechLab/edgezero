@@ -125,6 +125,10 @@ selected effective slot budget and does not, by itself, signal batch termination
 
 ## Migration record
 
+This is the historical platform-metadata migration record. Its five-argument response
+constructor is superseded by the outbound design's six-argument constructor carrying
+original Content-Type provenance; no five-argument compatibility API remains.
+
 The repository gains an unreleased changelog with an exact migration table:
 
 | Removed or changed API | Replacement |

@@ -14,6 +14,29 @@
 
 ## Preconditions
 
+### Content-Type Provenance Hardening
+
+This follow-up preserves original header ambiguity without retaining another raw header copy.
+
+- [x] Add failing normalization-path tests for missing, single UTF-8, repeated/conflicting,
+      comma-containing, opaque, mixed valid/opaque, and Connection-nominated Content-Type values.
+- [x] Return body disposition and typed Content-Type provenance from the shared normalizer;
+      inspect all values before filtering and certify only a retained, unchanged textual singleton.
+- [x] Require provenance in outbound response construction, preserve it in decomposition and
+      conversion, and invalidate eligibility after mutable header access without upgrading an
+      original ineligible/unknown result. MIME parsing and redaction remain application-owned.
+- [x] Carry provenance through every Axum/Fastly/Spin conversion path. Cloudflare reports Unknown
+      because its string-valued, combined headers cannot establish original field/byte identity.
+- [x] Exercise actual adapter conversion paths, update demo/template fixtures and public docs,
+      and run core/workspace tests, strict host/WASM lint, documentation guards and generated builds.
+
+Verification includes 750 core tests; 200 Axum unit and 13 contract tests, including a raw-TCP
+valid-plus-opaque duplicate; 161 Fastly runtime tests; 29 Cloudflare browser runtime tests;
+and 35 Spin hosted contracts. Spin executes its provenance matrix through the hosted contract
+because the standalone lib harness lacks required host imports; the host rejects Connection
+fields before normalization. Demo tests, fresh generated host/three-WASM builds, strict
+host/three-WASM Clippy, API docs and documentation format/lint/build checks also pass.
+
 - [ ] Phase 1b is complete and `cargo test --offline --locked -p edgezero-core --lib` passes.
 - [ ] Re-read spec §§3.1.4, 3.3.3-3.4.5, §5.1, and the core file summary in §7.
 - [ ] Preserve `Body::into_bytes_bounded(usize)` as the inbound 400 helper. Outbound response drains are separate `u64`/502 APIs.
@@ -197,7 +220,7 @@ pub fn stream<S>(stream: S) -> Self;                // infallible Bytes
 - [ ] Run both focused commands; each must execute a nonzero matching test count and fail for missing behavior:
   - `cargo test --offline --locked -p edgezero-core --lib response_normalization_`
   - `cargo test --offline --locked -p edgezero-core --lib outbound_response_into_response_`
-- [ ] Implement `normalize_response_headers` returning `ResponseBodyDisposition`, a private checked `parse_content_length`, plus `OutboundResponse::into_response`. Preserve HEAD/304 representation metadata; strip prohibited 1xx/204 framing; validate payload/205 length syntax; rewrite successful 205 to `Content-Length: 0` only after capturing `declared_body`. `into_response` must reapply the same helper idempotently after any `headers_mut` use.
+- [ ] Implement `normalize_response_headers` returning `ResponseHeadNormalization` (body disposition and pre-filter Content-Type provenance), a private checked `parse_content_length`, plus `OutboundResponse::into_response`. Preserve HEAD/304 representation metadata; strip prohibited 1xx/204 framing; validate payload/205 length syntax; rewrite successful 205 to `Content-Length: 0` only after capturing `declared_body`. `into_response` must reapply the same helper idempotently after any `headers_mut` use, without upgrading original provenance.
 - [ ] Rerun focused/core tests; expect success.
 - [ ] Commit: `feat(core): normalize outbound response metadata`.
 

@@ -105,6 +105,29 @@ separately from the portable API and must be considered when declaring required 
 - Share the future-based batch driver through `OutboundBatch::from_futures` on Axum, Cloudflare,
   and Spin. Preserve recorded terminal timestamps, ready-result retention, index validation,
   and clean-EOF completion; Fastly retains its provider-handle driver.
+- Add `ContentTypeProvenance::{Ineligible(ContentTypeIneligibility), SingleTextUnchanged, Unknown}`
+  from original response-header multiplicity and UTF-8 evidence before filtering. Reasons are
+  `Missing`, `Modified`, `MultipleValues`, `NonText`, and `Removed`. Axum/Fastly/Spin retain
+  evidence on every response path; Cloudflare always reports `Unknown` because Fetch strings
+  lose original bytes and field boundaries. No MIME validation, trimming, comma splitting,
+  raw-header/body copies, or new capability is added. A known textual singleton containing a
+  comma can remain eligible; application MIME validation, acceptance, and redaction still apply.
+- Expose `content_type_provenance()`. `headers_mut()` conservatively invalidates an originally
+  eligible result as `Ineligible(Modified)` without rewriting private original evidence;
+  original ineligible/unknown evidence never upgrades. `into_response()` carries the effective
+  enum as a response extension describing the historical outbound boundary only, not certifying
+  later ordinary `http::Response` edits.
+- Hard-cut response construction to
+  `OutboundResponse::new(method, status, headers, body, clock, content_type_provenance)`,
+  decomposition to `(method, status, headers, body, provenance)`, and normalization to
+  `Result<ResponseHeadNormalization, EdgeError>` containing body disposition and provenance.
+  Metadata is mandatory, never inferred from normalized headers; no old signatures remain.
+
+| Retired outbound API                                                           | Required replacement                                                                                                                    |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| four- or five-argument `OutboundResponse::new`                                 | six-argument `new(method, status, headers, body, clock, content_type_provenance)` requiring the application clock and original evidence |
+| four-element `OutboundResponse::into_parts()`                                  | five-tuple `(method, status, headers, body, provenance)` with effective `ContentTypeProvenance`                                         |
+| `normalize_response_headers(..) -> Result<ResponseBodyDisposition, EdgeError>` | `Result<ResponseHeadNormalization, EdgeError>`; use `.body_disposition` and retain original `.content_type_provenance`                  |
 
 ### Encoding, Limits, And Error Classification
 
@@ -281,6 +304,9 @@ Applications and adapter implementations must migrate to the current platform-fa
 construction APIs. The migration record includes APIs from earlier PR revisions as well as the
 pre-PR release surface, so consumers pinned to intermediate commits can update directly. No
 compatibility aliases are retained.
+
+The focused platform-design table below preserves that earlier migration record. Its outbound
+constructor row is historical and superseded by the six-argument outbound migration above.
 
 | Removed or changed API                                      | Replacement                                                                               |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
