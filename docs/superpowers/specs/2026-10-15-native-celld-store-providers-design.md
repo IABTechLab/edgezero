@@ -19,7 +19,7 @@ The current branch provides the needed application boundary:
 - `NativeStoreBindings` selects built-in providers in a deployment file, outside portable `edgezero.toml` declarations.
 - Native startup validates all source selections before polling deferred setup, prepares stores before readiness, and runs an application-owned initializer.
 - AWS config and secrets are startup snapshots. DynamoDB KV is live.
-- Compiled provider features and CLI target-feature resolution determine built-in provider availability.
+- Native startup checks built-in provider availability against the running binary's compiled features. Offline CLI validation is structural-only and reports target provider availability as unknown.
 
 Keep these contracts. Do not introduce a universal store trait or a dynamic provider registry.
 
@@ -173,7 +173,7 @@ Extend existing built-in dispatch rather than creating parallel startup:
 - Select provider-specific preparation sessions by their actual variants. Current AWS session selection treats any built-in binding as AWS, which must not remain true once celld exists.
 - Separate celld connection credentials from the AWS-specific `AgentAccessToken` config-source tuple. Keep AWS preparation limits AWS-owned. Add only the celld budget mechanism needed by the selected transport.
 - Preserve AWS-only and local-only startup behavior. A celld-only deployment must not require AWS credentials or local roots for remote-bound IDs.
-- Extend generated target feature forwarding and offline availability detection. Validation remains structural, not a remote connectivity or authorization check.
+- Extend generated target feature forwarding and structural binding validation for celld. Keep offline validation structural-only and report target provider availability as unknown. Do not add Cargo feature-graph resolution, remote connectivity or authorization checks. Startup rejects providers not compiled into the running binary.
 - Generalize the AWS-specific config-push guard so selected celld config cannot accidentally report a local file write as remote publication.
 
 Initial publication remains operator-owned. Do not add fleet provisioning, deployment, config publication or secret management to this provider task.
@@ -184,7 +184,7 @@ Initial publication remains operator-owned. Do not add fleet provisioning, deplo
 2. **Prove scoped native access.** Use a disposable local celld setup and a small native client with no application Worker. Exercise tokenless loopback and authenticated access. Observe binary put/get/delete, missing versus empty values, namespace isolation, pagination and explicit version/authentication failures. Prove config-write and out-of-grant store denial before dispatch, plus no fallback between access modes. Keep all fleet credentials inside the service boundary and record their acquisition. This is a transport and authorization gate, not production acceptance.
 3. **Implement live KV.** Add typed settings, strict offline validation, bounded transport and operation tests. Prove TTL renewal/reset, malformed responses, oversized encoded/decoded payloads, continuation and ambiguous-write behavior. Use provider-specific TTL tests because the shared native contract macro currently expects direct sub-second TTLs that celld rejects.
 4. **Implement config snapshots.** Prove whole-document preservation, missing and invalid UTF-8 failures, per-value/session budgets, bounded snapshot reads and restart-based adoption.
-5. **Integrate Axum and CLI.** Prove mixed AWS/celld/local source selection, missing-feature rejection, source conflicts, root requirements, readiness ordering and config-push refusal through public entrypoints.
+5. **Integrate Axum and CLI.** Prove mixed AWS/celld/local source selection, structural-only offline validation with target provider availability reported as unknown, startup missing-feature rejection, source conflicts, root requirements, readiness ordering and config-push refusal through public entrypoints.
 6. **Exercise a generated consumer.** Run a generated native Axum app against real celld. Check mutable KV, typed config initialization and restart adoption. Where available, compose celld config/KV with existing AWS fixtures for secrets. Run feature/dependency checks proving celld does not add Worker/V8 dependencies or change AWS-only builds.
 
 Each behavioral unit ends with its focused regression and neighboring tests. At the combined checkpoint run affected formatting, lint, builds and integration checks. Missing external tooling or a failed service startup is an unverified gate, not a passing skip.
