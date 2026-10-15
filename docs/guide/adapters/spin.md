@@ -306,7 +306,7 @@ Run contract tests for the Spin adapter:
 
 ```bash
 rustup target add wasm32-wasip2
-export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run -W component-model-async=y -S p3=y,http=y"
+export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run"
 cargo test -p edgezero-adapter-spin --features spin --target wasm32-wasip2 --test contract
 ```
 
@@ -353,13 +353,6 @@ request/response bodies and pending operations invocation-local. Existing
 response buffering and stream collection limits still apply. Restore `run_app`
 and remove the cache to roll back; default generated entry points are unchanged.
 
-## Next Steps
-
-- [Migration guide](/guide/manifest-store-migration) — moving from the
-  pre-rewrite store schema
-- [Adapters overview](/guide/adapters/overview) — cross-adapter contracts
-- [Configuration](/guide/configuration) — full manifest reference
-
 ## Runtime ingress metadata
 
 Conversion captures SDK URI parts before rebuilding the core request. Origin
@@ -376,7 +369,14 @@ restored inside EdgeZero. Same-name runtime values are copied byte-for-byte,
 while original-wire fidelity remains conservative and global order unavailable.
 
 Pure metadata tests execute on the host. The WASM contract suite runs with
-Wasmtime's explicit async/P3/HTTP flags. The full WASM library test artifact
+`wasmtime run`. The full WASM library test artifact
 also imports Spin-specific host interfaces, so plain Wasmtime cannot execute
 that artifact. The real Spin HTTP fixture supplies runtime conversion evidence.
 See [the capability matrix](./overview#inbound-request-fidelity).
+
+## Next Steps
+
+- [Migration guide](/guide/manifest-store-migration) — moving from the
+  pre-rewrite store schema
+- [Adapters overview](/guide/adapters/overview) — cross-adapter contracts
+- [Configuration](/guide/configuration) — full manifest reference

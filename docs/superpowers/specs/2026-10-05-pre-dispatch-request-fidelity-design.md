@@ -22,8 +22,6 @@ The motivating consumer is approved [Trusted Server PR #1107](https://github.com
 - Section 9.2: bounded cookie inspection, duplicate detection and non-UTF-8 rejection.
 - Sections 12 and 14: hardened local responses and actual adapter ordering/conversion tests.
 
-Local source: `/Users/prk-jr/Desktop/opensource/rust/trusted-server/docs/superpowers/specs/2026-09-01-mobile-ad-render-trace-endpoint-design.md`. Local consumer plan: `/Users/prk-jr/Desktop/opensource/rust/trusted-server/docs/superpowers/plans/2026-10-05-mobile-ad-render-trace-implementation-plan.md`, tasks F0/F4.
-
 Primary interoperability references: [Fetch header sorting/combining](https://fetch.spec.whatwg.org/#concept-header-list-sort-and-combine), [URL parsing](https://url.spec.whatwg.org/#url-parsing), and [Web IDL ByteString](https://webidl.spec.whatwg.org/#idl-ByteString). These define platform semantics, not proof of a particular deployed runtime.
 
 ## 3. Scope and alternatives

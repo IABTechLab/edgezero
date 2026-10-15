@@ -182,11 +182,6 @@ surfaces before any traffic, but the Fastly, Cloudflare, and Spin entry points c
 per request, so a conflicting route deploys successfully and then panics on the first request.
 Run the app under the Axum dev server before deploying to an edge target.
 
-## Next Steps
-
-- Learn about [Handlers & Extractors](/guide/handlers) for processing requests
-- Explore [Middleware](/guide/middleware) for cross-cutting concerns
-
 ## Intercepting before dispatch
 
 Use an optional `PreDispatchHook` when handling a request must precede method
@@ -239,3 +234,8 @@ router boundary; the hook does not replace those layers.
 
 Consult [adapter ingress capabilities](./adapters/overview#inbound-request-fidelity)
 before classifying a request using its target or duplicate headers.
+
+## Next Steps
+
+- Learn about [Handlers & Extractors](/guide/handlers) for processing requests
+- Explore [Middleware](/guide/middleware) for cross-cutting concerns

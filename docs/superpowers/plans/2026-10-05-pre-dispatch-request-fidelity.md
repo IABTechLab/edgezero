@@ -410,13 +410,30 @@ about original wire bytes.
 ## Latest independent review follow-up — 2026-10-06
 
 The earlier 47-case records above describe earlier execution checkpoints. The
-final baseline and dependency-handoff evidence contain 54 cases: Fastly 20,
-Cloudflare 17 and Spin 17. Those final counts supersede earlier probe totals.
+final checked-in baseline contains 56 cases: Fastly 20, Cloudflare 19 and
+Spin 17, including the two direct-workerd no-hook routing regressions
+(`route-unicode` and `route-backslash`). The 54-case execution records above
+are historical checkpoints; this baseline count does not claim a fresh
+56-probe runtime execution.
 
 Clarify the Axum guide: common field multiplicity remains `Unknown`, including
-the Content-Length override. `InboundOrigin::parse` validates URI authorities,
+Content-Length. `InboundOrigin::parse` validates URI authorities,
 not DNS-label-only names. Commas, asterisks and semicolons are permitted
 registered-name characters under [RFC 3986 section 3.2.2](https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.2),
 and a trailing dot is valid. The proposed DNS-only rejection would narrow the
 approved contract and reject valid authorities, so no parser change is made.
 These clarifications do not change the consumer dependency API or runtime code.
+
+## PR review follow-up — 2026-10-15
+
+The adapters share the conservative `HeaderFidelity::RUNTIME_HEADER_MAP` baseline.
+Axum uses the common value for Content-Length without a redundant override.
+Fastly retains the validated runtime URI authority after checking Host consistency;
+authority spelling is not canonicalized by the shared API. Spin's pure ingress
+helper and existing host tests now live in `src/request/ingress.rs`, compiled
+independently of its WASM-only request conversion module.
+
+The public Spin contract command and CI runner return to `wasmtime run`, matching
+main's unchanged contract suite and dependency graph. Earlier explicit-flag runs
+above remain historical evidence, not a requirement introduced by ingress metadata.
+The full WASM library artifact still requires Spin-specific host interfaces.

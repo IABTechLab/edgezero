@@ -13,8 +13,7 @@ use edgezero_core::http::{Extensions, HeaderValue, Request, Uri, request_builder
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::proxy::ProxyHandle;
 use edgezero_core::request::{
-    CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
-    TargetUnavailable,
+    CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, RequestIngress, TargetUnavailable,
 };
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
@@ -607,12 +606,7 @@ pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
     RequestIngress::new(
         target,
         origin,
-        HeaderFidelity::new(
-            Preservation::Unknown,
-            Preservation::Unknown,
-            Preservation::Unknown,
-            Preservation::Unavailable,
-        ),
+        HeaderFidelity::RUNTIME_HEADER_MAP,
         Vec::new(),
     )
     .expect("should use unique header overrides")
@@ -627,7 +621,7 @@ fn origin_from_runtime_uri<'header>(
         return None;
     }
     let scheme = uri.scheme_str()?;
-    let _runtime_origin =
+    let runtime_origin =
         InboundOrigin::parse(scheme, uri.authority()?.as_str(), OriginSource::RuntimeUri).ok()?;
     let origin = InboundOrigin::parse(scheme, host, OriginSource::RuntimeUri).ok()?;
     let host_uri = Uri::builder()
@@ -642,7 +636,7 @@ fn origin_from_runtime_uri<'header>(
     {
         return None;
     }
-    Some(origin)
+    Some(runtime_origin)
 }
 
 /// Convert a native request, capturing ingress before native mutation.
@@ -1039,8 +1033,10 @@ mod ingress_tests {
             );
             assert_eq!(
                 origin.authority(),
-                host,
-                "should retain validated authority"
+                uri.authority()
+                    .expect("should have runtime authority")
+                    .as_str(),
+                "should retain runtime authority rather than Host spelling"
             );
             assert_eq!(
                 origin.source(),

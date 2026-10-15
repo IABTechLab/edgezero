@@ -93,6 +93,15 @@ pub struct HeaderFidelity {
 }
 
 impl HeaderFidelity {
+    /// Conservative baseline for copied runtime headers: original octets,
+    /// multiplicity and same-name order are unknown; global order is unavailable.
+    pub const RUNTIME_HEADER_MAP: Self = Self::new(
+        Preservation::Unknown,
+        Preservation::Unknown,
+        Preservation::Unknown,
+        Preservation::Unavailable,
+    );
+
     /// Return original field-count preservation for this header.
     #[inline]
     #[must_use]
@@ -151,7 +160,10 @@ pub struct InboundOrigin {
 }
 
 impl InboundOrigin {
-    /// Borrow the validated authority, including any explicit port.
+    /// Borrow the validated authority in its source-provided spelling.
+    ///
+    /// Host case and explicit default ports are retained when the source exposes
+    /// them. Consumers must normalize authorities before comparing origins.
     #[inline]
     #[must_use]
     pub fn authority(&self) -> &str {

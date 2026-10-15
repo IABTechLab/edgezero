@@ -348,11 +348,6 @@ in flight in the same instance. A serialized test or two separate instances does
 not establish this property. Restore the existing `run_app` entry point to remove
 explicit retention. The generated default remains unchanged.
 
-## Next Steps
-
-- Learn about [Fastly Compute](/guide/adapters/fastly) as an alternative
-- Explore the [Axum adapter](/guide/adapters/axum) for local development
-
 ## Runtime request fidelity
 
 Inbound conversion reads `req.inner().method()` rather than the closed Workers
@@ -373,3 +368,17 @@ See [the capability matrix](./overview#inbound-request-fidelity).
 Captured runtime-target preservation is `Unknown`. Fetch URL normalization is
 a known runtime capability, but the original request target is unavailable, so
 a transformation cannot be established for each individual incoming request.
+
+### Conversion compatibility
+
+Unknown method tokens are retained rather than coerced to GET, so they no longer
+match a GET route. Invalid runtime header values return 400 during conversion.
+Method, URL, URI and header conversion errors use bounded messages without parse
+details. Primary routing still uses the existing SDK URL conversion, including
+Unicode percent encoding and backslash normalization; ingress target metadata is
+captured separately before that conversion.
+
+## Next Steps
+
+- Learn about [Fastly Compute](/guide/adapters/fastly) as an alternative
+- Explore the [Axum adapter](/guide/adapters/axum) for local development

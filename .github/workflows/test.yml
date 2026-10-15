@@ -162,7 +162,7 @@ jobs:
           - adapter: spin
             target: wasm32-wasip2
             runner_env: CARGO_TARGET_WASM32_WASIP2_RUNNER
-            runner_value: wasmtime run -W component-model-async=y -S p3=y,http=y
+            runner_value: wasmtime run
     steps:
       - uses: actions/checkout@v6
         with:
@@ -331,7 +331,11 @@ jobs:
       # The real Spin HTTP fixture below executes the converter instead.
       - name: Install lock-matched worker-build
         if: matrix.adapter == 'cloudflare'
-        run: cargo install worker-build --version 0.8.3 --locked --force
+        shell: bash
+        run: |
+          if [[ "$(worker-build --version 2>/dev/null || true)" != "0.8.3" ]]; then
+            cargo install worker-build --version 0.8.3 --locked --force
+          fi
 
       - name: Install pinned Spin HTTP runtime
         if: matrix.adapter == 'spin'
@@ -341,6 +345,10 @@ jobs:
           install_dir="$RUNNER_TEMP/spin"
           mkdir -p "$install_dir"
           curl -fL "https://github.com/spinframework/spin/releases/download/v${version}/spin-v${version}-linux-amd64.tar.gz" -o "$RUNNER_TEMP/spin.tar.gz"
+          # GitHub's published digest for the v4.0.0 linux-amd64 release asset.
+          # Keep the version and digest paired when updating the fixture pin.
+          test "$version" = "4.0.0"
+          echo "e705c9bfd9484a9175f392a116856680862a40f31d1a85618bed331f34ffccfa  $RUNNER_TEMP/spin.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/spin.tar.gz" -C "$install_dir"
           echo "$install_dir" >> "$GITHUB_PATH"
           "$install_dir/spin" --version

@@ -5,7 +5,8 @@ use anyhow::Context as _;
 
 use crate::SpinFullResponse;
 use crate::config_store::SpinConfigStore;
-use crate::context::{SpinRequestContext, capture_request_ingress, parse_client_addr};
+use crate::context::{SpinRequestContext, parse_client_addr};
+use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
 use crate::proxy::SpinProxyClient;
 use crate::response::from_core_response;

@@ -110,7 +110,7 @@ Spin's adapter targets `wasm32-wasip2` and its contract suite runs under Wasmtim
 
 ```bash
 rustup target add wasm32-wasip2
-export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run -W component-model-async=y -S p3=y,http=y"
+export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run"
 cargo test -p edgezero-adapter-spin --features spin --target wasm32-wasip2 --test contract
 ```
 
@@ -174,10 +174,12 @@ establishes provenance. Runtime URI facts use `RuntimeUri`; Axum's plain HTTP
 listener uses `TransportBinding` plus one consistent Host. Origin-form Axum
 conversion without that binding has no trusted origin. Ordinary Origin,
 Forwarded and Spin special headers do not establish ingress origin.
+Authorities retain source-provided spelling, including host case and explicit
+default ports when exposed. Consumers must normalize before comparing origins.
 
 Fastly records target unavailability before reading its SDK runtime URL for
 origin, and requires a client request with one consistent validated Host.
-This recovers canonical origin without claiming an original path.
+This recovers the validated runtime origin without claiming an original path.
 
 `HeaderFidelity` has separate octet, field-multiplicity, same-name-order and
 global-order axes, with per-name overrides. They concern original received

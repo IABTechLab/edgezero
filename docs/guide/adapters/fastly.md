@@ -601,11 +601,6 @@ resource accounting, or performance. Named endpoint delivery must be verified
 separately from echoed stdout. Roll back by restoring the original single-request
 entry point and removing retained state, not merely setting a request limit of one.
 
-## Next Steps
-
-- Learn about [Cloudflare Workers](/guide/adapters/cloudflare) as an alternative deployment target
-- Explore [Configuration](/guide/configuration) for manifest details
-
 ## Early ingress snapshots
 
 Call `request::capture_request_ingress(&req)` immediately after acquiring the
@@ -639,3 +634,8 @@ demonstrate that a normalized native shortcut can receive
 taken earlier. Original-target support and safe shortcut exclusion remain
 blocked on the SDK accessor; client/TLS preservation must be proved on the
 appropriate ingress. See [the capability matrix](./overview#inbound-request-fidelity).
+
+## Next Steps
+
+- Learn about [Cloudflare Workers](/guide/adapters/cloudflare) as an alternative deployment target
+- Explore [Configuration](/guide/configuration) for manifest details

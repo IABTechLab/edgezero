@@ -5,7 +5,7 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::http::Request;
 use edgezero_core::body::Body;
 use edgezero_core::http::Request as CoreRequest;
-use edgezero_core::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST};
+use edgezero_core::http::header::{CONTENT_TYPE, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Uri};
 use edgezero_core::proxy::ProxyHandle;
 use edgezero_core::request::{
@@ -74,7 +74,7 @@ pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest
 
 #[expect(
     clippy::expect_used,
-    reason = "the static override list contains exactly one unique header"
+    reason = "an empty override list cannot contain duplicate names"
 )]
 fn capture_request_ingress(
     uri: &Uri,
@@ -87,23 +87,12 @@ fn capture_request_ingress(
         TargetSource::RuntimePathAndQuery
     };
     let target = CapturedTarget::capture(&uri.to_string(), source, Preservation::Unknown);
-    let common = HeaderFidelity::new(
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unavailable,
-    );
-    let content_length = HeaderFidelity::new(
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unavailable,
-    );
+    let common = HeaderFidelity::RUNTIME_HEADER_MAP;
     RequestIngress::new(
         target,
         inbound_origin(uri, headers, transport),
         common,
-        vec![(CONTENT_LENGTH, content_length)],
+        Vec::new(),
     )
     .expect("should use unique header overrides")
 }

@@ -268,12 +268,7 @@ pub async fn into_core_request(
         .and_then(|(scheme, authority)| {
             InboundOrigin::parse(scheme, authority.as_str(), OriginSource::RuntimeUri).ok()
         });
-    let fidelity = HeaderFidelity::new(
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unavailable,
-    );
+    let fidelity = HeaderFidelity::RUNTIME_HEADER_MAP;
     let ingress = RequestIngress::new(target, origin, fidelity, Vec::new())?;
 
     let mut builder = request_builder().method(method).uri(uri);
