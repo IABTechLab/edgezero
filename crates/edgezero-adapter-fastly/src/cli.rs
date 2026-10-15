@@ -80,19 +80,19 @@ static FASTLY_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_fastly",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_fastly",
         repo_crate: "crates/edgezero-adapter-fastly",
-        fallback: "edgezero-adapter-fastly = { git = \"https://git@github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false }",
+        fallback: "edgezero-adapter-fastly = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_fastly_wasm",
         repo_crate: "crates/edgezero-adapter-fastly",
-        fallback: "edgezero-adapter-fastly = { git = \"https://git@github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false, features = [\"fastly\"] }",
+        fallback: "edgezero-adapter-fastly = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false, features = [\"fastly\"] }",
         features: &["fastly"],
     },
 ];

@@ -59,19 +59,19 @@ static CLOUDFLARE_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_cloudflare",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_cloudflare",
         repo_crate: "crates/edgezero-adapter-cloudflare",
-        fallback: "edgezero-adapter-cloudflare = { git = \"https://git@github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false }",
+        fallback: "edgezero-adapter-cloudflare = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_cloudflare_wasm",
         repo_crate: "crates/edgezero-adapter-cloudflare",
-        fallback: "edgezero-adapter-cloudflare = { git = \"https://git@github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false, features = [\"cloudflare\"] }",
+        fallback: "edgezero-adapter-cloudflare = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false, features = [\"cloudflare\"] }",
         features: &["cloudflare"],
     },
 ];
