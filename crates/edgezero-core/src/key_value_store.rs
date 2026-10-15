@@ -358,6 +358,7 @@ pub enum KvError {
 /// ```
 #[derive(Clone)]
 pub struct KvHandle {
+    max_ttl: Duration,
     store: Arc<dyn KvStore>,
 }
 
@@ -375,7 +376,9 @@ impl KvHandle {
     /// Maximum number of keys returned from a single page.
     pub const MAX_LIST_PAGE_SIZE: usize = 1_000;
 
-    /// Maximum TTL (1 year). Prevents overflow when adding to `SystemTime::now()`.
+    /// Default maximum TTL (1 year), applied by [`KvHandle::new`].
+    ///
+    /// Override it per handle with [`KvHandle::with_max_ttl`].
     #[expect(
         clippy::duration_suboptimal_units,
         reason = "`Duration::from_days` is not stable in const context (1.98)"
@@ -613,10 +616,21 @@ impl KvHandle {
         })
     }
 
+    /// The largest TTL this handle accepts in `put_with_ttl` /
+    /// `put_bytes_with_ttl`. Defaults to [`KvHandle::MAX_TTL`].
+    #[inline]
+    #[must_use]
+    pub const fn max_ttl(&self) -> Duration {
+        self.max_ttl
+    }
+
     /// Create a new handle wrapping a KV store implementation.
     #[inline]
     pub fn new(store: Arc<dyn KvStore>) -> Self {
-        Self { store }
+        Self {
+            max_ttl: Self::MAX_TTL,
+            store,
+        }
     }
 
     /// Put a value, serializing it to JSON.
@@ -669,7 +683,7 @@ impl KvHandle {
         ttl: Duration,
     ) -> Result<(), KvError> {
         Self::validate_key(key)?;
-        Self::validate_ttl(ttl)?;
+        self.validate_ttl(ttl)?;
         Self::validate_value(&value)?;
         let bytes_len = value.len();
         let started_at = Self::kv_timing_start();
@@ -690,7 +704,7 @@ impl KvHandle {
         T: Serialize,
     {
         Self::validate_key(key)?;
-        Self::validate_ttl(ttl)?;
+        self.validate_ttl(ttl)?;
         let bytes = serde_json::to_vec(value)?;
         Self::validate_value(&bytes)?;
         let bytes_len = bytes.len();
@@ -794,15 +808,16 @@ impl KvHandle {
         Ok(())
     }
 
-    fn validate_ttl(ttl: Duration) -> Result<(), KvError> {
+    fn validate_ttl(&self, ttl: Duration) -> Result<(), KvError> {
         if ttl < Self::MIN_TTL {
             return Err(KvError::Validation(format!(
                 "TTL {ttl:?} is less than minimum of at least 60 seconds"
             )));
         }
-        if ttl > Self::MAX_TTL {
+        if ttl > self.max_ttl {
             return Err(KvError::Validation(format!(
-                "TTL {ttl:?} exceeds maximum of 1 year"
+                "TTL {ttl:?} exceeds maximum of {:?}",
+                self.max_ttl
             )));
         }
         Ok(())
@@ -817,6 +832,20 @@ impl KvHandle {
             )));
         }
         Ok(())
+    }
+
+    /// Return this handle with a different TTL cap.
+    ///
+    /// Use this when an application's retention policy needs entries to
+    /// live longer than [`KvHandle::MAX_TTL`] (or should be capped lower).
+    /// The cap applies to this handle and its clones only. The
+    /// [`KvHandle::MIN_TTL`] floor still applies, so a cap below it rejects
+    /// every TTL write.
+    #[inline]
+    #[must_use]
+    pub const fn with_max_ttl(mut self, max_ttl: Duration) -> Self {
+        self.max_ttl = max_ttl;
+        self
     }
 }
 
@@ -872,7 +901,7 @@ pub struct KvPage {
 /// delegating here. Implementations may therefore assume that:
 /// - Keys are non-empty and within [`KvHandle::MAX_KEY_SIZE`]
 /// - Values are within [`KvHandle::MAX_VALUE_SIZE`]
-/// - TTLs are within `[MIN_TTL, MAX_TTL]`
+/// - TTLs are within `[MIN_TTL, max_ttl]` (see [`KvHandle::with_max_ttl`])
 /// - List limits are within `[1, MAX_LIST_PAGE_SIZE]`
 ///
 /// Do **not** call trait methods directly in production code; always go
@@ -1004,6 +1033,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::SystemTime;
+
+    const TWO_YEARS: Duration = KvHandle::MAX_TTL.saturating_mul(2);
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
     struct Counter {
@@ -1618,6 +1649,89 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, KvError::Validation(_)));
             assert!(format!("{err}").contains("exceeds maximum"));
+        });
+    }
+
+    #[test]
+    fn default_max_ttl_is_max_ttl_constant() {
+        let kv = handle();
+        assert_eq!(kv.max_ttl(), KvHandle::MAX_TTL);
+    }
+
+    #[test]
+    fn with_max_ttl_accepts_ttl_beyond_default_cap() {
+        let kv = handle().with_max_ttl(TWO_YEARS);
+        block_on(async {
+            kv.put_with_ttl("retained", &"val", TWO_YEARS)
+                .await
+                .unwrap();
+            kv.put_bytes_with_ttl("retained_bytes", Bytes::from("raw"), TWO_YEARS)
+                .await
+                .unwrap();
+            let val: Option<String> = kv.get("retained").await.unwrap();
+            assert_eq!(val, Some("val".to_owned()));
+            assert_eq!(
+                kv.get_bytes("retained_bytes").await.unwrap(),
+                Some(Bytes::from("raw"))
+            );
+        });
+    }
+
+    #[test]
+    fn with_max_ttl_rejects_ttl_beyond_custom_cap() {
+        let kv = handle().with_max_ttl(TWO_YEARS);
+        block_on(async {
+            let over = TWO_YEARS + Duration::from_secs(1);
+            let err = kv.put_with_ttl("long", &"val", over).await.unwrap_err();
+            assert!(matches!(err, KvError::Validation(_)));
+            assert!(format!("{err}").contains("exceeds maximum of 63072000s"));
+            let bytes_err = kv
+                .put_bytes_with_ttl("long", Bytes::from("raw"), over)
+                .await
+                .unwrap_err();
+            assert!(matches!(bytes_err, KvError::Validation(_)));
+            assert!(!kv.exists("long").await.unwrap());
+        });
+    }
+
+    #[test]
+    fn with_max_ttl_can_lower_the_cap() {
+        let kv = handle().with_max_ttl(Duration::from_hours(1));
+        block_on(async {
+            kv.put_with_ttl("short", &"val", Duration::from_hours(1))
+                .await
+                .unwrap();
+            let err = kv
+                .put_with_ttl("short", &"val", Duration::from_secs(3601))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KvError::Validation(_)));
+        });
+    }
+
+    #[test]
+    fn with_max_ttl_keeps_min_ttl_floor() {
+        let kv = handle().with_max_ttl(TWO_YEARS);
+        block_on(async {
+            let err = kv
+                .put_with_ttl("tiny", &"val", Duration::from_secs(59))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KvError::Validation(_)));
+            assert!(format!("{err}").contains("less than minimum"));
+        });
+    }
+
+    #[test]
+    fn with_max_ttl_is_preserved_by_clone() {
+        let kv = handle().with_max_ttl(TWO_YEARS);
+        let cloned = kv.clone();
+        assert_eq!(cloned.max_ttl(), TWO_YEARS);
+        block_on(async {
+            cloned
+                .put_with_ttl("retained", &"val", TWO_YEARS)
+                .await
+                .unwrap();
         });
     }
 
