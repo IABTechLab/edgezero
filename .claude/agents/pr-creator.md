@@ -72,7 +72,7 @@ EOF
 ### 6. Move linked issue to "In progress"
 
 After creating the PR, move the linked issue on the project board -- but only
-if it is **not** already in "In review" or "Done".
+if it is **not** already in "In review", "Done", or "Won't Fix".
 
 1. Get the issue's project item ID and current status:
 
@@ -93,7 +93,7 @@ if it is **not** already in "In review" or "Done".
    }' -f issueId="$(gh issue view <number> --json id --jq '.id')"
    ```
 
-2. If current status is not "In review" or "Done", set it to "In progress" (`47fc9ee4`):
+2. If current status is not "In review", "Done", or "Won't Fix", set it to "In progress" (`47fc9ee4`):
 
    ```
    gh api graphql -f query='mutation {
