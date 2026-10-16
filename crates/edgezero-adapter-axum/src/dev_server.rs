@@ -308,6 +308,10 @@ async fn serve_with_stores(
 ) -> anyhow::Result<()> {
     struct ShutdownOnDrop(Option<ShutdownSender<()>>);
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for ShutdownOnDrop {
         fn drop(&mut self) {
             if let Some(sender) = self.0.take() {
@@ -433,7 +437,10 @@ fn report_connection_exit(result: &ConnectionResult) {
 ///
 /// # Errors
 /// Returns an error if the dev server fails to bind or any required store handle cannot be initialised.
-fn build_app_for_dispatch<A: Hooks>() -> anyhow::Result<App> {
+fn build_app_for_dispatch<A>() -> anyhow::Result<App>
+where
+    A: Hooks,
+{
     App::build::<A>(crate::AXUM_PLATFORM).context("application configuration failed")
 }
 
@@ -449,7 +456,10 @@ fn app_logger(env: &EnvConfig) -> SimpleLogger {
 /// Returns an error if logger setup, application configuration, runtime setup, store initialization, listener
 /// binding, or connection serving fails.
 #[inline]
-pub fn run_app<A: Hooks>() -> anyhow::Result<()> {
+pub fn run_app<A>() -> anyhow::Result<()>
+where
+    A: Hooks,
+{
     run_app_with_preflight::<A, _>(|| Ok(()))
 }
 
@@ -1268,12 +1278,20 @@ mod bounded_ingress_tests {
         sources: Arc<AtomicUsize>,
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for DropProbe {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for Server {
         fn drop(&mut self) {
             self.task.abort();

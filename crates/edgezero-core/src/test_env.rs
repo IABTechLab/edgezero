@@ -56,7 +56,10 @@ impl EnvOverride {
     /// Removes `key` until the guard is dropped.
     #[inline]
     #[must_use]
-    pub fn remove<K: AsRef<OsStr>>(key: K) -> Self {
+    pub fn remove<K>(key: K) -> Self
+    where
+        K: AsRef<OsStr>,
+    {
         let owned = key.as_ref().to_owned();
         let original = env::var_os(&owned);
         // SAFETY: the caller holds the env lock for this guard's lifetime, so no
@@ -71,7 +74,11 @@ impl EnvOverride {
     /// Sets `key` to `value` until the guard is dropped.
     #[inline]
     #[must_use]
-    pub fn set<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) -> Self {
+    pub fn set<K, V>(key: K, value: V) -> Self
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
         let owned = key.as_ref().to_owned();
         let original = env::var_os(&owned);
         // SAFETY: as above — the caller holds the env lock.
@@ -83,6 +90,10 @@ impl EnvOverride {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for EnvOverride {
     #[inline]
     fn drop(&mut self) {

@@ -163,6 +163,10 @@ mod platform {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for FastlyPrepared {
         fn drop(&mut self) {
             if self.body != INVALID_BODY_HANDLE {
@@ -178,6 +182,10 @@ mod platform {
 
     pub(super) struct FastlyBodySink(FastlyBodyHandle);
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for FastlyBodySink {
         fn drop(&mut self) {
             if self.0 != INVALID_BODY_HANDLE {
@@ -1151,6 +1159,10 @@ mod tests {
     #[test]
     fn head_suppression_releases_source_without_polling() {
         struct DropSignal(Rc<Cell<usize>>);
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 self.0.set(self.0.get() + 1);

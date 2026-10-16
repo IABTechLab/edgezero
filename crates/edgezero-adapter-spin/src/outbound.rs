@@ -1526,6 +1526,10 @@ mod exchange_tests {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl<Output> Drop for ScriptedFuture<Output> {
         fn drop(&mut self) {
             self.drops.set(self.drops.get().saturating_add(1));
@@ -1617,6 +1621,10 @@ mod exchange_tests {
 
         struct DropSignal(Rc<Cell<u32>>);
 
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 self.0.set(self.0.get().saturating_add(1));

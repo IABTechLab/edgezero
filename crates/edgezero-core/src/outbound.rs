@@ -1063,7 +1063,10 @@ impl OutboundRequest {
     /// # Errors
     /// Returns [`EdgeError::Internal`] when serialization fails.
     #[inline]
-    pub fn json<T: Serialize>(mut self, value: &T) -> Result<Self, EdgeError> {
+    pub fn json<T>(mut self, value: &T) -> Result<Self, EdgeError>
+    where
+        T: Serialize,
+    {
         self.body = Body::json(value).map_err(EdgeError::internal)?;
         if !self.headers.contains_key(CONTENT_TYPE) {
             self.headers
@@ -1965,6 +1968,10 @@ mod tests {
 
     struct BodyDropSignal(Rc<Cell<usize>>);
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for BodyDropSignal {
         fn drop(&mut self) {
             self.0.set(self.0.get().saturating_add(1));
@@ -2690,6 +2697,10 @@ mod tests {
     fn terminal_stream_error_releases_source_before_yield() {
         struct DropSignal(Rc<Cell<usize>>);
 
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 self.0.set(self.0.get().saturating_add(1));
@@ -3033,6 +3044,10 @@ mod tests {
     #[test]
     fn batch_cancel_releases_pending_finalization_after_every_slot_resolves() {
         struct DropProbe(Rc<Cell<usize>>);
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropProbe {
             fn drop(&mut self) {
                 self.0.set(self.0.get() + 1);

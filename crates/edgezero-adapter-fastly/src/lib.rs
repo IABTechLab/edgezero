@@ -100,12 +100,18 @@ impl From<ResolvedLoggingConfig> for FastlyLogging {
 }
 
 #[cfg(feature = "fastly")]
-fn build_app_for_dispatch<A: Hooks>() -> Result<App, fastly::Error> {
+fn build_app_for_dispatch<A>() -> Result<App, fastly::Error>
+where
+    A: Hooks,
+{
     build_target_app::<A>().context("application configuration failed")
 }
 
 #[cfg(any(feature = "fastly", test))]
-fn build_target_app<A: Hooks>() -> Result<App, EdgeError> {
+fn build_target_app<A>() -> Result<App, EdgeError>
+where
+    A: Hooks,
+{
     App::build::<A>(FASTLY_PLATFORM)
 }
 
@@ -113,7 +119,10 @@ fn build_target_app<A: Hooks>() -> Result<App, EdgeError> {
 #[cfg(all(feature = "test-utils", feature = "fastly"))]
 #[doc(hidden)]
 #[inline]
-pub fn build_app_for_test<A: Hooks>() -> Result<App, fastly::Error> {
+pub fn build_app_for_test<A>() -> Result<App, fastly::Error>
+where
+    A: Hooks,
+{
     build_app_for_dispatch::<A>()
 }
 
@@ -159,7 +168,10 @@ pub fn init_logger(
 /// Logger setup failures and unavailable required stores return errors.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app<A: Hooks>() -> Result<(), fastly::Error> {
+pub fn run_app<A>() -> Result<(), fastly::Error>
+where
+    A: Hooks,
+{
     run_app_with_hooks::<A, _, _, ()>(|_req, _extensions| {}, |_response| ()).map(|_state| ())
 }
 
@@ -201,7 +213,10 @@ where
 #[cfg(feature = "fastly")]
 #[must_use = "inspect the summary or handle its terminal error with into_result()"]
 #[inline]
-pub fn serve_app<A: Hooks>(serve: Serve) -> ServeSummary<fastly::Error> {
+pub fn serve_app<A>(serve: Serve) -> ServeSummary<fastly::Error>
+where
+    A: Hooks,
+{
     serve_app_with_hooks::<A, _, _, _>(serve, |_request, _extensions| {}, |_response| ())
 }
 
@@ -260,10 +275,13 @@ where
 /// Returns an error if logger setup fails or the underlying handler returns an error.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app_with_config<A: Hooks>(
+pub fn run_app_with_config<A>(
     logging: &FastlyLogging,
     config_store_name: Option<&str>,
-) -> Result<(), fastly::Error> {
+) -> Result<(), fastly::Error>
+where
+    A: Hooks,
+{
     init_fastly_abi();
     if logging.use_fastly_logger && !A::owns_logging() {
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");

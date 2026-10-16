@@ -862,6 +862,10 @@ mod tests {
         Write,
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for MockIo {
         fn drop(&mut self) {
             let drops = self.0.borrow().drops;
@@ -1318,6 +1322,10 @@ mod tests {
     #[test]
     fn suppressed_application_source_is_dropped_without_polling() {
         struct DropSignal(Rc<Cell<usize>>);
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 self.0.set(self.0.get() + 1);

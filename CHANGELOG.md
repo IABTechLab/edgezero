@@ -11,6 +11,12 @@ separately from the portable API and must be considered when declaring required 
 
 ### Main Integration
 
+- Merge main's Rust 1.98.1 toolchain and dependency upgrades without restoring
+  retired outbound or lifecycle APIs. Keep audited decoder and SDK requirements
+  exact across the workspace, demo and generated applications. Adapt SHA-256
+  digest formatting without reintroducing full canonical-output staging.
+- Validate shared scaffold, demo and fixture dependency requirements with TOML
+  parsing, including exact SDK pins; regenerate all three workspace lockfiles.
 - Retain the fallible application assembly, pinned runtime targets and adapter-owned
   ingress/egress while integrating immutable release deployment from main. Deployment
   capability checks run before preflight or provider work; fallback dispatch retains

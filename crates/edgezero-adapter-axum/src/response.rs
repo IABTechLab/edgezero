@@ -427,6 +427,10 @@ impl AxumEgressBody {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for AxumEgressBody {
     fn drop(&mut self) {
         if self.active.is_none() {
@@ -1040,6 +1044,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn declared_stream_is_incremental_and_releases_staged_data_on_failure() {
         struct DropProbe(Arc<AtomicUsize>);
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropProbe {
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);

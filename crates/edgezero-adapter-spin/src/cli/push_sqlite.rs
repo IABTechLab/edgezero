@@ -49,8 +49,23 @@ use rusqlite::{Connection, params};
 /// Major version range of `spin` CLI / runtime we've verified the
 /// `spin_key_value` schema against. Spin's `crates/key-value-spin`
 /// has used this schema since at least Spin 2.x; we last verified
-/// against Spin 4.1.0 on 2026-09-13. An operator running a Spin CLI
-/// outside this range gets a `log::warn!` on first SQLite-direct push.
+/// against Spin 3.x (CLI 3.6.3, factor-key-value 3.x on
+/// spinframework/spin main, 2026-06-04) and re-checked against the
+/// v4.1.0 tag on 2026-09-13, where the statement is byte-identical.
+///
+/// When a major-version bump touches the schema, expect the
+/// verification to be repeated and this constant updated. Until then,
+/// an operator running a Spin CLI outside this range gets a
+/// `log::warn!` on first SQLite-direct push.
+///
+/// This is deliberately wider than the Spin 4.1 floor that
+/// `.tool-versions`, the adapter guide and `spin_version_guard.sh`
+/// state. Those describe what it takes to *run* a spin-sdk 7
+/// component; this describes which runtimes' on-disk KV schema we
+/// have compared ours against. `config push --adapter spin --local`
+/// only writes that file, so it stays correct on Spin 2.x/3.x even
+/// though such a runtime could never boot the component. Narrowing
+/// this to `&[4]` would warn operators whose push is fine.
 const VERIFIED_SPIN_MAJOR_RANGE: &[u32] = &[2, 3, 4];
 
 /// EXACT `CREATE TABLE IF NOT EXISTS spin_key_value (…)` statement
@@ -242,8 +257,11 @@ pub(crate) fn write_batch(
     })?;
 
     {
+        // rusqlite 0.40 dropped `prepare_cached` from `Transaction`;
+        // `prepare` still prepares once and reuses the statement across
+        // the batch below, which is all the cache bought here.
         let mut statement = transaction
-            .prepare_cached(SPIN_KV_SET)
+            .prepare(SPIN_KV_SET)
             .map_err(|err| format!("failed to prepare INSERT in `{}`: {err}", db_path.display()))?;
 
         for (key, value) in entries {
@@ -504,6 +522,16 @@ mod tests {
     fn verified_runtime_range_includes_spin_four_only_through_current_major() {
         assert!(VERIFIED_SPIN_MAJOR_RANGE.contains(&4));
         assert!(!VERIFIED_SPIN_MAJOR_RANGE.contains(&5));
+    }
+
+    #[test]
+    fn parse_spin_major_version_reads_the_supported_four_line() {
+        // Real output from `spin --version` on the 4.1.0 release, the
+        // floor spin-sdk 7 requires.
+        assert_eq!(
+            parse_spin_major_version("spin 4.1.0 (c0b3726 2026-08-25)\n"),
+            Some(4)
+        );
     }
 
     #[test]

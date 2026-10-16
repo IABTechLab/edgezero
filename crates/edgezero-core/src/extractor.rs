@@ -1026,7 +1026,10 @@ struct JsonStructureSeed<'budget> {
 impl<'de> DeserializeSeed<'de> for JsonStructureSeed<'_> {
     type Value = ();
 
-    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
         if self.depth > self.budget.max_depth || self.budget.nodes >= self.budget.max_nodes {
             self.budget.exceeded = true;
             return Err(de::Error::custom("config JSON structure limit exceeded"));
@@ -1055,19 +1058,31 @@ impl<'de> Visitor<'de> for JsonStructureVisitor<'_> {
         formatter.write_str("a JSON value")
     }
 
-    fn visit_bool<E: de::Error>(self, _value: bool) -> Result<(), E> {
+    fn visit_bool<E>(self, _value: bool) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 
-    fn visit_f64<E: de::Error>(self, _value: f64) -> Result<(), E> {
+    fn visit_f64<E>(self, _value: f64) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 
-    fn visit_i64<E: de::Error>(self, _value: i64) -> Result<(), E> {
+    fn visit_i64<E>(self, _value: i64) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: MapAccess<'de>,
+    {
         while map.next_key::<IgnoredAny>()?.is_some() {
             map.next_value_seed(JsonStructureSeed {
                 budget: self.budget,
@@ -1077,11 +1092,17 @@ impl<'de> Visitor<'de> for JsonStructureVisitor<'_> {
         Ok(())
     }
 
-    fn visit_none<E: de::Error>(self) -> Result<(), E> {
+    fn visit_none<E>(self) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+    fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
         while seq
             .next_element_seed(JsonStructureSeed {
                 budget: self.budget,
@@ -1092,19 +1113,31 @@ impl<'de> Visitor<'de> for JsonStructureVisitor<'_> {
         Ok(())
     }
 
-    fn visit_str<E: de::Error>(self, _value: &str) -> Result<(), E> {
+    fn visit_str<E>(self, _value: &str) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 
-    fn visit_string<E: de::Error>(self, _value: String) -> Result<(), E> {
+    fn visit_string<E>(self, _value: String) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 
-    fn visit_u64<E: de::Error>(self, _value: u64) -> Result<(), E> {
+    fn visit_u64<E>(self, _value: u64) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 
-    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
+    fn visit_unit<E>(self) -> Result<(), E>
+    where
+        E: de::Error,
+    {
         Ok(())
     }
 }
@@ -2724,10 +2757,10 @@ mod tests {
     // -- AppConfig<C> extractor tests ----------------------------------------
 
     // Build a RequestContext with a ConfigRegistry wired to `store`.
-    fn ctx_with_config_store<S: ConfigStore + 'static>(
-        store: S,
-        default_key: &str,
-    ) -> RequestContext {
+    fn ctx_with_config_store<S>(store: S, default_key: &str) -> RequestContext
+    where
+        S: ConfigStore + 'static,
+    {
         let binding = ConfigStoreBinding {
             handle: ConfigStoreHandle::new(Arc::new(store)),
             default_key: default_key.to_owned(),
@@ -2743,12 +2776,16 @@ mod tests {
     }
 
     // Build a RequestContext with a ConfigRegistry AND a SecretRegistry.
-    fn ctx_with_config_and_secrets<CS: ConfigStore + 'static, SS: SecretStore + 'static>(
+    fn ctx_with_config_and_secrets<CS, SS>(
         config_store: CS,
         default_key: &str,
         secret_store: SS,
         secret_store_name: &str,
-    ) -> RequestContext {
+    ) -> RequestContext
+    where
+        CS: ConfigStore + 'static,
+        SS: SecretStore + 'static,
+    {
         let binding = ConfigStoreBinding {
             handle: ConfigStoreHandle::new(Arc::new(config_store)),
             default_key: default_key.to_owned(),

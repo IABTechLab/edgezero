@@ -51,7 +51,10 @@ impl RouteId {
         &self.method
     }
 
-    fn new<S: Into<String>>(method: Method, pattern: S) -> Self {
+    fn new<S>(method: Method, pattern: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self {
             method,
             pattern: pattern.into(),
@@ -93,7 +96,10 @@ impl RouteMetadata {
     }
 
     #[inline]
-    pub fn new<S: Into<String>>(method: Method, pattern: S) -> Self {
+    pub fn new<S>(method: Method, pattern: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self {
             class: None,
             id: RouteId::new(method, pattern),
@@ -320,7 +326,10 @@ impl RouterBuilder {
 
     #[must_use]
     #[inline]
-    pub fn with_manifest_json<S: Into<Arc<str>>>(mut self, json: S) -> Self {
+    pub fn with_manifest_json<S>(mut self, json: S) -> Self
+    where
+        S: Into<Arc<str>>,
+    {
         self.manifest_json = Some(json.into());
         self
     }

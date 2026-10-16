@@ -132,6 +132,7 @@ function audit(workspace) {
 auditWorkflowFetchOrder()
 audit('.')
 audit('examples/app-demo')
+audit('tests/fixtures/reusable-app')
 
 if (process.exitCode === undefined) {
   process.stdout.write('flate dependency contract: ok\n')

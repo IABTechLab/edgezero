@@ -550,6 +550,10 @@ mod platform {
         writer: Option<web_sys::WritableStreamDefaultWriter>,
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for WorkersEgressIo {
         fn drop(&mut self) {
             self.abort();

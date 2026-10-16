@@ -1,6 +1,6 @@
-fastly 15.1.0
-nodejs 24.12.0
-rust 1.95.0
+fastly 16.0.0
+nodejs 24.20.0
+rust 1.98.1
 spin 4.1.0
 viceroy 0.21.0
 wasmtime 48.0.2

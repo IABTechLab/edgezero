@@ -37,6 +37,10 @@ pub(super) struct KvBinding {
     store: WorkerKvStore,
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for Acquisition {
     fn drop(&mut self) {
         let acquired = {
@@ -50,6 +54,10 @@ impl Drop for Acquisition {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for ConfigReader<'_> {
     fn drop(&mut self) {
         if !self.completed {

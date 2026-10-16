@@ -194,7 +194,10 @@ pub enum EdgeError {
 
 impl EdgeError {
     #[inline]
-    pub fn bad_gateway<S: Into<String>>(message: S) -> Self {
+    pub fn bad_gateway<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::BadGateway {
             message: message.into(),
             reason: BadGatewayReason::Unspecified,
@@ -202,7 +205,10 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn bad_gateway_with_reason<S: Into<String>>(message: S, reason: BadGatewayReason) -> Self {
+    pub fn bad_gateway_with_reason<S>(message: S, reason: BadGatewayReason) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::BadGateway {
             message: message.into(),
             reason,
@@ -210,7 +216,10 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn bad_request<S: Into<String>>(message: S) -> Self {
+    pub fn bad_request<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::BadRequest {
             message: message.into(),
         }
@@ -222,10 +231,11 @@ impl EdgeError {
     /// `String::new()` when no specific field is anchored.
     #[must_use]
     #[inline]
-    pub fn config_out_of_date<Msg: Into<String>, Path: Into<String>>(
-        message: Msg,
-        field_path: Path,
-    ) -> Self {
+    pub fn config_out_of_date<Msg, Path>(message: Msg, field_path: Path) -> Self
+    where
+        Msg: Into<String>,
+        Path: Into<String>,
+    {
         Self::ConfigOutOfDate {
             message: message.into(),
             field_path: field_path.into(),
@@ -233,7 +243,10 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn gateway_timeout<S: Into<String>>(message: S) -> Self {
+    pub fn gateway_timeout<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::GatewayTimeout {
             message: message.into(),
             cause: BudgetSource::Unspecified,
@@ -241,7 +254,10 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn gateway_timeout_caused<S: Into<String>>(message: S, cause: BudgetSource) -> Self {
+    pub fn gateway_timeout_caused<S>(message: S, cause: BudgetSource) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::GatewayTimeout {
             message: message.into(),
             cause,
@@ -349,26 +365,38 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn not_found<S: Into<String>>(path: S) -> Self {
+    pub fn not_found<S>(path: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::NotFound { path: path.into() }
     }
 
     #[inline]
-    pub fn not_implemented<S: Into<String>>(message: S) -> Self {
+    pub fn not_implemented<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::NotImplemented {
             message: message.into(),
         }
     }
 
     #[inline]
-    pub fn request_header_fields_too_large<S: Into<String>>(message: S) -> Self {
+    pub fn request_header_fields_too_large<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::RequestHeaderFieldsTooLarge {
             message: message.into(),
         }
     }
 
     #[inline]
-    pub fn request_timeout<S: Into<String>>(message: S) -> Self {
+    pub fn request_timeout<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::RequestTimeout {
             message: message.into(),
         }
@@ -388,7 +416,10 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn response_too_large<S: Into<String>>(message: S) -> Self {
+    pub fn response_too_large<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::ResponseTooLarge {
             message: message.into(),
             reason: ResponseLimitReason::Unspecified,
@@ -396,10 +427,10 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn response_too_large_with_reason<S: Into<String>>(
-        message: S,
-        reason: ResponseLimitReason,
-    ) -> Self {
+    pub fn response_too_large_with_reason<S>(message: S, reason: ResponseLimitReason) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::ResponseTooLarge {
             message: message.into(),
             reason,
@@ -407,7 +438,10 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn service_unavailable<S: Into<String>>(message: S) -> Self {
+    pub fn service_unavailable<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::ServiceUnavailable {
             message: message.into(),
         }
@@ -461,11 +495,14 @@ impl EdgeError {
 
     #[must_use]
     #[inline]
-    pub fn store_extraction<Msg: Into<String>>(
+    pub fn store_extraction<Msg>(
         reason: StoreExtractionReason,
         message: Msg,
         field_path: Option<String>,
-    ) -> Self {
+    ) -> Self
+    where
+        Msg: Into<String>,
+    {
         Self::StoreExtraction {
             reason,
             message: message.into(),
@@ -496,14 +533,20 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn uri_too_long<S: Into<String>>(message: S) -> Self {
+    pub fn uri_too_long<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::UriTooLong {
             message: message.into(),
         }
     }
 
     #[inline]
-    pub fn validation<S: Into<String>>(message: S) -> Self {
+    pub fn validation<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         EdgeError::Validation {
             message: message.into(),
         }
@@ -672,7 +715,10 @@ fn redact_serde_path(path: &serde_path_to_error::Path) -> String {
     out
 }
 
-fn json_or_text<T: Serialize>(payload: &T) -> Body {
+fn json_or_text<T>(payload: &T) -> Body
+where
+    T: Serialize,
+{
     Body::json(payload).unwrap_or_else(|_| Body::text("internal error"))
 }
 

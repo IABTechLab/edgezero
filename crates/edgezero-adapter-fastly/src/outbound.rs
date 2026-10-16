@@ -232,6 +232,10 @@ mod fastly_impl {
     }
 
     #[cfg(feature = "test-utils")]
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for DispatchSlackInjection {
         fn drop(&mut self) {
             DISPATCH_SLACK_INJECTION.set(self.previous);
@@ -1356,7 +1360,7 @@ mod fastly_impl {
     mod tests {
         use std::cell::Cell;
         use std::collections::VecDeque;
-        use std::io::{Error, Write as _};
+        use std::io::Error;
         use std::mem::discriminant;
         use std::num::NonZeroU64;
         use std::sync::{Arc, Mutex};

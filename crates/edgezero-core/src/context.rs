@@ -41,7 +41,10 @@ pub struct RuntimeVariables(BTreeMap<String, String>);
 impl RuntimeVariables {
     #[must_use]
     #[inline]
-    pub fn from_vars<I: IntoIterator<Item = (String, String)>>(vars: I) -> Self {
+    pub fn from_vars<I>(vars: I) -> Self
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
         Self(vars.into_iter().collect())
     }
 
@@ -182,6 +185,10 @@ impl DrainGuard<'_> {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for DrainGuard<'_> {
     fn drop(&mut self) {
         if self.armed

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use edgezero_core::ResponseEgressDeadline;
 use edgezero_core::action;
 use edgezero_core::body::Body;
 use edgezero_core::context::RequestContext;
@@ -16,10 +17,9 @@ use edgezero_core::outbound::{
     OutboundBatchTermination, OutboundCachePolicy, OutboundRequest, OutboundSlotResult,
 };
 use edgezero_core::response::Text;
-use edgezero_core::ResponseEgressDeadline;
-use futures::{stream, StreamExt as _};
+use futures::{StreamExt as _, stream};
 
-use crate::{config::AppDemoConfig, AdmissionLease};
+use crate::{AdmissionLease, config::AppDemoConfig};
 
 const ALLOWED_CONFIG_KEYS: &[&str] = &["greeting", "feature.new_checkout", "service.timeout_ms"];
 const DEFAULT_PROXY_BASE: &str = "https://httpbin.org";
@@ -297,11 +297,11 @@ fn build_proxy_target(base: &str, rest: &str, original_uri: &Uri) -> Result<Uri,
         target.push_str(trimmed_rest);
     }
 
-    if let Some(query) = original_uri.query() {
-        if !query.is_empty() {
-            target.push('?');
-            target.push_str(query);
-        }
+    if let Some(query) = original_uri.query()
+        && !query.is_empty()
+    {
+        target.push('?');
+        target.push_str(query);
     }
 
     target
@@ -480,7 +480,7 @@ pub async fn secrets_echo(
         _ => {
             return Err(EdgeError::bad_request(
                 "only smoke-test secret names are allowed",
-            ))
+            ));
         }
     }
 
@@ -514,12 +514,12 @@ mod tests {
     use edgezero_core::blob_envelope::BlobEnvelope;
     use edgezero_core::body::Body;
     use edgezero_core::config_store::{
-        finish_bounded_config_read, BoundedStoreRead, ConfigStore, ConfigStoreError,
-        ConfigStoreHandle,
+        BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
+        finish_bounded_config_read,
     };
     use edgezero_core::context::RequestContext;
     use edgezero_core::http::header::{HeaderName, HeaderValue};
-    use edgezero_core::http::{request_builder, HeaderMap, Method, StatusCode, Uri};
+    use edgezero_core::http::{HeaderMap, Method, StatusCode, Uri, request_builder};
     use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
     use edgezero_core::outbound::{
         HttpClient, OutboundBatch, OutboundBatchItem, OutboundHttpClient, OutboundRequestParts,
@@ -649,10 +649,12 @@ mod tests {
         async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
             let parts = request.into_parts();
             assert_eq!(parts.method, Method::POST);
-            assert!(parts
-                .uri
-                .path_and_query()
-                .is_some_and(|value| value.as_str() == "/status/201?source=demo"));
+            assert!(
+                parts
+                    .uri
+                    .path_and_query()
+                    .is_some_and(|value| value.as_str() == "/status/201?source=demo")
+            );
             assert!(parts.deadline.is_none());
             assert_outbound_policy(&parts);
             response_for(parts, self.clock.clone())
@@ -854,9 +856,10 @@ mod tests {
         assert_eq!(routes_resp.status(), StatusCode::OK);
         let routes_body: serde_json::Value = routes_resp.into_body().to_json().unwrap();
         let arr = routes_body.as_array().expect("routes array");
-        assert!(arr
-            .iter()
-            .any(|entry| entry["method"] == "GET" && entry["path"] == "/"));
+        assert!(
+            arr.iter()
+                .any(|entry| entry["method"] == "GET" && entry["path"] == "/")
+        );
 
         // /config: seed a default config store with a valid envelope so a wired
         // route returns 200 (a routing miss would be 404, proving nothing).
@@ -1342,10 +1345,12 @@ mod tests {
         let response = block_on(fanout(ctx)).expect("fanout response");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/json");
-        assert!(response
-            .extensions()
-            .get::<ResponseEgressDeadline>()
-            .is_some());
+        assert!(
+            response
+                .extensions()
+                .get::<ResponseEgressDeadline>()
+                .is_some()
+        );
         assert!(
             !String::from_utf8_lossy(response.body().as_bytes().expect("buffered"))
                 .contains("token@example.invalid")

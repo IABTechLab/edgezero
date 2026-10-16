@@ -210,7 +210,10 @@ impl<'app> CloudflareService<'app> {
     /// Only an unconfigured service has no config-store handle.
     #[must_use]
     #[inline]
-    pub fn with_config<S: Into<String>>(mut self, binding: S) -> Self {
+    pub fn with_config<S>(mut self, binding: S) -> Self
+    where
+        S: Into<String>,
+    {
         self.config = ConfigSource::Binding(binding.into());
         self
     }
@@ -231,7 +234,10 @@ impl<'app> CloudflareService<'app> {
     /// the manifest declares `[stores.kv]`.
     #[must_use]
     #[inline]
-    pub fn with_kv<S: Into<String>>(mut self, binding: S) -> Self {
+    pub fn with_kv<S>(mut self, binding: S) -> Self
+    where
+        S: Into<String>,
+    {
         self.kv = Some(KvSource {
             binding: binding.into(),
             required: false,
@@ -268,6 +274,10 @@ pub(crate) struct RegistryInputs<'env> {
 struct DropSignal(Arc<AtomicUsize>);
 
 #[cfg(feature = "test-utils")]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for DropSignal {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);

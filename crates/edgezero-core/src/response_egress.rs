@@ -410,6 +410,10 @@ impl<T> ResponseEgressResourceOwner<T> {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl<T> Drop for ResponseEgressResourceOwner<T> {
     fn drop(&mut self) {
         let Some(state) = self.state.take() else {
@@ -951,6 +955,10 @@ impl ResponseEgressAttempt {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for ResponseEgressAttempt {
     #[inline]
     fn drop(&mut self) {
@@ -1043,6 +1051,10 @@ mod tests {
 
     struct CompletionDropProbe(Arc<Mutex<usize>>);
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for CompletionDropProbe {
         fn drop(&mut self) {
             let mut drops = self.0.lock().expect("completion drops lock");
@@ -1052,6 +1064,10 @@ mod tests {
 
     struct ResourceDropProbe(Arc<AtomicUsize>);
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for ResourceDropProbe {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -1234,8 +1250,16 @@ mod tests {
 
     #[test]
     fn late_bound_resource_is_send_and_sync_for_send_not_sync_values() {
-        fn assert_error<T: Error>() {}
-        fn assert_send_sync<T: Send + Sync>() {}
+        fn assert_error<T>()
+        where
+            T: Error,
+        {
+        }
+        fn assert_send_sync<T>()
+        where
+            T: Send + Sync,
+        {
+        }
 
         assert_error::<ResponseEgressResourceInstallError>();
         assert_send_sync::<ResponseEgressResource<Cell<u8>>>();
@@ -1978,6 +2002,10 @@ mod tests {
 
         struct DropSignal(Rc<Cell<usize>>);
 
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 self.0.set(self.0.get() + 1);

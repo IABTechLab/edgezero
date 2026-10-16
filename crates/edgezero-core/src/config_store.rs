@@ -47,7 +47,10 @@ macro_rules! config_store_contract_tests {
             use super::*;
             use $crate::config_store::ConfigStore;
 
-            fn run<Fut: ::std::future::Future>(future: Fut) -> Fut::Output {
+            fn run<Fut>(future: Fut) -> Fut::Output
+            where
+                Fut: ::std::future::Future,
+            {
                 ::futures::executor::block_on(future)
             }
 
@@ -269,7 +272,10 @@ impl ConfigStoreError {
 
     /// Create an error for malformed or backend-invalid keys.
     #[inline]
-    pub fn invalid_key<S: Into<String>>(message: S) -> Self {
+    pub fn invalid_key<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::InvalidKey {
             message: message.into(),
         }
@@ -277,7 +283,10 @@ impl ConfigStoreError {
 
     /// Create an error for temporarily unavailable backends.
     #[inline]
-    pub fn unavailable<S: Into<String>>(message: S) -> Self {
+    pub fn unavailable<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::Unavailable {
             message: message.into(),
         }
@@ -356,7 +365,10 @@ impl From<String> for ConfigValue {
 
 impl serde::Serialize for ConfigValue {
     #[inline]
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(self.as_str())
     }
 }
@@ -571,13 +583,16 @@ impl ConfigStore for FailedOpenConfigStore {
 /// Conversion must preserve the UTF-8 bytes exposed by `AsRef<str>`; `String`
 /// becomes shared only after the caps pass. Conversion overlap is adapter-accounted.
 #[inline]
-pub fn finish_bounded_config_read<T: AsRef<str> + Into<ConfigValue>>(
+pub fn finish_bounded_config_read<T>(
     result: Result<Option<T>, ConfigStoreError>,
     clock: &MonotonicClock,
     deadline: Deadline,
     max_backend_bytes: u64,
     max_value_bytes: u64,
-) -> Result<BoundedStoreRead<crate::ConfigValue>, ConfigStoreError> {
+) -> Result<BoundedStoreRead<crate::ConfigValue>, ConfigStoreError>
+where
+    T: AsRef<str> + Into<ConfigValue>,
+{
     if deadline.is_expired_at(clock.now()) {
         return Err(ConfigStoreError::DeadlineExceeded);
     }

@@ -1701,7 +1701,7 @@ cache_key_for() {
     RUNNER_OS=Linux RUNNER_ARCH=X64 \
     EDGEZERO__ACTION__ROOT="$REPO_ROOT" \
     EDGEZERO__PROJECT__WORKING_DIRECTORY="${CK_WORKDIR:-app}" \
-    EDGEZERO__PROJECT__RUST_TOOLCHAIN="${CK_TOOLCHAIN:-1.95.0}" \
+    EDGEZERO__PROJECT__RUST_TOOLCHAIN="${CK_TOOLCHAIN:-1.98.1}" \
     EDGEZERO__PROJECT__TARGET="${CK_TARGET:-wasm32-wasip1}" \
     EDGEZERO__APP__CLI__VERSION="${CK_CLI_VERSION:-1.0.0}" \
     EDGEZERO__BUILD__CACHE="${CK_CACHE:-false}" \
@@ -1885,7 +1885,7 @@ run_resolve_in() {
     RUNNER_OS=Linux RUNNER_ARCH=X64 \
     EDGEZERO__ACTION__ROOT="$REPO_ROOT" \
     EDGEZERO__PROJECT__WORKING_DIRECTORY=app \
-    EDGEZERO__PROJECT__RUST_TOOLCHAIN=1.95.0 \
+    EDGEZERO__PROJECT__RUST_TOOLCHAIN=1.98.1 \
     EDGEZERO__PROJECT__TARGET=wasm32-wasip1 \
     EDGEZERO__PROJECT__MANIFEST="${BND_MANIFEST:-}" \
     bash "$CORE_SCRIPTS/resolve-project.sh"
@@ -2772,8 +2772,8 @@ test_fastly_logical_link_documentation() {
     grep -Fq -- '--service-id "$FASTLY_SERVICE_ID"' "$fastly_deployment"
   assert_fails "Fastly managed deployment does not recommend direct provider deployment" \
     grep -Fq 'fastly compute deploy' "$fastly_deployment"
-  assert_succeeds "bare Fastly deploy is explicitly store-free production compatibility" \
-    grep -Fq 'store-free production compatibility' "$fastly_deployment_flat"
+  assert_succeeds "bare Fastly deploy is explicitly limited to store-free production" \
+    grep -Fq 'supports store-free production deployments using a manifest command' "$fastly_deployment_flat"
 
   # shellcheck disable=SC2016 # GitHub expression is the literal documentation contract.
   assert_fails "lifecycle examples do not reference a cross-job archive path output" \

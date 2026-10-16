@@ -512,7 +512,10 @@ pub fn run_demo() -> Result<(), String> {
 }
 
 #[cfg(any(test, feature = "demo-example"))]
-fn demo_capability_gate<Application: Hooks>() -> Result<(), String> {
+fn demo_capability_gate<Application>() -> Result<(), String>
+where
+    Application: Hooks,
+{
     adapter::ensure_capabilities("axum", Application::manifest().as_contract())
 }
 

@@ -63,7 +63,10 @@ pub const CLOUDFLARE_PLATFORM: edgezero_core::PlatformMetadata =
     );
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-fn build_app_for_dispatch<A: Hooks>() -> Result<App, WorkerError> {
+fn build_app_for_dispatch<A>() -> Result<App, WorkerError>
+where
+    A: Hooks,
+{
     build_target_app::<A>().map_err(|error| {
         log::error!(target: edgezero_core::BOOT_LOG_TARGET, "application configuration failed: {}", error.kind());
         WorkerError::RustError("application configuration failed".to_owned())
@@ -71,7 +74,10 @@ fn build_app_for_dispatch<A: Hooks>() -> Result<App, WorkerError> {
 }
 
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
-fn build_target_app<A: Hooks>() -> Result<App, EdgeError> {
+fn build_target_app<A>() -> Result<App, EdgeError>
+where
+    A: Hooks,
+{
     App::build::<A>(CLOUDFLARE_PLATFORM)
 }
 
@@ -79,7 +85,10 @@ fn build_target_app<A: Hooks>() -> Result<App, EdgeError> {
 #[cfg(all(feature = "test-utils", feature = "cloudflare", target_arch = "wasm32"))]
 #[doc(hidden)]
 #[inline]
-pub fn build_app_for_test<A: Hooks>() -> Result<App, WorkerError> {
+pub fn build_app_for_test<A>() -> Result<App, WorkerError>
+where
+    A: Hooks,
+{
     build_app_for_dispatch::<A>()
 }
 
@@ -162,11 +171,10 @@ fn collect_worker_variables(
 /// store binding cannot be opened.
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[inline]
-pub async fn run_app<A: Hooks>(
-    req: Request,
-    env: Env,
-    ctx: Context,
-) -> Result<Response, WorkerError> {
+pub async fn run_app<A>(req: Request, env: Env, ctx: Context) -> Result<Response, WorkerError>
+where
+    A: Hooks,
+{
     if !A::owns_logging() {
         drop(init_logger());
     }
@@ -184,12 +192,15 @@ pub async fn run_app<A: Hooks>(
 /// Returns category-safe configuration, admission-abort, or adapter delivery errors.
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[inline]
-pub async fn dispatch_app<A: Hooks>(
+pub async fn dispatch_app<A>(
     app: &App,
     req: Request,
     env: Env,
     ctx: Context,
-) -> Result<Response, WorkerError> {
+) -> Result<Response, WorkerError>
+where
+    A: Hooks,
+{
     let stores = A::stores();
     let env_config = env_config_from_worker(&env, stores);
     let runtime_variables = match A::manifest() {

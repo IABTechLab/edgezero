@@ -246,7 +246,7 @@ pub fn generate_new(args: &NewArgs) -> Result<(), GeneratorError> {
 
 fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     let mut deps = BTreeMap::new();
-    deps.insert("bytes".to_owned(), "bytes = \"1\"".to_owned());
+    deps.insert("bytes".to_owned(), "bytes = \"=1.12.1\"".to_owned());
     deps.insert("anyhow".to_owned(), "anyhow = \"1\"".to_owned());
     deps.insert(
         "futures".to_owned(),
@@ -269,10 +269,10 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     );
     deps.insert(
         "worker".to_owned(),
-        "worker = { version = \"0.8.5\", default-features = false, features = [\"http\"] }"
+        "worker = { version = \"=0.8.5\", default-features = false, features = [\"http\"] }"
             .to_owned(),
     );
-    deps.insert("fastly".to_owned(), "fastly = \"0.13\"".to_owned());
+    deps.insert("fastly".to_owned(), "fastly = \"=0.13.1\"".to_owned());
     deps.insert("once_cell".to_owned(), "once_cell = \"1\"".to_owned());
     deps.insert(
         "tokio".to_owned(),
@@ -281,7 +281,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     deps.insert("tracing".to_owned(), "tracing = \"0.1\"".to_owned());
     deps.insert(
         "spin-sdk".to_owned(),
-        "spin-sdk = { version = \"7\", default-features = false }".to_owned(),
+        "spin-sdk = { version = \"=7.0.0\", default-features = false }".to_owned(),
     );
     // Core depends on `validator` for `#[derive(Validate)]` on the
     // generated `<Name>Config` struct. Pinned to the same
@@ -289,7 +289,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     // the generated core crate resolves cleanly.
     deps.insert(
         "validator".to_owned(),
-        "validator = { version = \"0.20\", features = [\"derive\"] }".to_owned(),
+        "validator = { version = \"0.21\", features = [\"derive\"] }".to_owned(),
     );
     deps
 }
@@ -617,16 +617,16 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
     let has = |id: &str| adapter_ids.iter().any(|adapter| adapter == id);
     let mut lines: Vec<String> = Vec::new();
     if has("cloudflare") {
-        lines.push("nodejs 24.12.0".to_owned());
+        lines.push("nodejs 24.20.0".to_owned());
     }
     if has("fastly") {
-        lines.push("fastly 15.1.0".to_owned());
+        lines.push("fastly 16.0.0".to_owned());
         lines.push("viceroy 0.21.0".to_owned());
     }
     if has("spin") {
         lines.push("spin 4.1.0".to_owned());
     }
-    lines.push("rust 1.95.0".to_owned());
+    lines.push("rust 1.98.1".to_owned());
     // Sort + dedup so the file is stable regardless of adapter
     // declaration order (and asdf doesn't care).
     lines.sort();
@@ -832,6 +832,151 @@ mod tests {
 
     // ---------- build_tool_versions ----------
 
+    fn dependency_requirement<'manifest>(
+        dependencies: &'manifest toml::Value,
+        name: &str,
+    ) -> Option<&'manifest str> {
+        let dependency = dependencies.get(name)?;
+        dependency
+            .as_str()
+            .or_else(|| dependency.get("version")?.as_str())
+    }
+
+    fn workspace_dependencies(manifest: &str) -> toml::Value {
+        let parsed: toml::Value = toml::from_str(manifest).expect("valid Cargo manifest");
+        parsed["workspace"]["dependencies"].clone()
+    }
+
+    #[test]
+    fn seeded_dependencies_track_the_edgezero_workspace() {
+        let root = workspace_dependencies(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Cargo.toml"
+        )));
+        for name in [
+            "bytes",
+            "validator",
+            "axum",
+            "fastly",
+            "worker",
+            "simple_logger",
+            "spin-sdk",
+        ] {
+            let seeds = seed_workspace_dependencies();
+            let seed: toml::Value = toml::from_str(&seeds[name]).expect("valid dependency seed");
+            let want = dependency_requirement(&root, name).expect("root dependency version");
+            assert_eq!(
+                dependency_requirement(&seed, name),
+                Some(want),
+                "{name} seed drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn independent_dependencies_track_the_edgezero_workspace() {
+        let root = workspace_dependencies(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Cargo.toml"
+        )));
+        for (manifest, needs_validator) in [
+            (
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../examples/app-demo/Cargo.toml"
+                )),
+                true,
+            ),
+            (
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tests/fixtures/reusable-app/Cargo.toml"
+                )),
+                false,
+            ),
+        ] {
+            let dependencies = workspace_dependencies(manifest);
+            for name in ["validator", "fastly", "worker", "spin-sdk"] {
+                if name == "validator" && !needs_validator {
+                    continue; // The reusable fixture does not derive app configuration.
+                }
+                assert_eq!(
+                    dependency_requirement(&dependencies, name),
+                    dependency_requirement(&root, name),
+                    "{name} differs in an independent workspace"
+                );
+            }
+        }
+        let smoke = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/actions/deploy-fastly/tests/make-smoke-fixture.sh"
+        ));
+        let marker = "cat >crates/fixture-app-cli/Cargo.toml <<'TOML'\n";
+        let manifest = smoke
+            .split_once(marker)
+            .expect("fixture manifest heredoc")
+            .1
+            .split_once("\nTOML")
+            .expect("fixture manifest end")
+            .0;
+        let parsed: toml::Value = toml::from_str(manifest).expect("valid fixture Cargo manifest");
+        assert_eq!(
+            dependency_requirement(&parsed["dependencies"], "validator"),
+            dependency_requirement(&root, "validator"),
+            "deploy fixture validator differs"
+        );
+        let spin: toml::Value = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/reusable-app/crates/fixture-spin/Cargo.toml"
+        )))
+        .expect("valid fixture member manifest");
+        assert_eq!(
+            spin["dependencies"]["spin-sdk"]["workspace"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn dependency_requirement_preserves_exact_pins_and_table_order() {
+        let parsed: toml::Value = toml::from_str(
+            r#"
+# validator = "wrong"
+validator = { features = ["derive"], version = "0.21" } # 99.0
+spin-sdk = "=7.0.0"
+unpinned = { path = "somewhere" }
+"#,
+        )
+        .expect("valid dependency fixture");
+        assert_eq!(dependency_requirement(&parsed, "validator"), Some("0.21"));
+        assert_eq!(dependency_requirement(&parsed, "spin-sdk"), Some("=7.0.0"));
+        assert_ne!(dependency_requirement(&parsed, "spin-sdk"), Some("7"));
+        assert_eq!(dependency_requirement(&parsed, "unpinned"), None);
+        assert_eq!(dependency_requirement(&parsed, "absent"), None);
+    }
+
+    #[test]
+    fn build_tool_versions_pins_track_repo_tool_versions() {
+        // Every version `build_tool_versions` emits is hardcoded above, and a
+        // scaffolded app is expected to build and deploy on the same tools this
+        // repo uses. Without this check they drift silently: the repo bumps
+        // `.tool-versions` and newly generated apps keep pinning superseded
+        // releases. Checks the adapter-gated pins too, so a bump to any of them
+        // has to touch both files.
+        let repo_tool_versions =
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.tool-versions"));
+        let got = build_tool_versions(&["cloudflare".to_owned(), "fastly".to_owned()]);
+        for tool in ["rust", "nodejs", "fastly", "viceroy"] {
+            let want = repo_tool_versions
+                .lines()
+                .find(|line| line.starts_with(&format!("{tool} ")))
+                .unwrap_or_else(|| panic!("repo .tool-versions must pin {tool}"));
+            assert!(
+                got.contains(want),
+                "scaffold pins a different {tool} than the repo: scaffold={got:?} repo={want:?}"
+            );
+        }
+    }
+
     #[test]
     fn build_tool_versions_pins_rust_only_with_no_adapters() {
         // The scaffolder always picks at least axum in practice,
@@ -839,7 +984,7 @@ mod tests {
         // produces a stable file containing exactly the
         // rust-toolchain pin and a trailing newline.
         let out = build_tool_versions(&[]);
-        assert_eq!(out, "rust 1.95.0\n");
+        assert_eq!(out, "rust 1.98.1\n");
     }
 
     #[test]
@@ -848,8 +993,8 @@ mod tests {
         // version we tested wrangler against (the same nodejs the
         // repo's own `.tool-versions` pins).
         let out = build_tool_versions(&["cloudflare".to_owned()]);
-        assert!(out.contains("nodejs 24.12.0"), "must pin nodejs: {out}");
-        assert!(out.contains("rust 1.95.0"), "always pin rust: {out}");
+        assert!(out.contains("nodejs 24.20.0"), "must pin nodejs: {out}");
+        assert!(out.contains("rust 1.98.1"), "always pin rust: {out}");
         assert!(
             !out.contains("fastly"),
             "no fastly pin without fastly adapter: {out}"
@@ -865,9 +1010,9 @@ mod tests {
         // project doesn't end up with a fastly-CLI install
         // requirement.
         let out = build_tool_versions(&["fastly".to_owned()]);
-        assert!(out.contains("fastly 15.1.0"), "must pin fastly: {out}");
+        assert!(out.contains("fastly 16.0.0"), "must pin fastly: {out}");
         assert!(out.contains("viceroy 0.21.0"), "must pin viceroy: {out}");
-        assert!(out.contains("rust 1.95.0"));
+        assert!(out.contains("rust 1.98.1"));
         assert!(
             !out.contains("nodejs"),
             "no nodejs pin without cloudflare adapter: {out}"
@@ -880,13 +1025,13 @@ mod tests {
         // needed — same as the "no adapters" shape but exercised
         // through the realistic axum-only case.
         let out = build_tool_versions(&["axum".to_owned()]);
-        assert_eq!(out, "rust 1.95.0\n");
+        assert_eq!(out, "rust 1.98.1\n");
     }
 
     #[test]
     fn build_tool_versions_pins_spin_runtime() {
         let out = build_tool_versions(&["spin".to_owned()]);
-        assert!(out.contains("rust 1.95.0"));
+        assert!(out.contains("rust 1.98.1"));
         assert!(
             out.contains("spin 4.1.0"),
             "must pin the verified Spin runtime: {out}"
@@ -909,11 +1054,11 @@ mod tests {
         let out = build_tool_versions(&adapters);
         // Each pin appears exactly once.
         for pin in [
-            "nodejs 24.12.0",
-            "fastly 15.1.0",
+            "nodejs 24.20.0",
+            "fastly 16.0.0",
             "spin 4.1.0",
             "viceroy 0.21.0",
-            "rust 1.95.0",
+            "rust 1.98.1",
         ] {
             assert_eq!(
                 out.matches(pin).count(),
@@ -1314,18 +1459,18 @@ mod tests {
 
     fn assert_scaffold_sdk_dependencies(cargo_toml: &str) {
         assert!(
-            cargo_toml.contains("fastly = \"0.13\""),
+            cargo_toml.contains("fastly = \"=0.13.1\""),
             "generated Fastly adapter must use the current SDK release line"
         );
         assert!(
             cargo_toml.contains(concat!(
-                "worker = { version = \"0.8.5\", default-features = false, ",
+                "worker = { version = \"=0.8.5\", default-features = false, ",
                 "features = [\"http\"] }",
             )),
             "generated Cloudflare adapter must use the current SDK release"
         );
         assert!(
-            cargo_toml.contains("spin-sdk = { version = \"7\", default-features = false }"),
+            cargo_toml.contains("spin-sdk = { version = \"=7.0.0\", default-features = false }"),
             "generated Spin adapter must use the current SDK major"
         );
     }

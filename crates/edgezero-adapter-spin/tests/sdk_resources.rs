@@ -21,7 +21,11 @@ mod tests {
     };
     use spin_sdk::wasip3::http_compat::BodyWriter;
 
-    fn assert_outbound_client<Client: OutboundHttpClient>() {}
+    fn assert_outbound_client<Client>()
+    where
+        Client: OutboundHttpClient,
+    {
+    }
 
     #[test]
     fn spin_outbound_client_implements_portable_contract() {

@@ -66,6 +66,7 @@ impl SpinConfigStore {
         not(all(feature = "spin", target_arch = "wasm32")),
         expect(
             clippy::unused_async,
+            clippy::unused_async_trait_impl,
             reason = "native fixture is synchronous; the production SDK read is asynchronous"
         )
     )]
@@ -258,6 +259,10 @@ mod tests {
 
     struct DropProbe(Arc<AtomicUsize>);
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for DropProbe {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);

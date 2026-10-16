@@ -75,6 +75,10 @@ pub(crate) struct Stores {
 struct DropSignal(Arc<AtomicUsize>);
 
 #[cfg(feature = "test-utils")]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for DropSignal {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);

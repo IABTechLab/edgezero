@@ -15,6 +15,7 @@
 //! - UTF-8 bytes of the resulting string feed into `Sha256`; hex
 //!   output is lowercase, no `0x` prefix.
 
+use base16ct::lower::encode_string;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use std::fmt::{self, Write};
@@ -56,7 +57,7 @@ pub fn canonical_data_sha256(data: &Value) -> String {
     test_hooks::CALL_COUNT.with(|cell| cell.set(cell.get().saturating_add(1)));
     let mut sink = CanonicalHasher(Sha256::new());
     write_canonical(&mut sink, data);
-    format!("{:x}", sink.0.finalize())
+    encode_string(&sink.0.finalize())
 }
 
 #[cfg(test)]
@@ -174,7 +175,7 @@ mod tests {
         let wire = serde_json::to_vec(&value).expect("canonical single-key fixture");
         assert_eq!(
             canonical_data_sha256(&value),
-            format!("{:x}", Sha256::digest(&wire))
+            encode_string(&Sha256::digest(&wire))
         );
     }
 

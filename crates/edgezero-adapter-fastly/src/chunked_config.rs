@@ -19,6 +19,7 @@
 //! }
 //! ```
 
+use base16ct::lower::encode_string;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 use sha2::{Digest as _, Sha256};
@@ -202,14 +203,17 @@ pub(crate) enum GcRootValue {
 // ---------------------------------------------------------------------------
 
 impl<'de> serde::Deserialize<'de> for RootMetadata<'de> {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         deserializer.deserialize_map(MetadataVisitor)
     }
 
-    fn deserialize_in_place<D: serde::Deserializer<'de>>(
-        deserializer: D,
-        place: &mut Self,
-    ) -> Result<(), D::Error> {
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         *place = Self::deserialize(deserializer)?;
         Ok(())
     }
@@ -226,7 +230,10 @@ impl<'de> Visitor<'de> for MetadataVisitor {
         formatter.write_str("a config metadata object")
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
         let mut metadata = RootMetadata::default();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -342,7 +349,7 @@ where
 
 /// Compute the lowercase-hex SHA-256 of `bytes`.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    encode_string(&Sha256::digest(bytes))
 }
 
 /// Prepare the physical Config Store entries for a single logical
@@ -1502,7 +1509,7 @@ fn chunk_key_parts(root_key: &str, key: &str) -> Option<(String, usize)> {
     let (sha, index) = rest.rsplit_once('.')?;
     // Canonical shape ONLY — this gates a destructive delete, so it must match
     // exactly what `prepare_fastly_config_entries` emits and nothing else:
-    // - a 64-char LOWERCASE hex SHA-256 (`format!("{:x}", Sha256::digest(..))`),
+    // - a 64-char LOWERCASE hex SHA-256 (`base16ct::lower::encode_string(&Sha256::digest(..))`),
     // - a canonical decimal index (no leading zeros; `usize` `Display`).
     // Anything else (short/uppercase hash, `00`, `007`) is foreign or
     // hand-edited and must never become a delete candidate.

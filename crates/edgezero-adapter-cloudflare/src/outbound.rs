@@ -186,6 +186,10 @@ mod worker_impl {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for HostEventYield {
         fn drop(&mut self) {
             if self.awoken.get() {
@@ -343,6 +347,10 @@ mod worker_impl {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for AbortGuard {
         fn drop(&mut self) {
             if let Some(controller) = self.controller.take() {
@@ -999,6 +1007,10 @@ mod worker_impl {
             }
         }
 
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for NumericTimeoutGuard {
             fn drop(&mut self) {
                 drop(Reflect::set(

@@ -241,7 +241,11 @@ mod tests {
 
     #[test]
     fn deadline_is_copy() {
-        fn assert_copy<T: Copy>() {}
+        fn assert_copy<T>()
+        where
+            T: Copy,
+        {
+        }
         assert_copy::<Deadline>();
     }
 

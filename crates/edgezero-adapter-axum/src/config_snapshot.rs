@@ -166,7 +166,10 @@ impl Snapshot {
 
 impl<'de> DeserializeSeed<'de> for SnapshotSeed<'_> {
     type Value = ();
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         deserializer.deserialize_map(self)
     }
 }
@@ -180,7 +183,10 @@ impl<'de> Visitor<'de> for SnapshotSeed<'_> {
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a flat string map")
     }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: MapAccess<'de>,
+    {
         while let Some(key) = map.next_key_seed(StringSeed {
             max_bytes: self.limits.max_key_bytes(),
             failure: self.failure,
@@ -207,7 +213,10 @@ impl<'de> Visitor<'de> for SnapshotSeed<'_> {
 
 impl<'de> DeserializeSeed<'de> for StringSeed<'_> {
     type Value = String;
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<String, D::Error> {
+    fn deserialize<D>(self, deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         deserializer.deserialize_str(self)
     }
 }
@@ -221,7 +230,10 @@ impl Visitor<'_> for StringSeed<'_> {
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a bounded UTF-8 string")
     }
-    fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+    fn visit_str<E>(self, v: &str) -> Result<String, E>
+    where
+        E: de::Error,
+    {
         if v.len() > self.max_bytes {
             *self.failure = Some(ConfigStoreError::ValueTooLarge);
             return Err(E::custom("snapshot string limit"));

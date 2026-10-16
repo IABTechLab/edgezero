@@ -40,6 +40,7 @@ async-compression = { version = "=0.4.43", default-features = false, features = 
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", default-features = true }
+base16ct = { version = "1", features = ["alloc"] }
 brotli = "=8.0.4"
 brotli-decompressor = "=5.0.1"
 bytes = "=1.12.1"
@@ -74,7 +75,11 @@ miniz_oxide = { version = "=0.8.9", default-features = false, features = ["simd"
 log-fastly = "=0.13.1"
 matchit = "0.9"
 once_cell = "1"
-redb = "4.1.0"
+# 4.2 asserts that no read reference outlives its transaction. That check
+# is what caught the `AccessGuard` bug in the axum KV store, so the
+# floor stays at 4.2 rather than 4.1 -- resolving an older patch would
+# silently drop the guard against reintroducing it.
+redb = "4.2.0"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "blocking", "json"] }
 simd-adler32 = { version = "=0.3.9", default-features = false }
 # `bundled` ships SQLite source so operators don't need a system
@@ -82,14 +87,14 @@ simd-adler32 = { version = "=0.3.9", default-features = false }
 # `config push --adapter spin` writer to write into Spin's local KV
 # file (`<spin.toml dir>/.spin/sqlite_key_value.db`) using the schema
 # vendored from spinframework/spin's `crates/key-value-spin/src/store.rs`.
-rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 ryu = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "=1.0.150"
 serde_path_to_error = "0.1"
 serde_urlencoded = "0.7"
-sha2 = "0.10"
-similar = "2"
+sha2 = "0.11"
+similar = "3"
 simple_logger = "5"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
@@ -109,7 +114,7 @@ tower-layer = "0.3"
 tower-service = "0.3"
 tracing = "0.1"
 url = "=2.5.8"
-validator = { version = "0.20", features = ["derive"] }
+validator = { version = "0.21", features = ["derive"] }
 walkdir = { version = "2" }
 web-time = "1"
 worker = { version = "=0.8.5", default-features = false, features = ["http"] }
@@ -135,7 +140,7 @@ single_call_fn = "allow"
 separated_literal_suffix = "allow"
 # `pub_with_shorthand` flags the shorthand `pub(crate)` form and wants the
 # longhand `pub(in crate)` form. Verified by removing this allow on
-# clippy 1.95: 6 errors of the form
+# clippy 1.98: 44 errors of the form
 #
 #   error: usage of `pub` without `in`
 #     |  pub(crate) fn decompress_body(...)
@@ -145,9 +150,9 @@ separated_literal_suffix = "allow"
 # So the lint flags `pub(crate)` and suggests `pub(in crate)`. We use
 # `pub(crate)` because rustfmt unconditionally rewrites `pub(in crate)`
 # → `pub(crate)` on save; no spelling satisfies both clippy and rustfmt.
-# Six legitimate cross-file `pub(crate)` items currently fire:
-# dispatch_raw, dispatch_with_store_names, parse_uri, parse_client_addr,
-# decompress_body, and one extra in fastly/request.rs.
+# 44 legitimate cross-file `pub(crate)` items currently fire, spread
+# across core and the adapter crates (dispatch_raw, parse_uri,
+# decompress_body, and the rest).
 pub_with_shorthand = "allow"
 # `module_name_repetitions` was attempted: 39 sites in edgezero-core,
 # centred on three concrete blockers that surfaced during the API review:
@@ -167,6 +172,13 @@ pub_with_shorthand = "allow"
 # real, but it conflicts with our flat re-export surface and several
 # names cannot be deprefixed without losing meaning.
 module_name_repetitions = "allow"
+
+# `inline_modules` (new in clippy 1.98) flags every `#[cfg(test)] mod tests
+# { .. }` block -- 77 of them workspace-wide. CLAUDE.md mandates the
+# opposite ("Colocate tests with implementation modules"), and splitting
+# each into a sibling `tests.rs` would separate every test from the code
+# it covers for no readability gain. Colocation wins.
+inline_modules = "allow"
 
 # `pattern_type_mismatch` and `ref_patterns` are mutually exclusive in modern
 # Rust — every `if let Some(x) = &foo` flags the first, every

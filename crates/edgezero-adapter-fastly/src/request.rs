@@ -297,7 +297,10 @@ impl<'app> FastlyService<'app> {
     /// the logical resource-link alias and uses its deterministic target key.
     #[must_use]
     #[inline]
-    pub fn with_config<S: Into<String>>(mut self, name: S) -> Self {
+    pub fn with_config<S>(mut self, name: S) -> Self
+    where
+        S: Into<String>,
+    {
         self.config = ConfigSource::Name(name.into());
         self
     }
@@ -322,7 +325,10 @@ impl<'app> FastlyService<'app> {
     /// fail loudly.
     #[must_use]
     #[inline]
-    pub fn with_kv<S: Into<String>>(mut self, name: S) -> Self {
+    pub fn with_kv<S>(mut self, name: S) -> Self
+    where
+        S: Into<String>,
+    {
         self.kv = Some(KvSource {
             name: name.into(),
             required: false,

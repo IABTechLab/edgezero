@@ -333,6 +333,10 @@ mod tests {
 
     struct DropSignal(Rc<Cell<usize>>);
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for DropSignal {
         fn drop(&mut self) {
             self.0.set(self.0.get().saturating_add(1));
@@ -503,6 +507,10 @@ mod tests {
     fn head_suppression_releases_stream_without_polling_and_preserves_length() {
         struct DropSignal(Rc<Cell<usize>>);
 
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 self.0.set(self.0.get() + 1);

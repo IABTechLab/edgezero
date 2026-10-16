@@ -19,10 +19,10 @@ use edgezero_core::app::App as EdgeZeroApp;
 use edgezero_core::http::StatusCode;
 use edgezero_core::{
     AdmissionDecision, BufferedIngressResponse, ConfigExtractionLimits,
-    DetachedResponseEgressDecision, EdgeError, IngressGrant, MemoryCeiling, MemoryCeilingScope,
-    MemoryEnvelope, MemoryEnvelopeValidation, MemoryEnvelopeValidationError, MemoryResource,
-    PlatformMetadata, ResponseEgressCompletion, ResponseEgressResource,
-    ResponseEgressResourceInstallError, RouteResolution, DEFAULT_RESPONSE_WRITE_BUDGET,
+    DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision, EdgeError, IngressGrant,
+    MemoryCeiling, MemoryCeilingScope, MemoryEnvelope, MemoryEnvelopeValidation,
+    MemoryEnvelopeValidationError, MemoryResource, PlatformMetadata, ResponseEgressCompletion,
+    ResponseEgressResource, ResponseEgressResourceInstallError, RouteResolution,
 };
 
 const DEFAULT_INGRESS_READ_BUDGET: Duration = Duration::from_secs(30);
@@ -135,6 +135,10 @@ impl ResponsePermit {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for ResponsePermit {
     fn drop(&mut self) {
         drop(self.route_class.take());
@@ -302,15 +306,15 @@ edgezero_core::app!(
 #[cfg(test)]
 mod lifecycle_tests {
     use std::num::NonZeroU32;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use bytes::Bytes;
     use edgezero_core::app::App as EdgeZeroApp;
     use edgezero_core::body::Body;
     use edgezero_core::error::EdgeError;
-    use edgezero_core::http::{request_builder, HeaderMap, Method, Response, StatusCode, Version};
+    use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, Version, request_builder};
     use edgezero_core::ingress::{
         AdmissionDecision, IngressBeginOutcome, IngressDispatchOutcome, IngressGrant,
         IngressHeadParts,

@@ -4,7 +4,11 @@ mod secret_store_compile_check {
     use edgezero_adapter_fastly::secret_store::FastlySecretStore;
     use edgezero_core::secret_store::SecretStore;
 
-    fn assert_provider_impl<T: SecretStore>() {}
+    fn assert_provider_impl<T>()
+    where
+        T: SecretStore,
+    {
+    }
 
     // Anonymous const whose initializer is a never-called fn pointer; the
     // type bound is checked at type-check time.
@@ -451,6 +455,10 @@ mod tests {
 
         struct DropSignal(Arc<AtomicUsize>);
 
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);

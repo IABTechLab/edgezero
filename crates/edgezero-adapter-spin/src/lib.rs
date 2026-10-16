@@ -100,14 +100,18 @@ impl AppExt for App {
 }
 
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
-fn build_app_for_dispatch<A: Hooks>(
-    platform: edgezero_core::PlatformMetadata,
-) -> anyhow::Result<App> {
+fn build_app_for_dispatch<A>(platform: edgezero_core::PlatformMetadata) -> anyhow::Result<App>
+where
+    A: Hooks,
+{
     build_target_app::<A>(platform).context("application configuration failed")
 }
 
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
-fn build_target_app<A: Hooks>(platform: edgezero_core::PlatformMetadata) -> Result<App, EdgeError> {
+fn build_target_app<A>(platform: edgezero_core::PlatformMetadata) -> Result<App, EdgeError>
+where
+    A: Hooks,
+{
     App::build::<A>(platform)
 }
 
@@ -115,7 +119,10 @@ fn build_target_app<A: Hooks>(platform: edgezero_core::PlatformMetadata) -> Resu
 #[cfg(all(feature = "test-utils", feature = "spin", target_arch = "wasm32"))]
 #[doc(hidden)]
 #[inline]
-pub fn build_app_for_test<A: Hooks>() -> anyhow::Result<App> {
+pub fn build_app_for_test<A>() -> anyhow::Result<App>
+where
+    A: Hooks,
+{
     build_app_for_dispatch::<A>(SPIN_PLATFORM)
 }
 
@@ -162,7 +169,10 @@ pub fn init_logger() -> Result<(), log::SetLoggerError> {
 /// router, store binding, or response translation errors propagate here.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[inline]
-pub async fn run_app<A: Hooks>(req: SpinRequest) -> anyhow::Result<SpinResponse> {
+pub async fn run_app<A>(req: SpinRequest) -> anyhow::Result<SpinResponse>
+where
+    A: Hooks,
+{
     run_app_with_platform::<A>(req, SPIN_PLATFORM).await
 }
 
@@ -176,10 +186,13 @@ pub async fn run_app<A: Hooks>(req: SpinRequest) -> anyhow::Result<SpinResponse>
 /// routing, store binding, or response translation fails.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[inline]
-pub async fn run_app_with_platform<A: Hooks>(
+pub async fn run_app_with_platform<A>(
     req: SpinRequest,
     platform: edgezero_core::PlatformMetadata,
-) -> anyhow::Result<SpinResponse> {
+) -> anyhow::Result<SpinResponse>
+where
+    A: Hooks,
+{
     if !A::owns_logging() {
         drop(init_logger());
     }
@@ -199,7 +212,10 @@ pub async fn run_app_with_platform<A: Hooks>(
 /// Returns configuration, admission-abort, or adapter delivery errors.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[inline]
-pub async fn dispatch_app<A: Hooks>(app: &App, req: SpinRequest) -> anyhow::Result<SpinResponse> {
+pub async fn dispatch_app<A>(app: &App, req: SpinRequest) -> anyhow::Result<SpinResponse>
+where
+    A: Hooks,
+{
     let stores = A::stores();
     let env = EnvConfig::from_env();
     request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)
