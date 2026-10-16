@@ -1,6 +1,6 @@
 # Native celld store providers
 
-Status: implementation started. The first scoped listener runs inside celld itself, with no separately operated gateway or sidecar. Native local KV, authenticated TLS and expiry proofs have executed. EdgeZero provider integration and deployment/fleet acceptance remain unfinished. See the [implementation plan](../plans/2026-10-15-native-celld-store-providers.md) for evidence and remaining gates.
+Status: embedded celld and the EdgeZero provider are implemented, including independent config/KV features, native composition and structural-only CLI support. Local provider, startup, verified TLS, generated-consumer and disposable isolation checks have executed. Release, deployment, stress and fleet acceptance remain unfinished. See the [implementation plan](../plans/2026-10-15-native-celld-store-providers.md) for current evidence and remaining gates.
 
 Initial celld implementation checkpoint: `f72ae21a515859570622ac9d6ca9c19cf6870b81` on `feat/scoped-store-api`. This is not a released capability or fleet acceptance claim.
 

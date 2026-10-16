@@ -987,12 +987,10 @@ async fn build_production_stores(
     let mut kv = BTreeMap::new();
     let mut secrets = BTreeMap::new();
     let mut resident = 0_usize;
-    let mut aws = sources.session()?;
+    let mut sessions = sources.sessions()?;
     for (id, source) in sources.config {
         let binding = match source {
-            NativeStoreSource::BuiltIn(builtin) => {
-                native_stores::prepare_aws_config(builtin, &mut aws, id).await?
-            }
+            NativeStoreSource::BuiltIn(builtin) => sessions.prepare_config(builtin, id).await?,
             local @ (NativeStoreSource::Local
             | NativeStoreSource::Ready(_)
             | NativeStoreSource::Prepare(_)) => {
@@ -1053,9 +1051,7 @@ async fn build_production_stores(
     }
     for (id, source) in sources.kv {
         let handle = match source {
-            NativeStoreSource::BuiltIn(builtin) => {
-                native_stores::prepare_aws_kv(builtin, &mut aws, id).await?
-            }
+            NativeStoreSource::BuiltIn(builtin) => sessions.prepare_kv(builtin, id).await?,
             local @ (NativeStoreSource::Local
             | NativeStoreSource::Ready(_)
             | NativeStoreSource::Prepare(_)) => {
@@ -1081,9 +1077,7 @@ async fn build_production_stores(
     let environment_secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));
     for (id, source) in sources.secrets {
         let binding = match source {
-            NativeStoreSource::BuiltIn(builtin) => {
-                native_stores::prepare_aws_secrets(builtin, &mut aws, id).await?
-            }
+            NativeStoreSource::BuiltIn(builtin) => sessions.prepare_secrets(builtin, id).await?,
             local @ (NativeStoreSource::Local
             | NativeStoreSource::Ready(_)
             | NativeStoreSource::Prepare(_)) => {

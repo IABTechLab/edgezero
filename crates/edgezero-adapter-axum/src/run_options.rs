@@ -10,10 +10,12 @@ use edgezero_core::addr;
 use edgezero_core::app::StoresMetadata;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_store_aws::settings::{AgentAccessToken, AwsPreparationLimits};
+use edgezero_store_celld::settings::{CelldAccessToken, CelldPreparationLimits};
 use log::LevelFilter;
 
 use crate::native_bindings::{
-    NativeBindingsLimits, NativeConfigBinding, NativeStoreBindings, NativeStoreBindingsInput,
+    NativeBindingsLimits, NativeConfigBinding, NativeKvBinding, NativePreparationPolicySources,
+    NativeStoreBindings, NativeStoreBindingsInput,
 };
 
 /// Validated explicit production hosting options. Construction never selects a
@@ -26,6 +28,7 @@ pub struct AxumRunOptions {
     bindings: NativeStoreBindingsInput,
     bindings_limits: NativeBindingsLimits,
     bootstrap_values: BTreeMap<String, BootstrapValue>,
+    celld_limits: Option<CelldPreparationLimits>,
     config_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     env: EnvConfig,
@@ -61,26 +64,38 @@ impl AxumRunOptions {
         self.aws_limits
     }
 
+    pub(crate) fn celld_limits(&self) -> Option<CelldPreparationLimits> {
+        self.celld_limits
+    }
+
+    pub(crate) fn preparation_policies(&self) -> NativePreparationPolicySources {
+        NativePreparationPolicySources {
+            aws: self.aws_limits(),
+            celld: self.celld_limits(),
+        }
+    }
+
+    pub(crate) fn celld_token(&self, name: &str) -> anyhow::Result<CelldAccessToken> {
+        CelldAccessToken::new(self.token_value(name, "celld token")?)
+            .map_err(|_category| failure("settings", "celld token", "invalid configured value"))
+    }
+
     pub(crate) fn agent_token(&self, name: &str) -> anyhow::Result<AgentAccessToken> {
+        AgentAccessToken::new(self.token_value(name, "Agent token")?)
+            .map_err(|_category| failure("settings", "Agent token", "invalid configured value"))
+    }
+
+    fn token_value(&self, name: &str, subject: &str) -> anyhow::Result<String> {
         let value = match self.bootstrap_values.get(name) {
             Some(BootstrapValue::Value(value)) => value.clone(),
             Some(BootstrapValue::Ambiguous) => {
-                return Err(failure(
-                    "settings",
-                    "Agent token",
-                    "duplicate configured value",
-                ));
+                return Err(failure("settings", subject, "duplicate configured value"));
             }
             None => {
-                return Err(failure(
-                    "settings",
-                    "Agent token",
-                    "configured value absent",
-                ));
+                return Err(failure("settings", subject, "configured value absent"));
             }
         };
-        AgentAccessToken::new(value)
-            .map_err(|_category| failure("settings", "Agent token", "invalid configured value"))
+        Ok(value)
     }
 
     pub(crate) fn config_dir(&self) -> Option<&Path> {
@@ -136,29 +151,52 @@ impl AxumRunOptions {
     where
         Lookup: FnMut(&str) -> Option<OsString>,
     {
-        let names: BTreeSet<String> = self
-            .bindings
-            .document()
-            .into_iter()
-            .flat_map(|document| document.config().values())
-            .filter_map(|binding| {
-                let NativeConfigBinding::AppConfigAgent(settings) = binding;
-                settings.access_token_env.clone()
-            })
-            .collect();
-        for name in names {
+        // Capture shared names once; validate them against every selected token type.
+        let mut names = BTreeMap::<String, (bool, bool)>::new();
+        if let Some(document) = self.bindings.document() {
+            for binding in document.config().values() {
+                match binding {
+                    NativeConfigBinding::AppConfigAgent(settings) => {
+                        if let Some(name) = &settings.access_token_env {
+                            names.entry(name.clone()).or_default().0 = true;
+                        }
+                    }
+                    NativeConfigBinding::Celld(settings) => {
+                        if let Some(name) = settings.access.token_env() {
+                            names.entry(name.to_owned()).or_default().1 = true;
+                        }
+                    }
+                }
+            }
+            for binding in document.kv().values() {
+                if let NativeKvBinding::Celld(settings) = binding
+                    && let Some(name) = settings.access.token_env()
+                {
+                    names.entry(name.to_owned()).or_default().1 = true;
+                }
+            }
+        }
+        for (name, (aws, celld)) in names {
+            let subject = if celld { "celld token" } else { "Agent token" };
             let value = lookup(&name)
                 .and_then(|value| value.into_string().ok())
                 .ok_or_else(|| {
                     failure(
                         "settings",
-                        "Agent token",
+                        subject,
                         "configured value absent or non-Unicode",
                     )
                 })?;
-            AgentAccessToken::new(value.clone()).map_err(|_category| {
-                failure("settings", "Agent token", "invalid configured value")
-            })?;
+            if aws {
+                AgentAccessToken::new(value.clone()).map_err(|_category| {
+                    failure("settings", "Agent token", "invalid configured value")
+                })?;
+            }
+            if celld {
+                CelldAccessToken::new(value.clone()).map_err(|_category| {
+                    failure("settings", "celld token", "invalid configured value")
+                })?;
+            }
             self.bootstrap_values
                 .insert(name, BootstrapValue::Value(value));
         }
@@ -259,6 +297,7 @@ impl AxumRunOptions {
             bindings_limits: NativeBindingsLimits::default(),
             aws_limits: None,
             bootstrap_values: BTreeMap::new(),
+            celld_limits: None,
             addr,
             config_dir: None,
             data_dir: None,
@@ -341,7 +380,7 @@ impl AxumRunOptions {
             return Err(failure("settings", "bindings", "duplicate selection"));
         }
         bindings
-            .validate(self.bindings_limits, self.aws_limits)
+            .validate_with_policies(self.bindings_limits, self.preparation_policies())
             .map_err(|category| failure("settings", "bindings", &category.to_string()))?;
         self.bindings = NativeStoreBindingsInput::Inline(bindings);
         Ok(self)
@@ -360,12 +399,12 @@ impl AxumRunOptions {
             return Err(failure("settings", "bindings", "duplicate selection"));
         }
         let path = locator.into();
-        let bindings =
-            NativeStoreBindings::read_with_policy(&path, self.bindings_limits, self.aws_limits)
-                .map_err(|category| failure("settings", "bindings", &category.to_string()))?;
-        bindings
-            .validate(self.bindings_limits, self.aws_limits)
-            .map_err(|category| failure("settings", "bindings", &category.to_string()))?;
+        let bindings = NativeStoreBindings::read_with_policies(
+            &path,
+            self.bindings_limits,
+            self.preparation_policies(),
+        )
+        .map_err(|category| failure("settings", "bindings", &category.to_string()))?;
         self.bindings = NativeStoreBindingsInput::File { path, bindings };
         Ok(self)
     }
@@ -433,10 +472,46 @@ impl AxumRunOptions {
             .map_err(|category| failure("settings", "AWS limits", &category.to_string()))?;
         if let Some(document) = self.bindings.document() {
             document
-                .validate(self.bindings_limits, Some(limits))
+                .validate_with_policies(
+                    self.bindings_limits,
+                    NativePreparationPolicySources {
+                        aws: Some(limits),
+                        celld: self.celld_limits,
+                    },
+                )
                 .map_err(|category| failure("settings", "AWS limits", &category.to_string()))?;
         }
         self.aws_limits = Some(limits);
+        Ok(self)
+    }
+
+    /// Selects a celld policy independently of any AWS policy.
+    ///
+    /// # Errors
+    /// Rejects duplicate policies, same-provider document conflicts and invalid limits.
+    #[inline]
+    pub fn with_celld_preparation_limits(
+        mut self,
+        limits: CelldPreparationLimits,
+    ) -> anyhow::Result<Self> {
+        if self.celld_limits.is_some() {
+            return Err(failure("settings", "celld limits", "duplicate policy"));
+        }
+        limits
+            .validate()
+            .map_err(|category| failure("settings", "celld limits", &category.to_string()))?;
+        if let Some(document) = self.bindings.document() {
+            document
+                .validate_with_policies(
+                    self.bindings_limits,
+                    NativePreparationPolicySources {
+                        aws: self.aws_limits,
+                        celld: Some(limits),
+                    },
+                )
+                .map_err(|category| failure("settings", "celld limits", &category.to_string()))?;
+        }
+        self.celld_limits = Some(limits);
         Ok(self)
     }
 
@@ -568,8 +643,217 @@ mod tests {
 
     const BINDINGS: &str = "version = 1\n[config.app]\nprovider = 'aws-appconfig-agent'\ndefault_key = 'settings'\nendpoint = 'http://127.0.0.1:2772'\naccess_token_env = 'AGENT_TOKEN'\n[config.app.documents.settings]\napplication = 'example'\nenvironment = 'production'\nprofile = 'envelope'\n";
 
+    const CELLD: &str = "version=1\n[config.remote]\nprovider='celld-config'\nendpoint='https://unreachable.invalid'\ndefault_key='settings'\n[config.remote.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n[config.remote.documents.settings]\nstore='config-fixture'\nkey='settings'\n[kv.state]\nprovider='celld-kv'\nendpoint='https://unreachable.invalid'\nstore='state-fixture'\n[kv.state.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n";
+    const CELL_TOKEN: &str = "celld-bootstrap-value-01234567890123456789";
+
     fn explicit() -> AxumRunOptions {
         AxumRunOptions::new(SocketAddr::from(([127, 0, 0, 1], 1234))).expect("explicit options")
+    }
+
+    #[test]
+    fn celld_capture_unions_config_and_kv_names_and_validates_shared_aws_use() {
+        for (input, expected) in [
+            (CELLD.to_owned(), 1),
+            (
+                CELLD.replace(
+                    "[kv.state.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'",
+                    "[kv.state.access]\nmode='authenticated'\ntoken_env='OTHER_TOKEN'",
+                ),
+                2,
+            ),
+            (
+                format!(
+                    "{BINDINGS}{}",
+                    CELLD
+                        .replace("version=1\n", "")
+                        .replace("CELL_TOKEN", "AGENT_TOKEN")
+                ),
+                1,
+            ),
+        ] {
+            let document = NativeStoreBindings::parse(&input, NativeBindingsLimits::default())
+                .expect("bindings");
+            let mut options = explicit().with_store_bindings(document).expect("inline");
+            let mut calls = 0_usize;
+            options
+                .capture_agent_tokens(|_name| {
+                    calls += 1;
+                    Some(OsString::from(CELL_TOKEN))
+                })
+                .expect("captured union");
+            assert_eq!(calls, expected);
+            let name = if input.contains("AGENT_TOKEN") {
+                "AGENT_TOKEN"
+            } else {
+                "CELL_TOKEN"
+            };
+            assert_eq!(
+                options.celld_token(name).expect("celld token").expose(),
+                CELL_TOKEN
+            );
+            if name == "AGENT_TOKEN" {
+                assert_eq!(
+                    options.agent_token(name).expect("AWS token").expose(),
+                    CELL_TOKEN
+                );
+            }
+        }
+        let shared = format!(
+            "{BINDINGS}{}",
+            CELLD
+                .replace("version=1\n", "")
+                .replace("CELL_TOKEN", "AGENT_TOKEN")
+        );
+        let document =
+            NativeStoreBindings::parse(&shared, NativeBindingsLimits::default()).expect("bindings");
+        let mut options = explicit().with_store_bindings(document).expect("inline");
+        // Valid AWS token, invalid celld token: shared names must not skip the stricter type.
+        let error = options
+            .capture_agent_tokens(|_name| Some(OsString::from("short")))
+            .expect_err("celld minimum");
+        assert_eq!(error.chain().count(), 1);
+        assert!(error.to_string().contains("celld token"));
+    }
+
+    #[test]
+    fn celld_bootstrap_is_explicit_closed_and_trusted_network_looks_up_nothing() {
+        let document =
+            NativeStoreBindings::parse(CELLD, NativeBindingsLimits::default()).expect("bindings");
+        let options = explicit().with_store_bindings(document).expect("inline");
+        options
+            .celld_token("CELL_TOKEN")
+            .expect_err("explicit token required");
+        for raw in [
+            None,
+            Some(OsString::new()),
+            Some(OsString::from("short")),
+            Some(OsString::from("invalid token sentinel")),
+        ] {
+            let error = options
+                .clone()
+                .capture_agent_tokens(|_name| raw.clone())
+                .expect_err("invalid token");
+            assert_eq!(error.chain().count(), 1);
+            assert!(!format!("{error:?}").contains("sentinel"));
+        }
+        let supplied = options
+            .with_bootstrap_values([("CELL_TOKEN", CELL_TOKEN)])
+            .expect("explicit token");
+        assert_eq!(
+            supplied.celld_token("CELL_TOKEN").expect("token").expose(),
+            CELL_TOKEN
+        );
+        assert!(!format!("{:?}", supplied.celld_token("CELL_TOKEN")).contains(CELL_TOKEN));
+        let duplicate =
+            AxumRunOptions::from_vars([("CELL_TOKEN", CELL_TOKEN), ("CELL_TOKEN", CELL_TOKEN)])
+                .expect("pairs");
+        duplicate
+            .celld_token("CELL_TOKEN")
+            .expect_err("duplicate token values rejected");
+        let trusted = CELLD
+            .replace("https://unreachable.invalid", "http://127.0.0.1:8788")
+            .replace(
+                "mode='authenticated'\ntoken_env='CELL_TOKEN'",
+                "mode='trusted-network'",
+            );
+        let mut trusted_options = explicit()
+            .with_store_bindings(
+                NativeStoreBindings::parse(&trusted, NativeBindingsLimits::default())
+                    .expect("trusted bindings"),
+            )
+            .expect("inline");
+        trusted_options
+            .capture_agent_tokens(|_name| panic!("trusted network must not resolve tokens"))
+            .expect("no lookup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn celld_non_unicode_capture_fails_closed() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let document =
+            NativeStoreBindings::parse(CELLD, NativeBindingsLimits::default()).expect("bindings");
+        let mut options = explicit().with_store_bindings(document).expect("inline");
+        assert!(
+            options
+                .capture_agent_tokens(|_name| Some(OsString::from_vec(vec![0xff])))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn options_preserve_independent_policy_sources_in_both_orders() {
+        let aws = AwsPreparationLimits {
+            max_remote_values: 7,
+            ..Default::default()
+        };
+        let celld = CelldPreparationLimits {
+            max_remote_values: 9,
+            ..Default::default()
+        };
+        for options in [
+            explicit()
+                .with_aws_preparation_limits(aws)
+                .expect("AWS")
+                .with_celld_preparation_limits(celld)
+                .expect("celld"),
+            explicit()
+                .with_celld_preparation_limits(celld)
+                .expect("celld")
+                .with_aws_preparation_limits(aws)
+                .expect("AWS"),
+        ] {
+            assert_eq!(
+                options.aws_limits().expect("AWS policy").max_remote_values,
+                7
+            );
+            assert_eq!(
+                options
+                    .celld_limits()
+                    .expect("celld policy")
+                    .max_remote_values,
+                9
+            );
+            assert!(
+                options
+                    .clone()
+                    .with_celld_preparation_limits(celld)
+                    .is_err()
+            );
+            assert!(options.with_aws_preparation_limits(aws).is_err());
+        }
+        for (table, explicit_aws) in [
+            ("[limits.celld]\nmax_remote_values=9", true),
+            ("[limits.aws]\nmax_remote_values=7", false),
+        ] {
+            let document = NativeStoreBindings::parse(
+                &format!("{CELLD}\n{table}"),
+                NativeBindingsLimits::default(),
+            )
+            .expect("file policy");
+            let selected = explicit()
+                .with_store_bindings(document.clone())
+                .expect("inline");
+            if explicit_aws {
+                selected
+                    .with_aws_preparation_limits(aws)
+                    .expect("cross-provider policy");
+                explicit()
+                    .with_aws_preparation_limits(aws)
+                    .expect("AWS")
+                    .with_store_bindings(document)
+                    .expect("cross-provider file");
+            } else {
+                selected
+                    .with_celld_preparation_limits(celld)
+                    .expect("cross-provider policy");
+                explicit()
+                    .with_celld_preparation_limits(celld)
+                    .expect("celld")
+                    .with_store_bindings(document)
+                    .expect("cross-provider file");
+            }
+        }
     }
 
     #[test]
@@ -827,7 +1111,29 @@ mod tests {
         let Some(expected) = env::var_os("EDGEZERO_NATIVE_BOOTSTRAP_TEST") else {
             return;
         };
-        if expected == "valid" {
+        if expected == "celld" {
+            let options = AxumRunOptions::from_env().expect("celld env token capture");
+            assert_eq!(
+                options
+                    .celld_token("CELL_TOKEN")
+                    .expect("captured celld token")
+                    .expose(),
+                CELL_TOKEN
+            );
+            let path = env::var_os("EDGEZERO__STORE_BINDINGS_FILE").expect("locator");
+            fs::write(
+                PathBuf::from(path),
+                CELLD.replace("CELL_TOKEN", "OTHER_TOKEN"),
+            )
+            .expect("change file after capture");
+            assert_eq!(
+                options
+                    .celld_token("CELL_TOKEN")
+                    .expect("retained token")
+                    .expose(),
+                CELL_TOKEN
+            );
+        } else if expected == "valid" {
             let options = AxumRunOptions::from_env().expect("env token capture");
             assert_eq!(
                 options
@@ -848,7 +1154,10 @@ mod tests {
                 .expect("captured document")
                 .config()
                 .get("app")
-                .expect("captured binding");
+                .expect("captured binding")
+            else {
+                panic!("expected AppConfig binding")
+            };
             assert_eq!(settings.access_token_env.as_deref(), Some("AGENT_TOKEN"));
             assert_eq!(
                 options
@@ -916,6 +1225,42 @@ mod tests {
             .output()
             .expect("non-Unicode locator fixture");
         assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_env_celld_capture_rejects_invalid_selected_values_and_retains_snapshot() {
+        use std::env::current_exe;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::process::Command;
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("bindings.toml");
+        for (token, valid) in [
+            (Some(OsString::from(CELL_TOKEN)), true),
+            (None, false),
+            (Some(OsString::new()), false),
+            (Some(OsString::from("short")), false),
+            (Some(OsString::from_vec(vec![0xff])), false),
+        ] {
+            fs::write(&path, CELLD).expect("bindings");
+            let mut command = Command::new(current_exe().expect("test binary"));
+            command
+                .env_clear()
+                .arg("--exact")
+                .arg("run_options::tests::env_bootstrap_child")
+                .env(
+                    "EDGEZERO_NATIVE_BOOTSTRAP_TEST",
+                    if valid { "celld" } else { "invalid" },
+                )
+                .env("EDGEZERO__STORE_BINDINGS_FILE", &path);
+            if let Some(value) = token {
+                command.env("CELL_TOKEN", value);
+            }
+            let output = command.output().expect("isolated env child");
+            assert!(output.status.success(), "child completed assertions");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(CELL_TOKEN));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(CELL_TOKEN));
+        }
     }
 
     #[test]

@@ -126,6 +126,16 @@ jobs:
           cargo test --offline --locked -p edgezero-store-aws --all-features --lib
           scripts/run_test_nonzero.sh production_runner_loads_envelope_and_real_sdk_secret_before_serving_mixed_stores cargo test --offline --locked -p edgezero-adapter-axum --features aws-stores,test-utils --test native_aws_startup
 
+      - name: Native celld independent provider and startup contracts (loopback only)
+        run: |
+          cargo test --offline --locked -p edgezero-store-celld --no-default-features --lib
+          cargo test --offline --locked -p edgezero-store-celld --no-default-features --features config --lib
+          cargo test --offline --locked -p edgezero-store-celld --no-default-features --features kv --lib
+          cargo test --offline --locked -p edgezero-store-celld --all-features --lib
+          cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features native-bindings --lib
+          cargo test --offline --locked -p edgezero-adapter-axum --features celld-config,celld-kv,test-utils --test native_celld_startup
+          cargo test --offline --locked -p edgezero-adapter-axum --features aws-stores,aws-dynamodb,celld-config,celld-kv,test-utils --lib --test native_aws_startup --test native_celld_startup
+
       - name: Bundled demo logging contract
         run: scripts/run_test_nonzero.sh demo_respects_off_without_hiding_terminal_errors cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
 
@@ -169,8 +179,13 @@ jobs:
           EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
         run: scripts/run_test_nonzero.sh --ignored generated_cli_default_off_and_enabled_dynamodb_crud_list_ttl_restart cargo test --offline --locked -p edgezero-cli --test dynamodb_generated_proof
 
-      - name: Native AWS integration runner tests
-        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs
+      - name: Generated native celld startup and KV (deterministic loopback fixture)
+        env:
+          EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
+        run: scripts/run_test_nonzero.sh --ignored generated_celld_default_off_kv_and_config_restart cargo test --offline --locked -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum --test celld_generated_proof generated_celld_default_off_kv_and_config_restart
+
+      - name: Native provider integration runner tests
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs
 
       - name: Generated native AWS independent service contracts
         env:

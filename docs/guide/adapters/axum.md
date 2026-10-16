@@ -328,6 +328,8 @@ With explicit AWS bindings, the runner fetches mapped values before its initiali
 and before it accepts requests. It does not fall back to a local provider when an AWS
 lookup or preparation fails. See the [native AWS stores guide](../native-aws-stores.md)
 for the schema, feature selection, permissions, and lifecycle limits.
+The independent [native celld providers](../native-celld-stores.md) add startup
+configuration snapshots and live KV through a scoped listener inside celld.
 
 The native binding file path must be absolute. `EDGEZERO__STORE_BINDINGS_FILE` is
 read only by the environment-loading runner. Explicit `AxumRunOptions` selection
