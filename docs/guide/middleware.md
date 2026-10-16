@@ -283,10 +283,67 @@ fresh data. The manifest names values; it cannot call constructors itself.
 Attachment does not finalize a request, consume a streamed body, render
 `Server-Timing`, or change cache/privacy policy. Header rendering and exposure
 remain application-owned. Unmatched routes bypass middleware, and
-`RouterService::oneshot` renders handler errors outside the chain. Use adapter or
-outer-service hooks for terminal/error and streaming measurements as needed.
-Those outer layers must retain a clone of the handle they preinstall; attachment
-does not copy the handle into response extensions.
+`RouterService::oneshot` renders handler errors outside the chain. The available
+measurement boundary depends on the adapter:
+
+- **Fastly:** `run_app_with_request_extensions` and
+  `serve_app_with_request_extensions` can preinstall a handle. Applications that
+  own dispatch and delivery can use `lifecycle::run_custom`. See
+  [Fastly request extensions](./adapters/fastly.md#capturing-raw-request-signals-ja4-h2-fingerprint).
+- **Axum:** wrap `RouterService` in an application-owned tower service to retain
+  the handle across dispatch, including unmatched routes and rendered errors.
+- **Cloudflare and Spin:** `run_app` and `dispatch_app` convert the platform
+  request internally and expose no request-extension injection hook. Their
+  registry-aware dispatchers are private; converting with `into_core_request`
+  and calling the router yourself does not preserve manifest store bindings
+  automatically. The outermost available boundary within standard dispatch is
+  application middleware registered before `RequestTimingMiddleware`.
+
+For Cloudflare and Spin, this boundary reuses the `Handle` alias above and keeps
+its clone across both successful and failed downstream results:
+
+```rust
+use async_trait::async_trait;
+use edgezero_core::error::EdgeError;
+use edgezero_core::http::Response;
+use edgezero_core::middleware::{Middleware, Next};
+
+struct TimingBoundary;
+
+#[async_trait(?Send)]
+impl Middleware for TimingBoundary {
+    async fn handle(&self, mut ctx: RequestContext, next: Next<'_>) -> Result<Response, EdgeError> {
+        let existing = ctx.request().extensions().get::<Handle>().cloned();
+        let timings = existing.unwrap_or_else(Handle::new);
+        ctx.request_mut().extensions_mut().insert(timings.clone());
+        let result = next.run(ctx).await;
+        let _ = timings.mark_headers_ready();
+        result
+    }
+}
+
+let router = RouterService::builder()
+    .middleware(TimingBoundary)
+    .middleware(TimingMiddleware::new())
+    .build();
+```
+
+Register application routes on that builder and add `async-trait = "0.1"` to
+compile this example. It deliberately installs a handle on **every matched path**,
+including `/health`: an exclusion on the later attachment middleware does not
+remove a handle preinstalled here. Applications that exclude paths must apply
+that policy in their boundary middleware too.
+
+The mark records when the downstream result becomes available. For a handler
+error it precedes `oneshot`'s error-response rendering; it does not observe that
+final response or add its headers. Unmatched 404/405 requests bypass this boundary,
+and returning a streamed body does not measure its consumption, delivery or
+completion. Request completion must still be marked where it is actually
+observable. Cloudflare/Spin request-extension hooks are deferred beyond this
+release.
+
+Outer layers must retain a clone of the handle they preinstall; attachment does
+not copy the handle into response extensions.
 
 ## Early Returns
 

@@ -10,13 +10,18 @@ at `9c03cc59300363ae5339fc970dded08ede563e98`, adopted by
 [Trusted Server #1121](https://github.com/IABTechLab/trusted-server/pull/1121)
 at `2791ceb46908e6af04ccaae0c10b29d35336a9f4`. The linked PRs record completed
 migration and joint validation for those exact revisions, not later API changes.
-Merge, release/tag, final dependency pins and tag-backed validation remain pending.
+The current consumer is [Trusted Server #1261](https://github.com/IABTechLab/trusted-server/pull/1261),
+which supersedes #1121 (closed on 2026-10-09). At the
+[review of EdgeZero `878be472`](https://github.com/stackpop/edgezero/pull/389#pullrequestreview-5541298609),
+#1261 pinned all six EdgeZero crates to `ab444946`. That is not joint validation
+of the merged candidate `878be472`; renewed integration, merge, release/tag,
+final dependency pins and tag-backed validation remain pending.
 
 ## Why this change
 
-Trusted Server PR [#1121](https://github.com/IABTechLab/trusted-server/pull/1121)
-adds request-timing middleware in both its Cloudflare and Spin adapters. The two
-implementations are identical. Aram's
+The original Trusted Server PR [#1121](https://github.com/IABTechLab/trusted-server/pull/1121)
+added request-timing middleware in both its Cloudflare and Spin adapters. The two
+implementations were identical. Aram's
 [blocking review comment](https://github.com/IABTechLab/trusted-server/pull/1121#discussion_r4090027047)
 asks for the generic collector and middleware to live in EdgeZero, while keeping
 auction-specific state in Trusted Server. He also accepts an interim move of the
@@ -91,8 +96,6 @@ The reviewer also identifies `server_timing_value` as movable. The approved scop
 keeps Trusted Server's renderer in place for the first extraction: its names and
 header-bearing phase list are application policy. A generic renderer would add
 validation and ordering contracts that are unnecessary for this migration.
-Explain this narrower scope in the review response; do not claim that the whole
-of the reviewer's suggested extraction moved upstream.
 
 ## Clock and lifecycle contract
 
@@ -108,8 +111,9 @@ outside the state mutex, so `elapsed()` is available during contention.
 
 On [deployed Cloudflare Workers](https://developers.cloudflare.com/workers/runtime-apis/performance/),
 timers advance only after I/O and CPU-only phases may record zero. Local
-Wrangler/workerd and Chromium tests do not reproduce that restriction. A shared
-origin does not imply uniform CPU-time resolution across providers.
+Wrangler/workerd and headless browser tests (Firefox in CI) do not reproduce that
+restriction. A shared origin does not imply uniform CPU-time resolution across
+providers.
 
 ```mermaid
 flowchart TD
@@ -386,9 +390,9 @@ and demo checks relevant to a public core API change. Compile checks do not prov
 runtime clock behavior; distinguish native execution, WASM compilation, and any
 platform clock smoke tests in the implementation report. Run the shared attachment
 scenario natively as well as in all three adapter harnesses. Separate advancement
-tests use native sleep or bounded polling in Viceroy, Wasmtime and Chromium, with
-an independent wall-clock deadline and an iteration cap. They do not establish
-deployed Cloudflare CPU-time behavior.
+tests use native sleep or bounded polling in Viceroy, Wasmtime and a headless
+browser (Firefox in CI), with an independent wall-clock deadline and an iteration
+cap. They do not establish deployed Cloudflare CPU-time behavior.
 
 Trusted Server uses its target-matched `cargo test-fastly`, `cargo test-axum`,
 `cargo test-cloudflare`, `cargo test-spin`, and `./scripts/test-cli.sh` commands.
@@ -456,6 +460,13 @@ These review suggestions remain outside this release's scope:
   current outer layers preinstall and retain a clone. Successful-response
   extensions alone would not cover unmatched routes, rendered errors or every
   adapter conversion. A wrapper must preserve application measurement boundaries.
+- [Cloudflare/Spin request-extension hooks](https://github.com/stackpop/edgezero/pull/389#discussion_r4289432139):
+  their public entrypoints convert platform requests internally and expose no
+  hook equivalent to Fastly's request-extension injection. Application middleware
+  can retain a handle across matched-route success/error results, but misses
+  unmatched routes, final error rendering and streamed-body completion. Future
+  `dispatch_app_with_request_extensions` APIs must preserve manifest store
+  registries as well as existing collector identity and measurement boundaries.
 - [Explicit span finish/discard](https://github.com/stackpop/edgezero/pull/389#discussion_r4162634076):
   manual `Instant` plus `record_with` handles conditional and compound recording
   today. Do not use `mem::forget` to discard a span; it leaks the shared handle.
@@ -474,9 +485,6 @@ These review suggestions remain outside this release's scope:
    evidence at `9c03cc59`/`2791ceb` does not cover this API revision.
 3. Approve the EdgeZero merge/tag through its normal release process, then replace
    temporary TS pins with that tag and perform final tag-backed validation.
-
-Publication, merge, releases, GitHub replies and thread resolution require their
-own authorization; this record does not grant it.
 
 ## Source references
 

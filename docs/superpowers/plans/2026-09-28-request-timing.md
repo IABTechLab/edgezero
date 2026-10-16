@@ -22,7 +22,12 @@ handle, and TS-owned rendering. The spec records the current API contract.
 `2791ceb46908e6af04ccaae0c10b29d35336a9f4` record completed migration and joint
 validation. Historical completion below refers to those exact candidates. The
 review API revision needs matching TS facade changes, new candidate pins and
-renewed joint validation. Merge/tag and final tag-backed delivery remain gated.
+renewed joint validation. The current consumer is
+[Trusted Server #1261](https://github.com/IABTechLab/trusted-server/pull/1261),
+which supersedes #1121 (closed on 2026-10-09). At the
+[review of EdgeZero `878be472`](https://github.com/stackpop/edgezero/pull/389#pullrequestreview-5541298609),
+it pinned all six EdgeZero crates to `ab444946`, not the merged candidate
+`878be472`. Merge/tag and final tag-backed delivery remain gated.
 
 ## Repositories and starting state
 
@@ -296,10 +301,10 @@ For example, the Spin check is
 Adapter test/check command shapes and runner setup come from those workflows.
 Run the shared clock/handle scenario natively and in each adapter contract suite.
 Separate advancement tests use native sleep or bounded polling only in the local
-Viceroy, Wasmtime and Chromium harnesses. Polling has an independent wall-clock
-deadline and an iteration cap. Deployed Cloudflare CPU-only timings may be zero;
-a local pass is not deployed-provider proof. Keep native-only sleep/thread/poison
-tests out of unsupported WASM test paths.
+Viceroy, Wasmtime and headless browser harnesses (Firefox in CI). Polling has an
+independent wall-clock deadline and an iteration cap. Deployed Cloudflare CPU-only
+timings may be zero; a local pass is not deployed-provider proof. Keep native-only
+sleep/thread/poison tests out of unsupported WASM test paths.
 
 Trusted Server gates:
 
@@ -358,11 +363,11 @@ remaining risks are explicit. Release is blocked on unverified consumer adoption
 
 ### Review revision verification
 
-Validated the uncommitted revision based on `9c03cc59`. Non-Markdown validation
-inputs have SHA256 `6f4da4b53c95794adab3b48658830c499c173cc223f8414d048d8e2cc7b46bc3`.
-Native evidence was reused only where subsequent changes were confined to
-WASM-only test bodies; generated-project evidence predates equivalent private
-field ordering and test-only lint fixes, with generator inputs unchanged.
+Historical local validation below covers the review API revision based on
+`9c03cc59`, before the merge of `main`. Native evidence was reused only where
+subsequent changes were confined to WASM-only test bodies; generated-project
+evidence predates equivalent private field ordering and test-only lint fixes,
+with generator inputs unchanged.
 
 | Check | Result |
 | --- | --- |
@@ -379,6 +384,17 @@ All four clock advancement entrypoints and the shared attachment scenario ran.
 These are local harness results, not deployed-provider smoke tests or refreshed
 TS integration evidence.
 
+The [review at `878be472`](https://github.com/stackpop/edgezero/pull/389#pullrequestreview-5541298609)
+reports the following post-merge CI results. These are distinct from the historical
+local runs above and do not establish renewed Trusted Server joint validation.
+
+| Post-merge CI check | Reported result at `878be472` |
+| --- | --- |
+| Cloudflare contract suite, headless Firefox | 10 tests passed |
+| Fastly/Viceroy contract suite | 9 tests passed |
+| Spin/Wasmtime contract suite | 14 tests passed |
+| Core doctests | One compile-fail test passed; 13 existing doctests ignored |
+
 An extra `cargo build --workspace --all-targets --all-features` native build fails
 linking Fastly's WASM-only hostcalls. The same failure was reproduced from an
 untouched archive of `9c03cc59`. It is a pre-existing native-link limitation,
@@ -386,9 +402,9 @@ not a passing check or a configured CI gate; target-matched Fastly builds pass.
 
 ## Task 7: Publish and finish coordinated adoption
 
-The linked PRs are open for review. The temporary TS git-revision pin is for
-joint validation, not final release-backed delivery. Publication, merge/tag,
-GitHub replies and resolution remain subject to separate authorization.
+EdgeZero #389 and the superseding Trusted Server #1261 are the coordinated PRs.
+The temporary TS git-revision pin is for joint validation, not final
+release-backed delivery.
 
 - [x] Record linked EdgeZero and TS PRs and their initial tested commits above.
 - [ ] Record refreshed candidates and confirm that joint evidence covers them
@@ -404,9 +420,7 @@ GitHub replies and resolution remain subject to separate authorization.
       EdgeZero package IDs and git sources against the released tag and commit.
       Confirm the lockfile uses the released git source, no local paths,
       and one intended EdgeZero core identity.
-- [ ] Deliver TS only after final tag-backed validation and approval. Reply to
-      Aram with evidence, including the deliberate choice to keep rendering local.
-      Resolve review threads only with separate authorization.
+- [ ] Deliver TS only after final tag-backed validation and approval.
 
 Completion: one shared EdgeZero middleware, generic collection used by all TS
 adapters, no duplicate clocks, unchanged TS output/privacy contracts, and final
