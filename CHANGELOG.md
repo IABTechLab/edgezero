@@ -4,13 +4,16 @@
 
 ### Portable HTTP And Request Lifecycles (PR #275)
 
-The changes below cover [PR #275](https://github.com/stackpop/edgezero/pull/275), including its
+The changes below cover [PR #275](https://github.com/IABTechLab/edgezero/pull/275), including its
 implementation and review follow-ups. This is a hard API migration: retired APIs and enum variants
 are removed rather than retained as compatibility aliases. Provider limitations are published
 separately from the portable API and must be considered when declaring required capabilities.
 
 ### Main Integration
 
+- Integrate main's IABTechLab repository transfer; align outbound guide links,
+  generated READMEs and capability diagnostics with the canonical repository
+  and GitHub Pages site.
 - Merge main's Rust 1.98.1 toolchain and dependency upgrades without restoring
   retired outbound or lifecycle APIs. Keep audited decoder and SDK requirements
   exact across the workspace, demo and generated applications. Adapt SHA-256

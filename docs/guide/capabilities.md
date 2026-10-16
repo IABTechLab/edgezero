@@ -192,7 +192,7 @@ proved cancellable within a finite wall-clock interval, so every adapter reports
 `config-read-deadlines`. Spin opens declared config labels inside that timed read, after ingress
 admission; Cloudflare and Fastly retain failed declared bindings as typed failing handles rather
 than treating them as absent. The
-[configuration design](https://github.com/stackpop/edgezero/blob/main/docs/superpowers/specs/2026-06-16-blob-app-config.md#632-bounded-capability-scoped-extraction-reads)
+[configuration design](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/specs/2026-06-16-blob-app-config.md#632-bounded-capability-scoped-extraction-reads)
 defines the normative accounting, cancellation, error, and promotion requirements.
 
 Application assembly is fallible. `Hooks::configure(&mut App) -> Result<(), EdgeError>` runs after

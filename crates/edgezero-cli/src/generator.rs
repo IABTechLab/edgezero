@@ -299,7 +299,7 @@ fn resolve_cli_dependency(
     repo_root: &Path,
     workspace_dependencies: &mut BTreeMap<String, String>,
 ) -> String {
-    const CLI_GIT_FALLBACK: &str = "edgezero-cli = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-cli\" }";
+    const CLI_GIT_FALLBACK: &str = "edgezero-cli = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-cli\" }";
 
     let ResolvedDependency {
         name,
@@ -336,7 +336,7 @@ fn resolve_core_dependency(
         &layout.out_dir,
         repo_root,
         "crates/edgezero-core",
-        "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         &[],
     );
 
@@ -1126,6 +1126,21 @@ unpinned = { path = "somewhere" }
         };
         generate_new(&args).expect("scaffold succeeds");
         assertions(&temp.path().join("demo-app"));
+    }
+
+    #[test]
+    fn generated_readme_links_canonical_documentation() {
+        with_generated_demo_app(|project_dir| {
+            let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README.md");
+            for page in ["capabilities", "blob-app-config-migration"] {
+                assert!(
+                    readme.contains(&format!(
+                        "https://iabtechlab.github.io/edgezero/guide/{page}"
+                    )),
+                    "generated README must link to the canonical {page} guide"
+                );
+            }
+        });
     }
 
     #[test]

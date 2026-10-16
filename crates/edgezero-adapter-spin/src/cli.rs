@@ -71,19 +71,19 @@ static SPIN_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_spin",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_spin",
         repo_crate: "crates/edgezero-adapter-spin",
-        fallback: "edgezero-adapter-spin = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false }",
+        fallback: "edgezero-adapter-spin = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_spin_wasm",
         repo_crate: "crates/edgezero-adapter-spin",
-        fallback: "edgezero-adapter-spin = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false, features = [\"spin\"] }",
+        fallback: "edgezero-adapter-spin = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false, features = [\"spin\"] }",
         features: &["spin"],
     },
 ];

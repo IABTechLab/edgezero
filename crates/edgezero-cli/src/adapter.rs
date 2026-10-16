@@ -422,7 +422,7 @@ pub(crate) fn ensure_capabilities(
     }
     if !best_effort.is_empty() {
         return Err(format!(
-            "adapter '{adapter_name}': required capabilities are only best-effort: {}. See https://edgezero.dev/guide/capabilities and declare them `optional` only when the documented limitation is acceptable.",
+            "adapter '{adapter_name}': required capabilities are only best-effort: {}. See https://iabtechlab.github.io/edgezero/guide/capabilities and declare them `optional` only when the documented limitation is acceptable.",
             best_effort.join(", ")
         ));
     }
@@ -431,7 +431,7 @@ pub(crate) fn ensure_capabilities(
         match adapter.capability(capability) {
             CapabilitySupport::BestEffort => log::warn!(
                 target: edgezero_core::BOOT_LOG_TARGET,
-                "adapter '{adapter_name}': optional capability '{}' is best-effort; see https://edgezero.dev/guide/capabilities",
+                "adapter '{adapter_name}': optional capability '{}' is best-effort; see https://iabtechlab.github.io/edgezero/guide/capabilities",
                 capability.as_str()
             ),
             CapabilitySupport::BoundedCooperative | CapabilitySupport::Native => {}
@@ -1030,6 +1030,21 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn capability_gate_links_canonical_documentation() {
+        register_adapter(&BEST_EFFORT_ADAPTER);
+        let loader = capability_manifest("required = [\"outbound-http\"]");
+        let error = ensure_capabilities(
+            BEST_EFFORT_ADAPTER.name,
+            ManifestContract::from_opt(Some(loader.manifest())),
+        )
+        .expect_err("required best-effort capability must fail");
+        assert!(
+            error.contains("https://iabtechlab.github.io/edgezero/guide/capabilities"),
+            "capability diagnostics must link to the canonical guide"
+        );
     }
 
     #[test]

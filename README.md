@@ -21,15 +21,15 @@ curl http://127.0.0.1:8787/
 
 ## Documentation
 
-Full documentation is available at **[stackpop.github.io/edgezero](https://stackpop.github.io/edgezero/)**.
+Full documentation is available at **[iabtechlab.github.io/edgezero](https://iabtechlab.github.io/edgezero/)**.
 
-- [Getting Started](https://stackpop.github.io/edgezero/guide/getting-started) - Project setup and first steps
-- [Architecture](https://stackpop.github.io/edgezero/guide/architecture) - How EdgeZero works
-- [Configuration](https://stackpop.github.io/edgezero/guide/configuration) - `edgezero.toml` reference
-- [Outbound HTTP](https://stackpop.github.io/edgezero/guide/proxying) - Portable requests, limits, deadlines, and batching
-- [Capabilities](https://stackpop.github.io/edgezero/guide/capabilities) - Exact adapter support matrix and deployment caveats
-- [CLI Reference](https://stackpop.github.io/edgezero/guide/cli-reference) - All CLI commands
-- [Blob App-Config Migration](https://stackpop.github.io/edgezero/guide/blob-app-config-migration) - Typed `AppConfig<C>` extractor + `config push` / `config diff` workflow
+- [Getting Started](https://iabtechlab.github.io/edgezero/guide/getting-started) - Project setup and first steps
+- [Architecture](https://iabtechlab.github.io/edgezero/guide/architecture) - How EdgeZero works
+- [Configuration](https://iabtechlab.github.io/edgezero/guide/configuration) - `edgezero.toml` reference
+- [Outbound HTTP](https://iabtechlab.github.io/edgezero/guide/proxying) - Portable requests, limits, deadlines, and batching
+- [Capabilities](https://iabtechlab.github.io/edgezero/guide/capabilities) - Exact adapter support matrix and deployment caveats
+- [CLI Reference](https://iabtechlab.github.io/edgezero/guide/cli-reference) - All CLI commands
+- [Blob App-Config Migration](https://iabtechlab.github.io/edgezero/guide/blob-app-config-migration) - Typed `AppConfig<C>` extractor + `config push` / `config diff` workflow
 
 ## Supported Platforms
 

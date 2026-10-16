@@ -6,7 +6,7 @@
 
 - **Status:** Draft for edgezero maintainer
 - **Date:** 2026-07-03
-- **Target repo:** `github.com/stackpop/edgezero` (`edgezero-adapter-fastly`, `edgezero-core`, `edgezero-macros`)
+- **Target repo:** `github.com/IABTechLab/edgezero` (`edgezero-adapter-fastly`, `edgezero-core`, `edgezero-macros`)
 - **Consumed by:** trusted-server "full convergence" migration — the decision that every adapter binary becomes the one-line `run_app::<App>` with `#[action]` handlers. These two capabilities are the remaining gaps that block Fastly (P0-C) and macro-based app state (P0-D). Independent of the earlier Phase 0 spec (State<T> + nested `#[secret]`, PR #306).
 - **Verified against:** originally `6ebc29a5`; **re-verified and revised against `47a112c`** (branch `worktree-state-nested-secrets-spec-review`, PR #306 tip). The revision matters: between those commits the router's app-state layer was simplified from a `Vec<StateInserter>` of type-erased closures to a single `state_extensions: Extensions` bag, which materially simplifies P0-D (see §P0-D).
 

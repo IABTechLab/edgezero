@@ -4410,7 +4410,7 @@ pub(crate) fn ensure_capabilities(
              best-effort means a documented limitation applies — timing (e.g. \
              unbounded cooperative enforcement) or functional (e.g. lazy streaming \
              becomes buffered). See the capability reference at \
-             https://edgezero.dev/guide/capabilities. Declare them \
+             https://iabtechlab.github.io/edgezero/guide/capabilities. Declare them \
              `optional` if the documented limitation is acceptable.",
             best_effort.join(", "),
         ));
@@ -4429,7 +4429,7 @@ pub(crate) fn ensure_capabilities(
             CapabilitySupport::BestEffort => log::warn!(
                 "adapter '{adapter_name}': optional capability '{}' is best-effort — a \
                  documented deviation applies; see the capability reference at \
-                 https://edgezero.dev/guide/capabilities",
+                 https://iabtechlab.github.io/edgezero/guide/capabilities",
                 cap.as_str(),
             ),
             _ => log::warn!(

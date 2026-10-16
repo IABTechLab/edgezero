@@ -25,7 +25,7 @@ deviations and may fail at runtime when a deployment prerequisite has not been
 verified. If application behavior depends on successful outbound requests,
 promote `outbound-http` to `required` and choose an adapter and deployment whose
 capability check passes. See the
-[capability guide](https://stackpop.github.io/edgezero/guide/capabilities) for
+[capability guide](https://iabtechlab.github.io/edgezero/guide/capabilities) for
 the current support matrix and deployment prerequisites.
 
 Both outbound examples bypass adapter-managed caches and set a 5-second timeout, a 1 MiB request-body cap,
@@ -104,5 +104,5 @@ vars, and Spin from application variables. Fastly uses the logical key
 `app_config` for production, staging, and local Viceroy. Its deploy flow links
 the selected physical store under the logical `app_config` alias; no service ID
 appears in an environment variable name.
-See the [blob app-config migration guide](https://stackpop.github.io/edgezero/guide/blob-app-config-migration)
+See the [blob app-config migration guide](https://iabtechlab.github.io/edgezero/guide/blob-app-config-migration)
 for the per-adapter steps and the full operator runbook.
