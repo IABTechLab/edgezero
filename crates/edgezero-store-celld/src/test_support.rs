@@ -21,6 +21,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{sleep, timeout};
+use tokio_rustls::TlsAcceptor;
 use url::Url;
 
 pub(crate) struct Request {
@@ -66,52 +67,11 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
-    #[expect(
-        clippy::integer_division_remainder_used,
-        reason = "Tokio select generates bounded branch-index arithmetic"
-    )]
     pub(crate) async fn new(replies: Vec<Reply>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fixture loopback listener");
-        let endpoint = format!(
-            "http://{}",
-            listener.local_addr().expect("read bound fixture address")
-        );
-        let state = Arc::new(Mutex::new(State {
-            replies: replies.into(),
-            ..State::default()
-        }));
-        let server_state = Arc::clone(&state);
-        let task = tokio::spawn(async move {
-            let mut connections = JoinSet::new();
-            let mut index = 0_usize;
-            loop {
-                tokio::select! {
-                    biased;
-                    accepted = listener.accept() => {
-                        let Ok((stream, _address)) = accepted else { break; };
-                        let connection_state = Arc::clone(&server_state);
-                        index = index.checked_add(1).expect("fixture connection count must fit usize");
-                        connections.spawn(serve(stream, connection_state, index));
-                    }
-                    Some(_result) = connections.join_next(), if !connections.is_empty() => {}
-                }
-            }
-        });
-        Self {
-            endpoint,
-            state,
-            task,
-        }
+        Self::start(replies, None).await
     }
 
-    #[expect(
-        clippy::integer_division_remainder_used,
-        reason = "Tokio select generates bounded branch-index arithmetic"
-    )]
     pub(crate) async fn tls(certificate: &'static [u8], replies: Vec<Reply>) -> Self {
-        use tokio_rustls::TlsAcceptor;
         use tokio_rustls::rustls::ServerConfig;
         use tokio_rustls::rustls::crypto::aws_lc_rs::default_provider;
         use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -125,12 +85,20 @@ impl Fixture {
             .with_no_client_auth()
             .with_single_cert(vec![CertificateDer::from(certificate.to_vec())], key)
             .expect("fixture certificate matches the bundled private key");
-        let acceptor = TlsAcceptor::from(Arc::new(config));
+        Self::start(replies, Some(TlsAcceptor::from(Arc::new(config)))).await
+    }
+
+    #[expect(
+        clippy::integer_division_remainder_used,
+        reason = "Tokio select generates bounded branch-index arithmetic"
+    )]
+    async fn start(replies: Vec<Reply>, acceptor: Option<TlsAcceptor>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fixture loopback listener");
+        let scheme = if acceptor.is_some() { "https" } else { "http" };
         let endpoint = format!(
-            "https://{}",
+            "{scheme}://{}",
             listener.local_addr().expect("read bound fixture address")
         );
         let state = Arc::new(Mutex::new(State {
@@ -150,10 +118,14 @@ impl Fixture {
                         let connection_acceptor = acceptor.clone();
                         index = index.checked_add(1).expect("fixture connection count must fit usize");
                         connections.spawn(async move {
-                            if let Ok(Ok(tls_stream)) = timeout(
-                                Duration::from_secs(3), connection_acceptor.accept(stream),
-                            ).await {
-                                serve(tls_stream, connection_state, index).await;
+                            if let Some(tls_acceptor) = connection_acceptor {
+                                if let Ok(Ok(tls_stream)) = timeout(
+                                    Duration::from_secs(3), tls_acceptor.accept(stream),
+                                ).await {
+                                    serve(tls_stream, connection_state, index).await;
+                                }
+                            } else {
+                                serve(stream, connection_state, index).await;
                             }
                         });
                     }
