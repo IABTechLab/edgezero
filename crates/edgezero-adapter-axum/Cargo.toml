@@ -25,11 +25,13 @@ axum = [
     "dep:reqwest",
     "dep:redb",
 ]
-native-bindings = ["dep:toml", "dep:edgezero-store-aws"]
+native-bindings = ["dep:toml", "dep:edgezero-store-aws", "dep:edgezero-store-celld"]
 aws-appconfig-agent = ["axum", "edgezero-store-aws/appconfig-agent"]
 aws-secrets-manager = ["axum", "edgezero-store-aws/secrets-manager"]
 aws-stores = ["aws-appconfig-agent", "aws-secrets-manager"]
 aws-dynamodb = ["axum", "edgezero-store-aws/dynamodb-kv"]
+celld-config = ["axum", "edgezero-store-celld/config"]
+celld-kv = ["axum", "edgezero-store-celld/kv"]
 cli = [
     "native-bindings",
     "dep:edgezero-adapter",
@@ -72,6 +74,7 @@ walkdir = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 edgezero-store-aws = { workspace = true, optional = true }
+edgezero-store-celld = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
@@ -92,6 +95,17 @@ test = false
 name = "native_aws_startup"
 path = "tests/native_aws_startup.rs"
 required-features = ["aws-stores", "test-utils"]
+
+[[bin]]
+name = "edgezero-native-celld-host"
+path = "tests/fixtures/native_celld_host.rs"
+required-features = ["celld-config", "celld-kv", "test-utils"]
+test = false
+
+[[test]]
+name = "native_celld_startup"
+path = "tests/native_celld_startup.rs"
+required-features = ["celld-config", "celld-kv", "test-utils"]
 
 [dev-dependencies]
 async-trait = { workspace = true }

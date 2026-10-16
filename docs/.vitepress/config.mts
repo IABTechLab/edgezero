@@ -51,6 +51,7 @@ export default defineConfig({
           { text: 'Fermyon Spin', link: '/guide/adapters/spin' },
           { text: 'Axum (Native)', link: '/guide/adapters/axum' },
           { text: 'Native AWS stores', link: '/guide/native-aws-stores' },
+          { text: 'Native celld stores', link: '/guide/native-celld-stores' },
           { text: 'DynamoDB KV', link: '/guide/dynamodb-kv' },
         ],
       },

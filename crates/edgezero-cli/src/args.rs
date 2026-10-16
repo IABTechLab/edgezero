@@ -635,13 +635,13 @@ pub struct ConfigValidateArgs {
     /// for the declared adapter set and well-formed handler paths.
     #[arg(long)]
     pub strict: bool,
-    /// Native Cargo target triple used for provider capability resolution.
+    /// Native Cargo target control to normalize; provider availability remains unknown.
     #[arg(long, requires = "store_bindings")]
     pub target: Option<String>,
-    /// Resolve with all target features enabled.
+    /// Normalize the all-features target control without resolving provider availability.
     #[arg(long)]
     pub target_all_features: bool,
-    /// Add native Cargo features for target capability resolution.
+    /// Additional native target feature controls; bindings validation remains structural.
     #[arg(long, value_delimiter = ',')]
     pub target_features: Vec<String>,
     /// Suppress target default features.

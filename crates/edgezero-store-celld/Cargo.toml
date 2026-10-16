@@ -1,0 +1,39 @@
+[package]
+name = "edgezero-store-celld"
+description = "Optional native scoped celld configuration snapshots and live KV for EdgeZero"
+authors = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+default = []
+config = ["_transport"]
+kv = ["_transport", "dep:base64", "dep:sha2"]
+_transport = ["dep:edgezero-core", "dep:bytes", "dep:async-trait", "dep:reqwest", "dep:tokio", "dep:futures-util", "dep:serde_json"]
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-trait = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+edgezero-core = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true, features = ["stream"] }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio-rustls = { workspace = true }

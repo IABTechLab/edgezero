@@ -9,6 +9,7 @@ members = [
     "crates/edgezero-core",
     "crates/edgezero-macros",
     "crates/edgezero-store-aws",
+    "crates/edgezero-store-celld",
 ]
 exclude = ["examples/app-demo"]
 resolver = "2"
@@ -60,6 +61,7 @@ edgezero-adapter-fastly = { path = "crates/edgezero-adapter-fastly", default-fea
 edgezero-adapter-spin = { path = "crates/edgezero-adapter-spin", default-features = false }
 edgezero-core = { path = "crates/edgezero-core", default-features = false }
 edgezero-store-aws = { path = "crates/edgezero-store-aws", default-features = false }
+edgezero-store-celld = { path = "crates/edgezero-store-celld", default-features = false }
 edgezero-cli = { path = "crates/edgezero-cli", default-features = false }
 fastly = "=0.13.1"
 fastly-shared = "=0.13.1"
@@ -109,6 +111,7 @@ tempfile = "3"
 toml_edit = "0.25"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
 trybuild = "1"
 toml = { version = "1.1" }
 tower = { version = "0.5", features = ["util"] }

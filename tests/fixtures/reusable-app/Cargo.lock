@@ -524,6 +524,7 @@ dependencies = [
  "bytes",
  "edgezero-core",
  "edgezero-store-aws",
+ "edgezero-store-celld",
  "futures",
  "futures-util",
  "http",
@@ -670,6 +671,15 @@ name = "edgezero-store-aws"
 version = "0.1.0"
 dependencies = [
  "percent-encoding",
+ "serde",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
+name = "edgezero-store-celld"
+version = "0.1.0"
+dependencies = [
  "serde",
  "thiserror 2.0.20",
  "url",
