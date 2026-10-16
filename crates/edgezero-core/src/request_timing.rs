@@ -166,12 +166,15 @@ impl<const N: usize, D> RequestTimings<N, D> {
     /// Invalid slots return [`TimingError::InvalidSlot`] before the callback or
     /// any mutation. Contention returns [`TimingError::Unavailable`] likewise.
     #[inline]
-    pub fn record_with<R, F: FnOnce(&mut D, Duration) -> R>(
+    pub fn record_with<R, F>(
         &self,
         slot: usize,
         duration: Duration,
         update: F,
-    ) -> Result<R, TimingError> {
+    ) -> Result<R, TimingError>
+    where
+        F: FnOnce(&mut D, Duration) -> R,
+    {
         Self::validate_slot(slot)?;
         let mut inner = self.try_inner()?;
         // Bounds were checked before acquiring the lock or invoking user code.
@@ -196,10 +199,10 @@ impl<const N: usize, D> RequestTimings<N, D> {
     /// # Errors
     /// Returns [`TimingError::Unavailable`] without invoking the callback on contention.
     #[inline]
-    pub fn snapshot<R, F: FnOnce(TimingSnapshot<'_, N, D>) -> R>(
-        &self,
-        project: F,
-    ) -> Result<R, TimingError> {
+    pub fn snapshot<R, F>(&self, project: F) -> Result<R, TimingError>
+    where
+        F: FnOnce(TimingSnapshot<'_, N, D>) -> R,
+    {
         let inner = self.try_inner()?;
         Ok(project(TimingSnapshot {
             phases: inner.phases,
@@ -238,10 +241,10 @@ impl<const N: usize, D> RequestTimings<N, D> {
     /// # Errors
     /// Returns [`TimingError::Unavailable`] without invoking the callback on contention.
     #[inline]
-    pub fn update_data<R, F: FnOnce(&mut D, Duration) -> R>(
-        &self,
-        update: F,
-    ) -> Result<R, TimingError> {
+    pub fn update_data<R, F>(&self, update: F) -> Result<R, TimingError>
+    where
+        F: FnOnce(&mut D, Duration) -> R,
+    {
         let mut inner = self.try_inner()?;
         let elapsed = self.elapsed();
         Ok(update(&mut inner.data, elapsed))
@@ -281,6 +284,14 @@ pub struct PhaseSpan<const N: usize, D = ()> {
     timings: RequestTimings<N, D>,
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "use allow for compatibility with Rust 1.95, which does not expose Drop::pin_drop"
+)]
+#[allow(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl<const N: usize, D> Drop for PhaseSpan<N, D> {
     #[inline]
     fn drop(&mut self) {
