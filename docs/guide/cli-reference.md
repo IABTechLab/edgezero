@@ -750,7 +750,7 @@ checkout):
 # need at least one adapter to deploy — so enable them explicitly. (Omitting
 # `default-features = false` also works: the defaults are `cli` plus all four
 # adapters.)
-edgezero-cli = { git = "https://github.com/stackpop/edgezero.git", default-features = false, features = [
+edgezero-cli = { git = "https://github.com/IABTechLab/edgezero.git", default-features = false, features = [
   "cli",
   "edgezero-adapter-fastly",
 ] }

@@ -85,12 +85,12 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/stackpop/edgezero' },
+      { icon: 'github', link: 'https://github.com/IABTechLab/edgezero' },
     ],
 
     footer: {
       message: 'Released under the Apache License 2.0.',
-      copyright: 'Copyright 2025-present Stackpop',
+      copyright: 'Copyright 2025-present IAB Technology Laboratory, Inc.',
     },
   },
 })
