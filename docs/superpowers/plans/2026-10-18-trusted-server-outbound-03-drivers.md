@@ -1,0 +1,296 @@
+# Adapter Outbound Progress Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make begun requests and batches progress eagerly, enforce bounded Fastly waits, and preserve arrival-time results and resource ownership on all four adapters.
+
+**Architecture:** Use each adapter's existing transport and scheduling model with the shared policies/ledger from phase 2. Fastly gets one cooperative timed multiplexer; native Axum uses its established local executor, workerd uses host-local scheduling, and Spin uses WASIp3 spawning. Callback and response-owned exchanges have separate cancellation owners even when they share a client.
+
+**Tech Stack:** Existing adapter features and target runners, Fastly async I/O handles, reqwest/Axum local runtime, worker fetch/AbortController, Spin SDK/WASI HTTP 0.3.
+
+---
+
+Dependencies: P1/P4 contracts; P2/P3/P5 integration accompanies each driver. G2 must pass before
+depending on Fastly timed reads. Do not introduce a background reader that buffers outside caps.
+Apply the index's scoped test/fmt/clippy card after each implementation increment, not only at
+phase completion. The target checks below supplement, not replace, all five root CI gates.
+
+Each D1-D4 migration implements plan 02's synchronous `validate_supported_options` and paired
+`time()` hooks as well as dispatch. Replace clock-only constructors per plan 02's migration table,
+preserving Axum's fallible `try_with_time` and transport-sharing setup, and migrate request-context
+injection. Reuse the adapter's own timer facility (native runtime,
+Workers Delay, Spin sleep, or G2's verified Fastly cooperative wait). Test unsupported options with
+a pending inbound body and zero timer/body/transport activity; on Axum/workerd/Spin also test a
+200 ms outbound settlement timeout against an otherwise permanently pending 10 s inbound read.
+Fastly's EZ-1.5 blocked-inbound-read exception stays explicit; no inert/default timer or core runtime
+is an alternative. Fake-clock tests install a paired wakeable timer, not only a timestamp callback.
+
+## D1: Fastly Driver Task Group
+
+Execute D1a-D1d serially; D1 closes only when all four close. Each task has its own red/green
+cycle and buildable commit. The public trait migration remains atomic across all adapters; these
+internal slices do not authorize merging an incomplete public implementation or keeping old APIs.
+
+### Task D1a: Bounded Multiplexer and Callback Ownership
+
+**Files:** Modify `crates/edgezero-adapter-fastly/src/outbound.rs`; create
+`src/outbound/progress.rs` and `src/outbound/backend.rs` only for the progress engine and backend
+registry extracted by this change; update `src/lib.rs`, `src/request.rs`, `src/response.rs`,
+`src/lifecycle.rs`, `tests/contract.rs`, and colocated lifecycle tests. Callback ownership is
+blocking EZ-6 work here, not deferred until F1/F6 reuse or delivery-report changes.
+
+**Dependencies:** P1/P4, passing local G2, G3 and G4's API/Fastly-policy approval. Keep existing
+backend identity and slack until D1b replaces them together; no new blocking-read fallback.
+
+- [ ] Read G2's feasibility report and G4's API/Fastly-policy approval. Check source/SDK/interface
+      digests and the literal configuration bound B. Adopt exactly the reported timed-read sequence,
+      readiness predicates and maximum read size. If any dependency is failed/missing/stale, follow
+      G2's cancelled/deferred map; do not implement a guessed host primitive or remove slack.
+- [ ] Add tests for one active slot plus a trickling sibling, two ready bodies, earliest slot
+      deadline, cutoff with a permanently pending body, handle reassociation failures, and cleanup.
+      Assert exact indices/reasons and preserved partial results; do not use preflight-only cases as
+      harvest coverage. Run the Fastly native `test-utils` contract suite to demonstrate failures.
+      Name the sibling case `fastly_multiplexer_preserves_sibling_progress` and run it with
+      `scripts/run_test_nonzero.sh fastly_multiplexer_preserves_sibling_progress cargo test -p edgezero-adapter-fastly --features test-utils`.
+      Expected red before implementation; after implementation, real indexed outcomes and owner
+      counts pass. Repeat the timed-read fixture via G2, then run the index's task lint card.
+- [ ] Use G2's verified timed-read primitives for header readiness, body readiness, and bounded
+      reads. Wait on all active request-lifetime exchanges and the earliest relevant timer. Bound
+      bytes/work per turn; yield between ready sources. While an origin read or ordinary send waits,
+      keep harvesting bidder progress; never enter an uninterruptible response-body read.
+- [ ] Keep transport resources in an owned registry with response/callback ownership tokens;
+      no path/query/header/body survives request lifetime. A response body retains its exchanges
+      after handoff; callback-owned work survives earlier response cleanup. Drop/cancel removes
+      only the corresponding exchanges and retains precise SDK-selection failures as driver errors.
+- [ ] Install one fresh adapter-private RAII callback guard in `Sandbox::handle`, immediately
+      around the handler invocation shared by `run_custom` and every `serve_custom` callback.
+      Bind scope membership per operation, not at client construction; saved clients must resolve
+      the current scope. Callback exit (Ok, Err, or supported unwinding) releases callback-owned
+      work exactly once even when clients/handles remain retained elsewhere. Do not retain the
+      guard in sandbox state or wait for sandbox destruction. Preserve the original return/error
+      and existing no-synthetic-send behavior. Response-owned work has its separate egress owner.
+- [ ] Standalone canonical send helpers and `FastlyService::send_request_with_hooks` establish
+      a helper-local fallback scope only if no outer callback scope exists. Under custom wrappers
+      they reuse the outer guard: helper return and response completion cannot cancel post-delivery
+      callback work. `response.rs` ends only the response-owned scope. New exchanges and completed
+      streamed-body transfers keep the existing exactly-once teardown owner.
+- [ ] Add `callback_scope_exit_releases_retained_exchange` and
+      `retained_client_resolves_fresh_callback_scope` in lifecycle/contract tests. Cover retained
+      pending handles, Ok/Err/pre-egress setup failure, supported unwinding, response cleanup while
+      same-client callback work is live, and post-delivery new work. Unit-simulate two invocations
+      on the same sandbox/client even when hosted reuse is disabled; previous scope handles cannot
+      restart or deliver old work. Actual next-request reuse qualification remains conditional.
+      Run `scripts/run_test_nonzero.sh callback_scope_exit_releases_retained_exchange cargo test -p edgezero-adapter-fastly --lib`
+      and the actual Viceroy sentinel; Expected: no early cancellation, no extra send, exactly one
+      release at callback exit, and no reuse of a stale scope. Apply the task fmt/clippy card.
+      Suggested commit: `feat: multiplex bounded Fastly exchanges with scoped ownership`.
+
+### Task D1b: Stable Backend Identity and Slack Removal
+
+**Files:** Fastly `src/outbound.rs`, `src/outbound/backend.rs`, `src/request.rs`,
+`tests/contract.rs`, and fixture Fastly qualification cases.
+
+**Dependencies:** D1a's verified bounded waits and G4's literal B/domain approval.
+
+- [ ] Add `backend_identity_ignores_remaining_budget` for equal per-call timeouts under different
+      absolute deadlines, with negative controls for connect/TLS/authority changes. Run
+      `scripts/run_test_nonzero.sh backend_identity_ignores_remaining_budget cargo test -p edgezero-adapter-fastly --features test-utils`.
+      Expected red for exact-remaining-budget identity at F; after implementation the equal keys
+      and distinct controls pass without changing logical deadlines or the approved policy domain.
+- [ ] Replace client/exact-budget backend names with deterministic versioned configuration keys.
+      Include origin, authority and TLS/phase settings; omit request/client/sandbox identifiers.
+      Equal per-call timeouts remain eligible under differing remaining budgets. Deadline-only
+      configurations use the G4-approved policy and literal maximum B; its documented timer
+      boundaries/cardinality proof must cover all valid budgets without shortening a deadline.
+      Keep explicit connect/idle limits distinct from aggregate deadlines; Image Optimizer is not
+      an identity discriminator. Detect inconsistent name reuse; never trust `NameInUse` blindly.
+- [ ] Add request-local registration count/config-count/total/max duration and >=50 ms warning.
+      Charge deadline from original call entry, retain a successfully registered backend even if
+      registration returns late, and return attributed 504 without sending an expired slot. Remove
+      slack guards, constant, hook, and tests only together with verified bounded waits. Preserve
+      router-state > prepare-hook > default-client precedence and cross-request Axum pooling.
+- [ ] Run native backend/registration contracts and the real G2 readiness suite after removing
+      slack; deadline, cutoff and sibling-progress sentinels must still execute nonzero. Apply the
+      task fmt/clippy card. Suggested commit: `feat: stabilize Fastly backend identity and remove proved slack`.
+
+### Task D1c: Connect Timeout Mapping
+
+**Files:** Fastly `src/outbound.rs`, `src/outbound/backend.rs`, `tests/contract.rs`,
+and fixture qualification/hosted probe cases from G2.
+
+**Dependencies:** D1b and P1/P5; independent of Image Optimizer horizon/entitlement approval.
+
+- [ ] Add `connect_timeout_reaches_provider_settings` and
+      `connect_expiry_preserves_governing_budget_precedence` from plan 02. Exercise Send/Begin/Batch
+      and permitted Follow hops; observe the actual platform mapping, full response-head budget,
+      ConnectTimeout before the governing expiry, and its original source at equality/late observation.
+      Run each via `scripts/run_test_nonzero.sh <sentinel> cargo test -p edgezero-adapter-fastly --features test-utils`.
+      Expected red for F's split/missing option, then nonzero pass. Hosted EZ-4 criterion 8 separately
+      proves real expiry; Viceroy setter/classifier tests do not establish that provider guarantee.
+- [ ] Implement Fastly connect timeout without a fixed connect/first-byte split. Run native contracts
+      and `CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run' scripts/run_test_nonzero.sh connect_timeout_reaches_provider_settings cargo test --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib`.
+      Expected: actual mapping assertions execute and the 900 ms head under a 1 s budget succeeds.
+      Keep hosted connect expiry pending until Q4 returns evidence. Apply the task lint card.
+      Suggested commit: `feat: map explicit Fastly connect timeouts`.
+
+### Task D1d: Image Optimizer Single-Send Mapping and Horizon
+
+**Files:** Fastly `src/outbound.rs`, `src/outbound/backend.rs`, `tests/contract.rs`,
+and fixture qualification/hosted probe cases from G2.
+
+**Dependencies:** D1c, P3/P5 and G4's separately approved EZ-8.10 horizon. Missing approval stops
+this task; missing hosted entitlement leaves its production qualification blocking, not passed.
+
+- [ ] Add `image_optimizer_follow_uses_single_send_mapping` at the Fastly boundary and run it
+      with `scripts/run_test_nonzero.sh image_optimizer_follow_uses_single_send_mapping cargo test -p edgezero-adapter-fastly --features test-utils`.
+      Expected red for missing mapping, then Send/Follow preserve options and Begin/Batch reject
+      before provider/body work. Implement Image Optimizer single-send mapping. Use the typed
+      entitlement reason even if EZ-16 is deferred. Preserve the exact built URI/signature-bearing
+      headers at the provider boundary; host query transformation is separately characterized.
+      Image Optimizer body handling remains lazy and uses shared policies after its response head.
+- [ ] Before Image Optimizer integration, read G4's separate approved EZ-8.10 horizon contract.
+      Implement H(K) lookup from the actual stable backend policy, not remaining-budget-derived
+      identity or an assumed two-timer sum. Add `image_optimizer_horizon_preserves_original_deadline`
+      with nanosecond/millisecond boundaries, equal timeout/different deadlines, late preparation,
+      host success/error at D, and post-head pending reads. Report original-entry, preparation and
+      host-call timings independently; a pre-dispatch timeout is not evidence of host-call boundedness.
+      Run the named sentinel under native scripted-host tests and actual hosted qualification;
+      Viceroy's entitlement rejection is not a successful Image Optimizer horizon test.
+- [ ] Run native contracts and the actual WASI contracts:
+      `CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run' scripts/run_test_nonzero.sh backend_creation_error_table_is_exhaustive cargo test --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib`.
+      Add equivalent nonzero sentinels for successful dispatch/harvest and `outbound-readiness`.
+      Complete EZ-2/3/4/6/8 loopback legs; hosted gates remain explicitly pending until run.
+      Hosted EZ-2 criterion 14b must prove fresh-execution connection reuse using origin connection
+      IDs and an SDK-only control. Registration counts, same POP and resumed TLS alone do not prove
+      pooling. Keep existing M1 handshake-rate measurement and M4's separate reuse-mode scope.
+      Apply the task fmt/clippy card. Suggested commit: `feat: map Fastly optimized single sends with approved horizon`.
+
+## Task D2: Native Axum Eager Exchanges
+
+**Files:** Modify `crates/edgezero-adapter-axum/src/outbound.rs`, `request.rs`, `service.rs`,
+`response.rs`, `dev_server.rs`; tests in `tests/contract.rs` and colocated modules.
+
+- [ ] Add `begin_dispatches_without_collection` and `unpolled_batch_dispatches_all_slots` using
+      loopback origins plus the existing local runtime. Include a missing-runtime-context case that
+      returns a typed setup error before network activity rather than panicking.
+- [ ] Install an adapter-owned local scheduling context through the existing `LocalSet` serving
+      path and explicit manual-client construction. Spawn local exchange work before returning a
+      batch/begun handle; do not use `tokio::spawn` with core's `!Send` body/futures or unsafe Send
+      wrappers. Return response data through bounded local state while preserving shared reqwest
+      cross-request pooling and caller-supplied client precedence.
+- [ ] Record buffered completion/cap/error at the actual observed terminal event and streamed
+      begin at the head. Race reads against deadlines, retain successful early arrivals for late
+      collection, enforce strict cutoff equality, and use shared head-first disposition. Dropping a
+      handle cancels its task and transport chain; detached runtime work must not retain a client cycle.
+- [ ] Integrate distinct callback/body cleanup with `AxumEgressBody` and disconnect/write/source
+      terminal paths. Run `cargo test -p edgezero-adapter-axum --features axum,test-utils` plus TCP
+      forwarding/cancellation cases. Assert healthy recovery and zero retained exchange owners.
+      Suggested commit: `feat: drive native outbound exchanges eagerly`.
+
+## Task D3: Cloudflare Eager Exchanges
+
+**Files:** Modify `crates/edgezero-adapter-cloudflare/src/outbound.rs`, `request.rs`, `response.rs`;
+tests in `tests/contract.rs` and existing WASM-gated module tests; workerd cases belong in
+`tests/fixtures/reusable-app/crates/fixture-cloudflare/src/lib.rs`, fixture-core qualification,
+and fixture-harness `net.rs`/`runners.rs`.
+
+- [ ] Add workerd cases for begin/batch dispatch during an unrelated awaited timer, arrival during
+      origin streaming, and a buffered cap failure while no result is being collected. Demonstrate
+      failures before replacing lazy futures. Keep browser-only body behavior separate from workerd.
+- [ ] Spawn exchange work with the provider's local scheduling primitive and keep one abort owner
+      from setup through streamed body lifetime. Preserve manual redirects, raw response encoding,
+      multi-value headers, token-safe diagnostics, frozen-clock fairness, and event-loop yield quotas.
+      Do not treat handing a future to a Rust container as proof it is executing.
+- [ ] Hand response-owned exchanges through the existing egress coordinator. Clean transport/body
+      completion disarms the abort guard and releases its ownership exactly once without aborting
+      completed work. Disconnect, deadline, source/conversion failure, cancellation, or drop before
+      clean completion stops guest polling and aborts still-armed unfinished work at most once,
+      then releases ownership exactly once. A previously aborted/disarmed guard cannot abort again;
+      retained callback work has a separate owner. Test each terminal path, including setup failure
+      after controller creation and streamed-body ownership transfer. Track arrival before collection
+      and keep the shared driver validator. Local tests do not upgrade provider guarantees.
+- [ ] Run native `test-utils` contracts and the repository's pinned browser/WASM contract command
+      from `.github/workflows/test.yml`, with nonzero new sentinels. Run
+      `scripts/smoke_test_reusable_app.sh --adapter cloudflare --suite smoke` after extending the
+      qualification fixture cases above. That Wrangler-local/workerd path, not the browser runner,
+      supplies the required Workers scheduling/lifetime evidence.
+      Suggested commit: `feat: drive Workers outbound exchanges eagerly`.
+
+## Task D4: Spin Eager Exchanges
+
+**Files:** Modify `crates/edgezero-adapter-spin/src/outbound.rs`, `request.rs`, `response.rs`;
+tests in `tests/contract.rs` and `tests/sdk_resources.rs`.
+
+- [ ] Add real SDK-resource cases for unpolled begin/batch dispatch, pending header/body deadline,
+      original coding, and response handoff. Run the pinned SDK-resource runner, not a compile-only
+      `wasm32-wasip2` check or a native test-double substitute.
+- [ ] Use `spin_sdk::wasip3::spawn` for eager exchange progress. Preserve the upload/send state
+      machine, response-completion future, and distinction between clean EOF and truncated transport.
+      Use the existing timer race for permanently pending operations. Preserve typed provider errors
+      and source release under every cancellation arm.
+- [ ] Pass configured connect timeout independently and accept all documented setter refusals as
+      BestEffort fallback to the aggregate budget. Do not modify authority to implement the unsupported
+      override. Integrate body/callback owner cleanup, head-first response policy, shared arrival ledger,
+      and actual ingress GET/HEAD settlement from P2.
+      Add `connect_timeout_reaches_provider_settings` with a recording setter and every refusal
+      variant, and execute it through `run_test_nonzero.sh` in the SDK-resource suite. The recorded
+      setting uses a configured timeout shorter than the aggregate budget, not a split of that
+      budget. Add an unset/longer-than-budget control following EZ-4.5; refusal keeps aggregate
+      enforcement and its typed source. Repeat the controlled-drop runtime case from EZ-4.
+- [ ] Run `cargo test -p edgezero-adapter-spin --no-default-features --features test-utils` and
+      `CARGO_TARGET_WASM32_WASIP2_RUNNER='wasmtime run -W component-model-async=y -S p3=y -S http=y' scripts/run_test_nonzero.sh spin_error_code_table_is_exhaustive cargo test --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --test sdk_resources`.
+      Extend named sentinels for the new paths and run the Spin smoke. Keep teardown BestEffort
+      unless authorized hosted evidence establishes more. Suggested commit: `feat: drive Spin outbound exchanges eagerly`.
+      Also run CI gate 5 explicitly:
+      `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`.
+      Expected: target compilation succeeds with the real Spin dispatch/spawn path enabled.
+
+## Task D5: Cross-Adapter Precedence and Send-Mode Parity
+
+**Files:** Four adapter `tests/contract.rs`, core `src/outbound.rs` tests, and the qualification
+fixture. Fix only the corresponding adapter implementation when a parity case fails.
+
+- [ ] Run each changed option through single send, begun request, batch slot, and redirect hops
+      where permitted; later include fire-and-forget only if implemented. Exercise client marker defaults
+      and overrides, all caps, connect limits, coding choices, and Image Optimizer rejections.
+- [ ] Assert one unsupported-option category wins before expired budget, GET/HEAD body reads,
+      and backend/network work. Valid siblings proceed. A timeout cause alone never abandons a batch;
+      strict observation cutoff and actual clock determine termination.
+- [ ] Compare one-slot batch and single send cache/validation/error behavior. Prove no-redirect
+      following parity for exact/overflow identity, compressed, and original-coded responses. Run the
+      header-first followed-body versus final-body cases through actual normalization and supplied clients.
+- [ ] Run core plus all native adapter contracts, real target contracts, dependency audits, and
+      docs/legacy gates. Do not merge until all required no-regression sentinels execute nonzero.
+      Suggested commit: `test: enforce outbound send-mode and cutoff parity`.
+
+## Task D6: Lifetime and Late-Collection Qualification
+
+**Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
+`runners.rs`, `evidence.rs`; adapter-local owner tests.
+
+- [ ] Implement all EZ-6 scenarios 1-23, with reuse scenario 10 and scenario 23's actual next-request
+      reuse leg separately conditional. Include
+      origin head 700 ms, bids 180/320/900 ms, batch start 34 ms and cutoff 534 ms; retain the first
+      two bids and report the third unresolved. Use injected clock for exact unit assertions.
+- [ ] Check origin flow while a bidder body is pending; cutoff returns by 539 ms rather than
+      waiting to 600 ms. Cover own timeout before cutoff, CPU-stretch observation, late collection,
+      repeated termination, and cancellation reporting recorded-but-undelivered indices.
+- [ ] Prove asynchronous response handoff retains body-owned work, egress end releases it once,
+      and an already-pending callback-owned exchange on the same client survives that cleanup.
+      Preserve Fastly post-delivery work and every documented host-cancellation limitation.
+- [ ] Exercise both Fastly lifecycle wrappers with the callback-scope return/error cases, not
+      merely a manually dropped pending handle. Observe real cancellation/release with a retained
+      handle and assert that helper return does not end the outer callback scope.
+- [ ] Run applicable local and hosted legs under the G1 inventory. Runtime assertions must count
+      real progress and terminal notifications; do not use sleeps alone as evidence of ownership.
+      Suggested commit: `test: qualify outbound arrival and lifetime contracts`.
+
+## Phase Exit
+
+- [ ] Execute the index's shared gates plus Q2's explicit native/WASM feature matrices and the
+      D1-D6 named runtime commands. Record nonzero test counts and the G1 inventory entries; a
+      passing command cannot substitute for G2/G4 approvals or missing hosted legs.
+- [ ] Existing outbound semantics remain green; no lazy adapter path remains behind eager APIs.
+- [ ] Fastly timed readiness is proved, not inferred; registration/upload/settlement/Image Optimizer
+      exceptions stay narrowly documented, never widened to response-body reads.
+- [ ] Every required mode has one transport, one response policy, and exactly one teardown owner.
