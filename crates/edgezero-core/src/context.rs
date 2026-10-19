@@ -950,6 +950,10 @@ mod tests {
         #[test]
         fn managed_partial_cancellation_drops_source_once_and_poisons() {
             struct DropSignal(Rc<Cell<usize>>);
+            #[expect(
+                clippy::missing_trait_methods,
+                reason = "Drop::pin_drop is unstable and conflicts with drop"
+            )]
             impl Drop for DropSignal {
                 fn drop(&mut self) {
                     self.0.set(self.0.get().saturating_add(1));

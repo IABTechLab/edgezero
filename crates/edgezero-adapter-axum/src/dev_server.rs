@@ -446,6 +446,10 @@ async fn serve_with_stores(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test embedding carries explicit ingress, JSON and diagnostics policies"
+)]
 fn serve_local(
     app: App,
     std_listener: StdTcpListener,
@@ -663,9 +667,9 @@ where
 )]
 #[expect(
     clippy::too_many_arguments,
-    reason = "one lifecycle owner carries the validated ingress policy and stop sources"
+    clippy::too_many_lines,
+    reason = "one lifecycle owner carries validated policies, stop sources and drain ownership"
 )]
-
 async fn run_owned<Prepare, Stop>(
     listener_source: ListenerSource,
     grace: Duration,
@@ -864,7 +868,10 @@ fn log_native_lifecycle(phase: LifecyclePhase, reason: &'static str, grace: Dura
 ///
 /// # Errors
 /// Returns an error if the dev server fails to bind or any required store handle cannot be initialised.
-fn build_app_for_dispatch<A: Hooks>() -> anyhow::Result<App> {
+fn build_app_for_dispatch<A>() -> anyhow::Result<App>
+where
+    A: Hooks,
+{
     App::build::<A>(crate::AXUM_PLATFORM)
         .map_err(|_error| anyhow::anyhow!("application configuration failed"))
 }
@@ -883,7 +890,10 @@ fn app_logger(env: &EnvConfig) -> SimpleLogger {
 /// # Errors
 /// Returns startup or listener errors from the selected runner.
 #[inline]
-pub fn run_generated_app<A: Hooks>() -> anyhow::Result<()> {
+pub fn run_generated_app<A>() -> anyhow::Result<()>
+where
+    A: Hooks,
+{
     let bindings_selected =
         vars_os().any(|(key, _value)| key.to_str().is_some_and(is_store_bindings_locator_key));
     if bindings_selected {
@@ -908,7 +918,10 @@ fn is_store_bindings_locator_key(key: &str) -> bool {
 /// Returns an error if logger setup, application configuration, runtime setup, store initialization, listener
 /// binding, or connection serving fails.
 #[inline]
-pub fn run_app<A: Hooks>() -> anyhow::Result<()> {
+pub fn run_app<A>() -> anyhow::Result<()>
+where
+    A: Hooks,
+{
     run_app_with_preflight::<A, _>(|| Ok(()))
 }
 
@@ -916,11 +929,12 @@ pub fn run_app<A: Hooks>() -> anyhow::Result<()> {
 ///
 /// # Errors
 /// Returns safe startup, preflight, or runner failures before listening.
-
 #[inline]
-pub fn run_app_with_preflight<A: Hooks, F: FnOnce() -> anyhow::Result<()>>(
-    preflight: F,
-) -> anyhow::Result<()> {
+pub fn run_app_with_preflight<A, F>(preflight: F) -> anyhow::Result<()>
+where
+    A: Hooks,
+    F: FnOnce() -> anyhow::Result<()>,
+{
     let (env, json_body_limit, native) = capture_dev_environment(vars_os())?;
     if !A::owns_logging() {
         app_logger(&env)
@@ -1000,7 +1014,10 @@ where
     ))
 }
 
-fn init_logging<A: Hooks>(level: log::LevelFilter) -> anyhow::Result<()> {
+fn init_logging<A>(level: log::LevelFilter) -> anyhow::Result<()>
+where
+    A: Hooks,
+{
     if !A::owns_logging() {
         SimpleLogger::new()
             .with_level(level)
@@ -1024,7 +1041,10 @@ fn no_initialize<'startup>(
 /// # Errors
 /// Returns classified startup/runner errors or non-success for forced shutdown.
 #[inline]
-pub fn run_production_app<A: Hooks>() -> anyhow::Result<()> {
+pub fn run_production_app<A>() -> anyhow::Result<()>
+where
+    A: Hooks,
+{
     run_production_selected::<A, _, _>(
         AxumRunOptions::from_env()?,
         NativeStoreOverrides::default(),
@@ -1335,11 +1355,14 @@ async fn build_production_stores(
     })
 }
 
-fn finish_registry<H: Clone>(
+fn finish_registry<H>(
     metadata: Option<StoreMetadata>,
     handles: BTreeMap<String, H>,
     kind: &str,
-) -> anyhow::Result<Option<StoreRegistry<H>>> {
+) -> anyhow::Result<Option<StoreRegistry<H>>>
+where
+    H: Clone,
+{
     metadata
         .map(|meta| {
             StoreRegistry::from_parts(handles, meta.default.to_owned())
@@ -3562,6 +3585,10 @@ mod native_store_tests {
         reads: Arc<AtomicUsize>,
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "Drop::pin_drop is unstable and conflicts with drop"
+    )]
     impl Drop for ProbeConfig {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::SeqCst);

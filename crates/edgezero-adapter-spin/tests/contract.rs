@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "spin", target_arch = "wasm32"))]
 #[path = "../../edgezero-core/tests/support/request_timing.rs"]
 mod request_timing_tests;
 

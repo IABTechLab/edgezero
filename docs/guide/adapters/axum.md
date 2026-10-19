@@ -214,6 +214,7 @@ This combined HTTP/1 resource policy does not implement the stricter independent
 field-section accounting or raw framing-rejection policy. Admission still receives
 `IngressHeadAccounting::HostManaged` and `IngressFraming::HostManaged`; both raw-ingress
 capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
+
 ## Buffered JSON body limits
 
 Every standard Axum hosting path defaults framework-managed JSON buffering to 2 MiB,
@@ -260,7 +261,6 @@ Taken streams and proxy forwarding receive no new aggregate size cap. Manual bod
 keeps its supplied cap and existing 400 overflow behavior. The ceiling bounds logical buffered
 body bytes, not parsed JSON allocations, host buffers, concurrent requests, or process memory.
 It does not promise client receipt or keep-alive reuse after rejection.
-
 
 ## Outbound HTTP
 
@@ -314,7 +314,6 @@ Wiring
 to control the bind address or store setup.
 
 Production `AxumRunOptions` rejects an invalid supplied logging level.
-
 
 To install your own logger, set `owns_logging = true` in the `app!` declaration and initialize
 it once in `main` before entering the runner. Ownership controls installation, not framework
@@ -396,7 +395,6 @@ With explicit AWS bindings, the runner fetches mapped values before its initiali
 and before it accepts requests. It does not fall back to a local provider when an AWS
 lookup or preparation fails. See the [native AWS stores guide](../native-aws-stores.md)
 for the schema, feature selection, permissions, and lifecycle limits.
-
 
 The native binding file path must be absolute. `EDGEZERO__STORE_BINDINGS_FILE` is
 read only by the environment-loading runner. Explicit `AxumRunOptions` selection
@@ -520,7 +518,6 @@ can break an application's tracing-to-log fallback. Do not enable dependency
 This limitation must be disclosed in release and PR review notes.
 
 ## Container packaging
-
 
 `edgezero new` generates a workspace-root `Dockerfile` and `.dockerignore` when
 Axum is registered in the CLI build. The recipe builds only the native Axum

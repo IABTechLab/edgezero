@@ -90,7 +90,6 @@ enum BootstrapValue {
     clippy::arbitrary_source_item_ordering,
     reason = "scalar validation precedes local-root validation; compatibility constructors remain grouped"
 )]
-
 impl AxumRunOptions {
     pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
@@ -423,10 +422,10 @@ impl AxumRunOptions {
     /// # Errors
     /// Rejects duplicate/relative/missing/malformed/oversized selections.
     #[inline]
-    pub fn with_store_bindings_file<Root: Into<PathBuf>>(
-        mut self,
-        locator: Root,
-    ) -> anyhow::Result<Self> {
+    pub fn with_store_bindings_file<Root>(mut self, locator: Root) -> anyhow::Result<Self>
+    where
+        Root: Into<PathBuf>,
+    {
         if !matches!(self.bindings, NativeStoreBindingsInput::LocalDefaults) {
             return Err(failure("settings", "bindings", "duplicate selection"));
         }
@@ -516,7 +515,10 @@ impl AxumRunOptions {
     /// # Errors
     /// Rejects relative, missing or non-directory roots.
     #[inline]
-    pub fn with_config_dir<Root: Into<PathBuf>>(mut self, root: Root) -> anyhow::Result<Self> {
+    pub fn with_config_dir<Root>(mut self, root: Root) -> anyhow::Result<Self>
+    where
+        Root: Into<PathBuf>,
+    {
         let directory = root.into();
         validate_root(&directory, "CONFIG_DIR")?;
         self.config_dir = Some(directory);
@@ -528,7 +530,10 @@ impl AxumRunOptions {
     /// # Errors
     /// Rejects relative, missing or non-directory roots.
     #[inline]
-    pub fn with_data_dir<Root: Into<PathBuf>>(mut self, root: Root) -> anyhow::Result<Self> {
+    pub fn with_data_dir<Root>(mut self, root: Root) -> anyhow::Result<Self>
+    where
+        Root: Into<PathBuf>,
+    {
         let directory = root.into();
         validate_root(&directory, "DATA_DIR")?;
         self.data_dir = Some(directory);
@@ -699,6 +704,9 @@ fn validate_root(root: &Path, setting: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use edgezero_core::app::StoreMetadata;
+    use std::fs;
+
+    const BINDINGS: &str = "version = 1\n[config.app]\nprovider = 'aws-appconfig-agent'\ndefault_key = 'settings'\nendpoint = 'http://127.0.0.1:2772'\naccess_token_env = 'AGENT_TOKEN'\n[config.app.documents.settings]\napplication = 'example'\nenvironment = 'production'\nprofile = 'envelope'\n";
 
     #[test]
     fn native_settings_defaults_explicit_builders_and_strict_values() {
@@ -752,10 +760,6 @@ mod tests {
             assert!(!error.to_string().contains("sentinel"));
         }
     }
-
-    use std::fs;
-
-    const BINDINGS: &str = "version = 1\n[config.app]\nprovider = 'aws-appconfig-agent'\ndefault_key = 'settings'\nendpoint = 'http://127.0.0.1:2772'\naccess_token_env = 'AGENT_TOKEN'\n[config.app.documents.settings]\napplication = 'example'\nenvironment = 'production'\nprofile = 'envelope'\n";
 
     fn explicit() -> AxumRunOptions {
         AxumRunOptions::new(SocketAddr::from(([127, 0, 0, 1], 1234))).expect("explicit options")
@@ -1188,7 +1192,7 @@ mod tests {
                 let error = AxumRunOptions::from_vars([(key, value)])
                     .err()
                     .expect("invalid");
-                assert!(error.chain().count() == 1);
+                assert_eq!(error.chain().count(), 1);
                 assert!(!format!("{error:?}").contains("sentinel"));
             }
         }

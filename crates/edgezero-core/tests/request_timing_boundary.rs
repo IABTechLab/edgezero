@@ -102,16 +102,16 @@ mod tests {
         let router = RouterService::builder()
             .middleware(RequestTimingMiddleware::<1>::new())
             .get("/", move |ctx: RequestContext| {
-                let now = Arc::clone(&handler_now);
-                let observed = Arc::clone(&handler_observed);
+                let handler_time = Arc::clone(&handler_now);
+                let handler_capture = Arc::clone(&handler_observed);
                 async move {
                     let timings = ctx.extensions().get::<Handle>().unwrap().clone();
                     assert_eq!(timings.elapsed(), Duration::ZERO);
                     let span = timings.span(0).unwrap();
-                    *now.lock().unwrap() = origin + Duration::from_millis(7);
+                    *handler_time.lock().unwrap() = origin + Duration::from_millis(7);
                     drop(span);
                     timings.mark_headers_ready().unwrap();
-                    *observed.lock().unwrap() = Some(timings);
+                    *handler_capture.lock().unwrap() = Some(timings);
                     response_with_body(StatusCode::OK, Body::stream(stream::pending()))
                 }
             })

@@ -411,6 +411,10 @@ pub(crate) struct ConnectionGuard {
     activity: ConnectionActivity,
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Drop::pin_drop is unstable and conflicts with drop"
+)]
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         let mut connection = lock(&self.activity.state);
@@ -578,6 +582,10 @@ impl RequestGuard {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Drop::pin_drop is unstable and conflicts with drop"
+)]
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         if !self.released {

@@ -147,7 +147,7 @@ provides explicit `X86_64`/`ARM64` task architecture, read-only root settings an
 configurable stop timeout. This fits the native image and avoids pretending a
 container's local disk is durable redb storage.
 
-The [AWS reference deployment draft](../specs/aws-reference-deployment.md)
+The [AWS reference deployment draft](https://github.com/IABTechLab/edgezero/blob/b8b82965a0464faecc4eb4c606fb5b98afca621a/docs/specs/aws-reference-deployment.md)
 extends this direction with AppConfig Agent, Secrets Manager, an ECR publishing
 option and an optional DynamoDB profile. It defines acceptance checks and open
 design decisions, not verified cloud support.

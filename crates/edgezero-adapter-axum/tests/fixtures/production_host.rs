@@ -165,6 +165,10 @@ struct FixtureApp;
 
 struct WorkGuard(&'static str);
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Drop::pin_drop is unstable and conflicts with drop"
+)]
 impl Drop for WorkGuard {
     fn drop(&mut self) {
         println!("{}", self.0);

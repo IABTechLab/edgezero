@@ -173,6 +173,10 @@ impl DynamoFixture {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Drop::pin_drop is unstable and conflicts with drop"
+)]
 impl Drop for DynamoFixture {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);

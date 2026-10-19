@@ -6,10 +6,13 @@ use std::sync::Arc;
 use edgezero_adapter_axum::dev_server::{
     AxumRunOptions, LocalStartupFuture, PreparedStores, run_app_with_native_stores,
 };
+use edgezero_adapter_axum::diagnostics::{
+    NativeDiagnosticsHandle, NativeRequestObserver, NativeRequestRecord,
+};
 use edgezero_adapter_axum::native_stores::NativeStoreOverrides;
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
 use edgezero_core::context::RequestContext;
-use edgezero_core::extractor::{AppConfig as TypedAppConfig, State};
+use edgezero_core::extractor::{AppConfig as TypedAppConfig, ForwardedHost, Json, State};
 use edgezero_core::router::RouterService;
 use edgezero_core::{EdgeError, action};
 use serde::Deserialize;
@@ -41,6 +44,7 @@ impl Hooks for NativeAwsApp {
         RouterService::builder()
             .get("/snapshot", snapshot)
             .get("/local-secret", local_secret)
+            .post("/policy", policy)
             .build()
     }
 
@@ -72,6 +76,35 @@ async fn local_secret(ctx: RequestContext) -> Result<String, EdgeError> {
     Ok(local.require_str("LOCAL_FIXTURE_SECRET").await?)
 }
 
+#[action]
+async fn policy(
+    Json(value): Json<String>,
+    ForwardedHost(host): ForwardedHost,
+    ctx: RequestContext,
+) -> Result<String, EdgeError> {
+    Ok(format!(
+        "{}|{}|{}",
+        value.len(),
+        host,
+        ctx.headers().contains_key("forwarded")
+    ))
+}
+
+struct PolicyObserver;
+
+impl NativeRequestObserver for PolicyObserver {
+    #[expect(
+        clippy::print_stdout,
+        reason = "subprocess fixture records category-only observer evidence"
+    )]
+    fn observe(&self, record: &NativeRequestRecord) {
+        println!(
+            "POLICY_RECORD {}",
+            record.status.map_or(0, |status| status.as_u16())
+        );
+    }
+}
+
 fn initialize<'startup>(
     app: &'startup mut App,
     stores: &'startup PreparedStores,
@@ -98,7 +131,8 @@ fn initialize<'startup>(
 }
 
 fn main() -> anyhow::Result<()> {
-    let options = AxumRunOptions::from_env()?;
+    let options = AxumRunOptions::from_env()?
+        .with_diagnostics(NativeDiagnosticsHandle::new().with_request_observer(PolicyObserver));
     run_app_with_native_stores::<NativeAwsApp, _, _>(
         options,
         NativeStoreOverrides::default(),

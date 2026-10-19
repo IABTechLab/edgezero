@@ -244,6 +244,10 @@ mod tests {
                 .env("EDGEZERO__ADAPTER__HOST", "127.0.0.1")
                 .env("EDGEZERO__ADAPTER__PORT", address.port().to_string())
                 .env("EDGEZERO__LOGGING__LEVEL", "off")
+                .env("EDGEZERO__LOGGING__REQUEST_RECORDS", "false")
+                .env("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES", "64")
+                .env("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+                .env("EDGEZERO__ADAPTER__FORWARDING_HEADER_FAMILY", "forwarded")
                 .env("APPCONFIG_AGENT_TOKEN", AGENT_TOKEN)
                 .env("EDGEZERO__SECRETS__LOCAL_FIXTURE_SECRET", LOCAL_SENTINEL)
                 .env("EDGEZERO__SECRETS__TOKEN", FALLBACK_SENTINEL)
@@ -350,6 +354,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "Drop::pin_drop is unstable and conflicts with drop"
+    )]
     impl Drop for ChildHost {
         fn drop(&mut self) {
             if self.child.try_wait().ok().flatten().is_none() {
@@ -510,6 +518,27 @@ secret_id = "{ARN}"
         let local = child.wait_http("/local-secret");
         assert_eq!(response_body(&local), "native-fixture-local-secret");
 
+        // Exercise the provider-enabled runner with nondefault body, proxy and diagnostics policy.
+        for (letters, status) in [(62, "200"), (63, "413")] {
+            let body = serde_json::to_string(&"a".repeat(letters)).expect("JSON payload");
+            let mut client = TcpStream::connect(child.address).expect("policy socket");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("read timeout");
+            write!(client, "POST /policy HTTP/1.1\r\nHost: direct.example\r\nForwarded: for=192.0.2.1;host=trusted.example;proto=https\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).expect("policy request");
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .expect("policy response");
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            if letters == 62 {
+                assert_eq!(response_body(&response), "62|trusted.example|false");
+            }
+        }
+
         let agent_request = agent.take_request();
         assert!(agent_request.headers.starts_with(
             "get /applications/native-fixture/environments/test/configurations/startup-proof "
@@ -535,6 +564,10 @@ secret_id = "{ARN}"
         // Each fixture accepted exactly one startup GET. Both request-time reads still succeeded
         // after their fixture listeners closed, so no request-time AWS call occurred.
         child.stop();
+        let output = child.collect_output();
+        assert_eq!(output.matches("POLICY_RECORD 413").count(), 1);
+        assert_eq!(output.matches("POLICY_RECORD 200").count(), 4);
+        assert!(!output.contains("event=request"));
     }
 
     #[test]

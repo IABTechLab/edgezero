@@ -450,14 +450,20 @@ impl EdgeError {
     }
 
     #[inline]
-    pub fn payload_too_large<S: Into<String>>(message: S) -> Self {
+    pub fn payload_too_large<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::PayloadTooLarge {
             message: message.into(),
         }
     }
 
     #[inline]
-    pub fn request_header_fields_too_large<S: Into<String>>(message: S) -> Self {
+    pub fn request_header_fields_too_large<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::RequestHeaderFieldsTooLarge {
             message: message.into(),
         }

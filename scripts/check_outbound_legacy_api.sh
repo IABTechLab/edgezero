@@ -968,9 +968,14 @@ assert_active_surface_fixture_rejected() {
 failed=0
 
 scan \
-  'Proxy(Client|Handle|Request|Response|Service)|proxy_handle|edgezero_core::proxy|crate::proxy|pub mod proxy' \
+  'Proxy(Client|Handle|Request|Response|Service)|proxy_handle|edgezero_core::proxy' \
   crates examples/app-demo tests/fixtures/reusable-app docs/guide README.md CLAUDE.md TODO.md Cargo.toml \
   .claude/agents/code-architect.md || failed=1
+
+# Axum's incoming trusted-proxy policy is not the retired outbound proxy API.
+scan 'crate::proxy|pub mod proxy' \
+  crates/edgezero-core crates/edgezero-adapter-fastly \
+  crates/edgezero-adapter-cloudflare crates/edgezero-adapter-spin || failed=1
 
 # Downstream response delivery is now adapter-owned. Keep the outbound-fetch
 # buffering helpers: they implement ResponseMode::Buffered and are unrelated to

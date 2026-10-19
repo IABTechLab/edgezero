@@ -495,7 +495,7 @@ impl<'declarations> NativeSourceSelection<'declarations> {
     /// # Errors
     /// Duplicate/undeclared sources, scalar collisions and absent target providers fail closed.
     #[inline]
-    pub fn validate<Declarations: Into<NativeStoreDeclarations<'declarations>>>(
+    pub fn validate<Declarations>(
         metadata: Declarations,
         bindings: &NativeStoreBindings,
         supplied: &NativeSuppliedIds,
@@ -503,7 +503,10 @@ impl<'declarations> NativeSourceSelection<'declarations> {
         capabilities: NativeProviderCapabilities,
         limits: NativeBindingsLimits,
         aws: Option<AwsPreparationLimits>,
-    ) -> Result<Self, NativeBindingsError> {
+    ) -> Result<Self, NativeBindingsError>
+    where
+        Declarations: Into<NativeStoreDeclarations<'declarations>>,
+    {
         bindings.validate(limits, aws)?;
         let declarations = metadata.into();
         let selection = Self {
@@ -533,13 +536,16 @@ impl<'declarations> NativeSourceSelection<'declarations> {
     }
 }
 
-fn resolve<'declarations, 'settings, Ids: Iterator<Item = &'settings String>>(
+fn resolve<'declarations, 'settings, Ids>(
     metadata: Option<NativeStoreDeclaration<'declarations>>,
     supplied: &BTreeSet<String>,
     bound: Ids,
     env: &EnvConfig,
     kind: &str,
-) -> Result<BTreeMap<&'declarations str, NativeBindingSource>, NativeBindingsError> {
+) -> Result<BTreeMap<&'declarations str, NativeBindingSource>, NativeBindingsError>
+where
+    Ids: Iterator<Item = &'settings String>,
+{
     let settings: BTreeSet<&str> = bound.map(String::as_str).collect();
     let Some(meta) = metadata else {
         return if supplied.is_empty() && settings.is_empty() {

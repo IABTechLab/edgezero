@@ -277,6 +277,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "Drop::pin_drop is unstable and conflicts with drop"
+    )]
     impl Drop for RunningHost {
         fn drop(&mut self) {
             if self.child.try_wait().ok().flatten().is_none() {

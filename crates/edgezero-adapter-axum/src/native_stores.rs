@@ -104,11 +104,14 @@ impl NativeStoreOverrides {
     /// # Errors
     /// Rejects a second supplied input for the same config ID.
     #[inline]
-    pub fn insert_config<Id: Into<String>>(
+    pub fn insert_config<Id>(
         &mut self,
         id: Id,
         binding: ConfigStoreBinding,
-    ) -> Result<(), NativeStorePreparationError> {
+    ) -> Result<(), NativeStorePreparationError>
+    where
+        Id: Into<String>,
+    {
         insert(
             &mut self.config,
             id.into(),
@@ -142,11 +145,14 @@ impl NativeStoreOverrides {
     /// # Errors
     /// Rejects a second supplied input for the same KV ID.
     #[inline]
-    pub fn insert_kv<Id: Into<String>>(
+    pub fn insert_kv<Id>(
         &mut self,
         id: Id,
         handle: KvHandle,
-    ) -> Result<(), NativeStorePreparationError> {
+    ) -> Result<(), NativeStorePreparationError>
+    where
+        Id: Into<String>,
+    {
         insert(&mut self.kv, id.into(), NativeStoreSource::Ready(handle))
     }
 
@@ -176,11 +182,14 @@ impl NativeStoreOverrides {
     /// # Errors
     /// Rejects a second supplied input for the same secret ID.
     #[inline]
-    pub fn insert_secrets<Id: Into<String>>(
+    pub fn insert_secrets<Id>(
         &mut self,
         id: Id,
         binding: BoundSecretStore,
-    ) -> Result<(), NativeStorePreparationError> {
+    ) -> Result<(), NativeStorePreparationError>
+    where
+        Id: Into<String>,
+    {
         insert(
             &mut self.secrets,
             id.into(),
@@ -358,12 +367,15 @@ impl NativeSourcePlan {
     }
 }
 
-fn resolve<H, B, BuiltIn: Fn(&str) -> anyhow::Result<B>>(
+fn resolve<H, B, BuiltIn>(
     selection: BTreeMap<&'static str, NativeBindingSource>,
     mut supplied: BTreeMap<String, NativeStoreSource<H>>,
     kind: &str,
     builtin: BuiltIn,
-) -> anyhow::Result<BTreeMap<&'static str, NativeStoreSource<H, B>>> {
+) -> anyhow::Result<BTreeMap<&'static str, NativeStoreSource<H, B>>>
+where
+    BuiltIn: Fn(&str) -> anyhow::Result<B>,
+{
     selection
         .into_iter()
         .map(|(id, selected)| {

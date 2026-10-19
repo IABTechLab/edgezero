@@ -69,7 +69,6 @@ export default defineConfig({
             text: 'Deploying Axum on Kubernetes',
             link: '/guide/deploying-axum-kubernetes',
           },
-
         ],
       },
       {

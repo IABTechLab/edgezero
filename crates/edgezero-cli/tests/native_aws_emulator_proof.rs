@@ -184,6 +184,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "Drop::pin_drop is unstable and conflicts with drop"
+    )]
     impl Drop for Process {
         fn drop(&mut self) {
             let _killed = self.child.kill();

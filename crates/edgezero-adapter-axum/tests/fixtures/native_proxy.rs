@@ -116,6 +116,10 @@ impl LocalProxy {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Drop::pin_drop is unstable and conflicts with drop"
+)]
 impl Drop for LocalProxy {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
@@ -131,9 +135,10 @@ fn invalid() -> io::Error {
     io::Error::new(ErrorKind::InvalidData, "invalid bounded fixture head")
 }
 
-async fn read_head<Client: AsyncRead + Unpin>(
-    client: &mut Client,
-) -> io::Result<(String, Vec<u8>)> {
+async fn read_head<Client>(client: &mut Client) -> io::Result<(String, Vec<u8>)>
+where
+    Client: AsyncRead + Unpin,
+{
     let mut received = Vec::with_capacity(1024);
     let mut chunk = [0_u8; 512];
     loop {
@@ -248,13 +253,16 @@ fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<S
     Ok(rewritten)
 }
 
-async fn relay<Client: AsyncRead + AsyncWrite + Unpin>(
+async fn relay<Client>(
     client: &mut Client,
     peer: SocketAddr,
     upstream: SocketAddr,
     source: Ipv4Addr,
     assertions: Assertions,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    Client: AsyncRead + AsyncWrite + Unpin,
+{
     let (head, body_prefix) = read_head(client).await?;
     let rewritten = rewrite(&head, peer, assertions)?;
     let socket = TcpSocket::new_v4()?;

@@ -287,9 +287,9 @@ remain application-owned. Unmatched routes bypass middleware, and
 `RouterService::oneshot` renders handler errors outside the chain. The available
 measurement boundary depends on the adapter:
 
-- **Fastly:** `run_app_with_request_extensions` and
-  `serve_app_with_request_extensions` can preinstall a handle. Applications that
-  own dispatch and delivery can use `lifecycle::run_custom`. See
+- **Fastly:** the preparation hooks of `run_app_with_hooks` and
+  `serve_app_with_hooks` can preinstall a handle. The adapter still owns response
+  delivery; routed finalization hooks run before terminal egress. See
   [Fastly request extensions](./adapters/fastly.md#capturing-raw-request-signals-ja4-h2-fingerprint).
 - **Axum:** wrap `RouterService` in an application-owned tower service to retain
   the handle across dispatch, including unmatched routes and rendered errors.
