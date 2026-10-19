@@ -2017,7 +2017,7 @@ mod tests {
         failed(
             command("initialized", &roots, malformed_addr),
             malformed_addr,
-            "invalid config snapshot",
+            "malformed",
         );
         for (map, category) in [
             (json!({}), "MissingBlob"),

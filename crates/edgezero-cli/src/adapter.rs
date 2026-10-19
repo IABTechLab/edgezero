@@ -2,6 +2,7 @@ use edgezero_adapter::cli_support::validate_spin_outbound_host_contract;
 use edgezero_adapter::registry::{
     self as adapter_registry, AdapterAction, AdapterDeployContext, DeployOwnership,
 };
+
 use edgezero_core::manifest::{
     CapabilitySupport, Manifest, ManifestContract, ManifestLoader, ResolvedEnvironment,
 };
@@ -119,6 +120,7 @@ pub fn execute(
         let root = loader.manifest().root().unwrap_or_else(|| Path::new("."));
         let env = loader.manifest().environment_for(adapter_name);
         let adapter_bind = adapter_bind_from_manifest(loader.manifest(), adapter_name);
+        let build_features = adapter_build_features(loader.manifest(), adapter_name);
         return run_shell(
             command,
             root,
@@ -127,6 +129,7 @@ pub fn execute(
             Some(env),
             adapter_bind,
             adapter_args,
+            &build_features,
         );
     }
 
@@ -206,6 +209,7 @@ pub fn deploy(
         let root = loader.manifest().root().unwrap_or_else(|| Path::new("."));
         let env = loader.manifest().environment_for(adapter_name);
         let adapter_bind = adapter_bind_from_manifest(loader.manifest(), adapter_name);
+        let build_features = adapter_build_features(loader.manifest(), adapter_name);
         let mut command_args = Vec::new();
         if let Some(service_id) = context.service_id.as_deref() {
             command_args.extend(["--service-id".to_owned(), service_id.to_owned()]);
@@ -219,6 +223,7 @@ pub fn deploy(
             Some(env),
             adapter_bind,
             &command_args,
+            &build_features,
         )?;
         if let Some(finalizer) = registered_adapter {
             finalizer.finalize_deploy(context, Some(&output))?;
@@ -258,6 +263,32 @@ pub(crate) fn execute_runtime(
 ) -> Result<(), String> {
     ensure_action_capabilities(runtime)?;
     execute_after_gate(runtime, adapter_args)
+}
+
+/// Capturing variant of [`execute_runtime`] for manifest shell commands.
+pub(crate) fn execute_capture_runtime(
+    runtime: &ResolvedRuntime,
+    adapter_args: &[String],
+) -> Result<Option<String>, String> {
+    ensure_action_capabilities(runtime)?;
+    if let ResolvedAdapterTarget::Shell(shell) = runtime.target() {
+        let build_features = runtime.manifest().map_or_else(Vec::new, |manifest| {
+            adapter_build_features(manifest, runtime.adapter_name())
+        });
+        return run_shell_tee(
+            shell.command(),
+            shell.root(),
+            runtime.adapter_name(),
+            runtime.action(),
+            Some(shell.environment().clone()),
+            (shell.bind_host().map(str::to_owned), shell.bind_port()),
+            adapter_args,
+            &build_features,
+        )
+        .map(Some);
+    }
+    execute_registered_after_gate(runtime, adapter_args)?;
+    Ok(None)
 }
 
 fn ensure_action_capabilities(runtime: &ResolvedRuntime) -> Result<(), String> {
@@ -301,15 +332,21 @@ fn execute_after_gate(runtime: &ResolvedRuntime, adapter_args: &[String]) -> Res
         ResolvedAdapterTarget::Registered(_target) => {
             execute_registered_after_gate(runtime, adapter_args)
         }
-        ResolvedAdapterTarget::Shell(shell) => run_shell(
-            shell.command(),
-            shell.root(),
-            runtime.adapter_name(),
-            runtime.action(),
-            Some(shell.environment().clone()),
-            (shell.bind_host().map(str::to_owned), shell.bind_port()),
-            adapter_args,
-        ),
+        ResolvedAdapterTarget::Shell(shell) => {
+            let build_features = runtime.manifest().map_or_else(Vec::new, |manifest| {
+                adapter_build_features(manifest, runtime.adapter_name())
+            });
+            run_shell(
+                shell.command(),
+                shell.root(),
+                runtime.adapter_name(),
+                runtime.action(),
+                Some(shell.environment().clone()),
+                (shell.bind_host().map(str::to_owned), shell.bind_port()),
+                adapter_args,
+                &build_features,
+            )
+        }
     }
 }
 
@@ -339,11 +376,54 @@ fn execute_registered_after_gate(
         resolve_environment_defaults(&manifest.environment_for(runtime.adapter_name()))
     });
     let selected = target.clone().with_environment_defaults(defaults);
+    let normalized_args = normalize_registered_axum_args(runtime, adapter_args)?;
     adapter.execute_target(
         AdapterAction::from(runtime.action()),
         &selected,
-        adapter_args,
+        &normalized_args,
     )
+}
+
+#[cfg(feature = "edgezero-adapter-axum")]
+fn normalize_registered_axum_args(
+    runtime: &ResolvedRuntime,
+    adapter_args: &[String],
+) -> Result<Vec<String>, String> {
+    if !runtime.adapter_name().eq_ignore_ascii_case("axum")
+        || !matches!(runtime.action(), Action::Build | Action::Serve)
+    {
+        return Ok(adapter_args.to_vec());
+    }
+    let features = runtime
+        .manifest()
+        .and_then(|manifest| {
+            manifest
+                .adapter_entry(runtime.adapter_name())
+                .map(|(_name, adapter)| adapter.build.features.clone())
+        })
+        .unwrap_or_default();
+    let selection = NativeCargoSelection::normalize_args(&features, adapter_args)?;
+    if matches!(runtime.action(), Action::Build) && !selection.run_args.is_empty() {
+        return Err("Axum build does not accept runtime arguments after `--`".to_owned());
+    }
+    let mut normalized = selection.cargo_args();
+    if matches!(runtime.action(), Action::Serve) && !selection.run_args.is_empty() {
+        normalized.push("--".to_owned());
+        normalized.extend(selection.run_args);
+    }
+    Ok(normalized)
+}
+
+#[cfg(not(feature = "edgezero-adapter-axum"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "retain the common fallible dispatch boundary without the optional native adapter"
+)]
+fn normalize_registered_axum_args(
+    _runtime: &ResolvedRuntime,
+    adapter_args: &[String],
+) -> Result<Vec<String>, String> {
+    Ok(adapter_args.to_vec())
 }
 
 pub(crate) fn resolve_environment_defaults(
@@ -504,19 +584,26 @@ fn adapter_bind_from_manifest(
 /// command, with the manifest environment / bind hints applied. Shared
 /// by [`run_shell`] (inherited stdio) and [`run_shell_tee`] (piped +
 /// echoed stdio) so both dispatch paths apply identical env precedence.
+fn adapter_build_features(manifest: &Manifest, adapter_name: &str) -> Vec<String> {
+    manifest
+        .adapter_entry(adapter_name)
+        .map_or_else(Vec::new, |(_name, config)| config.build.features.clone())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps command, action, environment, bind, passthrough, and selected features explicit at the shared shell boundary"
+)]
 fn build_shell_command(
     command: &str,
     cwd: &Path,
     adapter_name: &str,
+    action: Action,
     environment: Option<ResolvedEnvironment>,
     adapter_bind: (Option<String>, Option<u16>),
     adapter_args: &[String],
+    manifest_features: &[String],
 ) -> Result<Command, String> {
-    let full_command = if adapter_args.is_empty() {
-        command.to_owned()
-    } else {
-        format!("{} {}", command, shell_join(adapter_args))
-    };
     // Log only the manifest-defined `command`, never the trailing
     // `adapter_args` — passthrough args from `edgezero build/deploy <adapter>
     // -- --token …` can carry deploy tokens, API keys, or other secrets that
@@ -528,8 +615,17 @@ fn build_shell_command(
         cwd.display()
     );
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(&full_command).current_dir(cwd);
+    let mut cmd = match native_axum_cargo_command(
+        adapter_name,
+        action,
+        command,
+        cwd,
+        adapter_args,
+        manifest_features,
+    )? {
+        Some(native_command) => native_command,
+        None => shell_command(command, adapter_args, cwd),
+    };
 
     // Precedence (high to low) for `EDGEZERO__ADAPTER__HOST/PORT` on the
     // subprocess:
@@ -562,6 +658,73 @@ fn build_shell_command(
     Ok(cmd)
 }
 
+#[cfg(feature = "edgezero-adapter-axum")]
+fn native_axum_cargo_command(
+    adapter_name: &str,
+    action: Action,
+    command: &str,
+    cwd: &Path,
+    adapter_args: &[String],
+    manifest_features: &[String],
+) -> Result<Option<Command>, String> {
+    if !adapter_name.eq_ignore_ascii_case("axum")
+        || !matches!(action, Action::Build | Action::Serve)
+    {
+        return Ok(None);
+    }
+    let Some((subcommand, package)) = generated_axum_cargo_action(command) else {
+        return Ok(None);
+    };
+    let selection = NativeCargoSelection::normalize_args(manifest_features, adapter_args)?;
+    if subcommand == "build" && !selection.run_args.is_empty() {
+        return Err(
+            "generated `cargo build` does not accept runtime arguments after `--`".to_owned(),
+        );
+    }
+    let mut cargo = Command::new("cargo");
+    cargo
+        .arg(subcommand)
+        .arg("-p")
+        .arg(package)
+        .args(selection.cargo_args())
+        .current_dir(cwd);
+    if subcommand == "run" && !selection.run_args.is_empty() {
+        cargo.arg("--").args(&selection.run_args);
+    }
+    Ok(Some(cargo))
+}
+
+#[cfg(not(feature = "edgezero-adapter-axum"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "retain the common fallible command boundary without the optional native adapter"
+)]
+fn native_axum_cargo_command(
+    _adapter_name: &str,
+    _action: Action,
+    _command: &str,
+    _cwd: &Path,
+    _adapter_args: &[String],
+    _manifest_features: &[String],
+) -> Result<Option<Command>, String> {
+    Ok(None)
+}
+
+fn shell_command(command: &str, adapter_args: &[String], cwd: &Path) -> Command {
+    let full_command = if adapter_args.is_empty() {
+        command.to_owned()
+    } else {
+        format!("{} {}", command, shell_join(adapter_args))
+    };
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(full_command).current_dir(cwd);
+    cmd
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps command, action, environment, bind, passthrough, and selected features explicit for inherited stdio"
+)]
 fn run_shell(
     command: &str,
     cwd: &Path,
@@ -570,14 +733,17 @@ fn run_shell(
     environment: Option<ResolvedEnvironment>,
     adapter_bind: (Option<String>, Option<u16>),
     adapter_args: &[String],
+    manifest_features: &[String],
 ) -> Result<(), String> {
     let mut cmd = build_shell_command(
         command,
         cwd,
         adapter_name,
+        action,
         environment,
         adapter_bind,
         adapter_args,
+        manifest_features,
     )?;
 
     let status = cmd
@@ -631,6 +797,10 @@ where
 /// captured. Returns the captured `stdout + stderr` text so the caller
 /// can parse machine-readable lines (e.g. Fastly's activated
 /// `version=<N>`) out of a command it does not otherwise control.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps command, action, environment, bind, passthrough, and selected features explicit for captured stdio"
+)]
 fn run_shell_tee(
     command: &str,
     cwd: &Path,
@@ -639,14 +809,17 @@ fn run_shell_tee(
     environment: Option<ResolvedEnvironment>,
     adapter_bind: (Option<String>, Option<u16>),
     adapter_args: &[String],
+    manifest_features: &[String],
 ) -> Result<String, String> {
     let mut cmd = build_shell_command(
         command,
         cwd,
         adapter_name,
+        action,
         environment,
         adapter_bind,
         adapter_args,
+        manifest_features,
     )?;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -703,10 +876,13 @@ fn shell_join(args: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "edgezero-adapter-axum")]
+    use super::native_axum_cargo_command;
     use super::{
         AdapterDeployContext, ResolvedEnvironment, apply_environment, deploy, ensure_capabilities,
         execute_runtime,
     };
+
     use crate::adapter::Action;
     use crate::manifest_source::resolve_runtime_from;
     use crate::test_support::manifest_guard;
@@ -798,6 +974,39 @@ mod tests {
 
     fn capability_manifest(section: &str) -> ManifestLoader {
         ManifestLoader::load_from_str(&format!("[capabilities]\n{section}\n[adapters.gate]\n"))
+    }
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    #[test]
+    fn generated_axum_cargo_intercept_is_build_and_serve_only() {
+        use std::path::Path;
+
+        for action in [Action::Deploy, Action::AuthLogin] {
+            assert!(
+                native_axum_cargo_command(
+                    "axum",
+                    action,
+                    "cargo build -p app",
+                    Path::new("."),
+                    &[],
+                    &[],
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        assert!(
+            native_axum_cargo_command(
+                "axum",
+                Action::Build,
+                "cargo build -p app",
+                Path::new("."),
+                &[],
+                &[],
+            )
+            .unwrap()
+            .is_some()
+        );
     }
 
     #[test]

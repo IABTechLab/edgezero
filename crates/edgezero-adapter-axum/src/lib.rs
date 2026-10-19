@@ -19,6 +19,12 @@ pub mod ingress_config;
 
 #[cfg(feature = "axum")]
 pub mod key_value_store;
+#[cfg(all(feature = "native-bindings", not(target_arch = "wasm32")))]
+pub mod native_bindings;
+#[cfg(all(feature = "native-bindings", not(target_arch = "wasm32")))]
+pub mod native_build;
+#[cfg(feature = "axum")]
+pub mod native_stores;
 #[cfg(feature = "axum")]
 pub mod outbound;
 #[cfg(feature = "axum")]
@@ -31,6 +37,7 @@ mod response;
 mod run_options;
 #[cfg(any(feature = "axum", feature = "cli"))]
 pub mod secret_env;
+
 #[cfg(feature = "axum")]
 pub mod secret_store;
 #[cfg(feature = "axum")]
