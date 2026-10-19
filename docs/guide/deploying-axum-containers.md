@@ -9,7 +9,7 @@ The examples here prepare Docker and Compose operations. They do not claim
 production readiness, persistent recovery or graceful SIGTERM drain. The current
 generated entrypoint is the development `run_app`; `/` is a packaging response,
 not readiness. Production runtime work must be accepted before the remaining
-[#400](https://github.com/stackpop/edgezero/issues/400) deployment checks.
+[#400](https://github.com/IABTechLab/edgezero/issues/400) deployment checks.
 
 ## No-store Docker and Compose
 

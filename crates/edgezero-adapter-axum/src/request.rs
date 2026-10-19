@@ -11,6 +11,7 @@ use edgezero_core::http::{Request as CoreRequest, header::CONTENT_TYPE};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::{StreamExt as _, stream};
+use http_body::Body as _;
 use tokio::time::timeout;
 
 use crate::context::AxumRequestContext;
@@ -49,11 +50,16 @@ pub(crate) fn into_core_request_parts(
     let outbound_clock = read_lifetime
         .as_ref()
         .map_or_else(MonotonicClock::default, |(_, clock)| clock.clone());
-    let body = match read_lifetime {
-        Some((deadline, monotonic_clock)) => {
-            deadline_body(axum_body.into_data_stream(), deadline, monotonic_clock)
+    let body = if axum_body.is_end_stream() {
+        // Preserve transport-proven emptiness without polling or discarding an unknown body.
+        Body::empty()
+    } else {
+        match read_lifetime {
+            Some((deadline, monotonic_clock)) => {
+                deadline_body(axum_body.into_data_stream(), deadline, monotonic_clock)
+            }
+            None => Body::from_external_stream(axum_body.into_data_stream()),
         }
-        None => Body::from_external_stream(axum_body.into_data_stream()),
     };
 
     let managed_body = body.with_buffered_json_policy(json_body_limit.get(), ingress_is_json);
@@ -148,6 +154,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use edgezero_core::http::{Method, StatusCode};
+    use edgezero_core::outbound::validate_for_dispatch;
     use edgezero_core::time::MonotonicInstant;
     use std::io;
     use std::sync::Arc;
@@ -248,6 +255,60 @@ mod tests {
         assert_eq!(Arc::strong_count(&transport), 2);
         drop(core_request);
         assert_eq!(Arc::strong_count(&transport), 1);
+    }
+
+    #[tokio::test]
+    async fn known_empty_get_and_head_remain_forwardable() {
+        for method in [Method::GET, Method::HEAD] {
+            let request = Request::builder()
+                .method(method)
+                .uri("/proxy/index.html")
+                .body(AxumBody::empty())
+                .expect("request");
+            let converted = into_core_request(request).await.expect("conversion");
+            let outbound = edgezero_core::OutboundRequest::from_request(
+                converted,
+                "https://example.test/index.html".parse().expect("target"),
+            )
+            .expect("known empty request must remain forwardable");
+            validate_for_dispatch(&outbound).expect("empty preflight");
+            assert!(!outbound.into_parts().body.is_stream());
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_or_nonempty_get_body_is_not_discarded_or_polled_for_forwarding() {
+        for method in [Method::GET, Method::HEAD] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let signal = DropSignal(Arc::clone(&dropped));
+            let observed = Arc::clone(&polls);
+            let unknown_body = AxumBody::from_stream(stream::poll_fn(move |_cx| {
+                let _retained = &signal;
+                observed.fetch_add(1, Ordering::SeqCst);
+                Poll::<Option<Result<Bytes, io::Error>>>::Ready(None)
+            }));
+            for body in [unknown_body, AxumBody::from("not empty")] {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri("/proxy")
+                    .body(body)
+                    .expect("request");
+                let converted = into_core_request(request).await.expect("conversion");
+                assert!(converted.body().is_stream());
+                let outbound = edgezero_core::OutboundRequest::from_request(
+                    converted,
+                    "https://example.test/".parse().expect("target"),
+                )
+                .expect("forwarding request");
+                let error = validate_for_dispatch(&outbound)
+                    .expect_err("unknown and nonempty GET/HEAD bodies must stay rejected");
+                drop(outbound);
+                assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[tokio::test]

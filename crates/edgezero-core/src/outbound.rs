@@ -168,9 +168,12 @@ pub enum OutboundBatchTermination {
 /// That poll waits for driver EOF and still validates trailing events or finalization failures.
 #[derive(Debug)]
 #[non_exhaustive]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "the body carrier adds one word to terminal items; preserve the public unboxed batch contract"
+#[cfg_attr(
+    target_pointer_width = "64",
+    expect(
+        clippy::large_enum_variant,
+        reason = "the body carrier adds one word to native terminal items; preserve the public unboxed batch contract"
+    )
 )]
 pub enum OutboundBatchNext {
     /// The batch reached its normal or cutoff terminal state.

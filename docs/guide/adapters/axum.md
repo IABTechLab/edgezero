@@ -535,9 +535,9 @@ commit for every EdgeZero crate. For example:
 
 ```toml
 # Replace the placeholder with a reviewed release compatible with this app.
-edgezero-core = { git = "https://github.com/stackpop/edgezero.git", tag = "<approved-release>", default-features = false }
-edgezero-adapter-axum = { git = "https://github.com/stackpop/edgezero.git", tag = "<approved-release>", default-features = false }
-edgezero-cli = { git = "https://github.com/stackpop/edgezero.git", tag = "<approved-release>" }
+edgezero-core = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>", default-features = false }
+edgezero-adapter-axum = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>", default-features = false }
+edgezero-cli = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>" }
 ```
 
 Apply that ref to the other generated EdgeZero adapter entries too. Preserve

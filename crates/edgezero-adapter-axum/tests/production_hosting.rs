@@ -1704,6 +1704,48 @@ mod tests {
     }
 
     #[test]
+    fn non_unicode_ingress_and_snapshot_limits_fail_before_hooks_or_listen() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let roots = Roots::new();
+        for mode in ["diagnostics", "bare-dev"] {
+            for (group, fields) in [
+                (
+                    "INGRESS",
+                    &[
+                        "MAX_CONNECTIONS",
+                        "MAX_RAW_HEAD_BYTES",
+                        "MAX_HEADER_COUNT",
+                        "HEAD_READ_TIMEOUT_MS",
+                    ][..],
+                ),
+                (
+                    "CONFIG_STORE",
+                    &[
+                        "MAX_FILE_BYTES",
+                        "MAX_ENTRIES",
+                        "MAX_KEY_BYTES",
+                        "MAX_VALUE_BYTES",
+                        "MAX_RESIDENT_BYTES",
+                        "MAX_STARTUP_BYTES",
+                    ][..],
+                ),
+            ] {
+                for field in fields {
+                    let addr = address();
+                    let mut launch = command(mode, &roots, addr);
+                    launch.env(
+                        format!("EDGEZERO__ADAPTER__{group}__{field}"),
+                        OsString::from_vec(vec![0xff]),
+                    );
+                    let log = failed(launch, addr, group);
+                    assert!(log.contains("non-Unicode"));
+                    assert!(!log.contains("HOOK_ENTERED") && !log.contains("phase=ready"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn json_body_limit_wire_content_length_and_chunked() {
         let roots = Roots::new();
         let addr = address();

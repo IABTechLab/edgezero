@@ -639,9 +639,26 @@ fn fixed_setting(path: &[String]) -> Option<&'static str> {
         ["adapter", "json_body_limit_bytes"] => Some("JSON_BODY_LIMIT_BYTES"),
         ["logging", "level"] => Some("LOGGING__LEVEL"),
         ["store_bindings_file"] => Some("STORE_BINDINGS_FILE"),
-
-        _ => None,
+        _ => native_limit_setting(&path.join("__")),
     }
+}
+
+// Both environment-loading boundaries must reject binary values for owned limits.
+pub(crate) fn native_limit_setting(path: &str) -> Option<&'static str> {
+    [
+        ("ADAPTER__INGRESS__MAX_CONNECTIONS", "INGRESS"),
+        ("ADAPTER__INGRESS__MAX_RAW_HEAD_BYTES", "INGRESS"),
+        ("ADAPTER__INGRESS__MAX_HEADER_COUNT", "INGRESS"),
+        ("ADAPTER__INGRESS__HEAD_READ_TIMEOUT_MS", "INGRESS"),
+        ("ADAPTER__CONFIG_STORE__MAX_FILE_BYTES", "CONFIG_STORE"),
+        ("ADAPTER__CONFIG_STORE__MAX_ENTRIES", "CONFIG_STORE"),
+        ("ADAPTER__CONFIG_STORE__MAX_KEY_BYTES", "CONFIG_STORE"),
+        ("ADAPTER__CONFIG_STORE__MAX_VALUE_BYTES", "CONFIG_STORE"),
+        ("ADAPTER__CONFIG_STORE__MAX_RESIDENT_BYTES", "CONFIG_STORE"),
+        ("ADAPTER__CONFIG_STORE__MAX_STARTUP_BYTES", "CONFIG_STORE"),
+    ]
+    .into_iter()
+    .find_map(|(candidate, setting)| path.eq_ignore_ascii_case(candidate).then_some(setting))
 }
 
 pub(crate) fn shutdown_grace(env: &EnvConfig) -> anyhow::Result<Duration> {

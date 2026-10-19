@@ -1,7 +1,7 @@
 # Deploying Axum applications on Kubernetes
 
 ::: warning Draft, not deployment acceptance
-This guide defines the Kubernetes recipe for [#400](https://github.com/stackpop/edgezero/issues/400). Runnable manifests, controller/image pins and disposable-cluster execution are not delivered yet. The YAML fragments below are design examples, not a complete deployment. Do not treat them as production verification.
+This guide defines the Kubernetes recipe for [#400](https://github.com/IABTechLab/edgezero/issues/400). Runnable manifests, controller/image pins and disposable-cluster execution are not delivered yet. The YAML fragments below are design examples, not a complete deployment. Do not treat them as production verification.
 
 Production entrypoints, probes, startup validation and shutdown must use the accepted runtime contracts. The current container packaging response at `/` is not readiness.
 :::
@@ -241,4 +241,4 @@ Local Kubernetes acceptance can proceed independently of EKS qualification. #400
 - [Envoy Gateway YAML installation](https://gateway.envoyproxy.io/docs/install/install-yaml/), [compatibility matrix](https://gateway.envoyproxy.io/news/releases/matrix/) and [HTTPS secure gateways](https://gateway.envoyproxy.io/docs/tasks/security/secure-gateways/).
 - [kind configuration and local port mappings](https://kind.sigs.k8s.io/docs/user/configuration/).
 - [Kubernetes probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/), [Pod termination](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination) and [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/).
-- [EdgeZero #400](https://github.com/stackpop/edgezero/issues/400), [AWS provider issue #410](https://github.com/stackpop/edgezero/issues/410) and [draft provider PR #414](https://github.com/stackpop/edgezero/pull/414).
+- [EdgeZero #400](https://github.com/IABTechLab/edgezero/issues/400), [AWS provider issue #410](https://github.com/IABTechLab/edgezero/issues/410) and [draft provider PR #414](https://github.com/IABTechLab/edgezero/pull/414).

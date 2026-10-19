@@ -62,7 +62,8 @@ use crate::proxy::TrustedProxyPolicy;
 use crate::response::EgressConnection;
 pub use crate::run_options::AxumRunOptions;
 use crate::run_options::{
-    JsonBodyLimit, failure, native_settings, shutdown_grace, strip_native_config_prefix,
+    JsonBodyLimit, failure, native_limit_setting, native_settings, shutdown_grace,
+    strip_native_config_prefix,
 };
 use crate::secret_store::EnvSecretStore;
 use crate::service::{
@@ -993,6 +994,7 @@ where
             .into_iter()
             .find(|(candidate, _)| path.eq_ignore_ascii_case(candidate))
             .map(|(_, setting)| setting)
+            .or_else(|| native_limit_setting(path))
         });
         match (os_value.to_str(), recognized) {
             (Some(value), _) => pairs.push((key.to_owned(), value.to_owned())),

@@ -315,7 +315,9 @@ struct TimingBoundary;
 impl Middleware for TimingBoundary {
     async fn handle(&self, mut ctx: RequestContext, next: Next<'_>) -> Result<Response, EdgeError> {
         let existing = ctx.extensions().get::<Handle>().cloned();
-        let timings = existing.unwrap_or_else(Handle::new);
+        let timings = existing.unwrap_or_else(|| {
+            Handle::with_data_and_clock(AppData::default(), ctx.monotonic_clock())
+        });
         ctx.extensions_mut().insert(timings.clone());
         let result = next.run(ctx).await;
         let _ = timings.mark_headers_ready();
