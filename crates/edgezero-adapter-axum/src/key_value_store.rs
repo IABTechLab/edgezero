@@ -157,15 +157,10 @@ impl PersistentKvStore {
     /// # Errors
     /// Returns an error if the database file cannot be opened or initialised (corrupted file, locked by another process, or insufficient permissions).
     #[inline]
-    pub fn new<P>(path: P) -> Result<Self, KvError>
-    where
-        P: AsRef<Path>,
-    {
-        let db_path = path.as_ref().display().to_string();
-        let db = Database::create(path).map_err(|err| {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, KvError> {
+        let db = Database::create(path).map_err(|_error| {
             KvError::Internal(anyhow::anyhow!(
-                "Failed to open KV database at {db_path}. If the file is corrupted or locked \
-                 by another process, try deleting it and restarting: {err}"
+                "KV database unavailable; release other owners or check storage permissions, capacity and integrity"
             ))
         })?;
 
