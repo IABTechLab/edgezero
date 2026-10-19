@@ -2772,8 +2772,8 @@ test_fastly_logical_link_documentation() {
     grep -Fq -- '--service-id "$FASTLY_SERVICE_ID"' "$fastly_deployment"
   assert_fails "Fastly managed deployment does not recommend direct provider deployment" \
     grep -Fq 'fastly compute deploy' "$fastly_deployment"
-  assert_succeeds "bare Fastly deploy is explicitly store-free production compatibility" \
-    grep -Fq 'store-free production compatibility' "$fastly_deployment_flat"
+  assert_succeeds "bare Fastly deploy is explicitly limited to store-free production" \
+    grep -Fq 'supports store-free production deployments using a manifest command' "$fastly_deployment_flat"
 
   # shellcheck disable=SC2016 # GitHub expression is the literal documentation contract.
   assert_fails "lifecycle examples do not reference a cross-job archive path output" \
