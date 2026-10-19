@@ -45,14 +45,43 @@ Two read-only workers, both `openai-codex/gpt-6.1-sol`, investigated disjoint ru
 
 Toolchain follows checked-out `.tool-versions`: Rust 1.98.1. Host is native Linux amd64 with Docker 29.7.2 and all three Rust WASM targets installed. The inherited shell override was 1.95.0 and was not used. Documentation and worker Node/security checks use installed Node 24.20.0. The initial Bash-driven Node checks used inherited Node 24.12.0; final rechecks select 24.20.0 explicitly.
 
-Local detailed logs, source snapshots and the initial ledger are under `/tmp/edgezero-rc-run/`. Later logs and temporary consumer builds use `target/rc-late-evidence/` and `target/rc-validation-tmp/` after `/tmp` quota failures. Those quota failures are environment failures, not passing checks. Focused integration checkpoints passed core/Axum tests after 275, 406, 407 and 409. After 414, all 74 AWS all-feature unit tests passed and the serialized Axum all-feature suite passed, including five AWS startup and 32 production-hosting tests. The enhanced mixed-provider fixture proves typed initialization before listening, immutable provider reads after fixture listeners close, 64-byte acceptance/65-byte JSON rejection, checked Forwarded host/stripping and native observer delivery with request records disabled.
+Local detailed logs, source snapshots and the initial ledger are under `/tmp/edgezero-rc-run/`. Final logs and the command/revision/exit/duration ledger are under `target/rc-late-evidence/`. After `/tmp` quota failures, test temporaries moved to `/home/pav/.cache/edgezero-rc-20261019-tmp`, outside any Cargo workspace. An intermediate TMPDIR inside this checkout made a no-parent-manifest test discover this workspace; rerunning outside the checkout passed. Neither environment failure is counted as a pass. Focused integration checkpoints passed core/Axum tests after 275, 406, 407 and 409. After 414, all 74 AWS all-feature unit tests passed and the serialized Axum all-feature suite passed, including five AWS startup and 32 production-hosting tests. The enhanced mixed-provider fixture proves typed initialization before listening, immutable provider reads after fixture listeners close, 64-byte acceptance/65-byte JSON rejection, checked Forwarded host/stripping and native observer delivery with request records disabled.
 
 One parallel-load wire-disconnect test timed out before observing dispatch; it passed alone and in the full serialized Axum suite. This remains a load-sensitive test observation, not a waived failure.
 
-Final broad gate results and remaining gaps will be recorded here before the draft PR is opened. The draft PR body records the exact final pushed pin SHA, avoiding a self-referential SHA in this file.
+### Executed combined-state checks
+
+The final stable-code ledger has 24 gates, all exit 0, at `e3f13b699b03e99d21af92f12c6496c4d0c59d2b`. The subsequent commit completes only this excluded internal record. Earlier passing evidence is reused where relevant source inputs did not change; the distinction is explicit below.
+
+| Check | Outcome and scope |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo test --workspace --all-targets` | PASS, including the transport-proven-empty and unknown/nonempty GET/HEAD regressions |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `cargo check --workspace --all-targets --features 'fastly cloudflare spin'` | PASS |
+| Axum `--all-features --all-targets -- --test-threads=1` | PASS; five AWS startup tests and 33 production-hosting tests, including all twenty binary-limit startup cases |
+| Target Clippy, each adapter with its platform, `cli,test-utils`, `--all-targets -- -D warnings` | PASS on Fastly/wasip1, Spin/wasip2 and Cloudflare/unknown-unknown. Layout expectations apply only to 64-bit targets; actual test modules carry `cfg(test)` so test-only panic/unwrap conventions are recognized. |
+| Generated workspace opt-in proof | PASS; strict config validation, formatting, native workspace, nonzero generated core tests, CLI delegation and all three installed WASM targets |
+| Generated AWS startup opt-in proof | PASS; application build-feature forwarding, typed production initialization, local/AWS source planning, snapshots, JSON policy and trusted diagnostics composed |
+| Generated DynamoDB opt-in proof | PASS; default-off, enabled CRUD/list/logical TTL/caps and restart persistence |
+| `node scripts/run_native_aws_integration.mjs` | PASS using independent pinned DynamoDB Local, Moto and the real AppConfig Agent; synthetic local credentials only |
+| Flate/Brotli/serde map/shared-pin/native-isolation/legacy-API guards | PASS. Demo and reusable fixture lockfiles were reconciled to the new exact pins; the demo's rustls 0.23.45 was preserved. |
+| Prepared-context container Node suites | PASS, 54 tests, zero skips |
+| Docs format, lint, VitePress build and outbound docs contract | PASS on Node 24.20.0 |
+
+Earlier executed evidence whose runtime logic remains unchanged:
+
+- Native Axum/Fastly/Cloudflare/Spin feature matrices, core doctests, AWS no-feature/each-provider/all-feature matrix (74 all-feature tests), demo tests (48), and reusable core/harness tests (5 + 26) passed.
+- Real WASM harnesses passed: Viceroy Fastly contract 26 + library 161; Wasmtime Spin contract 37 + SDK resources 7; headless Chromium Cloudflare contract 31 + library 29. These include timing attachment and bounded local clock-advancement checks. They are local engine execution, not hosted provider qualification. Later WASM changes affect lint/test cfg attributes only, and strict target Clippy was rerun.
+- Action pins, release-example pins, actionlint, offline zizmor, ShellCheck and four action shell suites passed. The earlier 71 Node tests included three missing-prepared-context skips; the final prepared-context suites above executed all 54 container cases without skips.
+- Native amd64 generated-container packaging passed after the empty-body fix: ELF/shared-library checks, UID 10001, read-only root, capability drop, no-new-privileges, mounted read-only config/writable data, HTTP and controlled HTTPS trust/hostname rejection. Evidence records source `a3cd9e74a6b49748d451479f5c919c3cce226791`; later native source changes only align Windows prefix matching and test/lint cfg. This packaging check explicitly does not certify readiness, durable restart or SIGTERM; separate native tests cover those behaviors.
+
+The source/combined-state review and these executions do not substitute for one final Git-identity consumer proof. After pushing, generate a fresh consumer, replace **every** EdgeZero workspace dependency with `git = "https://github.com/IABTechLab/edgezero.git"` and the same full final `rev`, verify Cargo metadata contains one EdgeZero Git source and no path copies, and build/run default-off and AWS-enabled native variants. Record the exact pushed SHA, that consumer's startup/snapshot/drain result and the final-pin packaging result in the draft PR and session. This avoids a self-referential commit SHA in this file.
+
+Reproduction starts with a clean checkout of the PR's full pin, `RUSTUP_TOOLCHAIN=1.98.1`, Node 24.20.0, all three WASM targets and the harness tools. Run the four workspace commands above, serialized Axum all-feature tests, `scripts/check_adapter_feature_matrix.sh` for each adapter, and `scripts/run_native_aws_integration.mjs`. Explicit opt-in test names are `generated_workspace_compiles`, `generated_cli_build_features_and_native_aws_startup_are_proven_together`, and `generated_cli_default_off_and_enabled_dynamodb_crud_list_ttl_restart`; use `scripts/run_test_nonzero.sh --ignored <name> cargo test -p edgezero-cli --test <corresponding test file>`. Container preparation/packaging must use a disposable context outside the checkout. Never use real AWS credentials for these fixtures.
 
 ## Boundaries
 
-Local execution does not qualify hosted adapter lifecycle or confirm end-client receipt. Native amd64 execution does not prove arm64 execution. Independent Docker services do not establish AWS IAM, KMS, production AppConfig polling or capacity behavior. Dependency DEBUG/TRACE may expose SDK metadata; EdgeZero's own redaction does not suppress third-party logs. DynamoDB has no CAS/exactly-once guarantee. A packaging scan in report-only mode cannot satisfy strict release publication policy.
+Local execution does not qualify hosted adapter lifecycle or confirm end-client receipt. Native amd64 execution does not prove arm64 execution. Independent Docker services do not establish AWS IAM, KMS, production AppConfig polling or capacity behavior. Dependency DEBUG/TRACE may expose SDK metadata; EdgeZero's own redaction does not suppress third-party logs. DynamoDB has no CAS/exactly-once guarantee. A packaging scan in report-only mode cannot satisfy strict release publication policy; no registry-qualified release scan or publication was performed. Docs installation reported five dependency vulnerabilities (two moderate, three high); no dependency/security qualification is claimed.
 
 After this RC, adapt TS in a separate task so every EdgeZero dependency uses the one final Git identity, migrate intentional API breaks, and run TS-specific compatibility checks before choosing AWS infrastructure or deploying anything.
