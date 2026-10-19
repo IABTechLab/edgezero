@@ -49,9 +49,12 @@ enum SendFailure {
 }
 
 #[cfg(any(feature = "fastly", test))]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "keep batch observation allocation-free despite one-word Body carrier growth"
+#[cfg_attr(
+    target_pointer_width = "64",
+    expect(
+        clippy::large_enum_variant,
+        reason = "keep native batch observation allocation-free despite one-word Body carrier growth"
+    )
 )]
 enum FastlyBatchObservation {
     Continue(OutboundBatchItem),

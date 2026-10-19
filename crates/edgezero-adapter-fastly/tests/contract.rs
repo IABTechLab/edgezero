@@ -1357,11 +1357,7 @@ mod outbound_contract_tests {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "fastly",
-    feature = "test-utils",
-    target_arch = "wasm32"
-))]
+#[cfg(test)]
+#[cfg(all(feature = "fastly", feature = "test-utils", target_arch = "wasm32"))]
 #[path = "../../edgezero-core/tests/support/request_timing.rs"]
 mod request_timing_tests;

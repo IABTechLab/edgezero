@@ -981,7 +981,7 @@ where
         let Some(key) = os_key.to_str() else {
             continue;
         };
-        let recognized = key.strip_prefix("EDGEZERO__").and_then(|path| {
+        let recognized = strip_native_config_prefix(key).and_then(|path| {
             [
                 ("ADAPTER__JSON_BODY_LIMIT_BYTES", "JSON_BODY_LIMIT_BYTES"),
                 ("ADAPTER__TRUSTED_PROXY_CIDRS", "TRUSTED_PROXY_CIDRS"),
