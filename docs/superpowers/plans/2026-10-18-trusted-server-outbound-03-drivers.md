@@ -87,8 +87,9 @@ backend identity and slack until D1b replaces them together; no new blocking-rea
 
 ### Task D1b: Stable Backend Identity and Slack Removal
 
-**Files:** Fastly `src/outbound.rs`, `src/outbound/backend.rs`, `src/request.rs`,
-`tests/contract.rs`, and fixture Fastly qualification cases.
+**Files:** Fastly `src/outbound.rs`, `src/outbound/backend.rs`, `src/context.rs`,
+`src/request.rs`, `src/lifecycle.rs`, `tests/contract.rs`, and fixture Fastly qualification cases;
+create `tests/outbound_public_api.rs` for the external observation compile contract.
 
 **Dependencies:** D1a's verified bounded waits and G4's literal B/domain approval.
 
@@ -105,10 +106,32 @@ backend identity and slack until D1b replaces them together; no new blocking-rea
       Keep explicit connect/idle limits distinct from aggregate deadlines; Image Optimizer is not
       an identity discriminator. Detect inconsistent name reuse; never trust `NameInUse` blindly.
 - [ ] Add request-local registration count/config-count/total/max duration and >=50 ms warning.
+      Implement plan 02's G4-approved `FastlyOutboundObservation` and `FastlyOutboundStats` contract.
+      Install the extension handle before prepare, bind registration accounting per operation to
+      D1a's scope, and keep the read-only handle independent of cleanup ownership. Freeze numeric
+      accounting on callback/helper-fallback exit, not response completion or client drop.
       Charge deadline from original call entry, retain a successfully registered backend even if
       registration returns late, and return attributed 504 without sending an expired slot. Remove
       slack guards, constant, hook, and tests only together with verified bounded waits. Preserve
       router-state > prepare-hook > default-client precedence and cross-request Axum pooling.
+- [ ] Add `registration_observation_public_api` in the new external test file; compile every
+      getter plus Clone/Send/Sync handle bounds and Copy/equality snapshot bounds without private
+      constructors or a Fastly SDK dependency. Run
+      `scripts/run_test_nonzero.sh registration_observation_public_api cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --test outbound_public_api`.
+      Expected: missing/unusable declarations fail compilation, then a nonzero native pass.
+- [ ] Add `request_registration_observation_follows_scope` to native contract tests and repeat
+      real provider accounting on the Q2 WASI/fixture legs. Run the sentinel using the index's
+      exact Fastly native feature card. Expected: default, router-state and prepare injection see
+      the same request's counters; same-key cache hits, failed/late registrations and retries keep
+      the specified count/durations. Check zero-activity preflight, post-delivery work, helper reuse,
+      Ok/Err/unwind exit and retained handle/client isolation across two callbacks. Retaining a
+      handle retains only its frozen numbers, not an old exchange or configuration-key set.
+- [ ] Add `registration_warning_obeys_fifty_millisecond_boundary`; run
+      `scripts/run_test_nonzero.sh registration_warning_obeys_fifty_millisecond_boundary cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --lib`.
+      Use an injected clock and recording logger for just below 50 ms, exactly 50 ms and above,
+      including a failed registration. Expected: no warning below the boundary, one warn record
+      at/above it, correct request-local count/total/max observations, and unchanged wire errors.
+      This is EZ-2.13's acceptance proof, not a hosted registration-latency threshold.
 - [ ] Run native backend/registration contracts and the real G2 readiness suite after removing
       slack; deadline, cutoff and sibling-progress sentinels must still execute nonzero. Apply the
       task fmt/clippy card. Suggested commit: `feat: stabilize Fastly backend identity and remove proved slack`.
@@ -250,6 +273,13 @@ tests in `tests/contract.rs` and `tests/sdk_resources.rs`.
 **Files:** Four adapter `tests/contract.rs`, core `src/outbound.rs` tests, and the qualification
 fixture. Fix only the corresponding adapter implementation when a parity case fails.
 
+- [ ] Add `send_modes_preserve_options_and_failure_precedence` to each native adapter contract.
+      Run it with `scripts/run_test_nonzero.sh` using the index's four exact native feature cards,
+      replacing the existing sentinel name only. Expected: red for missing mode propagation, then
+      identical effective options/typed outcomes and zero activity on unsupported preflight.
+      Repeat the same named cases under Q2's SDK target cards and required real-runtime fixtures;
+      a passing native double cannot close a target leg. Apply the task lint card.
+
 - [ ] Run each changed option through single send, begun request, batch slot, and redirect hops
       where permitted; later include fire-and-forget only if implemented. Exercise client marker defaults
       and overrides, all caps, connect limits, coding choices, and Image Optimizer rejections.
@@ -266,7 +296,19 @@ fixture. Fix only the corresponding adapter implementation when a parity case fa
 ## Task D6: Lifetime and Late-Collection Qualification
 
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
-`runners.rs`, `evidence.rs`; adapter-local owner tests.
+`runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.
+
+- [ ] Add `late_collection_preserves_arrivals_and_response_ownership` to core and applicable
+      adapter contracts. Run
+      `scripts/run_test_nonzero.sh late_collection_preserves_arrivals_and_response_ownership cargo test -p edgezero-core --features test-utils --lib`
+      and the index/Q2's native/SDK cards with that sentinel. Expected: red for late-observation loss,
+      then on-time outcomes survive late collection, cutoff equality stays unresolved and response/
+      callback ownership releases exactly once at its own boundary. Apply the task lint card.
+- [ ] Add an `outbound-lifetimes` suite to the harness before invoking
+      `scripts/smoke_test_reusable_app.sh --adapter all --suite outbound-lifetimes`.
+      Expected: nonzero G1-mapped applicable EZ-6 cases per adapter, with exact outcomes/timings and
+      owner counts below. Reuse/hosted conditions stay separately pending until their own runs;
+      the suite does not skip a required Fastly case merely because G2 failed.
 
 - [ ] Implement all EZ-6 scenarios 1-23, with reuse scenario 10 and scenario 23's actual next-request
       reuse leg separately conditional. Include

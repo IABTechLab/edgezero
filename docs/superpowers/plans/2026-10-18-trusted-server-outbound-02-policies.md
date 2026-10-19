@@ -19,7 +19,8 @@ series; phase 3 supplies adapter integration, not a releasable default-stub peri
 
 G4 owns approval of this single interface contract before P1 changes runtime code. The following
 are signature declarations, not claimed existing or completed implementations. Supporting types
-are owned by core `outbound`; their fields are private unless shown public. Do not let individual
+are owned by core `outbound`, except the explicitly Fastly-local observation types below;
+their fields are private unless shown public. Do not let individual
 adapters invent competing head/context/pending/result types. These signatures preserve local
 `!Send` futures and `OutboundHttpClient: Send + Sync` without unsafe wrappers.
 
@@ -46,6 +47,9 @@ pub trait OutboundHttpClient: Send + Sync {
 }
 
 impl HttpClient {
+    pub fn new(client: std::sync::Arc<dyn OutboundHttpClient>) -> Self;
+    pub fn with_client<Client>(client: Client) -> Self
+    where Client: OutboundHttpClient + 'static;
     pub fn send(&self, request: OutboundRequest) -> OutboundFuture<OutboundResponse>;
     pub fn begin(&self, request: OutboundRequest) -> OutboundFuture<OutboundPending>;
     pub fn start_batch_until(&self, requests: Vec<OutboundRequest>, cutoff: Deadline)
@@ -53,6 +57,9 @@ impl HttpClient {
     pub fn send_all_until(&self, requests: Vec<OutboundRequest>, cutoff: Deadline)
         -> futures_util::future::LocalBoxFuture<'static,
             Result<OutboundBatchResults, OutboundBatchFailure>>;
+    pub fn with_proxy_marker(self, enabled: bool) -> Self;
+    pub fn proxy_marker_enabled(&self) -> bool;
+    pub fn effective_proxy_marker_enabled(&self, request: &OutboundRequest) -> bool;
 }
 ```
 
@@ -61,6 +68,151 @@ preparation hooks, not three transports. `HttpClient::send` and explicit redirec
 head finalizer; adapter begin/batch hooks schedule that same pipeline before returning. No trait
 default implements eager work as unpolled futures. Remove the old implementer-facing `send`
 requirement in the atomic migration; application-facing `HttpClient::send` remains.
+`new`/`with_client` retain these signatures and obtain the paired time source through the required
+trait hook. They do not create another transport, clock or inert timer. Client marker configuration
+belongs to the facade, with default on; effective inspection combines it with the request's override
+without polling, validating unrelated options or performing I/O.
+
+### Request Options and Readback
+
+```rust,ignore
+pub enum ResponseDecoding { Decode, Original }
+pub enum OutboundProxyMarker { Inherit, On, Off }
+pub enum OutboundImageFormat { Auto, Avif, Gif, Jpeg, JpegXl, Mp4, Png, WebP }
+pub enum OutboundResizeFilter { Nearest, Bilinear, Bicubic, Lanczos2, Lanczos3 }
+pub enum OutboundCropFocus { Default, Smart, Percent { x: u8, y: u8 } }
+
+impl OutboundRequest {
+    pub fn connect_timeout(self, timeout: Duration) -> Self;
+    pub fn connect_timeout_setting(&self) -> Option<Duration>;
+    pub fn response_decoding(self, choice: ResponseDecoding) -> Self;
+    pub fn response_decoding_setting(&self) -> ResponseDecoding;
+    pub fn proxy_marker(self, setting: OutboundProxyMarker) -> Self;
+    pub fn proxy_marker_setting(&self) -> OutboundProxyMarker;
+    pub fn image_optimizer(self, options: OutboundImageOptimizerOptions) -> Self;
+    pub fn image_optimizer_options(&self) -> Option<&OutboundImageOptimizerOptions>;
+}
+
+impl OutboundImageOptimizerRegion {
+    pub fn parse(token: &str) -> Result<Self, EdgeError>;
+    pub fn as_str(&self) -> &str;
+}
+
+impl OutboundImageOptimizerOptions {
+    pub fn new() -> Self;
+    pub fn region(self, region: OutboundImageOptimizerRegion) -> Self;
+    pub fn region_setting(&self) -> Option<&OutboundImageOptimizerRegion>;
+    pub fn preserve_origin_query(self, preserve: bool) -> Self;
+    pub fn preserve_origin_query_setting(&self) -> bool;
+    pub fn format(self, format: OutboundImageFormat) -> Self;
+    pub fn format_setting(&self) -> Option<OutboundImageFormat>;
+    pub fn quality(self, quality: u8) -> Result<Self, EdgeError>;
+    pub fn quality_setting(&self) -> Option<u8>;
+    pub fn resize_filter(self, filter: OutboundResizeFilter) -> Self;
+    pub fn resize_filter_setting(&self) -> Option<OutboundResizeFilter>;
+    pub fn width(self, width: u32) -> Result<Self, EdgeError>;
+    pub fn width_setting(&self) -> Option<u32>;
+    pub fn height(self, height: u32) -> Result<Self, EdgeError>;
+    pub fn height_setting(&self) -> Option<u32>;
+    pub fn crop(self, width: u32, height: u32, focus: OutboundCropFocus)
+        -> Result<Self, EdgeError>;
+    pub fn crop_setting(&self) -> Option<(u32, u32, OutboundCropFocus)>;
+}
+```
+
+The small selector enums are Copy/Debug/equality values. Region/options have private fields;
+region parsing accepts exactly the pinned SDK's seven region tokens without making core depend
+on that SDK. Options support Default/Clone/Debug/equality; `new` leaves selectors unset and query
+preservation false. Quality above 100, zero dimensions/crop ratio and percent focus above 100 fail
+at construction as typed client errors. Paired percentage focus makes incomplete offsets and
+smart-plus-offset combinations unrepresentable. Core validates public enum payloads at
+the options builder, not after provider dispatch. No implicit region or format is invented.
+
+Request defaults are no connect timeout, Decode, Inherit and no optimizer. Zero connect timeout
+is retained as invalid input and rejected at ordinary preflight under EZ-4.5; unsupported options
+still win first. Preserve all settings through parts round-trips and prepared redirect requests.
+The client resolves Inherit into the effective on/off value before every dispatch, including
+supplied clients. Its effective inspector, not the request's raw Inherit getter alone, satisfies EZ-7.7.
+
+### Explicit Redirect Following
+
+```rust,ignore
+impl OutboundRedirectLimit {
+    pub fn new(limit: usize) -> Result<Self, EdgeError>;
+    pub fn get(&self) -> usize;
+}
+
+impl<'head> OutboundRedirectContext<'head> {
+    pub fn redirect_number(&self) -> usize;
+    pub fn status(&self) -> StatusCode;
+    pub fn request_uri(&self) -> &Uri;
+    pub fn resolved_target(&self) -> &str;
+    pub fn headers(&self) -> &HeaderMap;
+    pub fn is_cross_origin(&self) -> bool;
+    pub fn prepared_request(&self) -> Option<&OutboundRequest>;
+    pub fn take_prepared_request(&mut self) -> Option<OutboundRequest>;
+}
+
+pub enum OutboundRedirectAction { FollowPrepared, Follow(OutboundRequest), Stop }
+pub enum OutboundRedirectStopReason {
+    NoLocation, MethodNotRewritable, BodyNotReplayable, LimitReached, StoppedByPolicy,
+}
+pub enum OutboundFollowFailure<E> {
+    Hop { index: usize, error: EdgeError },
+    Policy { redirect_number: usize, error: E },
+}
+
+impl OutboundFollowResult {
+    pub fn response(&self) -> &OutboundResponse;
+    pub fn final_uri(&self) -> &Uri;
+    pub fn redirects_followed(&self) -> usize;
+    pub fn stop_reason(&self) -> Option<OutboundRedirectStopReason>;
+    pub fn into_parts(self)
+        -> (OutboundResponse, Uri, usize, Option<OutboundRedirectStopReason>);
+}
+
+impl HttpClient {
+    pub fn follow<P, E>(&self, request: OutboundRequest,
+        limit: OutboundRedirectLimit, policy: P)
+        -> futures_util::future::LocalBoxFuture<'static,
+            Result<OutboundFollowResult, OutboundFollowFailure<E>>>
+    where
+        P: for<'head> FnMut(&mut OutboundRedirectContext<'head>)
+            -> Result<OutboundRedirectAction, E> + 'static,
+        E: 'static;
+}
+```
+
+Limit, context and success types have private fields. Limit accepts 1..=20 with no Default;
+success/context cannot be publicly reconstructed. The synchronous trusted policy may own Rc and
+return an arbitrary non-Clone, non-Send application error unchanged; neither P nor E requires
+Send/Sync/Debug/Error. Context borrows the answering head and owns its optional prepared request
+for that policy call only. Redirect numbers start at one, hop indices at zero. `FollowPrepared`
+uses the remaining prepared request; `Follow(request)` transfers a modified prepared request or
+a complete fresh replacement. Taking the prepared request and then selecting FollowPrepared is
+a protocol failure, not a second use or a hidden copy.
+
+The policy runs only at EZ-9.18's prescribed stage and never for the initial request. Invalid
+Location evidence/references, user information or unusable HTTP(S) targets fail as typed 502
+Protocol at the answering hop. A valid non-HTTP target is exposed as a resolved string with no
+prepared request; Stop/rejection remain possible, while FollowPrepared fails as 502 Protocol.
+Errors in a request the policy returns are unchanged hop errors, not reclassified URL failures.
+No policy rejection value is converted to EdgeError or exposed on the wire by this API.
+
+Each hop uses the same client's Follow-mode head-first pipeline and ordinary option validation.
+Preparation performs exactly the specified method/body-header/cross-origin credential rules;
+policy-authorized replacement credentials are not stripped again. Capture the initial request's
+absolute deadline independently, not its per-call timeout deadline. That bound survives every
+replacement through final-body consumption. Each hop captures entry before its own shared
+preparation and keeps that request's per-call timeout; policy time counts against the original
+absolute chain deadline, not an invented chain-wide per-call timeout. A synchronous policy cannot
+be preempted: preserve Err(E) unchanged even if it consumed the remaining time; after Ok(action),
+recheck the original chain deadline before dispatch or finalization. Unsupported-option validation
+still precedes budget rejection for a selected next request. No expired chain returns a late Ok.
+Followed heads are discarded without polling;
+final heads receive ordinary finalization. At most limit+1 requests are sent. Success reports the
+actual final dispatched URI and a stop reason exactly for a followable final status. Dropping the
+owned future cancels the current exchange and prevents later hops; no second transport is used.
 
 ### Dispatch and Response Context
 
@@ -120,12 +272,21 @@ impl OutboundResponseContext {
 }
 
 impl OutboundPreparedBatch {
+    pub fn slot_count(&self) -> usize;
     pub fn started_at(&self) -> MonotonicInstant;
     pub fn observation_cutoff(&self) -> Deadline;
     pub fn clock(&self) -> &MonotonicClock;
     pub fn time(&self) -> &OutboundTime;
     pub fn into_slots(self)
-        -> Vec<Result<OutboundDispatchRequest, OutboundSlotResult>>;
+        -> (OutboundBatchContext, Vec<(usize, OutboundDispatchRequest)>);
+}
+
+impl OutboundBatchContext {
+    pub fn slot_count(&self) -> usize;
+    pub fn started_at(&self) -> MonotonicInstant;
+    pub fn observation_cutoff(&self) -> Deadline;
+    pub fn clock(&self) -> &MonotonicClock;
+    pub fn time(&self) -> &OutboundTime;
 }
 
 impl OutboundHead {
@@ -174,8 +335,12 @@ impl OutboundPending {
 }
 ```
 
-Prepared-batch positions are original input indices. An Err is an already-terminal preflight
-result, never a successful response. The facade constructs validated contexts; implementations
+Prepared-batch indices are original input indices. `into_slots` transfers eligible requests
+with explicit indices and one opaque batch context. That context privately owns original slot
+count, entry instant, paired time source, cutoff, per-slot selected deadline/source metadata and
+exact preflight outcomes with their terminal observations. Producers must not enumerate the
+filtered eligible vector as if its positions were original indices or re-emit preflight errors.
+The facade constructs validated contexts; implementations
 read them, not manufacture a new start time. `OutboundResponseContext` owns the selected budget,
 paired time source, mode, complete effective response/header policies and immutable original chain deadline.
 It also carries the local progress-scope token; it never borrows a request/client stack frame.
@@ -186,6 +351,9 @@ read-only body-policy view uses P1's effective policy, not defaults reconstructe
 `clock()` is the clock inside the captured `time()`. Neither getter permits restarting a budget
 or changing the immutable original chain deadline. Prepared batches likewise have no public
 constructor; supplied clients receive validated inputs from the facade.
+`OutboundBatchContext` likewise has private fields with no public constructor, Clone, Default,
+setters or destructive decomposition. It carries terminal metadata, not a duplicate response
+context or SDK cleanup owner. Batch constructors consume it once and seed the preflight ledger.
 
 `OutboundTime` is cloneable and Send + Sync: it owns the existing MonotonicClock and an Arc-backed
 timer factory. The factory receives that same clock, creates an owned local future, and uses the
@@ -268,7 +436,11 @@ pub enum OutboundCollectedSlot {
 pub enum OutboundBatchDriverEvent {
     Cutoff,
     Failed(EdgeError),
-    Item { index: usize, result: OutboundSlotResult },
+    Item {
+        index: usize,
+        completed_at: MonotonicInstant,
+        outcome: Result<OutboundResponse, EdgeError>,
+    },
 }
 
 impl OutboundBatchItem {
@@ -303,15 +475,11 @@ impl OutboundBatchMergeFailure {
     );
 }
 
-pub fn finish_batch_item(
-    index: usize,
-    started_at: MonotonicInstant,
-    completed_at: MonotonicInstant,
-    observation_cutoff: Deadline,
-    outcome: Result<OutboundResponse, EdgeError>,
-) -> Option<OutboundBatchDriverEvent>;
-
 impl OutboundBatch {
+    pub fn cutoff(context: OutboundBatchContext) -> Self;
+    pub fn from_driver<S>(context: OutboundBatchContext, events: S,
+        owner: OutboundExchangeOwner) -> Self
+    where S: futures::Stream<Item = OutboundBatchDriverEvent> + 'static;
     pub fn accumulator(&self) -> OutboundBatchAccumulator;
     pub fn check(&mut self) -> Result<OutboundBatchCheck, EdgeError>;
     pub async fn next(&mut self) -> Result<OutboundBatchNext, EdgeError>;
@@ -342,15 +510,44 @@ Callers merge first, then decompose when taking response bodies. Hard-migrate ol
 access rather than preserving mutable field compatibility under the new identity contract.
 
 Core stamps an opaque batch identity on validated consumer items and collections. Driver events
-carry only unvalidated index/result payloads; adapters cannot fabricate the consumer identity.
+carry only unvalidated index/observation/outcome payloads; they carry no consumer identity.
 `OutboundBatchItem` has private identity/index/result, no Clone, no public `new`, mutable accessor
 or reconstruction method. `into_parts` consumes the receipt and relinquishes accumulator
 eligibility; a consumer inspecting status/headers may still insert the intact receipt, while a
 consumer taking its response body handles AlreadyDelivered itself. Hard-migrate the existing
-public constructor/field callers. Change the existing `finish_batch_item` helper to the signature
-above: Some contains only an unvalidated Item event, None denotes at/past cutoff, and the ledger
-alone stamps consumer identity. Preserve elapsed/backward-clock checks and explicit driver cutoff;
-the helper must not become an alternate receipt constructor or silently turn malformed EOF into cutoff.
+public constructor/field callers. Remove `from_futures` and `finish_batch_item` rather than keeping
+lazy defaults, raw count/clock/cutoff overloads or an alternate receipt constructor. Producers send
+raw observations of already scheduled work into `from_driver`; its stream does not schedule I/O.
+Core derives elapsed time and cutoff eligibility from the trusted context and earliest actual
+adapter terminal observation, not later collection. It preserves the adapter's typed outcome,
+including ConnectTimeout, unless the applicable governing deadline had expired at that observation
+and precedence requires the selected budget timeout. Later collection never changes a recorded
+outcome or cause. A backward sample produces the existing typed internal invariant result with
+zero elapsed, never an enlarged budget. No raw successful result is backdated to manufacture
+timeliness. IdleTimeout follows EZ-14's streamed-body rules, not this buffered batch ledger.
+
+The driver still enforces transport and individual deadlines and records progress while consumers
+are idle. For slots without an earlier recorded terminal outcome, it emits terminal observations
+whose own deadline precedes cutoff before emitting Cutoff, including a timeout first observed
+after cutoff. Never replace an earlier on-time success or failure with such a timeout. A late first
+poll does not excuse lazy scheduling or waiting behind a sibling. Core applies the existing logical
+own-deadline exception using retained metadata; own-deadline equality remains unresolved. A Cutoff
+that omits such a required timeout is a typed driver invariant failure, not silent abandonment.
+Drain already-recorded on-time outcomes before terminal cutoff/failure handling. Preserve clean
+EOF/trailing-event validation and poisoning; premature EOF never becomes cutoff or a timeout.
+
+`from_driver` owns one task-group/multiplexer cancellation guard; it drops that guard on cancel,
+failure or driver completion. Individual exchange owners still release SDK resources exactly once;
+the group guard unregisters/cancels work rather than duplicating SDK release callbacks. Scheduling
+or setup failure after any work was issued must still return an owned driver (including Failed),
+not discard its cancellation handle. Core adds no SDK controls or executor.
+
+`cutoff(context)` is only a no-scheduled-work constructor. It validates the captured cutoff against
+the same clock, preserves deliverable preflight outcomes and leaves cutoff-unresolved slots
+unresolved. With unresolved slots, premature use is typed Internal through the batch protocol.
+Empty/all-resolved input completes normally without an invalid trailing Cutoff. Once work is scheduled, even if time expires
+during scheduling, use `from_driver` with its owner. External supplied clients obtain preparation
+through `HttpClient`, not a public fixture constructor; core unit tests may use private test helpers.
 The accumulator comes from that batch, validates identity/count/index/duplicate/conflict before
 mutation, and substitutes its owned items only for `AlreadyDelivered`. A missing prior item is a
 typed merge error, not a timeout. Insert/merge failures own the rejected item or both input values,
@@ -380,12 +577,78 @@ After idle-mode headers, per-call/default expiry does not govern the body. Marke
 client off plus per-request inherit/on/off is one policy, not parallel APIs. Decoding default stays
 decode; identity always keeps its decoded cap, including original mode.
 
+### Fastly Request-Scoped Registration Observation
+
+These proposed types live in `edgezero_adapter_fastly::context`, not core or the client trait.
+G4 approves their signatures and semantics with the rest of this Interfaces section; D1b owns
+implementation and external compile/runtime tests. `FastlyRequestContext` stays unchanged.
+
+```rust,ignore
+impl FastlyOutboundObservation {
+    pub fn current() -> Option<Self>;
+    pub fn snapshot(&self) -> FastlyOutboundStats;
+}
+
+impl FastlyOutboundStats {
+    pub fn registration_count(&self) -> u64;
+    pub fn configuration_count(&self) -> u64;
+    pub fn total_registration_duration(&self) -> Duration;
+    pub fn max_registration_duration(&self) -> Duration;
+}
+```
+
+The observation handle has private fields and supports Clone/Debug/Send/Sync; a snapshot is an
+immutable Copy/Clone/Debug/Eq/PartialEq value. Neither has a public constructor, Default, setter
+or reset. Install the handle in the request extension bag before prepare runs; handlers obtain it
+with `ctx.extensions().get::<FastlyOutboundObservation>().cloned()`. `current()` returns a handle
+for the active callback or existing helper-fallback scope, and None outside those scopes. Both
+paths observe the same inbound-request accounting, without downcasting the type-erased HttpClient.
+
+Attribute each operation through D1a's current request scope, never through client construction.
+Default, router-state and prepare-supplied Fastly clients, including retained clients, contribute
+to that same request's record; a supplied non-Fastly client doing no Fastly registration contributes
+nothing. Client precedence is unchanged. Count actual provider registration attempts, including
+failures and late returns; do not hide retries. Configuration count is the number of distinct
+eligible configuration keys encountered by that request, including cache hits and failed attempts.
+Unsupported/already-expired preflight performs no registration/configuration accounting.
+Total/max duration measure registration calls through return in the paired application clock,
+including failed and late successful registration. Observation must not change wire outcomes,
+logical budgets, successful-late-registration caching, or the >=50 ms warning rule.
+
+The handle reads a coherent numeric snapshot without retaining the callback guard, exchanges,
+request data or configuration-key set. Callback exit freezes that record and releases its key
+set; a retained handle cannot keep work alive, resume recording or attach to the next request.
+After response delivery, the still-active outer callback can continue recording post-delivery
+work; helper return and response cleanup do not freeze its record. A standalone helper freezes
+only its own fallback record. No observation data is added to response headers or public errors.
+
 ### Compile Contract and Acceptance Sentinels
 
 G4/P1 compile-contract tests must prove object safety, a Send + Sync client, and owned local heads/
 futures/owners that can capture `Rc` without unsafe Send. The eight implementation sites at F are
 the four adapters, core `outbound.rs` and `context.rs` test clients, the demo client, and the CLI
 template client. Re-run `rg 'impl OutboundHttpClient'` at implementation time; do not trust a stale count.
+
+Create `crates/edgezero-core/tests/outbound_public_api.rs` with
+`public_follow_and_option_readback_compile_contract`. Compile an external supplied client through
+`HttpClient::new` and `with_client`, all four request builders/readbacks, effective marker inspection,
+the redirect limit/context/actions/result accessors, and a policy owning Rc with a non-Clone error
+that implements neither Debug nor Error. Verify the exact owned local-future return type without
+adding Send bounds. Run
+`scripts/run_test_nonzero.sh public_follow_and_option_readback_compile_contract cargo test -p edgezero-core --test outbound_public_api`.
+Expected: missing or unusable public declarations fail compilation before implementation; after
+implementation the named test executes and passes without a network or provider SDK.
+
+Add `batch_producer_uses_prepared_context` to the same external test file and execute it with
+`scripts/run_test_nonzero.sh batch_producer_uses_prepared_context cargo test -p edgezero-core --test outbound_public_api`.
+Expected: a supplied producer consumes indexed eligible slots once, returns a context-backed
+driver with its cancellation owner, and retains exact preflight outcomes. In colocated core ledger
+tests also cover cutoff without scheduled work, setup failure after scheduling, earlier recorded
+success across late collection, an early ConnectTimeout collected after both governing deadline
+and cutoff with its cause unchanged, own-deadline timeout observed after cutoff, invalid cutoff
+omitting that timeout, premature EOF, trailing/duplicate events and one release per owner. External
+compile-fail doctests reject raw context construction, cloning and removed producer factories.
+These tests establish a usable producer surface without publishing ledger receipts or an executor.
 
 | Sentinel                                             | Expected Behavior                                                                                            |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -412,9 +675,18 @@ Adapter-local connect sentinels supplement those core tests: Fastly and Spin imp
 `connect_timeout_reaches_provider_settings`, observing the actual setter input. Fastly also
 implements `connect_expiry_preserves_governing_budget_precedence`, asserting ConnectTimeout
 before the governing expiry, its original budget source on equality/late observation, and a
-full response-head budget. Run each with
-`scripts/run_test_nonzero.sh <sentinel> cargo test -p edgezero-adapter-<adapter> --features <adapter>,test-utils`,
-then repeat the real target legs in D1/D4.
+full response-head budget. Run the native mapping/classifier tests with these exact feature
+selections; do not enable WASM SDK features in a native test executable:
+
+```sh
+scripts/run_test_nonzero.sh connect_timeout_reaches_provider_settings cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --lib
+scripts/run_test_nonzero.sh connect_expiry_preserves_governing_budget_precedence cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --lib
+scripts/run_test_nonzero.sh connect_timeout_reaches_provider_settings cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils --lib
+```
+
+Place native mapping tests in portable policy code with a recording provider boundary. D1/D4
+also execute actual SDK setter/transport tests on their WASM targets with the platform feature
+and runner from Q2; a native mapping test cannot stand in for the SDK-resource leg.
 These are mapping/classifier proofs, not substitutes for hosted expiry in EZ-4 criterion 8.
 
 For each sentinel, run `scripts/run_test_nonzero.sh <sentinel> cargo test -p edgezero-core --lib`:
@@ -427,11 +699,18 @@ card passes. These are compile/test targets to implement, not claims of current 
 **Files:** Modify `crates/edgezero-core/src/outbound.rs`, `error.rs`, `lib.rs`, `time.rs`;
 create `crates/edgezero-core/src/outbound/exchange.rs` and `outbound/image_optimizer.rs`; migrate four adapter `src/outbound.rs`
 implementations and all test implementations found by `rg 'impl OutboundHttpClient'`.
+Create `crates/edgezero-core/tests/outbound_public_api.rs` for the external compile contracts above.
 Migrate callers in all four adapter `tests/contract.rs` and Spin `tests/sdk_resources.rs` in the
 same atomic cut, along with core/context tests, demo and template recording clients. Discover
 callers as well as implementations with `rg 'OutboundHttpClient|start_batch_until' crates examples tests`.
 Also search `rg 'OutboundBatch(Item|Results|Failure)|finish_batch_item' crates examples tests` and
 migrate item/collection field access, constructors and helper return handling to the approved API.
+Search `rg 'OutboundBatch::(cutoff|from_driver|from_futures)' crates examples tests` as well: migrate
+all producers directly to context-taking construction and remove the old future/helper factories.
+Explicitly include `crates/edgezero-cli/src/generator.rs` literal source assertions in P1, not only
+Q2. Its `failure.error`, `slot.elapsed`, clock-field/import and driver-construction expectations
+must change with the template API cut. Search those spellings and `handlers.contains` as well as
+type names; string assertions do not necessarily contain the implementing type names.
 Behavioral integration tests wrap adapters with `HttpClient::with_client` and use its request-vector
 API; generic trait-conformance assertions remain trait assertions. Do not add an unchecked public
 `OutboundPreparedBatch` constructor or an old-signature compatibility helper to keep tests compiling.
@@ -456,7 +735,8 @@ API; generic trait-conformance assertions remain trait assertions. Do not add an
       errors and one release for each original body owner. Run the named core sentinel and
       `cargo test -p edgezero-core --doc`; Expected: runtime ownership assertions pass only after
       implementation and privacy examples fail to compile for the intended reason. Migrate
-      `finish_batch_item`, old constructor/field consumers and every driver in the same hard cut.
+      old constructor/field consumers and every driver in the same hard cut; remove
+      `finish_batch_item` and `from_futures` rather than retaining alternate producer paths.
 - [ ] Before changing public traits, read G4's approved interface digest and G2/G3 artifacts. Stop
       if approval is missing, rejected, or refers to a different interface. Implement the Interfaces
       contract above; do not choose new public signatures inside this task.
@@ -585,6 +865,11 @@ and Cloudflare `src/response.rs`; tests colocated plus four `tests/contract.rs`.
       without consuming an item. A response at cutoff is unresolved; own-deadline timeout before
       cutoff remains deliverable. No public terminal metadata is invented before actual observation.
       Suggested commit: `feat: define eager exchange and nonblocking batch observation`.
+- [ ] Add `arrival_ledger_preserves_late_collection_and_cancel_safety` and run
+      `scripts/run_test_nonzero.sh arrival_ledger_preserves_late_collection_and_cancel_safety cargo test -p edgezero-core --features test-utils --lib`
+      before/after implementation. Expected: a real red assertion for missing eager/arrival behavior,
+      then strict cutoff equality, preserved earlier arrivals, mixed ownership states and cancelled
+      pending `next` all pass without wall-clock sleeps. Apply the index's task lint card.
 
 ## Task P5: Redirect Following Through the Same Client
 
@@ -609,6 +894,11 @@ test in that module and each adapter `tests/contract.rs`.
       3xx receives ordinary body policy. Run `cargo test -p edgezero-core` and adapter no-redirect/
       followed-response parity cases. Capture logs and prove query tokens never appear. Suggested
       commit: `feat: follow redirects with per-hop application policy`.
+- [ ] Add `redirect_chain_uses_supplied_head_client_and_original_deadline`; run
+      `scripts/run_test_nonzero.sh redirect_chain_uses_supplied_head_client_and_original_deadline cargo test -p edgezero-core --features test-utils --lib`.
+      Expected: red for missing following, then one supplied-client dispatch per hop, no polling of
+      followed bodies, unchanged typed policy/hop errors and an unextended original chain deadline.
+      Include each stop reason and normalized Location controls; apply the task lint card.
 
 ## Task P6: Published Portable Scripted Client, Only If Promoted
 
@@ -628,8 +918,14 @@ test in that module and each adapter `tests/contract.rs`.
       Prove `next` indices 1/2/0 at 10/20/30 ms versus `collect` indices 0/1/2, 99 ms kept versus
       100 ms cutoff unresolved, late-check retention, origin/batch overlap, and pending redirect-body
       bypass. Unscripted requests fail without panic; recordings remain accessible after injection.
-- [ ] Run `cargo test -p edgezero-core --features test-utils` and a nonzero selected test on
-      `wasm32-wasip1` using the pinned runner. JS legs run only if adopted. Document portable
+- [ ] Add `scripted_replies_preserve_cutoff_and_arrival_order`; run
+      `scripts/run_test_nonzero.sh scripted_replies_preserve_cutoff_and_arrival_order cargo test -p edgezero-core --features test-utils --lib`
+      and `CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run' scripts/run_test_nonzero.sh scripted_replies_preserve_cutoff_and_arrival_order cargo test --locked -p edgezero-core --features test-utils --target wasm32-wasip1 --lib scripted_replies_preserve_cutoff_and_arrival_order`.
+      Expected: red for missing published utility, then nonzero host/WASI passes with 1/2/0 arrival
+      order, positional collection and strict cutoff boundary using paired fake time. JS legs run
+      only if adopted. The explicit WASI test filter is required: the nonzero helper verifies
+      presence but does not filter, and unrelated native thread tests cannot execute under WASIp1.
+      Apply the task lint card. Document portable
       conformance versus real provider behavior. Suggested commit: `test: publish deterministic outbound scripts`.
 
 ## Phase Exit

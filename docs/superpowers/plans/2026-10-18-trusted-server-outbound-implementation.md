@@ -52,9 +52,15 @@ are still required; ordinary response waits and body reads keep their existing d
 ## Execution Order
 
 Each linked plan is an independently reviewable work package. Within a package, execute its
-checkbox steps in order. D1 and F3/F6/F7/F9/F10 are task groups: their lettered tasks have separate
+checkbox steps in order. D1, F3/F6/F7/F9/F10 and Q4 are task groups: their lettered tasks have separate
 files, dependencies and red/green exits, and the parent closes only when every applicable child
 closes. Do not parallel-edit shared `outbound.rs`, `error.rs`, or `time.rs`.
+
+Within qualification, Q1/Q2 and Q3's preparation finish every source change, including package
+tooling and the runbook template. Q3 then freezes the candidate before authoritative local runs;
+Q4a binds/accepts the external package, Q4b returns hosted results, and Q5 only validates/publishes
+that same SHA. A changed source commit returns to the freeze checkpoint and reruns all required
+legs; publication must not create a new source revision after qualification.
 
 | Order | Plan                                                                                  | Scope                                                            | Exit Gate                                                                                               |
 | ----- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
@@ -94,6 +100,16 @@ strong replacement assertion.
 | EZ-25       | Qualification Q1/Q2                       | Documentation updates accompany each affected behavior                 |
 | EZ-Q1       | Gates G1; qualification Q3-Q5             | Required blocking, approved promoted, and confirmed-present parts only |
 
+This summary inherits the normative-range-to-leaf ownership table in
+[plan 04](2026-10-18-trusted-server-outbound-04-followups.md#explicit-requirement-ownership).
+In particular EZ-11/12/13 close through F3a/F3b/F3c respectively, EZ-16/17/21 through
+F6a/F6b/F6c, EZ-18/19 through F7a/F7b, and EZ-22/23 through F9a/F9b. EZ-24.11/.12/JS
+remain separately selected F10a/F10b/F10c tasks. Fastly D1a/D1b/D1c/D1d own progress/backend/
+connect/Image Optimizer work respectively; a dependency names the required children, not all
+of D1 unless the entire driver really is required. Hosted qualification explicitly comprises
+Q4a's accepted package and Q4b's returned TS-executed results. A sibling's passing test, package
+delivery alone or a group heading never closes another leaf's requirement.
+
 ## Decisions Before Runtime Changes
 
 - [ ] G1 records the decision on EZ-24.1-24.10 host/WASI promotion. The default remains Follow-up;
@@ -114,9 +130,13 @@ strong replacement assertion.
 
 ## Shared Verification and Commit Discipline
 
-For every task: add a regression test, demonstrate the intended failure, implement the smallest
-change, rerun scoped tests, and review the diff. `scripts/run_test_nonzero.sh` must observe the
-named new sentinel; an empty test selection is failure, not green evidence. Commit boundaries
+For every runtime Rust task: add a regression test, demonstrate the intended failure, implement
+the smallest change, rerun scoped tests, and review the diff. `scripts/run_test_nonzero.sh` must
+observe the named new sentinel; an empty test selection is failure, not green evidence. The helper
+parses Rust test listings and must not wrap Node tests or host-probe CLIs. Node tasks name their
+test file/cases and assert nonzero execution; probe tasks additionally record nonzero real case
+counts and measured outcomes. Approval/handoff tasks close with attributed decisions/results,
+not an invented Rust test. Commit boundaries
 are suggested in each task; commit/push only when authorized and after required checks pass.
 
 Run these gates before a runtime series is declared ready:
@@ -161,6 +181,21 @@ For an adapter task replace the package with the changed adapter package and run
 WASM commands in plan 03/Q2. For fixture changes use `--manifest-path tests/fixtures/reusable-app/Cargo.toml`;
 format and lint that excluded workspace separately. Demo changes similarly use its own manifest.
 Do not commit a public trait cut until every affected implementation and generated fixture builds.
+
+Use these native test feature selections for every named adapter sentinel; replace only the
+sentinel name and test target when the owning task specifies one:
+
+```sh
+scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --test contract
+scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils --test contract
+scripts/run_test_nonzero.sh batch_preflight_rejects_streamed_slots_without_poisoning_siblings cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --test contract
+scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils --test contract
+```
+
+These existing cases are regression controls, not the new task's red test. Native Fastly tests
+must not enable `fastly`: SDK host symbols cannot link on the native target. Real Fastly/Spin/
+Cloudflare SDK tests instead use Q2's explicit WASM target, platform feature and pinned runner.
+Native all-features clippy/check is allowed because it does not link/run SDK test binaries.
 
 ### Clippy Briefing
 

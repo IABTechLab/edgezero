@@ -80,6 +80,12 @@ claim that feasibility has already been established.
       `scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness` after adding
       support for that suite. Capture per-read start/end times, readiness outcome, and candidate SHA.
       This command is a planned extension, not an existing passing suite at F.
+- [ ] Name the harness guard `outbound_readiness_rejects_empty_or_unbounded_measurements` and run
+      `scripts/run_test_nonzero.sh outbound_readiness_rejects_empty_or_unbounded_measurements cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness`
+      before/after adding the suite and evidence assertions. Expected: red for missing case/measurement
+      validation, then a nonzero pass rejecting empty counts or missing read/timer samples. Execute
+      the actual `outbound-readiness` command above afterward; its measured host reads, not the
+      harness unit test, establish feasibility. Apply the fixture task fmt/clippy card.
 - [ ] Provide the same fixture build and invocation contract for an authorized hosted Fastly
       staging run. TS owns hosted execution under EZ-Q1.4. Store SDK, runtime/service settings,
       source SHA, and timings. If proof fails, stop dependent Fastly qualification; report the
@@ -133,6 +139,14 @@ not add another production client. D6 repeats the scenarios through the implemen
       `cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core --features fixture-core/qualification`.
       Record local and hosted work separately; no new Native claim follows from a mock.
       Suggested commit: `test: characterize outbound progress and empty-body signals`.
+- [ ] Add `outbound_progress_probe_requires_origin_receipts` to the fixture harness and run
+      `scripts/run_test_nonzero.sh outbound_progress_probe_requires_origin_receipts cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness`.
+      Expected: red for missing receipt accounting, then zero-origin-receipt and unsupported-protocol
+      samples cannot masquerade as successful observations. Include the actual SDK probes above in
+      the smoke qualification routes and run
+      `scripts/smoke_test_reusable_app.sh --adapter all --suite smoke` with nonzero probe counts per
+      adapter. Record missing/failed runtime legs rather than inferring Native from the unit test;
+      apply the fixture task fmt/clippy card.
 
 ## Task G4: Maintainer API and Feasibility Approval
 
@@ -145,6 +159,14 @@ input is plan 02's Interfaces block and G2's feasibility report, plus G1's appli
       paired app-clock/adapter-timer provisioning with constructor migration. Digest the complete
       Interfaces section, including supporting-type recovery/readback signatures, immutable batch
       receipts, Image Optimizer mode matrix and ownership rules, not just the main trait block.
+      Include batch producer constructors, retained facade constructors, request option/readback
+      APIs and effective marker inspection, and the complete explicit-follow policy/result/error
+      surface. Include the Fastly-local observation handle, immutable snapshot/getters, extension
+      access/current-scope binding and lifetime/counting semantics for blocking EZ-2.13; D1b cannot
+      invent a different public getter after this freeze. The freeze covers blocking APIs and the
+      shared producer contract; public follow-up extensions require their own attributed review
+      before implementation, not an implicit change
+      to this digest or compatibility defaults.
       Include all implementer and caller files; facade-only preparation is intentional and external
       integration tests must not require an unchecked prepared-batch constructor. Record Approved,
       Rejected, or Pending with reviewer/date

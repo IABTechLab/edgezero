@@ -14,10 +14,12 @@ Dependencies are task-specific. Scheduling a task here does not approve its prom
 lands, record confirmed-present parts and their environment legs under EZ-Q1.6/Q1.8. Conditional
 SHOULD work, JS targets, and reusable-sandbox behavior retain their explicit applicability.
 
-Task numbers group ownership, not an instruction to ignore dependencies. F1-F5 depend on their
-phase 2 policies and phase 3 drivers; F7-F9 may proceed independently after those foundations.
-For lifecycle integration execute F8 (KV) and F9 (assembly) before F6's final custom-send report
-tests; F6's diagnostic types can land earlier. F10 requires the published P6 utility and includes
+Task numbers group ownership, not an instruction to ignore dependencies. Use the child-specific
+prerequisites below: ordinary cache work needs D1b, while callback/egress ownership integration
+needs D1a, not D1d's separately approved Image Optimizer work. Diagnostic types and independent
+application policies may land before their adapter integration. For lifecycle integration execute
+F8 (KV) and F9a (assembly) before F6b's final custom-send report tests; F9b is not a prerequisite.
+F10 requires the published P6 utility and includes
 F4/F5 cases only when those parts are adopted. Every task retains a buildable hard-cut boundary.
 
 ## Explicit Requirement Ownership
@@ -52,6 +54,13 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
 
 **Files:** Fastly `src/outbound/backend.rs` from D1, `src/lifecycle.rs`, `src/lib.rs`,
 `src/request.rs`, and `tests/contract.rs`; fixture Fastly reusable entrypoints.
+
+- [ ] Add `backend_retirement_rejects_two_hundred_and_first_configuration`; run
+      `scripts/run_test_nonzero.sh backend_retirement_rejects_two_hundred_and_first_configuration cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --lib`.
+      Expected: red for missing capacity/retirement policy, then the 201st configuration sends
+      nothing, emits typed 503, retires after the current request and retains request count.
+      Repeat real WASI/reuse cases below and apply the task lint card; single-request adoption
+      does not depend on a deferred reuse leg.
 
 - [ ] Add registry-growth tests across clients/callbacks, equal origins under jitter, and the
       200-configurations-plus-one case. Fail before a blocking 201st registration with 503 and no send.
@@ -93,7 +102,8 @@ F3a-F3c are independently closable tasks, not inline labels. None closes another
 **Files:** Core `src/outbound.rs` and `outbound/image_optimizer.rs`; Fastly `src/outbound.rs`;
 four adapter preflight/capability modules and `tests/contract.rs`; cache qualification fixture.
 
-**Dependencies:** P1/P3/P5 and D1-D4; F5 parity only when fire-and-forget is adopted.
+**Dependencies:** P1/P3/P5 and ordinary Fastly cache integration D1b (including D1a); D2/D3/D4
+for their respective mode-parity legs. No D1c/D1d prerequisite. F5 parity applies only when adopted.
 
 - [ ] Add typed tag validation/deduplication and cache behavior tests. Empty/no-tags behavior,
       bypass combinations, and Image Optimizer conflicts must follow EZ-11/EZ-8. Never send tags as
@@ -145,6 +155,13 @@ fixture Spin entrypoint and `docs/guide/adapters/spin.md`/`capabilities.md`.
 **Files:** Core `src/outbound.rs`, `outbound/progress.rs`, `time.rs`, `error.rs`; four adapters'
 raw response streams and request timeout setup; `outbound/testing.rs` if published.
 
+- [ ] Add `stream_idle_keeps_absolute_deadline_precedence`; run
+      `scripts/run_test_nonzero.sh stream_idle_keeps_absolute_deadline_precedence cargo test -p edgezero-core --features test-utils --lib`.
+      Expected: red for missing idle mode, then absolute-only, idle-only, equality and late samples
+      retain the required source, and only nonempty encoded progress resets idle waiting. Repeat
+      the named controls in native/SDK contracts with the index/Q2 cards and actual slow-origin
+      legs from EZ-14; apply the task lint card. A unit pass does not upgrade provider support.
+
 - [ ] Add zero/invalid-mode tests, getters and parts round-trip. Add a classifier truth table:
       idle only -> idle cause; absolute only -> RequestDeadline; both expired or equal -> RequestDeadline.
       In unit clocks, a read at 600 ms with idle 400 ms/deadline 1,000 ms must choose the deadline;
@@ -166,6 +183,13 @@ raw response streams and request timeout setup; `outbound/testing.rs` if publish
 
 **Files:** Core `src/outbound.rs`; four adapter `src/outbound.rs` and lifecycle/entrypoint modules;
 fixture-core qualification cases and adapter fixtures.
+
+- [ ] Add `fire_and_forget_capacity_recovers_after_every_terminal_path`; run
+      `scripts/run_test_nonzero.sh fire_and_forget_capacity_recovers_after_every_terminal_path cargo test -p edgezero-core --features test-utils --lib`.
+      Expected: red for missing explicit ownership, then capacity two rejects a third send without
+      dispatch, every terminal path releases once and the independent 64 KiB discard ceiling holds.
+      Repeat the named accounting test via native/SDK cards and G1's callback/reuse runtime legs;
+      deferred provider lifetime evidence remains pending. Apply the task lint card.
 
 - [ ] Add dispatch-without-observation cases and a per-instance capacity-two test across callbacks.
       Saturation rejects before send; capacity recovers after completion/failure/expiry exactly once.
@@ -193,7 +217,8 @@ tests wait for F8/F9a, not for unrelated F9b TCP helpers.
 **Files:** Core `src/error.rs`, `context.rs`, `response_egress.rs`;
 four adapter error/fallback paths and contracts.
 
-**Dependencies:** P1 and D1-D4 typed failure boundaries; does not require F8/F9a.
+**Dependencies:** P1 and existing typed failure boundaries; D1a/D2/D3/D4 only for integration at
+the boundaries they change. Diagnostic types can land earlier. No D1b-D1d or F8/F9a prerequisite.
 
 - [ ] Add token-bearing URLs/provider messages to regression fixtures. Assert wire bytes and
       existing Display/status/reasons do not change; retained body failures preserve diagnostic detail
@@ -213,7 +238,7 @@ four adapter error/fallback paths and contracts.
 **Files:** Core `src/response_egress.rs`; Fastly `src/request.rs`, `response.rs`, `lifecycle.rs`,
 `lib.rs`, and contracts; affected macros, demo and CLI templates when signatures change.
 
-**Dependencies:** F6a, F8 and F9a for final assembly/KV failure-path tests, plus D1 callback ownership.
+**Dependencies:** F6a, F8 and F9a for final assembly/KV failure-path tests, plus D1a callback ownership.
 
 - [ ] Hard-migrate Fastly custom-send helpers to an owned delivery report that preserves finalize
       state and reports actual disposition/commit/body/outcome. Preserve exactly-once completion.
@@ -260,7 +285,8 @@ four adapter normalizer/converter/fallback paths and contracts.
 **Files:** Core `src/response_egress.rs`, `response_egress_framing.rs`; four adapter
 `src/response.rs`; Fastly `src/fastly_response_abi.rs`; fixture response cases.
 
-**Dependencies:** Existing egress coordinator and D1-D4 ownership integration; independent of F7b.
+**Dependencies:** Existing egress coordinator; D1a/D2/D3/D4 for ownership-specific integration.
+Independent of F7b and D1b-D1d.
 
 - [ ] Add exact Content-Length cases for buffered data, explicit values, HEAD/304, mismatched
       streamed length, suppressed bodies, and platform compression. Compare Fastly SDK Automatic
@@ -280,8 +306,8 @@ four adapter normalizer/converter/fallback paths and contracts.
 **Files:** Core `src/app.rs`, `response_egress.rs`; four adapter `src/response.rs` and contracts;
 Fastly request preparation; fixture detached/error/fallback responses.
 
-**Dependencies:** Existing renderer/egress decisions and D1-D4. F2 adds only the conditional
-combined overflow test; F7b does not require F7a.
+**Dependencies:** Existing renderer/egress decisions; D1a/D2/D3/D4 for ownership-specific
+integration. F2 adds only the conditional combined overflow test; no F7a or D1b-D1d prerequisite.
 
 - [ ] Add bounded configured header sets for detached/error/fallback paths. Validate app-level
       sets at configuration; dynamic sets during normal prepare before installation. Invalid dynamic
@@ -307,6 +333,15 @@ combined overflow test; F7b does not require F7a.
 **Files:** Fastly `src/request.rs`/`key_value_store.rs`, Cloudflare and Spin corresponding modules,
 core `src/key_value_store.rs` and `store_registry.rs`; adapter tests and fixture routes.
 
+- [ ] Add `declared_kv_open_failure_retains_binding_and_recovers` to core/adapter tests; run
+      `scripts/run_test_nonzero.sh declared_kv_open_failure_retains_binding_and_recovers cargo test -p edgezero-core --features test-utils --lib`
+      and the index/Q2's native/SDK cards using that sentinel. Expected: red when a failed declared
+      store disappears; after implementation the typed failure binding remains, status dispatch
+      still works unless require_kv applies, and a later restored binding recovers. Include these
+      cases in the smoke qualification routes, then execute
+      `scripts/smoke_test_reusable_app.sh --adapter all --suite smoke` with nonzero case IDs and
+      actual read/write/delete/list results. Apply the task lint card.
+
 - [ ] Add missing declaration versus declared-open-failure cases, provider StoreNotFound versus
       transient error, and unaffected status-route dispatch. Honor explicit `require_kv` where requested.
 - [ ] Preserve failed declarations as typed handles; defer opening/failure to actual use where
@@ -324,8 +359,9 @@ core `src/key_value_store.rs` and `store_registry.rs`; adapter tests and fixture
 **Files:** Core `src/app.rs`/`router.rs`; macros `src/app.rs`; four adapter `src/lib.rs` and
 entrypoint/lifecycle modules; fixture apps and affected demo/template callers.
 
-**Dependencies:** Existing fallible assembly baseline, P1's client contract and D1-D4 lifecycle
-ownership. F8 is required for declared-KV assembly-failure integration only.
+**Dependencies:** Existing fallible assembly baseline and P1's client contract; D1a/D2/D3/D4 for
+affected lifecycle integration. F8 applies to declared-KV assembly-failure integration only.
+No F9b or D1b-D1d prerequisite. These scheduling scopes do not change the release blocking set.
 
 - [ ] Add failures-before-configure, registered-state identity/access, configure-from-state,
       manually-built-router policy/platform parity, success-only retention, and retry-after-failed-build
@@ -432,25 +468,35 @@ independent of F10a, with cancellation tests selected only when that part is pre
 - [ ] Replace demo/template bespoke doubles with the published utility,
       delete the duplicated implementations, and keep examples thin. Test request option recording,
       response policies, arrival/cutoff semantics, redirects, and typed errors rather than empty stubs.
-- [ ] Add `generated_core_tests_execute` to the ignored generated-project integration suite and
-      run it before/after migration with
-      `scripts/run_test_nonzero.sh --ignored generated_core_tests_execute cargo test --offline --locked -p edgezero-cli --test generated_project_builds`.
-      Expected: generated core tests actually execute and assert the adopted API; a compile-only
-      workspace pass is insufficient. Run core test-utils, CLI tests and the excluded demo tests
-      from Q2; Q2 wires both generated and demo execution into CI. Apply the task lint card.
+- [ ] Extend the existing `generated_workspace_compiles` integration test rather than adding a
+      duplicate execution wrapper. It already lists `generated_outbound_http_smoke` exactly once
+      and runs the generated core tests. Run it before/after migration with
+      `scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds`.
+      Expected red for assertions using the unadopted shared double, then actual generated tests
+      assert its recordings and behavior. Preserve the existing nonzero-listing guard, generated
+      test execution and demo CI job. Run core test-utils, CLI and excluded demo tests from Q2;
+      extend their existing CI execution with the adopted cases. Apply the task lint card.
       Suggested commit: `test: align generated outbound examples with shared scripts`.
 
 ### Task F10c: Published Scripted Client on JavaScript
 
-**Files:** Core test-utils Cargo feature gates and `src/outbound/testing.rs`; WASM test runner
+**Files:** Core `Cargo.toml`, test-utils feature gates and `src/outbound/testing.rs`; WASM test runner
 setup and CI commands owned by Q2.
 
 **Dependencies:** Published P6 and explicit JavaScript EZ-24.2 adoption; independent of F10b.
 
+- [ ] Add a target-specific `wasm-bindgen-test` dev-dependency under core's
+      `cfg(all(target_arch = "wasm32", target_os = "unknown"))` test configuration, aligned with the pinned runner,
+      and annotate the JS sentinel with `#[wasm_bindgen_test]`. Keep it out of production
+      dependencies and the core runtime. Q2 owns installation and CI invocation of the matching
+      `wasm-bindgen-test-runner`; the native Rust test attribute alone is not a JS execution proof.
+
 - [ ] Add a WASM-gated `scripted_client_uses_paired_js_fake_time` test for owned local futures,
       wakeable fake time, head/chunk timing and strict cutoff without provider emulation. Run the
       before/after command:
-      `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner scripts/run_test_nonzero.sh scripted_client_uses_paired_js_fake_time cargo test -p edgezero-core --features test-utils --target wasm32-unknown-unknown`.
+      `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner scripts/run_test_nonzero.sh scripted_client_uses_paired_js_fake_time cargo test -p edgezero-core --features test-utils --target wasm32-unknown-unknown --lib scripted_client_uses_paired_js_fake_time`.
+      Keep the explicit library/filter selection for target isolation; P1's external API contracts
+      run separately with their native commands.
       Expected red for missing target support, then a nonzero pass without wall-clock sleeps or
       extra runtime/thread requirements. Include F10a only when separately adopted, and activate
       the selected tests in Q2 CI. Apply the task lint card. Suggested commit:

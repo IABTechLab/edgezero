@@ -25,8 +25,9 @@ into a waiver.
 `manifest-store-migration.md`, `blob-app-config-migration.md`, `dependency-majors-migration.md`,
 `cli-reference.md`, `deploy-action-adoption.md`, four `docs/guide/adapters/*.md`, `CHANGELOG.md`,
 and `tests/fixtures/reusable-app/README.md`; update `scripts/check_outbound_docs_contract.mjs`.
-Conditionally add its Node regression tests and the guide-snippet checker/tests below; Q2 owns
-CI activation of the approved checks, with Q1 supplying the exact invocations.
+Create `scripts/check_forwarding_example.mjs` and `scripts/check_forwarding_example.test.mjs`
+for the mandatory EZ-1.14 doctest. Conditionally add the broader Node regression tests and
+guide-snippet checker/tests below; Q2 owns CI activation, with Q1 supplying exact invocations.
 
 - [ ] Convert EZ-25.1-25.44 into a checked source-to-fix list in G1's inventory. First add failing
       documentation-contract cases for incorrect helper signatures, result shape, marker accounting,
@@ -43,6 +44,19 @@ CI activation of the approved checks, with Q1 supplying the exact invocations.
       GET/HEAD/POST ingress, requests original coding, and suppresses only EdgeZero's marker. Show
       explicit follow policy, credential/target restrictions, scheduler requirements, budgets/idle
       precedence, and cancellation ownership. Do not show GET/HEAD body dropping as a workaround.
+- [ ] Unconditionally compile the actual forwarding example for blocking EZ-1.14, independently
+      of EZ-25.42 adoption. The narrow checker extracts the single Rust fence under
+      `Forward An Inbound Request` in `docs/guide/proxying.md`, without maintaining a copied example.
+      Build core with `cargo build --offline --locked -p edgezero-core --lib --message-format=json`;
+      parse Cargo's artifact records to locate its rlib and dependency directory, then invoke
+      rustdoc on the extracted Markdown with that extern, the workspace edition and dependencies.
+      Require exactly one non-ignored doctest in its listing and run it; never invoke the example's
+      network handler. Missing/duplicate fences, `ignore`, `no_run`, `compile_fail`, zero tests or
+      compile failure fail the gate. Add negative fixtures for each case, including the missing
+      `into_request()?`. Run `node --test scripts/check_forwarding_example.test.mjs` and
+      `node scripts/check_forwarding_example.mjs` before/after the example correction.
+      Expected: the current invalid example fails; the corrected actual example passes a nonzero
+      rustdoc run. This does not substitute for P2's real GET/HEAD/POST forwarding tests.
 - [ ] Explain that original coding preserves only representation fields surviving ordinary
       normalization, never stripped hop-by-hop/nominated or filtered fields. Document cause-based
       generated-overflow Retry-After suppression and its precedence over synthesized headers,
@@ -61,6 +75,9 @@ CI activation of the approved checks, with Q1 supplying the exact invocations.
       configuration and manual native-client scheduler setup. Include clock-only constructor removal,
       `with_time(OutboundTime)`, app-clock/timer propagation, and deterministic fake-time wakeups;
       do not publish a fake clock alone as sufficient for deadline conformance.
+      Include the Fastly-local observation/snapshot API, extension and current-callback access,
+      counting rules and frozen-handle lifetime in the Fastly guide and CHANGELOG; do not describe
+      its numbers as client-lifetime totals or provider-wide pooling statistics.
 - [ ] Record separate maintainer-attributed decisions for EZ-25.42 and EZ-25.43 through G1/G4;
       Q1 proposes and implements, Q2 owns CI execution. Neither is implicitly adopted by the other.
 - [ ] If EZ-25.42 is adopted, add `scripts/check_guide_rust_snippets.mjs` and
@@ -72,6 +89,8 @@ CI activation of the approved checks, with Q1 supplying the exact invocations.
       after locked dependency preparation. Expected: broken complete items fail, valid items and
       wrapped fragments compile, ignored fragments require reasons. Record any approved partial
       guide scope explicitly instead of claiming the whole SHOULD. Q2 wires both commands into CI.
+      Reuse the mandatory forwarding checker when that section is selected; do not duplicate its
+      extraction/compilation machinery or make its gate conditional on this broader adoption.
 - [ ] If EZ-25.43 is adopted, extend the existing docs-contract checker and add
       `scripts/check_outbound_docs_contract.test.mjs`. Run
       `node --test scripts/check_outbound_docs_contract.test.mjs` before/after implementation, then
@@ -89,6 +108,8 @@ CI activation of the approved checks, with Q1 supplying the exact invocations.
 `edgezero.toml.hbs`, root `README.md.hbs`, adapter templates as signatures require, `generator.rs`,
 and `tests/generated_project_builds.rs`; corresponding `examples/app-demo/` files;
 `.github/workflows/test.yml`, `format.yml`, and `scripts/run_test_nonzero.sh` only if necessary.
+Create `tests/fixtures/reusable-app/ts-outbound-qualification-runbook.md` as the source template
+for Q4a. Qualification binaries/tooling remain owned by G2/Q3, not duplicated here.
 
 - [ ] Add behavior tests to both demo and generated core for empty GET/HEAD and POST forwarding,
       coding/marker options, begin+batch overlap, strict cutoff, redirect policy and error preservation.
@@ -117,7 +138,9 @@ and `tests/generated_project_builds.rs`; corresponding `examples/app-demo/` file
 
 - [ ] Run `cargo test -p edgezero-cli` and
       `scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds`.
-      Confirm generated core tests execute, not merely compile. Run
+      Preserve this existing integration test's nonzero generated-core listing guard and actual
+      core-test execution; it is not compile-only despite its name. Extend its assertions for the
+      new protocol, not a duplicate wrapper. The app-demo CI test job also already exists; run
       `cargo test --locked --manifest-path examples/app-demo/Cargo.toml --workspace --all-targets`
       and equivalent demo format/clippy checks.
 - [ ] Preserve all existing feature combinations in `.github/workflows/format.yml` and
@@ -151,8 +174,14 @@ and `tests/generated_project_builds.rs`; corresponding `examples/app-demo/` file
   These runner contracts do not replace actual workerd/Spin HTTP fixtures. Add new nonzero
   outbound sentinels for this work instead of relying only on routing sentinels.
 
+- [ ] Run `node --test scripts/check_forwarding_example.test.mjs` and
+      `node scripts/check_forwarding_example.mjs` unconditionally in the existing Rust-capable
+      workspace CI job after locked dependency preparation. Preserve the one-doctest assertion;
+      deferring EZ-25.42 does not skip this blocking EZ-1.14 gate. Do not pass Node through
+      `run_test_nonzero.sh`, which parses Rust listings.
 - [ ] Activate each adopted conditional branch, not just its compilation: P3's individual metadata
-      sentinels, F10a cancellation on selected targets, F10b generated/demo core tests and F10c's
+      sentinels, F10a cancellation on selected targets, F10b's new assertions in the existing generated/
+      demo test gates and F10c's
       explicit JS runner when adopted. For Q1's adopted EZ-25.42/43 run the exact checker and Node
       test commands above in CI with the proper toolchains/dependencies. G1 records job and command
       per selected part; deferred parts retain a documented decision, not a green skipped test.
@@ -173,22 +202,35 @@ and `tests/generated_project_builds.rs`; corresponding `examples/app-demo/` file
       `test.yml`. Run the root verification list from the index plus fixture workspace tests/format/
       clippy. No green root-workspace result substitutes for the excluded workspaces. Suggested
       commit: `test: align demo generator and target gates with outbound adoption`.
+- [ ] Prepare and commit the runbook source template for Q4a, with the G1 case map, G4 approval
+      references, exact build/probe/export/validation commands and expected counts. Use explicit
+      candidate/build placeholders here; Q4a fills them in its external copy after Q3 freezes.
+      Finish all documentation/package-template source edits before that freeze. Runtime ownership
+      acknowledgement, staging authorization and candidate-specific package acceptance remain Q4a
+      gates, not implied by committing this template.
 
-## Task Q3: Full Local Acceptance and Evidence Assembly
+## Task Q3: Evidence Preparation, Candidate Freeze and Local Acceptance
 
 **Files:** Extend G1's inventory/checker, fixture harness `net.rs`, `runners.rs`, `evidence.rs`,
 `main.rs`, fixture-core qualification, and adapter fixtures. No consumer production code is owned
 by this plan.
+
+Finish the source-producing steps below and Q2's runbook/template preparation before freezing.
+Pre-freeze runs are development checks, not the authoritative EZ-Q1 record. After the freeze
+checkpoint, Q3/Q4 collect evidence externally without editing candidate source.
+
+- [ ] Add `outbound_evidence_assembly_retains_case_counts_and_hashes` to fixture-harness tests and
+      run `scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness`.
+      Expected: red for incomplete record assembly, then nonzero case counts, exact candidate/build
+      identities and raw artifact hashes survive export. Run the Node evidence-validator test file
+      below separately, asserting its cases actually execute; do not pass Node through the Rust
+      listing helper. Host runs still own measured outcomes, not these synthetic unit cases.
 
 - [ ] Supply controlled origins for every blocking case and confirmed-present follow-up. Include
       simultaneous requests, trickled headers/bodies, pending reads, encoded ranges, invalid body
       completion, redirects with unreadable bodies, capacity exhaustion/recovery, and host-cache
       behavior where applicable. Each case asserts observable counts, bytes, typed outcomes, ordering,
       deadlines, and owner release rather than just HTTP status.
-- [ ] Run the G1 inventory leg by leg under unit, native Axum TCP, Viceroy 0.21.0, workerd and
-      Spin 4.1. Record Rust/SDK/runtime versions, exact source SHA, runner image, case counts, seed,
-      measurements and sample counts. An offline compile, successful stub, skipped case, or safe
-      refusal of a required bounded operation cannot satisfy an acceptance leg.
 - [ ] Add a record-writer mode and release-validation invocation to the G1 checker. Normalize
       results into explicit per-leg pass/fail/approved-deferred status with artifact hashes. Include
       confirmed-present follow-up mapping from CHANGELOG plus consumer confirmation. A missing
@@ -206,6 +248,16 @@ by this plan.
       resumption rather than the approved 14b cross-execution origin connection proof. Missing
       entitlement/hosted execution is pending, never a passing Image Optimizer result. Suggested
       commit: `test: assemble outbound acceptance evidence`.
+- [ ] Freeze the candidate only after all implementation, test, checker, documentation and
+      qualification-package source changes, including Q2's runbook template and G2/Q3 tooling.
+      Record the clean source SHA and build identities externally. Any later source commit
+      invalidates exact-commit qualification: freeze the new SHA and rerun all required legs,
+      not only tests thought affected. Candidate freezing does not authorize deployment or release.
+- [ ] At that frozen SHA, run the G1 inventory leg by leg under unit, native Axum TCP,
+      Viceroy 0.21.0, workerd and Spin 4.1. Record Rust/SDK/runtime versions, exact source SHA,
+      runner image, case counts, seed, measurements and sample counts. An offline compile,
+      successful stub, skipped case, or safe refusal of a required bounded operation cannot
+      satisfy an acceptance leg. These are the authoritative local results Q4a/Q5 consume.
 
 ## Q4: Hosted Qualification Handoff Task Group
 
@@ -215,23 +267,24 @@ authorization to the consumer-owned staging service, never inferred from this pl
 
 ### Task Q4a: Qualification Package and Accepted Execution Runbook
 
-**Files:** Qualification binaries and fixture README from G2; create the execution runbook
-`tests/fixtures/reusable-app/ts-outbound-qualification-runbook.md` during execution;
-evidence checker/inventory from G1. This is a future deliverable, not an existing accepted runbook.
+**Files:** Read the committed qualification binaries/tooling and fixture README from G2/Q3,
+Q2's `tests/fixtures/reusable-app/ts-outbound-qualification-runbook.md` source template, and
+G1's checker/inventory. Produce an external candidate-specific package/runbook and acceptance
+record, not another source commit. No accepted runbook exists at plan creation.
 
-**Dependencies:** Implemented local acceptance and G2/G4 approvals. Commit the runbook template,
-fixtures and any package tooling before Q5 freezes the source SHA. Bind the exact candidate/build
-hashes in the external execution package/evidence record after freeze, without another source
-commit for the results. EdgeZero prepares the package; G1 must record the actual TS maintainer/operator accepting
+**Dependencies:** Q3's frozen candidate and authoritative local acceptance, the committed Q2
+runbook template and G2/Q3 package sources, and G2/G4 approvals. Bind candidate/build hashes in
+the external execution package/evidence record without another source commit. EdgeZero prepares the
+package; G1 must record the actual TS maintainer/operator accepting
 execution ownership and a reachable runbook/work-item link before Q4b starts.
 
 - [ ] EdgeZero supplies the exact candidate qualification build for all EZ-Q1.4-listed legs,
       including EZ-1 body/deadline cases, EZ-2 criteria 11/12/13b/14a/14b, EZ-4 criterion 8, hosted EZ-6
       scenarios 1/2/6/7/8/11 and hosted Image Optimizer behavior. Include version and candidate SHA
       in an authenticated/non-secret fixture identity, never provider diagnostics in public errors.
-- [ ] Write the runbook with candidate/baseline SHAs and build hashes, G1 case map, G4 API/B/H(K)
-      and threshold approvals, exact SDK/runtime versions, service settings, entitlements, controlled
-      origins, sampling plan and canonical lifecycle composition. List the precise build, probe,
+- [ ] Populate the external runbook copy with candidate/baseline SHAs and build hashes, G1 case
+      map, G4 API/B/H(K) and threshold approvals, exact SDK/runtime versions, settings, entitlements,
+      controlled origins, sampling plan and canonical lifecycle composition. List the build, probe,
       export and evidence-validation invocations and expected case counts per leg. Require TS to
       confirm its deployment/browser/response-diff commands rather than inventing commands for its
       repository. Include its known integration command, run from the TS checkout:
@@ -244,8 +297,8 @@ execution ownership and a reachable runbook/work-item link before Q4b starts.
       paths and the evidence-checker regression tests. Expected: exact-commit package, no zero-case
       acceptance, and TS acknowledgement of inputs/ownership. Missing operator, missing command,
       entitlement or deployment authorization leaves execution pending; do not fabricate acceptance.
-      A run exposing an implementation defect requires a new reviewed source SHA and rerunning
-      the affected exact-commit qualification; do not relabel the previous build's evidence.
+      A run exposing an implementation defect requires a new reviewed/frozen source SHA and
+      rerunning all required local and hosted qualification legs; do not relabel earlier evidence.
 
 ### Task Q4b: TS-Executed Hosted and Composition Evidence
 
@@ -259,10 +312,14 @@ pre-approved measurement definitions. None can be replaced with local CI success
       `send_request_with_registries_and_hooks`, single-request mode by default. Its baseline is
       `a9037770a` plus prerequisite PR 1123 at `4c5ca8ae5`; record immutable identities for both
       baseline and candidate, service compatibility settings, entitlements, origin delays, and POP.
-- [ ] Run EZ-2 M1-M6 and EZ-3 M7 against approved product thresholds, randomized build order,
+- [ ] Run EZ-2 M1, M2, M3, M5 and M6, plus EZ-3 M7, using their approved pass conditions,
+      randomized build order,
       fixed page mix/rate and sample counts. Use a controlled silent-drop connect destination, not
       TEST-NET assumptions; keep refused connection separate. Probe heterogeneous hosts/budgets,
       rolling versions, origin reuse, and Image Optimizer transformation/bounded-stall/query behavior.
+      M4 applies only to separately applicable reusable-sandbox qualification before enabling reuse;
+      record its exclusion from single-request qualification under EZ-Q1.5/Q1.8. Blocking 14b
+      cross-execution pooling evidence remains required and does not promote M4.
 - [ ] For Image Optimizer, use the separately approved EZ-8.10 horizon contract, numerical H(K)
       rule/maximum/domain and tolerance. Run 1 s and shortened-absolute-deadline cases with the same
       per-call timeout/backend, plus representative policy boundaries. Record preparation, host call
@@ -291,12 +348,12 @@ pre-approved measurement definitions. None can be replaced with local CI success
 
 ## Task Q5: Release Record and Reachable Pin
 
-**Files:** G1 inventory/checker, `CHANGELOG.md`, fixture README; release asset and immutable tag
+**Files:** Read G1 inventory/checker, `CHANGELOG.md` and fixture README; publish release asset and immutable tag
 for the reviewed candidate, created only when release/push is authorized.
 
-- [ ] Freeze the candidate after all implementation/test/doc changes. Any source commit change
-      invalidates earlier exact-commit qualification; rerun the required legs for the new SHA. Keep
-      hosted/local result identity tied to the same candidate and baseline builds.
+- [ ] Verify the reviewed source/build identities still match Q3's frozen candidate and Q3/Q4's
+      local/hosted records. Do not freeze a new commit or edit source during publication. Any source
+      change returns execution to Q3's freeze checkpoint and reruns all required legs for the new SHA.
 - [ ] Validate EZ-Q1.1-Q1.8 against the assembled record. Required results all pass; approved
       partial promotions/deferrals are explicit. Preserve failures as evidence but never as a passing
       record. Review body-read readiness, cancellation, raw-ingress and allocation caveats unchanged.
