@@ -269,7 +269,6 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
     let manifest = load_manifest_optional()?;
     ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
     assert_adapter_declared_paths_safe(manifest.as_ref(), &args.adapter)?;
-    let (_deploy_lock, overlay) = acquire_deploy_lock()?;
     let manifest_stores = manifest.as_ref().map(|loader| &loader.manifest().stores);
     let declared_ids = |declaration: Option<&StoreDeclaration>| {
         declaration
@@ -295,6 +294,14 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
         args.application_release.as_deref(),
         application_manifest_path.as_deref(),
     )?;
+    // Immutable releases have no local manifest writeback. Creating a project
+    // lock inside the bundle would invalidate its exact-member verification.
+    let (_deploy_lock, overlay) = if application_release_root.is_some() {
+        (None, Vec::new())
+    } else {
+        let (lock, overlay) = acquire_deploy_lock()?;
+        (Some(lock), overlay)
+    };
     let context = AdapterDeployContext {
         adapter_manifest_path,
         application_manifest_path,
@@ -1004,6 +1011,10 @@ serve = "echo"
                 adapter_args: vec!["--help".to_owned()],
             })
             .expect("registry deploy");
+            assert!(
+                dir.path().join(".edgezero/provision.lock").is_file(),
+                "source deployments must retain their shared project lock"
+            );
             let recorded = fs::read_to_string(argv).expect("recorded vendor arguments");
             assert!(
                 !recorded.contains("--manifest-path"),
@@ -1336,6 +1347,10 @@ deploy = "touch '{}'"
         })
         .expect("managed release deploy");
 
+        assert!(
+            !release.path().join(".edgezero").exists(),
+            "immutable release deployments must not add local project lock state"
+        );
         let context = DEPLOY_CONTEXT
             .lock()
             .expect("deploy context lock")
