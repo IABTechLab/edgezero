@@ -33,7 +33,7 @@ and before its Rust build steps:
 
 ```yaml
 - name: Set up Rust build cache
-  uses: stackpop/edgezero/.github/actions/setup-rust-build-cache@<ref>
+  uses: IABTechLab/edgezero/.github/actions/setup-rust-build-cache@<ref>
   with:
     app-name: example-app
     cache-target: true
@@ -59,7 +59,7 @@ the release:
 
 ```yaml
 - id: app-cli
-  uses: stackpop/edgezero/.github/actions/build-app-cli@<ref>
+  uses: IABTechLab/edgezero/.github/actions/build-app-cli@<ref>
   with:
     app-cli-package: example-app-cli
     app-cli-bin: example-app-cli
@@ -78,7 +78,7 @@ built in the credential-free producer job:
 
 ```yaml
 - id: release
-  uses: stackpop/edgezero/.github/actions/package-application-release-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/package-application-release-fastly@<ref>
   with:
     app-cli-archive: release-inputs/app-cli.tar
     fastly-package: application/pkg/app.tar.gz
@@ -166,7 +166,7 @@ Download the selected release once and reuse it:
     github-token: ${{ secrets.APPLICATION_RELEASE_TOKEN }}
 
 - id: deploy
-  uses: stackpop/edgezero/.github/actions/deploy-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/deploy-fastly@<ref>
   with:
     app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
     app-release-sha256: ${{ needs.release.outputs.sha256 }}
@@ -319,7 +319,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - id: environment
-        uses: stackpop/edgezero/.github/actions/require-github-environment@<ref>
+        uses: IABTechLab/edgezero/.github/actions/require-github-environment@<ref>
         with:
           environment-name: ${{ steps.target.outputs.environment }}
           repository: ${{ github.repository }}
@@ -369,7 +369,7 @@ jobs:
           export_selector EDGEZERO__STORES__SECRETS__CREDENTIALS__NAME "$SECRET_NAME"
 
       - id: config
-        uses: stackpop/edgezero/.github/actions/config-push-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/config-push-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}
@@ -390,7 +390,7 @@ jobs:
           exit 1
 
       - id: deploy
-        uses: stackpop/edgezero/.github/actions/deploy-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/deploy-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}
@@ -401,7 +401,7 @@ jobs:
           deploy-to: ${{ needs.preflight.outputs.deploy-to }}
 
       - id: health
-        uses: stackpop/edgezero/.github/actions/healthcheck-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/healthcheck-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}
@@ -415,7 +415,7 @@ jobs:
 
       - name: Roll back failed deployment
         if: ${{ (failure() || cancelled()) && steps.deploy.outputs.fastly-version != '' && (needs.preflight.outputs.deploy-to == 'staging' || steps.deploy.outputs.previous-version != '') }}
-        uses: stackpop/edgezero/.github/actions/rollback-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/rollback-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}

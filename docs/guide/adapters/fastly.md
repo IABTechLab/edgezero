@@ -560,7 +560,7 @@ fn handle(req: fastly::Request, sandbox: &mut Sandbox<App>) -> Result<(), fastly
 }
 ```
 
-The fixture's [`custom_dispatch`](https://github.com/stackpop/edgezero/blob/main/tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs)
+The fixture's [`custom_dispatch`](https://github.com/IABTechLab/edgezero/blob/main/tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs)
 is a fuller reference covering logger setup, handled initialization failure,
 response finalization, progressive streaming and post-send work.
 
@@ -583,7 +583,7 @@ against the checkout being adopted:
 ./scripts/smoke_test_reusable_app.sh --adapter fastly --suite smoke
 ```
 
-See the [fixture README](https://github.com/stackpop/edgezero/tree/main/tests/fixtures/reusable-app)
+See the [fixture README](https://github.com/IABTechLab/edgezero/tree/main/tests/fixtures/reusable-app)
 for assertions, runtime requirements and evidence files. An unavailable runtime
 or missing reuse is unverified and exits 2. Local fixtures do not guarantee
 provider reuse, deployed resource lifetimes or application workload gains.
