@@ -57,6 +57,19 @@ export default defineConfig({
           { text: 'Native AWS stores', link: '/guide/native-aws-stores' },
           { text: 'DynamoDB KV', link: '/guide/dynamodb-kv' },
 
+          {
+            text: 'Publishing Axum containers',
+            link: '/guide/publishing-axum-containers',
+          },
+          {
+            text: 'Deploying Axum containers',
+            link: '/guide/deploying-axum-containers',
+          },
+          {
+            text: 'Deploying Axum on Kubernetes',
+            link: '/guide/deploying-axum-kubernetes',
+          },
+
         ],
       },
       {

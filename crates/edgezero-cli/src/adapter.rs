@@ -1,4 +1,6 @@
 use edgezero_adapter::cli_support::validate_spin_outbound_host_contract;
+#[cfg(feature = "edgezero-adapter-axum")]
+use edgezero_adapter_axum::native_build::{NativeCargoSelection, generated_axum_cargo_action};
 use edgezero_adapter::registry::{
     self as adapter_registry, AdapterAction, AdapterDeployContext, DeployOwnership,
 };

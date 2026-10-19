@@ -61,7 +61,9 @@ use crate::outbound::AxumOutboundClient;
 use crate::proxy::TrustedProxyPolicy;
 use crate::response::EgressConnection;
 pub use crate::run_options::AxumRunOptions;
-use crate::run_options::{JsonBodyLimit, failure, native_settings, shutdown_grace, strip_native_config_prefix};
+use crate::run_options::{
+    JsonBodyLimit, failure, native_settings, shutdown_grace, strip_native_config_prefix,
+};
 use crate::secret_store::EnvSecretStore;
 use crate::service::{
     AxumServiceState, legacy_config_registry, legacy_kv_registry, legacy_secret_registry,
