@@ -163,6 +163,12 @@ jobs:
       # its tests live behind the `cli` feature, which the unfeatured
       # `cargo test --workspace` step above does not enable — so none of those
       # tests compile or run there. Exercise them explicitly.
+
+      - name: Core doctests
+        if: matrix.suite == 'workspace'
+        run: cargo test -p edgezero-core --doc
+
+
       - name: Run EdgeZero CLI tests
         if: matrix.suite == 'cli'
         run: cargo test -p edgezero-cli --all-targets

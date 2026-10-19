@@ -1,9 +1,9 @@
 use edgezero_adapter::cli_support::validate_spin_outbound_host_contract;
-#[cfg(feature = "edgezero-adapter-axum")]
-use edgezero_adapter_axum::native_build::{NativeCargoSelection, generated_axum_cargo_action};
 use edgezero_adapter::registry::{
     self as adapter_registry, AdapterAction, AdapterDeployContext, DeployOwnership,
 };
+#[cfg(feature = "edgezero-adapter-axum")]
+use edgezero_adapter_axum::native_build::{NativeCargoSelection, generated_axum_cargo_action};
 
 use edgezero_core::manifest::{
     CapabilitySupport, Manifest, ManifestContract, ManifestLoader, ResolvedEnvironment,
@@ -265,32 +265,6 @@ pub(crate) fn execute_runtime(
 ) -> Result<(), String> {
     ensure_action_capabilities(runtime)?;
     execute_after_gate(runtime, adapter_args)
-}
-
-/// Capturing variant of [`execute_runtime`] for manifest shell commands.
-pub(crate) fn execute_capture_runtime(
-    runtime: &ResolvedRuntime,
-    adapter_args: &[String],
-) -> Result<Option<String>, String> {
-    ensure_action_capabilities(runtime)?;
-    if let ResolvedAdapterTarget::Shell(shell) = runtime.target() {
-        let build_features = runtime.manifest().map_or_else(Vec::new, |manifest| {
-            adapter_build_features(manifest, runtime.adapter_name())
-        });
-        return run_shell_tee(
-            shell.command(),
-            shell.root(),
-            runtime.adapter_name(),
-            runtime.action(),
-            Some(shell.environment().clone()),
-            (shell.bind_host().map(str::to_owned), shell.bind_port()),
-            adapter_args,
-            &build_features,
-        )
-        .map(Some);
-    }
-    execute_registered_after_gate(runtime, adapter_args)?;
-    Ok(None)
 }
 
 fn ensure_action_capabilities(runtime: &ResolvedRuntime) -> Result<(), String> {

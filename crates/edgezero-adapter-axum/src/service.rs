@@ -2207,7 +2207,6 @@ mod tests {
         use std::future::pending;
         use std::net::{IpAddr, SocketAddr};
 
-        use http_body::Body as _;
         use serde_json::{Value, json};
 
         use crate::context::AxumRequestContext;

@@ -50,6 +50,10 @@ for adapter in axum cloudflare fastly spin; do
   run scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p "edgezero-adapter-${adapter}" --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
 done
 
+section "Core Doctests"
+run cargo test -p edgezero-core --doc
+
+
 section "Workspace Feature Compilation"
 run cargo check --workspace --all-targets --features "fastly cloudflare spin"
 

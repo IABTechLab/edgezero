@@ -696,6 +696,21 @@ mod tests {
         assert!(response_abort_lifecycle_holds_for_test().await);
     }
 
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn request_timing_clock_handle_and_attachment_work_on_runtime() {
+        super::request_timing_tests::clock_handle_and_attachment_work_on_runtime();
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn request_timing_clock_advances_in_browser_harness() {
+        use worker::Date;
+
+        let deadline = Date::now().as_millis().saturating_add(2_000_u64);
+        super::request_timing_tests::clock_advances_on_local_runtime(|| {
+            Date::now().as_millis() >= deadline
+        });
+    }
+
     #[cfg(feature = "test-utils")]
     mod ingress_contract {
         use std::future::Future as _;
@@ -1579,3 +1594,7 @@ mod native_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../edgezero-core/tests/support/request_timing.rs"]
+mod request_timing_tests;
