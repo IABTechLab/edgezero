@@ -8,7 +8,6 @@ pub mod config_store;
 pub mod context;
 mod decompress;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
-#[path = "request/ingress.rs"]
 mod ingress;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 pub mod key_value_store;

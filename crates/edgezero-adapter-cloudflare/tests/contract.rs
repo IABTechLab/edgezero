@@ -196,7 +196,7 @@ mod tests {
         for continue_routing in [false, true] {
             let app = App::new(
                 RouterService::builder()
-                    .pre_dispatch_hook(Arc::new(IngressHook { continue_routing }))
+                    .pre_dispatch_hook_arc(Arc::new(IngressHook { continue_routing }))
                     .get("/uri", capture_uri_for_ingress)
                     .build(),
             );

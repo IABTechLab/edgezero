@@ -217,7 +217,7 @@ jobs:
         if: matrix.adapter == 'cloudflare'
         uses: actions/setup-node@v6
         with:
-          node-version: 24.12.0
+          node-version-file: .tool-versions
           cache: npm
           cache-dependency-path: tests/fixtures/request-fidelity/package-lock.json
 
@@ -333,15 +333,12 @@ jobs:
           ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
         run: cargo test -p edgezero-adapter-fastly --features fastly --target wasm32-wasip1 --lib
 
-      # Spin's metadata helper runs on the host; its full lib test artifact
-      # imports Spin-specific interfaces unavailable in plain Wasmtime.
-      # The real Spin HTTP fixture below executes the converter instead.
       - name: Install lock-matched worker-build
         if: matrix.adapter == 'cloudflare'
         shell: bash
         run: |
-          if [[ "$(worker-build --version 2>/dev/null || true)" != "0.8.3" ]]; then
-            cargo install worker-build --version 0.8.3 --locked --force
+          if [[ "$(worker-build --version 2>/dev/null || true)" != "0.8.5" ]]; then
+            cargo install worker-build --version 0.8.5 --locked --force
           fi
 
       - name: Install pinned Spin HTTP runtime
@@ -349,13 +346,13 @@ jobs:
         shell: bash
         run: |
           version="$(awk '$1 == "spin-cli" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.toml)"
+          test "$version" = "4.1.0"
           install_dir="$RUNNER_TEMP/spin"
           mkdir -p "$install_dir"
-          curl -fL "https://github.com/spinframework/spin/releases/download/v${version}/spin-v${version}-linux-amd64.tar.gz" -o "$RUNNER_TEMP/spin.tar.gz"
-          # GitHub's published digest for the v4.0.0 linux-amd64 release asset.
+          curl --retry 3 -fL "https://github.com/spinframework/spin/releases/download/v${version}/spin-v${version}-linux-amd64.tar.gz" -o "$RUNNER_TEMP/spin.tar.gz"
+          # GitHub's published digest for the v4.1.0 linux-amd64 release asset.
           # Keep the version and digest paired when updating the fixture pin.
-          test "$version" = "4.0.0"
-          echo "e705c9bfd9484a9175f392a116856680862a40f31d1a85618bed331f34ffccfa  $RUNNER_TEMP/spin.tar.gz" | sha256sum --check --strict
+          echo "aeeb892f94cf861f5302546faa0bdaa82cc4be30539621299746a6dc011f3b5a  $RUNNER_TEMP/spin.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/spin.tar.gz" -C "$install_dir"
           echo "$install_dir" >> "$GITHUB_PATH"
           "$install_dir/spin" --version
@@ -373,7 +370,13 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.adapter }}" = "cloudflare" ]; then
+            version="$(awk '$1 == "name" && $3 == "\"wasm-bindgen\"" { in_pkg=1; next } in_pkg && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.lock)"
+            test -n "$version"
             WASM_BINDGEN_BIN="$(command -v wasm-bindgen)"
+            if [[ "$("$WASM_BINDGEN_BIN" --version)" != "wasm-bindgen $version" ]]; then
+              cargo install wasm-bindgen-cli --version "$version" --locked --root "$RUNNER_TEMP/fixture-wasm-bindgen"
+              WASM_BINDGEN_BIN="$RUNNER_TEMP/fixture-wasm-bindgen/bin/wasm-bindgen"
+            fi
             export WASM_BINDGEN_BIN
           fi
           ./scripts/test-request-fidelity.sh ${{ matrix.adapter }}

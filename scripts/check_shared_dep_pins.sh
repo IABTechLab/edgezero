@@ -74,7 +74,8 @@ elif [[ "$got" != "$WANT" ]]; then
   VIOLATIONS=$((VIOLATIONS + 1))
 fi
 
-# `spin-sdk` is pinned in four places and shares no lockfile across them.
+# `spin-sdk` pins span isolated workspaces and the scaffold; they do not
+# share one lockfile.
 # A mismatch does not fail at the pin: the fixture resolves a second copy
 # of the SDK and the build dies on `expected IncomingBody<Request>, found
 # a different IncomingBody<Request>`, naming neither crate nor version.
@@ -95,6 +96,7 @@ fi
 for file in \
   examples/app-demo/Cargo.toml \
   tests/fixtures/reusable-app/crates/fixture-spin/Cargo.toml \
+  tests/fixtures/request-fidelity/Cargo.toml \
   crates/edgezero-cli/src/generator.rs; do
   got="$(spin_major_in "$file")"
   if [[ -z "$got" ]]; then

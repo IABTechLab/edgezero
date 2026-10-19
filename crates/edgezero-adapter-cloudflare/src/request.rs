@@ -244,7 +244,8 @@ pub(crate) struct RegistryInputs<'env> {
 /// Convert a Cloudflare Worker request into an `EdgeZero` core request.
 ///
 /// # Errors
-/// Returns [`EdgeError::bad_request`] if the URL or URI cannot be parsed,
+/// Returns [`EdgeError::bad_request`] for invalid runtime methods, header values,
+/// URLs or URIs,
 /// and [`EdgeError::internal`] if the body cannot be read or the core
 /// request cannot be built.
 #[inline]
@@ -261,8 +262,8 @@ pub async fn into_core_request(
         TargetSource::RuntimeUrl,
         Preservation::Unknown,
     );
-    let url = req
-        .url()
+    let url: worker::Url = runtime_url
+        .parse()
         .map_err(|_error| EdgeError::bad_request("invalid runtime URL"))?;
     let uri: Uri = url
         .as_str()
@@ -275,7 +276,7 @@ pub async fn into_core_request(
             InboundOrigin::parse(scheme, authority.as_str(), OriginSource::RuntimeUri).ok()
         });
     let fidelity = HeaderFidelity::RUNTIME_HEADER_MAP;
-    let ingress = RequestIngress::new(target, origin, fidelity, Vec::new())?;
+    let ingress = RequestIngress::new(target, origin, fidelity);
 
     let mut builder = request_builder().method(method).uri(uri);
     let headers = req.headers();

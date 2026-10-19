@@ -199,12 +199,31 @@ impl RouterBuilder {
 
     /// Install one hook before route lookup, state injection and middleware.
     ///
-    /// Repeated registration replaces the previous hook. Router clones share
-    /// the same instance. None of the normal route lifecycle runs after a
-    /// terminal response; outer adapter/application finalizers may still run.
+    /// Router clones share the same instance. None of the normal route lifecycle
+    /// runs after a terminal response; outer adapter/application finalizers may run.
+    ///
+    /// # Panics
+    /// Panics if a hook is already registered.
     #[must_use]
     #[inline]
-    pub fn pre_dispatch_hook(mut self, hook: BoxPreDispatchHook) -> Self {
+    pub fn pre_dispatch_hook<H>(self, hook: H) -> Self
+    where
+        H: PreDispatchHook,
+    {
+        self.pre_dispatch_hook_arc(Arc::new(hook))
+    }
+
+    /// Install a shared hook with the same guarantees as [`Self::pre_dispatch_hook`].
+    ///
+    /// # Panics
+    /// Panics if a hook is already registered.
+    #[must_use]
+    #[inline]
+    pub fn pre_dispatch_hook_arc(mut self, hook: BoxPreDispatchHook) -> Self {
+        assert!(
+            self.pre_dispatch_hook.is_none(),
+            "pre-dispatch hook already registered"
+        );
         self.pre_dispatch_hook = Some(hook);
         self
     }
@@ -1294,7 +1313,7 @@ mod pre_dispatch_tests {
             .with_state(CountedState {
                 clones: Arc::clone(&clones),
             })
-            .pre_dispatch_hook(Arc::new(RewriteHook))
+            .pre_dispatch_hook(RewriteHook)
             .post("/after", after_handler)
             .build();
         let response = block_on(router.oneshot(input(Method::GET, "/before", Body::empty())))
@@ -1311,7 +1330,7 @@ mod pre_dispatch_tests {
             .with_state(CountedState {
                 clones: Arc::clone(&clones),
             })
-            .pre_dispatch_hook(Arc::new(TerminalHook {
+            .pre_dispatch_hook_arc(Arc::new(TerminalHook {
                 calls: Arc::clone(&calls),
                 fail: true,
             }))
@@ -1335,7 +1354,7 @@ mod pre_dispatch_tests {
     fn pre_dispatch_hook_is_shared_across_router_clones() {
         let calls = Arc::new(AtomicUsize::new(0));
         let router = RouterService::builder()
-            .pre_dispatch_hook(Arc::new(TerminalHook {
+            .pre_dispatch_hook_arc(Arc::new(TerminalHook {
                 calls: Arc::clone(&calls),
                 fail: false,
             }))
@@ -1351,7 +1370,7 @@ mod pre_dispatch_tests {
     #[test]
     fn pre_dispatch_inspects_empty_stream_without_send_bound() {
         let router = RouterService::builder()
-            .pre_dispatch_hook(Arc::new(InspectHook))
+            .pre_dispatch_hook_arc(Arc::new(InspectHook))
             .build();
         let chunks = stream::iter([Ok::<Bytes, IoError>(Bytes::new()), Ok(Bytes::new())]);
         let response =
@@ -1361,30 +1380,17 @@ mod pre_dispatch_tests {
     }
 
     #[test]
-    fn pre_dispatch_registration_replaces_previous_hook() {
-        let first = Arc::new(AtomicUsize::new(0));
-        let second = Arc::new(AtomicUsize::new(0));
-        let router = RouterService::builder()
-            .pre_dispatch_hook(Arc::new(TerminalHook {
-                calls: Arc::clone(&first),
-                fail: true,
-            }))
-            .pre_dispatch_hook(Arc::new(TerminalHook {
-                calls: Arc::clone(&second),
-                fail: false,
-            }))
-            .build();
-        let response = block_on(router.oneshot(input(Method::GET, "/unknown", Body::empty())))
-            .expect("should run replacement hook only");
-        assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
-        assert_eq!(first.load(Ordering::SeqCst), 0);
-        assert_eq!(second.load(Ordering::SeqCst), 1);
+    #[should_panic(expected = "pre-dispatch hook already registered")]
+    fn pre_dispatch_registration_rejects_duplicate_hook() {
+        let _builder = RouterService::builder()
+            .pre_dispatch_hook_arc(Arc::new(InspectHook))
+            .pre_dispatch_hook(RewriteHook);
     }
 
     #[test]
     fn pre_dispatch_rejects_nonempty_or_failed_streams() {
         let router = RouterService::builder()
-            .pre_dispatch_hook(Arc::new(InspectHook))
+            .pre_dispatch_hook_arc(Arc::new(InspectHook))
             .build();
         let chunks = stream::iter([Ok::<Bytes, IoError>(Bytes::from_static(b"x"))]);
         let response =
@@ -1411,7 +1417,7 @@ mod pre_dispatch_tests {
             .middleware(CountingMiddleware {
                 calls: Arc::clone(&middleware_calls),
             })
-            .pre_dispatch_hook(Arc::new(TerminalHook {
+            .pre_dispatch_hook_arc(Arc::new(TerminalHook {
                 calls: Arc::clone(&calls),
                 fail: false,
             }))

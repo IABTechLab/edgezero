@@ -190,7 +190,6 @@ the converted request before router state, introspection, request context,
 middleware or handlers. Its future can be non-`Send`.
 
 ```rust
-use std::sync::Arc;
 use async_trait::async_trait;
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
@@ -215,7 +214,7 @@ impl PreDispatchHook for ExampleHook {
 }
 
 let router = RouterService::builder()
-    .pre_dispatch_hook(Arc::new(ExampleHook))
+    .pre_dispatch_hook(ExampleHook)
     .build();
 ```
 
@@ -227,10 +226,28 @@ headers matter. `Err(error)` stops dispatch; direct `Service::call` propagates i
 while `RouterService::oneshot` renders it through the existing error response
 conversion.
 
-Repeated registration replaces the hook. Router clones share its `Arc`.
+Register a value with `pre_dispatch_hook`, or an existing shared hook with
+`pre_dispatch_hook_arc`. A second registration panics during router construction.
+Router clones share the same hook instance.
 Without a hook, existing routing is unchanged. Adapter buffering, capability
 bootstrap and outer response finalizers can still run before or after this
 router boundary; the hook does not replace those layers.
+
+The hook value must be `Send + Sync + 'static`; it cannot hold `Rc` state,
+although its returned future may be non-`Send`. Adapter extensions such as
+`RequestIngress`, platform context and store registries are available. Router
+state, introspection and `RequestContext` have not been injected yet:
+
+```rust
+let ingress = request.extensions()
+    .get::<edgezero_core::request::RequestIngress>();
+```
+
+If the hook consumes the body and returns `Ok(None)`, the handler receives only
+what remains unless the hook replaces the body. Generated `app!` applications
+cannot install a hook through the macro or modify the built router. Use a
+hand-written `Hooks::routes()` returning a configured `RouterService`, as in
+`tests/fixtures/request-fidelity/src/lib.rs`.
 
 Consult [adapter ingress capabilities](./adapters/overview#inbound-request-fidelity)
 before classifying a request using its target or duplicate headers.

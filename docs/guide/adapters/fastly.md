@@ -605,7 +605,7 @@ entry point and removing retained state, not merely setting a request limit of o
 
 Call `request::capture_request_ingress(&req)` immediately after acquiring the
 native request and before URL-based shortcuts or native mutation. It borrows
-the same request without round-tripping handles. With Fastly SDK 0.12.1,
+the same request without round-tripping handles. With Fastly SDK 0.13.1,
 safe raw-target acquisition is unavailable: the snapshot records `NotExposed`
 first, then uses the SDK runtime URL only to recover the canonical origin.
 This URL access can normalize the path; it never establishes original-target
@@ -634,6 +634,13 @@ demonstrate that a normalized native shortcut can receive
 taken earlier. Original-target support and safe shortcut exclusion remain
 blocked on the SDK accessor; client/TLS preservation must be proved on the
 appropriate ingress. See [the capability matrix](./overview#inbound-request-fidelity).
+
+Fastly exposes `get_original_header_names()` and `get_original_header_count()`.
+These provide original-name ordering and a total count, but cannot associate
+original fields with converted values. Local Viceroy can lowercase and deduplicate
+names, so global order is `Unknown`, pending production verification. Aggregate
+count equality cannot prove per-header multiplicity; no per-header guarantees
+are inferred from it.
 
 ## Next Steps
 

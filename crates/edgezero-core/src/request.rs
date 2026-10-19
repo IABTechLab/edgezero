@@ -1,17 +1,24 @@
 //! Confidential adapter-owned ingress facts and explicit preservation limits.
 //!
 //! Metadata describes what a runtime exposes; it cannot recover information
-//! erased before conversion. It is intentionally neither serializable nor
-//! printable because captured targets and authorities can contain private data.
+//! erased before conversion. Captured values are not serialized, and Debug
+//! implementations omit targets and authorities because they can contain private data.
 
+use std::fmt;
+use std::io::Error as IoError;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
+use http::uri::Authority;
+
 use crate::error::EdgeError;
-use crate::http::{HeaderName, Uri};
+use crate::http::HeaderName;
 
 /// Maximum complete target metadata, measured in UTF-8 bytes.
 pub const MAX_TARGET_BYTES: usize = 16 * 1024;
+
+/// Maximum inbound authority metadata, measured in UTF-8 bytes.
+pub const MAX_AUTHORITY_BYTES: usize = 1024;
 
 /// A complete bounded target or an explicit acquisition failure.
 #[derive(Clone)]
@@ -84,6 +91,8 @@ impl CompleteTarget {
 ///
 /// These axes compare original HTTP field values with core headers; successful
 /// runtime-to-core copying alone does not establish original-wire preservation.
+/// `Default` leaves all axes unknown; `RUNTIME_HEADER_MAP` additionally states
+/// that the converted map cannot supply global field order.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HeaderFidelity {
     field_multiplicity: Preservation,
@@ -154,7 +163,7 @@ impl HeaderFidelity {
 /// must establish provenance before calling the constructor.
 #[derive(Clone)]
 pub struct InboundOrigin {
-    authority: Arc<str>,
+    authority: Authority,
     scheme: &'static str,
     source: OriginSource,
 }
@@ -163,11 +172,13 @@ impl InboundOrigin {
     /// Borrow the validated authority in its source-provided spelling.
     ///
     /// Host case and explicit default ports are retained when the source exposes
-    /// them. Consumers must normalize authorities before comparing origins.
+    /// them, including leading zeros in explicit ports. Port zero is accepted
+    /// syntactically; this does not make it a usable destination. Consumers must
+    /// normalize authorities before comparing origins.
     #[inline]
     #[must_use]
     pub fn authority(&self) -> &str {
-        &self.authority
+        self.authority.as_str()
     }
 
     /// Validate a bounded HTTP(S) scheme and authority.
@@ -185,22 +196,16 @@ impl InboundOrigin {
             return Err(EdgeError::bad_request("invalid ingress origin"));
         };
         if authority.is_empty()
-            || authority.len() > 1024
+            || authority.len() > MAX_AUTHORITY_BYTES
             || authority
                 .chars()
                 .any(|character| matches!(character, '@' | '/' | '?' | '#' | '\\'))
         {
             return Err(EdgeError::bad_request("invalid ingress origin"));
         }
-        let uri = Uri::builder()
-            .scheme(normalized_scheme)
-            .authority(authority)
-            .path_and_query("/")
-            .build()
+        let parsed: Authority = authority
+            .parse()
             .map_err(|_error| EdgeError::bad_request("invalid ingress origin"))?;
-        let parsed = uri
-            .authority()
-            .ok_or_else(|| EdgeError::bad_request("invalid ingress origin"))?;
         let host = parsed.host();
         if host.chars().any(|character| matches!(character, '[' | ']'))
             && host
@@ -224,10 +229,28 @@ impl InboundOrigin {
             return Err(EdgeError::bad_request("invalid ingress origin"));
         }
         Ok(Self {
-            authority: Arc::from(authority),
+            authority: parsed,
             scheme: normalized_scheme,
             source,
         })
+    }
+
+    /// Compare hosts case-insensitively and ports using each scheme's default.
+    ///
+    /// This compares authorities, not full origins: the schemes may differ.
+    #[inline]
+    #[must_use]
+    pub fn same_authority(&self, other: &Self) -> bool {
+        let port = |origin: &Self| {
+            origin
+                .authority
+                .port_u16()
+                .unwrap_or(if origin.scheme == "https" { 443 } else { 80 })
+        };
+        self.authority
+            .host()
+            .eq_ignore_ascii_case(other.authority.host())
+            && port(self) == port(other)
     }
 
     /// Return the normalized HTTP(S) scheme.
@@ -249,6 +272,10 @@ impl InboundOrigin {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OriginSource {
     /// Scheme and authority supplied by the runtime request URI.
+    ///
+    /// Runtimes typically derive authority from the client's Host or :authority.
+    /// It identifies the requested origin; it does not establish that an operator
+    /// approves or owns that host.
     RuntimeUri,
     /// A trusted transport scheme combined with one validated inbound request authority.
     ///
@@ -294,34 +321,23 @@ impl RequestIngress {
             .unwrap_or(self.common_header_fidelity)
     }
 
-    /// Construct metadata with unambiguous per-header fidelity overrides.
+    /// Construct metadata without header-specific overrides.
     ///
-    /// Sources and preservation guarantees are caller assertions. Validation
-    /// checks override names, not the provenance or fidelity of captured facts.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded validation error for duplicate override names.
+    /// Sources and preservation guarantees are caller assertions, not validated
+    /// provenance or fidelity of captured facts.
     #[inline]
+    #[must_use]
     pub fn new(
         target: CapturedTarget,
         origin: Option<InboundOrigin>,
         common_header_fidelity: HeaderFidelity,
-        mut overrides: Vec<(HeaderName, HeaderFidelity)>,
-    ) -> Result<Self, EdgeError> {
-        overrides.sort_unstable_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
-        if overrides.windows(2).any(|pair| {
-            let [left, right] = pair else { return false };
-            left.0 == right.0
-        }) {
-            return Err(EdgeError::bad_request("duplicate ingress header override"));
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             common_header_fidelity,
             origin,
-            overrides,
+            overrides: Vec::new(),
             target,
-        })
+        }
     }
 
     /// Borrow the validated origin, when its trusted source is available.
@@ -336,6 +352,65 @@ impl RequestIngress {
     #[must_use]
     pub const fn target(&self) -> &CapturedTarget {
         &self.target
+    }
+    /// Set unambiguous per-header fidelity overrides.
+    ///
+    /// # Errors
+    /// Returns an internal error for duplicate override names, a caller mistake.
+    #[inline]
+    pub fn with_header_overrides(
+        mut self,
+        mut overrides: Vec<(HeaderName, HeaderFidelity)>,
+    ) -> Result<Self, EdgeError> {
+        overrides.sort_unstable_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+        if overrides
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left.0 == right.0))
+        {
+            return Err(EdgeError::internal(IoError::other(
+                "duplicate ingress header override",
+            )));
+        }
+        self.overrides = overrides;
+        Ok(self)
+    }
+}
+
+impl fmt::Debug for CapturedTarget {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Complete(target) => f.debug_tuple("Complete").field(target).finish(),
+            Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
+        }
+    }
+}
+
+impl fmt::Debug for CompleteTarget {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompleteTarget")
+            .field("source", &self.source)
+            .field("fidelity", &self.fidelity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for InboundOrigin {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InboundOrigin")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for RequestIngress {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestIngress")
+            .field("common_header_fidelity", &self.common_header_fidelity)
+            .finish_non_exhaustive()
     }
 }
 
@@ -363,6 +438,7 @@ pub enum TargetUnavailable {
 
 #[cfg(test)]
 mod tests {
+    use crate::http::StatusCode;
     use crate::http::header::{CONTENT_LENGTH, COOKIE};
     use crate::request::{
         CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
@@ -391,8 +467,8 @@ mod tests {
             CapturedTarget::Unavailable(TargetUnavailable::NotExposed),
             None,
             common,
-            vec![(CONTENT_LENGTH, folded)],
         )
+        .with_header_overrides(vec![(CONTENT_LENGTH, folded)])
         .expect("should accept distinct header overrides");
         assert_eq!(metadata.header_fidelity(&CONTENT_LENGTH), folded);
         assert_eq!(metadata.header_fidelity(&COOKIE), common);
@@ -453,15 +529,56 @@ mod tests {
             CapturedTarget::Unavailable(TargetUnavailable::ReadFailed),
             None,
             HeaderFidelity::default(),
-            vec![
-                (COOKIE, HeaderFidelity::default()),
-                (COOKIE, HeaderFidelity::default()),
-            ],
+        )
+        .with_header_overrides(vec![
+            (COOKIE, HeaderFidelity::default()),
+            (COOKIE, HeaderFidelity::default()),
+        ]);
+        assert_eq!(
+            result
+                .expect_err("should reject ambiguous overrides")
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
         );
-        assert!(
-            result.err().is_some(),
-            "should reject ambiguous override selection"
+    }
+
+    #[test]
+    fn ingress_debug_never_prints_captured_values() {
+        let target = CapturedTarget::capture(
+            "/private-target?secret=1",
+            TargetSource::RuntimeUrl,
+            Preservation::Unknown,
         );
+        let CapturedTarget::Complete(complete) = &target else {
+            panic!("should capture target")
+        };
+        let origin =
+            InboundOrigin::parse("https", "private-host.example", OriginSource::RuntimeUri)
+                .expect("should parse origin");
+        let values_output = format!("{target:?} {complete:?} {origin:?}");
+        let ingress = RequestIngress::new(target, Some(origin), HeaderFidelity::default());
+        let output = format!("{values_output} {ingress:?}");
+        assert!(!output.contains("private-target"));
+        assert!(!output.contains("secret=1"));
+        assert!(!output.contains("private-host"));
+    }
+
+    #[test]
+    fn ingress_authorities_compare_host_and_effective_port() {
+        for (scheme, left, right, same) in [
+            ("http", "Example.COM", "example.com:00080", true),
+            ("https", "Example.COM", "example.com:443", true),
+            ("https", "example.com", "example.com:80", false),
+            ("http", "[::1]", "[::1]:80", true),
+            ("http", "example.com", "other.example", false),
+            ("http", "example.com:0", "example.com:80", false),
+        ] {
+            let left_origin = InboundOrigin::parse(scheme, left, OriginSource::RuntimeUri)
+                .expect("should parse origin");
+            let right_origin = InboundOrigin::parse(scheme, right, OriginSource::TransportBinding)
+                .expect("should parse origin");
+            assert_eq!(left_origin.same_authority(&right_origin), same);
+        }
     }
 
     #[test]

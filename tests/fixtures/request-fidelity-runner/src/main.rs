@@ -1,6 +1,7 @@
 //! Fixed, loopback-only HTTP ingress probes for the three WASM adapters.
 
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::Seek as _;
@@ -149,7 +150,7 @@ struct OwnedProcess {
 
 impl OwnedProcess {
     fn spawn(command: &mut Command) -> io::Result<Self> {
-        command.process_group(0);
+        command.process_group(0).stdin(Stdio::null());
         let child = command.spawn()?;
         let group = child.id();
         Ok(Self { child, group })
@@ -194,6 +195,8 @@ impl Drop for OwnedProcess {
             thread::sleep(POLL_INTERVAL);
         }
         signal_group(self.group, "-KILL");
+        // Also stop the direct child if the external group signal failed.
+        let _result = self.child.kill();
         let _result = self.child.wait();
     }
 }
@@ -204,6 +207,9 @@ fn command(fixture: &Path, program: &str, arguments: &[&str]) -> Command {
         .args(arguments)
         .current_dir(fixture)
         .env("WRANGLER_SEND_METRICS", "false");
+    if program == "worker-build" {
+        command.env("ESBUILD_BIN", fixture.join("node_modules/.bin/esbuild"));
+    }
     command
 }
 
@@ -256,15 +262,8 @@ fn verify_version(
 }
 
 fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()> {
-    run_command(
-        fixture,
-        "cargo",
-        &["metadata", "--locked", "--format-version", "1", "--no-deps"],
-        cancelled,
-        true,
-    )?;
     if platform == "cloudflare" {
-        verify_version(fixture, "worker-build", "0.8.3", cancelled)?;
+        verify_version(fixture, "worker-build", "0.8.5", cancelled)?;
         run_command(fixture, "npm", &["ci"], cancelled, false)?;
         let lock = fs::read(fixture.join("Cargo.lock"))?;
         run_command(
@@ -313,6 +312,36 @@ fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()
             ["target/spin", "--target", "wasm32-wasip2", "--lib"].as_slice()
         });
         run_command(fixture, "cargo", &arguments, cancelled, false)?;
+    }
+    Ok(())
+}
+
+fn report_observation_diff(
+    output: &mut impl Write,
+    platform: &str,
+    expected: &Value,
+    observed: &Value,
+) -> io::Result<()> {
+    let cases: BTreeSet<_> = expected
+        .as_object()
+        .into_iter()
+        .flat_map(|cases| cases.keys())
+        .chain(
+            observed
+                .as_object()
+                .into_iter()
+                .flat_map(|cases| cases.keys()),
+        )
+        .collect();
+    for case in cases {
+        if expected.get(case) != observed.get(case) {
+            writeln!(
+                output,
+                "{platform}/{case}: expected={} observed={}",
+                expected.get(case).unwrap_or(&Value::Null),
+                observed.get(case).unwrap_or(&Value::Null)
+            )?;
+        }
     }
     Ok(())
 }
@@ -427,6 +456,12 @@ fn run(options: Options, cancelled: &Cancelled) -> io::Result<()> {
                     serde_json::from_slice(&fs::read(fixture.join("observations.json"))?)
                         .map_err(io::Error::other)?;
                 if expected.get(*platform) != Some(&observed) {
+                    report_observation_diff(
+                        &mut io::stderr(),
+                        platform,
+                        &expected[*platform],
+                        &observed,
+                    )?;
                     return Err(io::Error::other(format!(
                         "{platform}: full runtime observations changed; inspect before updating baseline"
                     )));
@@ -768,13 +803,13 @@ fn verify_observation(platform: &str, case: &str, status: u16, verdict: &Value) 
             )?;
         }
         require(
-            verdict["global_order_unavailable"] == true
+            verdict["global_order_unavailable"] == (platform != "fastly")
                 && verdict["spoofed_origin_ignored"] == true
                 && verdict["origin_available"] == true
                 && verdict["origin_matches_expected"] == true,
             platform,
             case,
-            "unavailable order and origin provenance must remain explicit",
+            "order capability and origin provenance must remain explicit",
         )?;
         require(
             verdict["target_available"] == (platform != "fastly"),
@@ -891,7 +926,7 @@ fn verify_observation(platform: &str, case: &str, status: u16, verdict: &Value) 
         )?,
         ("spin", "high-byte" | "compound-invalid", 500) => writeln!(
             io::stderr(),
-            "PENDING Spin 4.0 rejects non-UTF-8 header bytes before component invocation (500)."
+            "PENDING Spin rejects non-UTF-8 header bytes before component invocation (500)."
         )?,
         (_, "length-identical" | "length-conflict" | "te-cl" | "absolute", 400) => {}
         _ => {
@@ -1137,6 +1172,21 @@ mod tests {
     }
 
     #[test]
+    fn baseline_diff_reports_changed_added_and_removed_cases_once() {
+        let expected = json!({"same": {"hook": true}, "changed": {"count": 2}, "removed": true});
+        let observed = json!({"same": {"hook": true}, "changed": {"count": 1}, "added": false});
+        let mut output = Vec::new();
+        super::report_observation_diff(&mut output, "spin", &expected, &observed)
+            .expect("should report changes");
+        let output = String::from_utf8(output).expect("should write UTF-8");
+        assert_eq!(output.lines().count(), 3);
+        assert!(output.contains("spin/changed: expected={\"count\":2} observed={\"count\":1}"));
+        assert!(output.contains("spin/added: expected=null observed=false"));
+        assert!(output.contains("spin/removed: expected=true observed=null"));
+        assert!(!output.contains("spin/same"));
+    }
+
+    #[test]
     fn fixed_registry_contains_unicode_and_standalone_chunked_probes() {
         let cases = cases();
         assert_eq!(cases.len(), 17, "should include every fixed ingress case");
@@ -1166,9 +1216,16 @@ mod tests {
 
     #[test]
     fn observation_verification_rejects_utf8_corruption_even_during_collection() {
-        let verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "target_available": true, "target_matches_runtime": true, "cookie_utf8": false, "cookie_latin1": true});
-        let _error = verify_observation("cloudflare", "utf8", 200, &verdict)
+        let mut verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "origin_available": true, "origin_matches_expected": true, "target_available": true, "target_matches_runtime": true, "cookie_utf8": false, "cookie_latin1": true});
+        let error = verify_observation("cloudflare", "utf8", 200, &verdict)
             .expect_err("should reject the former C3 A9 to E9 defect");
+        assert!(
+            error.to_string().contains("C3 A9"),
+            "should reach the UTF-8 check: {error}"
+        );
+        verdict["cookie_utf8"] = json!(true);
+        verdict["cookie_latin1"] = json!(false);
+        verify_observation("cloudflare", "utf8", 200, &verdict).expect("should accept exact UTF-8");
         let _error = verify_observation("cloudflare", "unicode", 500, &serde_json::Value::Null)
             .expect_err("should reject the former C4 80 conversion error");
     }

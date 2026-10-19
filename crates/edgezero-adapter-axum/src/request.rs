@@ -72,10 +72,6 @@ pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest
     Ok(core_request)
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "an empty override list cannot contain duplicate names"
-)]
 fn capture_request_ingress(
     uri: &Uri,
     headers: &HeaderMap,
@@ -88,13 +84,7 @@ fn capture_request_ingress(
     };
     let target = CapturedTarget::capture(&uri.to_string(), source, Preservation::Unknown);
     let common = HeaderFidelity::RUNTIME_HEADER_MAP;
-    RequestIngress::new(
-        target,
-        inbound_origin(uri, headers, transport),
-        common,
-        Vec::new(),
-    )
-    .expect("should use unique header overrides")
+    RequestIngress::new(target, inbound_origin(uri, headers, transport), common)
 }
 
 fn inbound_origin(
@@ -119,13 +109,7 @@ fn inbound_origin(
         let supplied =
             InboundOrigin::parse("http", authority.as_str(), OriginSource::TransportBinding)
                 .ok()?;
-        let parsed_host = format!("http://{host}/").parse::<Uri>().ok()?;
-        let parsed_uri = format!("http://{}/", supplied.authority())
-            .parse::<Uri>()
-            .ok()?;
-        if !parsed_host.host()?.eq_ignore_ascii_case(parsed_uri.host()?)
-            || parsed_host.port_u16().unwrap_or(80) != parsed_uri.port_u16().unwrap_or(80)
-        {
+        if !origin.same_authority(&supplied) {
             return None;
         }
     }

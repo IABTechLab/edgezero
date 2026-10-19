@@ -583,21 +583,20 @@ fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretReg
 
 /// Capture available ingress facts without consuming the native request.
 ///
-/// Fastly SDK 0.12.1 does not expose a safe borrowed raw target accessor.
+/// Fastly SDK 0.13.1 does not expose a safe borrowed raw target accessor.
 /// Record target unavailability before reading the SDK URL for the canonical
 /// origin. That URL may normalize the path and is never used as an original
 /// target. Client requests require exactly one validated Host matching the
 /// runtime URL authority. No forwarded headers or missing TLS facts supply a
 /// scheme. This function does not clone handles or change client provenance.
 ///
+/// Original header names/count APIs expose partial ordering and aggregate count,
+/// but do not associate original fields with converted values. They cannot prove
+/// per-name multiplicity or full global order. Fidelity remains unknown pending
+/// production evidence; aggregate count equality is not proof of preservation.
+///
 /// # Panics
 /// The SDK URL accessor can panic if its runtime URI cannot be parsed.
-/// The static empty override list is asserted to be valid; this invariant
-/// cannot fail under the current metadata constructor.
-#[expect(
-    clippy::expect_used,
-    reason = "an empty override list cannot contain duplicate names"
-)]
 #[inline]
 #[must_use]
 pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
@@ -609,13 +608,7 @@ pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
     } else {
         None
     };
-    RequestIngress::new(
-        target,
-        origin,
-        HeaderFidelity::RUNTIME_HEADER_MAP,
-        Vec::new(),
-    )
-    .expect("should use unique header overrides")
+    RequestIngress::new(target, origin, HeaderFidelity::default())
 }
 
 fn origin_from_runtime_uri<'header>(
@@ -630,16 +623,7 @@ fn origin_from_runtime_uri<'header>(
     let runtime_origin =
         InboundOrigin::parse(scheme, uri.authority()?.as_str(), OriginSource::RuntimeUri).ok()?;
     let origin = InboundOrigin::parse(scheme, host, OriginSource::RuntimeUri).ok()?;
-    let host_uri = Uri::builder()
-        .scheme(origin.scheme())
-        .authority(origin.authority())
-        .path_and_query("/")
-        .build()
-        .ok()?;
-    let default_port = if origin.scheme() == "https" { 443 } else { 80 };
-    if !uri.host()?.eq_ignore_ascii_case(host_uri.host()?)
-        || uri.port_u16().unwrap_or(default_port) != host_uri.port_u16().unwrap_or(default_port)
-    {
+    if !runtime_origin.same_authority(&origin) {
         return None;
     }
     Some(runtime_origin)
@@ -976,6 +960,7 @@ mod ingress_tests {
     use edgezero_core::app::{App, StoresMetadata};
     use edgezero_core::body::Body;
     use edgezero_core::error::EdgeError;
+    use edgezero_core::http::header::HOST;
     use edgezero_core::http::{HeaderValue, Request, Response, Uri, response_builder};
     use edgezero_core::proxy::ProxyHandle;
     use edgezero_core::request::{
@@ -1099,15 +1084,17 @@ mod ingress_tests {
             ),
             None,
             HeaderFidelity::default(),
-            Vec::new(),
         )
-        .expect("should build snapshot")
     }
 
     #[test]
     fn ingress_current_sdk_reports_missing_target_and_no_synthetic_origin() {
         let native = FastlyRequest::get("https://example.com/reserved");
         let ingress = capture_request_ingress(&native);
+        assert_eq!(
+            ingress.header_fidelity(&HOST).global_field_order(),
+            Preservation::Unknown
+        );
         assert!(matches!(
             ingress.target(),
             CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
@@ -1153,7 +1140,7 @@ mod ingress_tests {
     fn ingress_registry_dispatch_wins_scratch_collision() {
         let app = App::new(
             RouterService::builder()
-                .pre_dispatch_hook(Arc::new(VerifySnapshot {
+                .pre_dispatch_hook_arc(Arc::new(VerifySnapshot {
                     scratch_expected: true,
                 }))
                 .build(),
@@ -1172,7 +1159,7 @@ mod ingress_tests {
         assert_eq!(response.get_status().as_u16(), 204);
         let service_app = App::new(
             RouterService::builder()
-                .pre_dispatch_hook(Arc::new(VerifySnapshot {
+                .pre_dispatch_hook_arc(Arc::new(VerifySnapshot {
                     scratch_expected: false,
                 }))
                 .build(),

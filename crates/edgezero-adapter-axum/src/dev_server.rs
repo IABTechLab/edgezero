@@ -884,7 +884,7 @@ mod integration_tests {
             .middleware(IngressMiddleware {
                 calls: Arc::clone(&middleware_calls),
             })
-            .pre_dispatch_hook(Arc::new(IngressHook {
+            .pre_dispatch_hook_arc(Arc::new(IngressHook {
                 calls: Arc::clone(&hook_calls),
             }))
             .get("/ordinary", ingress_ordinary)

@@ -372,7 +372,10 @@ a transformation cannot be established for each individual incoming request.
 ### Conversion compatibility
 
 Unknown method tokens are retained rather than coerced to GET, so they no longer
-match a GET route. Invalid runtime header values return 400 during conversion.
+match a GET route. Invalid runtime header values fail conversion with a bounded
+`EdgeError::bad_request`. Direct converter callers receive that error;
+`run_app`, `dispatch_app` and `CloudflareService` surface it as `worker::Error`,
+which the standard fetch wrapper returns as HTTP 500.
 Method, URL, URI and header conversion errors use bounded messages without parse
 details. Primary routing still uses the existing SDK URL conversion, including
 Unicode percent encoding and backslash normalization; ingress target metadata is

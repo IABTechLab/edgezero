@@ -34,7 +34,7 @@ impl Hooks for Fixture {
     fn routes() -> RouterService {
         let ordinary_calls = Arc::new(AtomicUsize::new(0));
         RouterService::builder()
-            .pre_dispatch_hook(Arc::new(Probe {
+            .pre_dispatch_hook_arc(Arc::new(Probe {
                 ordinary_calls: Arc::clone(&ordinary_calls),
             }))
             .middleware(CountOrdinary(ordinary_calls))

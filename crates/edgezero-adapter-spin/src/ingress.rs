@@ -4,10 +4,6 @@ use edgezero_core::request::{
     TargetSource,
 };
 
-#[expect(
-    clippy::expect_used,
-    reason = "the empty override list cannot contain duplicate names"
-)]
 pub(crate) fn capture_request_ingress(uri: &Uri) -> RequestIngress {
     let origin = uri
         .scheme_str()
@@ -22,8 +18,7 @@ pub(crate) fn capture_request_ingress(uri: &Uri) -> RequestIngress {
     };
     let target = CapturedTarget::capture(&uri.to_string(), source, Preservation::Unknown);
     let headers = HeaderFidelity::RUNTIME_HEADER_MAP;
-    RequestIngress::new(target, origin, headers, Vec::new())
-        .expect("should use unique header overrides")
+    RequestIngress::new(target, origin, headers)
 }
 
 #[cfg(test)]

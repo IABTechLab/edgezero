@@ -366,15 +366,18 @@ and remove the cache to roll back; default generated entry points are unchanged.
 Conversion captures SDK URI parts before rebuilding the core request. Origin
 comes from HTTP(S) URI scheme/authority, with runtime provenance.
 `spin-full-url`, `spin-client-addr`, Origin and forwarding headers do not become
-trusted ingress-origin facts. Existing context fields and store/body behavior
+adapter-supplied ingress-origin facts. Runtime URI authority still identifies the client-requested host; it does not establish operator approval or ownership. Existing context fields and store/body behavior
 remain unchanged.
 
-The Spin 4.0 HTTP component fixture verifies methods, tested target spelling,
-duplicates and hook ordering through the actual converter. Spin 4.0's request
+The Spin 4.1 HTTP component fixture verifies methods, tested target spelling,
+duplicates and hook ordering through the actual converter. Spin 4.1's request
 preparation requires UTF-8 header values; a Cookie containing FF returns 500
 before the component starts. This needs an upstream runtime fix and cannot be
 restored inside EdgeZero. Same-name runtime values are copied byte-for-byte,
 while original-wire fidelity remains conservative and global order unavailable.
+Spin 4.1 consumes chunked framing and removes `Transfer-Encoding` before
+component invocation: the `chunked` and `te-cl` probes expose no such field to
+the hook. The component cannot reconstruct that transport framing.
 
 Pure metadata tests execute on the host. The WASM contract suite runs with
 `wasmtime run`. The full WASM library test artifact
