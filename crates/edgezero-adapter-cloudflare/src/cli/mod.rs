@@ -5,9 +5,9 @@ use edgezero_adapter::cli_support;
 use edgezero_adapter::cli_support::run_native_cli;
 use edgezero_adapter::env_file::{EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header};
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterDeployedState, AdapterExecContext, AdapterPushContext,
-    ProvisionMode, ProvisionOutcome, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    TypedSecretEntry, register_adapter,
+    Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
+    AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, TypedSecretEntry, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
@@ -71,19 +71,19 @@ static CLOUDFLARE_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_cloudflare",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_cloudflare",
         repo_crate: "crates/edgezero-adapter-cloudflare",
-        fallback: "edgezero-adapter-cloudflare = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false }",
+        fallback: "edgezero-adapter-cloudflare = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_cloudflare_wasm",
         repo_crate: "crates/edgezero-adapter-cloudflare",
-        fallback: "edgezero-adapter-cloudflare = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false, features = [\"cloudflare\"] }",
+        fallback: "edgezero-adapter-cloudflare = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-cloudflare\", default-features = false, features = [\"cloudflare\"] }",
         features: &["cloudflare"],
     },
 ];
@@ -147,6 +147,43 @@ pub(super) const WRANGLER_INSTALL_HINT: &str =
 struct CloudflareCliAdapter;
 
 impl Adapter for CloudflareCliAdapter {
+    fn preflight_deploy(
+        &self,
+        _context: &AdapterDeployContext,
+        _args: &[String],
+    ) -> Result<DeployOwnership, String> {
+        Ok(DeployOwnership::ManifestCommand)
+    }
+    fn deploy(
+        &self,
+        context: &AdapterDeployContext,
+        args: &[String],
+        exec: &AdapterExecContext<'_>,
+    ) -> Result<(), String> {
+        let action = if context.staging {
+            AdapterAction::DeployStaging
+        } else {
+            AdapterAction::Deploy
+        };
+        self.execute(action, args, exec)
+    }
+    fn finalize_deploy(
+        &self,
+        _context: &AdapterDeployContext,
+        _output: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn validate_config_key_for_target(
+        &self,
+        _logical: &str,
+        _key: &str,
+        _staging: bool,
+        _local: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     fn deployed_fields(&self) -> &'static [&'static str] {
         &["kv_namespaces", "preview_kv_namespaces"]
     }
@@ -179,7 +216,7 @@ impl Adapter for CloudflareCliAdapter {
             AdapterAction::Deploy => run::deploy(args, ctx),
             AdapterAction::Serve => run::serve(args, ctx),
             // The Fastly staging lifecycle is Fastly-only.
-            AdapterAction::DeployStaged
+            AdapterAction::DeployStaging
             | AdapterAction::EmitVersion
             | AdapterAction::Healthcheck
             | AdapterAction::Rollback => Err(format!(

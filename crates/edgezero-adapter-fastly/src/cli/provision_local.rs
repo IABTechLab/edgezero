@@ -14,8 +14,8 @@ use super::push_local::{is_prunable_leaf, reject_local_generated_key_collisions}
 use super::{ManifestLock, atomically_replace_file};
 
 /// Local-mode provision: seed Viceroy state in `fastly.toml` for the
-/// declared stores + the `edgezero_runtime_env` runtime-override
-/// store. NO shell-outs to `fastly` -- everything is a `toml_edit`
+/// declared logical store aliases. NO shell-outs to `fastly` --
+/// everything is a `toml_edit`
 /// mutation, so operators can run `provision --local` without
 /// authenticating.
 ///
@@ -29,8 +29,7 @@ use super::{ManifestLock, atomically_replace_file};
 /// template. When `deployed` has no `service_id` we leave any existing
 /// value alone (operator's local seed is authoritative).
 ///
-/// All other mutations (kv-store blocks, config-store blocks, runtime
-/// override block) are idempotent — re-running is a no-op.
+/// Store-block mutations are idempotent — re-running is a no-op.
 pub(super) fn provision(
     manifest_root: &Path,
     adapter_manifest_path: Option<&str>,
@@ -40,14 +39,11 @@ pub(super) fn provision(
 ) -> Result<ProvisionOutcome, String> {
     use toml_edit::DocumentMut;
 
-    // The `.env` writer upper-cases each logical id into an
-    // `EDGEZERO__STORES__<KIND>__<LOGICAL>__NAME` line; ids differing
-    // only by case would collapse onto one variable and `env_file`'s
-    // dedup would silently drop the loser. Reject before any write.
+    // Portable physical-store selectors uppercase logical ids; reject ids
+    // that would collide in that selector namespace.
     stores.reject_case_colliding_logical_ids()?;
     // A user store named like the internal runtime-override config store
     // would be merged into it -- reject before any write.
-    super::reject_reserved_store_names(stores)?;
 
     let fastly_rel = adapter_manifest_path.unwrap_or("fastly.toml");
     let fastly_path = manifest_root.join(fastly_rel);
@@ -92,33 +88,24 @@ pub(super) fn provision(
     // the project root.
     let path_display = fastly_path.display().to_string();
 
-    // 2. [[local_server.kv_stores.<platform>]] per KV store.
+    // 2. [[local_server.kv_stores.<logical>]] per KV store.
     for store in stores.kv {
-        upsert_local_kv_store(&mut doc, &store.platform)?;
+        upsert_local_kv_store(&mut doc, &store.logical)?;
         status_lines.push(format!(
             "fastly: wrote local kv_store `{}` (logical id `{}`) in {path_display}",
-            store.platform, store.logical
+            store.logical, store.logical
         ));
     }
 
-    // 3. [local_server.config_stores.<platform>] + empty `.contents`
+    // 3. [local_server.config_stores.<logical>] + empty `.contents`
     //    sub-table per CONFIG store. `contents` MUST be a TOML table
     //    (not `contents = ""`) -- the `config push --local` writer
     //    edits it in place via `as_table_mut()`.
     for store in stores.config {
-        upsert_local_config_store(&mut doc, &store.platform)?;
+        upsert_local_config_store(&mut doc, &store.logical)?;
         status_lines.push(format!(
             "fastly: wrote local config_store `{}` (logical id `{}`) in {path_display}",
-            store.platform, store.logical
-        ));
-    }
-
-    // 4. `edgezero_runtime_env` block: __NAME lines for all kinds +
-    //    commented __KEY placeholders for CONFIG stores. Same
-    //    discipline as Cloudflare `.dev.vars`.
-    if upsert_runtime_env_config_store(&mut doc, stores)? {
-        status_lines.push(format!(
-            "fastly: wrote edgezero_runtime_env block in {path_display}"
+            store.logical, store.logical
         ));
     }
 
@@ -159,12 +146,8 @@ pub(super) fn provision_typed(
 
     let path_display = fastly_path.display().to_string();
     for entry in typed_secrets {
-        // Seed the Viceroy store under the PLATFORM name -- the name
-        // the runtime resolves via `EDGEZERO__STORES__SECRETS__<ID>__NAME`
-        // and passes to `SecretStore::open`. Keying it by the logical
-        // `store_id` would leave the runtime opening a store this seed
-        // never created whenever an env override renames it.
-        let added = upsert_secret_store_entry(&mut doc, &entry.platform, entry.key_value)?;
+        // Viceroy exposes the same logical alias as a production resource link.
+        let added = upsert_secret_store_entry(&mut doc, entry.store_id, entry.key_value)?;
         if added {
             appended = appended.saturating_add(1);
         }
@@ -308,220 +291,6 @@ fn upsert_local_config_store(
     store_tbl.insert("contents", Item::Table(contents_tbl));
     config_stores_tbl.insert(platform_name, Item::Table(store_tbl));
     Ok(())
-}
-
-/// Additive-merge the managed `__NAME` keys into an EXISTING
-/// runtime-env `.contents` table, and append a commented `__KEY` hint
-/// for each CONFIG store added THIS run (its `__NAME` was absent
-/// before), so an incremental provision converges to the same shape a
-/// clean first-write produces. Returns `true` when anything changed.
-fn merge_runtime_env_keys(
-    contents_tbl: &mut toml_edit::Table,
-    managed_keys: &[(String, String)],
-    stores: &ProvisionStores<'_>,
-) -> bool {
-    use std::collections::HashSet;
-    use toml_edit::value;
-
-    // Keys present BEFORE this run — used to detect newly-added stores.
-    let existing_before: HashSet<String> =
-        contents_tbl.iter().map(|(key, _)| key.to_owned()).collect();
-    let mut added = false;
-    for (key, platform) in managed_keys {
-        // CONVERGE the managed `__NAME` mapping: when the key already
-        // exists but its platform value changed (an operator renamed the
-        // store's platform NAME and reprovisioned), rewrite the value IN
-        // PLACE preserving decor -- the commented `__KEY` hints are
-        // stashed as a suffix on the last value's decor, so cloning it
-        // onto the replacement keeps them. An absent key is inserted.
-        if let Some(existing) = contents_tbl
-            .get_mut(key)
-            .and_then(toml_edit::Item::as_value_mut)
-        {
-            if existing.as_str() != Some(platform.as_str()) {
-                let mut replacement = toml_edit::Value::from(platform.as_str());
-                *replacement.decor_mut() = existing.decor().clone();
-                *existing = replacement;
-                added = true;
-            }
-        } else {
-            contents_tbl.insert(key, value(platform.as_str()));
-            added = true;
-        }
-    }
-    let new_config_comment: String = stores
-        .config
-        .iter()
-        .filter(|store| {
-            !existing_before.contains(&format!(
-                "EDGEZERO__STORES__CONFIG__{}__NAME",
-                store.logical.to_ascii_uppercase()
-            ))
-        })
-        .map(|store| {
-            let upper = store.logical.to_ascii_uppercase();
-            let logical = store.logical.as_str();
-            format!("\n# EDGEZERO__STORES__CONFIG__{upper}__KEY = \"{logical}_staging\"")
-        })
-        .collect::<Vec<_>>()
-        .concat();
-    if !new_config_comment.is_empty()
-        && let Some(last) = contents_tbl.iter().last().map(|(key, _)| key.to_owned())
-        && let Some(item) = contents_tbl.get_mut(&last)
-        && let Some(val) = item.as_value_mut()
-    {
-        // Append to any existing suffix rather than clobber it.
-        let mut suffix = val
-            .decor()
-            .suffix()
-            .and_then(toml_edit::RawString::as_str)
-            .unwrap_or("")
-            .to_owned();
-        suffix.push_str(&new_config_comment);
-        val.decor_mut().set_suffix(suffix);
-        added = true;
-    }
-    added
-}
-
-/// Ensure `[local_server.config_stores.edgezero_runtime_env]` exists
-/// and add any missing managed keys to its `.contents` sub-table:
-/// - one `EDGEZERO__STORES__<KIND>__<LOGICAL_UPPER>__NAME = "<platform>"`
-///   line per declared store across ALL kinds (KV / CONFIG / SECRETS);
-/// - one COMMENTED `# EDGEZERO__STORES__CONFIG__<LOGICAL_UPPER>__KEY =
-///   "<logical>_staging"` placeholder per CONFIG store, mirroring the
-///   Cloudflare `.dev.vars` discipline. Fastly has no way to preview
-///   the KEY overlay at provision time — commented placeholders hint
-///   the shape and let the operator uncomment + fill it in.
-///
-/// **Additive merge** (spec §"Merge mechanics"): on re-provision after
-/// adding a store, the block already exists — we open its `.contents`
-/// table and insert only the managed keys that aren't present.
-/// Operator-set values and non-managed keys are left byte-for-byte.
-/// A commented `__KEY` placeholder is emitted for each CONFIG store
-/// added in THIS run (its `__NAME` key was absent before), so an
-/// incremental provision converges to the same shape a clean provision
-/// would produce. Existing config stores are left untouched — their
-/// hint may have been intentionally uncommented or removed.
-///
-/// Returns `true` when the block was newly written OR at least one
-/// key was added; `false` when nothing changed.
-fn upsert_runtime_env_config_store(
-    doc: &mut toml_edit::DocumentMut,
-    stores: &ProvisionStores<'_>,
-) -> Result<bool, String> {
-    use toml_edit::{Item, Table, value};
-
-    const RUNTIME_ENV_NAME: &str = "edgezero_runtime_env";
-
-    let local_server_entry = doc
-        .entry("local_server")
-        .or_insert_with(|| Item::Table(Table::new()));
-    let local_server_tbl = local_server_entry.as_table_mut().ok_or_else(|| {
-        "`local_server` exists but is not a table; refusing to edit in place".to_owned()
-    })?;
-    let config_stores_entry = local_server_tbl
-        .entry("config_stores")
-        .or_insert_with(|| Item::Table(Table::new()));
-    let config_stores_tbl = config_stores_entry.as_table_mut().ok_or_else(|| {
-        "`local_server.config_stores` exists but is not a table; refusing to edit in place"
-            .to_owned()
-    })?;
-
-    // Compute the full managed __NAME key set once — used both for
-    // first-write insertion and for additive-merge gap-fill.
-    let managed_keys: Vec<(String, String)> = [
-        ("KV", stores.kv),
-        ("CONFIG", stores.config),
-        ("SECRETS", stores.secrets),
-    ]
-    .into_iter()
-    .flat_map(|(kind_label, kind_stores)| {
-        kind_stores.iter().map(move |store| {
-            (
-                format!(
-                    "EDGEZERO__STORES__{kind_label}__{}__NAME",
-                    store.logical.to_ascii_uppercase()
-                ),
-                store.platform.clone(),
-            )
-        })
-    })
-    .collect();
-
-    let block_existed = config_stores_tbl.contains_key(RUNTIME_ENV_NAME);
-    if block_existed {
-        // Additive merge path. Open the existing block's `.contents`
-        // sub-table and insert only the managed keys that aren't there.
-        let store_entry = config_stores_tbl.get_mut(RUNTIME_ENV_NAME).ok_or_else(|| {
-            format!(
-                "`local_server.config_stores.{RUNTIME_ENV_NAME}` disappeared between contains_key and get_mut"
-            )
-        })?;
-        let store_tbl = store_entry.as_table_mut().ok_or_else(|| {
-            format!(
-                "`local_server.config_stores.{RUNTIME_ENV_NAME}` exists but is not a table; refusing to edit in place"
-            )
-        })?;
-        let contents_entry = store_tbl
-            .entry("contents")
-            .or_insert_with(|| Item::Table(Table::new()));
-        let contents_tbl = contents_entry.as_table_mut().ok_or_else(|| {
-            format!(
-                "`local_server.config_stores.{RUNTIME_ENV_NAME}.contents` exists but is not a table; refusing to edit in place"
-            )
-        })?;
-        return Ok(merge_runtime_env_keys(contents_tbl, &managed_keys, stores));
-    }
-
-    // First-write path — build the whole block, including the
-    // commented __KEY placeholder decor.
-    let mut store_tbl = Table::new();
-    store_tbl.set_implicit(false);
-    store_tbl.insert("format", value("inline-toml"));
-
-    let mut contents_tbl = Table::new();
-    contents_tbl.set_implicit(false);
-    for (key, platform) in &managed_keys {
-        contents_tbl.insert(key, value(platform.as_str()));
-    }
-
-    // Commented `__KEY` placeholders for CONFIG stores. Toml_edit
-    // has no primitive for "commented key inside a table", so we
-    // stash the comment lines as a suffix on the last-inserted
-    // key/value's decor. The test asserts only presence-as-substring
-    // in the raw file text, so location within the block doesn't
-    // matter — but appending at the end keeps the __NAME contract
-    // uncontaminated (a re-parse still yields only real keys).
-    let comment_suffix: String = stores
-        .config
-        .iter()
-        .map(|store| {
-            let upper = store.logical.to_ascii_uppercase();
-            let logical = store.logical.as_str();
-            format!("\n# EDGEZERO__STORES__CONFIG__{upper}__KEY = \"{logical}_staging\"")
-        })
-        .collect::<Vec<_>>()
-        .concat();
-    if !comment_suffix.is_empty() {
-        let last_key = contents_tbl.iter().last().map(|(key, _)| key.to_owned());
-        if let Some(last) = last_key {
-            if let Some(item) = contents_tbl.get_mut(&last)
-                && let Some(val) = item.as_value_mut()
-            {
-                val.decor_mut().set_suffix(comment_suffix);
-            }
-        } else {
-            // Edge case: no declared stores at all (contents_tbl is
-            // empty). Attach the comments via the contents table's
-            // own decor so they survive serialisation.
-            contents_tbl.decor_mut().set_suffix(comment_suffix);
-        }
-    }
-
-    store_tbl.insert("contents", Item::Table(contents_tbl));
-    config_stores_tbl.insert(RUNTIME_ENV_NAME, Item::Table(store_tbl));
-    Ok(true)
 }
 
 /// Append one `[[local_server.secret_stores.<store_id>]]` entry with
@@ -853,35 +622,54 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn local_provision_rejects_reserved_runtime_env_store_name() {
-        // A user store whose PLATFORM name resolves to the reserved
-        // `edgezero_runtime_env` (here via an env overlay on a benign logical
-        // id) would be merged into provision's own runtime-override store.
-        // Refuse before any write.
-        let _lock = path_mutation_guard().lock().expect("guard");
-        let dir = tempdir().expect("tempdir");
+    fn local_provision_uses_logical_runtime_bindings_with_physical_selectors() {
+        let dir = tempfile::tempdir().expect("temporary project");
         let path = dir.path().join("fastly.toml");
-        fs::write(&path, synthesise_fastly_toml("demo", None)).expect("write");
-        let config_ids = vec![ResolvedStoreId::new("app_config", "edgezero_runtime_env")];
+        fs::write(&path, "manifest_version = 3\nname = \"demo\"\n").expect("manifest");
+        let config = [edgezero_adapter::ResolvedStoreId::new(
+            "app_config",
+            "config-production",
+        )];
+        let kv = [edgezero_adapter::ResolvedStoreId::new(
+            "sessions",
+            "sessions-production",
+        )];
+        let secrets = [edgezero_adapter::ResolvedStoreId::new(
+            "vault",
+            "vault-production",
+        )];
         let stores = ProvisionStores {
-            config: &config_ids,
-            kv: &[],
-            secrets: &[],
+            config: &config,
+            kv: &kv,
+            secrets: &secrets,
         };
-        let Err(err) = FastlyCliAdapter.provision(
-            dir.path(),
-            Some("fastly.toml"),
-            None,
-            &stores,
-            None,
-            ProvisionMode::Local,
-            false,
-        ) else {
-            panic!("a store colliding with the reserved runtime-env name must be refused");
-        };
+        provision(dir.path(), Some("fastly.toml"), &stores, None, false).expect("provision stores");
+        let typed = [
+            edgezero_adapter::TypedSecretEntry::new("vault", "token", "api_token")
+                .with_platform("vault-production"),
+        ];
+        provision_typed(dir.path(), Some("fastly.toml"), &typed, false).expect("provision secrets");
+        let raw = fs::read_to_string(path).expect("manifest after provision");
+        let doc = raw.parse::<toml_edit::DocumentMut>().expect("valid TOML");
         assert!(
-            err.contains("reserved") && err.contains("edgezero_runtime_env"),
-            "error explains the reserved-name collision: {err}"
+            doc["local_server"]["config_stores"]
+                .get("app_config")
+                .is_some(),
+            "config binding must use logical alias: {raw}"
+        );
+        assert!(
+            doc["local_server"]["kv_stores"].get("sessions").is_some(),
+            "KV binding must use logical alias: {raw}"
+        );
+        assert!(
+            doc["local_server"]["secret_stores"].get("vault").is_some(),
+            "secret binding must use logical alias: {raw}"
+        );
+        assert!(
+            doc["local_server"]["config_stores"]
+                .get("edgezero_runtime_env")
+                .is_none(),
+            "runtime no longer reads the old override store"
         );
     }
 
@@ -1010,231 +798,6 @@ mod tests {
                 .as_table()
                 .is_some(),
             "contents parses as a table (required by config push --local)"
-        );
-    }
-
-    /// Local provision writes the `edgezero_runtime_env` runtime-
-    /// override block: `__NAME` lines for ALL declared kinds and
-    /// commented `__KEY` placeholders for CONFIG stores only.
-    #[test]
-    fn fastly_local_provision_writes_edgezero_runtime_env() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("fastly.toml");
-        fs::write(&path, synthesise_fastly_toml("demo", None)).expect("write");
-        let kv_ids: Vec<ResolvedStoreId> = ResolvedStoreId::from_logicals(&[TEST_KV_ID]);
-        let config_ids: Vec<ResolvedStoreId> = ResolvedStoreId::from_logicals(&[TEST_CONFIG_ID]);
-        let stores = ProvisionStores {
-            config: &config_ids,
-            kv: &kv_ids,
-            secrets: &[],
-        };
-        FastlyCliAdapter
-            .provision(
-                dir.path(),
-                Some("fastly.toml"),
-                None,
-                &stores,
-                None,
-                ProvisionMode::Local,
-                false,
-            )
-            .expect("local provision succeeds");
-        let after = fs::read_to_string(&path).expect("read");
-        assert!(
-            after.contains("[local_server.config_stores.edgezero_runtime_env]"),
-            "runtime-env block header present: {after}"
-        );
-        assert!(
-            after.contains("[local_server.config_stores.edgezero_runtime_env.contents]"),
-            "runtime-env contents sub-table header present: {after}"
-        );
-        assert!(
-            after.contains(r#"EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME = "app_config""#),
-            "CONFIG __NAME line: {after}"
-        );
-        assert!(
-            after.contains(r#"EDGEZERO__STORES__KV__SESSIONS__NAME = "sessions""#),
-            "KV __NAME line: {after}"
-        );
-        assert!(
-            after.contains(r#"# EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY = "app_config_staging""#),
-            "commented CONFIG __KEY placeholder present: {after}"
-        );
-    }
-
-    /// Regression: re-provision after adding a store MUST add the new
-    /// store's `__NAME` line into the existing `edgezero_runtime_env`
-    /// block's `.contents` sub-table. Prior impl short-circuited
-    /// `Ok(false)` as soon as the block existed, leaving new stores
-    /// invisible to the local runtime. Violates spec §"Merge
-    /// mechanics" — "preserve operator-set values; only add what's
-    /// missing".
-    #[test]
-    fn fastly_local_provision_additively_merges_new_stores_into_existing_runtime_env() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("fastly.toml");
-        fs::write(&path, synthesise_fastly_toml("demo", None)).expect("write");
-
-        // First provision: only the KV store is declared.
-        let kv_ids: Vec<ResolvedStoreId> = ResolvedStoreId::from_logicals(&[TEST_KV_ID]);
-        FastlyCliAdapter
-            .provision(
-                dir.path(),
-                Some("fastly.toml"),
-                None,
-                &ProvisionStores {
-                    config: &[],
-                    kv: &kv_ids,
-                    secrets: &[],
-                },
-                None,
-                ProvisionMode::Local,
-                false,
-            )
-            .expect("first provision succeeds");
-
-        let after_first = fs::read_to_string(&path).expect("read");
-        assert!(
-            after_first.contains(r#"EDGEZERO__STORES__KV__SESSIONS__NAME = "sessions""#),
-            "first provision wrote the KV __NAME line: {after_first}"
-        );
-        assert!(
-            !after_first.contains("APP_CONFIG__NAME"),
-            "first provision must NOT emit a CONFIG line for a store that wasn't declared: {after_first}"
-        );
-
-        // Second provision: operator added a CONFIG store (and the
-        // block from run 1 already exists). The new store's __NAME
-        // line MUST land inside the existing runtime-env contents
-        // sub-table.
-        let config_ids: Vec<ResolvedStoreId> = ResolvedStoreId::from_logicals(&[TEST_CONFIG_ID]);
-        FastlyCliAdapter
-            .provision(
-                dir.path(),
-                Some("fastly.toml"),
-                None,
-                &ProvisionStores {
-                    config: &config_ids,
-                    kv: &kv_ids,
-                    secrets: &[],
-                },
-                None,
-                ProvisionMode::Local,
-                false,
-            )
-            .expect("second provision succeeds");
-
-        let after_second = fs::read_to_string(&path).expect("read");
-        // Additive: original KV line preserved.
-        assert!(
-            after_second.contains(r#"EDGEZERO__STORES__KV__SESSIONS__NAME = "sessions""#),
-            "second provision must preserve the KV __NAME line: {after_second}"
-        );
-        // Additive: new CONFIG line inserted into the existing block.
-        assert!(
-            after_second.contains(r#"EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME = "app_config""#),
-            "second provision must ADD the new CONFIG __NAME line into the existing runtime-env block: {after_second}"
-        );
-        // No duplicate runtime-env block header.
-        let block_header = "[local_server.config_stores.edgezero_runtime_env]";
-        assert_eq!(
-            after_second.matches(block_header).count(),
-            1,
-            "runtime-env block header must appear exactly once (no duplicate block emitted): {after_second}"
-        );
-        // The newly-added CONFIG store must get its commented `__KEY`
-        // hint on the additive path too, so incremental provisioning
-        // converges to the same shape a clean provision would produce.
-        assert!(
-            after_second
-                .contains(r#"# EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY = "app_config_staging""#),
-            "additive provision must emit the __KEY hint for the newly-added CONFIG store: {after_second}"
-        );
-    }
-
-    /// Regression: an operator changes a store's platform NAME
-    /// (`app_config` -> `prod_config`) and REPROVISIONS. The managed
-    /// `__NAME` mapping in the `edgezero_runtime_env` block must
-    /// CONVERGE to the new value -- the prior insert-only merge retained
-    /// the stale `= "app_config"` while the manifest binding moved on.
-    /// An operator-added sibling key in the same contents table must
-    /// survive.
-    #[test]
-    fn fastly_local_provision_converges_changed_platform_name_in_runtime_env() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("fastly.toml");
-        fs::write(&path, synthesise_fastly_toml("demo", None)).expect("write");
-
-        // First provision with platform `app_config`.
-        let first_ids = vec![ResolvedStoreId::new(TEST_CONFIG_ID, "app_config")];
-        FastlyCliAdapter
-            .provision(
-                dir.path(),
-                Some("fastly.toml"),
-                None,
-                &ProvisionStores {
-                    config: &first_ids,
-                    kv: &[],
-                    secrets: &[],
-                },
-                None,
-                ProvisionMode::Local,
-                false,
-            )
-            .expect("first provision succeeds");
-
-        // Operator hand-adds a sibling key into the runtime-env contents.
-        let after_first = fs::read_to_string(&path).expect("read");
-        assert!(
-            after_first.contains(r#"EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME = "app_config""#),
-            "first provision seeds the __NAME mapping: {after_first}"
-        );
-        let mut doc: toml_edit::DocumentMut = after_first.parse().expect("parse");
-        doc["local_server"]["config_stores"]["edgezero_runtime_env"]["contents"]["OPERATOR_EXTRA"] =
-            toml_edit::value("keepme");
-        fs::write(&path, doc.to_string()).expect("write operator edit");
-
-        // Reprovision with the platform renamed to `prod_config`.
-        let second_ids = vec![ResolvedStoreId::new(TEST_CONFIG_ID, "prod_config")];
-        FastlyCliAdapter
-            .provision(
-                dir.path(),
-                Some("fastly.toml"),
-                None,
-                &ProvisionStores {
-                    config: &second_ids,
-                    kv: &[],
-                    secrets: &[],
-                },
-                None,
-                ProvisionMode::Local,
-                false,
-            )
-            .expect("reprovision succeeds");
-
-        let after = fs::read_to_string(&path).expect("read");
-        let reparsed: toml_edit::DocumentMut = after.parse().expect("re-parse");
-        let contents =
-            reparsed["local_server"]["config_stores"]["edgezero_runtime_env"]["contents"]
-                .as_table()
-                .expect("runtime-env contents table");
-        assert_eq!(
-            contents
-                .get("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME")
-                .and_then(toml_edit::Item::as_str),
-            Some("prod_config"),
-            "reprovision must converge the __NAME value to prod_config: {after}"
-        );
-        assert!(
-            !after.contains(r#"EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME = "app_config""#),
-            "no stale = \"app_config\" __NAME entry may linger: {after}"
-        );
-        assert_eq!(
-            contents
-                .get("OPERATOR_EXTRA")
-                .and_then(toml_edit::Item::as_str),
-            Some("keepme"),
-            "operator-added sibling key must survive the reprovision: {after}"
         );
     }
 
@@ -1728,33 +1291,9 @@ mod tests {
             !after.contains(r#"contents = """#),
             "contents MUST NOT be an empty string (spec regression guard): {after}"
         );
-        // Runtime-env: __NAME line for every declared store.
         assert!(
-            after.contains("[local_server.config_stores.edgezero_runtime_env.contents]"),
-            "runtime-env contents sub-table header present: {after}"
-        );
-        assert!(
-            after.contains(r#"EDGEZERO__STORES__KV__SESSIONS__NAME = "sessions""#),
-            "KV __NAME line: {after}"
-        );
-        assert!(
-            after.contains(r#"EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME = "app_config""#),
-            "CONFIG __NAME line: {after}"
-        );
-        // Re-parse to confirm both `contents` slots are tables (the
-        // shape Viceroy + `config push --local` expect).
-        let doc: toml_edit::DocumentMut = after.parse().expect("re-parse");
-        assert!(
-            doc["local_server"]["config_stores"]["app_config"]["contents"]
-                .as_table()
-                .is_some(),
-            "app_config.contents parses as a table"
-        );
-        assert!(
-            doc["local_server"]["config_stores"]["edgezero_runtime_env"]["contents"]
-                .as_table()
-                .is_some(),
-            "edgezero_runtime_env.contents parses as a table"
+            !after.contains("edgezero_runtime_env"),
+            "no obsolete runtime override store"
         );
     }
 
@@ -1897,13 +1436,8 @@ mod tests {
         );
     }
 
-    /// The Viceroy `[[local_server.secret_stores.<name>]]` table must
-    /// be keyed by the PLATFORM name (the entry's resolved
-    /// `EDGEZERO__STORES__SECRETS__<ID>__NAME`), not the logical id.
-    /// The runtime opens the platform name, so seeding under the
-    /// logical id leaves the lookup opening an empty/absent store.
     #[test]
-    fn provision_typed_seeds_secret_store_under_platform_name() {
+    fn provision_typed_seeds_secret_store_under_logical_alias() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("fastly.toml");
         fs::write(&path, synthesise_fastly_toml("demo", None)).expect("write");
@@ -1927,12 +1461,12 @@ mod tests {
             .as_table()
             .expect("secret_stores table");
         assert!(
-            stores.contains_key("prod_vault"),
-            "Viceroy store must be keyed by the platform name: {after}"
+            stores.contains_key("vault"),
+            "Viceroy store must be keyed by the logical alias: {after}"
         );
         assert!(
-            !stores.contains_key("vault"),
-            "must NOT seed under the logical id when a platform override exists: {after}"
+            !stores.contains_key("prod_vault"),
+            "physical selectors must not rename runtime aliases: {after}"
         );
     }
 

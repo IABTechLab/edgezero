@@ -1,3 +1,23 @@
+impl SelectedFastlyService {
+    pub(super) fn into_id(self) -> String {
+        self.id
+    }
+}
+
+use super::staging::FASTLY_SERVICE_ID_ENV;
+#[derive(Clone, Copy, Debug)]
+pub(super) enum FastlyServiceIdSource {
+    Environment,
+    Manifest,
+}
+
+#[derive(Debug)]
+pub(super) struct SelectedFastlyService {
+    id: String,
+    source: FastlyServiceIdSource,
+}
+use super::staging::validate_service_id;
+use std::env;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -9,9 +29,8 @@ use super::{FASTLY_INSTALL_HINT, ManifestLock, atomically_replace_file};
 
 /// Cloud-mode `provision`: create Fastly platform stores via
 /// `fastly <kind>-store create`, then write the corresponding
-/// `[setup.<kind>_stores.<id>]` block to `fastly.toml`. Also
-/// creates the `edgezero_runtime_env` config-store the runtime
-/// override path depends on.
+/// `[setup.<kind>_stores.<id>]` block when physical and logical names match.
+/// Distinct physical names require an existing service and an explicit link.
 ///
 /// Callers in `mod.rs` gate this on `ProvisionMode::Cloud`; Local
 /// mode dispatches to `provision_local::provision`.
@@ -22,11 +41,6 @@ pub(super) fn provision(
     deployed: Option<&AdapterDeployedState>,
     dry_run: bool,
 ) -> Result<ProvisionOutcome, String> {
-    // A user store named like the internal runtime-override config store
-    // would be created remotely AND merged into the runtime-env store --
-    // reject BEFORE any account mutation (dry-run too, so the preview
-    // models the real outcome).
-    super::reject_reserved_store_names(stores)?;
     // Fastly is Multi for every store kind. Each id maps 1:1
     // to a Fastly resource (kv-store / config-store /
     // secret-store) created via the Fastly CLI; the manifest
@@ -62,7 +76,19 @@ pub(super) fn provision(
     // written -- otherwise a known conflict could leave an orphaned
     // remote store and a mutated manifest, and dry-run (which never
     // reached the old post-create check) would miss it entirely.
-    let service_id = reconcile_service_id(&fastly_path, deployed)?;
+    let tracked_or_local = reconcile_service_id(&fastly_path, deployed)?;
+    let environment_or_local = effective_fastly_service_id(&fastly_path)?.map(|service| service.id);
+    let selected_service = select_fastly_service_id(tracked_or_local, environment_or_local)?;
+    if selected_service.is_none() {
+        for store in stores.kv.iter().chain(stores.config).chain(stores.secrets) {
+            if store.logical != store.platform {
+                return Err(format!(
+                    "Fastly store `{}` is selected for logical id `{}`, but no service is selected. Fastly setup cannot bind a physical store under a different logical alias. Set service_id or FASTLY_SERVICE_ID before provisioning this mapping.",
+                    store.platform, store.logical
+                ));
+            }
+        }
+    }
 
     // Preflight the ENTIRE `[setup]` writeback shape BEFORE creating any
     // remote store. `append_fastly_setup` requires `setup` and each
@@ -80,19 +106,16 @@ pub(super) fn provision(
         ("secret", stores.secrets),
     ] {
         for store in ids {
-            // Fastly setup tables key on the resource name the
-            // CLI creates. The runtime resolves that same name
-            // via `EDGEZERO__STORES__<KIND>__<LOGICAL>__NAME`,
-            // so provision must use the env-resolved PLATFORM
-            // name -- the logical id stays in status lines for
-            // human-facing wording.
+            // Cloud creation selects physical resources; resource links keep
+            // the logical aliases compiled into the application.
             let logical = store.logical.as_str();
             let name = store.platform.as_str();
             // Check the skip condition FIRST, so dry-run models what the
             // real run does: if the `[setup.*]` block is already present
             // the real invocation skips the store, and dry-run must
             // report "would skip", not "would create".
-            if setup_block_present(&fastly_path, kind, name)? {
+            let setup_can_represent_mapping = logical == name;
+            if setup_can_represent_mapping && setup_block_present(&fastly_path, kind, logical)? {
                 let mut line = format!(
                     "fastly {kind}-store `{name}` (logical id `{logical}`) already declared in {}; skipping. To force a fresh remote: delete the [setup.{kind}_stores.{name}] block AND run `fastly {kind}-store delete --name={name}` (the old remote store lingers otherwise), then re-run provision.",
                     fastly_path.display()
@@ -102,11 +125,17 @@ pub(super) fn provision(
                 // unlinked. Re-emit the resource-link remediation on EVERY
                 // skip run so an operator who missed the first message can
                 // still recover -- provision is otherwise a dead end here.
-                if let Some(note) = resource_link_note(service_id.as_deref(), kind, name) {
+                if let Some(note) =
+                    resource_link_note(selected_service.as_ref(), kind, name, logical)
+                {
                     line.push('\n');
                     line.push_str(&note);
                 }
                 out.push(line);
+                continue;
+            }
+            if dry_run && !setup_can_represent_mapping {
+                out.push(format!("would run `fastly {kind}-store create --name={name}` for logical id `{logical}`; the selected service requires an explicit resource link under alias `{logical}`"));
                 continue;
             }
             if dry_run {
@@ -116,7 +145,7 @@ pub(super) fn provision(
                 ));
                 continue;
             }
-            create_fastly_store(kind, name)?;
+            create_fastly_store_in(kind, name, fastly_path.parent().unwrap_or(manifest_root))?;
             // If the platform store was created but the
             // writeback fails, remote state and the local
             // manifest are out of sync. Re-running `provision`
@@ -124,12 +153,14 @@ pub(super) fn provision(
             // and fail with "already exists". Surface the
             // recovery path explicitly so the operator isn't
             // stuck.
-            append_fastly_setup(&fastly_path, kind, name).map_err(|err| {
+            if setup_can_represent_mapping {
+                append_fastly_setup(&fastly_path, kind, logical).map_err(|err| {
                 format!(
                     "fastly {kind}-store `{name}` (logical id `{logical}`) was created remotely, but writeback to {path} failed: {err}\n  To recover, either:\n    1. Manually append `[setup.{kind}_stores.{name}]` to {path} and re-run, or\n    2. Delete the orphan remote store via `fastly {kind}-store delete --name={name}` and re-run `edgezero provision --adapter fastly`.",
                     path = fastly_path.display()
                 )
             })?;
+            }
             // Fastly's `[setup.<kind>_stores.<name>]` table is
             // consumed ONLY when `fastly compute deploy` is
             // creating a NEW service. If `service_id` is
@@ -148,11 +179,18 @@ pub(super) fn provision(
             // service is surprising. The instruction names
             // both the store-id lookup AND the link command so
             // the operator can audit before committing.
-            let post_create_note = resource_link_note(service_id.as_deref(), kind, name);
-            let mut line = format!(
-                "created fastly {kind}-store `{name}` (logical id `{logical}`); appended setup tables to {}",
-                fastly_path.display()
-            );
+            let post_create_note =
+                resource_link_note(selected_service.as_ref(), kind, name, logical);
+            let mut line = if setup_can_represent_mapping {
+                format!(
+                    "created fastly {kind}-store `{name}` (logical id `{logical}`); appended setup tables to {}",
+                    fastly_path.display()
+                )
+            } else {
+                format!(
+                    "created fastly {kind}-store `{name}` for logical id `{logical}`; fastly.toml was not changed because [setup] cannot express a distinct physical resource name"
+                )
+            };
             if let Some(note) = post_create_note {
                 line.push('\n');
                 line.push_str(&note);
@@ -160,60 +198,6 @@ pub(super) fn provision(
             out.push(line);
         }
     }
-    // EdgeZero runtime overrides live in a dedicated Fastly Config
-    // Store named `edgezero_runtime_env`. Compute@Edge has no
-    // process env, so `EDGEZERO__STORES__CONFIG__<ID>__KEY` and
-    // similar overrides have to come from a platform Config Store
-    // the runtime opens by name (see
-    // `env_config_from_runtime_dictionary` in lib.rs). Provision
-    // owns the store creation alongside the operator's declared
-    // stores so the runtime override path is wired correctly out
-    // of the box; if the store already appears in
-    // `[setup.config_stores.edgezero_runtime_env]`, skip.
-    let runtime_env_kind = "config";
-    let runtime_env_name = "edgezero_runtime_env";
-    // Check the skip condition FIRST -- BEFORE the dry-run branch -- the
-    // same way the declared-store loop above does. When the setup block
-    // already exists the real invocation skips silently, so a dry-run
-    // that reported "would create" would promise an account mutation
-    // that never happens.
-    if setup_block_present(&fastly_path, runtime_env_kind, runtime_env_name)? {
-        // Already declared; nothing to do, and nothing to report.
-    } else if dry_run {
-        out.push(format!(
-            "would run `fastly {runtime_env_kind}-store create --name={runtime_env_name}` and append [setup.{runtime_env_kind}_stores.{runtime_env_name}] to {} (EdgeZero runtime override store)",
-            fastly_path.display()
-        ));
-    } else {
-        create_fastly_store(runtime_env_kind, runtime_env_name)?;
-        append_fastly_setup(&fastly_path, runtime_env_kind, runtime_env_name).map_err(|err| {
-            format!(
-                "fastly {runtime_env_kind}-store `{runtime_env_name}` was created remotely, but writeback to {path} failed: {err}\n  Recover via `fastly {runtime_env_kind}-store delete --name={runtime_env_name}` then re-run `edgezero provision --adapter fastly`.",
-                path = fastly_path.display()
-            )
-        })?;
-        // Same already-deployed-service caveat as the declared-store
-        // path: if `service_id` is set in fastly.toml, the
-        // `[setup.config_stores.edgezero_runtime_env]` table won't
-        // be re-applied by the next `fastly compute deploy`, so the
-        // runtime can't open the store. Emit the resource-link
-        // remediation alongside the populate-keys hint.
-        let post_create_note =
-            resource_link_note(service_id.as_deref(), runtime_env_kind, runtime_env_name);
-        let mut line = format!(
-            "created fastly {runtime_env_kind}-store `{runtime_env_name}` (EdgeZero runtime override store); appended setup tables to {}\n  Populate per-environment override keys with:\n    fastly config-store-entry update --store-id=<STORE-ID> --key=EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY --value=app_config_staging --upsert",
-            fastly_path.display()
-        );
-        if let Some(note) = post_create_note {
-            line.push('\n');
-            line.push_str(&note);
-        }
-        out.push(line);
-    }
-
-    // Populate the runtime store-NAME mappings into `edgezero_runtime_env`.
-    populate_runtime_name_mappings(stores, runtime_env_name, dry_run, &mut out)?;
-
     if out.is_empty() {
         out.push("fastly has no declared stores to provision".to_owned());
     }
@@ -233,95 +217,28 @@ pub(super) fn provision(
     Ok(ProvisionOutcome::from_status_lines(out))
 }
 
-/// Write the per-store `EDGEZERO__STORES__<KIND>__<LOGICAL_UPPER>__NAME`
-/// mappings the runtime needs into the `edgezero_runtime_env` config store.
-/// The runtime resolves each store's PLATFORM name from these entries (see
-/// `edgezero_runtime_env_from_config_store` in lib.rs), falling back to the
-/// logical id -- so a store whose platform name was OVERRIDDEN away from its
-/// logical id (a rename) is UNREACHABLE at runtime unless the mapping is
-/// written here; creating the store alone is not enough.
-///
-/// Convergence: reprovision writes the managed key for EVERY declared store,
-/// not just renamed ones. Writing only when `platform != logical` leaves a
-/// STALE mapping behind when an earlier rename is later REVERTED (platform put
-/// back to the logical id): the old override entry keeps steering the runtime
-/// at the wrong store while `config push` targets the logical name -- a silent
-/// split. Upserting the current platform name (which EQUALS the logical id
-/// when there is no override) for every store is idempotent and keeps the
-/// mapping self-consistent with what `config push` uses.
-fn populate_runtime_name_mappings(
-    stores: &ProvisionStores<'_>,
-    runtime_env_name: &str,
-    dry_run: bool,
-    out: &mut Vec<String>,
-) -> Result<(), String> {
-    let mappings: Vec<(&str, String, &str)> = [
-        ("KV", stores.kv),
-        ("CONFIG", stores.config),
-        ("SECRETS", stores.secrets),
-    ]
-    .into_iter()
-    .flat_map(|(kind, ids)| {
-        ids.iter().map(move |store| {
-            (
-                kind,
-                store.logical.to_ascii_uppercase(),
-                store.platform.as_str(),
-            )
-        })
-    })
-    .collect();
-    if mappings.is_empty() {
-        return Ok(());
-    }
-    if dry_run {
-        for (kind, id_upper, platform) in &mappings {
-            out.push(format!(
-                "would set `EDGEZERO__STORES__{kind}__{id_upper}__NAME={platform}` in the `{runtime_env_name}` config store (runtime store-name mapping)"
-            ));
-        }
-        return Ok(());
-    }
-    let store_id = super::push_cloud::resolve_remote_config_store_id(runtime_env_name)?
-        .ok_or_else(|| {
-            format!(
-                "created `{runtime_env_name}` but could not resolve its store id to write the runtime store-name mappings; re-run `edgezero provision --adapter fastly`"
-            )
-        })?;
-    for (kind, id_upper, platform) in &mappings {
-        let key = format!("EDGEZERO__STORES__{kind}__{id_upper}__NAME");
-        super::push_cloud::create_config_store_entry(&store_id, &key, platform)?;
-        out.push(format!(
-            "set `{key}={platform}` in `{runtime_env_name}` (runtime store-name mapping)"
-        ));
-    }
-    Ok(())
-}
-
-/// Shell out to `fastly <kind>-store create --name=<platform-name>`. The
-/// caller resolves `<platform-name>` from `EDGEZERO__STORES__<KIND>__<ID>__NAME`
-/// (falling back to the logical id), so this helper takes whatever the
-/// caller hands it and does not re-translate. Returns `Ok(())` on success;
-/// surfaces the CLI's stderr verbatim on failure (including the "already
-/// exists" error, which is the caller's signal to fix the toml or use a
-/// different name).
+/// Shell out to `fastly <kind>-store create --name=<platform-name>`. The caller
+/// has already resolved and validated the selector. A provider response saying
+/// that the same-kind store already exists is treated as idempotent success;
+/// other failures retain the CLI diagnostic.
 ///
 /// # Errors
 /// Returns an error if `fastly` isn't on `PATH`, the child fails to
 /// spawn, or the exit status is non-zero.
-fn create_fastly_store(kind: &str, name: &str) -> Result<(), String> {
+fn create_fastly_store_in(kind: &str, name: &str, cwd: &Path) -> Result<(), String> {
     let subcommand = format!("{kind}-store");
     let name_arg = format!("--name={name}");
-    let output = Command::new("fastly")
+    let mut command = Command::new("fastly");
+    command
         .args([subcommand.as_str(), "create", name_arg.as_str()])
-        .output()
-        .map_err(|err| {
-            if err.kind() == ErrorKind::NotFound {
-                format!("`fastly` not found on PATH; {FASTLY_INSTALL_HINT}")
-            } else {
-                format!("failed to spawn `fastly`: {err}")
-            }
-        })?;
+        .current_dir(cwd);
+    let output = command.output().map_err(|err| {
+        if err.kind() == ErrorKind::NotFound {
+            format!("`fastly` not found on PATH; {FASTLY_INSTALL_HINT}")
+        } else {
+            format!("failed to spawn `fastly`: {err}")
+        }
+    })?;
     if output.status.success() {
         return Ok(());
     }
@@ -374,11 +291,11 @@ pub(super) fn looks_like_already_exists(stderr: &str, kind: &str) -> bool {
 
 /// Read the top-level `service_id` from `fastly.toml`. Returns
 /// `Ok(None)` when the file is absent (scaffold state before first
-/// `fastly compute deploy`) or when `service_id` is missing /
-/// empty. Used by `provision` to detect when an already-deployed
+/// `fastly compute deploy`) or when `service_id` is missing. Used by
+/// `provision` to detect when an already-deployed
 /// service needs a separate resource-link step beyond `[setup]`
 /// (which `compute deploy` only consumes on the FIRST deploy).
-fn read_fastly_service_id(path: &Path) -> Result<Option<String>, String> {
+pub(super) fn read_fastly_service_id(path: &Path) -> Result<Option<String>, String> {
     let raw = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
@@ -394,7 +311,7 @@ fn read_fastly_service_id(path: &Path) -> Result<Option<String>, String> {
         .get("service_id")
         .and_then(|item| item.as_str())
         .map(str::to_owned)
-        .filter(|svc_id| !svc_id.is_empty());
+        .filter(|service_id| !service_id.is_empty());
     Ok(svc)
 }
 
@@ -436,16 +353,27 @@ fn reconcile_service_id(
     }
 }
 
-/// If a `service_id` is recorded, the next `fastly compute deploy` skips
-/// `[setup]` entirely (it only runs on the FIRST deploy of a service),
-/// so any store provision creates afterwards needs a separate
-/// `fastly resource-link create`. Build that remediation note from the
-/// already-reconciled `service_id` (see [`reconcile_service_id`]), or
-/// `None` when the service hasn't been deployed yet.
-fn resource_link_note(service_id: Option<&str>, kind: &str, name: &str) -> Option<String> {
-    service_id.map(|svc_id| {
+/// If a service is selected through fastly.toml or `FASTLY_SERVICE_ID`, the
+/// next `fastly compute deploy` targets an existing service and skips `[setup]`.
+/// Any store created by provision then needs a separate resource link.
+fn resource_link_note(
+    selected: Option<&SelectedFastlyService>,
+    kind: &str,
+    physical_name: &str,
+    logical_alias: &str,
+) -> Option<String> {
+    selected.map(|service| {
+        let svc_id = &service.id;
+        let selection = match service.source {
+            FastlyServiceIdSource::Manifest => {
+                format!("fastly.toml declares `service_id = \"{svc_id}\"`")
+            }
+            FastlyServiceIdSource::Environment => {
+                format!("`{FASTLY_SERVICE_ID_ENV}` selects service `{svc_id}`")
+            }
+        };
         format!(
-            "  `service_id = \"{svc_id}\"` is recorded (tracked `[adapters.fastly.deployed]` takes precedence over the local fastly.toml), so this service is already deployed -- `[setup]` will NOT be re-run on the next `fastly compute deploy`. The store exists in the account but is NOT yet linked to the service. To finish provisioning, look up the store id with `fastly {kind}-store list --json` (match by name=`{name}`), then run:\n    fastly resource-link create --service-id={svc_id} --resource-id=<STORE-ID> --version=latest --autoclone --name={name}\n  (the link clones the active version so existing traffic is not affected until you `fastly service-version activate`)."
+            "  {selection}, so this service is already deployed -- `[setup]` will NOT be re-run on the next `fastly compute deploy`. The store exists in the account but is NOT yet linked to the service. To finish provisioning, look up the store id with `fastly {kind}-store list --json` (match by name=`{physical_name}`), then run:\n    fastly service resource-link create --service-id={svc_id} --resource-id=<STORE-ID> --version=latest --autoclone --name={logical_alias}\n  (the link clones the active version so existing traffic is not affected until you `fastly service version activate`)."
         )
     })
 }
@@ -598,16 +526,70 @@ fn append_fastly_setup(path: &Path, kind: &str, id: &str) -> Result<(), String> 
     Ok(())
 }
 
+pub(super) fn select_fastly_service_id(
+    manifest_id: Option<String>,
+    environment_id: Option<String>,
+) -> Result<Option<SelectedFastlyService>, String> {
+    if let Some(manifest) = manifest_id.as_deref() {
+        validate_service_id(manifest)?;
+    }
+    if let Some(environment) = environment_id.as_deref() {
+        validate_service_id(environment)?;
+    }
+    if let (Some(manifest), Some(environment)) = (&manifest_id, &environment_id)
+        && manifest != environment
+    {
+        return Err(format!(
+            "fastly.toml service_id `{manifest}` conflicts with {FASTLY_SERVICE_ID_ENV} `{environment}`; make them agree before provisioning"
+        ));
+    }
+
+    let selected = match (manifest_id, environment_id) {
+        (Some(id), _) => Some(SelectedFastlyService {
+            id,
+            source: FastlyServiceIdSource::Manifest,
+        }),
+        (None, Some(id)) => Some(SelectedFastlyService {
+            id,
+            source: FastlyServiceIdSource::Environment,
+        }),
+        (None, None) => None,
+    };
+    Ok(selected)
+}
+
+pub(super) fn effective_fastly_service_id(
+    path: &Path,
+) -> Result<Option<SelectedFastlyService>, String> {
+    let manifest_id = read_fastly_service_id(path)?;
+    let environment_id = match env::var(FASTLY_SERVICE_ID_ENV) {
+        Ok(id) => Some(id),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(format!(
+                "invalid service id from {FASTLY_SERVICE_ID_ENV}: expected ASCII letters and digits only"
+            ));
+        }
+    };
+    select_fastly_service_id(manifest_id, environment_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::FastlyCliAdapter;
     #[cfg(unix)]
+    use super::super::path_mutation_guard;
+    #[cfg(unix)]
     use super::super::provision_local::write_fastly_local_config_store;
     use super::super::run::synthesise_fastly_toml;
+    #[cfg(unix)]
+    use super::super::test_support::fake_fastly_runtime_mapping;
     use super::*;
     use edgezero_adapter::registry::{
         Adapter as _, AdapterDeployedState, ProvisionMode, ResolvedStoreId, TypedSecretEntry,
     };
+    #[cfg(unix)]
+    use edgezero_core::test_env::PathPrepend;
     use tempfile::tempdir;
 
     // Shared fixture names.
@@ -616,6 +598,197 @@ mod tests {
     const TEST_SECRET_ID: &str = "default";
 
     // ---------- looks_like_already_exists ----------
+
+    #[cfg(unix)]
+    #[cfg(unix)]
+    #[cfg(unix)]
+    #[test]
+    fn provision_rejects_conflicting_manifest_and_environment_service_ids() {
+        let err = select_fastly_service_id(
+            Some("manifestservice".to_owned()),
+            Some("environmentservice".to_owned()),
+        )
+        .expect_err("conflicting service ids must fail before provisioning");
+        assert!(
+            err.contains("conflicts with FASTLY_SERVICE_ID"),
+            "conflict names both selectors: {err}"
+        );
+    }
+
+    #[test]
+    fn provision_uses_fastly_service_id_environment_fallback_for_link_note() {
+        let selected = select_fastly_service_id(None, Some("envservice".to_owned()))
+            .expect("select environment service id");
+        let note = resource_link_note(
+            selected.as_ref(),
+            "secret",
+            "physical_credentials",
+            "credentials",
+        )
+        .expect("environment service produces a link note");
+        assert!(
+            note.contains("`FASTLY_SERVICE_ID` selects service `envservice`")
+                && note.contains("--service-id=envservice")
+                && note.contains("secret-store list --json"),
+            "environment-selected service is used consistently: {note}"
+        );
+    }
+
+    #[test]
+    fn scaffold_empty_service_id_is_treated_as_unselected() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = dir.path().join("fastly.toml");
+        fs::write(&manifest, "name = \"demo\"\nservice_id = \"\"\n").expect("write manifest");
+
+        assert!(
+            effective_fastly_service_id(&manifest)
+                .expect("read scaffold manifest")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_existing_service_links_physical_store_under_logical_alias() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("fastly.toml");
+        fs::write(&path, "name = \"demo\"\nservice_id = \"abc123svc\"\n").expect("write");
+        let kv = vec![ResolvedStoreId::new("sessions", "shared_sessions")];
+        let stores = ProvisionStores {
+            config: &[],
+            kv: &kv,
+            secrets: &[],
+        };
+        let oplog = dir.path().join("oplog.txt");
+        let fake = fake_fastly_runtime_mapping(&[], &oplog);
+        let _path = PathPrepend::new(fake.path());
+
+        let lines = FastlyCliAdapter
+            .provision(
+                dir.path(),
+                Some("fastly.toml"),
+                None,
+                &stores,
+                None,
+                ProvisionMode::Cloud,
+                false,
+            )
+            .expect("selected service can use a distinct physical store");
+
+        let log = fs::read_to_string(&oplog).expect("provider log");
+        assert!(
+            log.contains("kv-store-create name=--name=shared_sessions"),
+            "provider resource must use the selected physical name: {log}"
+        );
+        let manifest = fs::read_to_string(path).expect("read manifest");
+        assert!(
+            !manifest.contains("[setup.kv_stores"),
+            "Fastly setup cannot represent physical-to-logical mappings: {manifest}"
+        );
+        let message = lines.status_lines.join("\n");
+        assert!(
+            message.contains("name=`shared_sessions`")
+                && message.contains("--name=sessions")
+                && !message.contains("--name=shared_sessions"),
+            "lookup must use the physical name and the link must use the logical alias: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_rejects_non_default_mapping_without_service_before_mutation() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("fastly.toml");
+        let original = "name = \"demo\"\n";
+        fs::write(&path, original).expect("write");
+        let kv = vec![ResolvedStoreId::new("sessions", "shared_sessions")];
+        let stores = ProvisionStores {
+            config: &[],
+            kv: &kv,
+            secrets: &[],
+        };
+        let oplog = dir.path().join("oplog.txt");
+        let fake = fake_fastly_runtime_mapping(&[], &oplog);
+        let _path = PathPrepend::new(fake.path());
+
+        let error = FastlyCliAdapter
+            .provision(
+                dir.path(),
+                Some("fastly.toml"),
+                None,
+                &stores,
+                None,
+                ProvisionMode::Cloud,
+                false,
+            )
+            .expect_err("a distinct physical name needs a selected service");
+
+        assert!(
+            error.contains("shared_sessions")
+                && error.contains("sessions")
+                && error.contains("service_id"),
+            "error must explain the unsupported mapping and recovery: {error}"
+        );
+        assert!(
+            !oplog.exists(),
+            "provider must not be called before rejection"
+        );
+        assert_eq!(
+            fs::read_to_string(path).expect("read manifest"),
+            original,
+            "preflight rejection must not mutate fastly.toml"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_creates_declared_store_in_fastly_manifest_directory() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let dir = tempdir().expect("tempdir");
+        let adapter_dir = dir.path().join("adapters/fastly");
+        fs::create_dir_all(&adapter_dir).expect("adapter dir");
+        let path = adapter_dir.join("fastly.toml");
+        fs::write(&path, "name = \"demo\"\n").expect("write");
+        let kv = vec![ResolvedStoreId::from_logical("sessions")];
+        let stores = ProvisionStores {
+            config: &[],
+            kv: &kv,
+            secrets: &[],
+        };
+        let oplog = dir.path().join("oplog.txt");
+        let fake = fake_fastly_runtime_mapping(&[], &oplog);
+        let _path = PathPrepend::new(fake.path());
+
+        FastlyCliAdapter
+            .provision(
+                dir.path(),
+                Some("adapters/fastly/fastly.toml"),
+                None,
+                &stores,
+                None,
+                ProvisionMode::Cloud,
+                false,
+            )
+            .expect("provision succeeds");
+
+        let log = fs::read_to_string(&oplog).expect("oplog");
+        let manifest_dir = fs::canonicalize(&adapter_dir).expect("canonical manifest dir");
+        assert!(
+            log.contains(&format!(
+                "kv-store-create name=--name=sessions cwd={}",
+                manifest_dir.display()
+            )),
+            "declared store creation uses the Fastly manifest directory: {log}"
+        );
+        assert!(
+            fs::read_to_string(path)
+                .expect("manifest")
+                .contains("[setup.kv_stores.sessions]"),
+            "declared store setup block is written"
+        );
+    }
 
     #[test]
     fn looks_like_already_exists_recognises_common_phrasings() {
@@ -927,7 +1100,7 @@ mod tests {
         // 1 KV + 1 config + 1 secret + 1 runtime-env create rows, then the
         // convergence rows: one runtime store-name mapping PER declared store
         // (written unconditionally now, even when platform == logical) = 7.
-        assert_eq!(out.status_lines.len(), 7);
+        assert_eq!(out.status_lines.len(), 3);
         assert!(out.status_lines[0].contains("would run `fastly kv-store create --name=sessions`"));
         assert!(
             out.status_lines[1]
@@ -936,87 +1109,12 @@ mod tests {
         assert!(
             out.status_lines[2].contains("would run `fastly secret-store create --name=default`")
         );
-        assert!(
-            out.status_lines[3]
-                .contains("would run `fastly config-store create --name=edgezero_runtime_env`"),
-            "runtime-env store row: {out:?}",
-        );
-        // Every declared store gets a store-name mapping converged to its
-        // platform name (== logical id here, since nothing is renamed).
-        assert!(
-            out.status_lines[4]
-                .contains("would set `EDGEZERO__STORES__KV__SESSIONS__NAME=sessions`"),
-            "kv mapping row: {out:?}",
-        );
-        assert!(
-            out.status_lines[5]
-                .contains("would set `EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=app_config`"),
-            "config mapping row: {out:?}",
-        );
-        assert!(
-            out.status_lines[6]
-                .contains("would set `EDGEZERO__STORES__SECRETS__DEFAULT__NAME=default`"),
-            "secret mapping row: {out:?}",
-        );
         // Manifest untouched.
         let after = fs::read_to_string(&path).expect("read");
         assert_eq!(after, "name = \"demo\"\n", "dry-run mutated fastly.toml");
     }
 
     // ---------- populate_runtime_name_mappings (convergence) ----------
-
-    /// Reprovision must CONVERGE the managed store-name key for EVERY declared
-    /// store, not only renamed ones. Sequence that used to break: an operator
-    /// renames `app_config` -> `prod_config` (writing
-    /// `...APP_CONFIG__NAME=prod_config`), then REVERTS the override (platform
-    /// back to the logical `app_config`). The old code wrote nothing on the
-    /// revert because platform == logical, leaving the stale `prod_config`
-    /// mapping so the runtime kept opening `prod_config` while `config push`
-    /// targeted `app_config`. Now the reverted store still gets its mapping
-    /// re-emitted, converged back to the logical name.
-    #[test]
-    fn populate_runtime_name_mappings_converges_reverted_store() {
-        // Reverted store: platform back in line with the logical id.
-        let config_ids = vec![ResolvedStoreId::new("app_config", "app_config")];
-        let stores = ProvisionStores {
-            config: &config_ids,
-            kv: &[],
-            secrets: &[],
-        };
-        let mut out = Vec::new();
-        // Dry-run so no `fastly` shellout -- it still models the exact write.
-        populate_runtime_name_mappings(&stores, "edgezero_runtime_env", true, &mut out)
-            .expect("dry-run mapping succeeds");
-        assert_eq!(
-            out.len(),
-            1,
-            "reverted store still gets a mapping row: {out:?}"
-        );
-        assert!(
-            out[0].contains("would set `EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=app_config`"),
-            "revert converges the managed key back to the logical name: {out:?}"
-        );
-    }
-
-    /// A genuine rename (platform != logical) still writes the override name --
-    /// convergence did not regress the rename path.
-    #[test]
-    fn populate_runtime_name_mappings_writes_override_for_rename() {
-        let config_ids = vec![ResolvedStoreId::new("app_config", "prod_config")];
-        let stores = ProvisionStores {
-            config: &config_ids,
-            kv: &[],
-            secrets: &[],
-        };
-        let mut out = Vec::new();
-        populate_runtime_name_mappings(&stores, "edgezero_runtime_env", true, &mut out)
-            .expect("dry-run mapping succeeds");
-        assert_eq!(out.len(), 1, "renamed store gets a mapping row: {out:?}");
-        assert!(
-            out[0].contains("would set `EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=prod_config`"),
-            "rename maps the logical id to the platform name: {out:?}"
-        );
-    }
 
     /// Spec contract: cloud provision
     /// NEVER writes back `service_id`, even when `fastly.toml` already
@@ -1033,7 +1131,7 @@ mod tests {
         // must STILL leave `deployed` empty.
         fs::write(
             dir.path().join("fastly.toml"),
-            "manifest_version = 3\nname = \"demo\"\nservice_id = \"SVC_ALREADY_DEPLOYED\"\n\n[local_server]\n",
+            "manifest_version = 3\nname = \"demo\"\nservice_id = \"SVCALREADYDEPLOYED\"\n\n[local_server]\n",
         )
         .expect("write");
         let stores = ProvisionStores {
@@ -1056,7 +1154,7 @@ mod tests {
                     let mut state = AdapterDeployedState::default();
                     state
                         .fields
-                        .insert("service_id".to_owned(), "SVC_ALREADY_DEPLOYED".to_owned());
+                        .insert("service_id".to_owned(), "SVCALREADYDEPLOYED".to_owned());
                     state
                 }),
                 ProvisionMode::Cloud,
@@ -1172,33 +1270,6 @@ mod tests {
     }
 
     #[test]
-    fn cloud_dry_run_does_not_claim_to_create_existing_runtime_env_store() {
-        // Regression: the runtime-env arm reported "would create"
-        // unconditionally, so a dry-run promised an account mutation the
-        // real run skips.
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("fastly.toml");
-        fs::write(
-            &path,
-            "name = \"demo\"\n[setup.config_stores.edgezero_runtime_env]\n",
-        )
-        .expect("write");
-        let stores = ProvisionStores {
-            config: &[],
-            kv: &[],
-            secrets: &[],
-        };
-        let out = provision(dir.path(), Some("fastly.toml"), &stores, None, true)
-            .expect("dry-run succeeds");
-        let combined = out.status_lines.join("\n");
-        assert!(
-            !combined
-                .contains("would run `fastly config-store create --name=edgezero_runtime_env`"),
-            "dry-run must not claim to create an already-declared store: {combined}"
-        );
-    }
-
-    #[test]
     fn reconcile_service_id_falls_back_to_tracked() {
         // fastly.toml is gitignored: a teammate's regenerated manifest has
         // no `service_id` even though the team's tracked deployed state
@@ -1215,8 +1286,16 @@ mod tests {
             .expect("read")
             .expect("tracked service_id must be used when the local file lacks one");
         assert_eq!(resolved, "tracked123");
-        let note = resource_link_note(Some(&resolved), "kv", "sessions")
-            .expect("note present for a deployed service");
+        let note = resource_link_note(
+            Some(&SelectedFastlyService {
+                id: resolved,
+                source: FastlyServiceIdSource::Manifest,
+            }),
+            "kv",
+            "sessions",
+            "sessions",
+        )
+        .expect("note present for a deployed service");
         assert!(note.contains("tracked123"), "note uses the id: {note}");
     }
 
@@ -1363,16 +1442,11 @@ mod tests {
             .expect("skip path succeeds without invoking fastly");
         // The declared store is skipped (not re-created); the convergence step
         // still models its runtime store-name mapping.
-        assert_eq!(out.status_lines.len(), 2, "got: {out:?}");
+        assert_eq!(out.status_lines.len(), 1, "got: {out:?}");
         assert!(
             out.status_lines[0].contains("already declared")
                 && !out.status_lines[0].contains("would run"),
             "declared store skipped, not re-created: {out:?}"
-        );
-        assert!(
-            out.status_lines[1]
-                .contains("would set `EDGEZERO__STORES__KV__SESSIONS__NAME=sessions`"),
-            "convergence still reconciles the mapping on a skip run: {out:?}"
         );
     }
 
@@ -1410,66 +1484,6 @@ mod tests {
             out.status_lines[0].contains("already declared")
                 && !out.status_lines[0].contains("would run"),
             "dry-run must report the skip, not a would-create: {out:?}"
-        );
-    }
-
-    /// When `fastly.toml` declares `service_id`, the next
-    /// `fastly compute deploy` skips `[setup]` entirely. provision
-    /// must emit the `fastly resource-link create` remediation for
-    /// every store it creates -- including the implicit
-    /// `edgezero_runtime_env` store the runtime override path
-    /// depends on. Without this, a freshly-provisioned override
-    /// store would not be linked to the already-deployed service
-    /// and the runtime would silently fall back to baked defaults.
-    #[test]
-    fn provision_emits_resource_link_note_for_runtime_env_on_existing_service() {
-        // Dry-run only -- we just want to drive the resource_link_note
-        // helper for the runtime-env store branch. The real-create
-        // path can't run in tests (would shell out to `fastly`).
-        // The dry-run output line for runtime-env doesn't include the
-        // note (the helper only fires on real create), so we test the
-        // helper directly here.
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("fastly.toml");
-        fs::write(&path, "name = \"demo\"\nservice_id = \"abc123svc\"\n").expect("write");
-        let service_id = reconcile_service_id(&path, None).expect("read service_id");
-        let note = resource_link_note(service_id.as_deref(), "config", "edgezero_runtime_env")
-            .expect("note present when service_id set");
-        assert!(
-            note.contains("service_id = \"abc123svc\""),
-            "note quotes the service id: {note}"
-        );
-        assert!(
-            note.contains("fastly config-store list --json"),
-            "note tells operator how to find the store id: {note}"
-        );
-        assert!(
-            note.contains("name=`edgezero_runtime_env`"),
-            "note names the runtime override store: {note}"
-        );
-        assert!(
-            note.contains(
-                "fastly resource-link create --service-id=abc123svc --resource-id=<STORE-ID> --version=latest --autoclone --name=edgezero_runtime_env"
-            ),
-            "note carries the full resource-link command: {note}"
-        );
-    }
-
-    /// And the inverse: no `service_id` (a service that hasn't been
-    /// deployed yet) means `[setup]` will be applied on the next
-    /// `compute deploy`, so no manual resource-link step is needed.
-    /// The helper must return `None` to avoid noisy false-positive
-    /// guidance.
-    #[test]
-    fn provision_skips_resource_link_note_when_service_undeployed() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("fastly.toml");
-        fs::write(&path, "name = \"demo\"\n").expect("write");
-        let service_id = reconcile_service_id(&path, None).expect("read service_id");
-        let note = resource_link_note(service_id.as_deref(), "config", "edgezero_runtime_env");
-        assert!(
-            note.is_none(),
-            "no service_id => no resource-link prompt: {note:?}"
         );
     }
 

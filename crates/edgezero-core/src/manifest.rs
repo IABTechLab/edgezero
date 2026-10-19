@@ -171,7 +171,7 @@ impl Manifest {
         for (adapter, cfg) in &self.adapters {
             if cfg.logging.is_specified() {
                 resolved.insert(
-                    adapter.clone(),
+                    adapter.to_ascii_lowercase(),
                     ResolvedLoggingConfig::from_manifest(&cfg.logging),
                 );
             }
@@ -179,7 +179,7 @@ impl Manifest {
 
         for (adapter, cfg) in &self.logging.adapters {
             resolved
-                .entry(adapter.clone())
+                .entry(adapter.to_ascii_lowercase())
                 .or_insert_with(|| ResolvedLoggingConfig::from_manifest(cfg));
         }
 
@@ -189,7 +189,7 @@ impl Manifest {
     #[must_use]
     #[inline]
     pub fn logging_for(&self, adapter: &str) -> Option<&ResolvedLoggingConfig> {
-        self.logging_resolved.get(adapter)
+        self.logging_resolved.get(&adapter.to_ascii_lowercase())
     }
 
     #[must_use]
@@ -729,7 +729,10 @@ impl<'de> Deserialize<'de> for HttpMethod {
 
 impl serde::Serialize for HttpMethod {
     #[inline]
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(self.as_str())
     }
 }
@@ -767,7 +770,10 @@ impl<'de> Deserialize<'de> for BodyMode {
 
 impl serde::Serialize for BodyMode {
     #[inline]
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(match self {
             Self::Buffered => "buffered",
             Self::Stream => "stream",
@@ -848,7 +854,10 @@ impl<'de> Deserialize<'de> for LogLevel {
 
 impl serde::Serialize for LogLevel {
     #[inline]
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(self.as_str())
     }
 }
@@ -949,8 +958,8 @@ fn validate_manifest_adapter(adapter: &ManifestAdapter) -> Result<(), Validation
     Ok(())
 }
 
-/// Reject case-fold duplicate `[adapters.*]` keys at manifest load
-/// time so the case-insensitive `adapter_entry` lookup is never
+/// Reject case-fold duplicate adapter names within `[adapters.*]` and
+/// `[logging.*]` at manifest load time so case-insensitive lookups are never
 /// ambiguous.
 ///
 /// Pre-fix, an operator could declare BOTH `[adapters.fastly]` AND
@@ -974,63 +983,20 @@ fn validate_manifest_adapter_keys_case_unique(manifest: &Manifest) -> Result<(),
             return Err(error);
         }
     }
+
     validate_canonical_deployed_ownership(manifest)?;
-    Ok(())
-}
-
-/// Canonical `[adapters.<name>.deployed]` field ownership for the
-/// built-in adapters.
-///
-/// A deployed field is meaningful only for the adapter that produces
-/// it -- `service_id` for Fastly, the KV-namespace maps for
-/// Cloudflare -- and Spin / Axum have no durable cloud identifiers at
-/// all. Placing e.g. `service_id` under `[adapters.cloudflare.deployed]`
-/// is always a mistake.
-///
-/// The CLI already rejects this, but only for adapters present in its
-/// build registry -- a reduced-feature build or a non-CLI reader of
-/// the manifest would silently accept the misplaced field. Enforcing
-/// the canonical ownership here in core closes that gap for EVERY
-/// consumer. Adapter names core doesn't recognise are left to the
-/// CLI's registry-based check (out-of-tree adapters define their own
-/// ownership).
-const CANONICAL_DEPLOYED_OWNERS: &[(&str, &[&str])] = &[
-    ("axum", &[]),
-    ("cloudflare", &["kv_namespaces", "preview_kv_namespaces"]),
-    ("fastly", &["service_id"]),
-    ("spin", &[]),
-];
-
-fn validate_canonical_deployed_ownership(manifest: &Manifest) -> Result<(), ValidationError> {
-    for (name, adapter) in &manifest.adapters {
-        let Some(deployed) = adapter.deployed.as_ref() else {
-            continue;
-        };
-        let canonical = name.to_ascii_lowercase();
-        let Some((_, owned)) = CANONICAL_DEPLOYED_OWNERS
-            .iter()
-            .find(|(known, _)| *known == canonical)
-        else {
-            continue;
-        };
-        for field in deployed.populated_fields() {
-            if !owned.contains(&field) {
-                let mut error = ValidationError::new("deployed_field_not_owned");
-                let owned_list = if owned.is_empty() {
-                    "none".to_owned()
-                } else {
-                    owned.join(", ")
-                };
-                error.message = Some(
-                    format!(
-                        "[adapters.{name}.deployed].{field}: the `{canonical}` adapter does not \
-                         own this deployed field (owned: [{owned_list}]). A deployed field is only \
-                         valid under the adapter that produces it; move it or remove it."
-                    )
-                    .into(),
-                );
-                return Err(error);
-            }
+    seen_ci.clear();
+    for key in manifest.logging.adapters.keys() {
+        let folded = key.to_ascii_lowercase();
+        if let Some(prior) = seen_ci.insert(folded, key) {
+            let mut error = ValidationError::new("logging_adapters_case_duplicate");
+            error.message = Some(
+                format!(
+                    "manifest declares `[logging.{prior}]` AND `[logging.{key}]`, which differ only in case; logging adapter names are matched case-insensitively. Pick one spelling."
+                )
+                .into(),
+            );
+            return Err(error);
         }
     }
     Ok(())
@@ -1162,6 +1128,64 @@ fn validate_store_declaration(declaration: &StoreDeclaration) -> Result<(), Vali
         return Err(error);
     }
 
+    Ok(())
+}
+
+/// Canonical `[adapters.<name>.deployed]` field ownership for the
+/// built-in adapters.
+///
+/// A deployed field is meaningful only for the adapter that produces
+/// it -- `service_id` for Fastly, the KV-namespace maps for
+/// Cloudflare -- and Spin / Axum have no durable cloud identifiers at
+/// all. Placing e.g. `service_id` under `[adapters.cloudflare.deployed]`
+/// is always a mistake.
+///
+/// The CLI already rejects this, but only for adapters present in its
+/// build registry -- a reduced-feature build or a non-CLI reader of
+/// the manifest would silently accept the misplaced field. Enforcing
+/// the canonical ownership here in core closes that gap for EVERY
+/// consumer. Adapter names core doesn't recognise are left to the
+/// CLI's registry-based check (out-of-tree adapters define their own
+/// ownership).
+const CANONICAL_DEPLOYED_OWNERS: &[(&str, &[&str])] = &[
+    ("axum", &[]),
+    ("cloudflare", &["kv_namespaces", "preview_kv_namespaces"]),
+    ("fastly", &["service_id"]),
+    ("spin", &[]),
+];
+
+fn validate_canonical_deployed_ownership(manifest: &Manifest) -> Result<(), ValidationError> {
+    for (name, adapter) in &manifest.adapters {
+        let Some(deployed) = adapter.deployed.as_ref() else {
+            continue;
+        };
+        let canonical = name.to_ascii_lowercase();
+        let Some((_, owned)) = CANONICAL_DEPLOYED_OWNERS
+            .iter()
+            .find(|(known, _)| *known == canonical)
+        else {
+            continue;
+        };
+        for field in deployed.populated_fields() {
+            if !owned.contains(&field) {
+                let mut error = ValidationError::new("deployed_field_not_owned");
+                let owned_list = if owned.is_empty() {
+                    "none".to_owned()
+                } else {
+                    owned.join(", ")
+                };
+                error.message = Some(
+                    format!(
+                        "[adapters.{name}.deployed].{field}: the `{canonical}` adapter does not \
+                         own this deployed field (owned: [{owned_list}]). A deployed field is only \
+                         valid under the adapter that produces it; move it or remove it."
+                    )
+                    .into(),
+                );
+                return Err(error);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1673,6 +1697,23 @@ echo_stdout = true
     }
 
     #[test]
+    fn logging_lookup_matches_adapter_case_insensitively() {
+        let manifest = r#"
+[logging.Fastly]
+level = "debug"
+endpoint = "fastly_logs"
+"#;
+        let loader = ManifestLoader::load_from_str(manifest);
+        let logging = loader
+            .manifest()
+            .logging_for("fastly")
+            .expect("lowercase adapter lookup must match mixed-case logging key");
+
+        assert_eq!(logging.level, LogLevel::Debug);
+        assert_eq!(logging.endpoint.as_deref(), Some("fastly_logs"));
+    }
+
+    #[test]
     fn adapter_logging_config_overrides_global() {
         let manifest = r#"
 [adapters.fastly.logging]
@@ -1686,6 +1727,43 @@ endpoint = "https://fastly-logs.example.com"
         assert_eq!(
             logging.endpoint.as_deref(),
             Some("https://fastly-logs.example.com")
+        );
+    }
+
+    #[test]
+    fn adapter_logging_config_overrides_differently_cased_global_config() {
+        let manifest = r#"
+[adapters.fastly.logging]
+level = "error"
+endpoint = "adapter_logs"
+
+[logging.FASTLY]
+level = "debug"
+endpoint = "global_logs"
+"#;
+        let loader = ManifestLoader::load_from_str(manifest);
+        let logging = loader
+            .manifest()
+            .logging_for("FASTLY")
+            .expect("adapter logging must resolve regardless of lookup casing");
+
+        assert_eq!(logging.level, LogLevel::Error);
+        assert_eq!(logging.endpoint.as_deref(), Some("adapter_logs"));
+    }
+
+    #[test]
+    fn manifest_rejects_case_fold_duplicate_logging_keys() {
+        let manifest: Manifest = toml::from_str(
+            "[logging.fastly]\nlevel = \"info\"\n[logging.Fastly]\nlevel = \"debug\"\n",
+        )
+        .expect("case-distinct TOML keys should parse");
+        let error = manifest
+            .validate()
+            .expect_err("case-fold duplicate logging keys must fail validation");
+
+        assert!(
+            error.to_string().contains("case"),
+            "error must call out the case collision: {error}"
         );
     }
 

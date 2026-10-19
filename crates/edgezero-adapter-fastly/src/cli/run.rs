@@ -1,3 +1,8 @@
+use super::staging::{
+    args_without_flag_value, resolve_deploy_manifest_path, scan_reserved_deploy_args,
+    validate_deploy_service_id_for_manifest,
+};
+use edgezero_adapter::registry::AdapterDeployContext;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -64,33 +69,9 @@ pub fn build(extra_args: &[String], ctx: &AdapterExecContext<'_>) -> Result<Path
     Ok(dest)
 }
 
-/// # Errors
-/// Returns an error if the Fastly CLI deploy command fails.
-#[inline]
-pub fn deploy(extra_args: &[String], ctx: &AdapterExecContext<'_>) -> Result<(), String> {
-    let manifest = cli_support::declared_or_discovered_manifest(ctx, || {
-        find_fastly_manifest(cli_support::discovery_base(ctx)?.as_path())
-    })?;
-    let manifest_dir = manifest
-        .parent()
-        .ok_or_else(|| "fastly manifest has no parent directory".to_owned())?;
-
-    let mut command = Command::new("fastly");
-    command
-        .args(["compute", "deploy"])
-        .args(extra_args)
-        .current_dir(manifest_dir);
-    for (key, value) in ctx.env() {
-        command.env(key, value);
-    }
-    let status = command
-        .status()
-        .map_err(|err| format!("failed to run fastly CLI: {err}"))?;
-    if !status.success() {
-        return Err(format!("fastly compute deploy failed with status {status}"));
-    }
-
-    Ok(())
+pub(super) fn deploy(extra_args: &[String], exec: &AdapterExecContext<'_>) -> Result<(), String> {
+    let context = super::staging::legacy_deploy_context(extra_args, false);
+    deploy_with_context(&context, extra_args, exec)
 }
 
 /// # Errors
@@ -264,6 +245,61 @@ pub(crate) fn synthesise_fastly_toml(crate_name: &str, service_id: Option<&str>)
     doc.insert("scripts", Item::Table(scripts));
     doc.insert("local_server", Item::Table(Table::new()));
     doc.to_string()
+}
+
+pub(super) fn deploy_with_context(
+    context: &AdapterDeployContext,
+    extra_args: &[String],
+    exec: &AdapterExecContext<'_>,
+) -> Result<(), String> {
+    let manifest_path = resolve_deploy_manifest_path(context)?;
+    validate_deploy_service_id_for_manifest(context, &manifest_path)?;
+    let manifest_dir = manifest_path.parent().ok_or_else(|| {
+        format!(
+            "fastly manifest path {} has no parent directory",
+            manifest_path.display()
+        )
+    })?;
+    let without_manifest = args_without_flag_value(extra_args, "--manifest-path");
+    let mut forwarded = args_without_flag_value(&without_manifest, "--service-id");
+    scan_reserved_deploy_args(&forwarded)?;
+    if let Some(service_id) = context.service_id.as_deref() {
+        forwarded.extend(["--service-id".to_owned(), service_id.to_owned()]);
+    }
+
+    let status = Command::new("fastly")
+        .args(build_compute_deploy_args(&forwarded))
+        .current_dir(manifest_dir)
+        .envs(exec.env().iter().map(|(key, value)| (key, value)))
+        .status()
+        .map_err(|err| format!("failed to run fastly CLI: {err}"))?;
+    if !status.success() {
+        return Err(format!("fastly compute deploy failed with status {status}"));
+    }
+
+    Ok(())
+}
+
+/// Build the argv for `fastly compute deploy`, appending
+/// `--non-interactive` (a Fastly CLI *global* flag, supported by
+/// `compute deploy`) unless the caller already passed it. Without it a
+/// production deploy can block on an interactive prompt in CI.
+pub(super) fn build_compute_deploy_args(extra_args: &[String]) -> Vec<String> {
+    let mut argv = vec!["compute".to_owned(), "deploy".to_owned()];
+    argv.extend_from_slice(extra_args);
+    if !has_non_interactive(extra_args) {
+        argv.push("--non-interactive".to_owned());
+    }
+    argv
+}
+
+/// Whether `args` already carries the Fastly CLI's non-interactive
+/// switch, in either its long (`--non-interactive`) or short (`-i`)
+/// form. Used to avoid passing the flag twice when a caller already
+/// supplied it via `deploy-args` passthrough.
+pub(super) fn has_non_interactive(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--non-interactive" || arg == "-i")
 }
 
 #[cfg(test)]

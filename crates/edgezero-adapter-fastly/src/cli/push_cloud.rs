@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::io::{ErrorKind, Write as _};
+use std::path::Path;
 use std::process::{ChildStdin, Command, Stdio};
 
 use edgezero_adapter::registry::{ReadConfigEntry, ResolvedStoreId};
@@ -568,36 +569,20 @@ fn shape_summary(value: &serde_json::Value) -> &'static str {
 }
 
 /// Resolve the platform config-store id on demand: shell out to
-/// `fastly config-store list --json`, parse the JSON, match by `name`.
+/// `fastly config-store list --json`, parse the JSON, match by
+/// `name`. The provision flow doesn't persist this id, so push
+/// has to re-fetch every time.
 ///
 /// Returns a TYPED absence: `Ok(None)` ONLY when the list call SUCCEEDS and no
 /// store matches (a genuine absence). An operational failure (missing binary,
 /// spawn/list failure, schema drift) stays `Err` -- callers that read for a diff
 /// must not treat an operational failure as "store absent" and overwrite.
 pub(super) fn resolve_remote_config_store_id(name: &str) -> Result<Option<String>, String> {
-    let output = Command::new("fastly")
-        .args(["config-store", "list", "--json"])
-        .output()
-        .map_err(|err| {
-            if err.kind() == ErrorKind::NotFound {
-                format!("`fastly` not found on PATH; {FASTLY_INSTALL_HINT}")
-            } else {
-                format!("failed to spawn `fastly`: {err}")
-            }
-        })?;
-    if !output.status.success() {
-        return Err(format!(
-            "`fastly config-store list --json` exited with status {}\nstderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let stdout = strict_stdout(output.stdout, "config-store list --json")?;
-    match find_config_store_id(&stdout, name) {
+    match classify_remote_config_store(name)? {
         ConfigStoreLookup::Found(id) => Ok(Some(id)),
         ConfigStoreLookup::NotFound => Ok(None),
         ConfigStoreLookup::SchemaDrift(detail) => Err(format!(
-            "could not parse `fastly config-store list --json` output: {detail}.\n  The fastly CLI may have changed its JSON schema in a recent version. Please file a bug report at https://github.com/stackpop/edgezero/issues with the fastly CLI version (`fastly version`) and the raw stdout. Workaround: pin to a known-compatible fastly CLI version."
+            "could not parse `fastly config-store list --json` output: {detail}.\n  The fastly CLI may have changed its JSON schema in a recent version. Please file a bug report at https://github.com/IABTechLab/edgezero/issues with the fastly CLI version (`fastly version`) and the raw stdout. Workaround: pin to a known-compatible fastly CLI version."
         )),
     }
 }
@@ -643,6 +628,48 @@ pub(super) fn redact_stderr(stderr: &str) -> String {
     format!(
         "{len} bytes suppressed (may echo the stored config value); re-run the `fastly` command directly to inspect it"
     )
+}
+
+/// Look a config store up by name and return the raw [`ConfigStoreLookup`], so
+/// callers can tell "the account has no such store" (`NotFound`) apart from "the
+/// lookup itself failed" (`Err` — CLI missing / non-zero exit — or
+/// `SchemaDrift`). A staged deploy relies on that distinction to decide whether
+/// to skip config isolation (genuinely no store) or fail closed (couldn't tell).
+///
+/// `Err` is only for a failure to OBTAIN an answer; a successful listing that
+/// simply doesn't contain `name` is `Ok(ConfigStoreLookup::NotFound)`.
+pub(super) fn classify_remote_config_store(name: &str) -> Result<ConfigStoreLookup, String> {
+    classify_remote_config_store_with_cwd(name, None)
+}
+
+pub(super) fn classify_remote_config_store_with_cwd(
+    name: &str,
+    cwd: Option<&Path>,
+) -> Result<ConfigStoreLookup, String> {
+    let mut command = Command::new("fastly");
+    command.args(["config-store", "list", "--json"]);
+    if let Some(command_cwd) = cwd {
+        command.current_dir(command_cwd);
+    }
+    let output = command.output().map_err(|err| {
+        if err.kind() == ErrorKind::NotFound {
+            format!("`fastly` not found on PATH; {FASTLY_INSTALL_HINT}")
+        } else {
+            format!("failed to spawn `fastly`: {err}")
+        }
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "`fastly config-store list --json` exited with status {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    // Adopt main's strict UTF-8 gate (fail closed on undecodable stdout) but
+    // return the raw lookup so staging callers keep the 3-way verdict; the
+    // SchemaDrift -> Err mapping lives in resolve_remote_config_store_id.
+    let stdout = strict_stdout(output.stdout, "config-store list --json")?;
+    Ok(find_config_store_id(&stdout, name))
 }
 
 #[cfg(test)]

@@ -63,7 +63,7 @@ use super::runtime_config;
 /// constant updated. Until then, an operator running a Spin CLI
 /// outside this range gets a `log::warn!` on first SQLite-direct
 /// push.
-const VERIFIED_SPIN_MAJOR_RANGE: &[u32] = &[2, 3];
+const VERIFIED_SPIN_MAJOR_RANGE: &[u32] = &[2, 3, 4];
 
 /// EXACT `CREATE TABLE IF NOT EXISTS spin_key_value (…)` statement
 /// Spin's `crates/key-value-spin/src/store.rs::KeyValueSqlite::create_connection`
@@ -382,7 +382,7 @@ pub(crate) fn write_batch(
 
     {
         let mut statement = transaction
-            .prepare_cached(SPIN_KV_SET)
+            .prepare(SPIN_KV_SET)
             .map_err(|err| format!("failed to prepare INSERT in `{}`: {err}", db_path.display()))?;
 
         for (key, value) in entries {

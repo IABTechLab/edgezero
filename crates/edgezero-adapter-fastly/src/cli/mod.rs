@@ -8,9 +8,9 @@ use ctor::ctor;
 use edgezero_adapter::cli_support;
 use edgezero_adapter::cli_support::run_native_cli;
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterDeployedState, AdapterExecContext, AdapterPushContext,
-    ProvisionMode, ProvisionOutcome, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    TypedSecretEntry, register_adapter,
+    Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
+    AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, TypedSecretEntry, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
@@ -29,53 +29,14 @@ mod push_cloud;
 mod push_local;
 mod run;
 mod staging;
+use staging::{
+    deploy_managed_with_context, emit_active_version_for, owns_managed_deploy,
+    parse_fastly_version, parse_release_managed_deploy_args, require_token,
+    scan_reserved_deploy_args, validate_effective_deploy_service_id, validate_fastly_config_key,
+    validate_service_id, verify_version_active,
+};
 #[cfg(test)]
 mod test_support;
-
-/// Fastly's INTERNAL runtime-override config store. Provision creates it and
-/// writes the `__NAME` / `__KEY` overlays into it (local Viceroy block and the
-/// cloud config-store). A user-declared store resolving to the SAME platform
-/// name would be merged into it, cross-contaminating operator config with the
-/// runtime overrides -- so the name is reserved.
-pub(super) const RUNTIME_ENV_STORE_NAME: &str = "edgezero_runtime_env";
-
-/// Reject a SINGLE resolved store whose PLATFORM name collides with the
-/// reserved [`RUNTIME_ENV_STORE_NAME`]. Used by the config read/write
-/// dispatch so a runtime env overlay can't route application config into the
-/// internal runtime-override store (which provision manages) and overwrite
-/// runtime configuration.
-fn reject_reserved_store(store: &ResolvedStoreId) -> Result<(), String> {
-    if store.platform == RUNTIME_ENV_STORE_NAME {
-        return Err(format!(
-            "fastly: store `{}` (platform name `{}`) collides with the reserved runtime-override config store `{RUNTIME_ENV_STORE_NAME}` that EdgeZero manages. Rename the store id or its `EDGEZERO__STORES__..__NAME` override.",
-            store.logical, store.platform
-        ));
-    }
-    Ok(())
-}
-
-/// Reject any declared store whose PLATFORM name collides with the reserved
-/// [`RUNTIME_ENV_STORE_NAME`], BEFORE provision writes anything. Shared by the
-/// local and cloud provision arms.
-pub(super) fn reject_reserved_store_names(stores: &ProvisionStores<'_>) -> Result<(), String> {
-    for (kind, group) in [
-        ("kv", stores.kv),
-        ("config", stores.config),
-        ("secrets", stores.secrets),
-    ] {
-        for store in group {
-            if store.platform == RUNTIME_ENV_STORE_NAME {
-                return Err(format!(
-                    "fastly: {kind} store `{}` (platform name `{}`) collides with the reserved runtime-override config store `{RUNTIME_ENV_STORE_NAME}` that provision manages. Rename the store id or its `EDGEZERO__STORES__{}__..__NAME` override.",
-                    store.logical,
-                    store.platform,
-                    kind.to_ascii_uppercase(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
 
 static FASTLY_ADAPTER: FastlyCliAdapter = FastlyCliAdapter;
 
@@ -118,19 +79,19 @@ static FASTLY_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_fastly",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_fastly",
         repo_crate: "crates/edgezero-adapter-fastly",
-        fallback: "edgezero-adapter-fastly = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false }",
+        fallback: "edgezero-adapter-fastly = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_fastly_wasm",
         repo_crate: "crates/edgezero-adapter-fastly",
-        fallback: "edgezero-adapter-fastly = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false, features = [\"fastly\"] }",
+        fallback: "edgezero-adapter-fastly = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false, features = [\"fastly\"] }",
         features: &["fastly"],
     },
 ];
@@ -221,6 +182,77 @@ pub(super) enum ConfigStoreLookup {
 //   secret's Viceroy env var as `key.to_ascii_uppercase()`, which
 //   is lossy — see the impl for the collision this rejects.
 impl Adapter for FastlyCliAdapter {
+    fn preflight_deploy(
+        &self,
+        context: &AdapterDeployContext,
+        args: &[String],
+    ) -> Result<DeployOwnership, String> {
+        validate_effective_deploy_service_id(context)?;
+        if owns_managed_deploy(context) {
+            parse_release_managed_deploy_args(args)?;
+            Ok(DeployOwnership::AdapterManaged)
+        } else {
+            scan_reserved_deploy_args(args)?;
+            Ok(DeployOwnership::ManifestCommand)
+        }
+    }
+
+    fn validate_config_key_for_target(
+        &self,
+        logical_store_id: &str,
+        key: &str,
+        staging: bool,
+        local: bool,
+    ) -> Result<(), String> {
+        validate_fastly_config_key(logical_store_id, key, staging, local)
+    }
+
+    fn finalize_deploy(
+        &self,
+        context: &AdapterDeployContext,
+        command_output: Option<&str>,
+    ) -> Result<(), String> {
+        if context.staging {
+            return Ok(());
+        }
+
+        let Some(service_id) = context.service_id.as_deref() else {
+            return Ok(());
+        };
+        validate_service_id(service_id)?;
+        if let Some(version) = command_output.and_then(parse_fastly_version) {
+            let token = require_token()?;
+            verify_version_active(
+                service_id,
+                version,
+                &token,
+                "after manifest-command deployment",
+            )?;
+            log::info!("version={version}");
+            return Ok(());
+        }
+        emit_active_version_for(service_id, true).map_err(|error| {
+            format!(
+                "deploy succeeded but the activated version could not be resolved from the deploy output or Fastly API: {error}"
+            )
+        })
+    }
+
+    fn deploy(
+        &self,
+        context: &AdapterDeployContext,
+        args: &[String],
+        exec: &AdapterExecContext<'_>,
+    ) -> Result<(), String> {
+        if owns_managed_deploy(context) {
+            deploy_managed_with_context(context, args)
+        } else {
+            validate_effective_deploy_service_id(context)?;
+            scan_reserved_deploy_args(args)?;
+            run::deploy_with_context(context, args, exec)
+        }
+    }
+
     fn deployed_fields(&self) -> &'static [&'static str] {
         &["service_id"]
     }
@@ -251,7 +283,9 @@ impl Adapter for FastlyCliAdapter {
             }
             AdapterAction::Deploy => run::deploy(args, ctx),
             AdapterAction::Serve => run::serve(args, ctx),
-            AdapterAction::DeployStaged => staging::deploy_staged(args),
+            AdapterAction::DeployStaging => Err(
+                "Fastly staging requires typed deploy context and --application-release".to_owned(),
+            ),
             AdapterAction::EmitVersion => staging::emit_active_version(args),
             AdapterAction::Healthcheck => staging::healthcheck(args),
             AdapterAction::Rollback => staging::rollback(args),
@@ -445,7 +479,6 @@ impl Adapter for FastlyCliAdapter {
         _push_ctx: &AdapterPushContext<'_>,
         dry_run: bool,
     ) -> Result<Vec<String>, String> {
-        reject_reserved_store(store)?;
         push_cloud::write_entries(store, entries, dry_run)
     }
 
@@ -459,7 +492,6 @@ impl Adapter for FastlyCliAdapter {
         _push_ctx: &AdapterPushContext<'_>,
         dry_run: bool,
     ) -> Result<Vec<String>, String> {
-        reject_reserved_store(store)?;
         push_local::write_entries(
             manifest_root,
             adapter_manifest_path,
@@ -478,7 +510,6 @@ impl Adapter for FastlyCliAdapter {
         key: &str,
         _push_ctx: &AdapterPushContext<'_>,
     ) -> Result<ReadConfigEntry, String> {
-        reject_reserved_store(store)?;
         push_cloud::read_entry(store, key)
     }
 
@@ -491,7 +522,6 @@ impl Adapter for FastlyCliAdapter {
         key: &str,
         _push_ctx: &AdapterPushContext<'_>,
     ) -> Result<ReadConfigEntry, String> {
-        reject_reserved_store(store)?;
         push_local::read_entry(manifest_root, adapter_manifest_path, store, key)
     }
 
@@ -625,6 +655,10 @@ impl TempFileGuard {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Drop::pin_drop has a default; this guard uses ordinary drop"
+)]
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if let Some(path) = &self.path {
@@ -1019,66 +1053,8 @@ mod tests {
     use super::*;
     use crate::cli::test_support::{TEST_CONFIG_ID, make_test_envelope};
     use edgezero_adapter::TypedSecretEntry;
-    use edgezero_adapter::registry::{AdapterPushContext, ResolvedStoreId};
-    use std::path::Path;
     #[cfg(unix)]
     use tempfile::tempdir;
-
-    #[test]
-    fn config_dispatch_rejects_reserved_runtime_env_store() {
-        // An env overlay that routes a config store's platform name to the
-        // reserved `edgezero_runtime_env` must be refused at the read/write
-        // dispatch -- not just during provision -- so app config can't
-        // overwrite the internal runtime-override store.
-        let store = ResolvedStoreId::new("app_config", "edgezero_runtime_env");
-        let ctx = AdapterPushContext::new();
-        let entries = [("k".to_owned(), "v".to_owned())];
-        for result in [
-            FastlyCliAdapter
-                .read_config_entry(Path::new("."), Some("fastly.toml"), None, &store, "k", &ctx)
-                .map(|_| ()),
-            FastlyCliAdapter
-                .push_config_entries(
-                    Path::new("."),
-                    Some("fastly.toml"),
-                    None,
-                    &store,
-                    &entries,
-                    &ctx,
-                    true,
-                )
-                .map(|_| ()),
-            FastlyCliAdapter
-                .read_config_entry_local(
-                    Path::new("."),
-                    Some("fastly.toml"),
-                    None,
-                    &store,
-                    "k",
-                    &ctx,
-                )
-                .map(|_| ()),
-            FastlyCliAdapter
-                .push_config_entries_local(
-                    Path::new("."),
-                    Some("fastly.toml"),
-                    None,
-                    &store,
-                    &entries,
-                    &ctx,
-                    true,
-                )
-                .map(|_| ()),
-        ] {
-            let Err(err) = result else {
-                panic!("a config op against the reserved runtime store must be refused");
-            };
-            assert!(
-                err.contains("reserved") && err.contains("edgezero_runtime_env"),
-                "error explains the reserved-store collision: {err}"
-            );
-        }
-    }
 
     #[test]
     fn validate_typed_secrets_passes_with_no_collision() {

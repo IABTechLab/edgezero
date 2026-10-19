@@ -129,7 +129,7 @@ new store id — by re-running `<app-cli> provision --adapter <name>
 leaves your operator edits in place.
 :::
 
-- **Axum**: Uses a persistent `redb` embedded database stored under `.edgezero/`. Each declared KV id gets its own derived file; data persists across restarts (the scaffolder's `.gitignore` already excludes `.edgezero/`).
+- **Axum**: Uses a persistent `redb` embedded database under `.edgezero/`. Each distinct resolved store name gets its own file, `.edgezero/kv-<slug>-<hash>.redb`; ids that resolve to the same platform name share it. Data persists across restarts (add `.edgezero/` to your `.gitignore`).
 - **Fastly (Viceroy)**: Requires a `[[local_server.kv_stores]]` entry per declared KV id for local development. `<app-cli> provision --adapter fastly --local` writes it into your local `fastly.toml`. The cloud-mode counterpart (`provision --adapter fastly`, no `--local`) writes the `[setup.kv_stores.<name>]` block that `fastly compute deploy` consumes on first deploy — split responsibilities so operators can iterate locally without touching setup metadata.
 
   ```toml
@@ -138,9 +138,12 @@ leaves your operator edits in place.
   data = ""
   ```
 
-  Override the platform name per environment via
-  `EDGEZERO__STORES__KV__SESSIONS__NAME=<other-name>`; provision honours
-  the override when it writes the block.
+  Select a different physical store per environment with
+  `EDGEZERO__STORES__KV__SESSIONS__NAME=<other-name>`. Fastly setup cannot map
+  that resource to the logical `sessions` alias, so provision requires an
+  existing service and prints an explicit resource-link command instead of
+  writing a setup block. Managed deploy performs that link reconciliation on
+  its unpublished target version.
 
 - **Cloudflare (Workerd)**: `<app-cli> provision --adapter cloudflare` creates the namespace and appends the `[[kv_namespaces]]` binding to your local `wrangler.toml` using the env-resolved platform name (`EDGEZERO__STORES__KV__<ID>__NAME` or the logical id by default). The example below shows what provision writes for a `sessions` id with no override:
 
@@ -229,4 +232,4 @@ Violating any of these returns a `KvError::Validation`, which maps to
 
 ## Next Steps
 
-- Check out the [demo app](https://github.com/stackpop/edgezero/tree/main/examples/app-demo) for a full working example.
+- Check out the [demo app](https://github.com/IABTechLab/edgezero/tree/main/examples/app-demo) for a full working example.

@@ -27,12 +27,12 @@ Adapters also expose `from_core_response` (or equivalent) to transform an `edgez
 
 - **Map HTTP status codes** verbatim
 - **Copy headers**, respecting casing rules enforced by the provider
-- **Preserve streaming bodies** - `Body::Stream` should be written chunk-by-chunk to the provider output without buffering the entire payload
+- **Preserve streaming bodies** - `Body::Stream` should be written chunk-by-chunk to the provider output without buffering the entire payload. Cloudflare does this through standard dispatch via `Response::from_stream`. Fastly's standard `run_app`/`serve_app` paths drain the stream into a `fastly::Body`; custom [`lifecycle::serve_custom`](/guide/adapters/fastly#custom-dispatch-and-streaming) callbacks can stream progressively. Spin collects into a `Vec<u8>` capped at 16 MiB, and Axum buffers as well
 - **Handle encoding helpers** (`decode_gzip_stream`, `decode_brotli_stream`) where a provider requires transparent decompression
 
 ## Dispatch Helper
 
-Adapters surface a `dispatch` function that bridges from the provider event loop into the shared router (`App::router().oneshot(...)`). It should:
+Adapters surface a dispatch entry point, either a free function or a service builder's `dispatch` method, that bridges from the provider event loop into the shared router (`app.router().oneshot(...)`). It should:
 
 1. Convert the incoming provider request with `into_core_request`
 2. Await the router future
@@ -59,13 +59,14 @@ Adapters implement `edgezero_core::proxy::ProxyClient` so handlers can forward o
 - Accept a `ProxyRequest` created with `ProxyRequest::from_request`
 - Build and send an outbound provider request, reusing headers and streaming the body without buffering
 - Convert the provider response into a `ProxyResponse`, again preserving streaming behaviour and normalising encodings
-- Attach a diagnostic header (e.g., `x-edgezero-proxy`) identifying which adapter forwarded the call (Fastly and Cloudflare do this today)
+- Attach a diagnostic header (e.g., `x-edgezero-proxy`) identifying which adapter forwarded the call (Fastly, Cloudflare, and Spin do this today; Axum does not)
 - Surface provider errors as `EdgeError::internal` so applications can decide how to respond
 
 ## Logging Initialisation
 
 Each adapter exports an `init_logger` helper for platform-specific logging backends. Fastly wires
-`log_fastly`, Cloudflare currently no-ops, and Axum uses `simple_logger` in its `run_app` helper.
+`log_fastly`, Cloudflare currently no-ops, Spin no-ops because Spin manages its own logging
+internally, and Axum uses `simple_logger` in its `run_app` helper.
 New adapters should provide a comparable helper so apps consistently opt into logging.
 
 ## Contract Tests
@@ -103,16 +104,28 @@ cargo test -p edgezero-adapter-cloudflare --features cloudflare --target wasm32-
 Install a `wasm-bindgen-cli` version that matches the workspace's `wasm-bindgen`
 entry in `Cargo.lock` before running the Cloudflare tests.
 
+### Spin Tests
+
+Spin's adapter targets `wasm32-wasip2` and its contract suite runs under Wasmtime:
+
+```bash
+rustup target add wasm32-wasip2
+export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run"
+cargo test -p edgezero-adapter-spin --features spin --target wasm32-wasip2 --test contract
+```
+
+The `wasmtime` version CI uses is pinned in `.tool-versions`.
+
 ## Onboarding New Adapters
 
 When bringing up another adapter:
 
 1. **Implement request/response conversion functions** that follow the rules above
 2. **Provide a context type** exposing the adapter's metadata and insert it in `into_core_request`
-3. **Implement a `dispatch` wrapper** plus logging helper
+3. **Implement a dispatch entry point** (free function or service builder) plus logging helper
 4. **Wire up a `ProxyClient`** that streams bodies and normalises encodings
 5. **Copy the contract test suite**, swapping in the new adapter types. Ensure the tests are gated to the target architecture if the adapter SDK does not compile for native hosts
-6. **Register the adapter** with `edgezero-adapter::register_adapter` (typically in a `cli` module using the `ctor` crate) so the CLI can discover it dynamically
+6. **Register the adapter** with `edgezero-adapter::register_adapter` (typically in a `cli` module using the `ctor` crate) so the CLI can discover it dynamically. To take part in `provision` and `config push`, override the relevant `Adapter` trait hooks: `single_store_kinds` and `merged_id_kinds` declare the platform's store shape, `validate_adapter_manifest` checks the adapter's own manifest, `provision` creates platform resources, and `push_config_entries` plus `read_config_entry` move config blobs. `single_store_kinds` and `merged_id_kinds` default to empty, `validate_adapter_manifest` defaults to accepting, `provision` defaults to a no-op, and the config push and read hooks default to reporting the operation as unsupported
 
 Adapters that fulfil these steps can be dropped into the EdgeZero CLI without requiring changes to application code.
 
@@ -124,3 +137,75 @@ Adapters that fulfil these steps can be dropped into the EdgeZero CLI without re
 | [Cloudflare](/guide/adapters/cloudflare) | Cloudflare Workers  | `wasm32-unknown-unknown` | Stable |
 | [Spin](/guide/adapters/spin)             | Fermyon Spin        | `wasm32-wasip2`          | Stable |
 | [Axum](/guide/adapters/axum)             | Native (Tokio)      | Host                     | Stable |
+
+### Store Capabilities
+
+`single_store_kinds` lists the kinds that allow only one declared id; `merged_id_kinds`
+lists the kinds that share one underlying platform resource, so declaring the same
+logical id under both is a collision that `config validate` rejects.
+
+| Adapter    | Single-store kinds | Merged kinds   | Config GC | Staging lifecycle |
+| ---------- | ------------------ | -------------- | --------- | ----------------- |
+| Fastly     | none               | none           | Yes       | Yes               |
+| Cloudflare | `secrets`          | `kv`, `config` | No        | No                |
+| Spin       | `secrets`          | `kv`, `config` | No        | No                |
+| Axum       | `secrets`          | none           | No        | No                |
+
+Fastly is the only adapter implementing `gc_config_entries` and the staging lifecycle
+actions (`DeployStaged`, `EmitVersion`, `Healthcheck`, `Rollback`); the others return
+an unsupported error for those.
+
+## Opt-in application retention
+
+Use retention when measurements show that constructing the app is expensive.
+Keep per-request construction when `configure` or `app_state` reads values that
+can change and no refresh policy has been defined.
+
+Application ownership and request scheduling are separate. An `App` can be
+retained by its caller; each adapter still controls how requests arrive:
+
+| Adapter    | Existing default                         | Explicit retention                                                                                                    |
+| ---------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Fastly     | Build for each single-request invocation | `serve_app` with an SDK `Serve`, or [`lifecycle::serve_custom`](/guide/adapters/fastly#custom-dispatch-and-streaming) |
+| Cloudflare | Build on each fetch                      | Concrete application-owned cache and `dispatch_app`                                                                   |
+| Spin       | Build on each invocation                 | Concrete cache and `dispatch_app` on a compatible host                                                                |
+| Axum       | Build once at server startup             | Already retains the router                                                                                            |
+
+Retain owned settings, parsed objects, and bounded caches only when their
+staleness policy is acceptable. Keep native request handles, bodies, store
+registries, pending operations, and response effects request-local. `Send + Sync`
+and cloning do not prove host-resource validity. Shared `Arc` interiors remain
+shared; the framework does not reset them between requests. Registered app state
+continues to overwrite request extensions of the same type.
+
+Applications own refresh, invalidation, key rotation, initialization-failure
+policy, and workload benchmarks. Publish complete snapshots; overlapping requests
+keep the snapshot they acquired. Never put an unkeyed static in a generic cache
+function: that static would be shared between application types. Existing macros,
+manifest settings, and generated entry points retain their lifecycle defaults.
+The Cloudflare response-header correction applies to both default and retained apps.
+
+### Preparing an application for retention
+
+Audit the values captured by handlers, middleware, and registered state before
+opting in. The framework creates fresh request resources but cannot inspect or
+clear application-owned interiors.
+
+| Risk                                       | Application mitigation                                                                                                                                                                                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request data survives into another request | Store identity, authorization results, bodies, and correlation IDs in request-local values or extensions. Use distinct types for request data and registered state; registered state wins on a type collision.                                     |
+| Settings or parsed keys become stale       | Keep them request-scoped until a refresh policy is defined. For retained values, build and validate a complete replacement snapshot, then publish it atomically. Decide whether refresh failure keeps the last valid snapshot or rejects requests. |
+| Caches grow without bound                  | Limit entries and retained bytes, expire or evict entries, and bound origin diversity. A sandbox request limit cannot bound allocation within one request.                                                                                         |
+| Concurrent requests mutate shared state    | Synchronize mutations and acquire an immutable snapshot per request. Release locks before awaiting provider work. Rust's `Send + Sync` bounds do not establish application-level isolation.                                                        |
+| Initialization or required bindings fail   | Surface the error and monitor repeated fresh-instance failures. In custom dispatch, convert a recoverable failure into one response only when the application defines that recovery policy. Bound retries, e.g. with Fastly `Serve` limits.        |
+| Logging is installed twice                 | Choose one owner. With the Fastly helper, set `Hooks::owns_logging()` when application code installs the logger. First-snapshot logging is intentionally fixed; use custom dispatch for another policy.                                            |
+| A stream fails after commitment            | Finish or drop the streaming writer and settle request-owned pending work. Log the partial-response failure; do not attempt a replacement response after sending headers.                                                                          |
+
+Exercise cancellation as well as successful requests. The core regression tests
+drop a suspended request, verify its extension resources are released, and serve
+a fresh request through the same router. This does not cancel application-spawned
+background tasks or prove cleanup after a terminating provider trap.
+
+Roll out retention only after the application's isolation, refresh, and bounded
+memory workload checks pass. Provider eviction can force initialization on any
+request, so correctness must not depend on reaching the configured reuse limit.

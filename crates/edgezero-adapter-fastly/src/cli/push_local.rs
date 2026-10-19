@@ -34,7 +34,7 @@ pub(super) fn write_entries(
     };
     let fastly_path = manifest_root.join(rel);
     let logical = store.logical.as_str();
-    let name = store.platform.as_str();
+    let name = store.logical.as_str();
     if entries.is_empty() {
         return Ok(vec![format!(
             "no config entries to push to `[local_server.config_stores.{name}]` in {} (logical id `{logical}`)",
@@ -121,7 +121,7 @@ pub(super) fn read_entry(
         );
     };
     let fastly_path = manifest_root.join(rel);
-    let name = store.platform.as_str();
+    let name = store.logical.as_str();
     // A prior-state read failure must never BLOCK the command: the diff just
     // cannot be computed, so it degrades to `Unsupported` ("cannot diff").
     // Erroring here would newly fail a dry-run that reads nothing today.

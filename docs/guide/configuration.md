@@ -325,22 +325,29 @@ The function deserialises, runs the `validator` rules (e.g.
 optional secret is skipped at runtime — see
 [Nested and array secrets](#nested-and-array-secrets)); combining the
 annotation with `#[serde(flatten)]`, `#[serde(rename)]`, or
-`#[serde(skip)]` is a compile error. The `config validate` command
-(see [CLI reference](/guide/cli-reference)) checks that every
-`#[secret(store_ref)]` value matches a declared id.
+`#[serde(skip)]` is a compile error. `#[serde(rename_all = ...)]` is
+rejected on any struct that carries a `#[secret]` field or an
+`#[app_config(nested)]` child, because `secret_fields()` emits Rust field
+names verbatim and a container rename would desync `config validate` from
+runtime deserialisation. A `#[secret(store_ref)]` field may not be
+`Option<String>`; a store id is structural and must always be present. The
+`config validate` command (see [CLI reference](/guide/cli-reference))
+checks that every `#[secret(store_ref)]` value matches a declared id.
 
 Resolve secrets at request time from the secret store:
 
 ```rust
 // #[secret] field — key in the default store
 let token = ctx
-    .secret_store_default()?
+    .secret_store_default()
+    .ok_or_else(|| EdgeError::service_unavailable("no default secret store"))?
     .require_str(&cfg.api_token)
     .await?;
 
 // #[secret(store_ref)] field — value names the store itself
 let value = ctx
-    .secret_store(&cfg.vault)?
+    .secret_store(&cfg.vault)
+    .ok_or_else(|| EdgeError::service_unavailable("unknown secret store"))?
     .require_str("active")
     .await?;
 ```
@@ -432,6 +439,12 @@ concrete array indices — e.g. `integrations.datadome.server_side_key` or
   skippable. A missing or `null` intermediate object/array in the stored
   blob (e.g. the whole `partners` array) is a `ConfigOutOfDate` error, not
   a silent skip — both `config validate` and the runtime reject it.
+- **Hand-written optional paths:** the derive does not emit optional
+  intermediates, but a hand-written `AppConfigMeta` implementation can mark
+  one with `SecretPathSegment::OptionalField`. An absent or `null` optional
+  intermediate skips the rest of that secret path in `config validate`,
+  `config push`, and the runtime extractor. When present, it must still have
+  the expected object shape.
 - **No cyclic nesting:** a type that directly nests itself by name
   (`#[app_config(nested)] x: Vec<Config>`) is a compile error. A cycle the
   derive can't see one-type-at-a-time — a _mutual_ cycle (`A` nests `B`,
@@ -490,10 +503,13 @@ echo_stdout = true
 
 ### Adapter Metadata
 
-| Field      | Description                                            |
-| ---------- | ------------------------------------------------------ |
-| `crate`    | Path to adapter crate                                  |
-| `manifest` | Path to provider manifest (fastly.toml, wrangler.toml) |
+| Field       | Description                                                         |
+| ----------- | ------------------------------------------------------------------- |
+| `component` | Spin component id, when the adapter manifest declares more than one |
+| `crate`     | Path to adapter crate                                               |
+| `host`      | Bind address for the adapter server (e.g. `127.0.0.1`)              |
+| `manifest`  | Path to provider manifest (fastly.toml, wrangler.toml)              |
+| `port`      | Port for the adapter server                                         |
 
 ### Build Configuration
 
@@ -505,11 +521,14 @@ echo_stdout = true
 
 ### Commands
 
-| Field    | Description                                    |
-| -------- | ---------------------------------------------- |
-| `build`  | Command for `edgezero build --adapter <name>`  |
-| `serve`  | Command for `edgezero serve --adapter <name>`  |
-| `deploy` | Command for `edgezero deploy --adapter <name>` |
+| Field         | Description                                         |
+| ------------- | --------------------------------------------------- |
+| `build`       | Command for `edgezero build --adapter <name>`       |
+| `serve`       | Command for `edgezero serve --adapter <name>`       |
+| `deploy`      | Command for `edgezero deploy --adapter <name>`      |
+| `auth-login`  | Command for `edgezero auth login --adapter <name>`  |
+| `auth-logout` | Command for `edgezero auth logout --adapter <name>` |
+| `auth-status` | Command for `edgezero auth status --adapter <name>` |
 
 When commands are omitted, the CLI falls back to built-in adapter helpers.
 
@@ -655,6 +674,32 @@ The macro:
 - Wires middleware from the manifest
 - Bakes portable store metadata (`Hooks::stores()`) from `[stores.kv]`, `[stores.config]`, and `[stores.secrets]` when present
 - Creates the `App` struct that implements `Hooks` (use `App::build_app()`)
+
+Arguments:
+
+| Argument       | Form                    | Meaning                                                                                                           |
+| -------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| manifest path  | positional (required)   | Path to `edgezero.toml`, resolved against the invoking crate's `CARGO_MANIFEST_DIR`                               |
+| App identifier | positional (optional)   | Name for the generated struct instead of `App`; must come immediately after the path, before any keyword argument |
+| `owns_logging` | `owns_logging = <bool>` | Sets `Hooks::owns_logging()`. Defaults to `false`                                                                 |
+| `state`        | `state = <expr>`        | Emits `builder.with_state(expr)` so handlers can extract shared state                                             |
+
+```rust
+edgezero_core::app!(
+    "../../edgezero.toml",
+    MyApp,
+    owns_logging = true,
+    state = crate::app_state()
+);
+```
+
+The `state` expression is emitted inside the generated `build_router()`, which
+runs once per request on the default Fastly, Cloudflare and Spin entry points, so
+keep it cheap. Build the heavy value once and hand out clones.
+
+See [Sharing app state](/guide/handlers#sharing-app-state) for how handlers
+read `state`, and [Owning your own logging](/guide/adapters/fastly#owning-your-own-logging)
+for when to set `owns_logging`.
 
 ### ManifestLoader
 

@@ -18,12 +18,13 @@
 //! `test_support::manifest_guard()` instead — it already serialises
 //! the `EDGEZERO_MANIFEST` overrides those tests set.
 
-use std::sync::{Mutex, OnceLock};
+#[cfg(unix)]
+use crate::test_support::manifest_guard;
+use std::sync::Mutex;
 
 /// `$PATH`-mutating guard. Unix-only because Windows PATH semantics
 /// and the shim installation pattern differ.
 #[cfg(unix)]
 pub(crate) fn path_mutation_guard() -> &'static Mutex<()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(()))
+    manifest_guard()
 }

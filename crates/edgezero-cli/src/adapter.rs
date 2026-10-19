@@ -1,4 +1,7 @@
-use edgezero_adapter::registry::{self as adapter_registry, AdapterAction, AdapterExecContext};
+use edgezero_adapter::registry::{
+    self as adapter_registry, AdapterAction, AdapterDeployContext, AdapterExecContext,
+    DeployOwnership,
+};
 use edgezero_core::manifest::{Manifest, ManifestLoader, ResolvedEnvironment};
 
 use std::env;
@@ -18,7 +21,7 @@ pub enum Action {
     Build,
     Deploy,
     /// Fastly staging lifecycle: stage a draft version.
-    DeployStaged,
+    DeployStaging,
     /// Fastly staging lifecycle: emit the active version.
     EmitVersion,
     /// Fastly staging lifecycle: probe health.
@@ -38,7 +41,7 @@ impl fmt::Display for Action {
             Action::Build => "build",
             Action::Deploy => "deploy",
             Action::Serve => "serve",
-            Action::DeployStaged => "deploy --staging",
+            Action::DeployStaging => "deploy --staging",
             Action::EmitVersion => "deploy (version)",
             Action::Healthcheck => "healthcheck",
             Action::Rollback => "rollback",
@@ -57,7 +60,7 @@ impl From<Action> for AdapterAction {
             Action::Build => AdapterAction::Build,
             Action::Deploy => AdapterAction::Deploy,
             Action::Serve => AdapterAction::Serve,
-            Action::DeployStaged => AdapterAction::DeployStaged,
+            Action::DeployStaging => AdapterAction::DeployStaging,
             Action::EmitVersion => AdapterAction::EmitVersion,
             Action::Healthcheck => AdapterAction::Healthcheck,
             Action::Rollback => AdapterAction::Rollback,
@@ -261,6 +264,20 @@ pub(crate) fn execute_with_env_overlay(
     // env the shell path above would have applied, otherwise a `serve`
     // here starts with none of the `.env` secrets and resolves its
     // manifest from the process cwd.
+    with_exec_context(adapter_name, manifest_loader, env_overlay, |ctx| {
+        adapter.execute(AdapterAction::from(action), adapter_args, ctx)
+    })
+}
+
+fn with_exec_context<T, F>(
+    adapter_name: &str,
+    manifest_loader: Option<&ManifestLoader>,
+    env_overlay: &[(String, String)],
+    execute: F,
+) -> Result<T, String>
+where
+    F: FnOnce(&AdapterExecContext<'_>) -> Result<T, String>,
+{
     let (cwd, child_env): (Option<&Path>, Vec<(String, String)>) = match manifest_loader {
         Some(loader) => {
             let root = loader.manifest().root();
@@ -305,7 +322,7 @@ pub(crate) fn execute_with_env_overlay(
     if let Some(component) = adapter_component {
         ctx = ctx.with_adapter_component(component);
     }
-    adapter.execute(AdapterAction::from(action), adapter_args, &ctx)
+    execute(&ctx)
 }
 
 /// Resolve the declared, project-root-resolved
@@ -408,68 +425,110 @@ fn resolve_declared_adapter_paths(
     Ok((Some(root.join(rel)), Some(root.join(crate_rel))))
 }
 
-/// Same dispatch as [`execute`], but when the action resolves to a
-/// manifest-declared shell command the child's output is echoed AND
-/// captured (see [`run_shell_tee`]) and returned as `Some(text)`.
-///
-/// Returns `Ok(None)` when the action was served by the registered
-/// adapter's built-in `execute` instead — that path writes straight to
-/// the inherited stdio, so there is nothing for us to capture and the
-/// caller must fall back to another source of truth (for Fastly deploy:
-/// the Fastly API).
-/// The `env_overlay` (same precedence as [`execute_with_env_overlay`])
-/// lets a staged or version-emitting deploy advertise the held provision
-/// lock to its subprocess (and any nested provision) while still capturing
-/// the command's output.
-pub(crate) fn execute_capture(
+fn require_adapter(
     adapter_name: &str,
-    action: Action,
+    has_manifest: bool,
+) -> Result<&'static dyn adapter_registry::Adapter, String> {
+    adapter_registry::get_adapter(adapter_name).ok_or_else(|| {
+        let available = adapter_registry::registered_adapters();
+        if available.is_empty() {
+            if has_manifest {
+                format!("adapter `{adapter_name}` is not registered (no adapters available)")
+            } else {
+                format!(
+                    "adapter `{adapter_name}` is not registered in this build. Provide an `edgezero.toml` (or set `EDGEZERO_MANIFEST`) so the CLI can load adapters, or rebuild `edgezero-cli` with the `{adapter_name}` adapter feature enabled."
+                )
+            }
+        } else {
+            format!(
+                "adapter `{}` is not registered (available: {})",
+                adapter_name,
+                available.join(", ")
+            )
+        }
+    })
+}
+
+/// Select deployment ownership through the registered adapter's preflight.
+/// Manifest-owned and fallback deployments retain the legacy finalizer, while
+/// adapter-managed deployments own the complete lifecycle in `deploy`.
+pub fn deploy(
+    adapter_name: &str,
+    context: &AdapterDeployContext,
+    adapter_manifest_path_error: Option<&str>,
     manifest_loader: Option<&ManifestLoader>,
     adapter_args: &[String],
     env_overlay: &[(String, String)],
-) -> Result<Option<String>, String> {
-    if let Some(loader) = manifest_loader
-        && let Some(command) = manifest_command(loader.manifest(), adapter_name, action)
+) -> Result<(), String> {
+    assert_adapter_declaration_consistent(manifest_loader, adapter_name)?;
+    let registered_adapter = adapter_registry::get_adapter(adapter_name);
+    let ownership = registered_adapter
+        .map_or(Ok(DeployOwnership::ManifestCommand), |registered| {
+            registered.preflight_deploy(context, adapter_args)
+        })?;
+
+    if ownership != DeployOwnership::AdapterManaged && context.application_release_root.is_some() {
+        return Err(format!(
+            "adapter `{adapter_name}` does not support immutable application releases; omit --application-release"
+        ));
+    }
+
+    if ownership == DeployOwnership::AdapterManaged {
+        if let Some(err) = adapter_manifest_path_error {
+            return Err(err.to_owned());
+        }
+        let Some(managed_adapter) = registered_adapter else {
+            return Err(format!(
+                "adapter `{adapter_name}` selected managed deployment without being registered"
+            ));
+        };
+        return with_exec_context(adapter_name, manifest_loader, env_overlay, |exec| {
+            managed_adapter.deploy(context, adapter_args, exec)
+        });
+    }
+
+    if !context.staging
+        && let Some(loader) = manifest_loader
+        && let Some(command) = manifest_command(loader.manifest(), adapter_name, Action::Deploy)
     {
+        if registered_adapter.is_some()
+            && !context.stores.is_empty()
+            && let Some(err) = adapter_manifest_path_error
+        {
+            return Err(err.to_owned());
+        }
         let root = loader.manifest().root().unwrap_or_else(|| Path::new("."));
         let env = loader.manifest().environment_for(adapter_name);
         let adapter_bind = adapter_bind_from_manifest(loader.manifest(), adapter_name);
-        return run_shell_tee(
+        let mut command_args = Vec::new();
+        if let Some(service_id) = context.service_id.as_deref() {
+            command_args.extend(["--service-id".to_owned(), service_id.to_owned()]);
+        }
+        command_args.extend_from_slice(adapter_args);
+        let output = run_shell_tee(
             command,
             root,
             adapter_name,
-            action,
+            Action::Deploy,
             Some(&env),
             adapter_bind,
-            adapter_args,
+            &command_args,
             env_overlay,
-        )
-        .map(Some);
+        )?;
+        if let Some(finalizer) = registered_adapter {
+            finalizer.finalize_deploy(context, Some(&output))?;
+        }
+        return Ok(());
     }
-    execute_with_env_overlay(
-        adapter_name,
-        action,
-        manifest_loader,
-        adapter_args,
-        env_overlay,
-    )?;
-    Ok(None)
-}
 
-/// Whether `action` for `adapter_name` resolves to a manifest-declared
-/// shell command (rather than the registered adapter's built-in logic).
-///
-/// Callers use this to decide whether an EdgeZero-internal directive
-/// (e.g. `--manifest-path`, understood only by the built-in adapter) is
-/// safe to thread into `adapter_args`: a manifest shell command receives
-/// those args verbatim and would choke on a flag its own CLI lacks.
-pub fn has_manifest_command(
-    manifest_loader: Option<&ManifestLoader>,
-    adapter_name: &str,
-    action: Action,
-) -> bool {
-    manifest_loader
-        .is_some_and(|loader| manifest_command(loader.manifest(), adapter_name, action).is_some())
+    if let Some(err) = adapter_manifest_path_error {
+        return Err(err.to_owned());
+    }
+    let fallback_adapter = require_adapter(adapter_name, manifest_loader.is_some())?;
+    with_exec_context(adapter_name, manifest_loader, env_overlay, |exec| {
+        fallback_adapter.deploy(context, adapter_args, exec)
+    })?;
+    fallback_adapter.finalize_deploy(context, None)
 }
 
 fn manifest_command<'manifest>(
@@ -490,7 +549,9 @@ fn manifest_command<'manifest>(
         // adapter's built-in Fastly logic directly. Returning None
         // routes `adapter::execute` past the manifest-command path to
         // the registered adapter's `execute`.
-        Action::DeployStaged | Action::EmitVersion | Action::Healthcheck | Action::Rollback => None,
+        Action::DeployStaging | Action::EmitVersion | Action::Healthcheck | Action::Rollback => {
+            None
+        }
     }
 }
 
@@ -596,7 +657,11 @@ fn run_shell(
 /// This is the "tee" half of [`run_shell_tee`]: the operator still sees
 /// the child's output as it happens, and the caller still gets the text
 /// to parse.
-fn tee_stream<R: Read, W: Write>(reader: R, mut writer: W) -> String {
+fn tee_stream<R, W>(reader: R, mut writer: W) -> String
+where
+    R: Read,
+    W: Write,
+{
     let mut buffered = BufReader::new(reader);
     let mut captured = String::new();
     let mut line = String::new();
@@ -709,13 +774,28 @@ fn shell_join(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedEnvironment, assert_adapter_declaration_consistent, build_child_env,
-        resolve_declared_adapter_paths,
+        AdapterDeployContext, ResolvedEnvironment, assert_adapter_declaration_consistent,
+        build_child_env, deploy, resolve_declared_adapter_paths,
     };
     use crate::test_support::manifest_guard;
     use edgezero_core::manifest::{ManifestLoader, ResolvedEnvironmentBinding};
     use edgezero_core::test_env::EnvOverride;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn deploy_rejects_application_release_for_non_managed_adapter() {
+        let context = AdapterDeployContext {
+            application_release_root: Some(PathBuf::from("/verified/release")),
+            ..AdapterDeployContext::default()
+        };
+
+        let error = deploy("unregistered", &context, None, None, &[], &[])
+            .expect_err("a manifest-owned adapter must not ignore the release contract");
+        assert_eq!(
+            error,
+            "adapter `unregistered` does not support immutable application releases; omit --application-release"
+        );
+    }
 
     #[test]
     fn declared_adapter_paths_require_manifest_field() {

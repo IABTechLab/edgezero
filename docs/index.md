@@ -11,7 +11,7 @@ hero:
       link: /guide/getting-started
     - theme: alt
       text: View on GitHub
-      link: https://github.com/stackpop/edgezero
+      link: https://github.com/IABTechLab/edgezero
 
 features:
   - title: Write Once, Deploy Anywhere
@@ -20,6 +20,8 @@ features:
     details: Deploy to Fastly Compute@Edge with zero-cold-start WASM binaries using the wasm32-wasip1 target.
   - title: Cloudflare Workers Support
     details: Run on Cloudflare Workers with seamless wrangler integration and wasm32-unknown-unknown compilation.
+  - title: Fermyon Spin Support
+    details: Target Fermyon Spin with the wasm32-wasip2 component model and the spin CLI for local runs and deploys.
   - title: Native Development (Axum)
     details: Develop locally with a full-featured Axum/Tokio dev server, then deploy to containers or native hosts.
   - title: Type-Safe Extractors

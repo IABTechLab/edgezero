@@ -412,3 +412,83 @@ pub(crate) fn oplog_has(oplog: &Path, line: &str) -> bool {
         .lines()
         .any(|entry| entry == line)
 }
+
+/// Build a fake `fastly` for live runtime store-name reconciliation.
+/// The current runtime-env entries are listed verbatim and every update or
+/// delete is recorded in `oplog`.
+#[cfg(unix)]
+pub(crate) fn fake_fastly_runtime_mapping(
+    current: &[(String, String)],
+    oplog: &Path,
+) -> tempfile::TempDir {
+    fake_fastly_runtime_mapping_with_update_exit(current, oplog, 0)
+}
+
+#[cfg(unix)]
+fn fake_fastly_runtime_mapping_with_update_exit(
+    current: &[(String, String)],
+    oplog: &Path,
+    update_exit: i32,
+) -> tempfile::TempDir {
+    fake_fastly_runtime_mapping_with_exits(current, oplog, update_exit, 0)
+}
+
+#[cfg(unix)]
+fn fake_fastly_runtime_mapping_with_exits(
+    current: &[(String, String)],
+    oplog: &Path,
+    update_exit: i32,
+    delete_exit: i32,
+) -> tempfile::TempDir {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempdir().expect("tempdir");
+    let store_list = dir.path().join("stores.json");
+    let entry_list = dir.path().join("entries.json");
+    fs::write(
+        &store_list,
+        format!(r#"[{{"name":"{TEST_CONFIG_ID}","id":"store-abc123"}}]"#),
+    )
+    .expect("store list");
+    let entries = current
+        .iter()
+        .map(|(key, value)| {
+            serde_json::json!({
+                "item_key": key,
+                "item_value": value,
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        &entry_list,
+        serde_json::to_string(&entries).expect("entry list json"),
+    )
+    .expect("entry list");
+
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "compute" ] && [ "$2" = "deploy" ]; then printf 'compute-deploy cwd=%s\n' "$PWD" >> '{oplog}'; exit 0; fi
+if [ "$1" = "config-store" ] && [ "$2" = "create" ]; then printf 'store-create cwd=%s\n' "$PWD" >> '{oplog}'; exit 0; fi
+if [ "$1" = "kv-store" ] && [ "$2" = "create" ]; then printf 'kv-store-create name=%s cwd=%s\n' "$3" "$PWD" >> '{oplog}'; exit 0; fi
+if [ "$1" = "config-store" ]; then printf 'store-list cwd=%s\n' "$PWD" >> '{oplog}'; cat '{stores}'; exit 0; fi
+sub="$2"
+key=""
+for arg in "$@"; do case "$arg" in --key=*) key="${{arg#--key=}}";; esac; done
+if [ "$sub" = "list" ]; then printf 'list cwd=%s\n' "$PWD" >> '{oplog}'; cat '{entries}'; exit 0; fi
+if [ "$sub" = "update" ]; then value=$(cat); printf 'update %s=%s cwd=%s\n' "$key" "$value" "$PWD" >> '{oplog}'; exit {update_exit}; fi
+if [ "$sub" = "delete" ]; then printf 'delete %s cwd=%s\n' "$key" "$PWD" >> '{oplog}'; exit {delete_exit}; fi
+echo 'unexpected fastly invocation' >&2
+exit 1
+"#,
+        stores = store_list.display(),
+        entries = entry_list.display(),
+        oplog = oplog.display(),
+    );
+    let script_path = dir.path().join("fastly");
+    fs::write(&script_path, script).expect("script");
+    let mut perms = fs::metadata(&script_path).expect("meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).expect("chmod");
+    dir
+}

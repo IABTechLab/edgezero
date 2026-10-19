@@ -21,3 +21,5 @@ pub use registry::{
     Adapter, AdapterDeployedState, ProvisionMode, ProvisionOutcome, ProvisionStores,
     ResolvedStoreId, TypedSecretEntry, get_adapter,
 };
+#[cfg(feature = "cli")]
+pub mod release;

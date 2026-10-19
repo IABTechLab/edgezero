@@ -418,6 +418,10 @@ impl ProvisionLock {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Drop::pin_drop has a default; this lock uses ordinary drop"
+)]
 impl Drop for ProvisionLock {
     fn drop(&mut self) {
         // The OS releases the lock on descriptor close, but call `unlock`

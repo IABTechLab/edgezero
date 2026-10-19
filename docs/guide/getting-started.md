@@ -22,7 +22,7 @@ cargo install --path crates/edgezero-cli
 Or straight from Git, without cloning first:
 
 ```bash
-cargo install --git https://github.com/stackpop/edgezero.git edgezero-cli
+cargo install --git https://github.com/IABTechLab/edgezero.git edgezero-cli
 ```
 
 ## Create a New Project

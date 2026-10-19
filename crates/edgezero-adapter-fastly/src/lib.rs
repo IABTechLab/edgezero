@@ -1,9 +1,16 @@
 //! Utilities for bridging Fastly Compute@Edge requests into the
 //! `edgezero-core` service abstractions.
 
-// Only compiled where it is actually used (the CLI push/GC path and the Fastly
-// runtime resolver). Gating it keeps a `--no-default-features` build dead-code
-// clean instead of dragging in helpers no feature references.
+#![cfg_attr(
+    feature = "fastly",
+    expect(
+        clippy::pub_use,
+        reason = "re-export the SDK serving builder rather than duplicate its API"
+    )
+)]
+
+// Only compiled where it is actually used by the CLI push/GC path. Gating it
+// keeps a `--no-default-features` build dead-code clean.
 #[cfg(any(feature = "cli", feature = "fastly", test))]
 pub(crate) mod chunked_config;
 #[cfg(feature = "cli")]
@@ -13,6 +20,7 @@ pub mod config_store;
 pub mod context;
 #[cfg(feature = "fastly")]
 pub mod key_value_store;
+pub mod lifecycle;
 #[cfg(feature = "fastly")]
 pub mod logger;
 #[cfg(feature = "fastly")]
@@ -24,29 +32,16 @@ pub mod response;
 #[cfg(feature = "fastly")]
 pub mod secret_store;
 
+#[cfg(any(feature = "fastly", test))]
+use edgezero_core::app::App;
 #[cfg(feature = "fastly")]
 use edgezero_core::app::Hooks;
-#[cfg(any(feature = "fastly", test))]
-use edgezero_core::app::StoresMetadata;
-#[cfg(any(feature = "fastly", test))]
-use edgezero_core::env_config::EnvConfig;
 #[cfg(feature = "fastly")]
 use edgezero_core::http::Extensions;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::manifest::ResolvedLoggingConfig;
 #[cfg(feature = "fastly")]
-use fastly::compute_runtime::service_id;
-
-#[cfg(any(feature = "cli", feature = "fastly", test))]
-const RUNTIME_ENV_PREFIX: &str = "EDGEZERO__";
-
-/// Name of the Fastly Config Store the runtime opens for `EDGEZERO__*`
-/// overrides.
-///
-/// The fixed name is load-bearing: a staged deploy creates a per-service
-/// staging twin and links it into the staged version under THIS name, which is
-/// how the runtime resolves staged selectors without knowing the twin exists.
-pub const RUNTIME_ENV_STORE_NAME: &str = "edgezero_runtime_env";
+pub use fastly::http::serve::{Serve, ServeSummary};
 
 #[cfg(any(feature = "fastly", test))]
 #[derive(Debug, Clone)]
@@ -61,60 +56,40 @@ pub struct FastlyLogging {
 impl From<ResolvedLoggingConfig> for FastlyLogging {
     #[inline]
     fn from(config: ResolvedLoggingConfig) -> Self {
+        let use_fastly_logger = config.endpoint.is_some();
         Self {
             echo_stdout: config.echo_stdout.unwrap_or(true),
             endpoint: config.endpoint,
             level: config.level.into(),
-            use_fastly_logger: true,
-        }
-    }
-}
-
-/// Resolve [`FastlyLogging`] from the `EDGEZERO__LOGGING__*` overlay.
-///
-/// Three rules live here rather than in the caller. An unset or unparseable
-/// `EDGEZERO__LOGGING__LEVEL` falls back to [`log::LevelFilter::Info`], and
-/// `use_fastly_logger` is DERIVED from `endpoint.is_some()` so a Viceroy run
-/// with no endpoint is never handed the reserved `stdout` name. `echo_stdout`
-/// is always `true` on this path: `EDGEZERO__LOGGING__ECHO_STDOUT` is resolved
-/// into the [`EnvConfig`] for downstream readers but is not applied here.
-#[cfg(any(feature = "fastly", test))]
-impl From<&EnvConfig> for FastlyLogging {
-    #[inline]
-    fn from(env: &EnvConfig) -> Self {
-        use std::str::FromStr as _;
-
-        let level = env
-            .logging_level()
-            .and_then(|raw| log::LevelFilter::from_str(raw).ok())
-            .unwrap_or(log::LevelFilter::Info);
-        // Only attach Fastly's named-endpoint logger when `EDGEZERO__LOGGING__ENDPOINT`
-        // is set. Production deployments set it to a real `[log_endpoints]` entry from
-        // `fastly.toml`; local Viceroy runs leave it unset and avoid the
-        // "endpoint not found, or is reserved" error that fires when the adapter
-        // would otherwise fall back to a reserved name like `stdout`.
-        let endpoint = env.logging_endpoint().map(str::to_owned);
-        let use_fastly_logger = endpoint.is_some();
-        Self {
-            echo_stdout: true,
-            endpoint,
-            level,
             use_fastly_logger,
         }
     }
 }
 
-/// Prefix a canonical `EDGEZERO__*` key with its owning Fastly service.
-///
-/// The shared `edgezero_runtime_env` Config Store is account-wide. Service
-/// scoping prevents two linked services that declare the same logical store id
-/// from overwriting one another's runtime mappings.
-#[cfg(any(feature = "cli", feature = "fastly", test))]
-pub(crate) fn service_scoped_runtime_env_key(service_id: &str, canonical_key: &str) -> String {
-    let suffix = canonical_key
-        .strip_prefix(RUNTIME_ENV_PREFIX)
-        .unwrap_or(canonical_key);
-    format!("{RUNTIME_ENV_PREFIX}SERVICES__{service_id}__{suffix}")
+#[cfg(any(feature = "fastly", test))]
+#[derive(Default)]
+struct RetainedApp {
+    app: Option<App>,
+}
+
+#[cfg(any(feature = "fastly", test))]
+impl RetainedApp {
+    fn get_or_init<E>(
+        &mut self,
+        logging: &FastlyLogging,
+        owns_logging: impl FnOnce() -> bool,
+        install_logger: impl FnOnce(&str, log::LevelFilter, bool) -> Result<(), E>,
+        build: impl FnOnce() -> App,
+    ) -> Result<&App, E> {
+        if self.app.is_none() && logging.use_fastly_logger && !owns_logging() {
+            install_logger(
+                logging.endpoint.as_deref().unwrap_or("stdout"),
+                logging.level,
+                logging.echo_stdout,
+            )?;
+        }
+        Ok(self.app.get_or_insert_with(build))
+    }
 }
 
 /// # Errors
@@ -146,15 +121,18 @@ pub fn init_logger(
 
 /// Entry point for a Fastly Compute application.
 ///
-/// Portable store config is baked into `A` by the `app!` macro; adapter-specific
-/// values (platform store names, logging level) are read at runtime from
-/// `EDGEZERO__*` environment variables. No `edgezero.toml` is required.
+/// Portable store declarations and Fastly logging settings are baked into `A`
+/// by the `app!` macro. Deployment binds physical stores to the baked logical
+/// IDs through Fastly resource links.
 ///
 /// # Errors
-/// Returns an error if logger setup fails or any required store cannot be opened.
+/// Logger setup failures and unavailable required stores return errors.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app<A: Hooks>(req: fastly::Request) -> Result<fastly::Response, fastly::Error> {
+pub fn run_app<A>(req: fastly::Request) -> Result<fastly::Response, fastly::Error>
+where
+    A: Hooks,
+{
     run_app_with_request_extensions::<A, _>(req, |_req, _extensions| {})
 }
 
@@ -165,7 +143,7 @@ pub fn run_app<A: Hooks>(req: fastly::Request) -> Result<fastly::Response, fastl
 /// extensions and are visible to middleware and the `State`/extractor layer.
 ///
 /// # Errors
-/// Returns an error if logger setup fails or any required store cannot be opened.
+/// Logger setup failures and unavailable required stores return errors.
 #[cfg(feature = "fastly")]
 #[inline]
 pub fn run_app_with_request_extensions<A, F>(
@@ -177,136 +155,32 @@ where
     F: FnOnce(&fastly::Request, &mut Extensions),
 {
     let stores = A::stores();
-    let env = runtime_env_config(stores);
-    let logging = FastlyLogging::from(&env);
+    let logging = FastlyLogging::from(A::logging_for("fastly"));
     if logging.use_fastly_logger && !A::owns_logging() {
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
     }
     let app = A::build_app();
-    request::dispatch_with_registries(&app, req, stores, &env, extend)
+    request::dispatch_with_registries(&app, req, stores, extend)
 }
 
-/// Build an [`EnvConfig`] from the optional `edgezero_runtime_env`
-/// Fastly Config Store.
-///
-/// Compute@Edge has no process env, so the `EDGEZERO__*` runtime overrides
-/// come from the Config Store. The function reads a fixed allowlist: adapter
-/// host and port, logging settings, `__NAME` entries for declared stores, and
-/// `__KEY` entries for declared config stores.
-///
-/// Each lookup uses the current Fastly service's
-/// `EDGEZERO__SERVICES__<SERVICE_ID>__*` key. Legacy unscoped entries are not
-/// read because they have no safe owner when this Config Store is linked to more
-/// than one service. The returned [`EnvConfig`] contains canonical unscoped keys.
-///
-/// [`run_app`] and [`run_app_with_request_extensions`] call this themselves.
-/// [`run_app_with_config`] does NOT, and neither does a hand-built
-/// [`FastlyService`](request::FastlyService). A custom entry point on either path
-/// must call this explicitly.
-///
-/// The `stores` argument must name the app's logical store ids. A handwritten
-/// [`Hooks`] impl inherits the empty [`StoresMetadata::default`] and must
-/// override `stores()` or pass explicit metadata here.
-///
-/// If the store cannot be opened, the function logs a warning and returns an
-/// empty [`EnvConfig`]. Callers then use their baked-in adapter and store defaults.
-#[cfg(feature = "fastly")]
-#[must_use]
-#[inline]
-pub fn runtime_env_config(stores: StoresMetadata) -> EnvConfig {
-    use fastly::ConfigStore;
-    use std::iter::empty;
-    let Ok(dict) = ConfigStore::try_open(RUNTIME_ENV_STORE_NAME) else {
-        // The store is optional -- a clean cutover deploy with all
-        // baked-in defaults works without it. But the absence means
-        // EDGEZERO__* runtime overrides (spec 5.4 __KEY, spec 5.2
-        // __NAME) will silently fall back to baked defaults. Log
-        // once at request time so operators can spot the gap in
-        // their Fastly logs and run `edgezero provision --adapter fastly`
-        // to create the store.
-        log::warn!(
-            "Fastly Config Store `edgezero_runtime_env` not found; \
-             EDGEZERO__* runtime overrides will use baked-in defaults. \
-             Run `edgezero provision --adapter fastly` to create the store, \
-             then populate per-environment override keys with \
-             `fastly config-store-entry update --upsert`."
-        );
-        return EnvConfig::from_vars(empty::<(String, String)>());
-    };
-    let current_service_id = service_id();
-    let vars = runtime_env_vars_for_service(stores, current_service_id, |key| dict.get(key));
-    EnvConfig::from_vars(vars)
-}
-
-#[cfg(any(feature = "fastly", test))]
-fn runtime_env_vars_for_service<F>(
-    stores: StoresMetadata,
-    service_id: &str,
-    mut get: F,
-) -> Vec<(String, String)>
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    runtime_env_keys(stores)
-        .into_iter()
-        .filter_map(|canonical_key| {
-            let scoped_key = service_scoped_runtime_env_key(service_id, &canonical_key);
-            get(&scoped_key).map(|value| (canonical_key, value))
-        })
-        .collect()
-}
-
-/// The `EDGEZERO__*` keys resolved from the store into the [`EnvConfig`]: the
-/// fixed adapter and logging settings, plus a `__NAME` selector for every
-/// declared store id and a `__KEY` selector for config-store ids only.
-// The `test` arm keeps the key derivation tests in default workspace tests.
-#[cfg(any(feature = "fastly", test))]
-fn runtime_env_keys(stores: StoresMetadata) -> Vec<String> {
-    let mut keys: Vec<String> = vec![
-        "EDGEZERO__ADAPTER__HOST".to_owned(),
-        "EDGEZERO__ADAPTER__PORT".to_owned(),
-        "EDGEZERO__LOGGING__LEVEL".to_owned(),
-        "EDGEZERO__LOGGING__ENDPOINT".to_owned(),
-        "EDGEZERO__LOGGING__USE_FASTLY_LOGGER".to_owned(),
-        "EDGEZERO__LOGGING__ECHO_STDOUT".to_owned(),
-    ];
-    for (kind, store_meta) in [
-        ("CONFIG", stores.config),
-        ("KV", stores.kv),
-        ("SECRETS", stores.secrets),
-    ] {
-        if let Some(meta) = store_meta {
-            for id in meta.ids {
-                let id_upper = id.to_ascii_uppercase();
-                keys.push(format!("EDGEZERO__STORES__{kind}__{id_upper}__NAME"));
-                if kind == "CONFIG" {
-                    keys.push(format!("EDGEZERO__STORES__{kind}__{id_upper}__KEY"));
-                }
-            }
-        }
-    }
-    keys
-}
-
-/// Dispatch with a config store wired explicitly. This path does NOT apply the
-/// [`EnvConfig`] overlay: the store name comes directly from
-/// `config_store_name`, and its default key is always `"default"`, so staged or
-/// overridden `__NAME` / `__KEY` selectors are ignored. Use
-/// [`runtime_env_config`] with [`request::dispatch_with_registries`] for the
-/// same selector resolution as [`run_app`]. KV is not auto-injected on this
-/// path; chain `.with_kv(name)` on a [`request::FastlyService`] builder if you
-/// need KV alongside the config store.
+/// Dispatch with a config store wired explicitly. Its name and default key are
+/// provided by the caller rather than derived from manifest store metadata.
+/// KV is not auto-injected on this path; chain `.with_kv(name)` on a
+/// [`request::FastlyService`] builder if you need KV alongside the config store.
 ///
 /// # Errors
 /// Returns an error if logger setup fails or the underlying handler returns an error.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app_with_config<A: Hooks>(
+pub fn run_app_with_config<A>(
     logging: &FastlyLogging,
     req: fastly::Request,
     config_store_name: Option<&str>,
-) -> Result<fastly::Response, fastly::Error> {
+) -> Result<fastly::Response, fastly::Error>
+where
+    A: Hooks,
+{
     if logging.use_fastly_logger && !A::owns_logging() {
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
@@ -340,149 +214,179 @@ mod fastly_logging_tests {
     }
 
     #[test]
-    fn fastly_logging_from_env_falls_back_without_an_endpoint() {
-        let env = EnvConfig::from_vars([
-            ("EDGEZERO__LOGGING__LEVEL", "not-a-level"),
-            ("EDGEZERO__LOGGING__ECHO_STDOUT", "false"),
-        ]);
-
-        let logging = FastlyLogging::from(&env);
+    fn fastly_logging_without_manifest_endpoint_does_not_install_named_logger() {
+        let logging = FastlyLogging::from(ResolvedLoggingConfig::default());
 
         assert_eq!(logging.level, log::LevelFilter::Info);
         assert_eq!(logging.endpoint, None);
         assert!(!logging.use_fastly_logger);
         assert!(logging.echo_stdout);
     }
-
-    #[test]
-    fn fastly_logging_from_env_enables_the_named_endpoint_logger() {
-        let env = EnvConfig::from_vars([
-            ("EDGEZERO__LOGGING__LEVEL", "debug"),
-            ("EDGEZERO__LOGGING__ENDPOINT", "edgezero-logs"),
-        ]);
-
-        let logging = FastlyLogging::from(&env);
-
-        assert_eq!(logging.level, log::LevelFilter::Debug);
-        assert_eq!(logging.endpoint.as_deref(), Some("edgezero-logs"));
-        assert!(logging.use_fastly_logger);
-        assert!(logging.echo_stdout);
-    }
 }
 
 #[cfg(test)]
-mod runtime_env_key_tests {
-    use super::{runtime_env_keys, runtime_env_vars_for_service, service_scoped_runtime_env_key};
-    use edgezero_core::app::{StoreMetadata, StoresMetadata};
-    use edgezero_core::env_config::EnvConfig;
-    use std::collections::BTreeMap;
+mod retained_app_tests {
+    use super::*;
+    use edgezero_core::app::{App, Hooks};
+    use edgezero_core::router::RouterService;
+    use std::cell::{Cell, RefCell};
 
-    #[test]
-    fn runtime_env_keys_name_every_store_and_key_only_config_stores() {
-        let stores = StoresMetadata {
-            config: Some(StoreMetadata {
-                default: "main",
-                ids: &["main", "edge"],
-            }),
-            kv: Some(StoreMetadata {
-                default: "cache",
-                ids: &["cache"],
-            }),
-            secrets: Some(StoreMetadata {
-                default: "vault",
-                ids: &["vault"],
-            }),
-        };
+    struct CountedApp;
+    thread_local! { static CONFIGURES: Cell<usize> = const { Cell::new(0) }; }
 
-        let mut keys = runtime_env_keys(stores);
-        keys.sort();
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "exercise default app construction"
+    )]
+    impl Hooks for CountedApp {
+        fn configure(app: &mut App) {
+            CONFIGURES.with(|count| count.set(count.get().checked_add(1).unwrap()));
+            app.set_name("retained");
+        }
 
-        assert_eq!(
-            keys,
-            vec![
-                "EDGEZERO__ADAPTER__HOST",
-                "EDGEZERO__ADAPTER__PORT",
-                "EDGEZERO__LOGGING__ECHO_STDOUT",
-                "EDGEZERO__LOGGING__ENDPOINT",
-                "EDGEZERO__LOGGING__LEVEL",
-                "EDGEZERO__LOGGING__USE_FASTLY_LOGGER",
-                "EDGEZERO__STORES__CONFIG__EDGE__KEY",
-                "EDGEZERO__STORES__CONFIG__EDGE__NAME",
-                "EDGEZERO__STORES__CONFIG__MAIN__KEY",
-                "EDGEZERO__STORES__CONFIG__MAIN__NAME",
-                "EDGEZERO__STORES__KV__CACHE__NAME",
-                "EDGEZERO__STORES__SECRETS__VAULT__NAME",
-            ]
-        );
+        fn routes() -> RouterService {
+            RouterService::builder().build()
+        }
+    }
+
+    fn configured_logging() -> FastlyLogging {
+        FastlyLogging {
+            echo_stdout: true,
+            endpoint: Some("fixture-logs".to_owned()),
+            level: log::LevelFilter::Debug,
+            use_fastly_logger: true,
+        }
     }
 
     #[test]
-    fn runtime_env_keys_without_declared_stores_are_the_fixed_keys_only() {
-        let mut keys = runtime_env_keys(StoresMetadata::default());
-        keys.sort();
-
-        assert_eq!(
-            keys,
-            vec![
-                "EDGEZERO__ADAPTER__HOST",
-                "EDGEZERO__ADAPTER__PORT",
-                "EDGEZERO__LOGGING__ECHO_STDOUT",
-                "EDGEZERO__LOGGING__ENDPOINT",
-                "EDGEZERO__LOGGING__LEVEL",
-                "EDGEZERO__LOGGING__USE_FASTLY_LOGGER",
-            ]
-        );
+    fn retained_app_initializes_logging_before_build_once() {
+        let mut retained = RetainedApp::default();
+        let events = RefCell::new(Vec::new());
+        CONFIGURES.with(|count| count.set(0));
+        for _ in 0_usize..2 {
+            let app = retained
+                .get_or_init(
+                    &configured_logging(),
+                    || false,
+                    |endpoint, level, echo| {
+                        assert_eq!(endpoint, "fixture-logs");
+                        assert_eq!(level, log::LevelFilter::Debug);
+                        assert!(echo);
+                        events.borrow_mut().push("logger");
+                        Ok::<(), &'static str>(())
+                    },
+                    || {
+                        events.borrow_mut().push("build");
+                        CountedApp::build_app()
+                    },
+                )
+                .unwrap();
+            assert_eq!(app.name(), "retained");
+        }
+        assert_eq!(*events.borrow(), ["logger", "build"]);
+        CONFIGURES.with(|count| assert_eq!(count.get(), 1));
     }
 
     #[test]
-    fn runtime_dictionary_uses_only_the_current_service_namespace() {
-        let stores = StoresMetadata {
-            config: Some(StoreMetadata {
-                default: "app_config",
-                ids: &["app_config"],
-            }),
-            kv: Some(StoreMetadata {
-                default: "sessions",
-                ids: &["sessions"],
-            }),
-            secrets: None,
-        };
-        let scoped_sessions =
-            service_scoped_runtime_env_key("SVCA", "EDGEZERO__STORES__KV__SESSIONS__NAME");
-        let values = BTreeMap::from([
-            (scoped_sessions.clone(), "service_a_sessions".to_owned()),
-            (
-                service_scoped_runtime_env_key("SVCB", "EDGEZERO__STORES__KV__SESSIONS__NAME"),
-                "service_b_sessions".to_owned(),
-            ),
-            (
-                "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME".to_owned(),
-                "legacy_config".to_owned(),
-            ),
-            (
-                "EDGEZERO__STORES__KV__SESSIONS__NAME".to_owned(),
-                "legacy_sessions".to_owned(),
-            ),
-        ]);
-
-        assert_eq!(
-            scoped_sessions,
-            "EDGEZERO__SERVICES__SVCA__STORES__KV__SESSIONS__NAME"
-        );
-        let vars = runtime_env_vars_for_service(stores, "SVCA", |key| values.get(key).cloned());
-        let env = EnvConfig::from_vars(vars);
-
-        assert_eq!(env.store_name("kv", "sessions"), "service_a_sessions");
-        assert_eq!(env.store_name("config", "app_config"), "app_config");
-        assert_ne!(env.store_name("kv", "sessions"), "service_b_sessions");
-
-        let default_service_vars =
-            runtime_env_vars_for_service(stores, "SVCDEFAULT", |key| values.get(key).cloned());
-        let default_service_env = EnvConfig::from_vars(default_service_vars);
-        assert_eq!(default_service_env.store_name("kv", "sessions"), "sessions");
-        assert_eq!(
-            default_service_env.store_name("config", "app_config"),
-            "app_config"
-        );
+    fn retained_app_skips_disabled_logging_and_builds_once() {
+        let mut retained = RetainedApp::default();
+        let builds = Cell::new(0_usize);
+        let logging = FastlyLogging::from(ResolvedLoggingConfig::default());
+        for _ in 0_usize..2 {
+            retained
+                .get_or_init(
+                    &logging,
+                    || false,
+                    |_, _, _| -> Result<(), &'static str> { panic!("logger is disabled") },
+                    || {
+                        builds.set(builds.get().checked_add(1).unwrap());
+                        CountedApp::build_app()
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(builds.get(), 1);
     }
+
+    #[test]
+    fn retained_app_respects_owned_logging_and_fresh_owners() {
+        let builds = Cell::new(0_usize);
+        for _ in 0_usize..2 {
+            let mut retained = RetainedApp::default();
+            retained
+                .get_or_init(
+                    &configured_logging(),
+                    || true,
+                    |_, _, _| -> Result<(), &'static str> { panic!("caller owns logging") },
+                    || {
+                        builds.set(builds.get().checked_add(1).unwrap());
+                        CountedApp::build_app()
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(builds.get(), 2);
+    }
+
+    #[test]
+    fn retained_app_logger_error_prevents_construction() {
+        let mut retained = RetainedApp::default();
+        let result = retained.get_or_init(
+            &configured_logging(),
+            || false,
+            |_, _, _| Err("logger failed"),
+            || panic!("must not build"),
+        );
+        assert_eq!(result.err(), Some("logger failed"));
+        assert!(retained.app.is_none());
+    }
+}
+
+/// Serve requests with an app initialized once on the first callback.
+///
+/// Opt in using an ordinary `main` and an explicitly bounded [`Serve`]. The
+/// runtime may exit before any configured limit; every request must tolerate
+/// fresh initialization. The standard response conversion buffers core streams.
+/// Inspect the returned summary (whose request count includes failed attempts)
+/// or call its `into_result()` method to propagate terminal callback errors.
+#[cfg(feature = "fastly")]
+#[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
+#[inline]
+pub fn serve_app<A>(serve: Serve) -> ServeSummary<fastly::Error>
+where
+    A: Hooks,
+{
+    serve_app_with_request_extensions::<A, _>(serve, |_request, _extensions| {})
+}
+
+/// Serve a retained app with fresh request extensions and store registries.
+///
+/// Store aliases and logging settings are baked into `A`. The app and logging
+/// initialization are retained for the serving loop, while request extensions
+/// and store handles are recreated for every callback. Any returned error
+/// terminates the SDK loop; handler `EdgeError`s that render as responses do not.
+/// Construction panics remain sandbox failures.
+///
+/// The callback runs per request, but the closure and its captured state live
+/// for the entire serving loop. Create request-local mutable data inside the
+/// callback. For mutable native requests, manual streaming, response
+/// finalization, or custom initialization, use [`lifecycle::serve_custom`].
+#[cfg(feature = "fastly")]
+#[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
+#[inline]
+pub fn serve_app_with_request_extensions<A, F>(
+    serve: Serve,
+    mut extend: F,
+) -> ServeSummary<fastly::Error>
+where
+    A: Hooks,
+    F: FnMut(&fastly::Request, &mut Extensions),
+{
+    let stores = A::stores();
+    let logging = FastlyLogging::from(A::logging_for("fastly"));
+    let mut retained = RetainedApp::default();
+    serve.run(move |req| -> Result<fastly::Response, fastly::Error> {
+        let app = retained.get_or_init(&logging, A::owns_logging, init_logger, A::build_app)?;
+        request::dispatch_with_registries(app, req, stores, &mut extend)
+    })
 }

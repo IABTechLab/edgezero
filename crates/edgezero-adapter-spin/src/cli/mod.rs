@@ -7,9 +7,9 @@ use ctor::ctor;
 use edgezero_adapter::cli_support;
 use edgezero_adapter::cli_support::run_native_cli;
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterDeployedState, AdapterExecContext, AdapterPushContext,
-    ProvisionMode, ProvisionOutcome, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    TypedSecretEntry, register_adapter,
+    Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
+    AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, TypedSecretEntry, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
@@ -73,19 +73,19 @@ static SPIN_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_spin",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_spin",
         repo_crate: "crates/edgezero-adapter-spin",
-        fallback: "edgezero-adapter-spin = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false }",
+        fallback: "edgezero-adapter-spin = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_spin_wasm",
         repo_crate: "crates/edgezero-adapter-spin",
-        fallback: "edgezero-adapter-spin = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false, features = [\"spin\"] }",
+        fallback: "edgezero-adapter-spin = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-spin\", default-features = false, features = [\"spin\"] }",
         features: &["spin"],
     },
 ];
@@ -130,6 +130,43 @@ const SPIN_INSTALL_HINT: &str = "install the Spin CLI (https://spinframework.dev
 struct SpinCliAdapter;
 
 impl Adapter for SpinCliAdapter {
+    fn preflight_deploy(
+        &self,
+        _context: &AdapterDeployContext,
+        _args: &[String],
+    ) -> Result<DeployOwnership, String> {
+        Ok(DeployOwnership::ManifestCommand)
+    }
+    fn deploy(
+        &self,
+        context: &AdapterDeployContext,
+        args: &[String],
+        exec: &AdapterExecContext<'_>,
+    ) -> Result<(), String> {
+        let action = if context.staging {
+            AdapterAction::DeployStaging
+        } else {
+            AdapterAction::Deploy
+        };
+        self.execute(action, args, exec)
+    }
+    fn finalize_deploy(
+        &self,
+        _context: &AdapterDeployContext,
+        _output: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn validate_config_key_for_target(
+        &self,
+        _logical: &str,
+        _key: &str,
+        _staging: bool,
+        _local: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     fn execute(
         &self,
         action: AdapterAction,
@@ -157,7 +194,7 @@ impl Adapter for SpinCliAdapter {
             AdapterAction::Deploy => run::deploy(args, ctx),
             AdapterAction::Serve => run::serve(args, ctx),
             // The Fastly staging lifecycle is Fastly-only.
-            AdapterAction::DeployStaged
+            AdapterAction::DeployStaging
             | AdapterAction::EmitVersion
             | AdapterAction::Healthcheck
             | AdapterAction::Rollback => Err(format!(
@@ -706,7 +743,7 @@ impl Adapter for SpinCliAdapter {
         use std::collections::HashMap;
         // KV-backed config no longer shares Spin's flat
         // variable namespace, so config keys are NOT considered here
-        // (and the trait later dropped the parameter) — config
+        // (and the trait dropped the parameter) — config
         // can use arbitrary UTF-8 keys without colliding with
         // `#[secret]` values. Secrets still resolve through
         // `spin_sdk::variables`, so two checks remain:
@@ -727,14 +764,13 @@ impl Adapter for SpinCliAdapter {
             if !is_valid_spin_key(&spin_var) {
                 let reason = spin_key_rule_violation(&spin_var);
                 return Err(format!(
-                    "`#[secret]` field `{field}` value `{value}` translates to Spin variable `{spin_var}`, which is not a valid Spin variable name. {reason}. Pick a `#[secret]` value that conforms.",
+                    "`#[secret]` field `{field}` does not reference a valid Spin variable name. {reason}. Pick a secret reference that conforms; its value is redacted.",
                     field = entry.field_name,
-                    value = entry.key_value,
                 ));
             }
             if let Some(prev_field) = seen.insert(spin_var.clone(), entry.field_name.as_str()) {
                 return Err(format!(
-                    "Spin variable `{spin_var}` would receive values from BOTH `#[secret]` field `{prev_field}` AND `#[secret]` field `{this_field}`; Spin's flat variable namespace cannot disambiguate them. Pick distinct `#[secret]` values whose lowercased forms differ.",
+                    "`#[secret]` fields `{prev_field}` and `{this_field}` reference the same Spin variable after lowercasing; Spin's flat variable namespace cannot disambiguate them. Pick distinct secret references; their values are redacted.",
                     this_field = entry.field_name,
                 ));
             }
@@ -951,6 +987,37 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn secret_validation_errors_redact_original_and_normalized_values() {
+        for entries in [
+            vec![TypedSecretEntry::new(
+                "default",
+                "credential",
+                "Private-Canary",
+            )],
+            vec![
+                TypedSecretEntry::new("default", "first", "Private_Canary"),
+                TypedSecretEntry::new("default", "second", "private_canary"),
+            ],
+        ] {
+            let err = SpinCliAdapter.validate_typed_secrets(&entries).unwrap_err();
+            for entry in &entries {
+                assert!(
+                    !err.contains(entry.key_value),
+                    "raw reference leaked: {err}"
+                );
+                assert!(
+                    !err.contains(&entry.key_value.to_ascii_lowercase()),
+                    "normalized reference leaked: {err}"
+                );
+                assert!(
+                    err.contains(entry.field_name.as_str()),
+                    "missing field: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn spin_blueprint_build_pins_target_dir_to_conventional_source() {
         // The generated `commands.build` must pin `--target-dir target` so a
         // custom `CARGO_TARGET_DIR` can't leave `spin.toml`'s `source`
@@ -1084,13 +1151,10 @@ mod tests {
             .validate_typed_secrets(&[TypedSecretEntry::new("default", "api_token", "api-token")])
             .expect_err("dashed secret value must error");
         assert!(
-            // The error must name BOTH the field name (`api_token`,
-            // underscore) and the offending value (`api-token`,
-            // dash), plus mark it as a Spin variable issue. The prior
-            // assertion double-checked the value and silently missed
-            // the field-name half.
-            err.contains("api_token") && err.contains("api-token") && err.contains("Spin variable"),
-            "error names the field, the bad value, and the Spin-variable bucket: {err}"
+            err.contains("api_token")
+                && !err.contains("api-token")
+                && err.contains("Spin variable"),
+            "error names the field and rule without its value: {err}"
         );
     }
 
@@ -1106,16 +1170,16 @@ mod tests {
             ])
             .expect_err("two values lowercasing to the same name must collide");
         assert!(
-            err.contains("shared_name") && (err.contains("first") || err.contains("second")),
-            "error names the shared canonical name and at least one field: {err}"
+            !err.contains("shared_name") && err.contains("first") && err.contains("second"),
+            "error names both fields without the shared value: {err}"
         );
     }
 
     // named-store secret adapter validation
 
     #[test]
-    fn collision_error_names_both_field_names_and_lowercased_variable() {
-        // KeyInDefault and KeyInNamedStore that
+    fn collision_error_names_both_fields_without_the_lowercased_value() {
+        // case (b): KeyInDefault and KeyInNamedStore that
         // collide on the lowercased Spin variable.
         let entries = [
             TypedSecretEntry::new("default", "one", "Demo_Token"),
@@ -1124,19 +1188,19 @@ mod tests {
         let err = SpinCliAdapter.validate_typed_secrets(&entries).unwrap_err();
         assert!(err.contains("`one`"), "{err}");
         assert!(err.contains("`two`"), "{err}");
-        assert!(err.contains("demo_token"), "{err}");
+        assert!(!err.contains("demo_token"), "{err}");
     }
 
     #[test]
     fn rejects_invalid_spin_variable_name_with_hyphen() {
-        // KeyInNamedStore value contains a hyphen,
+        // case (a): KeyInNamedStore value contains a hyphen,
         // which is not a valid Spin variable name.
         let entries = [TypedSecretEntry::new("vault", "api_token", "demo-token")];
         let err = SpinCliAdapter.validate_typed_secrets(&entries).unwrap_err();
         assert!(err.contains("`api_token`"), "{err}");
-        assert!(err.contains("demo-token"), "{err}");
+        assert!(!err.contains("demo-token"), "{err}");
         assert!(
-            err.to_lowercase().contains("hyphen") || err.contains("not a valid"),
+            err.contains("lowercase letters, digits, and underscores"),
             "{err}"
         );
     }

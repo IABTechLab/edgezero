@@ -9,6 +9,7 @@
 //! here.
 
 use std::collections::BTreeMap;
+use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -18,10 +19,10 @@ use toml_edit::{DocumentMut, TableLike, table};
 
 use crate::args::ProvisionArgs;
 use crate::config::{
-    ValidationContext, build_typed_secret_entries, enforce_single_store_capability,
-    load_validation_context_with_options, reject_merged_id_collisions,
-    resolve_app_config_path_primitive, run_typed_preflight, strict_handler_paths,
-    validate_deployed_field_ownership,
+    ValidationContext, build_typed_secret_entries, effective_manifest_environment,
+    enforce_single_store_capability, load_validation_context_with_options,
+    reject_merged_id_collisions, resolve_app_config_path_primitive, run_typed_preflight,
+    strict_handler_paths, validate_deployed_field_ownership,
 };
 use crate::copy_tree::copy_dir_recursive;
 use crate::ensure_adapter_defined;
@@ -716,13 +717,20 @@ fn resolve_kind(
     declaration: Option<&StoreDeclaration>,
     env_config: &EnvConfig,
     kind: &str,
-) -> Vec<ResolvedStoreId> {
-    declaration.map_or_else(Vec::new, |decl| {
-        decl.ids
-            .iter()
-            .map(|id| ResolvedStoreId::new(id.clone(), env_config.store_name(kind, id)))
-            .collect()
-    })
+) -> Result<Vec<ResolvedStoreId>, String> {
+    declaration.map_or_else(
+        || Ok(Vec::new()),
+        |decl| {
+            decl.ids
+                .iter()
+                .map(|id| {
+                    env_config
+                        .store_name_checked(kind, id)
+                        .map(|platform| ResolvedStoreId::new(id.clone(), platform))
+                })
+                .collect()
+        },
+    )
 }
 
 /// Write each `(rel, contents)` baseline pair under `root`, skipping
@@ -1131,11 +1139,11 @@ fn validate_and_dispatch(
         // provision may refresh a single-component selector mismatch.
         true,
     )?;
-    let env_config = EnvConfig::from_env();
+    let env_config = effective_manifest_environment(manifest, ctx.adapter_name, env::vars());
     reject_merged_id_collisions(ctx.adapter_name, ctx.adapter, manifest, &env_config)?;
-    let config_ids = resolve_kind(manifest.stores.config.as_ref(), &env_config, "config");
-    let kv_ids = resolve_kind(manifest.stores.kv.as_ref(), &env_config, "kv");
-    let secret_ids = resolve_kind(manifest.stores.secrets.as_ref(), &env_config, "secrets");
+    let config_ids = resolve_kind(manifest.stores.config.as_ref(), &env_config, "config")?;
+    let kv_ids = resolve_kind(manifest.stores.kv.as_ref(), &env_config, "kv")?;
+    let secret_ids = resolve_kind(manifest.stores.secrets.as_ref(), &env_config, "secrets")?;
     let stores = ProvisionStores {
         config: &config_ids,
         kv: &kv_ids,
@@ -1171,12 +1179,12 @@ fn build_stores_against(
     adapter: &'static dyn adapter_registry::Adapter,
     manifest: &Manifest,
 ) -> Result<OwnedProvisionStores, String> {
-    let env_config = EnvConfig::from_env();
+    let env_config = effective_manifest_environment(manifest, &args.adapter, env::vars());
     reject_merged_id_collisions(&args.adapter, adapter, manifest, &env_config)?;
     Ok(OwnedProvisionStores {
-        config: resolve_kind(manifest.stores.config.as_ref(), &env_config, "config"),
-        kv: resolve_kind(manifest.stores.kv.as_ref(), &env_config, "kv"),
-        secrets: resolve_kind(manifest.stores.secrets.as_ref(), &env_config, "secrets"),
+        config: resolve_kind(manifest.stores.config.as_ref(), &env_config, "config")?,
+        kv: resolve_kind(manifest.stores.kv.as_ref(), &env_config, "kv")?,
+        secrets: resolve_kind(manifest.stores.secrets.as_ref(), &env_config, "secrets")?,
     })
 }
 
@@ -1956,6 +1964,10 @@ serve = "echo"
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "Drop::pin_drop has a default; this test guard uses ordinary drop"
+    )]
     impl Drop for CwdGuard {
         fn drop(&mut self) {
             // Best-effort cwd restore during unwind or normal drop.
@@ -2188,6 +2200,40 @@ serve = "echo"
             }
         }
         Ok(())
+    }
+
+    const SPIN_MANIFEST: &str = "spin_manifest_version = 2\n[application]\nname = \"x\"\nversion = \"0\"\n[component.demo]\nsource = \"demo.wasm\"\n";
+
+    fn spin_provision_manifest(environment_default: Option<&str>) -> String {
+        let environment = environment_default.map_or_else(String::new, |value| {
+            format!(
+                r#"
+[[environment.variables]]
+name = "CONFIG_STORE"
+env = "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME"
+value = "{value}"
+adapters = ["spin"]
+"#
+            )
+        });
+        format!(
+            r#"
+[app]
+name = "demo-app"
+{environment}
+[adapters.spin.adapter]
+crate = "crates/demo-spin"
+manifest = "spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = "echo"
+
+[stores.config]
+ids = ["app_config"]
+"#
+        )
     }
 
     #[test]
@@ -2543,6 +2589,104 @@ ids = ["default"]
         assert!(
             !env_contents.contains("EDGEZERO__STORES__KV__SESSIONS__NAME=sessions"),
             ".env still carries the un-overridden logical id — the env overlay was bypassed: {env_contents}"
+        );
+    }
+
+    #[test]
+    fn run_provision_applies_manifest_store_name_default() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        fs::write(
+            &manifest_path,
+            spin_provision_manifest(Some("manifest_config")),
+        )
+        .expect("write manifest");
+        let spin_path = temp.path().join("spin.toml");
+        fs::write(&spin_path, SPIN_MANIFEST).expect("write spin manifest");
+
+        run_provision(&ProvisionArgs {
+            local: false,
+            adapter: "spin".to_owned(),
+            dry_run: false,
+            manifest: manifest_path,
+        })
+        .expect("manifest store default must provision");
+
+        let spin = fs::read_to_string(spin_path).expect("read spin manifest");
+        assert!(
+            spin.contains("\"manifest_config\""),
+            "provision must write the adapter-scoped manifest default: {spin}"
+        );
+        assert!(
+            !spin.contains("\"app_config\""),
+            "logical fallback must not replace a declared manifest default: {spin}"
+        );
+    }
+
+    #[test]
+    fn run_provision_parent_selector_overrides_manifest_default() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let _selector = EnvOverride::set(
+            "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME",
+            "parent_config",
+        );
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        fs::write(
+            &manifest_path,
+            spin_provision_manifest(Some("manifest_config")),
+        )
+        .expect("write manifest");
+        let spin_path = temp.path().join("spin.toml");
+        fs::write(&spin_path, SPIN_MANIFEST).expect("write spin manifest");
+
+        run_provision(&ProvisionArgs {
+            local: false,
+            adapter: "spin".to_owned(),
+            dry_run: false,
+            manifest: manifest_path,
+        })
+        .expect("parent selector must provision");
+
+        let spin = fs::read_to_string(spin_path).expect("read spin manifest");
+        assert!(
+            spin.contains("\"parent_config\""),
+            "parent selector must override the manifest default: {spin}"
+        );
+        assert!(
+            !spin.contains("\"manifest_config\""),
+            "stale default: {spin}"
+        );
+    }
+
+    #[test]
+    fn run_provision_rejects_empty_store_selector_before_adapter_write() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let _selector = EnvOverride::set("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME", "");
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        fs::write(&manifest_path, spin_provision_manifest(None)).expect("write manifest");
+        let spin_path = temp.path().join("spin.toml");
+        fs::write(&spin_path, SPIN_MANIFEST).expect("write spin manifest");
+        let before = fs::read_to_string(&spin_path).expect("read before");
+
+        let error = run_provision(&ProvisionArgs {
+            local: false,
+            adapter: "spin".to_owned(),
+            dry_run: false,
+            manifest: manifest_path,
+        })
+        .expect_err("an explicitly empty selector must fail before provision");
+
+        assert!(
+            error.contains("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME"),
+            "error must identify the invalid selector without its value: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(spin_path).expect("read after"),
+            before,
+            "invalid selector must not mutate the adapter manifest"
         );
     }
 

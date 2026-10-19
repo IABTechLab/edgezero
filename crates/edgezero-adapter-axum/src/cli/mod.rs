@@ -1,3 +1,4 @@
+use crate::secret_env::secret_env_var;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -10,9 +11,9 @@ use edgezero_adapter::env_file::{
     reject_symlinked_target,
 };
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterDeployedState, AdapterExecContext, AdapterPushContext,
-    ProvisionMode, ProvisionOutcome, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    TypedSecretEntry, register_adapter,
+    Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
+    AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, TypedSecretEntry, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
@@ -59,13 +60,13 @@ static AXUM_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_axum",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\" }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\" }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_axum",
         repo_crate: "crates/edgezero-adapter-axum",
-        fallback: "edgezero-adapter-axum = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-axum\", default-features = false }",
+        fallback: "edgezero-adapter-axum = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-axum\", default-features = false }",
         features: &["axum"],
     },
 ];
@@ -120,6 +121,43 @@ static AXUM_ADAPTER: AxumCliAdapter = AxumCliAdapter;
 struct AxumCliAdapter;
 
 impl Adapter for AxumCliAdapter {
+    fn preflight_deploy(
+        &self,
+        _context: &AdapterDeployContext,
+        _args: &[String],
+    ) -> Result<DeployOwnership, String> {
+        Ok(DeployOwnership::ManifestCommand)
+    }
+    fn deploy(
+        &self,
+        context: &AdapterDeployContext,
+        args: &[String],
+        exec: &AdapterExecContext<'_>,
+    ) -> Result<(), String> {
+        let action = if context.staging {
+            AdapterAction::DeployStaging
+        } else {
+            AdapterAction::Deploy
+        };
+        self.execute(action, args, exec)
+    }
+    fn finalize_deploy(
+        &self,
+        _context: &AdapterDeployContext,
+        _output: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn validate_config_key_for_target(
+        &self,
+        _logical: &str,
+        _key: &str,
+        _staging: bool,
+        _local: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     fn execute(
         &self,
         action: AdapterAction,
@@ -140,7 +178,7 @@ impl Adapter for AxumCliAdapter {
             AdapterAction::Deploy => run::deploy(args),
             AdapterAction::Serve => run::serve(args, ctx),
             // The Fastly staging lifecycle is Fastly-only.
-            AdapterAction::DeployStaged
+            AdapterAction::DeployStaging
             | AdapterAction::EmitVersion
             | AdapterAction::Healthcheck
             | AdapterAction::Rollback => Err(format!(
@@ -188,7 +226,7 @@ impl Adapter for AxumCliAdapter {
         Ok(())
     }
 
-    /// Axum writes each typed secret as a bare `<key>=` line into
+    /// Axum writes each typed secret as an `EDGEZERO__SECRETS__<KEY>=` line into
     /// `.edgezero/.env`. A key that cannot round-trip through that format
     /// would emit a line meaning something else: `partner=token` becomes
     /// `partner=token=`, which every `.env` reader parses back as the key
@@ -234,6 +272,24 @@ impl Adapter for AxumCliAdapter {
                     field = entry.field_name,
                 ));
             }
+        }
+        let mut claimed: BTreeMap<String, &TypedSecretEntry<'_>> = BTreeMap::new();
+        for entry in entries {
+            let var = secret_env_var(entry.key_value)
+                .map_err(|err| format!("`#[secret]` field `{}`: {err}", entry.field_name))?;
+            if let Some(prev) = claimed.get(&var) {
+                if prev.key_value != entry.key_value {
+                    return Err(format!(
+                        "`#[secret]` field `{prev_field}` (`{prev_value}`) and `#[secret]` field `{this_field}` (`{this_value}`) both read Axum env var `{var}`, which cannot tell them apart. Pick `#[secret]` values whose uppercased forms differ.",
+                        prev_field = prev.field_name,
+                        prev_value = prev.key_value,
+                        this_field = entry.field_name,
+                        this_value = entry.key_value,
+                    ));
+                }
+                continue;
+            }
+            claimed.insert(var, entry);
         }
         Ok(())
     }
@@ -310,7 +366,7 @@ impl Adapter for AxumCliAdapter {
         dry_run: bool,
     ) -> Result<ProvisionOutcome, String> {
         // Axum has no cloud secret store: cloud is a documented no-op.
-        // Local mode appends `<key_value>=` lines to `.edgezero/.env`
+        // Local mode appends `EDGEZERO__SECRETS__<KEY_UPPER>=` lines to `.edgezero/.env`
         // (unquoted empty value — the loosest `.env` form). The
         // operator fills in the actual secret by editing the file.
         // `append_lines_dedup` handles parent-dir creation so
@@ -321,8 +377,8 @@ impl Adapter for AxumCliAdapter {
         let env_path = manifest_root.join(".edgezero").join(".env");
         let lines: Vec<String> = typed_secrets
             .iter()
-            .map(|entry| format!("{}=", entry.key_value))
-            .collect();
+            .map(|entry| secret_env_var(entry.key_value).map(|name| format!("{name}=")))
+            .collect::<Result<_, _>>()?;
         let wrote = append_lines_dedup_with_header(
             &env_path,
             Some(EDGEZERO_PROVISION_HEADER),
@@ -689,6 +745,74 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_secrets_accepts_same_key_in_two_fields() {
+        let entries = [
+            TypedSecretEntry::new("default", "api_token", "shared_token"),
+            TypedSecretEntry::new("vault", "backup_token", "shared_token"),
+        ];
+        assert_eq!(AXUM_ADAPTER.validate_typed_secrets(&entries), Ok(()));
+    }
+
+    #[test]
+    fn validate_typed_secrets_rejects_distinct_keys_that_share_an_env_var() {
+        let entries = [
+            TypedSecretEntry::new("default", "api_token", "upstream_token"),
+            TypedSecretEntry::new("vault", "backup_token", "UPSTREAM_TOKEN"),
+        ];
+        let err = AXUM_ADAPTER.validate_typed_secrets(&entries).unwrap_err();
+        assert!(err.contains("`api_token`"), "{err}");
+        assert!(err.contains("`backup_token`"), "{err}");
+        assert!(err.contains("`EDGEZERO__SECRETS__UPSTREAM_TOKEN`"), "{err}");
+    }
+
+    #[test]
+    fn validate_typed_secrets_rejects_key_outside_charset_naming_field() {
+        let entries = [
+            TypedSecretEntry::new("default", "api_token", "demo_api_token"),
+            TypedSecretEntry::new("default", "partners[0].key", "partner-key"),
+        ];
+        let err = AXUM_ADAPTER.validate_typed_secrets(&entries).unwrap_err();
+        assert!(err.contains("`partners[0].key`"), "{err}");
+        assert!(err.contains("partner-key"), "{err}");
+        assert!(err.contains("ASCII letters, digits, or `_`"), "{err}");
+    }
+
+    #[test]
+    fn validate_typed_secrets_accepts_keys_that_map_to_env_vars() {
+        let entries = [
+            TypedSecretEntry::new("default", "api_token", "demo_api_token"),
+            TypedSecretEntry::new("default", "partners[0].key", "Partner_Key_2"),
+        ];
+        assert_eq!(AXUM_ADAPTER.validate_typed_secrets(&entries), Ok(()));
+    }
+
+    #[test]
+    fn typed_provision_uses_runtime_secret_env_names() {
+        let dir = tempfile::tempdir().expect("temporary project");
+        let entries = [TypedSecretEntry::new(
+            "default",
+            "api_token",
+            "demo_api_token",
+        )];
+        AxumCliAdapter
+            .provision_typed(
+                dir.path(),
+                None,
+                None,
+                &entries,
+                ProvisionMode::Local,
+                false,
+            )
+            .expect("provision placeholders");
+        let raw = fs::read_to_string(dir.path().join(".edgezero/.env")).expect("secret env file");
+        assert!(
+            raw.lines()
+                .any(|line| line == "EDGEZERO__SECRETS__DEMO_API_TOKEN="),
+            "placeholder must match the runtime secret reader: {raw}"
+        );
+    }
+
+    #[test]
     fn derive_axum_crate_dir_nested_manifest_without_existing_config_dir() {
         // Regression: the nested `config/` dir does NOT exist yet (fresh
         // clone / synthesis), but the crate root does. The derivation must
@@ -991,13 +1115,14 @@ mod tests {
         assert!(
             fs::read_to_string(&env_path)
                 .expect("provision wrote .env")
-                .contains("demo_api_token="),
+                .contains("EDGEZERO__SECRETS__DEMO_API_TOKEN="),
             "provision must write the secret placeholder line"
         );
         // 2. Operator fills the placeholder with a real value.
-        let filled = fs::read_to_string(&env_path)
-            .unwrap()
-            .replace("demo_api_token=", "demo_api_token=real-secret-value");
+        let filled = fs::read_to_string(&env_path).unwrap().replace(
+            "EDGEZERO__SECRETS__DEMO_API_TOKEN=",
+            "EDGEZERO__SECRETS__DEMO_API_TOKEN=real-secret-value",
+        );
         fs::write(&env_path, &filled).expect("operator edit");
 
         // 3. Push config; the secret file must be left intact.
@@ -1016,7 +1141,7 @@ mod tests {
         assert!(
             fs::read_to_string(&env_path)
                 .expect("read .env")
-                .contains("demo_api_token=real-secret-value"),
+                .contains("EDGEZERO__SECRETS__DEMO_API_TOKEN=real-secret-value"),
             "config push must not touch the provision-written .env secret"
         );
     }
@@ -1292,7 +1417,8 @@ mod tests {
         assert!(env_path.exists(), ".env exists: {}", env_path.display());
         let env = fs::read_to_string(&env_path).unwrap();
         assert!(
-            env.lines().any(|line| line == "demo_api_token="),
+            env.lines()
+                .any(|line| line == "EDGEZERO__SECRETS__DEMO_API_TOKEN="),
             "unquoted empty-value placeholder present: {env}"
         );
         assert!(
@@ -1389,7 +1515,11 @@ mod tests {
         let dot_edgezero = dir.path().join(".edgezero");
         fs::create_dir_all(&dot_edgezero).unwrap();
         let env_path = dot_edgezero.join(".env");
-        fs::write(&env_path, "demo_api_token=operator_value\n").unwrap();
+        fs::write(
+            &env_path,
+            "EDGEZERO__SECRETS__DEMO_API_TOKEN=operator_value\n",
+        )
+        .unwrap();
         let entries = [TypedSecretEntry::new(
             "default",
             "api_token",
@@ -1407,14 +1537,16 @@ mod tests {
             .unwrap();
         let env = fs::read_to_string(&env_path).unwrap();
         assert!(
-            env.contains("demo_api_token=operator_value"),
+            env.contains("EDGEZERO__SECRETS__DEMO_API_TOKEN=operator_value"),
             "operator's real value survives: {env}"
         );
         let token_lines = env
             .lines()
             .filter(|line| {
                 let after_hash = line.trim_start().strip_prefix('#').unwrap_or(line);
-                after_hash.trim_start().starts_with("demo_api_token=")
+                after_hash
+                    .trim_start()
+                    .starts_with("EDGEZERO__SECRETS__DEMO_API_TOKEN=")
             })
             .count();
         assert_eq!(
@@ -1445,7 +1577,11 @@ mod tests {
             )
             .unwrap();
         let env = fs::read_to_string(dir.path().join(".edgezero/.env")).unwrap();
-        for expected in ["demo_api_token=", "demo_hmac_key=", "audit_secret="] {
+        for expected in [
+            "EDGEZERO__SECRETS__DEMO_API_TOKEN=",
+            "EDGEZERO__SECRETS__DEMO_HMAC_KEY=",
+            "EDGEZERO__SECRETS__AUDIT_SECRET=",
+        ] {
             let count = env.lines().filter(|line| *line == expected).count();
             assert_eq!(
                 count, 1,
