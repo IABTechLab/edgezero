@@ -99,7 +99,8 @@ mod worker_impl {
     use async_stream::stream;
     use async_trait::async_trait;
     use bytes::Bytes;
-    use edgezero_core::body::{Body, BodyStream};
+    use edgezero_core::body::{Body, BodyContent, BodyStream};
+
     #[cfg(feature = "test-utils")]
     use edgezero_core::error::BudgetSource;
     use edgezero_core::error::{BadGatewayReason, EdgeError};
@@ -667,8 +668,8 @@ mod worker_impl {
         budget: DispatchBudget,
         clock: MonotonicClock,
     ) -> Result<Option<JsValue>, EdgeError> {
-        match body {
-            Body::Once(bytes) => {
+        match body.into_content() {
+            BodyContent::Once(bytes) => {
                 let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 if length > maximum {
                     return Err(EdgeError::bad_request(
@@ -682,7 +683,7 @@ mod worker_impl {
                     Ok(Some(Uint8Array::from(bytes.as_ref()).into()))
                 }
             }
-            Body::Stream(source) => {
+            BodyContent::Stream(source) => {
                 let mut bounded = upload_stream(source, maximum, budget, clock);
                 let mut collected = Vec::new();
                 while let Some(item) = bounded.next().await {

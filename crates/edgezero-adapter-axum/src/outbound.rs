@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use core::num::NonZeroU64;
 use core::time::Duration;
-use edgezero_core::body::{Body, BodyStream};
+use edgezero_core::body::{Body, BodyContent, BodyStream};
+
 use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
 use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -225,8 +226,8 @@ async fn collect_request_body(
     budget: DispatchBudget,
     clock: &MonotonicClock,
 ) -> Result<Bytes, EdgeError> {
-    match body {
-        Body::Once(bytes) => {
+    match body.into_content() {
+        BodyContent::Once(bytes) => {
             let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             if length > maximum {
                 return Err(EdgeError::bad_request(
@@ -236,7 +237,7 @@ async fn collect_request_body(
             budget_remaining(budget, clock)?;
             Ok(bytes)
         }
-        Body::Stream(mut source) => {
+        BodyContent::Stream(mut source) => {
             let mut collected = Vec::new();
             let mut total = 0_u64;
             loop {
