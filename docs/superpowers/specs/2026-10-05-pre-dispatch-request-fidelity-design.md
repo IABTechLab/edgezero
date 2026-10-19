@@ -120,6 +120,9 @@ Use private fields, Clone, and borrowed accessors. Do not derive value-bearing D
 - `HeaderFidelity`: independent `Preservation` values for octets, field multiplicity, same-name value order and global field order.
 - `RequestIngress`: captured target, optional inbound origin, common header fidelity and small per-header fidelity overrides. `header_fidelity(&HeaderName)` returns an override or the common default; this handles Content-Length folding without implying identical behavior for Cookie.
 
+`Preservation`, `OriginSource`, `TargetSource` and `TargetUnavailable` are
+non-exhaustive public enums; downstream matches must handle future variants.
+
 Choose these names and semantics for implementation; constructors/accessors may follow repository naming conventions without adding speculative APIs. `RequestIngress::new(target, origin, fidelity)` is infallible; `with_header_overrides` rejects duplicate names with an internal error. `InboundOrigin::same_authority` compares host case and effective ports without asserting scheme equality. `MAX_AUTHORITY_BYTES` exposes the 1 KiB bound; source port spelling is retained, including leading zeros and syntactic port zero. Do not duplicate method metadata: `Request::method()` is authoritative after lossless conversion.
 
 HeaderFidelity axes describe original received HTTP field-value octets, field multiplicity and ordering compared with the resulting core headers, not merely a successful runtime-to-core copy. Octets mean field-value bytes, not header-name case, delimiters, HTTP framing or complete request serialization. Trimming/combining or parser/runtime loss must be reflected as Transformed, Unknown or Unavailable; Preserved requires pinned runtime/parser evidence and actual transport tests. Document and test runtime-to-core copying separately when it is all that can be established.

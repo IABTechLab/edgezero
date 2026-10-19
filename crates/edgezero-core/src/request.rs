@@ -270,6 +270,7 @@ impl InboundOrigin {
 
 /// Provenance of a validated inbound origin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum OriginSource {
     /// Scheme and authority supplied by the runtime request URI.
     ///
@@ -286,6 +287,7 @@ pub enum OriginSource {
 
 /// Degree of preservation established for a particular fact.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Preservation {
     /// Pinned source and transport evidence establish equality.
     Preserved,
@@ -353,6 +355,7 @@ impl RequestIngress {
     pub const fn target(&self) -> &CapturedTarget {
         &self.target
     }
+
     /// Set unambiguous per-header fidelity overrides.
     ///
     /// # Errors
@@ -416,6 +419,7 @@ impl fmt::Debug for RequestIngress {
 
 /// Source of captured target information, independent of fidelity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum TargetSource {
     /// A runtime path/query before additional `EdgeZero` parsing.
     RuntimePathAndQuery,
@@ -427,6 +431,7 @@ pub enum TargetSource {
 
 /// Why no complete target was retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum TargetUnavailable {
     /// The runtime offers no safe acquisition API.
     NotExposed,

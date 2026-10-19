@@ -36,8 +36,10 @@ jobs:
             ~/.cargo/git/db/
             target/
             tests/fixtures/reusable-app/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-${{ hashFiles('**/Cargo.lock') }}
+            tests/fixtures/request-fidelity-runner/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-ingress-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-ingress-v1-
             ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-
 
       - name: Retrieve Rust version
@@ -186,8 +188,10 @@ jobs:
             ~/.wasmtime/bin/
             target/
             tests/fixtures/reusable-app/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-${{ hashFiles('**/Cargo.lock', '.tool-versions') }}
+            tests/fixtures/request-fidelity/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-${{ hashFiles('**/Cargo.lock', '.tool-versions') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-
 
       - name: Retrieve Rust version
@@ -337,8 +341,10 @@ jobs:
         if: matrix.adapter == 'cloudflare'
         shell: bash
         run: |
-          if [[ "$(worker-build --version 2>/dev/null || true)" != "0.8.5" ]]; then
-            cargo install worker-build --version 0.8.5 --locked --force
+          version="$(awk '$1 == "worker-build" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.toml)"
+          test -n "$version"
+          if [[ "$(worker-build --version 2>/dev/null || true)" != "$version" ]]; then
+            cargo install worker-build --version "$version" --locked --force
           fi
 
       - name: Install pinned Spin HTTP runtime

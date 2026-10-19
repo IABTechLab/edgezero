@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_shared_dep_pins.sh — keep every `validator` pin on one major.
+# check_shared_dep_pins.sh — keep shared manifest and fixture SDK pins in sync.
 #
 # `edgezero-core` re-exports the `Validate` derive, so any crate that
 # derives `AppConfig` links against the exact `validator` the core crate
@@ -108,8 +108,54 @@ for file in \
   fi
 done
 
+# Fixture SDKs must use the same resolved packages as the workspace. Check
+# both the exact manifest pins and the isolated lockfile, not just SDK majors.
+locked_version_in() {
+  awk -v package="$2" '
+    $0 == "[[package]]" { name=""; next }
+    $1 == "name" { name=$3; gsub(/"/, "", name) }
+    name == package && $1 == "version" {
+      version=$3; gsub(/"/, "", version); count++; found=version
+    }
+    END { if (count == 1) print found }
+  ' "$1"
+}
+
+fixture_manifest="tests/fixtures/request-fidelity/Cargo.toml"
+fixture_lock="tests/fixtures/request-fidelity/Cargo.lock"
+for package in fastly worker wasm-bindgen spin-sdk; do
+  want="$(locked_version_in Cargo.lock "$package")"
+  pin="$(awk -v package="$package" '
+    $1 == package && $2 == "=" {
+      if (match($0, /version[[:space:]]*=[[:space:]]*"=[^"]+"/)) {
+        version=substr($0, RSTART, RLENGTH)
+        sub(/^[^"]*"=/, "", version); sub(/"$/, "", version)
+        count++; found=version
+      }
+    }
+    END { if (count == 1) print found }
+  ' "$fixture_manifest")"
+  locked="$(locked_version_in "$fixture_lock" "$package")"
+  if [[ -z "$want" || -z "$pin" || -z "$locked" ]]; then
+    echo "$fixture_manifest / $fixture_lock: violation: $package requires one exact pin and one resolved version in each lock"
+    VIOLATIONS=$((VIOLATIONS + 1))
+  elif [[ "$pin" != "$want" || "$locked" != "$want" ]]; then
+    echo "$fixture_manifest / $fixture_lock: violation: $package pin=$pin lock=$locked, workspace lock has $want"
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+done
+
+# worker-build's release must match the fixture's Worker SDK, but its pin is
+# declared once in metadata and consumed by CI and the native runner.
+worker_build="$(awk '$1 == "worker-build" { gsub(/"/, "", $3); print $3; exit }' "$fixture_manifest")"
+worker_version="$(locked_version_in Cargo.lock worker)"
+if [[ -z "$worker_build" || "$worker_build" != "$worker_version" ]]; then
+  echo "$fixture_manifest: violation: worker-build $worker_build, workspace worker is $worker_version"
+  VIOLATIONS=$((VIOLATIONS + 1))
+fi
+
 if ((VIOLATIONS > 0)); then
   echo "check_shared_dep_pins: $VIOLATIONS pin(s) out of sync" >&2
   exit 1
 fi
-echo "check_shared_dep_pins: validator pins agree ($WANT); spin-sdk majors agree ($SPIN_WANT)"
+echo "check_shared_dep_pins: validator pins agree ($WANT); spin-sdk majors agree ($SPIN_WANT); fixture SDK locks and worker-build agree"

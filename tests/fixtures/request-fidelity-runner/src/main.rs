@@ -261,9 +261,23 @@ fn verify_version(
     Ok(())
 }
 
+fn fixture_tool_pin(fixture: &Path, tool: &str) -> io::Result<String> {
+    let manifest: toml::Value = toml::from_str(&fs::read_to_string(fixture.join("Cargo.toml"))?)
+        .map_err(io::Error::other)?;
+    manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("request-fidelity"))
+        .and_then(|pins| pins.get(tool))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("missing fixture tool pin"))
+}
+
 fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()> {
     if platform == "cloudflare" {
-        verify_version(fixture, "worker-build", "0.8.5", cancelled)?;
+        let pin = fixture_tool_pin(fixture, "worker-build")?;
+        verify_version(fixture, "worker-build", &pin, cancelled)?;
         run_command(fixture, "npm", &["ci"], cancelled, false)?;
         let lock = fs::read(fixture.join("Cargo.lock"))?;
         run_command(
@@ -316,6 +330,19 @@ fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()
     Ok(())
 }
 
+fn with_runtime_log<T>(
+    result: io::Result<T>,
+    log_path: &Path,
+    output: &mut impl Write,
+) -> io::Result<T> {
+    if result.is_err()
+        && let Ok(log) = fs::read_to_string(log_path)
+    {
+        let _result = writeln!(output, "{log}");
+    }
+    result
+}
+
 fn report_observation_diff(
     output: &mut impl Write,
     platform: &str,
@@ -352,13 +379,8 @@ fn run(options: Options, cancelled: &Cancelled) -> io::Result<()> {
     for platform in &options.platforms {
         check_cancelled(cancelled)?;
         if *platform == "spin" {
-            let manifest: toml::Value =
-                toml::from_str(&fs::read_to_string(fixture.join("Cargo.toml"))?)
-                    .map_err(io::Error::other)?;
-            let pin = manifest["package"]["metadata"]["request-fidelity"]["spin-cli"]
-                .as_str()
-                .ok_or_else(|| io::Error::other("missing Spin runtime pin"))?;
-            verify_version(&fixture, "spin", pin, cancelled)?;
+            let pin = fixture_tool_pin(&fixture, "spin-cli")?;
+            verify_version(&fixture, "spin", &pin, cancelled)?;
         } else if *platform == "fastly" {
             let versions = fs::read_to_string(options.root.join(".tool-versions"))?;
             let pin = versions
@@ -470,15 +492,7 @@ fn run(options: Options, cancelled: &Cancelled) -> io::Result<()> {
             Ok(observed)
         })();
         drop(process);
-        match result {
-            Ok(observed) => observations[*platform] = observed,
-            Err(error) => {
-                if let Ok(log) = fs::read_to_string(&log_path) {
-                    writeln!(io::stderr(), "{log}")?;
-                }
-                return Err(error);
-            }
-        }
+        observations[*platform] = with_runtime_log(result, &log_path, &mut io::stderr())?;
     }
     serde_json::to_writer_pretty(io::stdout(), &observations).map_err(io::Error::other)?;
     writeln!(io::stdout())
@@ -1017,10 +1031,7 @@ fn cloudflare_routing_probes(
         Ok(observed)
     })();
     drop(process);
-    if result.is_err() {
-        writeln!(io::stderr(), "{}", fs::read_to_string(log_path)?)?;
-    }
-    result
+    with_runtime_log(result, &log_path, &mut io::stderr())
 }
 
 fn probes(platform: &str, port: u16, cancelled: &Cancelled) -> io::Result<Value> {
@@ -1109,6 +1120,30 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn diagnostic_failures_preserve_the_original_runtime_error() {
+        let directory = tempfile::tempdir().expect("should create log directory");
+        for (name, contents) in [
+            ("missing", None),
+            ("invalid-utf8", Some(b"\xff".as_slice())),
+            ("failed-output", Some(b"runtime diagnostics".as_slice())),
+        ] {
+            let path = directory.path().join(name);
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).expect("should create diagnostic log");
+            }
+            let mut output = Cursor::new([].as_mut_slice());
+            let result = Err::<(), _>(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "original readiness failure",
+            ));
+            let error = super::with_runtime_log(result, &path, &mut output)
+                .expect_err("should preserve runtime failure");
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{name}");
+            assert_eq!(error.to_string(), "original readiness failure", "{name}");
+        }
+    }
 
     #[test]
     #[ignore = "requires a freshly built Cloudflare fixture and pinned workerd"]

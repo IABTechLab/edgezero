@@ -19,7 +19,8 @@ verification checklist, not a chronological session log.
 - `crates/edgezero-core/src/request.rs`: bounded target/origin metadata,
   infallible `RequestIngress::new`, fallible `with_header_overrides` with an
   internal error for duplicate names, redacted Debug, public authority/target
-  limits and shared host/effective-port comparison. Authorities are requested
+  limits and shared host/effective-port comparison. The four metadata enums are
+  non-exhaustive so acquisition sources and guarantees can evolve. Authorities are requested
   hosts, not operator approval; port spelling is retained.
 - Fastly `src/request.rs`: capture before native mutation, explicit snapshot
   conversion and `dispatch_with_registries_and_ingress(app, req, stores,
@@ -59,7 +60,11 @@ Spin SDK 7.0.0. Its lockfile must be regenerated with these pins together.
 CI and the runner require worker-build 0.8.5 and Spin CLI 4.1.0. Rust, Node,
 Viceroy and Wasmtime versions come from `.tool-versions`. The shared Spin pin
 check includes this fixture. CI resolves fixture wasm-bindgen from its own lock,
-and worker-build uses the npm-integrity-locked esbuild executable.
+and worker-build uses the npm-integrity-locked esbuild executable. Its version
+is declared once beside Spin CLI in fixture metadata. SDK drift checks compare
+exact Fastly, Worker, wasm-bindgen and Spin SDK pins against both lockfiles.
+CI caches the actual native-runner and WASM-fixture target directories with
+versioned cache keys; debug lint and release probe builds keep their profiles.
 
 ## Verification checklist
 
@@ -99,7 +104,7 @@ All five required workspace gates pass, including strict all-feature Clippy,
 combined adapter feature compilation and Spin wasm32-wasip2 compilation.
 Both isolated workspaces pass formatting and strict lint; the WASM fixture is
 linted on all three target/feature combinations with its regenerated lock.
-The native runner passes ten tests; its ignored direct-workerd routing test is
+The native runner passes eleven tests; its ignored direct-workerd routing test is
 covered by the full runtime probe run.
 
 Fastly/Viceroy passes seven WASM contracts and 97 runtime unit tests. Spin passes
@@ -107,7 +112,7 @@ Fastly/Viceroy passes seven WASM contracts and 97 runtime unit tests. Spin passe
 matrix passes with Viceroy 0.21.0, Spin 4.1.0, Worker/worker-build 0.8.5,
 wasm-bindgen 0.2.128 and Node 24.20.0. Public matrices identify these tested
 versions. Docs lint/format/build, dependency-pin checks, actionlint and whitespace
-checks pass. All 12 Cloudflare browser contracts pass under the CI-pinned
+checks pass. All 13 Cloudflare browser contracts pass under the CI-pinned
 Chrome/ChromeDriver 154.0.8037.92 with wasm-bindgen 0.2.128.
 
 ## Decision log

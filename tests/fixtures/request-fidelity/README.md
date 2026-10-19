@@ -12,13 +12,15 @@ prove source freshness. Use the default locked build for review evidence.
 
 The isolated Cargo workspace and npm lock pin fixture dependencies. Install
 Viceroy 0.21.0, Spin 4.1.0, worker-build 0.8.5 and wasm-bindgen CLI 0.2.128.
+The fixture manifest's `[package.metadata.request-fidelity]` is authoritative for
+Spin CLI and worker-build versions; the runner and CI read those pins.
 Wrangler 4.83.0 and its local workerd are installed by `npm ci`. Each runtime
 uses its own target directory, an ephemeral loopback port, bounded readiness
 and an owned process group that is cleaned up on success, failure or interruption.
 No platform credentials or deployment are required.
 
 The runner sends 56 fixed raw HTTP cases across Fastly, Cloudflare and Spin.
-The client and process orchestration use an isolated native Rust harness with exact existing Tokio/serde_json/tempfile/TOML pins. Tokio is confined to this host test helper; it adds no core or WASM runtime dependency. Responses contain fixed booleans/counts rather than unrestricted request values.
+The client and process orchestration use an isolated native Rust harness with exact isolated Tokio/serde_json/tempfile/TOML pins. Tokio is confined to this host test helper; it adds no core or WASM runtime dependency. Responses contain fixed booleans/counts rather than unrestricted request values.
 `observations.json` records the pinned local runtimes' observed outcomes, and
 subsequent runs compare them exactly and report each changed case. Inspect
 changes before updating it. Record all platforms to a temporary file first:

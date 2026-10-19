@@ -384,8 +384,12 @@ where
 /// Dispatch with logical store bindings and an already captured ingress snapshot.
 ///
 /// The snapshot is inserted after the extension callback, preventing scratch
-/// metadata from replacing adapter-captured facts. Store semantics match
+/// metadata from replacing the supplied snapshot. Store semantics match
 /// [`dispatch_with_registries`].
+///
+/// The caller must supply a snapshot captured from this same native request
+/// before mutation. Metadata construction and syntax validation do not establish
+/// its provenance or authenticate caller assertions.
 ///
 /// # Errors
 /// Returns an error if a declared KV store cannot be opened or dispatch fails.
@@ -434,8 +438,12 @@ where
 /// Convert with store registries and an already captured ingress snapshot.
 ///
 /// The snapshot is inserted after the extension callback, preventing scratch
-/// metadata from replacing adapter-captured facts. Store semantics match
+/// metadata from replacing the supplied snapshot. Store semantics match
 /// [`into_core_request_with_registries`].
+///
+/// The caller must supply a snapshot captured from this same native request
+/// before mutation. Metadata construction and syntax validation do not establish
+/// its provenance or authenticate caller assertions.
 ///
 /// # Errors
 /// Returns an error if a declared KV store cannot be opened or the request
@@ -594,6 +602,11 @@ fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretReg
 /// but do not associate original fields with converted values. They cannot prove
 /// per-name multiplicity or full global order. Fidelity remains unknown pending
 /// production evidence; aggregate count equality is not proof of preservation.
+/// Unlike the other adapters, Fastly exposes partial original-header metadata,
+/// so unresolved native capability is intentionally `Unknown` rather than
+/// `Unavailable`. This extension does not supply original global order to hooks.
+/// Consumers requiring it must accept only `Preserved`; both `Unknown` and
+/// `Unavailable` are insufficient.
 ///
 /// # Panics
 /// The SDK URL accessor can panic if its runtime URI cannot be parsed.

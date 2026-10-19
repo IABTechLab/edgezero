@@ -81,6 +81,21 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn ingress_invalid_runtime_header_value_is_a_bad_request() {
+        let raw = web_sys::Request::new_with_str("https://example.com/reserved")
+            .expect("should construct Web Request");
+        raw.headers()
+            .append("x-bad", "a\u{1}b")
+            .expect("Fetch should accept SOH inside a header value");
+        let (env, ctx) = test_env_ctx();
+        let error = into_core_request(CfRequest::from(raw), env, ctx)
+            .await
+            .expect_err("core headers should reject SOH");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.to_string(), "invalid runtime header value");
+    }
+
+    #[wasm_bindgen_test]
     async fn ingress_preserves_runtime_extension_methods_and_header_strings() {
         for token in [
             "EXAMPLE-METHOD",
