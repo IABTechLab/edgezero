@@ -709,7 +709,9 @@ fn normalise_runtime_config_header(serialised: String) -> String {
 /// Returns `(name_lines, comment_lines)`: the `__NAME` overlay lines
 /// (converging upsert path) and the commented `__KEY` placeholders
 /// (operator-owned, insert-only append path) split apart.
-fn build_env_lines(stores: &ProvisionStores<'_>) -> Result<(Vec<String>, Vec<String>), String> {
+fn build_env_lines(
+    stores: &ProvisionStores<'_>,
+) -> Result<(Vec<String>, Vec<String>), &'static str> {
     let mut name_lines: Vec<String> = Vec::new();
     for (kind, kind_stores) in [
         ("KV", stores.kv),

@@ -202,3 +202,13 @@ the CLI, env grammar differences, typed-error checkpoint loss, native serve
 writeback, immutable startup writes, and API child-environment propagation.
 The chosen design keeps adapter policy in adapters and removes the nested lock
 protocol rather than extending its ownership tokens.
+
+The first CI run passed all build, test, lint, and deployment jobs, but CodeQL
+reported 32 logging alerts. Independent boundary and env reviews traced every
+path to secret-store identifier metadata, then an encoded `Ok(String)` being
+treated as a propagated error. No trace originated in a stored credential.
+The encoder and its three adapter-local line builders now return static
+borrowed diagnostics, separating value bytes from errors at the type boundary.
+This retains the existing messages and normal error propagation without
+changing logging, renaming store kinds, or suppressing security checks. A
+regression requires static diagnostic types and excludes input sentinels.

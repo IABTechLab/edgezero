@@ -87,7 +87,7 @@ pub(super) fn provision(
 /// (operator-owned, insert-only append path) split apart.
 fn build_axum_env_lines(
     stores: &ProvisionStores<'_>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> Result<(Vec<String>, Vec<String>), &'static str> {
     let mut name_lines: Vec<String> = Vec::new();
     for (kind, kind_stores) in [
         ("KV", stores.kv),

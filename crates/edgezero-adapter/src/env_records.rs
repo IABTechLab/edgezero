@@ -205,10 +205,11 @@ pub fn decode_value(assignment: EnvAssignment<'_>) -> Result<String, String> {
 ///
 /// # Errors
 /// Rejects control separators and values which dotenv cannot quote losslessly.
+/// Diagnostics are static and never include bytes from the supplied value.
 #[inline]
-pub fn encode_value(value: &str, always_quote: bool) -> Result<String, String> {
+pub fn encode_value(value: &str, always_quote: bool) -> Result<String, &'static str> {
     if value.contains(['\r', '\n', '\0']) {
-        return Err("env-file value contains an embedded newline or NUL byte".to_owned());
+        return Err("env-file value contains an embedded newline or NUL byte");
     }
     let needs_quote = always_quote
         || value.trim_matches(dotenv_whitespace) != value
@@ -226,7 +227,7 @@ pub fn encode_value(value: &str, always_quote: bool) -> Result<String, String> {
             }
         }
     }
-    Err("env-file value cannot be represented losslessly in a single dotenv assignment".to_owned())
+    Err("env-file value cannot be represented losslessly in a single dotenv assignment")
 }
 
 #[cfg(test)]
@@ -276,6 +277,24 @@ mod tests {
         ] {
             let entry = records(input).first().unwrap().assignment.unwrap();
             assert_eq!(decode_value(entry).unwrap(), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn encoding_diagnostics_are_static_and_exclude_input() {
+        for (value, expected) in [
+            (
+                "PRIVATE_SENTINEL\n",
+                "env-file value contains an embedded newline or NUL byte",
+            ),
+            (
+                "PRIVATE_SENTINEL#\\",
+                "env-file value cannot be represented losslessly in a single dotenv assignment",
+            ),
+        ] {
+            let error: &'static str = encode_value(value, false).unwrap_err();
+            assert_eq!(error, expected);
+            assert!(!error.contains("PRIVATE_SENTINEL"));
         }
     }
 
