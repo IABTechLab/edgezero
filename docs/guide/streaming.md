@@ -114,8 +114,10 @@ body-mode = "buffered"  # or "stream"
 
 ## Outbound Response Decompression
 
-The outbound client decodes a single bare `gzip`, `deflate`, or `br` content coding through shared
-`edgezero-core` decoders. Unknown, parameterized, or stacked codings pass through unchanged.
+By default, the outbound client decodes a single bare `gzip`, `deflate`, or `br` content coding
+through shared `edgezero-core` decoders. `response_decoding(ResponseDecoding::Original)` opts out;
+206 responses always retain original coding. Unknown, parameterized, or stacked codings also
+pass through unchanged. Identity bodies keep their decoded-byte cap under either choice.
 Encoded transport bytes, decoded output, and final buffered bytes have independent limits; see
 [Capabilities](/guide/capabilities#limits-and-accounting).
 

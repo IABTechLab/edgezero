@@ -1,0 +1,1865 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-20",
+  "base_revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "scope": "client/request proxy marker on adapter-visible headers; not raw-header fidelity or hosted qualification",
+  "source_sha256": {
+    "Cargo.toml": "ee73d1318af74a997ecc12bac0f80cd7eefbe8ead34a35b1432c8d6f49fc42e1",
+    "Cargo.lock": "1afb33fe3067419ad5a2a948b330ac1df123d53214e49dc4005a92f7bc69e043",
+    "crates/edgezero-core/src/outbound.rs": "878081903443f72ee3bbd23976390bc426af09a213121bb7394218edf2224420",
+    "crates/edgezero-core/src/outbound/exchange.rs": "f8ca9867b572b2e40e0c08ae55fefefaefbf82355c83aa8b28f74870d6e2a879",
+    "crates/edgezero-core/src/lib.rs": "88fd8859f734b1c3f750f48a38e6c3eb69584128243acc0243eca6f03f923b31",
+    "crates/edgezero-core/src/compression.rs": "4acccc0c01009894ebe4f77f57ce8ce501d3f3f2ccb565c6b3d3871d826037d4",
+    "crates/edgezero-core/src/body.rs": "50a8bc65fcbc7df3d9afd3ddc520889f42da46af1c6419e23c19625c33d5bf9e",
+    "crates/edgezero-core/src/time.rs": "bcd7047587f656b6547c860986f0c8f6459a5554850cbac4c1bfd9c480ec7435",
+    "crates/edgezero-adapter-axum/src/outbound.rs": "cc6e1f50eb1d85c42100f73ad850109433d56fe43e249f3cdb7203553f0a23a2",
+    "crates/edgezero-adapter-cloudflare/src/outbound.rs": "25dbde10a5502c1644a791ce188d39531689d0f1c138594ba17cc23c5854072c",
+    "crates/edgezero-adapter-fastly/src/outbound.rs": "4284cc2af486e2bed63beb6434332965832dbc15a6fc40a0b538bcc54b5a3f31",
+    "crates/edgezero-adapter-spin/src/outbound.rs": "be9f5ff721bcc47ed530deab39dbdff4058b1ec4e97865c2b8bbb65ae08c1ad5",
+    "crates/edgezero-adapter-spin/src/cli.rs": "03e5772b7f0d55e56492547fb13791cc2c033338f5ed3eeb2b8f5c14a8c81364",
+    "crates/edgezero-adapter-spin/src/response.rs": "03e8b98de3e4854810b4bdabba7783d3a66cacb5e91402e941609d7dfe567075",
+    "tests/fixtures/reusable-app/Cargo.toml": "7665200757e4e565d11fa7eb036215aa583d21fd543bca39fdbdce470fee11ae",
+    "tests/fixtures/reusable-app/Cargo.lock": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/progress.rs": "295b98872ab59c185f6907189dad13c5c4c56699538d9756872d1c7f82cb6812",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/progress.rs": "b29022de35c338efd6969b4f0f254a3c3dbf1036600364f593d7eef0288a3758",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/net.rs": "8719b6eb05c39b514f2f571166628a5d919935f3ebbb9e69be9b854bb416d4a3",
+    "tests/fixtures/reusable-app/crates/fixture-axum/src/progress.rs": "0c41390031d857f0589667b88bd27fc8e185b483cedc57ec2ee73c99d36a9e4a",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_progress.rs": "0b4a81e3678459801b9f5a9379de70160452317929936d1b6c85393c1249c704",
+    "tests/fixtures/reusable-app/crates/fixture-spin/src/progress.rs": "0a20af88ab9a94fe8ef806b15e38994c7790ec0f9040add4c3dec4ead9f022db",
+    "tests/fixtures/reusable-app/crates/fixture-cloudflare/src/progress.rs": "305f70039af59501639916bd8cfb8db696613c73af670e953dd329a3eed14498"
+  },
+  "limitations": [
+    "not an authoritative frozen candidate; these selected source hashes characterize a working tree",
+    "hosted execution pending",
+    "Cloudflare runtime blocked on locked wasm-bindgen 0.2.129 CLI availability; no replacement tool installed or dependency repinned",
+    "Spin hides Connection before EdgeZero receives SDK-native response fields; 15 nominated-shape cases pass only against adapter-visible fields",
+    "Spin OutboundHeaderFidelity is BestEffort; marker-off cannot remove a nomination the host hides",
+    "head-first, eager begin and redirect-follow migration remain unimplemented",
+    "Fastly readiness gate remains failed; current dispatch-slack guard and body-read engine retained"
+  ],
+  "diagnostic_history": {
+    "adapter": "spin",
+    "command_exit_code": 1,
+    "raw_events_path": "/private/tmp/edgezero-marker-spin-20261019/events.jsonl",
+    "raw_events_sha256": "f17cdf68ebe9ec19e713b709cc940fe6b4d9f2034fc03db513515d0ffa921225",
+    "initial_failed_case": {
+      "adapter": "spin",
+      "case": "marker-get-200-nominated-inherit",
+      "client": {
+        "body": "{\"case\":\"marker-get-200-nominated-inherit\",\"enabled\":false,\"markers\":[\"upstream\"],\"qualification\":false,\"status\":200}",
+        "complete_ns": 10866125,
+        "event": "client_completed",
+        "first_byte_ns": 10853875,
+        "header_ns": 10852083,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 06:46:33 GMT"]
+        ],
+        "status": 200,
+        "token": "18e029f751d5fde8-115d6-1e"
+      },
+      "error": "marker policy/status mismatch",
+      "event": "outbound-marker",
+      "qualification": false,
+      "status": "fail"
+    },
+    "source_snapshot": "initial source snapshot not retained; no source equivalence to the rerun asserted",
+    "resolution": "SDK-native controls independently show absent Connection and retained upstream marker for ordinary and nominated fields; retain ordinary fields in Off mode, record hidden nomination and demote header fidelity rather than claim raw normalization"
+  },
+  "runs": [
+    {
+      "adapter": "axum",
+      "command": "cargo run --locked --offline --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -- --adapter axum --suite outbound-progress --output /private/tmp/edgezero-marker-axum-20261020",
+      "exit_code": 0,
+      "environment": {
+        "event": "build_environment",
+        "host_arch": "aarch64",
+        "host_os": "macos",
+        "lockfile": {
+          "bytes": 84127,
+          "fnv1a64": "10d93fc12c84db43",
+          "path": "/private/tmp/edgezero-marker-axum-20261020/Cargo.lock",
+          "purpose": "non-security build identity"
+        },
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      },
+      "runtime": {
+        "adapter": "axum",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "source_state": "working-tree-characterization",
+        "version": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+      },
+      "artifact": {
+        "bytes": 8871776,
+        "fnv1a64": "d6efca5a500547a8",
+        "path": "/private/tmp/edgezero-marker-axum-20261020/progress-axum/artifacts/fixture-axum-outbound-progress",
+        "purpose": "non-security build identity",
+        "sha256": "fe02353170d2ecae021113d6f1fd90a7518056f2d26c4a2939d17c2884e1150e"
+      },
+      "raw_events_path": "/private/tmp/edgezero-marker-axum-20261020/events.jsonl",
+      "raw_events_sha256": "a1b6d4f96fcdf1041c9634f65ef9509d5aa79414e2d3a53a70726a4bd890c039",
+      "coding_regression_controls_passed": 24,
+      "sdk_header_visibility_controls": [],
+      "provider_hidden_nomination_cases": 0,
+      "checks": [
+        {
+          "case": "marker-get-200-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-nominated-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-204-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-nominated-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-head-200-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-nominated-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-304-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-nominated-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-302-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-nominated-on",
+            "enabled": true,
+            "markers": ["axum"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-batch",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-batch",
+            "markers": [null, "axum"],
+            "qualification": false
+          }
+        }
+      ]
+    },
+    {
+      "adapter": "fastly",
+      "command": "cargo run --locked --offline --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -- --adapter fastly --suite outbound-progress --output /private/tmp/edgezero-marker-fastly-final",
+      "exit_code": 0,
+      "environment": {
+        "event": "build_environment",
+        "host_arch": "aarch64",
+        "host_os": "macos",
+        "lockfile": {
+          "bytes": 84127,
+          "fnv1a64": "10d93fc12c84db43",
+          "path": "/private/tmp/edgezero-marker-fastly-final/Cargo.lock",
+          "purpose": "non-security build identity"
+        },
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      },
+      "runtime": {
+        "adapter": "fastly",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "source_state": "working-tree-characterization",
+        "version": "viceroy 0.21.0"
+      },
+      "artifact": {
+        "bytes": 2141949,
+        "fnv1a64": "44648754657ea5e8",
+        "path": "/private/tmp/edgezero-marker-fastly-final/progress-fastly/artifacts/fixture-fastly-outbound-progress.wasm",
+        "purpose": "non-security build identity",
+        "sha256": "3f5ca3689ddfefeb245087a77bb952bd139e166ac493d9e6b5739b8beff4832f"
+      },
+      "raw_events_path": "/private/tmp/edgezero-marker-fastly-final/events.jsonl",
+      "raw_events_sha256": "824f05e5479f4e854bb407e527553b9fe52d17b5d82834cdf82a973f922c5377",
+      "coding_regression_controls_passed": 24,
+      "sdk_header_visibility_controls": [],
+      "provider_hidden_nomination_cases": 0,
+      "checks": [
+        {
+          "case": "marker-get-200-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-nominated-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-204-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-nominated-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-head-200-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-nominated-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-304-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-nominated-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-302-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-nominated-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-nominated-on",
+            "enabled": true,
+            "markers": ["fastly"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-nominated-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-batch",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-batch",
+            "markers": [null, "fastly"],
+            "qualification": false
+          }
+        }
+      ]
+    },
+    {
+      "adapter": "spin",
+      "command": "cargo run --locked --offline --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -- --adapter spin --suite outbound-progress --output /private/tmp/edgezero-marker-spin-visibility2",
+      "exit_code": 0,
+      "environment": {
+        "event": "build_environment",
+        "host_arch": "aarch64",
+        "host_os": "macos",
+        "lockfile": {
+          "bytes": 84127,
+          "fnv1a64": "10d93fc12c84db43",
+          "path": "/private/tmp/edgezero-marker-spin-visibility2/Cargo.lock",
+          "purpose": "non-security build identity"
+        },
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      },
+      "runtime": {
+        "adapter": "spin",
+        "event": "progress-runtime",
+        "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "source_state": "working-tree-characterization",
+        "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+      },
+      "artifact": {
+        "bytes": 2308687,
+        "fnv1a64": "cf46233d56aa1321",
+        "path": "/private/tmp/edgezero-marker-spin-visibility2/progress-spin/artifacts/fixture_spin.wasm",
+        "purpose": "non-security build identity",
+        "sha256": "54fb2da731641ee0cd0b4e1f2e91a187e3284b9df9d67e29e9ae1611bfc52035"
+      },
+      "raw_events_path": "/private/tmp/edgezero-marker-spin-visibility2/events.jsonl",
+      "raw_events_sha256": "63d1bdae2c037f6bb18984b9e68a3a532a77609b0d84656dd4a3d5e23461e449",
+      "coding_regression_controls_passed": 24,
+      "sdk_header_visibility_controls": [
+        {
+          "shape": "upstream",
+          "probe": {
+            "case": "sdk-marker-headers",
+            "connection": [],
+            "markers": ["upstream"],
+            "qualification": false,
+            "sdk_native": true
+          },
+          "client_status": 200
+        },
+        {
+          "shape": "nominated",
+          "probe": {
+            "case": "sdk-marker-headers",
+            "connection": [],
+            "markers": ["upstream"],
+            "qualification": false,
+            "sdk_native": true
+          },
+          "client_status": 200
+        }
+      ],
+      "provider_hidden_nomination_cases": 15,
+      "checks": [
+        {
+          "case": "marker-get-200-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-200-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-200-nominated-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-200-nominated-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-200-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-200-nominated-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-204-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-204-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-204-nominated-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-204-nominated-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-get-204-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-204-nominated-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 204
+          }
+        },
+        {
+          "case": "marker-head-200-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-head-200-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-head-200-nominated-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-head-200-nominated-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-head-200-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-head-200-nominated-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 200
+          }
+        },
+        {
+          "case": "marker-get-304-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-304-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-304-nominated-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-304-nominated-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-304-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-304-nominated-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 304
+          }
+        },
+        {
+          "case": "marker-get-302-absent-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-inherit",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-absent-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-absent-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-absent-off",
+            "enabled": false,
+            "markers": [],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-on",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-upstream-off",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-get-302-upstream-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-inherit",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-302-nominated-inherit",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-on",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-302-nominated-on",
+            "enabled": true,
+            "markers": ["spin"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-get-302-nominated-off",
+          "result": "pass",
+          "provider_hidden_nomination": true,
+          "observed": {
+            "case": "marker-get-302-nominated-off",
+            "enabled": false,
+            "markers": ["upstream"],
+            "qualification": false,
+            "status": 302
+          }
+        },
+        {
+          "case": "marker-batch",
+          "result": "pass",
+          "provider_hidden_nomination": false,
+          "observed": {
+            "case": "marker-batch",
+            "markers": [null, "spin"],
+            "qualification": false
+          }
+        }
+      ]
+    }
+  ]
+}

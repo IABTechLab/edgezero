@@ -12,12 +12,180 @@
 
 ## Status and Authority
 
-Planning only. No runtime tasks below are complete. Baseline is PR 275 at
+Execution started with G1's inventory/checker and G2's opt-in host diagnostic. No production
+runtime migration below is complete. The local G2 control failed: timed body readiness consumes a
+source error on pinned Viceroy. See the [feasibility report](../../audits/2026-10-18-outbound-feasibility.md)
+for retained evidence and cancelled/deferred Fastly work. G3's local probes are implemented:
+native and Viceroy passed the exercised cases. Spin's initial response-owned failure exposed an
+existing egress bug: early successful host observation aborted pending body work. That internal
+bug is fixed without changing the outbound/public APIs; all local Spin cases and isolated controls
+now pass. Cloudflare's subsequent local workerd run passes the exercised coding, marker,
+scheduling and framing cases; downstream encoded relay proof remains open. Protocol/hosted/context legs and
+Fastly-policy approvals remain pending. The requester's scoped reply authorizes the exact G4 API
+digest, with approving maintainer name supplied as AG. P1's core paired-time and ownership foundations have started, not
+the full client/adapter hard migration. Baseline is PR 275 at
 `f6c708ccb5be19ba9fa92575db3c08c0f17e0d72`, called F in the
 [requirements](../specs/2026-10-17-edgezero-pr275-requirements.md).
 That requirements document supplies observable behavior, priorities, exceptions, acceptance
 criteria, and evidence ownership. This series supplies implementation order and file ownership.
 Historical outbound plans are implementation history, not instructions to recreate removed APIs.
+
+The [G4 review packet](../../audits/2026-10-18-outbound-api-approval.md) presents the exact API digest,
+hard-migration inventory and independent decisions, including the scoped API-only conversation
+approval attributed to AG. Dependent Fastly implementation still needs a
+new preserving primitive/report and its separately approved policy. No failed gate was waived.
+
+### P1 Foundation Checkpoint
+
+- [x] Verify the exact submitted Interfaces digest before implementation and record the scoped
+      API-only approval with the supplied maintainer attribution, AG.
+- [x] Add `OutboundFuture` and `OutboundTime` with the existing clock and an owned local wakeup
+      factory. Preserve the absolute deadline, retain pending registrations, yield before early
+      rearming, preserve original timer errors and release terminal/cancelled state exactly once.
+- [x] Demonstrate missing-type/export red and the late timer-error regression, then eleven
+      deterministic passing time tests, including
+      fake-clock wakeups, frozen time, original error identity, resource release and clock regression.
+- [ ] Integrate paired time with support-first preparation and timer-before-body settlement.
+- [ ] Hard-migrate the shared dispatch trait, every current implementation, adapter injectors,
+      behavioral tests, demo, generator and guards together. No old-signature defaults or aliases.
+
+The foundation does not change transport behavior or qualify a runtime. G1 applicability, remaining
+G3 premises, Fastly B/H(K), and hosted results retain their own open gates.
+
+### P1/P4 Ownership Checkpoint
+
+- [x] Add the approved local `OutboundExchangeOwner` and `OutboundPending` types with private
+      ownership state and root exports. Retain the exact submitted Interfaces digest.
+- [x] Use one receiver-observation path for readiness and collection; cache the original outcome,
+      release a completed receiver immediately and release failed work on observation. Do not poll
+      a response body, resample deadlines or reconstruct typed errors during handoff.
+- [x] Cancel on handle/collection-future drop, including an unpolled future; disarm pending
+      cancellation only before returning success. Keep streamed-body cleanup separately owned.
+- [x] Demonstrate missing-type/export red, then nine deterministic passing ownership tests,
+      including live-stream handoff, repeated readiness, exact non-Clone error identity, cached
+      response abandonment, ordered cancellation before receiver/body release and real-waker
+      registration after a nonblocking check. Debug inspection neither polls nor exposes cached payloads.
+- [x] Finish broad verification and independent spec/quality review for this checkpoint.
+- [ ] Integrate these primitives with head-first dispatch, verified eager scheduling, scope owners
+      and the arrival ledger during the full hard cut. No lazy compatibility begin is supplied.
+
+Both investigation/proposal reviews selected the same minimal design: retain cancellation on cached
+success, release it on cached error, and privately disarm it on successful collection. Dropping a
+disarmed callback still destroys its captures: pending producers must use passively droppable
+cancellation handles, not armed abort-on-drop SDK guards. Buffered publication follows transport
+cleanup; streamed publication follows transfer to a distinct body owner. These are producer
+obligations, not guarantees inferred by polling a supplied future. No adapter, runtime scheduling
+semantics or capability is changed by this standalone foundation. At that checkpoint Fastly G2
+remained failed and Cloudflare tooling was unavailable; portable tests waived neither. The later
+Cloudflare checkpoint below supersedes only that local tool gap.
+
+Checkpoint verification passed: all five workspace Rust gates (782 core tests), core doctests,
+all seven eight-combination adapter matrices rerun after the final test additions, three WASM
+target clippy runs, demo tests and the generated-workspace gate with 22 executed core tests.
+Docs checks, dependency audits, the legacy guard and the 18 evidence-checker tests passed; the
+inventory still reports 255 criteria / 511 planned legs with `qualified: false`. Independent spec
+and quality reviews found no correctness defect in this subset; the suggested ordered-cleanup
+regression was added and reviewed. No new trait implementation or compatibility path was introduced.
+
+The nine ownership tests also executed successfully under pinned Viceroy on wasm32-wasip1:
+
+```sh
+SSL_CERT_FILE=/etc/ssl/cert.pem CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run' scripts/run_test_nonzero.sh pending_cancellation_precedes_receiver_and_cached_body_release cargo test --offline --locked -p edgezero-core --target wasm32-wasip1 --lib outbound::progress::tests
+```
+
+The initial local runner exited before test discovery because its macOS keychain was unavailable.
+Using the existing system CA bundle through the documented native-certificate override fixed
+runner startup without changing code, disabling verification or accessing the keychain. These are
+portable ownership tests, not Fastly SDK scheduling/readiness or hosted qualification evidence.
+The previously retained runtime characterization records remain historical source snapshots.
+
+### P1/P3 Original-Coding Checkpoint
+
+- [x] Add the approved Decode/Original request choice, default/readback/parts preservation and
+      enforced propagation through all four current adapter transports, including Fastly batch metadata.
+- [x] Centralize original and mandatory 206 delivery in the existing shared body policy; preserve
+      normalization precedence, identity decoded caps, transport/final caps and decoder bypass.
+- [x] Demonstrate failing decoder/header/buffer-cap regressions, then passing core and actual Axum
+      transport tests, including mixed batch choices and zero-poll bodyless controls.
+- [x] Exercise gzip/deflate/Brotli through pinned local Viceroy and Spin origins: 24 checks per target,
+      both response modes, Original/200, Original/206, Decode/206 and Decode/200 controls.
+- [x] Align relay demo/template requests with Original while keeping JSON fanout on Decode.
+- [ ] Complete the head-first hard cut, full adapter normalization/limit matrices, Fastly mixed-batch
+      host proof, Cloudflare downstream relay proof and hosted qualification before closing P1/P3.
+
+This original-coding slice preceded the marker checkpoint below and does not implement eager dispatch or redirect following. It
+does not adopt EZ-5.9/5.10's optional metadata changes or bypass the failed Fastly readiness gate.
+The approved Interfaces text and its digest remain unchanged.
+
+Checkpoint verification passed: all five workspace Rust gates (768 core tests), all seven
+eight-combination adapter matrices, three real-target WASM clippy runs, demo format/clippy/tests,
+and the generated-workspace gate including 22 executed generated-core tests. Docs checks, dependency
+audits, both nonzero original-coding sentinels and the fixture's tests/clippy passed. Two independent
+read-only reviews found no blocking defect; their additional declared/observed cap controls were
+added and verified. Local coding results are retained in the feasibility report, not claimed as
+release evidence. The forwarding-example checker is still a later Q2 deliverable, not present yet.
+
+### P1/P3 Marker Checkpoint
+
+- [x] Add the approved client default, effective inspector and per-request Inherit/On/Off APIs;
+      preserve readback/parts settings and resolve policy before supplied-client send/batch delegation.
+- [x] Wire the shared insertion/accounting policy through all four adapters and Fastly pending slots;
+      retain default-on behavior and ordinary pre-normalization upstream accounting.
+- [x] Test exact byte/count budgets, duplicate upstream values, nomination precedence, overwrite
+      behavior, clone isolation and a non-polling inspector, plus real Axum disposition/batch cases.
+- [x] Configure only demo/template relay handles off; keep JSON fanout default on and test both.
+- [x] Exercise 46 marker checks each on native Axum, pinned Viceroy and Spin, including mixed-policy
+      batches; retain working-tree source/artifact identities and the initial Spin failure.
+- [x] Isolate Spin's host-hidden Connection nomination with direct SDK controls and demote its
+      header fidelity to BestEffort without claiming raw-field normalization.
+- [ ] Complete hosted marker evidence, plus the larger head-first/eager/follow
+      migration before closing P1/P3. Future send modes must use the same policy preparation.
+
+The [marker record](../../audits/evidence/2026-10-20-outbound-marker.json) characterizes visible-field
+policy, not a frozen candidate or raw-header fidelity. Fifteen Spin cases explicitly record hidden
+nomination rather than count it as successful raw normalization. The same three runs also passed
+24 coding controls each. At that checkpoint Cloudflare lacked the exact locked wasm-bindgen CLI;
+no download or repin had been attempted. The subsequent Cloudflare checkpoint records its separate
+authorized tool install. Fastly's failed readiness gate and existing dispatch-slack guard remain unchanged.
+
+Checkpoint verification passed: all five workspace Rust gates (773 core tests), all seven
+eight-combination adapter matrices, three real-target WASM clippy runs, demo tests/clippy and the
+generated-workspace gate including 22 generated-core tests. Independent adapter and core/template
+reviews found no remaining marker-policy defect; the template formatting finding and stale Spin
+capability prose were corrected and rechecked. The new test-only MarkerClient adds one implementer
+to rediscover during the full P1 hard cut; the frozen eight-implementation approval inventory remains
+submission-time history and its Interfaces digest is unchanged.
+
+### Cloudflare Runtime Checkpoint
+
+- [x] Provision the exact locked wasm-bindgen CLI in an authorized temporary directory without
+      repinning dependencies or changing global tools. Run only local workerd with local bindings.
+- [x] Execute 24 coding, 46 marker, five SDK/public scheduling and five HTTP/1 framing checks;
+      assert 89 origin receipts and retain the 18 individual scheduling receipts.
+- [x] Strengthen framing validation against missing, mistyped or contradictory pre-conversion
+      Workers signals. Prove all eight independent-group failure combinations retain overall
+      failure and still execute scheduling/framing; keep Spin terminal diagnostics intact.
+- [x] Retain separate initial and strengthened source snapshots, raw events, JS/WASM/runtime/tool
+      hashes and effective compatibility settings in the
+      [new record](../../audits/evidence/2026-10-20-cloudflare-outbound.json).
+- [ ] Complete downstream encoded relay proof, full head-first/eager/follow integration and
+      hosted/protocol/context/cancellation qualification before closing their parent tasks.
+
+This dated checkpoint supersedes earlier Cloudflare tool-unavailable status only for the local
+cases exercised. No production source, dependency pin, capability assignment, Fastly readiness
+gate or approved Interfaces digest changes. Historical evidence is not rewritten as passing.
+
+Checkpoint verification passed: all five workspace Rust gates, the three real-WASM-target clippy
+runs, 37 harness tests, 12 fixture-core tests, fixture format/clippy and docs format/lint/build.
+The 18 evidence-checker tests, inventory validation, docs/legacy guards and decoder/map dependency
+audits passed. Source, embedded-content, artifact and tool hashes were recomputed successfully.
+Two read-only investigations selected private framing/phase helpers over a new runner framework:
+the runtime review found no need for URL/header workarounds, while the evidence review identified
+the missing host-signal assertion and independent-phase coverage gap. The subsequent scoped spec
+review found no defect in the strengthened harness or final local observations. Independent quality
+review verified 27 file hashes, 16 embedded payload hashes, 23 final source hashes and the unchanged
+approval/requirements digests; it found no remaining defect in this checkpoint. It did not rerun
+the broader CI commands, whose results above are from the central verification run.
 
 The requirements' EZ-14.6 correction makes an expired application absolute deadline take
 precedence over idle expiry, including a tie and late observation of both expiries. It changes
@@ -118,8 +286,8 @@ delivery alone or a group heading never closes another leaf's requirement.
 - [ ] Confirm EZ-2 M1-M5/M7 product thresholds and all open questions that change acceptance.
       The written normative defaults remain the proposed implementation; do not silently adjust
       thresholds or skip required legs.
-- [ ] G4 obtains maintainer approval for the Interfaces blocks in plan 02 before P1 changes public
-      traits. Separately approve G2's Fastly primitive and literal backend-policy bound before D1.
+- [ ] Complete G4's remaining policy decisions. AG approved the exact Interfaces digest for API
+      implementation; separately approve G2's Fastly primitive and literal backend-policy bound before D1.
       Image Optimizer integration additionally requires the revised horizon contract, numerical
       H(K) rule/maximum and tolerance approved by both maintainers, not inferred from timer rounding.
       A failed Fastly feasibility leg does not prohibit approved portable or other-adapter work.
@@ -214,5 +382,5 @@ CLI-only/no-default/target feature matrix: native all-features clippy does not c
       capability promotion is present.
 - [ ] Q5 identifies a reachable candidate SHA and a durable passing record for that exact SHA.
 
-This turn creates the plan and fixes the requirements wording only. Runtime execution, deployment,
-evidence production, consumer migration, commits, and pushes are separate actions.
+Deployment, consumer migration, commits and pushes remain separately authorized actions. A
+negative feasibility experiment is not completion of the runtime series or approval to repin.

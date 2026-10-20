@@ -1,5 +1,6 @@
 use crate::{evidence::*, net::Backend, *};
 use std::collections::HashMap;
+mod progress;
 fn cargo_build() -> Command {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -212,6 +213,16 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
     }
+    if args.suite == "outbound-progress" {
+        return progress::run("fastly", run, records);
+    }
+    if args.suite == "outbound-readiness" {
+        require(
+            version.split_whitespace().nth(1) == Some(pin),
+            "readiness proof requires the pinned runtime",
+        )?;
+        return outbound_readiness(&exe, run, records);
+    }
     checked(
         cargo_build()
             .args([
@@ -270,6 +281,7 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if args.suite == "smoke" {
         logging(&exe, run, records)?;
         faults(&exe, run, records)?;
+        progress::run("fastly", run, records)?;
     }
     if records
         .values
@@ -279,6 +291,96 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
         records.push(json!({"status":"unsupported","reason":"heap snapshot unavailable; memory limit unverified"}))?;
     }
     Ok(())
+}
+
+fn outbound_readiness(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
+    let revision = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root())
+        .output()?;
+    require(revision.status.success(), "cannot record source revision")?;
+    let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
+    checked(
+        cargo_build()
+            .args([
+                "build",
+                "--offline",
+                "--locked",
+                "--release",
+                "-p",
+                "fixture-fastly",
+                "--features",
+                "readiness",
+                "--bin",
+                "fixture-fastly-outbound-readiness",
+                "--target",
+                "wasm32-wasip1",
+            ])
+            .env("EDGEZERO_QUALIFICATION_REVISION", &revision),
+    )?;
+    let binary = stage(
+        &root().join("target/wasm32-wasip1/release/fixture-fastly-outbound-readiness.wasm"),
+        run,
+    )?;
+    records.push(json!({"event":"readiness-build", "revision":revision,
+        "source_state":"working-tree-characterization", "sdk":"0.13.1", "artifact":artifact(&binary)?}))?;
+    let config = run.join("fastly.toml");
+    fs::copy(root().join("crates/fixture-fastly/fastly.toml"), &config)?;
+    let port = net::port()?;
+    let log = run.join("readiness.log");
+    let _process = Process::start(
+        &mut fastly_command(exe, &config, run, "outbound-readiness", port),
+        &log,
+        port,
+    )?;
+    let backend = Backend::start()?;
+    let mut probes = Vec::new();
+    for repetition in 0..3 {
+        for mode in ["direct", "selected"] {
+            let reply = net::request(
+                port,
+                &format!("/{mode}"),
+                &token(),
+                Some(&backend.url("/readiness/truncated")),
+                None,
+            )?;
+            let mut probe = guest(&reply)?;
+            probe["repetition"] = json!(repetition);
+            records.push(probe.clone())?;
+            probes.push(probe);
+        }
+    }
+    validate_outbound_readiness(&probes)?;
+    require(
+        probes.len() == 6 && backend.receipts.lock().unwrap().len() == 6,
+        "readiness controls must execute six real origin requests",
+    )?;
+    let mut lost = false;
+    for pair in probes.as_chunks::<2>().0 {
+        let error = |probe: &Value| {
+            probe["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|s| s["error"].as_str().map(str::to_owned))
+        };
+        let direct = error(&pair[0]);
+        let selected = error(&pair[1]);
+        require(
+            direct.as_deref() == Some("UnexpectedEof"),
+            "truncated direct-read control did not observe UnexpectedEof",
+        )?;
+        lost |= direct != selected;
+        records.push(
+            json!({"event":"readiness-error-preservation", "direct":direct, "selected":selected,
+            "status":if direct == selected {"pass"} else {"fail"}, "qualification":false}),
+        )?;
+    }
+    require(
+        !lost,
+        "pinned Viceroy body readiness consumed the source error; Fastly G2 fails",
+    )?;
+    records.push(json!({"status":"unverified", "reason":"paired error control passed; remaining G2 timed-read scenarios are still pending", "qualification":false}))
 }
 fn fastly_variant(
     args: &Args,
@@ -630,6 +732,9 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "outbound-progress" {
+        return progress::run(name, run, records);
+    }
     let package = root().join("crates").join(format!("fixture-{name}"));
     let Some((exe, staged)) = provider_build(name, &package, run, records)? else {
         return Ok(());
@@ -653,6 +758,9 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
             failure,
             outcome,
         )?;
+    }
+    if args.suite == "smoke" {
+        progress::run(name, run, records)?;
     }
     Ok(())
 }
@@ -716,6 +824,9 @@ fn provider_build(
             records.push(json!({"status":"unsupported","reason":"worker-build unavailable"}))?;
             return Ok(None);
         };
+        if !progress::check_bindgen(records)? {
+            return Ok(None);
+        }
         checked(
             Command::new(builder)
                 .args(["--release", ".", "--", "--locked"])

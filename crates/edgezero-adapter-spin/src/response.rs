@@ -6,7 +6,10 @@
     )
 )]
 
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -96,6 +99,12 @@ struct WriteProgress {
     remaining: Vec<u8>,
 }
 
+enum EgressRace<Output> {
+    Deadline,
+    Operation(Output),
+    ResponseFailure,
+}
+
 enum StartOutcome<Response> {
     Precommit {
         attempt: Box<ResponseEgressAttempt>,
@@ -141,6 +150,38 @@ trait SpinEgressIo {
         deadline: Deadline,
         clock: &MonotonicClock,
     ) -> Result<WriteProgress, IoFailure>;
+}
+
+fn poll_egress_operation<Timer, ResponseResult, Operation, Error>(
+    context: &mut Context<'_>,
+    mut timer: Pin<&mut Timer>,
+    response_result: &mut Option<Pin<Box<ResponseResult>>>,
+    mut operation: Pin<&mut Operation>,
+) -> Poll<EgressRace<Operation::Output>>
+where
+    Timer: Future<Output = ()>,
+    ResponseResult: Future<Output = Result<(), Error>>,
+    Operation: Future,
+{
+    if timer.as_mut().poll(context).is_ready() {
+        return Poll::Ready(EgressRace::Deadline);
+    }
+    let observed =
+        response_result
+            .as_mut()
+            .and_then(|future| match future.as_mut().poll(context) {
+                Poll::Pending => None,
+                Poll::Ready(result) => Some(result),
+            });
+    if let Some(result) = observed {
+        // A successful host observation does not mean the response body has been drained.
+        // Retire it once, and keep the same source/write operation and deadline alive.
+        drop(response_result.take());
+        if result.is_err() {
+            return Poll::Ready(EgressRace::ResponseFailure);
+        }
+    }
+    operation.as_mut().poll(context).map(EgressRace::Operation)
 }
 
 async fn transmit_committed<Io>(
@@ -328,13 +369,13 @@ mod platform {
     use futures_util::StreamExt as _;
 
     use super::{
-        BodyStream, Bytes, Deadline, DeliveryError, EdgeError, EgressKind, HeaderMap, IoFailure,
-        IoFailureKind, LocalBoxFuture, MonotonicClock, SpinEgressCommitter, SpinEgressIo,
-        StartOutcome, StatusCode, WriteProgress, ensure_deadline, start_fallback, start_prepared,
+        BodyStream, Bytes, Deadline, DeliveryError, EdgeError, EgressKind, EgressRace, HeaderMap,
+        IoFailure, IoFailureKind, LocalBoxFuture, MonotonicClock, SpinEgressCommitter,
+        SpinEgressIo, StartOutcome, StatusCode, WriteProgress, ensure_deadline,
+        poll_egress_operation, start_fallback, start_prepared,
     };
-    use std::future::{Future, IntoFuture as _, pending};
+    use std::future::{Future, IntoFuture as _};
     use std::pin::Pin;
-    use std::task::Poll;
 
     use edgezero_core::response_egress::ResponseEgressEnvelope;
     use futures_util::future::poll_fn;
@@ -348,6 +389,8 @@ mod platform {
     };
 
     use crate::SpinResponse;
+
+    type ResponseObservation = Option<Pin<Box<FutureRead<Result<(), ErrorCode>>>>>;
 
     const fn public_message(error: DeliveryError) -> &'static str {
         match error {
@@ -390,7 +433,7 @@ mod platform {
             Ok((
                 response,
                 WasiEgressIo {
-                    response_result: Box::pin(response_result.into_future()),
+                    response_result: Some(Box::pin(response_result.into_future())),
                     result_writer: Some(result_writer),
                     stream_writer: Some(stream_writer),
                 },
@@ -403,46 +446,36 @@ mod platform {
     }
 
     struct WasiEgressIo {
-        response_result: Pin<Box<FutureRead<Result<(), ErrorCode>>>>,
+        response_result: ResponseObservation,
         result_writer: Option<FutureWriter<BodyResult>>,
         stream_writer: Option<StreamWriter<u8>>,
-    }
-
-    enum RaceEvent<Output> {
-        Deadline,
-        Operation(Output),
-        Response(Result<(), ErrorCode>),
     }
 
     async fn race_operation<Operation>(
         deadline: Deadline,
         clock: &MonotonicClock,
-        mut response_result: Pin<&mut FutureRead<Result<(), ErrorCode>>>,
+        response_result: &mut ResponseObservation,
         mut operation: Pin<&mut Operation>,
-    ) -> RaceEvent<Operation::Output>
+    ) -> EgressRace<Operation::Output>
     where
         Operation: Future,
     {
         let Some(remaining) = deadline.remaining_at(clock.now()) else {
-            return RaceEvent::Deadline;
+            return EgressRace::Deadline;
         };
         let timer = sleep(remaining);
         futures_util::pin_mut!(timer);
         poll_fn(|context| {
-            if timer.as_mut().poll(context).is_ready() {
-                return Poll::Ready(RaceEvent::Deadline);
-            }
-            if let Poll::Ready(result) = response_result.as_mut().poll(context) {
-                return Poll::Ready(RaceEvent::Response(result));
-            }
-            operation.as_mut().poll(context).map(RaceEvent::Operation)
+            poll_egress_operation(context, timer.as_mut(), response_result, operation.as_mut())
         })
         .await
     }
 
     impl WasiEgressIo {
         fn cancel_response_result(&mut self) {
-            drop(self.response_result.as_mut().cancel());
+            if let Some(mut result) = self.response_result.take() {
+                drop(result.as_mut().cancel());
+            }
         }
 
         fn cancelled_write(
@@ -478,51 +511,47 @@ mod platform {
             let event = race_operation(
                 deadline,
                 clock,
-                self.response_result.as_mut(),
+                &mut self.response_result,
                 result_write.as_mut(),
             )
             .await;
             match event {
-                RaceEvent::Deadline => {
+                EgressRace::Deadline => {
                     drop(cancel_result_write(result_write.as_mut()));
                     self.cancel_response_result();
                     return Err(IoFailureKind::Deadline);
                 }
-                RaceEvent::Response(_result) => {
+                EgressRace::ResponseFailure => {
                     drop(cancel_result_write(result_write.as_mut()));
                     return Err(IoFailureKind::Transport);
                 }
-                RaceEvent::Operation(Ok(())) => {}
-                RaceEvent::Operation(Err(_error)) => return Err(IoFailureKind::Transport),
+                EgressRace::Operation(Ok(())) => {}
+                EgressRace::Operation(Err(_error)) => return Err(IoFailureKind::Transport),
             }
             if deadline.is_expired_at(clock.now()) {
                 self.cancel_response_result();
                 return Err(IoFailureKind::Deadline);
             }
 
-            let pending = pending::<()>();
-            futures_util::pin_mut!(pending);
-            match race_operation(
-                deadline,
-                clock,
-                self.response_result.as_mut(),
-                pending.as_mut(),
-            )
-            .await
+            let Some(mut response_result) = self.response_result.take() else {
+                return Ok(());
+            };
+            let mut no_observer = None;
+            match race_operation(deadline, clock, &mut no_observer, response_result.as_mut()).await
             {
-                RaceEvent::Deadline => {
-                    self.cancel_response_result();
+                EgressRace::Deadline => {
+                    drop(response_result.as_mut().cancel());
                     Err(IoFailureKind::Deadline)
                 }
-                RaceEvent::Response(Ok(())) if !deadline.is_expired_at(clock.now()) => Ok(()),
-                RaceEvent::Response(Ok(()) | Err(_)) => {
+                EgressRace::Operation(Ok(())) if !deadline.is_expired_at(clock.now()) => Ok(()),
+                EgressRace::Operation(Ok(()) | Err(_)) => {
                     if deadline.is_expired_at(clock.now()) {
                         Err(IoFailureKind::Deadline)
                     } else {
                         Err(IoFailureKind::Transport)
                     }
                 }
-                RaceEvent::Operation(()) => Err(IoFailureKind::Transport),
+                EgressRace::ResponseFailure => Err(IoFailureKind::Transport),
             }
         }
 
@@ -535,25 +564,18 @@ mod platform {
             ensure_deadline(deadline, clock).map_err(|_error| IoFailureKind::Deadline)?;
             let next = source.next();
             futures_util::pin_mut!(next);
-            match race_operation(
-                deadline,
-                clock,
-                self.response_result.as_mut(),
-                next.as_mut(),
-            )
-            .await
-            {
-                RaceEvent::Deadline => {
+            match race_operation(deadline, clock, &mut self.response_result, next.as_mut()).await {
+                EgressRace::Deadline => {
                     self.cancel_response_result();
                     Err(IoFailureKind::Deadline)
                 }
-                RaceEvent::Response(_result) => Err(IoFailureKind::Transport),
-                RaceEvent::Operation(item) if deadline.is_expired_at(clock.now()) => {
+                EgressRace::ResponseFailure => Err(IoFailureKind::Transport),
+                EgressRace::Operation(item) if deadline.is_expired_at(clock.now()) => {
                     drop(item);
                     self.cancel_response_result();
                     Err(IoFailureKind::Deadline)
                 }
-                RaceEvent::Operation(item) => Ok(item),
+                EgressRace::Operation(item) => Ok(item),
             }
         }
 
@@ -577,15 +599,11 @@ mod platform {
                 })?;
                 let write = stream_writer.write(bytes);
                 futures_util::pin_mut!(write);
-                let event = race_operation(
-                    deadline,
-                    clock,
-                    self.response_result.as_mut(),
-                    write.as_mut(),
-                )
-                .await;
+                let event =
+                    race_operation(deadline, clock, &mut self.response_result, write.as_mut())
+                        .await;
                 match event {
-                    RaceEvent::Deadline => (
+                    EgressRace::Deadline => (
                         Err(Self::cancelled_write(
                             write.as_mut(),
                             requested,
@@ -593,7 +611,7 @@ mod platform {
                         )),
                         true,
                     ),
-                    RaceEvent::Response(_result) => (
+                    EgressRace::ResponseFailure => (
                         Err(Self::cancelled_write(
                             write.as_mut(),
                             requested,
@@ -601,7 +619,7 @@ mod platform {
                         )),
                         false,
                     ),
-                    RaceEvent::Operation((status, buffer)) => {
+                    EgressRace::Operation((status, buffer)) => {
                         let accepted = requested.saturating_sub(buffer.remaining());
                         if deadline.is_expired_at(clock.now()) {
                             (
@@ -801,10 +819,129 @@ fn fallback_response(cause: ResponseEgressOutcome) -> Response {
 }
 
 #[cfg(test)]
+mod race_tests {
+    use super::{EgressRace, poll_egress_operation};
+    use futures_util::future::poll_fn;
+    use std::cell::Cell;
+    use std::future::{pending, ready};
+    use std::task::{Context, Poll, Waker};
+    #[test]
+    fn early_host_success_preserves_later_deadline_and_operation_failure() {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut timer = Box::pin(pending::<()>());
+        let mut observer = Some(Box::pin(ready(Ok::<(), u8>(()))));
+        let mut pending_operation = Box::pin(pending::<Result<(), u8>>());
+        assert!(
+            poll_egress_operation(
+                &mut context,
+                timer.as_mut(),
+                &mut observer,
+                pending_operation.as_mut()
+            )
+            .is_pending()
+        );
+        let mut failed = Box::pin(ready(Err::<(), u8>(9)));
+        assert!(matches!(
+            poll_egress_operation(&mut context, timer.as_mut(), &mut observer, failed.as_mut()),
+            Poll::Ready(EgressRace::Operation(Err(9)))
+        ));
+        let mut expired = Box::pin(ready(()));
+        let mut ready_operation = Box::pin(ready(Ok::<(), u8>(())));
+        assert!(matches!(
+            poll_egress_operation(
+                &mut context,
+                expired.as_mut(),
+                &mut observer,
+                ready_operation.as_mut()
+            ),
+            Poll::Ready(EgressRace::Deadline)
+        ));
+    }
+
+    #[test]
+    fn host_failure_still_preempts_work_and_deadline_still_has_priority() {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut timer = Box::pin(pending::<()>());
+        let mut observer = Some(Box::pin(ready(Err::<(), u8>(1))));
+        let mut operation = Box::pin(poll_fn(|_| -> Poll<()> {
+            panic!("failed observer must preempt operation")
+        }));
+        assert!(matches!(
+            poll_egress_operation(
+                &mut context,
+                timer.as_mut(),
+                &mut observer,
+                operation.as_mut()
+            ),
+            Poll::Ready(EgressRace::ResponseFailure)
+        ));
+        assert!(observer.is_none());
+        let mut unpolled_observer = Some(Box::pin(ready(Err::<(), u8>(1))));
+        let mut expired = Box::pin(ready(()));
+        assert!(matches!(
+            poll_egress_operation(
+                &mut context,
+                expired.as_mut(),
+                &mut unpolled_observer,
+                operation.as_mut()
+            ),
+            Poll::Ready(EgressRace::Deadline)
+        ));
+        assert!(
+            unpolled_observer.is_some(),
+            "deadline must win before polling the host result"
+        );
+    }
+
+    #[test]
+    fn successful_early_host_handoff_does_not_abort_pending_body_work() {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut timer = Box::pin(pending::<()>());
+        let mut result = Some(Box::pin(ready(Ok::<(), u8>(()))));
+        let polls = Cell::new(0_u8);
+        let mut operation = Box::pin(poll_fn(|_| {
+            polls.set(polls.get() + 1);
+            if polls.get() == 1 {
+                Poll::Pending
+            } else {
+                Poll::Ready(7_u8)
+            }
+        }));
+        assert!(
+            poll_egress_operation(
+                &mut context,
+                timer.as_mut(),
+                &mut result,
+                operation.as_mut()
+            )
+            .is_pending()
+        );
+        assert!(
+            result.is_none(),
+            "completed host result must not be polled again"
+        );
+        assert!(matches!(
+            poll_egress_operation(
+                &mut context,
+                timer.as_mut(),
+                &mut result,
+                operation.as_mut()
+            ),
+            Poll::Ready(EgressRace::Operation(7))
+        ));
+        assert_eq!(
+            polls.get(),
+            2,
+            "the original pending operation must be resumed"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
-    use std::future::{Future as _, pending};
+    use std::future::pending;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};

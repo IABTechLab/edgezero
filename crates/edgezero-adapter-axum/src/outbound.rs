@@ -8,10 +8,10 @@ use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
 use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use edgezero_core::outbound::{
-    OutboundBatch, OutboundHttpClient, OutboundRequest, OutboundRequestParts, OutboundResponse,
-    ResponseBodyDisposition, ResponseBodyPolicy, ResponseHeaderLimiter, ResponseMode,
-    apply_response_body_policy, collect_response_stream, insert_proxy_header,
-    normalize_for_dispatch, normalize_response_headers, validate_for_dispatch,
+    OutboundBatch, OutboundHttpClient, OutboundProxyMarker, OutboundRequest, OutboundRequestParts,
+    OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
+    ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
+    insert_proxy_header, normalize_for_dispatch, normalize_response_headers, validate_for_dispatch,
 };
 use edgezero_core::time::{
     Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
@@ -51,6 +51,8 @@ impl AxumOutboundClient {
             max_response_header_bytes,
             max_response_header_count,
             method,
+            proxy_marker,
+            response_decoding,
             response_mode,
             uri,
             ..
@@ -79,6 +81,8 @@ impl AxumOutboundClient {
         process_response(
             response,
             method,
+            proxy_marker,
+            response_decoding,
             response_mode,
             budget,
             max_decoder_bytes,
@@ -312,6 +316,8 @@ fn deadline_stream(
 async fn process_response(
     response: reqwest::Response,
     request_method: Method,
+    proxy_marker: OutboundProxyMarker,
+    response_decoding: ResponseDecoding,
     response_mode: ResponseMode,
     budget: DispatchBudget,
     max_decoder_bytes: u64,
@@ -335,6 +341,7 @@ async fn process_response(
     insert_proxy_header(
         &mut headers,
         &mut header_limiter,
+        proxy_marker,
         HeaderValue::from_static("axum"),
     )?;
 
@@ -382,7 +389,9 @@ async fn process_response(
             max_decoded_response_bytes,
             max_decoder_bytes,
             max_encoded_response_bytes,
+            response_decoding,
             response_mode,
+            status,
         },
     )?;
     let deadline_bound = deadline_stream(shaped, budget, clock);
@@ -486,12 +495,36 @@ fn apply_dispatch_timeout(
 #[cfg(test)]
 mod clock_tests {
     use std::collections::VecDeque;
+    use std::io::Error as IoError;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
 
     use edgezero_core::time::Deadline;
     use futures_util::stream;
+    use http_body::Frame;
 
     use super::*;
+
+    struct NeverReadyBody(Arc<AtomicUsize>);
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "default size and EOF hints describe this never-ready test source"
+    )]
+    impl http_body::Body for NeverReadyBody {
+        type Data = Bytes;
+        type Error = IoError;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Poll::Pending
+        }
+    }
 
     fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
         let observations = Arc::new(Mutex::new(VecDeque::from(script)));
@@ -509,6 +542,141 @@ mod clock_tests {
             cause: BudgetSource::PerCallTimeout,
             deadline: Deadline::at_instant(start.checked_add(duration).expect("deadline")),
             duration,
+        }
+    }
+
+    #[tokio::test]
+    async fn marker_off_preserves_exact_upstream_header_budgets() {
+        let bytes = u64::try_from(edgezero_core::PROXY_HEADER.len() + "upstream".len() + 2)
+            .expect("header bytes");
+        for (max_bytes, max_count, reason) in [
+            (
+                Some(bytes),
+                None,
+                edgezero_core::ResponseLimitReason::HeaderBytes,
+            ),
+            (
+                None,
+                Some(2),
+                edgezero_core::ResponseLimitReason::HeaderCount,
+            ),
+        ] {
+            for setting in [
+                OutboundProxyMarker::Off,
+                OutboundProxyMarker::On,
+                OutboundProxyMarker::Inherit,
+            ] {
+                let native = http::Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .header(edgezero_core::PROXY_HEADER, "upstream")
+                    .header("x", "y")
+                    .body(reqwest::Body::from(Bytes::new()))
+                    .expect("native response");
+                let start = MonotonicInstant::now();
+                let result = process_response(
+                    reqwest::Response::from(native),
+                    Method::GET,
+                    setting,
+                    ResponseDecoding::Decode,
+                    ResponseMode::Buffered { max_bytes: 0 },
+                    test_budget(start, Duration::from_secs(1)),
+                    0,
+                    24,
+                    None,
+                    Some(0),
+                    Some(0),
+                    max_bytes,
+                    max_count,
+                    MonotonicClock::new(move || start),
+                )
+                .await;
+                if setting == OutboundProxyMarker::Off {
+                    assert_eq!(
+                        result
+                            .expect("exact upstream caps")
+                            .headers()
+                            .get(edgezero_core::PROXY_HEADER)
+                            .expect("upstream marker"),
+                        "upstream"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(EdgeError::ResponseTooLarge { reason: actual, .. }) if actual == reason)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn original_coding_bodyless_disposition_precedes_caps_and_polling() {
+        for (method, status) in [
+            (Method::HEAD, StatusCode::OK),
+            (Method::GET, StatusCode::NOT_MODIFIED),
+            (Method::GET, StatusCode::NO_CONTENT),
+            (Method::GET, StatusCode::RESET_CONTENT),
+        ] {
+            for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for mode in [
+                    ResponseMode::Buffered { max_bytes: 1 },
+                    ResponseMode::Streamed,
+                ] {
+                    let polls = Arc::new(AtomicUsize::new(0));
+                    let native = http::Response::builder()
+                        .status(status)
+                        .header("content-encoding", "gzip")
+                        .header("content-length", "1073741824")
+                        .body(reqwest::Body::wrap(NeverReadyBody(Arc::clone(&polls))))
+                        .expect("native response");
+                    let start = MonotonicInstant::now();
+                    let response = process_response(
+                        reqwest::Response::from(native),
+                        method.clone(),
+                        OutboundProxyMarker::Inherit,
+                        choice,
+                        mode,
+                        test_budget(start, Duration::from_secs(1)),
+                        0,
+                        24,
+                        None,
+                        Some(1),
+                        Some(1),
+                        None,
+                        None,
+                        MonotonicClock::new(move || start),
+                    )
+                    .await
+                    .expect("bodyless response");
+                    assert_eq!(polls.load(Ordering::Relaxed), 0);
+                    assert_eq!(response.body().as_bytes(), Some(b"".as_slice()));
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get("content-encoding")
+                            .expect("baseline coding metadata"),
+                        "gzip"
+                    );
+                    if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+                        assert_eq!(
+                            response
+                                .headers()
+                                .get("content-length")
+                                .expect("representation length"),
+                            "1073741824"
+                        );
+                    } else if status == StatusCode::RESET_CONTENT {
+                        assert_eq!(
+                            response
+                                .headers()
+                                .get("content-length")
+                                .expect("reset length"),
+                            "0"
+                        );
+                    } else {
+                        assert!(!response.headers().contains_key("content-length"));
+                    }
+                }
+            }
         }
     }
 
@@ -634,6 +802,8 @@ mod clock_tests {
         let response = process_response(
             native,
             Method::GET,
+            OutboundProxyMarker::Inherit,
+            ResponseDecoding::Decode,
             ResponseMode::Streamed,
             budget,
             32 * 1024 * 1024,
@@ -737,33 +907,14 @@ mod clock_tests {
             (&[b"\xff"], false, Ineligible(NonText)),
             (&[b"application/json"], true, Ineligible(Removed)),
         ];
+        let buffered = ResponseMode::Buffered { max_bytes: 32 };
         for (method, status, response_mode) in [
-            (
-                Method::GET,
-                StatusCode::OK,
-                ResponseMode::Buffered { max_bytes: 32 },
-            ),
+            (Method::GET, StatusCode::OK, buffered),
             (Method::GET, StatusCode::OK, ResponseMode::Streamed),
-            (
-                Method::HEAD,
-                StatusCode::OK,
-                ResponseMode::Buffered { max_bytes: 32 },
-            ),
-            (
-                Method::GET,
-                StatusCode::NO_CONTENT,
-                ResponseMode::Buffered { max_bytes: 32 },
-            ),
-            (
-                Method::GET,
-                StatusCode::RESET_CONTENT,
-                ResponseMode::Buffered { max_bytes: 32 },
-            ),
-            (
-                Method::GET,
-                StatusCode::NOT_MODIFIED,
-                ResponseMode::Buffered { max_bytes: 32 },
-            ),
+            (Method::HEAD, StatusCode::OK, buffered),
+            (Method::GET, StatusCode::NO_CONTENT, buffered),
+            (Method::GET, StatusCode::RESET_CONTENT, buffered),
+            (Method::GET, StatusCode::NOT_MODIFIED, buffered),
         ] {
             for (values, nominated, expected) in cases {
                 let mut native_headers = HeaderMap::new();
@@ -785,6 +936,8 @@ mod clock_tests {
                 let response = process_response(
                     reqwest::Response::from(native),
                     method.clone(),
+                    OutboundProxyMarker::Inherit,
+                    ResponseDecoding::Decode,
                     response_mode,
                     test_budget(start, Duration::from_secs(1)),
                     32 * 1024 * 1024,

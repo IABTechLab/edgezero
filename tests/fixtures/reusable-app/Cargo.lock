@@ -793,6 +793,9 @@ dependencies = [
  "edgezero-adapter-axum",
  "edgezero-core",
  "fixture-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -802,6 +805,7 @@ dependencies = [
  "edgezero-adapter-cloudflare",
  "edgezero-core",
  "fixture-core",
+ "futures",
  "serde_json",
  "worker",
 ]
@@ -825,6 +829,7 @@ dependencies = [
  "edgezero-adapter-fastly",
  "edgezero-core",
  "fastly",
+ "fastly-sys",
  "fixture-core",
  "futures",
  "log",
@@ -847,6 +852,8 @@ dependencies = [
  "edgezero-adapter-spin",
  "edgezero-core",
  "fixture-core",
+ "futures",
+ "http-body",
  "serde_json",
  "spin-sdk",
 ]

@@ -81,21 +81,31 @@ pub fn release(signal: &Signal) {
 pub struct Backend {
     pub port: u16,
     pub receipts: Arc<Mutex<Vec<String>>>,
+    pub progress: Arc<Mutex<Vec<Value>>>,
     pub release: Signal,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl Backend {
     pub fn start() -> Result<Self> {
+        Self::start_with_progress_gate(false)
+    }
+    pub fn start_gated_progress() -> Result<Self> {
+        Self::start_with_progress_gate(true)
+    }
+    fn start_with_progress_gate(gate_progress: bool) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
         let receipts = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let origin_clock = Instant::now();
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let barrier = Arc::new((Mutex::new(0usize), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (r, s, b, done) = (
+        let (r, p, s, b, done) = (
             receipts.clone(),
+            progress.clone(),
             release.clone(),
             barrier.clone(),
             stop.clone(),
@@ -104,9 +114,9 @@ impl Backend {
             while !done.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        let (r, s, b) = (r.clone(), s.clone(), b.clone());
+                        let (r, p, s, b) = (r.clone(), p.clone(), s.clone(), b.clone());
                         thread::spawn(move || {
-                            let _ = serve(stream, r, s, b);
+                            let _ = serve(stream, r, p, origin_clock, s, b, gate_progress);
                         });
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -119,6 +129,7 @@ impl Backend {
         Ok(Self {
             port,
             receipts,
+            progress,
             release,
             stop,
             worker: Some(worker),
@@ -140,14 +151,22 @@ impl Drop for Backend {
 fn serve(
     mut stream: TcpStream,
     receipts: Arc<Mutex<Vec<String>>>,
+    progress: Arc<Mutex<Vec<Value>>>,
+    origin_clock: Instant,
     signal: Signal,
     barrier: Arc<(Mutex<usize>, Condvar)>,
+    gate_progress: bool,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
+    let method = line
+        .split_whitespace()
+        .next()
+        .ok_or("missing request method")?
+        .to_owned();
     let path = line
         .split_whitespace()
         .nth(1)
@@ -161,6 +180,79 @@ fn serve(
         }
     }
     receipts.lock().unwrap().push(path.clone());
+    if let Some(path) = path.strip_prefix("/marker/") {
+        let parts: Vec<_> = path.split('/').collect();
+        let [
+            expected_method @ ("get" | "head"),
+            status @ ("200" | "204" | "304" | "302"),
+            shape @ ("absent" | "upstream" | "nominated"),
+        ] = parts.as_slice()
+        else {
+            return Err("invalid marker path".into());
+        };
+        require(
+            method.eq_ignore_ascii_case(expected_method),
+            "marker origin method mismatch",
+        )?;
+        write!(
+            stream,
+            "HTTP/1.1 {status} Probe\r\nContent-Length: 0\r\nConnection: close\r\n"
+        )?;
+        if *shape != "absent" {
+            stream.write_all(b"x-edgezero-proxy: upstream\r\n")?;
+        }
+        if *shape == "nominated" {
+            stream.write_all(b"Connection: x-edgezero-proxy\r\n")?;
+        }
+        stream.write_all(b"Location: /not-followed\r\n\r\n")?;
+        return Ok(());
+    }
+    if let Some(path) = path.strip_prefix("/coding/") {
+        let (coding, status) = path.split_once('/').ok_or("invalid coding path")?;
+        require(["200", "206"].contains(&status), "invalid coding status")?;
+        let body = coding_body(coding)?;
+        write!(
+            stream,
+            "HTTP/1.1 {status} {}\r\nContent-Encoding: {coding}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            if status == "206" {
+                "Partial Content"
+            } else {
+                "OK"
+            },
+            body.len()
+        )?;
+        stream.write_all(body)?;
+        return Ok(());
+    }
+    if path.starts_with("/g3/") {
+        progress
+            .lock()
+            .unwrap()
+            .push(json!({"path":path,"received_ns":origin_clock.elapsed().as_nanos()}));
+        if path
+            .rsplit('/')
+            .next()
+            .is_some_and(|s| s.starts_with("slot-"))
+        {
+            thread::sleep(Duration::from_millis(300));
+            if gate_progress {
+                let (released, _) = signal
+                    .1
+                    .wait_timeout_while(
+                        signal.0.lock().unwrap(),
+                        Duration::from_secs(3),
+                        |released| !*released,
+                    )
+                    .unwrap();
+                require(
+                    *released,
+                    "progress response not released by first client byte",
+                )?;
+            }
+        }
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+        return Ok(());
+    }
     if path.starts_with("/barrier") {
         let mut count = barrier.0.lock().unwrap();
         *count += 1;
@@ -174,7 +266,11 @@ fn serve(
             return Ok(());
         }
     }
-    if path.starts_with("/chunks") {
+    if path.starts_with("/readiness/truncated") {
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nx")?;
+        stream.flush()?;
+        thread::sleep(Duration::from_millis(50));
+    } else if path.starts_with("/chunks") {
         stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nfirst\r\n")?;
         stream.flush()?;
         let (ready, _) = signal
@@ -211,6 +307,25 @@ pub fn port() -> Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
+pub fn coding_body(coding: &str) -> Result<&'static [u8]> {
+    // Deterministic gzip, zlib and Brotli encodings of b"raw coding probe\n".
+    match coding {
+        "gzip" => Ok(&[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 19, 43, 74, 44, 87, 72, 206, 79, 201, 204, 75, 87, 40,
+            40, 202, 79, 74, 229, 2, 0, 25, 107, 60, 67, 17, 0, 0, 0,
+        ]),
+        "deflate" => Ok(&[
+            120, 156, 43, 74, 44, 87, 72, 206, 79, 201, 204, 75, 87, 40, 40, 202, 79, 74, 229, 2,
+            0, 57, 147, 6, 33,
+        ]),
+        "br" => Ok(&[
+            11, 8, 128, 114, 97, 119, 32, 99, 111, 100, 105, 110, 103, 32, 112, 114, 111, 98, 101,
+            10, 3,
+        ]),
+        _ => Err("unknown coding fixture".into()),
+    }
+}
+
 pub fn malformed_request(port: u16, token: &str) -> Result<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -229,17 +344,64 @@ pub fn request(
     backend: Option<&str>,
     signal: Option<&Signal>,
 ) -> Result<Value> {
+    request_with_framing(port, path, token, backend, signal, None)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Framing {
+    Absent,
+    LengthZero,
+    ChunkedEmpty,
+    FixedBody,
+    ChunkedBody,
+}
+
+impl Framing {
+    fn wire(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Absent => ("", ""),
+            Self::LengthZero => ("Content-Length: 0\r\n", ""),
+            Self::ChunkedEmpty => ("Transfer-Encoding: chunked\r\n", "0\r\n\r\n"),
+            Self::FixedBody => ("Content-Length: 4\r\n", "body"),
+            Self::ChunkedBody => ("Transfer-Encoding: chunked\r\n", "4\r\nbody\r\n0\r\n\r\n"),
+        }
+    }
+}
+
+pub fn framed_request(port: u16, framing: Framing) -> Result<Value> {
+    request_with_framing(
+        port,
+        "/progress/empty",
+        &crate::token(),
+        None,
+        None,
+        Some(framing),
+    )
+}
+
+fn request_with_framing(
+    port: u16,
+    path: &str,
+    token: &str,
+    backend: Option<&str>,
+    signal: Option<&Signal>,
+    framing: Option<Framing>,
+) -> Result<Value> {
     let start = Instant::now();
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(12)))?;
     stream.set_write_timeout(Some(Duration::from_secs(12)))?;
     let probe = path.starts_with("/probe/");
     let body = if probe { token } else { "" };
+    let framing_header = framing.map_or_else(
+        || format!("Content-Length: {}\r\n", body.len()),
+        |f| f.wire().0.to_owned(),
+    );
+    let body = framing.map_or(body, |f| f.wire().1);
     write!(
         stream,
-        "{} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-request-token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "{} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-request-token: {token}\r\n{framing_header}Connection: close\r\n",
         if probe { "POST" } else { "GET" },
-        body.len()
     )?;
     if let Some(url) = backend {
         write!(stream, "x-fixture-backend: {url}\r\n")?;
@@ -348,6 +510,55 @@ pub fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_response_gate_waits_for_client_release() {
+        let backend = Backend::start_gated_progress().unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", backend.port)).unwrap();
+        stream
+            .write_all(
+                b"GET /g3/gated/slot-0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(350));
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut first = [0];
+        assert!(stream.read(&mut first).is_err());
+        release(&backend.release);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+    }
+    #[test]
+    fn empty_body_framing_cases_preserve_wire_distinctions() {
+        assert_eq!(Framing::Absent.wire(), ("", ""));
+        assert_eq!(Framing::LengthZero.wire(), ("Content-Length: 0\r\n", ""));
+        assert_eq!(
+            Framing::ChunkedEmpty.wire(),
+            ("Transfer-Encoding: chunked\r\n", "0\r\n\r\n")
+        );
+        assert_eq!(Framing::FixedBody.wire().1, "body");
+        assert_eq!(Framing::ChunkedBody.wire().1, "4\r\nbody\r\n0\r\n\r\n");
+    }
+
+    #[test]
+    fn progress_origin_records_distinct_receipts_before_delayed_completion() {
+        let backend = Backend::start().unwrap();
+        request(backend.port, "/g3/test/start", "test", None, None).unwrap();
+        request(backend.port, "/g3/test/slot-0", "test", None, None).unwrap();
+        let receipts = backend.progress.lock().unwrap().clone();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0]["path"], "/g3/test/start");
+        assert_eq!(receipts[1]["path"], "/g3/test/slot-0");
+        assert!(
+            receipts[0]["received_ns"].as_u64().unwrap()
+                <= receipts[1]["received_ns"].as_u64().unwrap()
+        );
+    }
 
     #[test]
     fn no_response_head_classification_excludes_timeouts_and_malformed_bytes() {
@@ -390,8 +601,11 @@ mod tests {
             serve(
                 server,
                 Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                Instant::now(),
                 Arc::new((Mutex::new(false), Condvar::new())),
                 Arc::new((Mutex::new(0), Condvar::new())),
+                false,
             )
         });
         thread::sleep(Duration::from_millis(100));

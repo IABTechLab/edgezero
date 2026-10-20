@@ -1768,6 +1768,8 @@ unpinned = { path = "somewhere" }
             "generated core must contain the outbound smoke sentinel",
         );
         for required in [
+            ".response_decoding(ResponseDecoding::Original)",
+            ".with_proxy_marker(false)",
             ".cache_policy(",
             ".max_request_body_bytes(",
             ".max_encoded_response_bytes(",

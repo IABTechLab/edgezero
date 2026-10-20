@@ -6,6 +6,7 @@ publish.workspace = true
 
 [features]
 qualification = ["fixture-core/qualification"]
+progress = ["fixture-core/qualification", "dep:futures"]
 
 [dependencies]
 serde_json.workspace = true
@@ -13,6 +14,7 @@ fixture-core.workspace = true
 edgezero-core.workspace = true
 edgezero-adapter-cloudflare.workspace = true
 worker.workspace = true
+futures = { workspace = true, optional = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

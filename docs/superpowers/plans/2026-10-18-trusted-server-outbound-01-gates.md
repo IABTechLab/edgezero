@@ -14,6 +14,26 @@ Read the [index](2026-10-18-trusted-server-outbound-implementation.md) and its b
 This phase does not claim any requirement implemented merely because an SDK declares an API.
 Apply the index's per-task test/format/clippy procedure after every eventual code change.
 
+## Execution Record
+
+G1's draft inventory and fail-closed checker are implemented: 255 source acceptance cases,
+including two consumer prose checks, plus supplemental template/demo checks produce 511
+reviewed split/environment legs. Individual
+execution commands remain planned until their task owners implement and activate them; no
+applicability or product approval is fabricated. Scope lock awaits those owner decisions.
+
+G2's first measured error-preservation control **failed** on pinned Viceroy 0.21.0. The opt-in
+`outbound-readiness` suite and its nonzero measurement guard are implemented. Three direct reads
+report `UnexpectedEof`; the corresponding timed-readiness paths report clean EOF. See the
+[feasibility report](../../audits/2026-10-18-outbound-feasibility.md). The remaining scenarios below
+are not passing or complete. D1's dependent proposal is cancelled pending a reviewed primitive;
+G3 probes record native/Viceroy local observations and Cloudflare's tooling block. The initial
+Spin failure exposed and now regression-tests an internal egress early-success bug; the fixed
+local cases pass. G3's remaining legs and Fastly-policy approvals stay pending. A later scoped
+conversation reply authorizes the exact G4 API digest, with maintainer attribution supplied as AG.
+P1's core clock/timer foundation has started without changing client traits, adapter transports
+or constructors. The response-egress fix itself did not approve the new begin API.
+
 ## Task G1: Acceptance Inventory and Scope Lock
 
 **Files:** Create `tests/fixtures/reusable-app/outbound-cutover-cases.json` and
@@ -21,7 +41,7 @@ Apply the index's per-task test/format/clippy procedure after every eventual cod
 `scripts/check_outbound_cutover_evidence.test.mjs`; document the invocation in
 `tests/fixtures/reusable-app/README.md`.
 
-- [ ] Write Node tests rejecting a missing blocking leg, wrong candidate SHA, zero samples,
+- [x] Write Node tests rejecting a missing blocking leg, wrong candidate SHA, zero samples,
       expired-only artifact, wrong environment, failed measurement, and unjustified deferral.
       Run `node --test scripts/check_outbound_cutover_evidence.test.mjs`; demonstrate failure.
 - [ ] Inventory every acceptance criterion of EZ-1-EZ-25 and EZ-Q1, including unnumbered EZ-9
@@ -54,7 +74,7 @@ Apply the index's per-task test/format/clippy procedure after every eventual cod
   | EZ-25.42                      | Q1                              | Snippet checker, Node tests and compile invocation in Rust-capable CI                  |
   | EZ-25.43                      | Q1                              | Existing docs-checker drift regressions and CI execution                               |
 
-- [ ] Run the Node tests and `node scripts/check_outbound_cutover_evidence.mjs --help`.
+- [x] Run the Node tests and `node scripts/check_outbound_cutover_evidence.mjs --help`.
       Add a manifest-validation mode that passes with pending results and a separate release mode
       that fails until all applicable results pass. Review the inventory against EZ-Q1.1-Q1.8.
       Suggested commit: `test: define outbound cutover evidence inventory`.
@@ -68,7 +88,7 @@ and register the binary in its `Cargo.toml`; add controlled origin cases in
 Create the report `docs/audits/2026-10-18-outbound-feasibility.md` as this task's output, not as a
 claim that feasibility has already been established.
 
-- [ ] First inspect the exact Fastly `fastly-sys` async I/O declarations, normal-body readiness,
+- [x] First inspect the exact Fastly `fastly-sys` async I/O declarations, normal-body readiness,
       pending-response readiness, read semantics, and Viceroy implementation cited in EZ-2 open
       question 6. Record what read size and readiness state make a subsequent read bounded. A
       readiness indication followed by an unconstrained blocking read does not establish the gate.
@@ -122,6 +142,40 @@ This is host/runtime characterization before the new public begin API exists. Us
 operations only inside the opt-in qualification fixture to establish scheduler feasibility; do
 not add another production client. D6 repeats the scenarios through the implemented public APIs.
 
+**Execution update, 2026-10-19:** default-off `progress` fixtures and `outbound-progress` suite
+are implemented and included after the ordinary smoke cases. The origin-receipt sentinel passed
+after rejecting empty, foreign, duplicate, wrong-protocol, unknown-adapter and unmeasured-wait
+traces. Separate regressions cover requested case/token identity, cross-adapter build fingerprints
+and a response gate released only by the first client byte. Fixture tests: 33 harness and 10 core
+passes, plus the native absent-runtime control. The all-adapter smoke run exited 1: native and
+Viceroy each passed five progress and five HTTP/1 framing cases; Spin passed four progress and
+five framing cases, but response-owned execution failed. Cloudflare's CLI mismatch prevented
+runtime execution without repinning/downloading. See the retained G3 record linked in the
+[feasibility report](../../audits/2026-10-18-outbound-feasibility.md). The checkboxes below remain
+open because their full protocol, scheduler-context, hosted and callback-return proofs are not
+complete. G4 approval is not inferred from partial local evidence.
+
+**Subsequent repair:** isolated ready/timer-only responses failed through Spin's adapter while
+equivalent SDK-native body-writer controls passed. The response-result future could return success
+before source/writes completed; the adapter incorrectly aborted on it. It now latches that success
+once, retains the same operation and deadline, and closes/publishes the body before terminal success.
+The native helper regression was red before this fix; deadline/error precedence and resumption of
+the same pinned operation are covered. Spin now passes all five progress cases, five framing cases
+and four comparison controls, with 18 origin receipts and two token-correlated SDK terminals.
+Native unpolled-worker cleanup and unconsumed-response job drops are also covered. Canonical guest
+diagnostics are revalidated after the finite pre-shutdown observation hold. The latest all-adapter
+smoke exits 2 for unavailable/unverified legs, not a Spin request-serving failure. Historical failed
+evidence remains retained; see the newer repair record in the feasibility report. No SDK pin,
+capability, public API or approval was changed.
+
+**Cloudflare update, 2026-10-20:** an authorized temporary tool install supplied the exact locked
+wasm-bindgen CLI without repinning. Local workerd 2026-09-10 now passes 24 coding, 46 marker,
+five scheduling and five HTTP/1 framing checks, with 89 asserted origin receipts. The strengthened
+harness requires original Workers body signals and keeps independent groups running after policy
+failures. See the additive Cloudflare record in the feasibility report for source/artifact/runtime
+hashes and exact compatibility settings. This supersedes the old tool gap, not the failed Fastly
+gate or the remaining hosted/protocol/context/relay proofs. G3's complete acceptance stays open.
+
 - [ ] Write a probe that starts a request, then awaits an unrelated timer/KV operation with no
       outbound polling for 100 ms. Record when the origin received it. Repeat with a never-polled
       batch and with callback return followed by response-owned streaming. Run current probes to
@@ -153,7 +207,15 @@ not add another production client. D6 repeats the scenarios through the implemen
 **Files:** Create `docs/audits/2026-10-18-outbound-api-approval.md` as a future approval record;
 input is plan 02's Interfaces block and G2's feasibility report, plus G1's applicability decisions.
 
-- [ ] The plan owner presents the exact Interfaces block, its SHA-256 digest, the old/new
+**Preparation update, 2026-10-19:** the [review packet](../../audits/2026-10-18-outbound-api-approval.md)
+now pins the complete Interfaces section and its input identities, inventories all eight current
+implementations and their callers, and separates API, Fastly policy, optimizer horizon,
+applicability and measurement decisions. The requester subsequently replied `continue` to the
+question naming the exact API digest, then supplied AG as the approving maintainer. The packet
+records this API-only approval, not any Fastly-policy approval. P1's paired-time foundation starts
+under that instruction. The remaining G4 decisions stay open.
+
+- [x] The plan owner presents the exact Interfaces block, its SHA-256 digest, the old/new
       implementer migration table, mixed-collection semantics, marker default, and timeout cause
       variants to the EdgeZero maintainer. Include synchronous pre-settlement support rejection and
       paired app-clock/adapter-timer provisioning with constructor migration. Digest the complete

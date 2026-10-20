@@ -15,6 +15,7 @@ use edgezero_core::extractor::{
 use edgezero_core::http::{self, Method, Response, StatusCode, Uri};
 use edgezero_core::outbound::{
     OutboundBatchTermination, OutboundCachePolicy, OutboundRequest, OutboundSlotResult,
+    ResponseDecoding,
 };
 use edgezero_core::response::Text;
 use futures::{StreamExt as _, stream};
@@ -212,13 +213,16 @@ pub async fn fanout(RequestContext(ctx): RequestContext) -> Result<Response, Edg
 #[action]
 pub async fn proxy_demo(RequestContext(ctx): RequestContext) -> Result<Response, EdgeError> {
     let params: ProxyPath = ctx.path()?;
-    let http_client = ctx.http_client();
+    let http_client = ctx
+        .http_client()
+        .map(|client| client.with_proxy_marker(false));
     let base = ctx
         .variable("API_BASE_URL")
         .unwrap_or_else(|| DEFAULT_PROXY_BASE.to_owned());
     let request = ctx.into_request()?;
     let target = build_proxy_target(&base, &params.rest, request.uri())?;
-    let outbound_request = outbound_policy(OutboundRequest::from_request(request, target)?);
+    let outbound_request = outbound_policy(OutboundRequest::from_request(request, target)?)
+        .response_decoding(ResponseDecoding::Original);
 
     if let Some(client) = http_client {
         client.send(outbound_request).await?.into_response()
@@ -522,8 +526,8 @@ mod tests {
     use edgezero_core::http::{HeaderMap, Method, StatusCode, Uri, request_builder};
     use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
     use edgezero_core::outbound::{
-        HttpClient, OutboundBatch, OutboundBatchItem, OutboundHttpClient, OutboundRequestParts,
-        OutboundResponse, OutboundSlotResult, ResponseMode,
+        HttpClient, OutboundBatch, OutboundBatchItem, OutboundHttpClient, OutboundProxyMarker,
+        OutboundRequestParts, OutboundResponse, OutboundSlotResult, ResponseMode,
     };
     use edgezero_core::params::PathParams;
     use edgezero_core::response::IntoResponse as _;
@@ -656,6 +660,8 @@ mod tests {
                     .is_some_and(|value| value.as_str() == "/status/201?source=demo")
             );
             assert!(parts.deadline.is_none());
+            assert_eq!(parts.response_decoding, ResponseDecoding::Original);
+            assert_eq!(parts.proxy_marker, OutboundProxyMarker::Off);
             assert_outbound_policy(&parts);
             response_for(parts, self.clock.clone())
         }
@@ -670,6 +676,8 @@ mod tests {
             let mut results = Vec::with_capacity(slot_count);
             for (index, request) in requests.into_iter().enumerate() {
                 let parts = request.into_parts();
+                assert_eq!(parts.response_decoding, ResponseDecoding::Decode);
+                assert_eq!(parts.proxy_marker, OutboundProxyMarker::On);
                 assert_outbound_policy(&parts);
                 let slot_deadline = parts.deadline.expect("batch deadline");
                 if let Some(expected) = observed_deadline {
@@ -1321,12 +1329,14 @@ mod tests {
         let start = MonotonicInstant::now();
         let observed = Arc::new(Mutex::new(start));
         let clock_now = Arc::clone(&observed);
-        let client = TestOutboundClient {
+        let client = HttpClient::with_client(TestOutboundClient {
             clock: MonotonicClock::new(move || *clock_now.lock().expect("clock lock")),
-        };
+        })
+        .with_proxy_marker(false);
         let request = outbound_policy(
             OutboundRequest::post("https://example.com/status/201?source=demo").expect("request"),
-        );
+        )
+        .response_decoding(ResponseDecoding::Original);
         let response = block_on(client.send(request)).expect("response");
         let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
         *observed.lock().expect("clock lock") = deadline;

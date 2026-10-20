@@ -192,10 +192,10 @@ mod fastly_impl {
     use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
         OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundHttpClient,
-        OutboundRequest, OutboundRequestParts, OutboundResponse, ResponseBodyDisposition,
-        ResponseBodyPolicy, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
-        collect_response_stream, insert_proxy_header, normalize_for_dispatch,
-        normalize_response_headers, validate_for_dispatch,
+        OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse,
+        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
+        ResponseMode, apply_response_body_policy, collect_response_stream, insert_proxy_header,
+        normalize_for_dispatch, normalize_response_headers, validate_for_dispatch,
     };
     use edgezero_core::time::{
         BATCH_DISPATCH_SLACK_MAX, Deadline, DispatchBudget, MonotonicClock, MonotonicInstant,
@@ -284,6 +284,8 @@ mod fastly_impl {
         max_response_header_bytes: Option<u64>,
         max_response_header_count: Option<u64>,
         request_method: Method,
+        proxy_marker: OutboundProxyMarker,
+        response_decoding: ResponseDecoding,
         response_mode: ResponseMode,
     }
 
@@ -436,6 +438,8 @@ mod fastly_impl {
                 max_response_header_bytes,
                 max_response_header_count,
                 method,
+                proxy_marker,
+                response_decoding,
                 response_mode,
                 uri,
                 ..
@@ -468,6 +472,8 @@ mod fastly_impl {
             process_response(
                 response,
                 method,
+                proxy_marker,
+                response_decoding,
                 response_mode,
                 budget,
                 max_decoder_bytes,
@@ -506,6 +512,8 @@ mod fastly_impl {
                 max_response_header_bytes,
                 max_response_header_count,
                 method,
+                proxy_marker,
+                response_decoding,
                 response_mode,
                 uri,
                 ..
@@ -540,6 +548,8 @@ mod fastly_impl {
                     max_response_header_bytes,
                     max_response_header_count,
                     request_method: method,
+                    proxy_marker,
+                    response_decoding,
                     response_mode,
                 },
                 pending,
@@ -850,6 +860,8 @@ mod fastly_impl {
             max_response_header_bytes,
             max_response_header_count,
             request_method,
+            proxy_marker,
+            response_decoding,
             response_mode,
             ..
         } = metadata;
@@ -860,6 +872,8 @@ mod fastly_impl {
         process_response(
             response,
             request_method,
+            proxy_marker,
+            response_decoding,
             response_mode,
             budget,
             max_decoder_bytes,
@@ -988,6 +1002,8 @@ mod fastly_impl {
     async fn process_response(
         mut response: FastlyResponse,
         request_method: Method,
+        proxy_marker: OutboundProxyMarker,
+        response_decoding: ResponseDecoding,
         response_mode: ResponseMode,
         budget: DispatchBudget,
         max_decoder_bytes: u64,
@@ -1016,6 +1032,7 @@ mod fastly_impl {
         insert_proxy_header(
             &mut headers,
             &mut header_limiter,
+            proxy_marker,
             HeaderValue::from_static("fastly"),
         )?;
         if disposition == ResponseBodyDisposition::FramingBodyless {
@@ -1062,7 +1079,9 @@ mod fastly_impl {
                 max_decoded_response_bytes,
                 max_decoder_bytes,
                 max_encoded_response_bytes,
+                response_decoding,
                 response_mode,
+                status,
             },
         )?;
         let deadline_bound = deadline_stream(shaped, budget, clock);
@@ -1721,6 +1740,8 @@ mod fastly_impl {
             let response = block_on(process_response(
                 native,
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 ResponseMode::Streamed,
                 budget,
                 32 * 1024 * 1024,
@@ -1812,6 +1833,8 @@ mod fastly_impl {
                         let mut response = block_on(process_response(
                             native,
                             Method::GET,
+                            OutboundProxyMarker::Inherit,
+                            ResponseDecoding::Decode,
                             mode,
                             clock_budget(start, Duration::from_secs(1)),
                             1024,
@@ -1883,6 +1906,8 @@ mod fastly_impl {
             let response = block_on(process_response(
                 native,
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 ResponseMode::Streamed,
                 budget,
                 32 * 1024 * 1024,
@@ -1924,6 +1949,8 @@ mod fastly_impl {
             let error = block_on(process_response(
                 native,
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 ResponseMode::Buffered { max_bytes: 1 },
                 budget,
                 32 * 1024 * 1024,
@@ -1958,6 +1985,8 @@ mod fastly_impl {
             let error = block_on(process_response(
                 native,
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 ResponseMode::Buffered { max_bytes: 16 },
                 budget,
                 32 * 1024 * 1024,

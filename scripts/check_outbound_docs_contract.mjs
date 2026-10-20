@@ -31,7 +31,7 @@ const observationCutoffSourcePaths = [
   'crates/edgezero-core/src/time.rs',
   ...outboundAdapterPaths,
   ...['axum', 'cloudflare', 'fastly', 'spin'].map(
-    (adapter) => `crates/edgezero-adapter-${adapter}/tests/contract.rs`,
+    (adapter) => `crates/edgezero-adapter-${adapter}/tests/contract.rs`
   ),
   templateHandlersPath,
   demoHandlersPath,
@@ -142,7 +142,7 @@ const expectedOutboundRows = [
     'Unsupported',
     'Unsupported',
   ],
-  ['outbound-header-fidelity', 'Native', 'BestEffort', 'Native', 'Native'],
+  ['outbound-header-fidelity', 'Native', 'BestEffort', 'Native', 'BestEffort'],
   ['outbound-deadlines', 'Native', 'BestEffort', 'BestEffort', 'BestEffort'],
   [
     'outbound-flexible-phase-budget',
@@ -216,12 +216,12 @@ const expectedLimitRows = [
   ],
   [
     'max_response_header_bytes',
-    'Adapter-visible upstream header name/value bytes before normalization, plus `x-edgezero-proxy`',
+    'Adapter-visible upstream header name/value bytes before normalization, plus `x-edgezero-proxy` when enabled',
     'Unset',
   ],
   [
     'max_response_header_count',
-    'Adapter-visible upstream header fields before normalization, plus `x-edgezero-proxy`',
+    'Adapter-visible upstream header fields before normalization, plus `x-edgezero-proxy` when enabled',
     'Unset',
   ],
   [
@@ -338,7 +338,7 @@ function normalizeSupport(value) {
 
 function readRustU64Constant(source, name) {
   const match = source.match(
-    new RegExp(`pub const ${name}: u64 = ([^;]+);`, 'u'),
+    new RegExp(`pub const ${name}: u64 = ([^;]+);`, 'u')
   )
   const expression = match?.[1]
   if (expression === undefined) {
@@ -350,7 +350,7 @@ function readRustU64Constant(source, name) {
   }
   return factors.reduce(
     (product, factor) => product * BigInt(factor.replaceAll('_', '')),
-    1n,
+    1n
   )
 }
 
@@ -411,7 +411,7 @@ function maskObservationCutoffNonCode(source) {
       continue
     }
     const quoted = rest.match(
-      /^(?:(?:b|c)?"(?:\\[\s\S]|[^"\\])*"|b?'(?:\\(?:u\{[0-9A-Fa-f_]+\}|x[0-9A-Fa-f]{2}|.)|[^'\\\r\n])')/u,
+      /^(?:(?:b|c)?"(?:\\[\s\S]|[^"\\])*"|b?'(?:\\(?:u\{[0-9A-Fa-f_]+\}|x[0-9A-Fa-f]{2}|.)|[^'\\\r\n])')/u
     )
     if (quoted !== null) {
       blank(index, index + quoted[0].length)
@@ -531,7 +531,7 @@ function signatureContractError(
   name,
   count,
   typeShape,
-  unusedCount = 0,
+  unusedCount = 0
 ) {
   const code = maskObservationCutoffNonCode(source)
   const signatures =
@@ -542,12 +542,12 @@ function signatureContractError(
     signatures.filter((signature) =>
       new RegExp(
         String.raw`(?:^|,)\s*${parameter}\s*:\s*${expectedType}\s*(?=,|\))`,
-        'u',
-      ).test(signature.slice(signature.indexOf('(') + 1)),
+        'u'
+      ).test(signature.slice(signature.indexOf('(') + 1))
     ).length
   const staleParameter = new RegExp(
     String.raw`(?:^|,)\s*(?:cutoff|_cutoff|batch_cutoff)\s*:\s*${deadlineType}\s*(?=,|\))`,
-    'u',
+    'u'
   )
   return signatures.some((signature) => staleParameter.test(signature)) ||
     signatures.length !== count ||
@@ -561,7 +561,7 @@ function exampleCodeError(code) {
   const staleName = String.raw`(?:cutoff|_cutoff|batch_cutoff)`
   const staleBinding = new RegExp(
     String.raw`^\s*let\s+(?:mut\s+)?${staleName}\b`,
-    'mu',
+    'mu'
   )
   if (staleBinding.test(code)) return 'a stale cutoff binding'
   const batchCall = /\b(?:start_batch_until|send_all_until)\s*\(/gu
@@ -652,7 +652,7 @@ function runObservationCutoffContractSelfTests() {
     exampleContractError(
       'fixture.md',
       `Prose: send_all_until(requests, ${bareCutoff})\n` +
-        '```rust\nlet observation_cutoff = deadline();\n```',
+        '```rust\nlet observation_cutoff = deadline();\n```'
     ) === null
   ) {
     fail('observation cutoff self-test missed Markdown prose')
@@ -660,7 +660,7 @@ function runObservationCutoffContractSelfTests() {
   if (
     exampleContractError(
       'fixture.md',
-      `\`\`\`rust,no_run\nlet ${bareCutoff} = deadline();\n\`\`\``,
+      `\`\`\`rust,no_run\nlet ${bareCutoff} = deadline();\n\`\`\``
     ) === null
   ) {
     fail('observation cutoff self-test missed a modified Rust fence')
@@ -668,10 +668,12 @@ function runObservationCutoffContractSelfTests() {
   if (
     exampleContractError(
       'fixture.md',
-      `\`\`\`rust\`bad\nlet ${bareCutoff} = deadline();\n\`\`\``,
+      `\`\`\`rust\`bad\nlet ${bareCutoff} = deadline();\n\`\`\``
     ) === null
   ) {
-    fail('observation cutoff self-test treated an invalid backtick fence as a fence')
+    fail(
+      'observation cutoff self-test treated an invalid backtick fence as a fence'
+    )
   }
   for (const [name, fence] of [
     [
@@ -725,7 +727,7 @@ function runObservationCutoffContractSelfTests() {
 
 function observationCutoffContract(outboundCoreSource) {
   const publicRustdoc = outboundCoreSource.match(
-    /(?<rustdoc>(?:\s*\/\/\/[^\n]*\n)+)\s*fn start_batch_until\(/u,
+    /(?<rustdoc>(?:\s*\/\/\/[^\n]*\n)+)\s*fn start_batch_until\(/u
   )?.groups?.rustdoc
   if (publicRustdoc === undefined) fail('missing start_batch_until Rustdoc')
   const normalizedPublicRustdoc = publicRustdoc
@@ -742,7 +744,7 @@ function observationCutoffContract(outboundCoreSource) {
   }
 
   const signatureContracts = [
-    [outboundCorePath, 'start_batch_until', 3, 'plain', 1],
+    [outboundCorePath, 'start_batch_until', 4, 'plain', 2],
     [outboundCorePath, 'send_all_until', 1, 'plain'],
     [outboundCorePath, 'finish_batch_item', 1, 'plain'],
     ['crates/edgezero-core/src/context.rs', 'start_batch_until', 1, 'plain', 1],
@@ -769,7 +771,7 @@ function observationCutoffContract(outboundCoreSource) {
       name,
       count,
       typeShape,
-      unusedCount,
+      unusedCount
     )
     if (error !== null) fail(`${path}: ${error}`)
   }
@@ -795,18 +797,18 @@ const lines = capabilitySource.split(/\r?\n/u)
 
 function readExactTable(sectionTitle, header, name) {
   const headingIndex = lines.findIndex(
-    (line) => line.trim() === `## ${sectionTitle}`,
+    (line) => line.trim() === `## ${sectionTitle}`
   )
   if (headingIndex === -1) fail(`${name} section is missing`)
   const nextHeadingIndex = lines.findIndex(
-    (line, index) => index > headingIndex && line.startsWith('## '),
+    (line, index) => index > headingIndex && line.startsWith('## ')
   )
   const sectionEnd = nextHeadingIndex === -1 ? lines.length : nextHeadingIndex
   const headerIndex = lines.findIndex(
     (line, index) =>
       index > headingIndex &&
       index < sectionEnd &&
-      JSON.stringify(cells(line)) === JSON.stringify(header),
+      JSON.stringify(cells(line)) === JSON.stringify(header)
   )
   if (headerIndex === -1) fail(`${name} table is missing`)
   const separator = cells(lines[headerIndex + 1] ?? '')
@@ -823,7 +825,7 @@ function readExactTable(sectionTitle, header, name) {
     if (row === null) break
     if (row.length !== header.length) {
       fail(
-        `${name} row ${index + 1} has ${row.length} cells, expected ${header.length}`,
+        `${name} row ${index + 1} has ${row.length} cells, expected ${header.length}`
       )
     }
     rows.push(row)
@@ -834,11 +836,11 @@ function readExactTable(sectionTitle, header, name) {
 const actualMemoryRows = readExactTable(
   'Platform Memory Ceilings',
   expectedMemoryHeader,
-  'platform memory',
+  'platform memory'
 )
 if (JSON.stringify(actualMemoryRows) !== JSON.stringify(expectedMemoryRows)) {
   fail(
-    `platform memory mismatch\nexpected=${JSON.stringify(expectedMemoryRows)}\nactual=${JSON.stringify(actualMemoryRows)}`,
+    `platform memory mismatch\nexpected=${JSON.stringify(expectedMemoryRows)}\nactual=${JSON.stringify(actualMemoryRows)}`
   )
 }
 const normalizedCapabilitySource = capabilitySource.replaceAll(/\s+/gu, ' ')
@@ -868,7 +870,7 @@ function tableAfterHeading(source, heading, header) {
     (line, index) =>
       index > headingIndex &&
       index < sectionEnd &&
-      JSON.stringify(cells(line)) === JSON.stringify(header),
+      JSON.stringify(cells(line)) === JSON.stringify(header)
   )
   if (headerIndex === -1) fail(`missing table under ${heading}`)
   const separator = cells(sourceLines[headerIndex + 1] ?? '')
@@ -895,24 +897,24 @@ const migrationHeader = ['Removed or changed API', 'Replacement']
 const designMigrationRows = tableAfterHeading(
   readFileSync(platformMetadataDesignPath, 'utf8'),
   '## Migration record',
-  migrationHeader,
+  migrationHeader
 )
 const changelogMigrationRows = tableAfterHeading(
   readFileSync(changelogPath, 'utf8'),
   '### Platform resource metadata',
-  migrationHeader,
+  migrationHeader
 )
 if (
   designMigrationRows.length !== 8 ||
   JSON.stringify(changelogMigrationRows) !== JSON.stringify(designMigrationRows)
 ) {
   fail(
-    'Unreleased changelog must contain the focused design migration table exactly',
+    'Unreleased changelog must contain the focused design migration table exactly'
   )
 }
 if (
   !readFileSync(adapterOverviewPath, 'utf8').includes(
-    'CHANGELOG.md#platform-resource-metadata',
+    'CHANGELOG.md#platform-resource-metadata'
   )
 ) {
   fail('adapter overview must link to the Unreleased migration table')
@@ -920,20 +922,20 @@ if (
 
 function findMatrixHeader(sectionTitle, name) {
   const headingIndex = lines.findIndex(
-    (line) => line.trim() === `## ${sectionTitle}`,
+    (line) => line.trim() === `## ${sectionTitle}`
   )
   if (headingIndex === -1) {
     fail(`${name} capability section is missing`)
   }
   const nextHeadingIndex = lines.findIndex(
-    (line, index) => index > headingIndex && line.startsWith('## '),
+    (line, index) => index > headingIndex && line.startsWith('## ')
   )
   const sectionEnd = nextHeadingIndex === -1 ? lines.length : nextHeadingIndex
   const headerIndex = lines.findIndex(
     (line, index) =>
       index > headingIndex &&
       index < sectionEnd &&
-      JSON.stringify(cells(line)) === JSON.stringify(expectedHeader),
+      JSON.stringify(cells(line)) === JSON.stringify(expectedHeader)
   )
   if (headerIndex === -1) {
     fail(`${name} capability matrix is missing`)
@@ -957,7 +959,7 @@ function readMatrix(headerIndex, name) {
     if (row === null) break
     if (row.length !== expectedHeader.length) {
       fail(
-        `${name} capability matrix row ${index + 1} has ${row.length} cells, expected 5`,
+        `${name} capability matrix row ${index + 1} has ${row.length} cells, expected 5`
       )
     }
     actualRows.push([
@@ -984,7 +986,7 @@ const matrices = [
     expectedResponseEgressRows,
     readMatrix(
       findMatrixHeader('Response Egress Matrix', 'response egress'),
-      'response egress',
+      'response egress'
     ),
   ],
   [
@@ -996,7 +998,7 @@ const matrices = [
 for (const [name, expectedRows, actualRows] of matrices) {
   if (JSON.stringify(actualRows) !== JSON.stringify(expectedRows)) {
     fail(
-      `${name} capability matrix mismatch\nexpected=${JSON.stringify(expectedRows)}\nactual=${JSON.stringify(actualRows)}`,
+      `${name} capability matrix mismatch\nexpected=${JSON.stringify(expectedRows)}\nactual=${JSON.stringify(actualRows)}`
     )
   }
 }
@@ -1026,7 +1028,7 @@ for (const staleFragment of [
 ]) {
   if (capabilitySource.includes(staleFragment)) {
     fail(
-      `${capabilityPath} contains stale Fastly batch behavior: ${staleFragment}`,
+      `${capabilityPath} contains stale Fastly batch behavior: ${staleFragment}`
     )
   }
 }
@@ -1051,30 +1053,30 @@ for (const requiredFragment of [
 ]) {
   if (!handlersGuideSource.includes(requiredFragment)) {
     fail(
-      `${handlersGuidePath} is missing lifecycle contract: ${requiredFragment}`,
+      `${handlersGuidePath} is missing lifecycle contract: ${requiredFragment}`
     )
   }
 }
 const cloudflareGuideSource = readFileSync(cloudflareGuidePath, 'utf8')
 if (
   !cloudflareGuideSource.includes(
-    'EdgeZeroApp::build::<App>(CLOUDFLARE_PLATFORM)',
+    'EdgeZeroApp::build::<App>(CLOUDFLARE_PLATFORM)'
   ) ||
   cloudflareGuideSource.includes('build_app')
 ) {
   fail(
-    `${cloudflareGuidePath} must construct manual applications with Cloudflare platform metadata`,
+    `${cloudflareGuidePath} must construct manual applications with Cloudflare platform metadata`
   )
 }
 const axumGuideSource = readFileSync(axumGuidePath, 'utf8')
 if (
   !axumGuideSource.includes(
-    'EdgeZeroApp::build::<App>(edgezero_adapter_axum::AXUM_PLATFORM)',
+    'EdgeZeroApp::build::<App>(edgezero_adapter_axum::AXUM_PLATFORM)'
   ) ||
   axumGuideSource.includes('build_app')
 ) {
   fail(
-    `${axumGuidePath} must construct manual applications with Axum platform metadata`,
+    `${axumGuidePath} must construct manual applications with Axum platform metadata`
   )
 }
 const routingGuideSource = readFileSync(routingGuidePath, 'utf8')
@@ -1083,7 +1085,7 @@ if (
   routingGuideSource.includes('build_app')
 ) {
   fail(
-    `${routingGuidePath} must document the platform-aware application builder`,
+    `${routingGuidePath} must document the platform-aware application builder`
   )
 }
 for (const [path, source] of [
@@ -1110,14 +1112,14 @@ for (const requiredFragment of [
 ]) {
   if (!hardCutSurfaces[2][1].includes(requiredFragment)) {
     fail(
-      `${proxyGuidePath} is missing typed batch contract: ${requiredFragment}`,
+      `${proxyGuidePath} is missing typed batch contract: ${requiredFragment}`
     )
   }
 }
 if (
   !hardCutSurfaces[2][1].includes('.deadline_after(Duration::from_secs(2))') ||
   hardCutSurfaces[2][1].includes(
-    'let observation_cutoff = Deadline::after(Duration::from_secs(2))',
+    'let observation_cutoff = Deadline::after(Duration::from_secs(2))'
   )
 ) {
   fail(`${proxyGuidePath} must anchor batch cutoffs to the request clock`)
@@ -1138,17 +1140,17 @@ try {
 
 if (!outboundSpecSource.includes('## 2. Historical implementation baseline')) {
   fail(
-    'outbound specification must label section 2 as a historical implementation baseline',
+    'outbound specification must label section 2 as a historical implementation baseline'
   )
 }
 if (outboundSpecSource.includes('## 2. Current state (summary)')) {
   fail(
-    'outbound specification still labels its historical baseline as current state',
+    'outbound specification still labels its historical baseline as current state'
   )
 }
 if (outboundSpecSource.includes("Today's Fastly client")) {
   fail(
-    'outbound specification still describes the historical Fastly client as current',
+    'outbound specification still describes the historical Fastly client as current'
   )
 }
 for (const staleFragment of [
@@ -1159,12 +1161,12 @@ for (const staleFragment of [
 ]) {
   if (outboundSpecSource.includes(staleFragment)) {
     fail(
-      `outbound specification contains removed clock behavior: ${staleFragment}`,
+      `outbound specification contains removed clock behavior: ${staleFragment}`
     )
   }
 }
 const budgetSourceDefinitions = outboundSpecSource.match(
-  /pub enum BudgetSource\s*\{/gu,
+  /pub enum BudgetSource\s*\{/gu
 )
 if (budgetSourceDefinitions?.length !== 1) {
   fail('outbound specification must define BudgetSource exactly once')
@@ -1201,7 +1203,7 @@ for (const staleFragment of [
 ]) {
   if (outboundSpecSource.includes(staleFragment)) {
     fail(
-      `outbound specification contains stale implementation text: ${staleFragment}`,
+      `outbound specification contains stale implementation text: ${staleFragment}`
     )
   }
 }
@@ -1223,17 +1225,17 @@ for (const requiredFragment of [
 ]) {
   if (!outboundSpecSource.includes(requiredFragment)) {
     fail(
-      `outbound specification is missing typed batch contract: ${requiredFragment}`,
+      `outbound specification is missing typed batch contract: ${requiredFragment}`
     )
   }
 }
 if (
   !/terminal samples follow\s+poll-observation order in the shared monotonic clock domain/u.test(
-    outboundSpecSource,
+    outboundSpecSource
   )
 ) {
   fail(
-    'outbound specification is missing the monotonic terminal-observation ordering proof',
+    'outbound specification is missing the monotonic terminal-observation ordering proof'
   )
 }
 
@@ -1241,7 +1243,7 @@ const cloudflareExactDeadlineRecommendation =
   /\btarget(?:s|ing)?\s+(?:Axum\s+(?:or|and)\s+Cloudflare|Cloudflare\s+(?:or|and)\s+Axum)\b/u
 if (cloudflareExactDeadlineRecommendation.test(outboundSpecSource)) {
   fail(
-    'outbound specification recommends Cloudflare for exact deadlines despite its BestEffort capability',
+    'outbound specification recommends Cloudflare for exact deadlines despite its BestEffort capability'
   )
 }
 
@@ -1268,7 +1270,7 @@ for (const requiredFragment of [
 ]) {
   if (!inboundSpecSource.includes(requiredFragment)) {
     fail(
-      `${inboundSpecPath} is missing lifecycle contract: ${requiredFragment}`,
+      `${inboundSpecPath} is missing lifecycle contract: ${requiredFragment}`
     )
   }
 }
@@ -1280,14 +1282,14 @@ for (const staleFragment of [
 ]) {
   if (inboundSpecSource.includes(staleFragment)) {
     fail(
-      `inbound specification contains removed Axum bridge text: ${staleFragment}`,
+      `inbound specification contains removed Axum bridge text: ${staleFragment}`
     )
   }
 }
 
 const outboundReviewHardeningPlanSource = readFileSync(
   outboundReviewHardeningPlanPath,
-  'utf8',
+  'utf8'
 )
 for (const staleFragment of [
   'Preserve default-clock constructors for low-level use',
@@ -1338,7 +1340,7 @@ for (const [path, source] of currentDocumentation) {
 const outboundImplementationIndexSource = currentDocumentation[0][1]
 if (!outboundImplementationIndexSource.includes('Spin SDK 7 / WASI HTTP 0.3')) {
   fail(
-    'outbound implementation index must name the current Spin SDK 7 baseline',
+    'outbound implementation index must name the current Spin SDK 7 baseline'
   )
 }
 if (
@@ -1346,10 +1348,10 @@ if (
   outboundImplementationIndexSource.includes('Tasks 1-6 blocked') ||
   outboundImplementationIndexSource.includes('all downstream phases stay') ||
   outboundImplementationIndexSource.includes(
-    'exactly seven **outbound** capabilities',
+    'exactly seven **outbound** capabilities'
   ) ||
   outboundImplementationIndexSource.includes(
-    'block_in_place` + `Handle::block_on',
+    'block_in_place` + `Handle::block_on'
   )
 ) {
   fail('outbound implementation index contains stale implementation state')
@@ -1363,14 +1365,14 @@ try {
 }
 const normalizedBrotliAuditSource = brotliAuditSource.replace(/\s+/gu, ' ')
 const expectedBrotliDependencies = JSON.parse(
-  readFileSync('scripts/brotli_dependency_contract.json', 'utf8'),
+  readFileSync('scripts/brotli_dependency_contract.json', 'utf8')
 )
 const auditedBrotliDependencies = new Map(
   [
     ...brotliAuditSource.matchAll(
-      /^\| `([^`]+)`\s+\| `([^`]+)`\s+\| `([0-9a-f]{64})` \|$/gmu,
+      /^\| `([^`]+)`\s+\| `([^`]+)`\s+\| `([0-9a-f]{64})` \|$/gmu
     ),
-  ].map((match) => [match[1], [match[2], match[3]]]),
+  ].map((match) => [match[1], [match[2], match[3]]])
 )
 if (auditedBrotliDependencies.size !== expectedBrotliDependencies.length) {
   fail(`${brotliAuditPath} must contain exactly the pinned dependency graph`)
@@ -1379,7 +1381,7 @@ for (const [name, version, checksum] of expectedBrotliDependencies) {
   const audited = auditedBrotliDependencies.get(name)
   if (audited?.[0] !== version || audited?.[1] !== checksum) {
     fail(
-      `${brotliAuditPath} has stale version or checksum evidence for ${name}`,
+      `${brotliAuditPath} has stale version or checksum evidence for ${name}`
     )
   }
 }
@@ -1404,14 +1406,14 @@ for (const requiredFragment of [
 const outboundBatchTerminationPlanSource = currentDocumentation[1][1]
 if (outboundBatchTerminationPlanSource.includes('send_all_until(...).await?')) {
   fail(
-    `${outboundBatchTerminationPlanPath} contains the stale batch collector error conversion`,
+    `${outboundBatchTerminationPlanPath} contains the stale batch collector error conversion`
   )
 }
 if (
   outboundBatchTerminationPlanSource.includes('doc-hidden adapter driver event')
 ) {
   fail(
-    `${outboundBatchTerminationPlanPath} still describes the public adapter driver protocol as doc-hidden`,
+    `${outboundBatchTerminationPlanPath} still describes the public adapter driver protocol as doc-hidden`
   )
 }
 
@@ -1424,7 +1426,7 @@ for (const staleFragment of [
 ]) {
   if (cloudflarePhaseSource.includes(staleFragment)) {
     fail(
-      `${cloudflarePhasePath} contains stale Cloudflare capability text: ${staleFragment}`,
+      `${cloudflarePhasePath} contains stale Cloudflare capability text: ${staleFragment}`
     )
   }
 }
@@ -1447,7 +1449,7 @@ for (const currentRow of [
 ]) {
   if (!migrationPhaseSource.includes(currentRow)) {
     fail(
-      `${migrationPhasePath} is missing current capability row: ${currentRow}`,
+      `${migrationPhasePath} is missing current capability row: ${currentRow}`
     )
   }
 }
@@ -1466,17 +1468,17 @@ for (const dependency of [
 ]) {
   if (!outboundSpecSource.includes(`\`${dependency}\``)) {
     fail(
-      `outbound specification is missing audited dependency pin ${dependency}`,
+      `outbound specification is missing audited dependency pin ${dependency}`
     )
   }
 }
 if (
   !outboundSpecSource.includes(
-    "plus EdgeZero's synthetic `x-edgezero-proxy` marker",
+    "plus EdgeZero's synthetic `x-edgezero-proxy` marker"
   )
 ) {
   fail(
-    'outbound specification does not include the proxy header in response caps',
+    'outbound specification does not include the proxy header in response caps'
   )
 }
 
@@ -1513,18 +1515,18 @@ for (const requiredFragment of [
 ]) {
   if (!responseEgressSpecSource.includes(requiredFragment)) {
     fail(
-      `${responseEgressSpecPath} is missing application deadline contract: ${requiredFragment}`,
+      `${responseEgressSpecPath} is missing application deadline contract: ${requiredFragment}`
     )
   }
 }
 
 if (
   responseEgressSpecSource.includes(
-    'Normalized pre-admission validation obtains exactly one completion',
+    'Normalized pre-admission validation obtains exactly one completion'
   )
 ) {
   fail(
-    'response-egress evidence still claims every normalized rejection has a completion',
+    'response-egress evidence still claims every normalized rejection has a completion'
   )
 }
 
@@ -1534,19 +1536,19 @@ for (const requiredFragment of [
 ]) {
   if (!capabilitySource.includes(requiredFragment)) {
     fail(
-      `${capabilityPath} is missing detached-ingress abort caveat: ${requiredFragment}`,
+      `${capabilityPath} is missing detached-ingress abort caveat: ${requiredFragment}`
     )
   }
 }
 
 const responseEgressHeadingIndex = lines.findIndex(
-  (line) => line.trim() === '## Response Egress Matrix',
+  (line) => line.trim() === '## Response Egress Matrix'
 )
 if (responseEgressHeadingIndex === -1) {
   fail(`${capabilityPath} is missing the response-egress section`)
 }
 const nextCapabilityHeadingIndex = lines.findIndex(
-  (line, index) => index > responseEgressHeadingIndex && line.startsWith('## '),
+  (line, index) => index > responseEgressHeadingIndex && line.startsWith('## ')
 )
 const responseEgressSectionEnd =
   nextCapabilityHeadingIndex === -1 ? lines.length : nextCapabilityHeadingIndex
@@ -1559,7 +1561,7 @@ for (const requiredFragment of [
 ]) {
   if (!responseEgressSection.includes(requiredFragment)) {
     fail(
-      `${capabilityPath} response-egress section is missing caveat: ${requiredFragment}`,
+      `${capabilityPath} response-egress section is missing caveat: ${requiredFragment}`
     )
   }
 }
@@ -1569,7 +1571,7 @@ function responseEgressProviderBullet(provider) {
     (line, index) =>
       index > responseEgressHeadingIndex &&
       index < responseEgressSectionEnd &&
-      line.startsWith(`- ${provider} `),
+      line.startsWith(`- ${provider} `)
   )
   if (bulletIndex === -1) {
     fail(`${capabilityPath} is missing the ${provider} response-egress caveat`)
@@ -1626,26 +1628,26 @@ for (const [provider, requiredFragments] of responseEgressProviderCaveats) {
   for (const requiredFragment of requiredFragments) {
     if (!bullet.includes(requiredFragment)) {
       fail(
-        `${capabilityPath} ${provider} response-egress caveat is missing: ${requiredFragment}`,
+        `${capabilityPath} ${provider} response-egress caveat is missing: ${requiredFragment}`
       )
     }
   }
 }
 
 const limitsHeadingIndex = lines.findIndex(
-  (line) => line.trim() === '## Limits And Accounting',
+  (line) => line.trim() === '## Limits And Accounting'
 )
 if (limitsHeadingIndex === -1) {
   fail('limits and accounting section is missing')
 }
 const limitsSectionEnd = lines.findIndex(
-  (line, index) => index > limitsHeadingIndex && line.startsWith('## '),
+  (line, index) => index > limitsHeadingIndex && line.startsWith('## ')
 )
 const limitsHeaderIndex = lines.findIndex(
   (line, index) =>
     index > limitsHeadingIndex &&
     (limitsSectionEnd === -1 || index < limitsSectionEnd) &&
-    JSON.stringify(cells(line)) === JSON.stringify(expectedLimitHeader),
+    JSON.stringify(cells(line)) === JSON.stringify(expectedLimitHeader)
 )
 if (limitsHeaderIndex === -1) {
   fail('outbound limits table is missing')
@@ -1669,7 +1671,7 @@ for (let index = limitsHeaderIndex + 2; index < lines.length; index += 1) {
 }
 if (JSON.stringify(actualLimitRows) !== JSON.stringify(expectedLimitRows)) {
   fail(
-    `outbound limits mismatch\nexpected=${JSON.stringify(expectedLimitRows)}\nactual=${JSON.stringify(actualLimitRows)}`,
+    `outbound limits mismatch\nexpected=${JSON.stringify(expectedLimitRows)}\nactual=${JSON.stringify(actualLimitRows)}`
   )
 }
 for (const requiredFragment of [
@@ -1678,7 +1680,7 @@ for (const requiredFragment of [
 ]) {
   if (!capabilitySource.includes(requiredFragment)) {
     fail(
-      `${capabilityPath} is missing the response-header accounting rule: ${requiredFragment}`,
+      `${capabilityPath} is missing the response-header accounting rule: ${requiredFragment}`
     )
   }
 }
@@ -1705,7 +1707,9 @@ for (const requiredFragment of [
   'pub fn decode_deflate_stream',
 ]) {
   if (!compressionCoreSource.includes(requiredFragment)) {
-    fail(`${compressionCorePath} is missing the content-encoding contract: ${requiredFragment}`)
+    fail(
+      `${compressionCorePath} is missing the content-encoding contract: ${requiredFragment}`
+    )
   }
 }
 for (const requiredFragment of [
@@ -1716,13 +1720,65 @@ for (const requiredFragment of [
   'decode_deflate_stream',
 ]) {
   if (!outboundSpecSource.includes(requiredFragment)) {
-    fail(`${outboundSpecPath} is missing the content-encoding documentation: ${requiredFragment}`)
+    fail(
+      `${outboundSpecPath} is missing the content-encoding documentation: ${requiredFragment}`
+    )
   }
 }
 observationCutoffContract(outboundCoreSource)
+for (const fragment of [
+  'pub enum OutboundProxyMarker',
+  'pub fn proxy_marker(',
+  'pub fn proxy_marker_setting(',
+  'pub fn effective_proxy_marker_enabled(',
+  'pub fn proxy_marker_enabled(',
+  'pub fn with_proxy_marker(',
+  'proxy_marker_off_preserves_upstream_and_consumes_no_header_budget',
+]) {
+  if (!outboundCoreSource.includes(fragment)) {
+    fail(`${outboundCorePath} is missing the proxy-marker contract: ${fragment}`)
+  }
+}
+for (const fragment of [
+  'pub enum ResponseDecoding',
+  'pub fn response_decoding(',
+  'pub fn response_decoding_setting(',
+  'original_coding_skips_decoder_but_keeps_transport_caps',
+  'original_coding_preserves_normalization_precedence',
+]) {
+  if (!outboundCoreSource.includes(fragment)) {
+    fail(
+      `${outboundCorePath} is missing the original-coding contract: ${fragment}`
+    )
+  }
+}
+for (const path of [proxyGuidePath, capabilityPath]) {
+  const source = readFileSync(path, 'utf8')
+  for (const fragment of [
+    'ResponseDecoding::Original',
+    'ResponseDecoding::Decode',
+    '206',
+  ]) {
+    if (!source.includes(fragment)) {
+      fail(`${path} is missing the original-coding documentation: ${fragment}`)
+    }
+  }
+}
+for (const path of [demoHandlersPath, templateHandlersPath]) {
+  if (!readFileSync(path, 'utf8').includes('.with_proxy_marker(false)')) {
+    fail(`${path} must configure its relay handle with the marker off`)
+  }
+  if (
+    !readFileSync(path, 'utf8').includes(
+      '.response_decoding(ResponseDecoding::Original)'
+    )
+  ) {
+    fail(`${path} must select original coding for its relay request`)
+  }
+}
 if (
   !/#\[non_exhaustive\]\s*pub enum OutboundBatchDriverEvent\s*\{/u.test(
-    outboundCoreSource,
+    outboundCoreSource
   )
 ) {
   fail('OutboundBatchDriverEvent must remain non-exhaustive')
@@ -1735,7 +1791,7 @@ const outboundResponseConstructor =
   /impl OutboundResponse \{[\s\S]*?pub fn new\(\s*request_method: Method,\s*status: StatusCode,\s*headers: HeaderMap,\s*body: Body,\s*monotonic_clock: MonotonicClock,\s*content_type_provenance: ContentTypeProvenance,\s*\) -> Self \{/u
 if (!outboundResponseConstructor.test(outboundCoreSource)) {
   fail(
-    'OutboundResponse::new must require the application clock and original Content-Type provenance',
+    'OutboundResponse::new must require the application clock and original Content-Type provenance'
   )
 }
 for (const adapterPath of outboundAdapterPaths) {
@@ -1747,7 +1803,7 @@ for (const adapterPath of outboundAdapterPaths) {
     : 'normalization\\.content_type_provenance'
   const pairedClockCount =
     adapterSource.match(
-      new RegExp(`response_clock,\\s*${provenance},\\s*\\)\\)`, 'gu'),
+      new RegExp(`response_clock,\\s*${provenance},\\s*\\)\\)`, 'gu')
     )?.length ?? 0
   if (
     constructorCount === 0 ||
@@ -1755,7 +1811,7 @@ for (const adapterPath of outboundAdapterPaths) {
     !adapterSource.includes('let response_clock = clock.clone();')
   ) {
     fail(
-      `${adapterPath} must pass the paired client clock and original Content-Type provenance (Unknown on Cloudflare) to every outbound response`,
+      `${adapterPath} must pass the paired client clock and original Content-Type provenance (Unknown on Cloudflare) to every outbound response`
     )
   }
   if (!adapterSource.includes('converted_response_retains_injected_clock')) {
@@ -1763,7 +1819,7 @@ for (const adapterPath of outboundAdapterPaths) {
   }
 }
 const documentedDefaults = new Map(
-  actualLimitRows.map((row) => [row[0], row[2]]),
+  actualLimitRows.map((row) => [row[0], row[2]])
 )
 for (const [control, constant] of [
   ['max_request_body_bytes', 'DEFAULT_OUTBOUND_REQUEST_BODY_BYTES'],
@@ -1771,12 +1827,12 @@ for (const [control, constant] of [
   ['max_decoder_bytes', 'DEFAULT_MAX_DECODER_BYTES'],
 ]) {
   const rustDefault = formatBinaryBytes(
-    readRustU64Constant(outboundCoreSource, constant),
+    readRustU64Constant(outboundCoreSource, constant)
   )
   const documentedDefault = documentedDefaults.get(control)
   if (documentedDefault !== rustDefault) {
     fail(
-      `${control} default mismatch: Rust ${constant} is ${rustDefault}, documentation says ${documentedDefault}`,
+      `${control} default mismatch: Rust ${constant} is ${rustDefault}, documentation says ${documentedDefault}`
     )
   }
 }
@@ -1786,6 +1842,6 @@ const sidebarLinks =
   sidebarSource.match(/link:\s*['"]\/guide\/capabilities['"]/gu) ?? []
 if (sidebarLinks.length !== 1) {
   fail(
-    `expected exactly one /guide/capabilities sidebar link, found ${sidebarLinks.length}`,
+    `expected exactly one /guide/capabilities sidebar link, found ${sidebarLinks.length}`
   )
 }

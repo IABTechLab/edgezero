@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_stream::stream as async_body_stream;
 use axum::Router;
 use axum::body::Body;
+use axum::extract::Path;
 use axum::http::HeaderValue;
 use axum::http::header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, HOST, SET_COOKIE};
 use axum::response::Response;
@@ -23,8 +24,9 @@ use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError, ResponseLi
 use edgezero_core::http::{HeaderMap, Method, StatusCode};
 use edgezero_core::time::Deadline;
 use edgezero_core::{
-    FLATE_DECODER_FIXED_CHARGE_BYTES, OutboundBatchNext, OutboundBatchTermination,
-    OutboundCachePolicy, OutboundHttpClient as _, OutboundRequest, PROXY_HEADER,
+    FLATE_DECODER_FIXED_CHARGE_BYTES, HttpClient, OutboundBatchNext, OutboundBatchTermination,
+    OutboundCachePolicy, OutboundHttpClient as _, OutboundProxyMarker, OutboundRequest,
+    PROXY_HEADER, ResponseDecoding,
 };
 use flate2::Compression;
 use flate2::write::{GzEncoder, ZlibEncoder};
@@ -51,6 +53,121 @@ async fn start_origin(router: Router) -> String {
         axum::serve(listener, router).await.expect("serve origin");
     });
     format!("http://{address}")
+}
+
+async fn start_coding_origin(coding: &'static str, origin_body: Vec<u8>) -> String {
+    start_origin(Router::new().route(
+        "/{status}",
+        get(move |Path(status): Path<u16>, headers: HeaderMap| {
+            let bytes = origin_body.clone();
+            async move {
+                assert_eq!(
+                    headers.get("accept-encoding").expect("encoding"),
+                    "gzip, deflate",
+                    "request encoding negotiation must survive both response decoding choices"
+                );
+                Response::builder()
+                    .status(status)
+                    .header(CONTENT_ENCODING, coding)
+                    .header(CONTENT_LENGTH, bytes.len())
+                    .header("etag", "\"original\"")
+                    .header("content-range", "bytes 0-3/8")
+                    .body(Body::from(bytes))
+                    .expect("origin response")
+            }
+        }),
+    ))
+    .await
+}
+
+#[tokio::test]
+async fn marker_policy_reaches_transport_bodyless_redirect_and_batch_paths() {
+    let origin = start_origin(Router::new().route(
+        "/{status}",
+        get(|Path(status): Path<u16>, headers: HeaderMap| async move {
+            let mut response = Response::builder()
+                .status(status)
+                .header("location", "/unreachable");
+            if headers.contains_key("x-fixture-upstream-marker") {
+                response = response.header(PROXY_HEADER, "upstream");
+            }
+            response.body(Body::empty()).expect("origin response")
+        }),
+    ))
+    .await;
+    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"))
+        .with_proxy_marker(false);
+    for (method, status) in [
+        (Method::GET, StatusCode::OK),
+        (Method::GET, StatusCode::NO_CONTENT),
+        (Method::HEAD, StatusCode::OK),
+        (Method::GET, StatusCode::NOT_MODIFIED),
+        (Method::GET, StatusCode::FOUND),
+    ] {
+        for override_setting in [
+            OutboundProxyMarker::Inherit,
+            OutboundProxyMarker::On,
+            OutboundProxyMarker::Off,
+        ] {
+            for upstream in [false, true] {
+                let mut request = OutboundRequest::new(
+                    method.clone(),
+                    format!("{origin}/{}", status.as_u16())
+                        .parse()
+                        .expect("target"),
+                )
+                .expect("request")
+                .proxy_marker(override_setting)
+                .max_encoded_response_bytes(0)
+                .max_decoded_response_bytes(0)
+                .max_response_bytes(0);
+                if upstream {
+                    request = request
+                        .header("x-fixture-upstream-marker", "yes")
+                        .expect("header");
+                }
+                let enabled = client.effective_proxy_marker_enabled(&request);
+                let response = client.send(request).await.expect("response");
+                assert_eq!(response.status(), status);
+                let expected = if enabled {
+                    Some("axum")
+                } else if upstream {
+                    Some("upstream")
+                } else {
+                    None
+                };
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(PROXY_HEADER)
+                        .and_then(|value| value.to_str().ok()),
+                    expected
+                );
+            }
+        }
+    }
+    let requests = [OutboundProxyMarker::Inherit, OutboundProxyMarker::On]
+        .into_iter()
+        .map(|setting| {
+            OutboundRequest::get(format!("{origin}/200"))
+                .expect("request")
+                .proxy_marker(setting)
+        })
+        .collect();
+    let results = client
+        .send_all_until(requests, Deadline::after(Duration::from_secs(2)))
+        .await
+        .expect("batch");
+    for (slot, expected) in results.slots.into_iter().zip([None, Some("axum")]) {
+        let response = slot.expect("resolved slot").outcome.expect("response");
+        assert_eq!(
+            response
+                .headers()
+                .get(PROXY_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            expected
+        );
+    }
 }
 
 #[tokio::test]
@@ -487,6 +604,130 @@ async fn deflate_response_is_decoded_stripped_and_bounded() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn original_chunked_response_obeys_observed_buffer_cap() {
+    let origin = start_origin(Router::new().route(
+        "/",
+        get(|| async {
+            Response::builder()
+                .header(CONTENT_ENCODING, "gzip")
+                .body(Body::from_stream(stream::iter([Ok::<_, Infallible>(
+                    Bytes::from_static(b"raw!"),
+                )])))
+                .expect("chunked origin response")
+        }),
+    ))
+    .await;
+    let client = AxumOutboundClient::try_new().expect("client");
+    let error = client
+        .send(
+            OutboundRequest::get(origin)
+                .expect("request")
+                .response_decoding(ResponseDecoding::Original)
+                .max_decoder_bytes(0)
+                .max_decoded_response_bytes(1)
+                .max_encoded_response_bytes(20)
+                .max_response_bytes(3),
+        )
+        .await
+        .expect_err("observed final buffer overflow");
+    assert!(matches!(
+        error,
+        EdgeError::ResponseTooLarge {
+            reason: ResponseLimitReason::BufferedBody,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn original_and_partial_coding_survive_actual_transport_and_mixed_batch() {
+    let plain = b"original compressed representation";
+    for (coding, encoded) in [("gzip", gzip(plain)), ("deflate", zlib(plain))] {
+        let origin = start_coding_origin(coding, encoded.clone()).await;
+        let client = AxumOutboundClient::try_new().expect("client");
+        let length = u64::try_from(encoded.len()).expect("encoded length");
+        for (choice, status) in [
+            (ResponseDecoding::Original, 200_u16),
+            (ResponseDecoding::Original, 206),
+            (ResponseDecoding::Decode, 206),
+        ] {
+            for streamed in [false, true] {
+                let request = OutboundRequest::get(format!("{origin}/{status}"))
+                    .expect("request")
+                    .header("accept-encoding", "gzip, deflate")
+                    .expect("header")
+                    .response_decoding(choice)
+                    .max_decoder_bytes(0)
+                    .max_decoded_response_bytes(1)
+                    .max_encoded_response_bytes(length)
+                    .max_response_bytes(length);
+                let outgoing = if streamed {
+                    request.stream_response()
+                } else {
+                    request
+                };
+                let response = client.send(outgoing).await.expect("raw response");
+                assert_eq!(
+                    response.headers().get(CONTENT_ENCODING).expect("coding"),
+                    coding
+                );
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(CONTENT_LENGTH)
+                        .expect("length")
+                        .as_bytes(),
+                    length.to_string().as_bytes()
+                );
+                assert_eq!(
+                    response.headers().get("etag").expect("etag"),
+                    "\"original\""
+                );
+                assert_eq!(
+                    response.headers().get("content-range").expect("range"),
+                    "bytes 0-3/8"
+                );
+                assert_eq!(
+                    response
+                        .into_bytes_bounded(length)
+                        .await
+                        .expect("raw bytes"),
+                    encoded
+                );
+            }
+        }
+        let requests = [ResponseDecoding::Original, ResponseDecoding::Decode]
+            .into_iter()
+            .map(|choice| {
+                OutboundRequest::get(format!("{origin}/200"))
+                    .expect("request")
+                    .header("accept-encoding", "gzip, deflate")
+                    .expect("header")
+                    .response_decoding(choice)
+            })
+            .collect();
+        let results = client
+            .start_batch_until(requests, Deadline::after(Duration::from_secs(2)))
+            .collect()
+            .await
+            .expect("batch");
+        assert_eq!(results.termination, OutboundBatchTermination::Completed);
+        for (index, slot) in results.slots.into_iter().enumerate() {
+            let response = slot.expect("resolved").outcome.expect("response");
+            let expected = if index == 0 {
+                encoded.as_slice()
+            } else {
+                plain.as_slice()
+            };
+            assert_eq!(
+                response.into_bytes_bounded(256).await.expect("bytes"),
+                expected
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -6,12 +6,15 @@ publish.workspace = true
 
 [features]
 qualification = ["fixture-core/qualification"]
+progress = ["fixture-core/qualification"]
+readiness = ["dep:fastly-sys"]
 
 [dependencies]
 edgezero-core.workspace = true
 edgezero-adapter-fastly.workspace = true
 fixture-core.workspace = true
 fastly.workspace = true
+fastly-sys = { version = "=0.13.1", optional = true }
 futures.workspace = true
 serde_json.workspace = true
 log.workspace = true
@@ -19,6 +22,16 @@ log.workspace = true
 [[bin]]
 name = "fixture-fastly-single-request"
 path = "src/bin/single_request.rs"
+
+[[bin]]
+name = "fixture-fastly-outbound-progress"
+path = "src/bin/outbound_progress.rs"
+required-features = ["progress"]
+
+[[bin]]
+name = "fixture-fastly-outbound-readiness"
+path = "src/bin/outbound_readiness.rs"
+required-features = ["readiness"]
 
 [[bin]]
 name = "fixture-fastly-qualification"

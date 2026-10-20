@@ -73,6 +73,37 @@ separately from the portable API and must be considered when declaring required 
 
 ### Outbound HTTP And Batches
 
+- Retain local Cloudflare workerd 2026-09-10 characterization: 24 coding, 46 marker, five
+  scheduling and five HTTP/1 framing checks. Require the original Workers body signal in framing
+  assertions and continue independent scheduling checks after policy-probe failures. Record exact
+  tool, source, JS/WASM and compatibility-setting identities without claiming hosted qualification.
+- Add the portable `OutboundExchangeOwner` / `OutboundPending` ownership foundation. Teardown
+  is local and exactly once; readiness caches success or the original error without polling body
+  bytes, and cancellation releases uncollected work. Successful collection disarms pending
+  cancellation before handing off a live streamed response. Producers must supply already-scheduled
+  completion receivers and separate body cleanup, not lazy transport futures or duplicate SDK
+  release guards. This does not yet add `HttpClient::begin` or migrate the dispatch trait.
+- Add client-wide proxy-marker defaults and per-request `OutboundProxyMarker::{Inherit, On, Off}`,
+  with effective-policy inspection and resolution before supplied-client delegation. Default stays
+  on; off skips synthetic header insertion/accounting while preserving ordinary upstream fields.
+  Relay demo/templates configure their client handle off. Carry the policy through single sends,
+  batches, bodyless responses and parts round-trips on all four adapters.
+  Adapter implementers must pass the request policy to `insert_proxy_header`; its prior
+  unconditional signature is removed rather than retained as a compatibility overload.
+- Correct Spin `outbound-header-fidelity` to BestEffort: a local direct-WASI control proves the
+  host hides `Connection` before normalization while retaining a nominated extension field.
+  Preserve visible-header normalization and upstream marker opt-out; do not claim raw fidelity.
+- Add `ResponseDecoding::{Decode, Original}` with per-request readback and parts round-tripping
+  across all four adapters. Original delivers recognized encoded bytes without decoder allocation;
+  every 206 response now retains original coding, even with Decode selected. Keep normalization
+  precedence, identity decoded caps, encoded/final limits, bodyless handling and provenance.
+  Relay demo/templates select Original; JSON fanout keeps Decode. Local Axum/Viceroy/Spin/workerd
+  probes do not constitute hosted qualification; encoded downstream relay evidence remains pending.
+- Add the portable `OutboundFuture` / `OutboundTime` foundation for pairing the application
+  clock with an adapter-owned wakeup factory. Preserve absolute deadlines across early wakes,
+  yield cooperatively, propagate timer errors unchanged, reject observed clock regression and
+  release timer/factory state on termination or cancellation. This core foundation does not yet
+  migrate client constructors or dispatch traits, or strengthen provider capabilities.
 - Replace the proxy-client/service API with `HttpClient`, `OutboundHttpClient`, `OutboundRequest`,
   and `OutboundResponse`. Standard adapters inject the client into request extensions; handlers
   access it through `RequestContext::http_client()`. Missing manual wiring remains explicit.
@@ -253,6 +284,10 @@ separately from the portable API and must be considered when declaring required 
   Axum's Hyper connection, Cloudflare's writer/abort lifetime, Fastly's manual `stream_to_client`,
   and Spin's owned WASI response/body/result writers. Account accepted payload prefixes and release
   sources on timeout, disconnect, source failure, and terminal transport errors.
+- Fix Spin streamed egress when its host response-result future succeeds before body production
+  finishes. Retire that observation once, continue the same pending source/write under its deadline,
+  and finish only after stream closure and successful body-result publication. Keep late success,
+  disconnects and source/write failures distinct from end-client delivery guarantees.
 - Share response framing rules for HEAD, body-forbidden statuses, declared-length validation,
   hop-by-hop stripping, unsupported upgrades, and bounded pre-commit error fallbacks. Fastly manual
   framing is enabled only when a body is actually transmitted.

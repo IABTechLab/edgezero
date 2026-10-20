@@ -107,10 +107,10 @@ mod worker_impl {
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use edgezero_core::outbound::{
         ContentTypeProvenance, OutboundBatch, OutboundCachePolicy, OutboundHttpClient,
-        OutboundRequest, OutboundRequestParts, OutboundResponse, ResponseBodyDisposition,
-        ResponseBodyPolicy, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
-        collect_response_stream, insert_proxy_header, normalize_for_dispatch,
-        normalize_response_headers, validate_for_dispatch,
+        OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse,
+        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
+        ResponseMode, apply_response_body_policy, collect_response_stream, insert_proxy_header,
+        normalize_for_dispatch, normalize_response_headers, validate_for_dispatch,
     };
     use edgezero_core::time::{
         Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
@@ -258,6 +258,8 @@ mod worker_impl {
                 max_response_header_bytes,
                 max_response_header_count,
                 method,
+                proxy_marker,
+                response_decoding,
                 response_mode,
                 uri,
                 ..
@@ -281,6 +283,8 @@ mod worker_impl {
                 response,
                 abort_guard,
                 method,
+                proxy_marker,
+                response_decoding,
                 response_mode,
                 budget,
                 max_decoder_bytes,
@@ -503,6 +507,8 @@ mod worker_impl {
         mut response: WorkerResponse,
         mut abort_guard: AbortGuard,
         request_method: Method,
+        proxy_marker: OutboundProxyMarker,
+        response_decoding: ResponseDecoding,
         response_mode: ResponseMode,
         budget: DispatchBudget,
         max_decoder_bytes: u64,
@@ -526,6 +532,7 @@ mod worker_impl {
         insert_proxy_header(
             &mut headers,
             &mut header_limiter,
+            proxy_marker,
             HeaderValue::from_static("cloudflare"),
         )?;
 
@@ -587,7 +594,9 @@ mod worker_impl {
                 max_decoded_response_bytes,
                 max_decoder_bytes,
                 max_encoded_response_bytes,
+                response_decoding,
                 response_mode,
+                status,
             },
         )?;
         let deadline_bound = deadline_stream(shaped, budget, clock, abort_guard);
@@ -722,6 +731,8 @@ mod worker_impl {
                 response,
                 AbortGuard::new(controller),
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 ResponseMode::Buffered { max_bytes: 64 },
                 DispatchBudget {
                     cause: BudgetSource::PerCallTimeout,
@@ -1308,6 +1319,8 @@ mod worker_impl {
                 empty_worker_response(StatusCode::NO_CONTENT, None),
                 AbortGuard::new(controller),
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 ResponseMode::Streamed,
                 budget,
                 32 * 1024 * 1024,
@@ -1380,6 +1393,8 @@ mod worker_impl {
                             native,
                             AbortGuard::new(controller),
                             Method::GET,
+                            OutboundProxyMarker::Inherit,
+                            ResponseDecoding::Decode,
                             mode,
                             test_budget(start, Duration::from_secs(1)),
                             1024,
@@ -1423,6 +1438,8 @@ mod worker_impl {
                     empty_worker_response(StatusCode::RESET_CONTENT, content_length),
                     AbortGuard::new(controller),
                     Method::GET,
+                    OutboundProxyMarker::Inherit,
+                    ResponseDecoding::Decode,
                     ResponseMode::Buffered { max_bytes: 64 },
                     budget,
                     1024,
@@ -1454,6 +1471,8 @@ mod worker_impl {
                 empty_worker_response(StatusCode::NO_CONTENT, None),
                 AbortGuard::new(controller),
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 ResponseMode::Buffered { max_bytes: 64 },
                 budget,
                 1024,

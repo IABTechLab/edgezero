@@ -223,7 +223,9 @@ terminal report. The boundaries remain `BestEffort` because none proves end-clie
 - Fastly accounts synchronous body-handle writes through `stream_to_client` close, but cannot
   preempt a blocked source poll or hostcall and loses the body handle if `finish` itself fails.
 - Spin owns the WASI response/body/result writers through handoff and races pending operations
-  against its timer; host teardown and network completion remain provider-observable only.
+  against its timer. An early successful host response-result observation is retired once without
+  ending pending body work; source EOF, writes and body-result publication must still succeed under
+  the same deadline; host teardown and network completion remain provider-observable only.
 
 Provider-owned buffering, SDK allocations, and bytes beyond each stated acceptance boundary are
 not included. These limitations block whole-response-lifetime certification.
@@ -239,7 +241,7 @@ not included. These limitations block whole-response-lifetime certification.
 | `outbound-batch-slot-isolation`         | Native                            | Native                            | BestEffort⁴                       | Native                            |
 | `outbound-cache-bypass`                 | Native                            | Native                            | Native                            | Native                            |
 | `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] |
-| `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                            | Native                            |
+| `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                            | BestEffort[^spin-header-fidelity] |
 | `outbound-deadlines`                    | Native                            | BestEffort⁸                       | BestEffort¹                       | BestEffort⁸                       |
 | `outbound-flexible-phase-budget`        | Native                            | Native                            | BestEffort⁵                       | BestEffort⁵                       |
 | `streamed-upload-deadlines`             | Native                            | BestEffort⁸                       | BestEffort²                       | BestEffort⁸                       |
@@ -303,6 +305,13 @@ The CLI cannot currently prove that entitlement. If disabled, dispatch returns a
 with the documented enablement diagnostic.
 
 ## Outbound Content-Type Provenance
+
+[^spin-header-fidelity]:
+    A local Spin 4.1 SDK-only WASI control observes `Connection` removed
+    before EdgeZero receives response fields, while a nominated extension field remains. EdgeZero
+    preserves the bytes/field boundaries that the host exposes, but cannot enforce or certify a
+    hidden nomination. Shared normalization still rejects malformed visible nomination lists and
+    strips visible nominated fields. This is not complete raw-header fidelity or hosted proof.
 
 `OutboundResponse::content_type_provenance()` reports original `Content-Type` evidence
 captured before EdgeZero drops non-UTF-8 values or hop-by-hop/connection-nominated fields.
@@ -380,27 +389,32 @@ not require provider host registration.
 
 Each `OutboundRequest` owns independent limits:
 
-| Control                      | Scope                                                                                          | Default |
-| ---------------------------- | ---------------------------------------------------------------------------------------------- | ------- |
-| `max_request_body_bytes`     | Buffered or streamed request bytes                                                             | 8 MiB   |
-| `max_encoded_response_bytes` | Upstream transport bytes before decoding                                                       | Unset   |
-| `max_decoded_response_bytes` | Identity or EdgeZero-decoded gzip/deflate/Brotli output                                        | Unset   |
-| `max_response_bytes`         | Final buffered response, including raw passthrough                                             | 1 MiB   |
-| `max_response_header_bytes`  | Adapter-visible upstream header name/value bytes before normalization, plus `x-edgezero-proxy` | Unset   |
-| `max_response_header_count`  | Adapter-visible upstream header fields before normalization, plus `x-edgezero-proxy`           | Unset   |
-| `max_brotli_window_bits`     | Brotli stream header checked before decoder allocation                                         | 24      |
-| `max_decoder_bytes`          | Pinned policy charge for Brotli/gzip/deflate decoder state                                     | 32 MiB  |
-| `max_chunk_bytes`            | Maximum emitted item size after decoding or passthrough                                        | Unset   |
+| Control                      | Scope                                                                                                       | Default |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ------- |
+| `max_request_body_bytes`     | Buffered or streamed request bytes                                                                          | 8 MiB   |
+| `max_encoded_response_bytes` | Upstream transport bytes before decoding                                                                    | Unset   |
+| `max_decoded_response_bytes` | Identity or EdgeZero-decoded gzip/deflate/Brotli output                                                     | Unset   |
+| `max_response_bytes`         | Final buffered response, including raw passthrough                                                          | 1 MiB   |
+| `max_response_header_bytes`  | Adapter-visible upstream header name/value bytes before normalization, plus `x-edgezero-proxy` when enabled | Unset   |
+| `max_response_header_count`  | Adapter-visible upstream header fields before normalization, plus `x-edgezero-proxy` when enabled           | Unset   |
+| `max_brotli_window_bits`     | Brotli stream header checked before decoder allocation                                                      | 24      |
+| `max_decoder_bytes`          | Pinned policy charge for Brotli/gzip/deflate decoder state                                                  | 32 MiB  |
+| `max_chunk_bytes`            | Maximum emitted item size after decoding or passthrough                                                     | Unset   |
 
 The encoded counter applies to every response path. The decoded counter applies to identity
 and gzip/deflate/Brotli data decoded by EdgeZero, but not to unknown, stacked, parameterized, or other
-raw passthrough encodings. The final buffered cap is independent of both. This separation lets
+raw passthrough encodings, including recognized codings delivered as Original or in a 206 response.
+Identity keeps its decoded cap under both choices. The final buffered cap is independent of both. This separation lets
 an application permit a larger raw body while keeping decoded expansion small.
 
 `max_chunk_bytes` is an item-shape guarantee, not a source-allocation limit: splitting a
 `Bytes` value may retain its original allocation, and a provider may have already materialized
 the source chunk. Header controls cover every adapter-visible upstream field before EdgeZero
-normalization, including fields later stripped, and then charge EdgeZero's synthetic proxy marker.
+normalization, including fields later stripped, and then charge EdgeZero's synthetic proxy marker
+only when enabled. `HttpClient::with_proxy_marker(false)` selects a relay default; request
+`OutboundProxyMarker::{Inherit, On, Off}` overrides it. The default remains on. Off neither adds
+nor removes upstream marker fields and consumes no synthetic byte/count budget. The effective
+inspector `client.effective_proxy_marker_enabled(&request)` is available before dispatch.
 They do not cover opaque parser allocations, informational blocks that the SDK hides, or
 provider-owned trailers. These exclusions are why
 `outbound-complete-resource-accounting` is `Unsupported` on every current adapter.
@@ -413,8 +427,12 @@ that formula.
 ## Encoding Boundaries
 
 An application-provided request body is sent with its declared `Content-Encoding`; EdgeZero
-does not silently recompress it. Response decoding is automatic only for a single bare `gzip`,
-`deflate`, or `br` coding. Multi-member gzip is drained through the final member and transport EOF.
+does not silently recompress it. `ResponseDecoding::Decode` is the default and decodes only a single
+bare `gzip`, `deflate`, or `br` coding. `ResponseDecoding::Original` preserves encoded bytes without
+allocating a decoder. All 206 responses retain original coding under either choice. Surviving
+representation fields stay unchanged; ordinary normalization still removes nominated/non-text fields
+first. Neither choice changes request `Accept-Encoding`, and identity retains decoded limits.
+Multi-member gzip in Decode mode is drained through the final member and transport EOF.
 Unknown codings are typed as `Passthrough(Unsupported(token))`, compound codings as
 `Passthrough(Stacked)`, and malformed values as `Passthrough(Malformed)`; all remain encoded
 and retain `Content-Encoding`.
@@ -424,6 +442,13 @@ response bytes so EdgeZero can enforce transport and decode limits. When those b
 passed through to the downstream response, the converter also selects manual response-body
 encoding so Workers does not encode them again. The latter does not promise an exact streamed
 wire `Content-Length`, because Workers owns final framing.
+
+Original-coding policy is wired through all four adapters. Local controlled-origin checks cover
+gzip/deflate/Brotli on Axum, pinned Viceroy 0.21.0, Spin 4.1 and workerd 2026-09-10, in buffered and
+streamed modes, including 206 and Decode controls. These are working-tree characterizations, not
+hosted qualification. The [Cloudflare record](../audits/evidence/2026-10-20-cloudflare-outbound.json)
+retains exact build tools, served artifacts and compatibility settings. Its coding checks report
+outbound bytes as JSON; encoded downstream relay framing remains unproved. No capability is promoted.
 
 ## Batch Timing
 

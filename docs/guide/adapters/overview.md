@@ -75,7 +75,10 @@ each core request. Implementations must:
 - Preserve typed deadline, transport, protocol, codec, and resource failures without message matching
 - Construct every `OutboundResponse` with the same `MonotonicClock` retained by the outbound
   client; the constructor has no process-default-clock fallback
-- Attach `x-edgezero-proxy: <adapter>` to completed outbound responses
+- Attach `x-edgezero-proxy: <adapter>` by default; configure relay handles with
+  `HttpClient::with_proxy_marker(false)` or override an individual request with
+  `OutboundProxyMarker::Off`. An omitted synthetic marker consumes no header budget and does not
+  overwrite an upstream marker.
 - Publish an exact static capability level for every outbound capability
 
 Provider limitations are part of the contract rather than hidden implementation details. See

@@ -1,5 +1,7 @@
 //! Opt-in, synthetic hosted probes through standard application/adaptor lifecycles.
 
+pub mod progress;
+
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};

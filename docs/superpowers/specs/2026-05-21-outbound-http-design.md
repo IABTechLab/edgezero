@@ -1444,8 +1444,10 @@ capability covers both directions:
 outbound request field lines reach the platform transport without EdgeZero coalescing, and
 raw response-header octets plus original field-line boundaries reach normalization. This
 includes fail-closed malformed `connection`, malformed/repeated `content-encoding`
-disposition, and repeated non-`set-cookie` field-line preservation. Axum/Fastly/Spin are
-`Native`; Cloudflare is `BestEffort`, so a `required` declaration hard-fails there.
+disposition, and repeated non-`set-cookie` field-line preservation. Axum/Fastly are
+`Native`; Cloudflare and Spin are `BestEffort`, so a `required` declaration hard-fails there.
+Spin's host hides `Connection` before guest normalization; footnote 8 records the direct-WASI
+control. Preserving the remaining raw fields is not sufficient for the stronger contract.
 Cloudflare's Fetch `Headers` may semantically combine repeated request values, and response
 processing sees post-workerd strings and comma-joined non-`set-cookie` values. It cannot
 claim original request field-line preservation, malformed raw `connection` → 502, or
@@ -3721,7 +3723,7 @@ Capability matrix (all four adapters):
 | `outbound-batch-slot-isolation` | Native | Native | BestEffort⁴ | Native |
 | `outbound-cache-bypass` | Native | Native | Native | Native |
 | `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] |
-| `outbound-header-fidelity` | Native | BestEffort⁸ | Native | Native |
+| `outbound-header-fidelity` | Native | BestEffort⁸ | Native | BestEffort⁸ |
 | `outbound-deadlines` | Native | BestEffort⁸ | BestEffort¹ | BestEffort⁸ |
 | `outbound-flexible-phase-budget` | Native | Native | BestEffort⁵ | BestEffort⁵ |
 | `streamed-upload-deadlines` | Native | BestEffort⁸ | BestEffort² | BestEffort⁸ |
@@ -3897,15 +3899,19 @@ remains `BestEffort` because guest cancellation does not establish a deployed fi
 or end-client-completion bound. The hand-built outbound request path remains independently
 `BestEffort` per footnote 8.
 
-⁸ **Spin/Cloudflare deadline and Cloudflare header-fidelity caveats.** Spin has a monotonic timer and can race the
+⁸ **Spin/Cloudflare deadline and header-fidelity caveats.** Spin has a monotonic timer and can race the
 guest-visible exchange, but Component Model cancellation is cooperative. Dropping a
 `FutureWriter` that has not written launches a background default write, and dropping a
 canonical-ABI subtask does not establish a documented one-tick host teardown bound. The
 adapter therefore implements explicit request/response completion protocols (§4.4) and
 returns a timeout when its timer wins, while `outbound-deadlines` and
 `streamed-upload-deadlines` remain `BestEffort` until host-observed runtime tests prove
-bounded teardown for stalled upload and response paths. Separately, Spin exposes raw
-header bytes and original field lines, so `outbound-header-fidelity` is `Native`.
+bounded teardown for stalled upload and response paths. A local Spin 4.1 SDK-only WASI control
+observes `Connection` removed before guest normalization while a nominated extension field remains.
+Spin preserves the bytes and boundaries exposed by the host, but cannot establish original raw
+header fidelity or filter hidden nominations, so `outbound-header-fidelity` is `BestEffort`.
+The stronger raw-header contract in §5.4 is unchanged; adapter-visible injection tests do not
+prove host-original fidelity. This local characterization is not hosted qualification.
 Cloudflare wires one owned `AbortController` through the final fetch options and body wrapper,
 but the PR has no deployed host-observed cancellation artifact proving a finite bound. Its
 `outbound-deadlines` and `streamed-upload-deadlines` cells therefore remain `BestEffort` until
@@ -6421,7 +6427,7 @@ this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper. The
   `[capabilities.outbound].hosts` per §3.5.4 when generating `spin.toml`.
 - `capability()` per §3.5.2 reports the exact twelve outbound-cell tuple (additional
   non-outbound capability variants are owned by their respective specifications):
-  `outbound-http` = `Native`, `outbound-header-fidelity` = `Native`,
+  `outbound-http` = `Native`, `outbound-header-fidelity` = `BestEffort` (footnote 8),
   `outbound-complete-resource-accounting` = `Unsupported`,
   `outbound-deadlines` = `BestEffort` (footnote 8),
   `outbound-flexible-phase-budget` = `BestEffort` (footnote 5: request-option setters may

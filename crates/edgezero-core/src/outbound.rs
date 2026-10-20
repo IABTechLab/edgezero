@@ -1,3 +1,11 @@
+#![expect(
+    clippy::self_named_module_files,
+    reason = "the workspace denies both contradictory module-file conventions; retain its self-named-file convention"
+)]
+
+mod exchange;
+mod progress;
+
 use std::future::Future;
 use std::iter;
 use std::net::IpAddr;
@@ -11,7 +19,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
-use futures_util::future::poll_fn;
+use futures_util::future::{LocalBoxFuture, poll_fn};
 use futures_util::stream::{FuturesUnordered, LocalBoxStream, Stream, iter};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -39,6 +47,46 @@ pub const DEFAULT_OUTBOUND_REQUEST_BODY_BYTES: u64 = 8 * 1024 * 1024;
 /// Response header identifying the adapter that completed an outbound request.
 pub const PROXY_HEADER: &str = "x-edgezero-proxy";
 
+/// An owned local outbound operation; neither its future nor its result needs to be `Send`.
+pub type OutboundFuture<T> = LocalBoxFuture<'static, Result<T, EdgeError>>;
+
+type OutboundWaitFactory =
+    dyn Fn(Deadline, MonotonicClock) -> OutboundFuture<()> + Send + Sync + 'static;
+
+/// An application clock paired with an adapter-owned deadline wakeup factory.
+///
+/// Clones share the same clock source and factory. There is deliberately no default or inert
+/// timer: providers must supply wakeups that work in the application's monotonic time domain.
+#[derive(Clone)]
+pub struct OutboundTime {
+    clock: MonotonicClock,
+    wait: Arc<OutboundWaitFactory>,
+}
+
+/// Local, exactly-once teardown ownership for an outbound exchange or task group.
+///
+/// The callback may own `Rc` values and SDK handles. It must perform bounded, nonblocking
+/// cleanup. Do not assign the same SDK resource two independent teardown callbacks.
+/// When used as pending cancellation, destroying the callback's captures without invoking it
+/// must be safe after a successful response handoff; do not capture an armed abort-on-drop guard.
+#[must_use]
+pub struct OutboundExchangeOwner {
+    release: Option<Box<dyn FnOnce()>>,
+}
+
+/// A completion receiver and cancellation owner for work that is already scheduled.
+///
+/// This handle does not schedule transport work. Its producer must issue or schedule the
+/// exchange before construction, provide a nonblocking receiver, and complete transport/body
+/// ownership transfer before publishing success. A successful streamed response owns its own
+/// transport cleanup; pending cancellation only cancels/unregisters scheduled work.
+#[must_use]
+pub struct OutboundPending {
+    completion: Option<OutboundFuture<OutboundResponse>>,
+    outcome: Option<Result<OutboundResponse, EdgeError>>,
+    owner: Option<OutboundExchangeOwner>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct BudgetInputs {
     pub deadline: Option<Deadline>,
@@ -61,6 +109,8 @@ pub struct OutboundRequest {
     max_response_header_bytes: Option<u64>,
     max_response_header_count: Option<u64>,
     method: Method,
+    proxy_marker: OutboundProxyMarker,
+    response_decoding: ResponseDecoding,
     response_mode: ResponseMode,
     timeout: Option<Duration>,
     uri: Uri,
@@ -83,9 +133,37 @@ pub struct OutboundRequestParts {
     pub max_response_header_bytes: Option<u64>,
     pub max_response_header_count: Option<u64>,
     pub method: Method,
+    pub proxy_marker: OutboundProxyMarker,
+    pub response_decoding: ResponseDecoding,
     pub response_mode: ResponseMode,
     pub timeout: Option<Duration>,
     pub uri: Uri,
+}
+
+/// Whether recognized response content codings are decoded or delivered unchanged.
+///
+/// Partial (206) responses always retain their original coding. Identity bodies remain subject
+/// to decoded-byte limits under either choice; encoded passthrough skips only that limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseDecoding {
+    Decode,
+    Original,
+}
+
+/// Per-request override of the client's synthetic adapter-marker policy.
+/// Direct adapter calls interpret Inherit using the default-on policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundProxyMarker {
+    Inherit,
+    Off,
+    On,
+}
+
+#[derive(Clone, Copy)]
+enum PayloadDelivery {
+    Decoded,
+    Identity,
+    Original,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,7 +181,9 @@ pub struct ResponseBodyPolicy {
     pub max_decoded_response_bytes: Option<u64>,
     pub max_decoder_bytes: u64,
     pub max_encoded_response_bytes: Option<u64>,
+    pub response_decoding: ResponseDecoding,
     pub response_mode: ResponseMode,
+    pub status: StatusCode,
 }
 
 /// Controls use of an adapter-managed intermediary cache for one request.
@@ -117,6 +197,7 @@ pub enum OutboundCachePolicy {
 #[derive(Clone)]
 pub struct HttpClient {
     inner: Arc<dyn OutboundHttpClient>,
+    proxy_marker_enabled: bool,
 }
 
 /// One terminal batch slot paired with its original request index.
@@ -565,9 +646,38 @@ impl ResponseHeaderLimiter {
 }
 
 impl HttpClient {
+    /// Inspects the effective policy without validation, body polling or transport work.
+    #[must_use]
+    #[inline]
+    pub fn effective_proxy_marker_enabled(&self, request: &OutboundRequest) -> bool {
+        match request.proxy_marker_setting() {
+            OutboundProxyMarker::Inherit => self.proxy_marker_enabled,
+            OutboundProxyMarker::On => true,
+            OutboundProxyMarker::Off => false,
+        }
+    }
+
     #[inline]
     pub fn new(client: Arc<dyn OutboundHttpClient>) -> Self {
-        Self { inner: client }
+        Self {
+            inner: client,
+            proxy_marker_enabled: true,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn proxy_marker_enabled(&self) -> bool {
+        self.proxy_marker_enabled
+    }
+
+    fn resolve_proxy_marker(&self, request: OutboundRequest) -> OutboundRequest {
+        let setting = if self.effective_proxy_marker_enabled(&request) {
+            OutboundProxyMarker::On
+        } else {
+            OutboundProxyMarker::Off
+        };
+        request.proxy_marker(setting)
     }
 
     /// Delegates one request to the adapter-owned outbound implementation.
@@ -576,7 +686,7 @@ impl HttpClient {
     /// Returns the adapter's typed outbound failure unchanged.
     #[inline]
     pub async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-        self.inner.send(request).await
+        self.inner.send(self.resolve_proxy_marker(request)).await
     }
 
     /// Collects a completion-driven batch into original request order.
@@ -602,7 +712,11 @@ impl HttpClient {
         requests: Vec<OutboundRequest>,
         observation_cutoff: Deadline,
     ) -> OutboundBatch {
-        self.inner.start_batch_until(requests, observation_cutoff)
+        let resolved = requests
+            .into_iter()
+            .map(|request| self.resolve_proxy_marker(request))
+            .collect();
+        self.inner.start_batch_until(resolved, observation_cutoff)
     }
 
     #[inline]
@@ -611,6 +725,14 @@ impl HttpClient {
         Client: OutboundHttpClient + 'static,
     {
         Self::new(Arc::new(client))
+    }
+
+    /// Sets the marker default for this handle and its future clones; request overrides win.
+    #[must_use]
+    #[inline]
+    pub fn with_proxy_marker(mut self, enabled: bool) -> Self {
+        self.proxy_marker_enabled = enabled;
+        self
     }
 }
 
@@ -905,6 +1027,8 @@ impl OutboundRequest {
             max_response_header_bytes: parts.max_response_header_bytes,
             max_response_header_count: parts.max_response_header_count,
             method: parts.method,
+            proxy_marker: parts.proxy_marker,
+            response_decoding: parts.response_decoding,
             response_mode: parts.response_mode,
             timeout: parts.timeout,
             uri: canonical_uri,
@@ -1040,6 +1164,8 @@ impl OutboundRequest {
             max_response_header_bytes: self.max_response_header_bytes,
             max_response_header_count: self.max_response_header_count,
             method: self.method,
+            proxy_marker: self.proxy_marker,
+            response_decoding: self.response_decoding,
             response_mode: self.response_mode,
             timeout: self.timeout,
             uri: self.uri,
@@ -1174,6 +1300,19 @@ impl OutboundRequest {
         Self::from_raw(Method::POST, uri.as_ref())
     }
 
+    #[must_use]
+    #[inline]
+    pub fn proxy_marker(mut self, setting: OutboundProxyMarker) -> Self {
+        self.proxy_marker = setting;
+        self
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn proxy_marker_setting(&self) -> OutboundProxyMarker {
+        self.proxy_marker
+    }
+
     fn resolved_port(&self) -> u16 {
         self.uri.port_u16().unwrap_or_else(|| {
             if self.uri.scheme_str() == Some("https") {
@@ -1182,6 +1321,20 @@ impl OutboundRequest {
                 80
             }
         })
+    }
+
+    /// Selects response decoding without changing `Accept-Encoding` or any response limit.
+    #[must_use]
+    #[inline]
+    pub fn response_decoding(mut self, choice: ResponseDecoding) -> Self {
+        self.response_decoding = choice;
+        self
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn response_decoding_setting(&self) -> ResponseDecoding {
+        self.response_decoding
     }
 
     #[must_use]
@@ -1231,6 +1384,8 @@ impl OutboundRequest {
             max_response_header_bytes: None,
             max_response_header_count: None,
             method,
+            proxy_marker: OutboundProxyMarker::Inherit,
+            response_decoding: ResponseDecoding::Decode,
             response_mode: ResponseMode::Buffered {
                 max_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             },
@@ -1243,8 +1398,9 @@ impl OutboundRequest {
 /// Applies the shared payload policy without polling the native body.
 ///
 /// Declared lengths are checked first, then streaming encoded limits, recognized decoding,
-/// decoded limits, and rechunking. Raw passthrough keeps its encoding/length headers and bypasses
-/// only the decoded limit. Adapters must handle bodyless responses before calling this helper.
+/// decoded limits, and rechunking. Original coding and all 206 payloads keep their surviving
+/// encoding/length headers and bypass decoding, not normalization or transport/final caps.
+/// Identity still obeys the decoded cap. Adapters must handle bodyless responses first.
 ///
 /// # Errors
 /// Returns malformed content-length or declared payload-limit errors before rewriting headers.
@@ -1255,18 +1411,26 @@ pub fn apply_response_body_policy(
     policy: ResponseBodyPolicy,
 ) -> Result<BodyStream, EdgeError> {
     let encoding = classify_content_encoding(headers);
+    let delivery = payload_delivery(
+        &encoding,
+        policy.response_decoding == ResponseDecoding::Decode
+            && policy.status != StatusCode::PARTIAL_CONTENT,
+    );
     let max_buffered = match policy.response_mode {
         ResponseMode::Buffered { max_bytes } => Some(max_bytes),
         ResponseMode::Streamed => None,
     };
-    enforce_payload_content_length(
+    enforce_declared_payload_length(
         headers,
-        &encoding,
+        delivery,
         max_buffered,
         policy.max_decoded_response_bytes,
         policy.max_encoded_response_bytes,
     )?;
     let encoded = limit_encoded_stream(native, policy.max_encoded_response_bytes);
+    if matches!(delivery, PayloadDelivery::Original) {
+        return Ok(rechunk_stream(encoded, policy.max_chunk_bytes));
+    }
     let decoded = match &encoding {
         ContentEncoding::Brotli => decode_brotli_stream(
             encoded,
@@ -1367,6 +1531,8 @@ pub async fn collect_response_stream(stream: BodyStream, max: u64) -> Result<Byt
 }
 
 /// Applies sound pre-poll checks to a normalized payload `content-length`.
+/// This low-level check assumes ordinary decoding of a full payload; original/206 delivery uses
+/// [`apply_response_body_policy`] so declared limits match the bytes actually delivered.
 ///
 /// # Errors
 /// Returns a protocol 502 for malformed length metadata or a typed response-limit 502 when
@@ -1379,14 +1545,43 @@ pub fn enforce_payload_content_length(
     max_decoded_bytes: Option<u64>,
     max_encoded_bytes: Option<u64>,
 ) -> Result<(), EdgeError> {
+    enforce_declared_payload_length(
+        headers,
+        payload_delivery(encoding, true),
+        max_buffered_bytes,
+        max_decoded_bytes,
+        max_encoded_bytes,
+    )
+}
+
+fn payload_delivery(encoding: &ContentEncoding, decode: bool) -> PayloadDelivery {
+    match encoding {
+        ContentEncoding::Identity => PayloadDelivery::Identity,
+        ContentEncoding::Passthrough(_) => PayloadDelivery::Original,
+        ContentEncoding::Brotli | ContentEncoding::Deflate | ContentEncoding::Gzip if decode => {
+            PayloadDelivery::Decoded
+        }
+        ContentEncoding::Brotli | ContentEncoding::Deflate | ContentEncoding::Gzip => {
+            PayloadDelivery::Original
+        }
+    }
+}
+
+fn enforce_declared_payload_length(
+    headers: &HeaderMap,
+    delivery: PayloadDelivery,
+    max_buffered_bytes: Option<u64>,
+    max_decoded_bytes: Option<u64>,
+    max_encoded_bytes: Option<u64>,
+) -> Result<(), EdgeError> {
     let Some(length) = parse_content_length(headers)? else {
         return Ok(());
     };
     if max_encoded_bytes.is_some_and(|max| length > max) {
         return Err(response_limit_error(ResponseLimitReason::EncodedBody));
     }
-    match encoding {
-        ContentEncoding::Identity => {
+    match delivery {
+        PayloadDelivery::Identity => {
             if max_decoded_bytes.is_some_and(|max| length > max) {
                 return Err(response_limit_error(ResponseLimitReason::DecodedBody));
             }
@@ -1394,17 +1589,19 @@ pub fn enforce_payload_content_length(
                 return Err(response_limit_error(ResponseLimitReason::BufferedBody));
             }
         }
-        ContentEncoding::Passthrough(_) => {
+        PayloadDelivery::Original => {
             if max_buffered_bytes.is_some_and(|max| length > max) {
                 return Err(response_limit_error(ResponseLimitReason::BufferedBody));
             }
         }
-        ContentEncoding::Brotli | ContentEncoding::Deflate | ContentEncoding::Gzip => {}
+        PayloadDelivery::Decoded => {}
     }
     Ok(())
 }
 
-/// Accounts and inserts `EdgeZero`'s guest-visible adapter marker.
+/// Applies the synthetic adapter-marker policy after ordinary header normalization.
+/// Off neither charges nor edits headers. Inherit uses the direct adapter default, on;
+/// the client facade resolves its own default before handing requests to an implementation.
 ///
 /// # Errors
 /// Returns a typed response-header limit error before insertion when the marker would exceed the
@@ -1413,8 +1610,12 @@ pub fn enforce_payload_content_length(
 pub fn insert_proxy_header(
     headers: &mut HeaderMap,
     limiter: &mut ResponseHeaderLimiter,
+    setting: OutboundProxyMarker,
     value: HeaderValue,
 ) -> Result<(), EdgeError> {
+    if setting == OutboundProxyMarker::Off {
+        return Ok(());
+    }
     let name = HeaderName::from_static(PROXY_HEADER);
     limiter.observe_field(&name, &value)?;
     headers.insert(name, value);
@@ -1953,11 +2154,12 @@ mod tests {
 
     use super::{
         HttpClient, OutboundBatch, OutboundBatchDriverEvent, OutboundBatchItem, OutboundBatchNext,
-        OutboundBatchTermination, OutboundCachePolicy, OutboundHttpClient, OutboundRequest,
-        OutboundResponse, OutboundSlotResult, PROXY_HEADER, ResponseBodyDisposition,
-        ResponseBodyPolicy, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
-        collect_response_stream, enforce_payload_content_length, finish_batch_item,
-        insert_proxy_header, limit_decoded_stream, limit_encoded_stream, normalize_for_dispatch,
+        OutboundBatchTermination, OutboundCachePolicy, OutboundHttpClient, OutboundProxyMarker,
+        OutboundRequest, OutboundResponse, OutboundSlotResult, PROXY_HEADER,
+        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
+        ResponseMode, apply_response_body_policy, collect_response_stream,
+        enforce_payload_content_length, finish_batch_item, insert_proxy_header,
+        limit_decoded_stream, limit_encoded_stream, normalize_for_dispatch,
         normalize_response_headers, rechunk_stream, validate_for_dispatch,
     };
 
@@ -1966,7 +2168,35 @@ mod tests {
         send_calls: AtomicUsize,
     }
 
+    struct MarkerClient;
+
     struct BodyDropSignal(Rc<Cell<usize>>);
+
+    #[async_trait(?Send)]
+    impl OutboundHttpClient for MarkerClient {
+        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
+            marker_response(&request)
+        }
+
+        fn start_batch_until(
+            &self,
+            requests: Vec<OutboundRequest>,
+            _observation_cutoff: Deadline,
+        ) -> OutboundBatch {
+            let count = requests.len();
+            let items = requests
+                .into_iter()
+                .enumerate()
+                .map(|(index, request)| {
+                    OutboundBatchDriverEvent::Item(super::OutboundBatchItem::new(
+                        index,
+                        OutboundSlotResult::new(Duration::ZERO, marker_response(&request)),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            OutboundBatch::from_driver(count, stream::iter(items))
+        }
+    }
 
     #[expect(
         clippy::missing_trait_methods,
@@ -2031,6 +2261,216 @@ mod tests {
                 slot_count,
                 stream::iter(items.into_iter().map(OutboundBatchDriverEvent::Item)),
             )
+        }
+    }
+
+    fn marker_response(request: &OutboundRequest) -> Result<OutboundResponse, EdgeError> {
+        if request.proxy_marker_setting() == OutboundProxyMarker::Inherit {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "client failed to resolve marker policy"
+            )));
+        }
+        let mut headers = HeaderMap::new();
+        let mut limiter = ResponseHeaderLimiter::new(None, None);
+        insert_proxy_header(
+            &mut headers,
+            &mut limiter,
+            request.proxy_marker_setting(),
+            HeaderValue::from_static("test"),
+        )?;
+        Ok(OutboundResponse::new(
+            request.method().clone(),
+            StatusCode::OK,
+            headers,
+            Body::empty(),
+            MonotonicClock::default(),
+            super::ContentTypeProvenance::Unknown,
+        ))
+    }
+
+    #[test]
+    fn proxy_marker_overwrite_and_normalization_precedence_are_unchanged() {
+        for setting in [
+            OutboundProxyMarker::Inherit,
+            OutboundProxyMarker::On,
+            OutboundProxyMarker::Off,
+        ] {
+            for nominated in [false, true] {
+                let mut headers = HeaderMap::new();
+                headers.append(PROXY_HEADER, HeaderValue::from_static("upstream"));
+                headers.append(PROXY_HEADER, HeaderValue::from_static("other"));
+                if nominated {
+                    headers.insert("connection", HeaderValue::from_static(PROXY_HEADER));
+                }
+                let mut limiter = ResponseHeaderLimiter::new(None, None);
+                limiter.observe(&headers).expect("upstream accounting");
+                normalize_response_headers(&Method::GET, StatusCode::OK, &mut headers)
+                    .expect("normalize");
+                insert_proxy_header(
+                    &mut headers,
+                    &mut limiter,
+                    setting,
+                    HeaderValue::from_static("test"),
+                )
+                .expect("marker policy");
+                let values = headers
+                    .get_all(PROXY_HEADER)
+                    .iter()
+                    .map(HeaderValue::as_bytes)
+                    .collect::<Vec<_>>();
+                let expected = if setting != OutboundProxyMarker::Off {
+                    vec![b"test".as_slice()]
+                } else if nominated {
+                    vec![]
+                } else {
+                    vec![b"upstream".as_slice(), b"other".as_slice()]
+                };
+                assert_eq!(values, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_marker_request_setting_round_trips() {
+        let request = OutboundRequest::get("https://example.com").expect("request");
+        assert_eq!(request.proxy_marker_setting(), OutboundProxyMarker::Inherit);
+        let setting: crate::OutboundProxyMarker = OutboundProxyMarker::Off;
+        let parts = request.proxy_marker(setting).into_parts();
+        assert_eq!(parts.proxy_marker, setting);
+        let request = OutboundRequest::from_parts(parts).expect("round trip");
+        assert_eq!(request.proxy_marker_setting(), setting);
+        assert_eq!(
+            request
+                .proxy_marker(OutboundProxyMarker::On)
+                .proxy_marker_setting(),
+            OutboundProxyMarker::On
+        );
+    }
+
+    #[test]
+    fn proxy_marker_client_resolves_overrides_for_supplied_send_and_batch() {
+        let default_client = HttpClient::with_client(MarkerClient);
+        let default_arc = HttpClient::new(Arc::new(MarkerClient));
+        assert!(default_client.proxy_marker_enabled());
+        assert!(default_arc.proxy_marker_enabled());
+        let off_client = default_client.clone().with_proxy_marker(false);
+        assert!(
+            default_client.proxy_marker_enabled(),
+            "configuring a clone must not mutate the original handle"
+        );
+        assert!(!off_client.proxy_marker_enabled());
+        for client in [default_client, off_client] {
+            for setting in [
+                OutboundProxyMarker::Inherit,
+                OutboundProxyMarker::On,
+                OutboundProxyMarker::Off,
+            ] {
+                let expected = match setting {
+                    OutboundProxyMarker::Inherit => client.proxy_marker_enabled(),
+                    OutboundProxyMarker::On => true,
+                    OutboundProxyMarker::Off => false,
+                };
+                let request = OutboundRequest::get("https://example.com")
+                    .expect("request")
+                    .proxy_marker(setting);
+                assert_eq!(client.effective_proxy_marker_enabled(&request), expected);
+                assert_eq!(
+                    request.proxy_marker_setting(),
+                    setting,
+                    "inspection is immutable"
+                );
+                let response = block_on(client.send(request)).expect("supplied response");
+                assert_eq!(response.headers().contains_key(PROXY_HEADER), expected);
+            }
+            let requests = [
+                OutboundProxyMarker::Inherit,
+                OutboundProxyMarker::On,
+                OutboundProxyMarker::Off,
+            ]
+            .into_iter()
+            .map(|setting| {
+                OutboundRequest::get("https://example.com")
+                    .expect("request")
+                    .proxy_marker(setting)
+            })
+            .collect();
+            let results =
+                block_on(client.send_all_until(requests, Deadline::after(Duration::from_secs(1))))
+                    .expect("batch");
+            for (slot, expected) in
+                results
+                    .slots
+                    .into_iter()
+                    .zip([client.proxy_marker_enabled(), true, false])
+            {
+                let response = slot.expect("terminal slot").outcome.expect("response");
+                assert_eq!(response.headers().contains_key(PROXY_HEADER), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_marker_inspector_neither_validates_nor_polls_body() {
+        let polls = Rc::new(Cell::new(0_usize));
+        let counted = Rc::clone(&polls);
+        let body = Body::from_stream(stream::poll_fn(move |_context| {
+            counted.set(counted.get() + 1);
+            Poll::Pending
+        }));
+        let request = OutboundRequest::get("https://example.com")
+            .expect("request")
+            .body(body)
+            .max_brotli_window_bits(0);
+        let client = HttpClient::with_client(MarkerClient).with_proxy_marker(false);
+        assert!(!client.effective_proxy_marker_enabled(&request));
+        assert_eq!(request.proxy_marker_setting(), OutboundProxyMarker::Inherit);
+        assert_eq!(polls.get(), 0);
+    }
+
+    #[test]
+    fn proxy_marker_off_preserves_upstream_and_consumes_no_header_budget() {
+        let mut upstream = HeaderMap::new();
+        upstream.append(PROXY_HEADER, HeaderValue::from_static("upstream"));
+        upstream.append(PROXY_HEADER, HeaderValue::from_static("other"));
+        upstream.insert("x", HeaderValue::from_static("y"));
+        let bytes = upstream
+            .iter()
+            .map(|(name, value)| {
+                u64::try_from(name.as_str().len() + value.as_bytes().len()).expect("header size")
+            })
+            .sum::<u64>();
+        for adapter in ["axum", "cloudflare", "fastly", "spin"] {
+            for (byte_cap, count_cap, reason) in [
+                (Some(bytes), None, ResponseLimitReason::HeaderBytes),
+                (None, Some(3), ResponseLimitReason::HeaderCount),
+            ] {
+                for setting in [
+                    OutboundProxyMarker::Off,
+                    OutboundProxyMarker::On,
+                    OutboundProxyMarker::Inherit,
+                ] {
+                    let mut headers = upstream.clone();
+                    let mut limiter = ResponseHeaderLimiter::new(byte_cap, count_cap);
+                    limiter.observe(&headers).expect("exact upstream limit");
+                    let result = insert_proxy_header(
+                        &mut headers,
+                        &mut limiter,
+                        setting,
+                        HeaderValue::from_static(adapter),
+                    );
+                    if setting == OutboundProxyMarker::Off {
+                        result.expect("off adds no synthetic charge");
+                    } else {
+                        assert!(
+                            matches!(result, Err(EdgeError::ResponseTooLarge { reason: actual, .. }) if actual == reason)
+                        );
+                    }
+                    assert_eq!(
+                        headers, upstream,
+                        "off and failed insertions must leave all upstream values intact"
+                    );
+                }
+            }
         }
     }
 
@@ -2235,7 +2675,246 @@ mod tests {
             max_decoded_response_bytes: Some(32),
             max_decoder_bytes: super::DEFAULT_MAX_DECODER_BYTES,
             max_encoded_response_bytes: Some(256),
+            response_decoding: ResponseDecoding::Decode,
             response_mode: ResponseMode::Buffered { max_bytes: 32 },
+            status: StatusCode::OK,
+        }
+    }
+
+    #[test]
+    fn response_decoding_request_option_round_trips() {
+        let request = OutboundRequest::get("https://example.com").expect("request");
+        assert_eq!(
+            request.response_decoding_setting(),
+            ResponseDecoding::Decode
+        );
+        let parts = request
+            .response_decoding(ResponseDecoding::Original)
+            .into_parts();
+        assert_eq!(parts.response_decoding, ResponseDecoding::Original);
+        let request = OutboundRequest::from_parts(parts).expect("round trip");
+        assert_eq!(
+            request.response_decoding_setting(),
+            ResponseDecoding::Original
+        );
+        assert_eq!(
+            request
+                .response_decoding(ResponseDecoding::Decode)
+                .response_decoding_setting(),
+            ResponseDecoding::Decode
+        );
+        let choice: crate::ResponseDecoding = ResponseDecoding::Original;
+        assert_eq!(choice, ResponseDecoding::Original);
+    }
+
+    #[test]
+    fn original_coding_skips_decoder_but_keeps_transport_caps() {
+        for coding in ["gzip", "deflate", "br", "unknown", "gzip, br", "gzip;"] {
+            for response_mode in [
+                ResponseMode::Buffered { max_bytes: 4 },
+                ResponseMode::Streamed,
+            ] {
+                for (choice, status) in [
+                    (ResponseDecoding::Original, StatusCode::OK),
+                    (ResponseDecoding::Original, StatusCode::PARTIAL_CONTENT),
+                    (ResponseDecoding::Decode, StatusCode::PARTIAL_CONTENT),
+                ] {
+                    let mut headers = HeaderMap::new();
+                    headers.insert("content-encoding", HeaderValue::from_static(coding));
+                    headers.insert("content-length", HeaderValue::from_static("4"));
+                    headers.insert("content-range", HeaderValue::from_static("bytes 0-3/8"));
+                    let original = headers.clone();
+                    let source = stream::iter([Ok(Bytes::from_static(b"raw!"))]).boxed_local();
+                    let policy = ResponseBodyPolicy {
+                        max_decoded_response_bytes: Some(1),
+                        max_decoder_bytes: 0,
+                        max_encoded_response_bytes: Some(4),
+                        max_chunk_bytes: NonZeroU64::new(2),
+                        response_decoding: choice,
+                        response_mode,
+                        status,
+                        ..body_policy()
+                    };
+                    let output = apply_response_body_policy(source, &mut headers, policy)
+                        .expect("raw policy");
+                    assert_eq!(headers, original, "{coding} {choice:?} {status}");
+                    let chunks = block_on(output.collect::<Vec<_>>());
+                    let mut bytes = Vec::new();
+                    for chunk in chunks {
+                        let chunk = chunk.expect("no decoder and no decoded cap");
+                        assert!(chunk.len() <= 2);
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    assert_eq!(bytes, b"raw!");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn original_coding_declared_caps_fail_before_polling() {
+        for (encoded_cap, response_mode, reason) in [
+            (
+                3,
+                ResponseMode::Buffered { max_bytes: 4 },
+                ResponseLimitReason::EncodedBody,
+            ),
+            (
+                4,
+                ResponseMode::Buffered { max_bytes: 3 },
+                ResponseLimitReason::BufferedBody,
+            ),
+            (3, ResponseMode::Streamed, ResponseLimitReason::EncodedBody),
+        ] {
+            for (choice, status) in [
+                (ResponseDecoding::Original, StatusCode::OK),
+                (ResponseDecoding::Original, StatusCode::PARTIAL_CONTENT),
+                (ResponseDecoding::Decode, StatusCode::PARTIAL_CONTENT),
+            ] {
+                let polls = Rc::new(Cell::new(0_usize));
+                let counted = Rc::clone(&polls);
+                let source = stream::poll_fn(move |_context| {
+                    counted.set(counted.get() + 1);
+                    Poll::Ready(None)
+                })
+                .boxed_local();
+                let mut headers = HeaderMap::new();
+                headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+                headers.insert("content-length", HeaderValue::from_static("4"));
+                let original = headers.clone();
+                let policy = ResponseBodyPolicy {
+                    max_encoded_response_bytes: Some(encoded_cap),
+                    response_decoding: choice,
+                    response_mode,
+                    status,
+                    ..body_policy()
+                };
+                let error = apply_response_body_policy(source, &mut headers, policy)
+                    .err()
+                    .expect("declared cap");
+                assert!(
+                    matches!(error, EdgeError::ResponseTooLarge { reason: actual, .. } if actual == reason)
+                );
+                assert_eq!(polls.get(), 0);
+                assert_eq!(headers, original);
+            }
+        }
+    }
+
+    #[test]
+    fn original_coding_observed_caps_and_source_errors_are_preserved() {
+        for response_mode in [
+            ResponseMode::Buffered { max_bytes: 4 },
+            ResponseMode::Streamed,
+        ] {
+            let policy = ResponseBodyPolicy {
+                response_decoding: ResponseDecoding::Original,
+                response_mode,
+                max_encoded_response_bytes: Some(3),
+                ..body_policy()
+            };
+            let mut headers = HeaderMap::new();
+            headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+            let source = stream::iter([Ok(Bytes::from_static(b"raw!"))]).boxed_local();
+            let output =
+                apply_response_body_policy(source, &mut headers, policy).expect("lazy policy");
+            assert!(matches!(
+                block_on(collect_response_stream(output, 4)),
+                Err(EdgeError::ResponseTooLarge {
+                    reason: ResponseLimitReason::EncodedBody,
+                    ..
+                })
+            ));
+
+            let source = stream::iter([Err(EdgeError::gateway_timeout_caused(
+                "source timeout",
+                BudgetSource::RequestDeadline,
+            ))])
+            .boxed_local();
+            let output =
+                apply_response_body_policy(source, &mut headers, policy).expect("lazy policy");
+            assert!(matches!(
+                block_on(collect_response_stream(output, 4)),
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::RequestDeadline,
+                    ..
+                })
+            ));
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("br"));
+        let source = stream::iter([Ok(Bytes::from_static(b"raw!"))]).boxed_local();
+        let policy = ResponseBodyPolicy {
+            response_decoding: ResponseDecoding::Original,
+            ..body_policy()
+        };
+        let output = apply_response_body_policy(source, &mut headers, policy).expect("raw policy");
+        assert!(matches!(
+            block_on(collect_response_stream(output, 3)),
+            Err(EdgeError::ResponseTooLarge {
+                reason: ResponseLimitReason::BufferedBody,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn original_identity_retains_declared_and_observed_decoded_caps() {
+        for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                for response_mode in [
+                    ResponseMode::Buffered { max_bytes: 20 },
+                    ResponseMode::Streamed,
+                ] {
+                    for declared in [false, true] {
+                        for (bytes, exceeds) in [
+                            (b"0123456789".as_slice(), false),
+                            (b"0123456789x".as_slice(), true),
+                        ] {
+                            let polls = Rc::new(Cell::new(0_usize));
+                            let counted = Rc::clone(&polls);
+                            let mut chunk = Some(Bytes::copy_from_slice(bytes));
+                            let source = stream::poll_fn(move |_context| {
+                                counted.set(counted.get() + 1);
+                                Poll::Ready(chunk.take().map(Ok))
+                            })
+                            .boxed_local();
+                            let mut headers = HeaderMap::new();
+                            if declared {
+                                headers.insert(
+                                    "content-length",
+                                    HeaderValue::from_str(&bytes.len().to_string())
+                                        .expect("length"),
+                                );
+                            }
+                            let policy = ResponseBodyPolicy {
+                                response_decoding: choice,
+                                status,
+                                response_mode,
+                                max_decoded_response_bytes: Some(10),
+                                max_encoded_response_bytes: Some(20),
+                                ..body_policy()
+                            };
+                            let result = apply_response_body_policy(source, &mut headers, policy)
+                                .and_then(|output| block_on(collect_response_stream(output, 20)));
+                            if exceeds {
+                                assert!(matches!(
+                                    result,
+                                    Err(EdgeError::ResponseTooLarge {
+                                        reason: ResponseLimitReason::DecodedBody,
+                                        ..
+                                    })
+                                ));
+                            } else {
+                                assert_eq!(result.expect("exact cap"), bytes);
+                            }
+                            if declared && exceeds {
+                                assert_eq!(polls.get(), 0);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2264,6 +2943,156 @@ mod tests {
         assert_eq!(polls.get(), 0);
         assert!(headers.contains_key("content-encoding"));
         assert!(headers.contains_key("content-length"));
+    }
+
+    #[test]
+    fn original_coding_preserves_normalization_precedence() {
+        for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                for response_mode in [
+                    ResponseMode::Streamed,
+                    ResponseMode::Buffered { max_bytes: 20 },
+                ] {
+                    let policy = ResponseBodyPolicy {
+                        response_decoding: choice,
+                        status,
+                        response_mode,
+                        max_decoded_response_bytes: Some(1),
+                        ..body_policy()
+                    };
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        "connection",
+                        HeaderValue::from_static("content-encoding, content-length, etag"),
+                    );
+                    headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+                    headers.insert("content-length", HeaderValue::from_static("malformed"));
+                    headers.insert("etag", HeaderValue::from_static("\"removed\""));
+                    headers.insert(
+                        "last-modified",
+                        HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
+                    );
+                    normalize_response_headers(&Method::GET, status, &mut headers)
+                        .expect("nominations before length validation");
+                    let normalized = headers.clone();
+                    let source = stream::iter([Ok(Bytes::from_static(b"ab"))]).boxed_local();
+                    let output = apply_response_body_policy(source, &mut headers, policy)
+                        .expect("identity policy");
+                    assert_eq!(headers, normalized);
+                    assert!(!headers.contains_key("etag"));
+                    assert!(!headers.contains_key("content-encoding"));
+                    assert!(!headers.contains_key("content-length"));
+                    assert!(matches!(
+                        block_on(collect_response_stream(output, 20)),
+                        Err(EdgeError::ResponseTooLarge {
+                            reason: ResponseLimitReason::DecodedBody,
+                            ..
+                        })
+                    ));
+
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        "content-encoding",
+                        HeaderValue::from_bytes(&[0xff]).expect("opaque coding"),
+                    );
+                    headers.insert(
+                        "etag",
+                        HeaderValue::from_bytes(&[0xff]).expect("opaque etag"),
+                    );
+                    normalize_response_headers(&Method::GET, status, &mut headers)
+                        .expect("normalization");
+                    assert!(!headers.contains_key("etag"));
+                    assert_eq!(
+                        classify_content_encoding(&headers),
+                        ContentEncoding::Passthrough(PassthroughReason::Malformed)
+                    );
+                    let normalized = headers.clone();
+                    let source = stream::iter([Ok(Bytes::from_static(b"ab"))]).boxed_local();
+                    let output = apply_response_body_policy(source, &mut headers, policy)
+                        .expect("malformed coding passthrough");
+                    assert_eq!(headers, normalized);
+                    assert_eq!(
+                        block_on(collect_response_stream(output, 20)).expect("raw body"),
+                        b"ab".as_slice()
+                    );
+
+                    headers.insert("content-length", HeaderValue::from_static("malformed"));
+                    assert!(matches!(
+                        normalize_response_headers(&Method::GET, status, &mut headers),
+                        Err(EdgeError::BadGateway {
+                            reason: BadGatewayReason::Protocol,
+                            ..
+                        })
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn original_coding_retains_valid_compressed_bytes_and_representation_fields() {
+        let plain = b"decoded body";
+        let mut gzip = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plain).expect("gzip");
+        let mut deflate = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(plain).expect("deflate");
+        let mut brotli = Vec::new();
+        let mut compressor = brotli::CompressorWriter::new(&mut brotli, 4096, 5, 21);
+        compressor.write_all(plain).expect("brotli");
+        drop(compressor);
+        for (coding, encoded) in [
+            ("gzip", gzip.finish().expect("gzip finish")),
+            ("deflate", deflate.finish().expect("deflate finish")),
+            ("br", brotli),
+        ] {
+            for response_mode in [
+                ResponseMode::Buffered { max_bytes: 256 },
+                ResponseMode::Streamed,
+            ] {
+                for (response_decoding, status) in [
+                    (ResponseDecoding::Original, StatusCode::OK),
+                    (ResponseDecoding::Original, StatusCode::PARTIAL_CONTENT),
+                    (ResponseDecoding::Decode, StatusCode::PARTIAL_CONTENT),
+                ] {
+                    let mut headers = HeaderMap::new();
+                    for (name, value) in [
+                        ("etag", "\"strong\""),
+                        ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                        ("vary", "Accept-Encoding"),
+                        ("content-range", "bytes 0-3/8"),
+                        ("accept-ranges", "bytes"),
+                        ("cache-control", "public, max-age=60"),
+                        ("content-digest", "sha-256=:c2hhMjU2:"),
+                    ] {
+                        headers.insert(name, HeaderValue::from_static(value));
+                    }
+                    headers.insert("content-encoding", HeaderValue::from_static(coding));
+                    headers.insert(
+                        "content-length",
+                        HeaderValue::from_str(&encoded.len().to_string()).expect("length"),
+                    );
+                    normalize_response_headers(&Method::GET, status, &mut headers)
+                        .expect("normalization");
+                    let normalized = headers.clone();
+                    let policy = ResponseBodyPolicy {
+                        response_decoding,
+                        status,
+                        response_mode,
+                        max_decoder_bytes: 0,
+                        max_decoded_response_bytes: Some(1),
+                        ..body_policy()
+                    };
+                    let source = stream::iter([Ok(Bytes::copy_from_slice(&encoded))]).boxed_local();
+                    let output = apply_response_body_policy(source, &mut headers, policy)
+                        .expect("raw policy");
+                    assert_eq!(headers, normalized);
+                    assert_eq!(
+                        block_on(collect_response_stream(output, 256)).expect("original bytes"),
+                        encoded
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3370,16 +4199,25 @@ mod tests {
             let value = HeaderValue::from_str(adapter).expect("adapter marker");
             let mut exact_headers = HeaderMap::new();
             let mut exact = ResponseHeaderLimiter::new(Some(exact_bytes), Some(1));
-            insert_proxy_header(&mut exact_headers, &mut exact, value.clone())
-                .expect("exact proxy header budget");
+            insert_proxy_header(
+                &mut exact_headers,
+                &mut exact,
+                OutboundProxyMarker::On,
+                value.clone(),
+            )
+            .expect("exact proxy header budget");
             assert_eq!(exact_headers.get(PROXY_HEADER), Some(&value));
 
             let mut byte_headers = HeaderMap::new();
             let mut byte_limited =
                 ResponseHeaderLimiter::new(Some(exact_bytes.saturating_sub(1)), None);
-            let byte_error =
-                insert_proxy_header(&mut byte_headers, &mut byte_limited, value.clone())
-                    .expect_err("proxy header exceeds byte cap");
+            let byte_error = insert_proxy_header(
+                &mut byte_headers,
+                &mut byte_limited,
+                OutboundProxyMarker::On,
+                value.clone(),
+            )
+            .expect_err("proxy header exceeds byte cap");
             assert!(matches!(
                 byte_error,
                 EdgeError::ResponseTooLarge {
@@ -3390,8 +4228,13 @@ mod tests {
 
             let mut count_headers = HeaderMap::new();
             let mut count_limited = ResponseHeaderLimiter::new(None, Some(0));
-            let count_error = insert_proxy_header(&mut count_headers, &mut count_limited, value)
-                .expect_err("proxy header exceeds count cap");
+            let count_error = insert_proxy_header(
+                &mut count_headers,
+                &mut count_limited,
+                OutboundProxyMarker::On,
+                value,
+            )
+            .expect_err("proxy header exceeds count cap");
             assert!(matches!(
                 count_error,
                 EdgeError::ResponseTooLarge {

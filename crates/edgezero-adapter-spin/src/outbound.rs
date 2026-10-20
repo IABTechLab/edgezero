@@ -249,10 +249,11 @@ mod spin_impl {
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundHttpClient, OutboundRequest, OutboundRequestParts, OutboundResponse,
-        ResponseBodyDisposition, ResponseBodyPolicy, ResponseHeaderLimiter, ResponseMode,
-        apply_response_body_policy, collect_response_stream, insert_proxy_header,
-        normalize_for_dispatch, normalize_response_headers,
+        OutboundBatch, OutboundHttpClient, OutboundProxyMarker, OutboundRequest,
+        OutboundRequestParts, OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy,
+        ResponseDecoding, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
+        collect_response_stream, insert_proxy_header, normalize_for_dispatch,
+        normalize_response_headers,
     };
     use edgezero_core::time::{
         Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
@@ -348,6 +349,8 @@ mod spin_impl {
                 max_response_header_bytes,
                 max_response_header_count,
                 method,
+                proxy_marker,
+                response_decoding,
                 response_mode,
                 uri,
                 ..
@@ -382,6 +385,8 @@ mod spin_impl {
             process_response(
                 response,
                 method,
+                proxy_marker,
+                response_decoding,
                 response_mode,
                 budget,
                 max_decoder_bytes,
@@ -632,6 +637,8 @@ mod spin_impl {
     async fn process_response(
         response: Response,
         request_method: Method,
+        proxy_marker: OutboundProxyMarker,
+        response_decoding: ResponseDecoding,
         response_mode: ResponseMode,
         budget: DispatchBudget,
         max_decoder_bytes: u64,
@@ -660,6 +667,7 @@ mod spin_impl {
         insert_proxy_header(
             &mut headers,
             &mut header_limiter,
+            proxy_marker,
             HeaderValue::from_static("spin"),
         )?;
 
@@ -702,7 +710,9 @@ mod spin_impl {
                 max_decoded_response_bytes,
                 max_decoder_bytes,
                 max_encoded_response_bytes,
+                response_decoding,
                 response_mode,
+                status,
             },
         )?;
         let deadline_bound = deadline_stream(super::cooperative_stream(shaped), budget, clock);
@@ -983,6 +993,8 @@ mod spin_impl {
         let Ok(response) = process_response(
             native,
             Method::GET,
+            OutboundProxyMarker::Inherit,
+            ResponseDecoding::Decode,
             ResponseMode::Streamed,
             budget,
             32 * 1024 * 1024,
@@ -1233,6 +1245,8 @@ mod spin_impl {
             let result = process_response(
                 native,
                 Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
                 mode,
                 DispatchBudget {
                     cause: BudgetSource::PerCallTimeout,

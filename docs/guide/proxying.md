@@ -9,12 +9,16 @@ typed `OutboundResponse` or `EdgeError` outcomes.
 This example preserves the inbound method and body, replaces the target URI, removes a private
 header, and converts the outbound response back into a core response.
 
+At this implementation checkpoint, use it only for methods that carry a body. Forwarded inbound
+GET/HEAD requests still carry lazy bodies and fail with 400; bounded empty-body settlement is not
+implemented yet. Do not discard an inbound body to bypass that check.
+
 ```rust
 use edgezero_core::action;
 use edgezero_core::context::RequestContext;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{HeaderValue, Response, Uri};
-use edgezero_core::outbound::{OutboundCachePolicy, OutboundRequest};
+use edgezero_core::outbound::{OutboundCachePolicy, OutboundRequest, ResponseDecoding};
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -24,12 +28,14 @@ async fn forward_with_auth(
 ) -> Result<Response, EdgeError> {
     let client = ctx
         .http_client()
-        .ok_or_else(|| EdgeError::not_implemented("outbound HTTP client not available"))?;
+        .ok_or_else(|| EdgeError::not_implemented("outbound HTTP client not available"))?
+        .with_proxy_marker(false);
     let target: Uri = "https://api.example.com/v1/data"
         .parse()
         .map_err(|_| EdgeError::bad_request("invalid upstream URI"))?;
 
-    let mut request = OutboundRequest::from_request(ctx.into_request(), target)?
+    let mut request = OutboundRequest::from_request(ctx.into_request()?, target)?
+        .response_decoding(ResponseDecoding::Original)
         .cache_policy(OutboundCachePolicy::Bypass)
         .timeout(Duration::from_secs(2))
         .max_request_body_bytes(256 * 1024)
@@ -56,6 +62,35 @@ async fn forward_with_auth(
 Outbound failures remain typed. Deadline expiry maps to `GatewayTimeout { cause }`; transport,
 protocol, and codec failures map to inspectable `BadGatewayReason` values; resource limits use
 `ResponseLimitReason`. Applications do not need to classify errors by matching messages.
+
+`ResponseDecoding::Original` preserves encoded payload bytes and the representation headers
+that survive ordinary normalization. It does not restore hop-by-hop or invalid fields. Use it
+for relays; the demo and generated proxy handler do so. Other requests default to
+`ResponseDecoding::Decode`, which decodes a single bare gzip, deflate or Brotli coding. All 206
+responses retain original coding under either choice, so partial representation offsets stay
+meaningful. HEAD/304 metadata and bodyless handling retain their existing behavior.
+
+Original coding skips decoder allocation and the decoded-byte cap for encoded payloads, not the
+encoded or final buffered caps. Identity bodies still obey the decoded cap. `Accept-Encoding`
+is independent: a supplied value survives unchanged and an absent value defaults to `identity`.
+`response_decoding_setting()` exposes the choice before dispatch; `json()` parses delivered
+bytes and never implicitly decodes an original encoded body.
+
+## Adapter Marker
+
+`HttpClient::with_proxy_marker(false)` configures a relay handle once. Other handles keep the
+default-on policy. `OutboundRequest::proxy_marker(OutboundProxyMarker::On)` or `Off` overrides
+that handle; the request default, `Inherit`, uses its client setting. The demo and generated relay
+turn the marker off without per-request stripping, while JSON fanout keeps the default on.
+
+Inspect `client.effective_proxy_marker_enabled(&request)` before sending. This combines both
+settings without validation, body polling or I/O; `proxy_marker_setting()` alone may still be
+`Inherit`. Supplied client implementations receive a resolved `On` or `Off` setting.
+
+When off, EdgeZero adds no synthetic `x-edgezero-proxy` field or header-budget charge. It does
+not remove or overwrite an upstream field with that name; ordinary normalization still applies,
+including adapter-visible Connection nominations. When on, the marker overwrites upstream values
+and consumes the same byte/count budget as before. Direct adapter calls with `Inherit` use default on.
 
 ## Construct A Request
 

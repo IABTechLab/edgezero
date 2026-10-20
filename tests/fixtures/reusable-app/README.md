@@ -15,12 +15,119 @@ The driver is the native Rust `fixture-harness` crate. Its HTTP clients, control
 loopback backend, process management, and evidence checks run outside the WASM
 applications. The shell script only launches it through Cargo.
 
+## Outbound Cutover Gates
+
+The acceptance inventory is `outbound-cutover-cases.json`. It records acceptance criteria,
+including the unnumbered lists and consumer end-to-end prose checks, expanded into individual
+environment legs. Source and criterion SHA-256 digests require explicit review when the
+requirements change. A split criterion retains its source ID and adds a letter to its case ID;
+cache parity and fresh-execution pooling are separate cases, not one passing result.
+The checker's reviewed leg-set digest also rejects deleted environment/split legs. Supplemental
+template/demo checks cite normative EZ-24.12 directly rather than reusing a consumer assertion.
+
+```sh
+node --test scripts/check_outbound_cutover_evidence.test.mjs
+node scripts/check_outbound_cutover_evidence.mjs --manifest
+node scripts/check_outbound_cutover_evidence.mjs --help
+```
+
+Run these commands from the repository root. Manifest validation accepts pending decisions and
+planned commands; it is not qualification. Per-case sentinels and `outbound-cutover` commands are
+implementation targets, not existing passing tests. `consumer-runbook` and `hosted-runbook` denote
+external execution recipes whose owners must replace them with exact runnable commands before
+setting a leg to `ready`. No staging deployment or approval is inferred from this inventory.
+
+Release validation is a different, fail-closed command:
+
+```sh
+node scripts/check_outbound_cutover_evidence.mjs --release \
+  --candidate <40-character-source-SHA> --record RECORD.json --artifacts EVIDENCE_DIRECTORY
+```
+
+The record must contain the same candidate SHA in every required result, exact command/sentinel/
+source digest/artifact path, positive sample counts, passing assertions and numeric measurement
+bounds. Each artifact is checked against its SHA-256 under the evidence directory. An explicit
+applicability entry is required for every leg. Deferred follow-ups name the unmet condition or an
+attributed, leg-scoped approval; a sibling approval never adopts an entire requirement range.
+Blocking work cannot be skipped because it is unimplemented or lacks an entitlement.
+
+The record also names the pinned toolchain, workerd revision, runner image and baseline/candidate
+comparison identities where required. Retention must be a non-expiring repository or release asset
+for the lifetime of the pin, not a CI artifact. This validator checks recorded facts and hashes;
+it does not authenticate telemetry, approvers, deployment identities or continued remote retention.
+Independent owner review remains necessary.
+
+### Fastly Readiness Diagnostic
+
+```sh
+scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness
+```
+
+This opt-in suite uses direct pinned SDK/ABI calls only in the diagnostic fixture. It runs three
+pairs against a controlled, truncated loopback response. Each pair compares a direct one-byte
+read control with a timed readiness check before every one-byte read. It records head waits,
+readiness waits, read outcomes and timings; zero samples or an unbounded readiness timeout fail.
+The direct control intentionally uses a blocking read against an origin that closes after 50 ms;
+it is never a proposed production fallback. A stuck experiment is terminated by the harness's
+finite client timeout and runtime process-group cleanup, not counted as successful cancellation.
+
+Pinned Viceroy 0.21.0 currently loses the body error on the readiness path, so this diagnostic
+intentionally exits 1. It is not part of normal smoke or unit-test gates. Even if the paired control
+later passes, this initial suite exits 2 until the remaining G2 scenarios are implemented and run.
+Working-tree characterization is labelled as such, never as exact-commit release evidence.
+See the [feasibility report](../../../docs/audits/2026-10-18-outbound-feasibility.md).
+
+### Scheduling and Empty-Body Characterization
+
+```sh
+scripts/smoke_test_reusable_app.sh --adapter all --suite outbound-progress
+scripts/smoke_test_reusable_app.sh --adapter all --suite smoke
+```
+
+The default-off `progress` feature selects fixture-only SDK probes, independent of the hosted
+`qualification` application. Smoke also builds and runs these probes after its existing cases;
+their artifacts are staged separately. Eager single/batch SDK starts are compared with the
+existing lazy public single/batch APIs during a measured 100 ms unrelated wait. Origin-local
+receipt timestamps and consumer poll counts are checked without comparing guest/host clock
+epochs. A response-owned stream must reach the client before the gated origin can complete.
+Fastly's synchronous SDK dispatch and guest sleep are not a background guest executor proof.
+
+Five raw HTTP/1 inputs exercise absent framing, explicit zero length, terminating chunks, and
+nonempty fixed/chunked controls. Host snapshots do not consume or replace body data. Native raw
+signals are unavailable at the existing entrypoint; Spin hints are explicitly not raw framing
+evidence. HTTP/2/3, hosted behavior and provider scheduler-context rejection remain unverified.
+
+The initial local run passed on native/Viceroy but exposed a Spin response-owned egress defect.
+Separate ready/timer-only adapter streams and SDK-native controls isolated early successful
+host observation being mistaken for transport failure. After the internal fix, Spin passes
+all five progress, five framing and four comparison cases. Token-correlated SDK terminal evidence
+is required from canonical component stderr; missing, duplicated, failed or foreign completions
+and guest panic records fail the check. It is revalidated after the finite pre-shutdown hold.
+Host worker-panic text before controlled shutdown fails; post-shutdown observations are recorded
+separately and are not proof of panic-free teardown. The original failed evidence remains retained;
+these local cases do not qualify hosted Spin or weaken G2. A subsequent Cloudflare run with the
+exact matching wasm-bindgen CLI passed 24 coding, 46 marker, five scheduling and five framing
+checks on local workerd 2026-09-10. The framing checks require a pre-conversion boolean body
+signal, not just matching byte counts. Coding/marker failures do not skip the independent progress
+group; any failed group still fails the run. Compilation is not runtime proof. See the
+[feasibility report](../../../docs/audits/2026-10-18-outbound-feasibility.md) for exact versions,
+source identities, retained evidence and remaining hosted/relay limitations.
+
+Cloudflare builds require explicit absolute `WASM_BINDGEN_BIN`, `ESBUILD_BIN` and `WASM_OPT_BIN`
+executable overrides. The wasm-bindgen version must match the locked crate. Preflight refuses
+implicit tool downloads or dependency repins; missing tools produce unverified exit 2, not pass.
+Actual failed cases produce exit 1, including when another adapter also has unavailable tooling.
+The retained local run uses `WRANGLER_LOG_PATH` in its temporary tool directory and
+`WRANGLER_SEND_METRICS=false`; Wrangler runs `dev --local` with loopback-only listening and local
+fixture bindings. It neither deploys a Worker nor accesses production bindings.
+
 ## Opt-in Hosted Response Qualification
 
 The default-off `qualification` feature selects a synthetic application through the standard
 entrypoints. Use only a designated isolated nonproduction service with complete unsampled logging
 at `Info` or above, including the `edgezero_qualification` target. No production stores, traffic,
-credentials or log exports should be reused. Existing smoke profiles remain unchanged by default.
+credentials or log exports should be reused. Without this feature, normal fixture applications
+remain selected; smoke separately builds the `progress` probes described above.
 
 Compile from a clean committed checkout with recorded build identity:
 
@@ -91,6 +198,21 @@ these tools, local tests or successful compilation. The response-egress specific
 the per-target evidence matrix and limitations.
 
 ## Understand the change in five minutes
+
+The opt-in `outbound-progress` suite also runs 24 controlled-origin coding checks per target:
+gzip, deflate and Brotli; buffered and streamed responses; Original/200, Original/206, Decode/206
+and Decode/200 controls. It compares exact delivered bytes and surviving coding/length metadata
+through each actual adapter client. Original and 206 use decoder budget zero and decoded cap one.
+These JSON-report probes characterize outbound delivery, not encoded downstream relay framing or
+hosted qualification. Cloudflare still requires the exact explicitly supplied build tools.
+
+It also runs 46 marker-policy checks: inherited-off/explicit-off/explicit-on crossed with absent,
+upstream and Connection-nominated markers on GET/200, GET/204, HEAD/200, GET/304 and GET/302, plus
+a mixed-policy batch. Returned fields must agree with the client inspector. Spin adds two direct
+SDK header snapshots before EdgeZero conversion. If the host hides Connection while retaining the
+nominated marker, the record labels the affected cases `provider_hidden_nomination`; those passes
+characterize adapter-visible fields, not raw-header fidelity. No provider workaround reconstructs
+missing fields, and these cases do not qualify header allocation or hosted cancellation bounds.
 
 Think of the app as the route table plus any state you attach to it. A request
 still brings its own headers, body, extensions, and provider resources.

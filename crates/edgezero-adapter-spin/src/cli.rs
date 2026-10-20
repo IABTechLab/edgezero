@@ -143,7 +143,6 @@ impl Adapter for SpinCliAdapter {
             | Capability::OutboundBatchCompletionOrder
             | Capability::OutboundBatchSlotIsolation
             | Capability::OutboundCacheBypass
-            | Capability::OutboundHeaderFidelity
             | Capability::OutboundHttp => CapabilitySupport::Native,
             Capability::ConfigReadDeadlines
             | Capability::InboundReadDeadlines
@@ -152,6 +151,7 @@ impl Adapter for SpinCliAdapter {
             | Capability::OutboundBatchCancellation
             | Capability::OutboundDeadlines
             | Capability::OutboundFlexiblePhaseBudget
+            | Capability::OutboundHeaderFidelity
             | Capability::ResponseEgressAbort
             | Capability::ResponseEgressBackpressure
             | Capability::ResponseEgressCompletion
@@ -1376,7 +1376,7 @@ mod tests {
             ),
             (
                 Capability::OutboundHeaderFidelity,
-                CapabilitySupport::Native,
+                CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundDeadlines, CapabilitySupport::BestEffort),
             (

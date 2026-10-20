@@ -6,6 +6,7 @@ publish.workspace = true
 
 [features]
 qualification = ["fixture-core/qualification"]
+progress = ["fixture-core/qualification", "dep:futures", "dep:http-body"]
 
 [dependencies]
 serde_json.workspace = true
@@ -14,6 +15,8 @@ edgezero-core.workspace = true
 edgezero-adapter-spin.workspace = true
 spin-sdk = { workspace = true, features = ["http", "key-value"] }
 anyhow = "1"
+futures = { workspace = true, optional = true }
+http-body = { version = "1", optional = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

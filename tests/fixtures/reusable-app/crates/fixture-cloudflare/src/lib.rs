@@ -1,5 +1,8 @@
 #![cfg(target_arch = "wasm32")]
 
+#[cfg(feature = "progress")]
+mod progress;
+
 use edgezero_core::app::{App, Hooks};
 #[cfg(not(feature = "qualification"))]
 use fixture_core::FixtureApp;
@@ -18,6 +21,10 @@ fn retained_app_for_dispatch<A: Hooks>(cell: &OnceLock<App>) -> worker::Result<&
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
+    #[cfg(feature = "progress")]
+    if req.path().starts_with("/progress/") {
+        return progress::dispatch(req, env, ctx).await;
+    }
     if !FixtureApp::owns_logging() {
         drop(edgezero_adapter_cloudflare::init_logger());
     }

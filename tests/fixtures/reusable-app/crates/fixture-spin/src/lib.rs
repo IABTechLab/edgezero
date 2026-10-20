@@ -5,6 +5,8 @@
 )]
 
 use anyhow::Context as _;
+#[cfg(feature = "progress")]
+mod progress;
 use edgezero_core::app::{App, Hooks};
 #[cfg(not(feature = "qualification"))]
 use fixture_core::FixtureApp;
@@ -26,6 +28,10 @@ fn retained_app_for_dispatch<A: Hooks>(cell: &OnceLock<App>) -> anyhow::Result<&
 
 #[http_service]
 async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
+    #[cfg(feature = "progress")]
+    if req.uri().path().starts_with("/progress/") {
+        return progress::dispatch(req).await;
+    }
     if !FixtureApp::owns_logging() {
         drop(edgezero_adapter_spin::init_logger());
     }
