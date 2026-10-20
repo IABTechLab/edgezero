@@ -526,11 +526,10 @@ fn render_manifest_section(
 
     out.push('\n');
     writeln!(out, "[adapters.{}.logging]", blueprint.id)?;
-    let endpoint_value = if blueprint.id == "fastly" {
-        Some(format!("{}_log", layout.project_mod))
-    } else {
-        blueprint.logging.endpoint.map(str::to_owned)
-    };
+    let endpoint_value = blueprint
+        .logging
+        .endpoint
+        .map(|endpoint| expand(endpoint).replace("{project_mod}", &layout.project_mod));
     if let Some(endpoint) = endpoint_value {
         writeln!(out, "endpoint = \"{endpoint}\"")?;
     }
@@ -642,6 +641,23 @@ fn build_base_data(
         Value::String(workspace_dep_lines),
     );
 
+    let mut ignore_patterns: Vec<&str> = scaffold::registered_blueprints()
+        .into_iter()
+        .filter(|blueprint| {
+            artifacts
+                .adapter_ids
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(blueprint.id))
+        })
+        .flat_map(|blueprint| blueprint.local_ignore_patterns.iter().copied())
+        .collect();
+    ignore_patterns.sort_unstable();
+    ignore_patterns.dedup();
+    data.insert(
+        "adapter_local_ignore_patterns".into(),
+        Value::String(ignore_patterns.join("\n")),
+    );
+
     data.insert(
         "tool_versions_contents".into(),
         Value::String(build_tool_versions(&artifacts.adapter_ids)),
@@ -656,47 +672,31 @@ fn build_base_data(
 /// `asdf install` reads this file to pin per-tool versions. Every
 /// generated project gets `rust` pinned (it's a Rust workspace).
 /// Per-adapter pins are added ONLY when the operator selected
-/// that adapter at `edgezero new` time:
-///
-/// - `cloudflare` → `nodejs` (wrangler is a Node binary).
-/// - `fastly` → `fastly` (the Fastly CLI we shell out to for
-///   provision + config push) plus `viceroy` (what
-///   `fastly compute serve` uses for local emulation).
-/// - `spin` → no asdf pin; the Spin CLI is install-flow-managed
-///   (<https://spinframework.dev/install>). A header comment points
-///   the operator at the URL when `spin` is in the adapter set so
-///   they don't wonder why everything else is pinned but spin.
-/// - `axum` → no extra pin (uses the host Rust toolchain only).
-///
-/// Versions are pulled from this repo's own `.tool-versions` (see
-/// the repo root). When we bump those, we bump these.
+/// that adapter at `edgezero new` time.
 fn build_tool_versions(adapter_ids: &[String]) -> String {
-    let has = |id: &str| adapter_ids.iter().any(|adapter| adapter == id);
-    let mut lines: Vec<String> = Vec::new();
-    if has("cloudflare") {
-        lines.push("nodejs 24.20.0".to_owned());
+    let mut lines = vec!["rust 1.98.1".to_owned()];
+    let mut notes = Vec::new();
+    for blueprint in scaffold::registered_blueprints() {
+        if adapter_ids
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(blueprint.id))
+        {
+            lines.extend(blueprint.tool_pins.iter().map(|pin| (*pin).to_owned()));
+            notes.extend(
+                blueprint
+                    .install_notes
+                    .iter()
+                    .map(|note| format!("# {note}\n")),
+            );
+        }
     }
-    if has("fastly") {
-        lines.push("fastly 16.0.0".to_owned());
-        lines.push("viceroy 0.21.0".to_owned());
-    }
-    lines.push("rust 1.98.1".to_owned());
-    // Sort + dedup so the file is stable regardless of adapter
-    // declaration order (and asdf doesn't care).
     lines.sort();
     lines.dedup();
     let mut body = lines.join("\n");
-    if has("spin") {
-        body.push_str(concat!(
-            "\n\n# Spin is not asdf-managed in this scaffold; install via\n",
-            "# https://spinframework.dev/install\n",
-            "# Requires Spin 4.1 or newer: spin-sdk 7 imports\n",
-            "# wasi:http/types@0.3.0, which Spin 4.0.x does not provide.\n",
-            "# On an older runtime the component builds and its tests\n",
-            "# pass, then the wasm linker rejects it at startup.\n",
-        ));
-    } else {
+    body.push('\n');
+    if !notes.is_empty() {
         body.push('\n');
+        body.extend(notes);
     }
     body
 }
@@ -881,6 +881,73 @@ mod tests {
 
     // `super::*` re-exports `env` and `fs` from outer `use` lines, so they're
     // already in scope here.
+
+    #[test]
+    fn custom_blueprint_owns_tool_pins_notes_and_logging_templates() {
+        const CHILD: &str = "EDGEZERO_CUSTOM_BLUEPRINT_TEST";
+        if env::var_os(CHILD).is_none() {
+            let status = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "generator::tests::custom_blueprint_owns_tool_pins_notes_and_logging_templates",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let base = scaffold::registered_blueprints()
+            .into_iter()
+            .next()
+            .unwrap();
+        let custom = Box::leak(Box::new(AdapterBlueprint {
+            local_ignore_patterns: &["*.custom-state"],
+            id: "custom-blueprint",
+            tool_pins: &["custom-tool 8.9.0"],
+            install_notes: &["Install custom tooling here"],
+            logging: scaffold::LoggingDefaults {
+                endpoint: Some("{project_mod}/{crate}/{crate_dir}/{manifest}/{manifest_dir}"),
+                level: "info",
+                echo_stdout: None,
+            },
+            commands: base.commands,
+            crate_suffix: base.crate_suffix,
+            dependencies: base.dependencies,
+            dependency_crate: base.dependency_crate,
+            dependency_repo_path: base.dependency_repo_path,
+            display_name: base.display_name,
+            extra_dirs: base.extra_dirs,
+            files: base.files,
+            manifest: base.manifest,
+            readme: base.readme,
+            run_module: base.run_module,
+            template_registrations: base.template_registrations,
+        }));
+        scaffold::register_adapter_blueprint(custom);
+        let tools = build_tool_versions(&[custom.id.to_owned()]);
+        assert!(
+            tools.contains("custom-tool 8.9.0") && tools.contains("# Install custom tooling here"),
+            "{tools}"
+        );
+        let dir = TempDir::new().unwrap();
+        let layout = ProjectLayout::new(&NewArgs {
+            name: "custom-app".to_owned(),
+            dir: Some(dir.path().to_string_lossy().into_owned()),
+        })
+        .unwrap();
+        let section =
+            render_manifest_section(&layout, custom, "custom-crate", "crates/custom").unwrap();
+        assert!(
+            section.contains("custom_app/custom-crate/crates/custom/crates/custom/"),
+            "{section}"
+        );
+        assert!(
+            !section.contains('{'),
+            "unexpanded logging template: {section}"
+        );
+    }
 
     #[test]
     fn upper_camel_from_sanitized_covers_derivation_rules() {

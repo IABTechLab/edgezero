@@ -27,6 +27,7 @@ publish = false
 version = "0.1.0"
 
 [workspace.dependencies]
+regex = "1.13.1"
 anyhow = "1"
 async-compression = { version = "0.4", features = [
     "futures-io",

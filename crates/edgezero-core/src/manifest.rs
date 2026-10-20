@@ -984,7 +984,6 @@ fn validate_manifest_adapter_keys_case_unique(manifest: &Manifest) -> Result<(),
         }
     }
 
-    validate_canonical_deployed_ownership(manifest)?;
     seen_ci.clear();
     for key in manifest.logging.adapters.keys() {
         let folded = key.to_ascii_lowercase();
@@ -1128,64 +1127,6 @@ fn validate_store_declaration(declaration: &StoreDeclaration) -> Result<(), Vali
         return Err(error);
     }
 
-    Ok(())
-}
-
-/// Canonical `[adapters.<name>.deployed]` field ownership for the
-/// built-in adapters.
-///
-/// A deployed field is meaningful only for the adapter that produces
-/// it -- `service_id` for Fastly, the KV-namespace maps for
-/// Cloudflare -- and Spin / Axum have no durable cloud identifiers at
-/// all. Placing e.g. `service_id` under `[adapters.cloudflare.deployed]`
-/// is always a mistake.
-///
-/// The CLI already rejects this, but only for adapters present in its
-/// build registry -- a reduced-feature build or a non-CLI reader of
-/// the manifest would silently accept the misplaced field. Enforcing
-/// the canonical ownership here in core closes that gap for EVERY
-/// consumer. Adapter names core doesn't recognise are left to the
-/// CLI's registry-based check (out-of-tree adapters define their own
-/// ownership).
-const CANONICAL_DEPLOYED_OWNERS: &[(&str, &[&str])] = &[
-    ("axum", &[]),
-    ("cloudflare", &["kv_namespaces", "preview_kv_namespaces"]),
-    ("fastly", &["service_id"]),
-    ("spin", &[]),
-];
-
-fn validate_canonical_deployed_ownership(manifest: &Manifest) -> Result<(), ValidationError> {
-    for (name, adapter) in &manifest.adapters {
-        let Some(deployed) = adapter.deployed.as_ref() else {
-            continue;
-        };
-        let canonical = name.to_ascii_lowercase();
-        let Some((_, owned)) = CANONICAL_DEPLOYED_OWNERS
-            .iter()
-            .find(|(known, _)| *known == canonical)
-        else {
-            continue;
-        };
-        for field in deployed.populated_fields() {
-            if !owned.contains(&field) {
-                let mut error = ValidationError::new("deployed_field_not_owned");
-                let owned_list = if owned.is_empty() {
-                    "none".to_owned()
-                } else {
-                    owned.join(", ")
-                };
-                error.message = Some(
-                    format!(
-                        "[adapters.{name}.deployed].{field}: the `{canonical}` adapter does not \
-                         own this deployed field (owned: [{owned_list}]). A deployed field is only \
-                         valid under the adapter that produces it; move it or remove it."
-                    )
-                    .into(),
-                );
-                return Err(error);
-            }
-        }
-    }
     Ok(())
 }
 
@@ -2497,30 +2438,12 @@ default = "feature__flags"
     }
 
     #[test]
-    fn core_rejects_deployed_field_under_wrong_adapter() {
-        // `service_id` is Fastly's; declaring it under Cloudflare is a
-        // mistake core must reject on load, so reduced-feature builds
-        // and non-CLI readers catch it too (not just the CLI registry
-        // check).
-        let toml = "[adapters.cloudflare.deployed]\nservice_id = \"SVC1\"\n";
-        let msg = match ManifestLoader::try_load_from_str(toml) {
-            Ok(_) => panic!("service_id under cloudflare must be rejected"),
-            Err(err) => err.to_string(),
-        };
-        assert!(
-            msg.contains("service_id") && msg.contains("cloudflare"),
-            "error names the field and adapter: {msg}"
-        );
-    }
-
-    #[test]
-    fn core_rejects_deployed_field_under_no_owner_adapter() {
-        // Spin owns no deployed fields.
-        let toml = "[adapters.spin.deployed]\nservice_id = \"SVC1\"\n";
-        assert!(
-            ManifestLoader::try_load_from_str(toml).is_err(),
-            "a deployed field under spin (owns none) must be rejected"
-        );
+    fn core_leaves_all_provider_ownership_to_registered_adapters() {
+        for name in ["cloudflare", "spin", "custom"] {
+            let body = format!("[adapters.{name}.deployed]\nservice_id = \"SVC1\"\n");
+            ManifestLoader::try_load_from_str(&body)
+                .expect("core validates structure, adapters own policy");
+        }
     }
 
     #[test]

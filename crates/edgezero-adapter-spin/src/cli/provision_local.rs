@@ -3,6 +3,7 @@
 //! stanzas to `runtime-config.toml`, and emitting `.env` placeholders
 //! next to the spin manifest.
 
+use edgezero_adapter::env_records::encode_value;
 use std::fs;
 use std::path::Path;
 
@@ -116,7 +117,7 @@ pub(super) fn provision(
     // (CONFIG only). Dedup honours operator overrides -- an operator
     // who already uncommented + edited a __KEY line does NOT get the
     // commented placeholder re-added on a subsequent provision.
-    let (name_lines, comment_lines) = build_env_lines(stores);
+    let (name_lines, comment_lines) = build_env_lines(stores)?;
 
     if spin_changed && !dry_run {
         fs::write(&spin_path, spin_doc.to_string())
@@ -708,7 +709,7 @@ fn normalise_runtime_config_header(serialised: String) -> String {
 /// Returns `(name_lines, comment_lines)`: the `__NAME` overlay lines
 /// (converging upsert path) and the commented `__KEY` placeholders
 /// (operator-owned, insert-only append path) split apart.
-fn build_env_lines(stores: &ProvisionStores<'_>) -> (Vec<String>, Vec<String>) {
+fn build_env_lines(stores: &ProvisionStores<'_>) -> Result<(Vec<String>, Vec<String>), String> {
     let mut name_lines: Vec<String> = Vec::new();
     for (kind, kind_stores) in [
         ("KV", stores.kv),
@@ -717,7 +718,7 @@ fn build_env_lines(stores: &ProvisionStores<'_>) -> (Vec<String>, Vec<String>) {
     ] {
         for store in kind_stores {
             let logical_upper = store.logical.to_ascii_uppercase();
-            let platform = &store.platform;
+            let platform = encode_value(&store.platform, false)?;
             name_lines.push(format!(
                 "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
             ));
@@ -731,7 +732,7 @@ fn build_env_lines(stores: &ProvisionStores<'_>) -> (Vec<String>, Vec<String>) {
             "# EDGEZERO__STORES__CONFIG__{logical_upper}__KEY={logical}_staging"
         ));
     }
-    (name_lines, comment_lines)
+    Ok((name_lines, comment_lines))
 }
 
 #[cfg(test)]

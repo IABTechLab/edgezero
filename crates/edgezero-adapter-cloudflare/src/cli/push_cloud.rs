@@ -299,6 +299,9 @@ pub(super) fn read_wrangler_kv_key(
     let wrangler_path = manifest_root.join(rel);
     let binding = store.platform.as_str();
     let project_dir = wrangler_path.parent().unwrap_or(manifest_root);
+    if locality == "--local" {
+        reject_symlink_components(project_dir, &project_dir.join(".wrangler/state"))?;
+    }
     let output = Command::new("wrangler")
         .args(["kv", "key", "get", "--binding", binding, key, locality])
         // Anchor at the DECLARED manifest so diff/read resolves the same
@@ -1142,6 +1145,29 @@ mod tests {
             !err.contains("wrangler kv bulk put") && !err.contains("not found on PATH"),
             "refusal must precede the wrangler invocation: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_read_refuses_symlinked_miniflare_state_before_vendor_io() {
+        use std::os::unix::fs::symlink;
+        let _lock = path_mutation_guard().lock().unwrap();
+        let project = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        write_wrangler(project.path(), "name = 'demo'\n");
+        fs::create_dir_all(project.path().join(".wrangler")).unwrap();
+        symlink(outside.path(), project.path().join(".wrangler/state")).unwrap();
+        let error = read_wrangler_kv_key(
+            project.path(),
+            Some("wrangler.toml"),
+            &ResolvedStoreId::from_logical(TEST_CONFIG_ID),
+            "root",
+            "--local",
+        )
+        .err()
+        .expect("symlink refusal");
+        assert!(error.contains("symlink"), "{error}");
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[test]

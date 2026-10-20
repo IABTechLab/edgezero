@@ -10,6 +10,7 @@ use edgezero_adapter::env_file::{
     EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, reject_symlink_components,
     reject_symlinked_target,
 };
+use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout, LocalArtifactKind};
 use edgezero_adapter::registry::{
     Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
     AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
@@ -72,6 +73,9 @@ static AXUM_DEPENDENCIES: &[DependencySpec] = &[
 ];
 
 static AXUM_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
+    local_ignore_patterns: &["axum.toml"],
+    tool_pins: &[],
+    install_notes: &[],
     id: "axum",
     display_name: "Axum",
     crate_suffix: "adapter-axum",
@@ -125,6 +129,7 @@ impl Adapter for AxumCliAdapter {
         &self,
         _context: &AdapterDeployContext,
         _args: &[String],
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<DeployOwnership, String> {
         Ok(DeployOwnership::ManifestCommand)
     }
@@ -145,6 +150,7 @@ impl Adapter for AxumCliAdapter {
         &self,
         _context: &AdapterDeployContext,
         _output: Option<&str>,
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -186,6 +192,16 @@ impl Adapter for AxumCliAdapter {
             )),
             other => Err(format!("axum adapter does not support {other:?}")),
         }
+    }
+
+    fn local_layout(
+        &self,
+        context: &AdapterLocalContext<'_>,
+    ) -> Result<AdapterLocalLayout, String> {
+        let manifest = context.manifest().unwrap_or("axum.toml");
+        Ok(AdapterLocalLayout::new(manifest)
+            .with_artifact(".edgezero/.env", LocalArtifactKind::Env)
+            .with_serve_env(".edgezero/.env"))
     }
 
     fn name(&self) -> &'static str {

@@ -4,6 +4,7 @@ use ctor::ctor;
 use edgezero_adapter::cli_support;
 use edgezero_adapter::cli_support::run_native_cli;
 use edgezero_adapter::env_file::{EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header};
+use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout, LocalArtifactKind};
 use edgezero_adapter::registry::{
     Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
     AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
@@ -22,6 +23,9 @@ mod run;
 static CLOUDFLARE_ADAPTER: CloudflareCliAdapter = CloudflareCliAdapter;
 
 static CLOUDFLARE_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
+    local_ignore_patterns: &["wrangler.toml", ".dev.vars", ".wrangler/"],
+    tool_pins: &["nodejs 24.20.0"],
+    install_notes: &[],
     id: "cloudflare",
     display_name: "Cloudflare Workers",
     crate_suffix: "adapter-cloudflare",
@@ -151,6 +155,7 @@ impl Adapter for CloudflareCliAdapter {
         &self,
         _context: &AdapterDeployContext,
         _args: &[String],
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<DeployOwnership, String> {
         Ok(DeployOwnership::ManifestCommand)
     }
@@ -171,6 +176,7 @@ impl Adapter for CloudflareCliAdapter {
         &self,
         _context: &AdapterDeployContext,
         _output: Option<&str>,
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -244,6 +250,18 @@ impl Adapter for CloudflareCliAdapter {
         &["kv", "config"]
     }
 
+    fn local_layout(
+        &self,
+        context: &AdapterLocalContext<'_>,
+    ) -> Result<AdapterLocalLayout, String> {
+        let manifest = context.manifest().unwrap_or("wrangler.toml");
+        let parent = Path::new(manifest)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        Ok(AdapterLocalLayout::new(manifest)
+            .with_artifact(parent.join(".dev.vars"), LocalArtifactKind::Env))
+    }
+
     fn name(&self) -> &'static str {
         "cloudflare"
     }
@@ -297,6 +315,11 @@ impl Adapter for CloudflareCliAdapter {
                 Some("has leading or trailing whitespace")
             } else if key.starts_with('#') {
                 Some("starts with `#`, which `.dev.vars` readers treat as a comment")
+            } else if !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+            {
+                Some("contains characters outside the dotenv key alphabet [A-Za-z0-9_.-]")
             } else if key.to_ascii_uppercase().starts_with(RESERVED_PREFIX) {
                 Some(
                     "is in the reserved `EDGEZERO__` namespace used for runtime configuration \

@@ -485,13 +485,20 @@ pub fn run_config_gc(args: &ConfigGcArgs) -> Result<(), String> {
 /// project root and vendor dispatch creates no files. Every adapter is
 /// checked because shared checks iterate every adapter, not just the
 /// targeted one.
-fn assert_push_adapter_paths(validation: &ValidationContext, local: bool) -> Result<(), String> {
+fn assert_push_adapter_paths(
+    validation: &ValidationContext,
+    local: bool,
+    selected: &str,
+) -> Result<(), String> {
     let manifest_root_for_check = validation
         .manifest_path()
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    for adapter_cfg in validation.manifest().adapters.values() {
+    for (name, adapter_cfg) in &validation.manifest().adapters {
+        if !name.eq_ignore_ascii_case(selected) {
+            continue;
+        }
         if local {
             assert_provision_paths_contained(
                 manifest_root_for_check,
@@ -556,7 +563,7 @@ where
     // Pre-flight: load + validate.
     let ctx = load_push_context(args)?;
 
-    assert_push_adapter_paths(&ctx.validation, args.local)?;
+    assert_push_adapter_paths(&ctx.validation, args.local, &args.adapter)?;
 
     let validation_scope = AdapterValidationScope::Selected(ctx.adapter);
     run_shared_checks(&ctx.validation, validation_scope)?;
@@ -750,7 +757,10 @@ where
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    for adapter_cfg in ctx.manifest().adapters.values() {
+    for (name, adapter_cfg) in &ctx.manifest().adapters {
+        if !name.eq_ignore_ascii_case(&args.adapter) {
+            continue;
+        }
         if args.local {
             assert_provision_paths_contained(
                 manifest_root_for_check,
@@ -998,20 +1008,20 @@ fn handle_consent(args: &ConfigPushArgs, remote: &ReadConfigEntry) -> Result<(),
         }
         if args.dry_run {
             return Err(format!(
-                "config push --dry-run --adapter spin against Spin Cloud is unsupported \
-                 ({reason}); re-run with --local for the on-disk SQLite write or drop \
+                "config push --dry-run against the selected adapter is unsupported \
+                 ({reason}); re-run with --local for local state or drop \
                  --dry-run to write unconditionally with --yes"
             ));
         }
         if !args.yes {
             if !stdin().is_terminal() {
                 return Err(format!(
-                    "Spin Cloud read-back unsupported ({reason}); pass --yes for \
+                    "remote read-back unsupported ({reason}); pass --yes for \
                      non-interactive runs (the push writes unconditionally)"
                 ));
             }
             prompt_stderr(&format!(
-                "cannot read remote on Spin Cloud ({reason}); write anyway? [y/N] "
+                "cannot read remote for this adapter ({reason}); write anyway? [y/N] "
             ));
             let mut buf = String::new();
             stdin()
@@ -1755,7 +1765,13 @@ fn run_shared_checks(
     adapter_scope: AdapterValidationScope,
 ) -> Result<(), String> {
     run_adapter_shared_checks(ctx, adapter_scope)?;
-    validate_deployed_field_ownership(ctx.manifest())?;
+    validate_deployed_field_ownership(
+        ctx.manifest(),
+        match adapter_scope {
+            AdapterValidationScope::All => None,
+            AdapterValidationScope::Selected(adapter) => Some(adapter.name()),
+        },
+    )?;
     if ctx.args_strict {
         match adapter_scope {
             AdapterValidationScope::All => strict_capability_completeness(ctx.manifest())?,
@@ -1784,8 +1800,14 @@ fn run_shared_checks(
 /// Runs at manifest-shape validation time via `run_shared_checks`
 /// so `config validate --strict`, `provision`, `config push --local`,
 /// and `config diff` all see the same rejection.
-pub(crate) fn validate_deployed_field_ownership(manifest: &Manifest) -> Result<(), String> {
+pub(crate) fn validate_deployed_field_ownership(
+    manifest: &Manifest,
+    selected: Option<&str>,
+) -> Result<(), String> {
     for (name, adapter_cfg) in &manifest.adapters {
+        if selected.is_some_and(|target| !name.eq_ignore_ascii_case(target)) {
+            continue;
+        }
         let Some(deployed) = adapter_cfg.deployed.as_ref() else {
             continue;
         };
@@ -2125,12 +2147,23 @@ where
     Ok(entries)
 }
 
-pub(crate) fn run_typed_preflight<C>(typed: &C, ctx: &ValidationContext) -> Result<(), String>
+pub(crate) fn run_typed_preflight<C>(
+    typed: &C,
+    ctx: &ValidationContext,
+    selected: Option<&str>,
+) -> Result<(), String>
 where
     C: AppConfigMeta,
 {
     typed_secret_checks(typed, ctx)?;
-    run_adapter_typed_checks::<C>(ctx, AdapterValidationScope::All)?;
+    let scope = match selected {
+        Some(name) => AdapterValidationScope::Selected(
+            adapter_registry::get_adapter(name)
+                .ok_or_else(|| format!("adapter `{name}` is not registered"))?,
+        ),
+        None => AdapterValidationScope::All,
+    };
+    run_adapter_typed_checks::<C>(ctx, scope)?;
     Ok(())
 }
 
@@ -5188,7 +5221,7 @@ ids = ["default"]
     /// entry with a traversal path, and asserts the error names the
     /// containment violation (proving the guard fired first).
     #[test]
-    fn config_push_local_rejects_parent_traversal_in_sibling_spin_adapter() {
+    fn config_push_local_ignores_unselected_sibling_paths() {
         let manifest_bad = r#"
 [app]
 name = "demo-app"
@@ -5221,16 +5254,9 @@ ids = ["default"]
         let (_dir, manifest, _) = setup_project(manifest_bad, FIXTURE_APP_CONFIG);
         let mut args = push_args(&manifest, "axum");
         args.local = true;
-        let err = run_config_push_typed::<FixtureConfig>(&args)
-            .expect_err("sibling adapter with traversal path must be rejected");
-        assert!(
-            err.contains("must not contain `..` traversal"),
-            "guard must fire before Spin's validate_adapter_manifest reads the poisoned path: {err}"
-        );
-        assert!(
-            !err.contains("failed to read spin manifest"),
-            "if this substring appears, the Spin fs::read escaped before the containment guard: {err}"
-        );
+        args.yes = true;
+        run_config_push_typed::<FixtureConfig>(&args)
+            .expect("unselected adapter paths must not be read or validated");
     }
 
     // -------------------------------------------------------------------
@@ -5973,6 +5999,6 @@ ids = ["default"]
             &load_opts,
         )
         .unwrap();
-        run_typed_preflight(&typed, &ctx).unwrap();
+        run_typed_preflight(&typed, &ctx, None).unwrap();
     }
 }

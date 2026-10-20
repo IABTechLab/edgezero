@@ -76,7 +76,7 @@ pub use provision::{run_provision, run_provision_typed};
 use args::{
     ActiveVersionArgs, BuildArgs, DeployArgs, HealthcheckArgs, NewArgs, RollbackArgs, ServeArgs,
 };
-use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds};
+use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds, get_adapter};
 #[cfg(feature = "cli")]
 use edgezero_core::manifest::{Manifest, ManifestLoader, StoreDeclaration};
 #[cfg(feature = "cli")]
@@ -193,49 +193,6 @@ fn assert_adapter_declared_paths_safe(
     Ok(())
 }
 
-/// Acquire the cross-process provision lock for a deploy and return it
-/// alongside the env overlay a nested `provision` / `config push` / deploy
-/// inherits to BORROW the same lock.
-///
-/// The lock is held for the whole deploy so a vendor `service_id` writeback
-/// (e.g. `fastly compute deploy` rewriting the gitignored `fastly.toml`)
-/// can't interleave with a concurrent `provision` / `config push` and lose
-/// one side's edits -- the reconcile-on-next-run fallback can't recover a
-/// value already discarded.
-///
-/// The overlay advertises the lock via the CHILD's environment (never the
-/// parent's global env, which edition-2024 `set_var` makes unsafe and the
-/// workspace forbids). It carries the lock path, the per-holder token (a
-/// stale/leaked advertisement whose token no longer matches the lock file is
-/// refused), and the borrow DEPTH (so a nested provision serialises on the
-/// correct depth-keyed sibling lock -- one level deeper than this deploy
-/// holds, avoiding a composed-deploy deadlock while still serialising
-/// co-siblings). All three keys OVERRIDE any inherited ancestor
-/// advertisement (see `adapter::build_child_env`) so this deploy always
-/// advertises ITS OWN lock. The caller MUST hold the returned lock (via its
-/// `Drop`) until the deploy finishes.
-#[cfg(feature = "cli")]
-fn acquire_deploy_lock() -> Result<(provision_lock::ProvisionLock, Vec<(String, String)>), String> {
-    let lock_root = manifest_root_for_lock();
-    let lock = provision_lock::ProvisionLock::acquire_for_deploy(&lock_root)?;
-    let advert = provision_lock::ProvisionLock::lock_path_for(&lock_root);
-    let overlay = vec![
-        (
-            provision_lock::LOCK_ENV.to_owned(),
-            advert.to_string_lossy().into_owned(),
-        ),
-        (
-            provision_lock::LOCK_TOKEN_ENV.to_owned(),
-            lock.token().to_owned(),
-        ),
-        (
-            provision_lock::SIBLING_DEPTH_ENV.to_owned(),
-            lock.child_sibling_depth().to_string(),
-        ),
-    ];
-    Ok((lock, overlay))
-}
-
 /// Deploy the project to a target edge adapter.
 ///
 /// # Errors
@@ -294,14 +251,6 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
         args.application_release.as_deref(),
         application_manifest_path.as_deref(),
     )?;
-    // Immutable releases have no local manifest writeback. Creating a project
-    // lock inside the bundle would invalidate its exact-member verification.
-    let (_deploy_lock, overlay) = if application_release_root.is_some() {
-        (None, Vec::new())
-    } else {
-        let (lock, overlay) = acquire_deploy_lock()?;
-        (Some(lock), overlay)
-    };
     let context = AdapterDeployContext {
         adapter_manifest_path,
         application_manifest_path,
@@ -318,7 +267,7 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
         adapter_manifest_path_error.as_deref(),
         manifest.as_ref(),
         &args.adapter_args,
-        &overlay,
+        &[],
     )
 }
 
@@ -528,15 +477,7 @@ pub fn run_rollback(args: &RollbackArgs) -> Result<(), String> {
         passthrough.push("--rollback-to".to_owned());
         passthrough.push(target.to_owned());
     } else {
-        return Err(
-            "a production rollback requires --rollback-to (the version to re-activate). Fastly \
-             exposes no metadata to infer it, so it must be captured before the deploy that \
-             superseded it -- run `active-version` (it prints `version=<N>`) before deploying, \
-             or wire the deploy-fastly GitHub action's `previous-version` output. If it was \
-             never captured, choose the target from the service's version history -- Fastly \
-             cannot identify it for you. Pass --staging to deactivate a staged version instead."
-                .to_owned(),
-        );
+        // The selected adapter determines whether an implicit rollback is supported.
     }
     adapter::execute(&args.adapter, adapter::Action::Rollback, None, &passthrough)
 }
@@ -610,7 +551,7 @@ pub fn run_serve(args: &ServeArgs) -> Result<(), String> {
         && let Some(root) = loader.manifest().root()
     {
         let manifest_data = loader.manifest();
-        if let Some(env_path) = resolve_serve_env_file(manifest_data, &args.adapter, root) {
+        if let Some(env_path) = resolve_serve_env_file(manifest_data, &args.adapter, root)? {
             // The env-file chain (e.g. `<root>/.edgezero/.env`) is NOT
             // covered by `assert_adapter_declared_paths_safe`, which only
             // guards the declared `.manifest` / `.crate`. Guard it
@@ -637,55 +578,27 @@ pub fn run_serve(args: &ServeArgs) -> Result<(), String> {
     )
 }
 
-/// Return the `.env` file `run_serve` should pre-load into the
-/// process environment for the selected adapter, or `None` if the
-/// adapter reads its env file directly (cloudflare, fastly) or the
-/// adapter is unknown.
-///
-/// `axum` maps to `<manifest_root>/.edgezero/.env` (the writer
-/// target). `spin` maps to `<spin.toml parent>/.env`, derived from the
-/// required `[adapters.spin.adapter].manifest` (the same directory
-/// provision writes `.env` into); a spin adapter without `.manifest`
-/// resolves to `None` — there is no `.crate`/root fallback.
-///
-/// The adapter name is matched case-insensitively so `--adapter Spin`
-/// or `SPIN` resolves the same as `spin`.
+/// Resolve serve inputs through the selected adapter's local layout.
 #[cfg(feature = "cli")]
 fn resolve_serve_env_file(
     manifest: &Manifest,
     adapter_name: &str,
     manifest_root: &Path,
-) -> Option<PathBuf> {
-    let adapter_lower = adapter_name.to_ascii_lowercase();
-    match adapter_lower.as_str() {
-        "axum" => Some(manifest_root.join(".edgezero").join(".env")),
-        "spin" => {
-            // Spin provision writes `.env` next to the resolved
-            // `spin.toml` (see
-            // `edgezero-adapter-spin/src/cli/provision_local.rs`:
-            // `env_path = spin_dir.join(".env")`). Derive the same path
-            // here from the REQUIRED `[adapters.spin.adapter].manifest`.
-            // A nested manifest like
-            // `[adapters.spin.adapter].manifest = "crates/spin/config/spin.toml"`
-            // places `.env` at `crates/spin/config/.env`.
-            //
-            // There is deliberately NO `.crate`/root fallback: build,
-            // deploy, provision, and config all reject a spin adapter
-            // whose `.manifest` is unset, so an absent `.manifest` is a
-            // malformed manifest, not a legacy shape to accommodate.
-            // Deriving from `.crate` would look in the wrong directory
-            // and miss the runtime env-label + typed `SPIN_VARIABLE_*`
-            // lines provision wrote. Absent `.manifest` => no overlay.
-            let (_key, adapter_cfg) = manifest.adapter_entry(adapter_name)?;
-            let manifest_rel = adapter_cfg.adapter.manifest.as_deref()?;
-            let manifest_abs = manifest_root.join(manifest_rel);
-            let env_dir = manifest_abs
-                .parent()
-                .map_or_else(|| manifest_root.to_path_buf(), Path::to_path_buf);
-            Some(env_dir.join(".env"))
-        }
-        _ => None,
-    }
+) -> Result<Option<PathBuf>, String> {
+    let Some((_, cfg)) = manifest.adapter_entry(adapter_name) else {
+        return Ok(None);
+    };
+    let Some(adapter) = get_adapter(adapter_name) else {
+        return Ok(None);
+    };
+    let layout = path_safety::local_layout(
+        manifest_root,
+        adapter,
+        cfg.adapter.manifest.as_deref(),
+        cfg.adapter.crate_path.as_deref(),
+        cfg.adapter.component.as_deref(),
+    )?;
+    Ok(layout.serve_env.map(|path| manifest_root.join(path)))
 }
 
 /// Create a new `EdgeZero` app skeleton.
@@ -725,17 +638,7 @@ fn store_bindings_message(adapter_name: &str, manifest: &ManifestLoader) -> Opti
     // returned by a function whose name contains "secret" (it can't tell
     // metadata from secret material), and adapters/operators can read the
     // binding name from their own `edgezero.toml` if they need to verify it.
-    let message = match adapter_name {
-        "axum" => {
-            "[edgezero] secrets enabled for axum -- ensure the required environment variables are set for local runs"
-        }
-        "cloudflare" => {
-            "[edgezero] secrets enabled for cloudflare -- ensure the required secret bindings exist in wrangler"
-        }
-        _ => {
-            "[edgezero] secrets enabled -- ensure the configured secret store is provisioned on the target platform"
-        }
-    };
+    let message = "[edgezero] secrets enabled -- ensure the configured secret store is provisioned on the target platform";
 
     Some(message.to_owned())
 }
@@ -774,18 +677,7 @@ fn ensure_adapter_defined(
 }
 
 #[cfg(feature = "cli")]
-/// Directory whose `.edgezero/provision.lock` guards this project, derived
-/// from the same manifest source `load_manifest_optional` uses so the
-/// deploy lock and the provision/push locks target the same sentinel.
-#[cfg(feature = "cli")]
-fn manifest_root_for_lock() -> PathBuf {
-    let path = env::var("EDGEZERO_MANIFEST")
-        .map_or_else(|_| PathBuf::from("edgezero.toml"), PathBuf::from);
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
-}
-
+/// Load the explicit application manifest, or the default when present.
 fn load_manifest_optional() -> Result<Option<ManifestLoader>, String> {
     let (path, explicit) = env::var("EDGEZERO_MANIFEST").map_or_else(
         |_| (PathBuf::from("edgezero.toml"), false),
@@ -807,7 +699,9 @@ fn load_manifest_optional() -> Result<Option<ManifestLoader>, String> {
 #[cfg(feature = "cli")]
 mod tests {
     use super::*;
-    use crate::test_support::{BASIC_MANIFEST, EnvOverride, manifest_guard};
+    use crate::test_support::{
+        BASIC_MANIFEST, EnvOverride, LAYOUT_TEST_ADAPTER, PROVISION_MANIFEST, manifest_guard,
+    };
     use edgezero_adapter::registry::AdapterExecContext;
     use edgezero_adapter::registry::{
         self as adapter_registry, Adapter, AdapterAction, DeployOwnership,
@@ -933,6 +827,7 @@ serve = "echo"
             &self,
             _context: &AdapterDeployContext,
             _command_output: Option<&str>,
+            _exec: &AdapterExecContext<'_>,
         ) -> Result<(), String> {
             DEPLOY_FINALIZE_CALLS.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -946,6 +841,7 @@ serve = "echo"
             &self,
             context: &AdapterDeployContext,
             _args: &[String],
+            _exec: &AdapterExecContext<'_>,
         ) -> Result<DeployOwnership, String> {
             *DEPLOY_PREFLIGHT_CONTEXT
                 .lock()
@@ -1012,8 +908,8 @@ serve = "echo"
             })
             .expect("registry deploy");
             assert!(
-                dir.path().join(".edgezero/provision.lock").is_file(),
-                "source deployments must retain their shared project lock"
+                !dir.path().join(".edgezero/provision.lock").exists(),
+                "deploy shells must not hold the project write lock"
             );
             let recorded = fs::read_to_string(argv).expect("recorded vendor arguments");
             assert!(
@@ -1821,10 +1717,10 @@ ids = ["MY_SECRETS"]
         );
 
         let axum = store_bindings_message("axum", &loader).expect("axum message");
-        assert!(axum.contains("environment variables"));
+        assert!(axum.contains("secret store"));
 
         let cloudflare = store_bindings_message("cloudflare", &loader).expect("cloudflare message");
-        assert!(cloudflare.contains("wrangler"));
+        assert!(cloudflare.contains("secret store"));
 
         let fastly = store_bindings_message("fastly", &loader).expect("fastly message");
         assert!(fastly.contains("secrets enabled"));
@@ -1836,13 +1732,51 @@ ids = ["MY_SECRETS"]
         assert!(store_bindings_message("fastly", &loader).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn custom_adapter_serve_uses_its_own_env_sidecar() {
+        let _guard = manifest_guard().lock().unwrap();
+        adapter_registry::register_adapter(&LAYOUT_TEST_ADAPTER);
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("crate")).unwrap();
+        let body = "[app]\nname='demo'\n[adapters.__layout_test__.adapter]\ncrate='crate'\nmanifest='crate/provider.settings'\ncomponent='selected'\n[adapters.__layout_test__.commands]\nserve='printf %s \"$EDGEZERO_CUSTOM_LAYOUT_MARKER\" > served'\n";
+        let manifest = dir.path().join("edgezero.toml");
+        fs::write(&manifest, body).unwrap();
+        fs::write(
+            dir.path().join("crate/selected.credentials"),
+            "EDGEZERO_CUSTOM_LAYOUT_MARKER=`literal value`\n",
+        )
+        .unwrap();
+        let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+        run_serve(&ServeArgs {
+            adapter: "__layout_test__".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("served")).unwrap(),
+            "literal value"
+        );
+        for (component, message) in [
+            ("../../outside", "traversal"),
+            ("error", "custom layout rejected"),
+        ] {
+            let loader = ManifestLoader::load_from_str(
+                &body.replace("component='selected'", &format!("component='{component}'")),
+            );
+            let error = resolve_serve_env_file(loader.manifest(), "__layout_test__", dir.path())
+                .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
     #[test]
     fn resolve_serve_env_file_axum_returns_dot_edgezero_dot_env() {
         // axum's `.env` lives under `<manifest_root>/.edgezero/.env`
         // — the target the line writer produces.
-        let loader = ManifestLoader::load_from_str(BASIC_MANIFEST);
+        let loader = ManifestLoader::load_from_str(PROVISION_MANIFEST);
         let root = PathBuf::from("/tmp/proj");
         let resolved = resolve_serve_env_file(loader.manifest(), "axum", &root)
+            .expect("valid adapter layout")
             .expect("axum arm returns Some");
         assert_eq!(resolved, root.join(".edgezero").join(".env"));
     }
@@ -1855,6 +1789,7 @@ ids = ["MY_SECRETS"]
         let loader = ManifestLoader::load_from_str(SPIN_MANIFEST_LOWER);
         let root = PathBuf::from("/tmp/proj");
         let resolved = resolve_serve_env_file(loader.manifest(), "spin", &root)
+            .expect("valid adapter layout")
             .expect("spin arm returns Some");
         assert_eq!(resolved, root.join("crates/spin").join(".env"));
     }
@@ -1870,7 +1805,9 @@ ids = ["MY_SECRETS"]
         );
         let root = PathBuf::from("/tmp/proj");
         assert!(
-            resolve_serve_env_file(loader.manifest(), "spin", &root).is_none(),
+            resolve_serve_env_file(loader.manifest(), "spin", &root)
+                .expect("valid adapter layout")
+                .is_none(),
             "no `.manifest` => no serve env overlay (no legacy `.crate` fallback)"
         );
     }
@@ -1889,6 +1826,7 @@ ids = ["MY_SECRETS"]
         let loader = ManifestLoader::load_from_str(SPIN_MANIFEST_NESTED);
         let root = PathBuf::from("/tmp/proj");
         let resolved = resolve_serve_env_file(loader.manifest(), "spin", &root)
+            .expect("valid adapter layout")
             .expect("spin arm returns Some");
         assert_eq!(
             resolved,
@@ -1902,7 +1840,11 @@ ids = ["MY_SECRETS"]
         // Wrangler reads `.dev.vars` itself; run_serve does not touch it.
         let loader = ManifestLoader::load_from_str(BASIC_MANIFEST);
         let root = PathBuf::from("/tmp/proj");
-        assert!(resolve_serve_env_file(loader.manifest(), "cloudflare", &root).is_none());
+        assert!(
+            resolve_serve_env_file(loader.manifest(), "cloudflare", &root)
+                .expect("valid adapter layout")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1911,7 +1853,11 @@ ids = ["MY_SECRETS"]
         // `fastly.toml`; run_serve does not touch it.
         let loader = ManifestLoader::load_from_str(BASIC_MANIFEST);
         let root = PathBuf::from("/tmp/proj");
-        assert!(resolve_serve_env_file(loader.manifest(), "fastly", &root).is_none());
+        assert!(
+            resolve_serve_env_file(loader.manifest(), "fastly", &root)
+                .expect("valid adapter layout")
+                .is_none()
+        );
     }
 
     #[cfg(not(windows))]
@@ -2167,11 +2113,11 @@ serve = 'sh -c "printf %s \"${{{marker_key}:-<unset>}}\" > {observed_path_displa
         let root = PathBuf::from("/tmp/proj");
         let expected = root.join("crates/spin").join(".env");
         assert_eq!(
-            resolve_serve_env_file(loader.manifest(), "spin", &root),
+            resolve_serve_env_file(loader.manifest(), "spin", &root).expect("valid adapter layout"),
             Some(expected.clone())
         );
         assert_eq!(
-            resolve_serve_env_file(loader.manifest(), "SPIN", &root),
+            resolve_serve_env_file(loader.manifest(), "SPIN", &root).expect("valid adapter layout"),
             Some(expected)
         );
     }

@@ -13,6 +13,12 @@
 //! can share the harness without each duplicating the BASIC /
 //! PROVISION manifest fixtures.
 
+use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout, LocalArtifactKind};
+use edgezero_adapter::registry::{
+    Adapter, AdapterAction, AdapterDeployedState, AdapterExecContext, ProvisionMode,
+    ProvisionOutcome, ProvisionStores,
+};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 /// RAII guard that overrides a process-global env var for the duration of a
@@ -114,6 +120,59 @@ pub(crate) fn manifest_guard() -> &'static Mutex<()> {
 /// the same mutex; separate locks do not make `setenv` and `env::vars` safe.
 pub(crate) fn path_mutation_guard() -> &'static Mutex<()> {
     manifest_guard()
+}
+
+pub(crate) struct LayoutTestAdapter;
+pub(crate) static LAYOUT_TEST_ADAPTER: LayoutTestAdapter = LayoutTestAdapter;
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "test adapter overrides only the layout and execution contract"
+)]
+impl Adapter for LayoutTestAdapter {
+    fn name(&self) -> &'static str {
+        "__layout_test__"
+    }
+
+    fn local_layout(
+        &self,
+        context: &AdapterLocalContext<'_>,
+    ) -> Result<AdapterLocalLayout, String> {
+        if context.component() == Some("error") {
+            return Err("custom layout rejected".to_owned());
+        }
+        let manifest = context.manifest().ok_or("custom manifest required")?;
+        let sidecar =
+            Path::new(context.crate_path().ok_or("custom crate required")?).join(format!(
+                "{}.credentials",
+                context.component().ok_or("custom component required")?
+            ));
+        Ok(AdapterLocalLayout::new(manifest)
+            .with_artifact(&sidecar, LocalArtifactKind::Env)
+            .with_serve_env(sidecar))
+    }
+
+    fn provision(
+        &self,
+        _root: &Path,
+        _manifest: Option<&str>,
+        _component: Option<&str>,
+        _stores: &ProvisionStores<'_>,
+        _deployed: Option<&AdapterDeployedState>,
+        _mode: ProvisionMode,
+        _dry_run: bool,
+    ) -> Result<ProvisionOutcome, String> {
+        Ok(ProvisionOutcome::default())
+    }
+
+    fn execute(
+        &self,
+        _action: AdapterAction,
+        _args: &[String],
+        _ctx: &AdapterExecContext<'_>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

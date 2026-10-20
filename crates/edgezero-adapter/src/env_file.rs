@@ -4,6 +4,7 @@
 //! OR uncommented entry is skipped. See spec §"Merge mechanics"
 //! → "Line-oriented".
 
+use crate::env_records::records;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -66,11 +67,15 @@ pub fn append_lines_dedup_with_header(
         existing =
             fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
     }
+    validate_existing_records(&existing)?;
     // Seeded from the file's keys, then GROWN as we append so duplicate
     // keys WITHIN this batch are also deduped -- otherwise two new lines
     // sharing a key (e.g. two typed secrets that resolve to the same key)
     // both land, and a trailing blank-valued duplicate can win at load.
-    let mut existing_keys: BTreeSet<String> = existing.lines().filter_map(normalised_key).collect();
+    let mut existing_keys: BTreeSet<String> = records(&existing)
+        .iter()
+        .filter_map(|record| record.assignment.map(|entry| entry.key.to_owned()))
+        .collect();
 
     // Header decision: prepend only when the caller asked for one AND
     // the existing file has no trimmed-equal line already. Empty files
@@ -78,7 +83,9 @@ pub fn append_lines_dedup_with_header(
     // provision writes it.
     let header_needed = header.filter(|hdr| {
         let trimmed_hdr = hdr.trim();
-        !existing.lines().any(|line| line.trim() == trimmed_hdr)
+        !records(&existing)
+            .iter()
+            .any(|record| record.raw.trim() == trimmed_hdr)
     });
 
     let mut to_append = String::new();
@@ -90,7 +97,7 @@ pub fn append_lines_dedup_with_header(
         // integrity"). The value is either an operator-provided env
         // override or a placeholder we control; both must be single-
         // line by contract.
-        if line.contains('\n') || line.contains('\r') {
+        if line.contains('\n') || line.contains('\r') || line.contains('\0') {
             return Err(format!(
                 "refusing to write line-oriented entry with embedded newline/carriage-return to {} -- \
                  an env-var value with `\\n` or `\\r` would split into multiple lines and let a \
@@ -141,7 +148,7 @@ pub fn append_lines_dedup_with_header(
         }
     }
     combined.push_str(&existing);
-    if !combined.is_empty() && !combined.ends_with('\n') {
+    if !combined.is_empty() && !combined.ends_with(['\n', '\r']) {
         combined.push('\n');
     }
     combined.push_str(&to_append);
@@ -207,7 +214,7 @@ pub fn upsert_lines_with_header(
     let mut managed: Vec<(String, &str)> = Vec::with_capacity(managed_lines.len());
     let mut managed_keys: BTreeSet<String> = BTreeSet::new();
     for line in managed_lines {
-        if line.contains('\n') || line.contains('\r') {
+        if line.contains('\n') || line.contains('\r') || line.contains('\0') {
             return Err(format!(
                 "refusing to write line-oriented entry with embedded newline/carriage-return to {} -- \
                  an env-var value with `\\n` or `\\r` would split into multiple lines and let a \
@@ -223,52 +230,51 @@ pub fn upsert_lines_with_header(
         }
     }
 
-    // Rebuild the file: replace the FIRST existing occurrence of each
-    // managed key with its managed line, drop later duplicates of that
-    // key, and pass every other line (operator keys, comments, blanks)
-    // through verbatim and in order.
+    validate_existing_records(&existing)?;
     let mut consumed: BTreeSet<String> = BTreeSet::new();
-    let mut out_lines: Vec<&str> = Vec::new();
-    for line in existing.lines() {
-        match normalised_key(line) {
-            Some(key) if managed_keys.contains(&key) => {
-                if consumed.insert(key.clone()) {
-                    let replacement = managed
-                        .iter()
-                        .find(|(managed_key, _)| *managed_key == key)
-                        .map_or(line, |(_, managed_line)| *managed_line);
-                    out_lines.push(replacement);
-                }
-                // A later duplicate of an already-consumed managed key:
-                // drop it so the file converges to a single entry.
-            }
-            _ => out_lines.push(line),
-        }
-    }
-    // Append managed keys that never appeared in the file, in order.
-    for (key, line) in &managed {
-        if !consumed.contains(key) {
-            out_lines.push(line);
-        }
-    }
-
-    // Header decision mirrors the append fn: prepend only when the caller
-    // asked for one AND no trimmed-equal line already exists.
-    let header_needed = header.filter(|hdr| {
-        let trimmed_hdr = hdr.trim();
-        !existing.lines().any(|line| line.trim() == trimmed_hdr)
-    });
-
     let mut combined = String::new();
-    if let Some(hdr) = header_needed {
+    if let Some(hdr) = header.filter(|hdr| {
+        !records(&existing)
+            .iter()
+            .any(|record| record.raw.trim() == hdr.trim())
+    }) {
         combined.push_str(hdr);
         if !hdr.ends_with('\n') {
             combined.push('\n');
         }
     }
-    for line in &out_lines {
-        combined.push_str(line);
-        combined.push('\n');
+    for record in records(&existing) {
+        if let Some(entry) = record.assignment
+            && managed_keys.contains(entry.key)
+        {
+            if consumed.insert(entry.key.to_owned()) {
+                let replacement = managed
+                    .iter()
+                    .find(|(key, _)| key == entry.key)
+                    .map_or(record.raw, |(_, line)| *line);
+                combined.push_str(replacement);
+                if record.raw.ends_with("\r\n") {
+                    combined.push_str("\r\n");
+                } else if record.raw.ends_with('\n') {
+                    combined.push('\n');
+                } else if record.raw.ends_with('\r') {
+                    combined.push('\r');
+                } else {
+                    // Preserve the absence of a final newline.
+                }
+            }
+        } else {
+            combined.push_str(record.raw);
+        }
+    }
+    for (key, value) in &managed {
+        if !consumed.contains(key) {
+            if !combined.is_empty() && !combined.ends_with(['\n', '\r']) {
+                combined.push('\n');
+            }
+            combined.push_str(value);
+            combined.push('\n');
+        }
     }
 
     // `dry_run` previews only: never touch the file or its mode.
@@ -293,6 +299,16 @@ pub fn upsert_lines_with_header(
     #[cfg(unix)]
     set_restrictive_mode(path)?;
     Ok(true)
+}
+
+fn validate_existing_records(body: &str) -> Result<(), String> {
+    if records(body)
+        .iter()
+        .any(|record| record.assignment.is_some_and(|entry| !entry.terminated))
+    {
+        return Err("refusing to edit an env file with an unterminated quoted value".to_owned());
+    }
+    Ok(())
 }
 
 /// Reject a target whose final component is a symlink, before a
@@ -434,6 +450,44 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn managed_upsert_preserves_quoted_records_and_line_endings() {
+        for quote in ['\'', '"', '`'] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join(".env");
+            let secret = format!(
+                "TOKEN={quote}line one\r\nMANAGED=inside secret\r\n# edgezero-provision: v1\r\nline four{quote}\r\n"
+            );
+            let original = format!("{secret}MANAGED=old\r\nKEEP=bytes");
+            fs::write(&path, original).unwrap();
+            upsert_lines_with_header(
+                &path,
+                Some(EDGEZERO_PROVISION_HEADER),
+                &["MANAGED=new".to_owned()],
+                false,
+            )
+            .unwrap();
+            let result = fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                result,
+                format!("{EDGEZERO_PROVISION_HEADER}\n{secret}MANAGED=new\r\nKEEP=bytes")
+            );
+        }
+    }
+
+    #[test]
+    fn append_does_not_deduplicate_against_secret_continuations() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".env");
+        fs::write(&path, "TOKEN=`first\nMANAGED=inside\nlast`\n").unwrap();
+        append_lines_dedup(&path, &["MANAGED=outside".to_owned()], false).unwrap();
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .ends_with("MANAGED=outside\n")
+        );
+    }
 
     /// Regression: a symlinked
     /// `.env` let provision write THROUGH the link and clobber a file

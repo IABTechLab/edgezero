@@ -8,9 +8,8 @@
 //! each `edgezero-adapter-*` crate's `Adapter::provision` impl, not
 //! here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -27,10 +26,14 @@ use crate::config::{
 use crate::copy_tree::copy_dir_recursive;
 use crate::ensure_adapter_defined;
 use crate::path_safety::{
-    assert_provision_paths_contained, assert_provision_paths_safe, reject_symlink_components,
+    assert_provision_paths_contained, assert_provision_paths_safe, local_layout,
+    reject_symlink_components,
 };
 use crate::provision_lock::ProvisionLock;
 use edgezero_adapter::AdapterDeployedState;
+use edgezero_adapter::env_file::EDGEZERO_PROVISION_HEADER;
+use edgezero_adapter::env_records::redaction_records;
+use edgezero_adapter::local::{AdapterLocalContext, LocalArtifactKind};
 use edgezero_adapter::registry::{
     self as adapter_registry, ProvisionOutcome, ProvisionStores, ResolvedStoreId, TypedSecretEntry,
 };
@@ -39,27 +42,6 @@ use edgezero_core::env_config::EnvConfig;
 use edgezero_core::manifest::{Manifest, ManifestAdapter, ManifestLoader, StoreDeclaration};
 use serde::de::DeserializeOwned;
 use validator::Validate;
-
-/// Owned counterpart to the borrowed `ProvisionStores<'_>`. Used by
-/// dispatch arms that need to build resolved store ids per-root
-/// (e.g. inside the `run_with_staging` closure where a borrowed
-/// return would dangle when the `Vec` locals dropped). The typed
-/// provision path consumes this too.
-pub(crate) struct OwnedProvisionStores {
-    pub config: Vec<ResolvedStoreId>,
-    pub kv: Vec<ResolvedStoreId>,
-    pub secrets: Vec<ResolvedStoreId>,
-}
-
-impl OwnedProvisionStores {
-    pub(crate) fn as_refs(&self) -> ProvisionStores<'_> {
-        ProvisionStores {
-            config: &self.config,
-            kv: &self.kv,
-            secrets: &self.secrets,
-        }
-    }
-}
 
 /// Resolved per-adapter allow-list inputs the dry-run driver diffs.
 /// Built by the CLI from the resolved adapter manifest path (NOT a
@@ -74,6 +56,7 @@ impl OwnedProvisionStores {
 pub(crate) struct DryRunAllowList {
     /// (`project_path`, `staged_path`) pairs the driver diffs.
     pub pairs: Vec<(PathBuf, PathBuf)>,
+    pub env_paths: BTreeSet<PathBuf>,
 }
 
 /// # Errors
@@ -93,7 +76,7 @@ pub(crate) struct DryRunAllowList {
 fn run_manifest_shape_gates(manifest: &Manifest, adapter_name: &str) -> Result<(), String> {
     enforce_single_store_capability(manifest, adapter_name)?;
     strict_handler_paths(manifest)?;
-    validate_deployed_field_ownership(manifest)?;
+    validate_deployed_field_ownership(manifest, Some(adapter_name))?;
     Ok(())
 }
 
@@ -181,7 +164,24 @@ pub fn run_provision(args: &ProvisionArgs) -> Result<(), String> {
     // (it must not create the lock sentinel) and gets snapshot consistency from
     // a pristine staged copy instead. See `provision_lock.rs` for the design.
     let _lock = acquire_provision_lock(args)?;
-    run_provision_inner(args)
+    run_provision_inner(args, None)
+}
+
+fn validate_local_layout(
+    args: &ProvisionArgs,
+    cfg: &ManifestAdapter,
+    adapter: &dyn adapter_registry::Adapter,
+) -> Result<(), String> {
+    if args.local {
+        local_layout(
+            manifest_root_from(&args.manifest),
+            adapter,
+            cfg.adapter.manifest.as_deref(),
+            cfg.adapter.crate_path.as_deref(),
+            cfg.adapter.component.as_deref(),
+        )?;
+    }
+    Ok(())
 }
 
 /// Lock-agnostic body of [`run_provision`]. Callers MUST hold the
@@ -191,7 +191,10 @@ pub fn run_provision(args: &ProvisionArgs) -> Result<(), String> {
 /// deployed merge, without `run_provision`'s inner acquisition
 /// re-entering flock (which is per-descriptor on Linux/macOS and
 /// would deadlock a second acquire from the same process).
-fn run_provision_inner(args: &ProvisionArgs) -> Result<(), String> {
+fn run_provision_inner(
+    args: &ProvisionArgs,
+    typed_entries: Option<&[TypedSecretEntry<'_>]>,
+) -> Result<(), String> {
     let manifest_loader = ManifestLoader::from_path(&args.manifest)
         .map_err(|err| format!("failed to load {}: {err}", args.manifest.display()))?;
     let manifest = manifest_loader.manifest();
@@ -223,6 +226,7 @@ fn run_provision_inner(args: &ProvisionArgs) -> Result<(), String> {
     run_manifest_shape_gates(manifest, &args.adapter)?;
 
     let manifest_root = manifest_root_from(&args.manifest);
+    validate_local_layout(args, adapter_cfg, adapter)?;
 
     // Fallback to "" when [app].name is unset: today's synthesiser
     // default is a no-op so the value isn't consulted; per-adapter
@@ -285,19 +289,18 @@ fn run_provision_inner(args: &ProvisionArgs) -> Result<(), String> {
                 deployed.as_ref(),
                 &adapter_cfg.adapter.allowed_outbound_hosts,
             )?;
-            let synthesised = write_baseline_to_disk(manifest_root, &baseline_pairs)?;
             let dispatch = DispatchContext {
                 adapter,
                 adapter_cfg,
                 adapter_name: &args.adapter,
                 manifest_root,
             };
-            let merged = validate_and_dispatch(
+            let (synthesised, merged) = run_local_transaction(
                 &dispatch,
                 manifest,
                 deployed.as_ref(),
-                adapter_registry::ProvisionMode::Local,
-                false,
+                &baseline_pairs,
+                typed_entries,
             )?;
             prepend_baseline_status_lines_worktree(&args.adapter, &synthesised, merged)
         }
@@ -430,7 +433,7 @@ where
 
     // 6. Shared typed preflight (typed_secret_checks + per-adapter
     //    validate_typed_secrets).
-    run_typed_preflight(&cfg, &ctx)?;
+    run_typed_preflight(&cfg, &ctx, Some(&canonical_adapter_name))?;
 
     // 7. Build the TypedSecretEntry slice.
     let entries = build_typed_secret_entries::<C>(&ctx)?;
@@ -440,49 +443,16 @@ where
         format!("adapter `{canonical_adapter_name}` is not registered in this build")
     })?;
 
+    local_layout(
+        manifest_root,
+        adapter,
+        adapter_manifest_rel_owned.as_deref(),
+        adapter_crate_rel_owned.as_deref(),
+        adapter_component_owned.as_deref(),
+    )?;
+
     if !args.dry_run {
-        // Real-write: base then typed against the live worktree.
-        // Call the lock-agnostic inner so we don't re-acquire flock
-        // from the same process (which would deadlock -- flock is
-        // per-descriptor on Linux/macOS and a second descriptor from
-        // this process would block waiting for ourselves).
-        run_provision_inner(args)?;
-        let outcome = adapter.provision_typed(
-            manifest_root,
-            adapter_manifest_rel_owned.as_deref(),
-            adapter_component_owned.as_deref(),
-            &entries,
-            adapter_registry::ProvisionMode::Local,
-            false,
-        )?;
-        for line in outcome.status_lines {
-            log::info!("{line}");
-        }
-        // Same writeback path as the base run_provision: if the typed
-        // arm surfaced any deployed fields (e.g. cloud secret store
-        // ids captured during typed placeholder emission), merge them
-        // into `[adapters.<name>.deployed]` in edgezero.toml. Today
-        // every impl returns deployed: None so this is a no-op; the
-        // hook exists so a future secrets-store-id capture doesn't
-        // silently leak out the side.
-        if let Some(deployed_writeback) = outcome.deployed.as_ref() {
-            let (canonical_adapter_key, _) = manifest
-                .adapter_entry(&args.adapter)
-                .ok_or_else(|| format!("adapter `{}` vanished from manifest", args.adapter))?;
-            merge_deployed_into_manifest(
-                &args.manifest,
-                canonical_adapter_key,
-                deployed_writeback,
-                adapter.deployed_fields(),
-                args.dry_run,
-            )?;
-        }
-        // Checkpoint durable ids above, THEN surface a partial failure --
-        // same ordering as the base `run_provision`.
-        if let Some(err) = outcome.error {
-            return Err(err);
-        }
-        return Ok(());
+        return run_provision_inner(args, Some(&entries));
     }
 
     let (report, dry_run_error) = run_local_dry_run_typed(
@@ -495,7 +465,6 @@ where
             adapter_crate_rel: adapter_crate_rel_owned.as_deref(),
             manifest_root,
         },
-        args,
         &entries,
     )?;
     if !report.is_empty() {
@@ -541,7 +510,7 @@ fn merge_and_render_typed_dry_run(
     typed: ProvisionOutcome,
     synthesised: &[PathBuf],
     canonical_adapter_name: &str,
-    adapter_manifest_rel: Option<&str>,
+    context: &AdapterLocalContext<'_>,
     // `(project_root, staged_root)` -- bundled so the arg count stays within
     // the restriction-lint limit now that the pristine snapshot is threaded.
     roots: (&Path, &Path),
@@ -551,23 +520,11 @@ fn merge_and_render_typed_dry_run(
     let staged_str = staged_root.to_string_lossy().into_owned();
     let project_str = manifest_root.to_string_lossy().into_owned();
 
-    let merged_status: Vec<String> = base
-        .status_lines
-        .into_iter()
-        .chain(typed.status_lines)
-        .collect();
-    // Preserve a partial-failure error from EITHER arm -- SANITISED, since
-    // an adapter's error is built against the staged tempdir and would
-    // otherwise leak raw staging paths into dry-run output (spec §"Dry-run"
-    // forbids tempdir paths in stdout/stderr, on the error path too).
-    let merged_error = base
+    let mut merged_outcome = merge_provision_outcomes(base, typed);
+    let merged_error = merged_outcome
         .error
-        .or(typed.error)
-        .map(|err| err.replace(&staged_str, &project_str));
-    let merged_outcome = match base.deployed.or(typed.deployed) {
-        Some(state) => ProvisionOutcome::with_deployed(merged_status, state),
-        None => ProvisionOutcome::from_status_lines(merged_status),
-    };
+        .take()
+        .map(|error| error.replace(&staged_str, &project_str));
     let combined = prepend_baseline_status_lines_with_rewrite(
         canonical_adapter_name,
         synthesised,
@@ -578,21 +535,15 @@ fn merge_and_render_typed_dry_run(
                 .replace(&staged_str, &project_str)
         },
     );
-    // Render INSIDE this helper — the allow-list builder /
-    // `default_adapter_manifest_for` both match on lowercase, so
-    // canonical (possibly mixed-case) names MUST be lowercased first.
-    let adapter_lower = canonical_adapter_name.to_ascii_lowercase();
-    let adapter_manifest_rel_or_default = adapter_manifest_rel.map_or_else(
-        || default_adapter_manifest_for(&adapter_lower).to_owned(),
-        String::from,
-    );
-    let adapter_manifest_abs = staged_root.join(&adapter_manifest_rel_or_default);
-    let allow_list = build_dry_run_allow_list(
+    let allow_list = match resolve_dry_run_allow_list(
         manifest_root,
         staged_root,
-        &adapter_lower,
-        &adapter_manifest_abs,
-    );
+        canonical_adapter_name,
+        context,
+    ) {
+        Ok(allow_list) => allow_list,
+        Err(error) => return (String::new(), Some(error)),
+    };
     let report =
         render_dry_run_report(manifest_root, staged_root, &allow_list, &combined, pristine);
     (report, merged_error)
@@ -600,7 +551,6 @@ fn merge_and_render_typed_dry_run(
 
 fn run_local_dry_run_typed(
     req: &DryRunTypedRequest<'_>,
-    args: &ProvisionArgs,
     entries: &[TypedSecretEntry<'_>],
 ) -> Result<(String, Option<String>), String> {
     let &DryRunTypedRequest {
@@ -641,58 +591,53 @@ fn run_local_dry_run_typed(
             // Snapshot the diff-target files NOW, before any baseline or
             // provision write mutates the staged tree, so the report's
             // "before" side is a single consistent worktree instant.
+            stage_local_artifacts(
+                manifest_root,
+                staged_root,
+                adapter,
+                adapter_manifest_rel,
+                adapter_crate_rel,
+                adapter_component,
+            )?;
             let pristine = capture_pristine_snapshot(&resolve_dry_run_allow_list(
                 manifest_root,
                 staged_root,
                 canonical_adapter_name,
-                adapter_manifest_rel,
-            ));
-            let synthesised =
-                write_baseline_to_disk(staged_root, &baseline_pairs).map_err(&sanitize)?;
-            adapter
-                .validate_adapter_manifest(
-                    staged_root,
+                &AdapterLocalContext::new(
                     adapter_manifest_rel,
+                    adapter_crate_rel,
                     adapter_component,
+                ),
+            )?);
+            let (_, adapter_cfg) = ctx
+                .manifest()
+                .adapter_entry(canonical_adapter_name)
+                .ok_or_else(|| "selected adapter vanished".to_owned())?;
+            let dispatch = DispatchContext {
+                adapter,
+                adapter_cfg,
+                adapter_name: canonical_adapter_name,
+                manifest_root: staged_root,
+            };
+            let (synthesised, base) = run_local_transaction(
+                &dispatch,
+                ctx.manifest(),
+                deployed_state.as_ref(),
+                &baseline_pairs,
+                Some(entries),
+            )
+            .map_err(&sanitize)?;
+            if let Some(state) = base.deployed.as_ref() {
+                merge_deployed_into_manifest(
+                    ctx.manifest_path(),
+                    canonical_adapter_name,
+                    state,
+                    adapter.deployed_fields(),
                     true,
                 )
                 .map_err(&sanitize)?;
-            let owned_stores = build_stores_against(staged_root, args, adapter, ctx.manifest())
-                .map_err(&sanitize)?;
-            let stores = owned_stores.as_refs();
-            // Spec §"Dry-run" step 3: pass `dry_run = false` — the
-            // tempdir IS the dry-run mechanism, not the flag.
-            let base = adapter
-                .provision(
-                    staged_root,
-                    adapter_manifest_rel,
-                    adapter_component,
-                    &stores,
-                    deployed_state.as_ref(),
-                    adapter_registry::ProvisionMode::Local,
-                    false,
-                )
-                .map_err(&sanitize)?;
-            // Mirror real execution: `run_provision_inner` returns Err on a
-            // base PARTIAL failure BEFORE typed provision runs, so typed
-            // mutations never happen. In dry-run, previewing them anyway
-            // would advertise writes the real command won't perform --
-            // skip typed when the base failed and let the base error
-            // propagate through the merge.
-            let typed = if base.error.is_some() {
-                adapter_registry::ProvisionOutcome::from_status_lines(Vec::new())
-            } else {
-                adapter
-                    .provision_typed(
-                        staged_root,
-                        adapter_manifest_rel,
-                        adapter_component,
-                        entries,
-                        adapter_registry::ProvisionMode::Local,
-                        false,
-                    )
-                    .map_err(&sanitize)?
-            };
+            }
+            let typed = ProvisionOutcome::default();
             // Merge, prepend baseline lines, and render. The report and
             // any partial-failure error travel out together so the caller
             // can propagate the error after logging the report.
@@ -701,7 +646,11 @@ fn run_local_dry_run_typed(
                 typed,
                 &synthesised,
                 canonical_adapter_name,
-                adapter_manifest_rel,
+                &AdapterLocalContext::new(
+                    adapter_manifest_rel,
+                    adapter_crate_rel,
+                    adapter_component,
+                ),
                 (manifest_root, staged_root),
                 Some(&pristine),
             ))
@@ -1160,99 +1109,77 @@ fn validate_and_dispatch(
     )
 }
 
-/// Same store-construction pattern `validate_and_dispatch` runs
-/// inline, but returns the owned form so the caller can hold it
-/// across a closure and `.as_refs()` immediately before dispatch.
-/// Used by the `(true, true)` arm today; the typed provision path
-/// consumes it too.
-///
-/// The `_root` parameter is unused today — reserved for future
-/// per-root state (e.g. reading a synthesised sidecar file).
-///
-/// `adapter` is `&'static dyn` to match `validate_and_dispatch` and
-/// `reject_merged_id_collisions`, both of which take `'static`
-/// trait objects because the registry only hands out `&'static`
-/// references.
-fn build_stores_against(
-    _root: &Path,
-    args: &ProvisionArgs,
-    adapter: &'static dyn adapter_registry::Adapter,
+/// Shared ordered local pipeline; only the supplied filesystem root changes
+/// between real writes and staged previews.
+fn run_local_transaction(
+    dispatch: &DispatchContext<'_>,
     manifest: &Manifest,
-) -> Result<OwnedProvisionStores, String> {
-    let env_config = effective_manifest_environment(manifest, &args.adapter, env::vars());
-    reject_merged_id_collisions(&args.adapter, adapter, manifest, &env_config)?;
-    Ok(OwnedProvisionStores {
-        config: resolve_kind(manifest.stores.config.as_ref(), &env_config, "config")?,
-        kv: resolve_kind(manifest.stores.kv.as_ref(), &env_config, "kv")?,
-        secrets: resolve_kind(manifest.stores.secrets.as_ref(), &env_config, "secrets")?,
-    })
+    deployed: Option<&AdapterDeployedState>,
+    baseline: &[(PathBuf, String)],
+    entries: Option<&[TypedSecretEntry<'_>]>,
+) -> Result<(Vec<PathBuf>, ProvisionOutcome), String> {
+    let written = write_baseline_to_disk(dispatch.manifest_root, baseline)?;
+    let mut outcome = validate_and_dispatch(
+        dispatch,
+        manifest,
+        deployed,
+        adapter_registry::ProvisionMode::Local,
+        false,
+    )?;
+    if outcome.error.is_none()
+        && let Some(typed_entries) = entries
+    {
+        let typed_result = dispatch.adapter.provision_typed(
+            dispatch.manifest_root,
+            dispatch.adapter_cfg.adapter.manifest.as_deref(),
+            dispatch.adapter_cfg.adapter.component.as_deref(),
+            typed_entries,
+            adapter_registry::ProvisionMode::Local,
+            false,
+        );
+        outcome = match typed_result {
+            Ok(typed) => merge_provision_outcomes(outcome, typed),
+            Err(error) => outcome.with_error(error),
+        };
+    }
+    Ok((written, outcome))
 }
 
-/// Build the allow-list from the resolved adapter manifest path.
-/// `adapter_manifest_abs` is the absolute path the adapter would
-/// write to (`staged_root.join(adapter_manifest_rel)`); the helper
-/// computes its sibling paths and the corresponding project-tree
-/// twins by prefix-swapping `staged_root` → `project_root`.
-///
-/// **Case contract:** callers MUST lowercase the adapter name
-/// before passing it in. The manifest's canonical spelling (e.g.
-/// `Fastly`) does NOT match the match arms.
+fn merge_provision_outcomes(
+    mut base: ProvisionOutcome,
+    typed: ProvisionOutcome,
+) -> ProvisionOutcome {
+    base.status_lines.extend(typed.status_lines);
+    base.error = base.error.or(typed.error);
+    if let Some(typed_state) = typed.deployed {
+        let state = base
+            .deployed
+            .get_or_insert_with(AdapterDeployedState::default);
+        state.fields.extend(typed_state.fields);
+        for (name, fields) in typed_state.sub_tables {
+            state.sub_tables.entry(name).or_default().extend(fields);
+        }
+    }
+    base
+}
+
+/// Resolve an adapter's declared artifacts into project/staged pairs.
+#[cfg(test)]
 pub(crate) fn build_dry_run_allow_list(
     project_root: &Path,
     staged_root: &Path,
-    adapter_lower: &str,
+    adapter_name: &str,
     adapter_manifest_abs: &Path,
-) -> DryRunAllowList {
-    let project_manifest = adapter_manifest_abs.strip_prefix(staged_root).map_or_else(
-        |_| adapter_manifest_abs.to_path_buf(),
-        |rel| project_root.join(rel),
-    );
-    let manifest_parent_staged = adapter_manifest_abs
-        .parent()
-        .unwrap_or(staged_root)
-        .to_path_buf();
-    let manifest_parent_project = project_manifest
-        .parent()
-        .unwrap_or(project_root)
-        .to_path_buf();
-    let mut pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
-    match adapter_lower {
-        "axum" => {
-            // Axum's synthesised axum.toml + the .edgezero/.env file
-            // provision writes for the runtime store->platform-name
-            // map. The manifest lives at the resolved
-            // `[adapters.axum.adapter].manifest` path (or default
-            // `axum.toml` if unset -- see `default_adapter_manifest_for`).
-            pairs.push((project_manifest.clone(), adapter_manifest_abs.to_path_buf()));
-            pairs.push((
-                project_root.join(".edgezero/.env"),
-                staged_root.join(".edgezero/.env"),
-            ));
-        }
-        "cloudflare" => {
-            pairs.push((project_manifest.clone(), adapter_manifest_abs.to_path_buf()));
-            pairs.push((
-                manifest_parent_project.join(".dev.vars"),
-                manifest_parent_staged.join(".dev.vars"),
-            ));
-        }
-        "fastly" => {
-            pairs.push((project_manifest, adapter_manifest_abs.to_path_buf()));
-        }
-        "spin" => {
-            pairs.push((project_manifest.clone(), adapter_manifest_abs.to_path_buf()));
-            pairs.push((
-                manifest_parent_project.join("runtime-config.toml"),
-                manifest_parent_staged.join("runtime-config.toml"),
-            ));
-            pairs.push((
-                manifest_parent_project.join(".env"),
-                manifest_parent_staged.join(".env"),
-            ));
-        }
-        _ => {}
-    }
-    DryRunAllowList { pairs }
+) -> Result<DryRunAllowList, String> {
+    let relative = adapter_manifest_abs
+        .strip_prefix(staged_root)
+        .map_err(|err| format!("adapter manifest is outside staging: {err}"))?;
+    resolve_dry_run_allow_list(
+        project_root,
+        staged_root,
+        adapter_name,
+        &AdapterLocalContext::new(relative.to_str(), None, None),
+    )
 }
 
 /// Snapshot the pre-provision content of every diff-target file in the
@@ -1276,39 +1203,32 @@ fn capture_pristine_snapshot(allow_list: &DryRunAllowList) -> BTreeMap<PathBuf, 
         .collect()
 }
 
-/// Resolve the dry-run allow-list for `adapter_name` against the staged
-/// tree: lowercase the adapter, fall back to its default manifest name when
-/// unset, and build the `(project, staged)` diff pairs. Shared by the
-/// snapshot capture (T1, pre-provision) and the report render (T2), so both
-/// key off identical staged paths.
+/// Obtain reporting policy from the registered adapter.
 fn resolve_dry_run_allow_list(
     manifest_root: &Path,
     staged_root: &Path,
     adapter_name: &str,
-    adapter_manifest_rel: Option<&str>,
-) -> DryRunAllowList {
-    let adapter_lower = adapter_name.to_lowercase();
-    let manifest_rel =
-        adapter_manifest_rel.unwrap_or_else(|| default_adapter_manifest_for(&adapter_lower));
-    build_dry_run_allow_list(
+    context: &AdapterLocalContext<'_>,
+) -> Result<DryRunAllowList, String> {
+    let adapter = adapter_registry::get_adapter(adapter_name)
+        .ok_or_else(|| format!("unknown adapter `{adapter_name}`"))?;
+    let layout = local_layout(
         manifest_root,
-        staged_root,
-        &adapter_lower,
-        &staged_root.join(manifest_rel),
-    )
-}
-
-/// Per-adapter default manifest filename. Fallback for when
-/// `[adapters.<name>.adapter].manifest` is unset. Mirrors each
-/// adapter crate's default.
-pub(crate) fn default_adapter_manifest_for(adapter_lower: &str) -> &'static str {
-    match adapter_lower {
-        "axum" => "axum.toml",
-        "cloudflare" => "wrangler.toml",
-        "fastly" => "fastly.toml",
-        "spin" => "spin.toml",
-        _ => "",
+        adapter,
+        context.manifest(),
+        context.crate_path(),
+        context.component(),
+    )?;
+    let mut pairs = Vec::new();
+    let mut env_paths = BTreeSet::new();
+    for artifact in layout.artifacts {
+        let project = manifest_root.join(&artifact.path);
+        if artifact.kind == LocalArtifactKind::Env {
+            env_paths.insert(project.clone());
+        }
+        pairs.push((project, staged_root.join(&artifact.path)));
     }
+    Ok(DryRunAllowList { pairs, env_paths })
 }
 
 /// Permission delta (`project_mode`, `staged_mode`) between a project file
@@ -1426,7 +1346,7 @@ pub(crate) fn render_dry_run_report(
         // `KEY=<redacted>` filter for env-shaped paths BEFORE
         // computing the diff. Comment lines and blank lines pass
         // through as-is so structural drift is still visible.
-        let is_env_like = is_env_secret_carriage_path(proj_path);
+        let is_env_like = allow_list.env_paths.contains(proj_path);
         let old_render = if is_env_like {
             redact_env_body_for_diff(&old)
         } else {
@@ -1464,145 +1384,28 @@ pub(crate) fn render_dry_run_report(
     out
 }
 
-/// True when the path is a secret-carriage env file (`.env`,
-/// `.dev.vars`). Match on file NAME only so nested paths like
-/// `.edgezero/.env` and `<spin_crate>/.env` are both covered.
-fn is_env_secret_carriage_path(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(OsStr::to_str),
-        Some(".env" | ".dev.vars")
-    )
-}
-
-/// Rewrite each `KEY=value` line in an env-shaped body as
-/// `KEY=<redacted>`, preserving comment and blank lines verbatim.
-/// Used by `render_dry_run_report` before diffing so a `.env` or
-/// `.dev.vars` never surfaces operator secrets as context in the
-/// unified-diff output. Structural changes (added/removed KEYS,
-/// added comment lines) still show up as normal +/- hunks.
-/// Does an env value OPEN a multiline quoted value -- i.e. start with a
-/// quote (`"` or `'`) that it does not close (unescaped) on the same line?
-/// Returns the quote char when so, so continuation lines get redacted.
-fn env_value_opens_multiline_quote(value: &str) -> Option<char> {
-    let mut chars = value.trim_start().chars();
-    let quote = chars.next().filter(|ch| *ch == '"' || *ch == '\'')?;
-    // Closed (unescaped) on this same line -> a single-line quoted value.
-    if env_line_closes_quote(chars.as_str(), quote) {
-        return None;
-    }
-    Some(quote)
-}
-
-/// Does `line` contain an UNESCAPED occurrence of `quote` (closing an open
-/// multiline quoted value)?
-fn env_line_closes_quote(line: &str, quote: char) -> bool {
-    let mut escaped = false;
-    for ch in line.chars() {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == quote {
-            return true;
-        } else {
-            // An ordinary character -- keep scanning.
-        }
-    }
-    false
-}
-
+/// Redact entire logical values, including malformed and stashed multiline values.
 fn redact_env_body_for_diff(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    // The quote char of a multiline quoted value we are INSIDE. A dotenv
-    // value like `KEY="line1\nline2"` spans lines; only its first line is
-    // `KEY=`-shaped, so without this state the CONTINUATION lines (real secret
-    // bytes) would fall through and surface in the unified-diff context.
-    let mut in_multiline: Option<char> = None;
-    for line in body.split_inclusive('\n') {
-        // Split off the trailing newline (if any) — env-file content
-        // is normally 7-bit ASCII, but redaction of a hand-authored
-        // operator note that includes UTF-8 must not panic.
-        let (content, tail) = match line.rfind('\n') {
-            Some(idx) => line.split_at(idx),
-            None => (line, ""),
-        };
-        // A continuation line of a multiline quoted value: the WHOLE line is
-        // secret content -- redact it, and end the state at the closing quote.
-        if let Some(quote) = in_multiline {
+    let mut out = String::new();
+    for record in redaction_records(body) {
+        if record.raw.trim() == EDGEZERO_PROVISION_HEADER {
+            out.push_str(record.raw);
+            continue;
+        }
+        if let Some(entry) = record.assignment {
+            out.push_str(entry.prefix);
             out.push_str("<redacted>");
-            out.push_str(tail);
-            if env_line_closes_quote(content, quote) {
-                in_multiline = None;
+            // Preserve the number of physical lines without copying their contents.
+            for _ in 0..record.raw.bytes().filter(|ch| *ch == b'\n').count() {
+                out.push('\n');
             }
-            continue;
-        }
-        let trimmed = content.trim_start();
-        if trimmed.is_empty() {
-            out.push_str(line);
-            continue;
-        }
-        // Comment-shaped lines still get redacted when they carry a
-        // `KEY=value` shape. Reason: adapter provisioners emit
-        // commented placeholder entries like
-        // `# EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY=` (see
-        // `edgezero-adapter-axum/src/cli/provision_local.rs`), and
-        // operators frequently leave stashed real values behind a
-        // leading `#` for later use. `env_file.rs`'s dedup helper
-        // treats single-hash `# KEY=value` as a real commented env
-        // entry, so it's part of the secret-carriage surface.
-        //
-        // Pure comments — either shebang-style banners
-        // (`# edgezero-provision: v1`), or comments that don't
-        // contain an `=` — pass through unchanged so structural
-        // context stays readable.
-        if let Some(after_hash) = trimmed.strip_prefix('#') {
-            let body_after_hash = after_hash.trim_start();
-            if let Some((key, value)) = body_after_hash.split_once('=') {
-                // Preserve the operator's original indent + leading
-                // `#` shape (e.g. `#`, `# `, `  # `). Iterate chars
-                // rather than byte-slice so a multi-byte UTF-8
-                // codepoint in the key or value never triggers an
-                // in-codepoint slice.
-                let mut past_hash = false;
-                for ch in content.chars() {
-                    if past_hash {
-                        if ch.is_whitespace() {
-                            out.push(ch);
-                        } else {
-                            break;
-                        }
-                    } else {
-                        out.push(ch);
-                        if ch == '#' {
-                            past_hash = true;
-                        }
-                    }
-                }
-                out.push_str(key);
-                out.push_str("=<redacted>");
-                out.push_str(tail);
-                // A commented value can also open a multiline quote.
-                in_multiline = env_value_opens_multiline_quote(value);
-                continue;
-            }
-            // Pure comment — no `=` in the body.
-            out.push_str(line);
-            continue;
-        }
-        if let Some((key, value)) = content.split_once('=') {
-            out.push_str(key);
-            out.push('=');
-            out.push_str("<redacted>");
-            out.push_str(tail);
-            // If the value opens a quote it doesn't close on this line, the
-            // secret continues onto the next lines -- redact those too.
-            in_multiline = env_value_opens_multiline_quote(value);
+        } else if record.raw.trim_start().starts_with('#') || record.raw.trim().is_empty() {
+            out.push_str(record.raw);
         } else {
-            // Malformed line without `=`; emit as-is so the operator
-            // sees the structural anomaly. Not a secret leak: any
-            // real `.env` file uses `KEY=VALUE`, and a stray line
-            // that isn't `KEY=` shape usually can't hold a secret.
-            out.push_str(line);
+            out.push_str("<redacted>");
+            if record.raw.ends_with('\n') {
+                out.push('\n');
+            }
         }
     }
     out
@@ -1660,44 +1463,33 @@ fn run_local_dry_run(
             // "before" side is a single consistent worktree instant. Keys
             // match the allow-list rebuilt below the closure (same
             // `staged_root` + manifest resolution).
+            stage_local_artifacts(
+                manifest_root,
+                staged_root,
+                adapter,
+                adapter_cfg.adapter.manifest.as_deref(),
+                adapter_cfg.adapter.crate_path.as_deref(),
+                adapter_cfg.adapter.component.as_deref(),
+            )?;
             let pristine = capture_pristine_snapshot(&resolve_dry_run_allow_list(
                 manifest_root,
                 staged_root,
                 &args.adapter,
-                adapter_cfg.adapter.manifest.as_deref(),
-            ));
-            let synthesised =
-                write_baseline_to_disk(staged_root, &baseline_pairs).map_err(sanitize)?;
-            adapter
-                .validate_adapter_manifest(
-                    staged_root,
+                &AdapterLocalContext::new(
                     adapter_cfg.adapter.manifest.as_deref(),
+                    adapter_cfg.adapter.crate_path.as_deref(),
                     adapter_cfg.adapter.component.as_deref(),
-                    true,
-                )
-                .map_err(sanitize)?;
-            let owned_stores =
-                build_stores_against(staged_root, args, adapter, manifest).map_err(sanitize)?;
-            // Spec §"Dry-run" step 3: pass `dry_run = false` to the
-            // adapter even though `args.dry_run == true`. The tempdir
-            // IS the dry-run mechanism — the adapter takes its real
-            // write branch against the staged tree so operators can
-            // preview the actual files that would land. If we passed
-            // `true`, adapters would early-return from their dry-run
-            // branches (cloudflare cli.rs:263, spin cli.rs:223) and
-            // leave the staged tree empty of the content the diff
-            // report is supposed to show.
-            let outcome = adapter
-                .provision(
-                    staged_root,
-                    adapter_cfg.adapter.manifest.as_deref(),
-                    adapter_cfg.adapter.component.as_deref(),
-                    &owned_stores.as_refs(),
-                    deployed,
-                    adapter_registry::ProvisionMode::Local,
-                    false,
-                )
-                .map_err(sanitize)?;
+                ),
+            )?);
+            let dispatch = DispatchContext {
+                adapter,
+                adapter_cfg,
+                adapter_name: &args.adapter,
+                manifest_root: staged_root,
+            };
+            let (synthesised, outcome) =
+                run_local_transaction(&dispatch, manifest, deployed, &baseline_pairs, None)
+                    .map_err(sanitize)?;
             // Prepend baseline-write lines with staged paths rewritten
             // back to project-relative form (spec §"Dry-run": stdout
             // must NEVER carry raw tempdir paths).
@@ -1721,8 +1513,12 @@ fn run_local_dry_run(
         manifest_root,
         staged_root,
         &args.adapter,
-        adapter_cfg.adapter.manifest.as_deref(),
-    );
+        &AdapterLocalContext::new(
+            adapter_cfg.adapter.manifest.as_deref(),
+            adapter_cfg.adapter.crate_path.as_deref(),
+            adapter_cfg.adapter.component.as_deref(),
+        ),
+    )?;
     let report = render_dry_run_report(
         manifest_root,
         staged_root,
@@ -1766,6 +1562,34 @@ fn run_local_dry_run(
         }
         None => rebuilt,
     })
+}
+
+fn stage_local_artifacts(
+    project: &Path,
+    staged: &Path,
+    adapter: &dyn adapter_registry::Adapter,
+    manifest: Option<&str>,
+    crate_path: Option<&str>,
+    component: Option<&str>,
+) -> Result<(), String> {
+    let layout = local_layout(project, adapter, manifest, crate_path, component)?;
+    for path in layout
+        .artifacts
+        .iter()
+        .map(|artifact| &artifact.path)
+        .chain(layout.serve_env.iter())
+    {
+        let source = project.join(path);
+        if source.is_file() {
+            let target = staged.join(path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+            }
+            fs::copy(&source, &target)
+                .map_err(|err| format!("stage {}: {err}", source.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Stage a real recursive copy of the adapter crate dir AND the
@@ -1871,14 +1695,16 @@ where
 mod tests {
     use super::*;
     use crate::args::ProvisionArgs;
-    use crate::test_support::{EnvOverride, PROVISION_MANIFEST, manifest_guard};
+    use crate::test_support::{
+        EnvOverride, LAYOUT_TEST_ADAPTER, PROVISION_MANIFEST, manifest_guard,
+    };
     use edgezero_adapter::registry::{
         Adapter, AdapterAction, AdapterExecContext, ProvisionMode, ProvisionOutcome, get_adapter,
         register_adapter,
     };
     use edgezero_core::app_config::{SecretField, SecretKind, SecretPathSegment};
     use std::borrow::Cow;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::env;
     use std::fs;
     use std::io;
@@ -3271,6 +3097,7 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(proj.clone(), staged.clone())],
+            env_paths: BTreeSet::new(),
         };
         let outcome = ProvisionOutcome::from_status_lines(vec![]);
         let report = render_dry_run_report(temp.path(), temp.path(), &allow_list, &outcome, None);
@@ -3294,6 +3121,7 @@ ids = ["default"]
         fs::write(&staged, "name = \"before\"\n").expect("write staged");
         let allow_list = DryRunAllowList {
             pairs: vec![(proj.clone(), staged.clone())],
+            env_paths: BTreeSet::new(),
         };
         let pristine = capture_pristine_snapshot(&allow_list);
 
@@ -3345,7 +3173,10 @@ ids = ["default"]
             "fastly: wrote local kv_store `sessions` (logical id `sessions`) in fastly.toml"
                 .to_owned(),
         ]);
-        let allow_list = DryRunAllowList { pairs: vec![] };
+        let allow_list = DryRunAllowList {
+            pairs: vec![],
+            env_paths: BTreeSet::new(),
+        };
         let report = render_dry_run_report(temp.path(), temp.path(), &allow_list, &outcome, None);
         assert!(
             report.contains("would write crates/spin/spin.toml"),
@@ -3430,7 +3261,7 @@ ids = ["default"]
             typed,
             &[],
             "axum",
-            Some("axum.toml"),
+            &AdapterLocalContext::new(Some("axum.toml"), None, None),
             (dir.path(), dir.path()),
             None,
         );
@@ -3451,7 +3282,10 @@ ids = ["default"]
         let outcome = ProvisionOutcome::from_status_lines(vec![
             "wrote /tmp/staging-xyz/proj/crates/spin/spin.toml".to_owned(),
         ]);
-        let allow_list = DryRunAllowList { pairs: vec![] };
+        let allow_list = DryRunAllowList {
+            pairs: vec![],
+            env_paths: BTreeSet::new(),
+        };
         let report = render_dry_run_report(project, staged, &allow_list, &outcome, None);
         assert!(
             report.contains("would write /home/dev/proj/crates/spin/spin.toml"),
@@ -3460,6 +3294,136 @@ ids = ["default"]
         assert!(
             !report.contains("/tmp/staging-xyz"),
             "no staged tempdir path may leak into the report: {report}"
+        );
+    }
+
+    #[test]
+    fn preview_redacts_backtick_and_unterminated_records() {
+        for quote in ['\'', '"', '`'] {
+            let input = format!(
+                "TOKEN={quote}first sentinel\nSECOND_SENTINEL\nlast{quote}\nNEXT=visible-key\n"
+            );
+            let report = redact_env_body_for_diff(&input);
+            assert!(
+                !report.contains("sentinel") && !report.contains("SECOND_SENTINEL"),
+                "{report}"
+            );
+            let malformed_report =
+                redact_env_body_for_diff(&format!("TOKEN={quote}first\nSECRET_SENTINEL\n"));
+            assert!(
+                !malformed_report.contains("SECRET_SENTINEL"),
+                "{malformed_report}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_layout_reports_and_redacts_sidecars_derived_from_full_context() {
+        let adapter = &LAYOUT_TEST_ADAPTER;
+        adapter_registry::register_adapter(adapter);
+        let project = TempDir::new().unwrap();
+        let staged = TempDir::new().unwrap();
+        let context = AdapterLocalContext::new(
+            Some("crate/provider.settings"),
+            Some("crate"),
+            Some("selected"),
+        );
+        fs::create_dir_all(project.path().join("crate")).unwrap();
+        fs::write(
+            project.path().join("crate/selected.credentials"),
+            "TOKEN=`FIRST_SENTINEL\nSECOND_SENTINEL`\n",
+        )
+        .unwrap();
+        stage_local_artifacts(
+            project.path(),
+            staged.path(),
+            adapter,
+            context.manifest(),
+            context.crate_path(),
+            context.component(),
+        )
+        .unwrap();
+        let allow =
+            resolve_dry_run_allow_list(project.path(), staged.path(), adapter.name(), &context)
+                .unwrap();
+        let pristine = capture_pristine_snapshot(&allow);
+        fs::write(
+            staged.path().join("crate/selected.credentials"),
+            "TOKEN=new\nADDED=THIRD_SENTINEL\n",
+        )
+        .unwrap();
+        let report = render_dry_run_report(
+            project.path(),
+            staged.path(),
+            &allow,
+            &ProvisionOutcome::default(),
+            Some(&pristine),
+        );
+        assert!(
+            report.contains("selected.credentials") && report.contains("ADDED=<redacted>"),
+            "{report}"
+        );
+        assert!(!report.contains("SENTINEL"), "{report}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derived_symlinks_are_rejected_before_staging_and_real_writes() {
+        use std::os::unix::fs::symlink;
+        let _guard = manifest_guard().lock().unwrap();
+        let adapter = &LAYOUT_TEST_ADAPTER;
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::create_dir_all(project.path().join("crate")).unwrap();
+        symlink(
+            outside.path().join("untouched"),
+            project.path().join("crate/selected.credentials"),
+        )
+        .unwrap();
+        adapter_registry::register_adapter(adapter);
+        let manifest = project.path().join("edgezero.toml");
+        fs::write(&manifest, "[app]\nname='demo'\n[adapters.__layout_test__.adapter]\ncrate='crate'\nmanifest='crate/provider.settings'\ncomponent='selected'\n").unwrap();
+        for dry_run in [true, false] {
+            let error = run_provision(&ProvisionArgs {
+                adapter: adapter.name().to_owned(),
+                local: true,
+                dry_run,
+                manifest: manifest.clone(),
+            })
+            .unwrap_err();
+            assert!(error.contains("symlink"), "dry_run={dry_run}: {error}");
+        }
+        assert!(!outside.path().join("untouched").exists());
+    }
+
+    #[test]
+    fn dry_run_reports_a_registered_adapter_with_an_unusual_manifest() {
+        let _guard = manifest_guard().lock().expect("manifest guard");
+        adapter_registry::register_adapter(&FAKE_ADAPTER);
+        let project = TempDir::new().expect("project");
+        let staged = TempDir::new().expect("staged");
+        let relative = Path::new("crates/custom/provider.settings");
+        let staged_manifest = staged.path().join(relative);
+        fs::create_dir_all(staged_manifest.parent().expect("manifest parent"))
+            .expect("create parent");
+        fs::write(&staged_manifest, "provider = 'custom'\n").expect("staged manifest");
+        let allow_list = build_dry_run_allow_list(
+            project.path(),
+            staged.path(),
+            FAKE_ADAPTER.name(),
+            &staged_manifest,
+        )
+        .expect("adapter layout");
+        let report = render_dry_run_report(
+            project.path(),
+            staged.path(),
+            &allow_list,
+            &ProvisionOutcome::default(),
+            None,
+        );
+        assert!(
+            report.contains("provider.settings"),
+            "registered adapters must participate without a CLI provider branch: {report}"
         );
     }
 
@@ -3480,7 +3444,8 @@ ids = ["default"]
             staged.path(),
             "cloudflare",
             &staged.path().join("wrangler.toml"),
-        );
+        )
+        .expect("adapter layout");
         let cf_report = render_dry_run_report(
             project.path(),
             staged.path(),
@@ -3517,7 +3482,8 @@ ids = ["default"]
             axum_staged.path(),
             "axum",
             &axum_staged.path().join("axum.toml"),
-        );
+        )
+        .expect("adapter layout");
         let axum_report = render_dry_run_report(
             axum_project.path(),
             axum_staged.path(),
@@ -3568,7 +3534,8 @@ ids = ["default"]
             staged.path(),
             "cloudflare",
             &staged.path().join("crates/cf/config/wrangler.toml"),
-        );
+        )
+        .expect("adapter layout");
         let report = render_dry_run_report(
             project.path(),
             staged.path(),
@@ -3759,7 +3726,7 @@ ids = ["default"]
         "#;
         let manifest: Manifest = toml::from_str(toml_body).unwrap();
         manifest.validate().unwrap();
-        validate_deployed_field_ownership(&manifest)
+        validate_deployed_field_ownership(&manifest, None)
             .expect("fake owns service_id -- must validate cleanly");
     }
 
@@ -3784,7 +3751,7 @@ ids = ["default"]
         "#;
         let manifest: Manifest = toml::from_str(toml_body).unwrap();
         manifest.validate().unwrap();
-        let err = validate_deployed_field_ownership(&manifest)
+        let err = validate_deployed_field_ownership(&manifest, None)
             .expect_err("adapter declares no fields -- must reject");
         assert!(
             err.contains("service_id") && err.contains("__test_no_fields_fake__"),
@@ -4749,7 +4716,6 @@ ids = ["default"]
                 adapter_crate_rel: adapter_crate_rel.as_deref(),
                 manifest_root,
             },
-            &args,
             &entries,
         )
         .expect("dry-run helper must succeed");
@@ -4838,6 +4804,13 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(project_env.clone(), staged_env.clone())],
+            env_paths: [
+                project.path().join(".env"),
+                project.path().join(".dev.vars"),
+                project.path().join(".edgezero/.env"),
+            ]
+            .into_iter()
+            .collect(),
         };
         let outcome = adapter_registry::ProvisionOutcome::default();
         let report =
@@ -4873,6 +4846,13 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(project_env.clone(), staged_env.clone())],
+            env_paths: [
+                project.path().join(".env"),
+                project.path().join(".dev.vars"),
+                project.path().join(".edgezero/.env"),
+            ]
+            .into_iter()
+            .collect(),
         };
         let outcome = adapter_registry::ProvisionOutcome::default();
         let report =
@@ -4901,6 +4881,13 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(project_toml.clone(), staged_toml.clone())],
+            env_paths: [
+                project.path().join(".env"),
+                project.path().join(".dev.vars"),
+                project.path().join(".edgezero/.env"),
+            ]
+            .into_iter()
+            .collect(),
         };
         let outcome = adapter_registry::ProvisionOutcome::default();
         let report =

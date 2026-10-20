@@ -173,3 +173,32 @@ Clippy, combined-feature compilation, adapter WASM checks, generated-project
 compilation, docs checks, and fake-provider deployment smoke tests. Preserve
 existing user changes in other worktrees. Do not merge the PR or post review
 comments as part of implementation.
+
+## Implementation decisions and review
+
+The implementation adds neutral local-layout metadata and moves tool pins,
+install notes, ignore patterns, and logging expansion policy to adapter
+blueprints. Targeted validation is selected-adapter policy; core validates only
+manifest structure. A common local transaction handles staged and real writes.
+
+The initial handwritten env scanner was replaced after differential review
+found valid Wrangler forms with escaped quotes, colon separators, and Unicode
+whitespace. The shared lossless records use the dotenv grammar and a literal
+serializer. Read-only review compared 629 parser inputs and 2,696 serialized
+values with the installed dotenv consumer; no mismatches remained. Nine direct
+writer/redactor probes cover multiline records and all line endings.
+
+Fastly private environment selection is confined to native deploy. Upstream
+Fastly build temporarily replaces its source manifest when an environment is
+selected, so native serve retains the standard manifest build path and rejects
+custom basenames explicitly. Managed deployments instead retain an external
+startup directory with a manifest copy, protecting immutable releases from
+startup upgrades. Resolved execution environment also reaches curl transport.
+
+Read-only proposal/review agents covered adapter boundaries, lock lifetime,
+env records, and the implementation plan. Review found and corrected unsafe
+serve layout resolution, missing crate/component metadata, rollback policy in
+the CLI, env grammar differences, typed-error checkpoint loss, native serve
+writeback, immutable startup writes, and API child-environment propagation.
+The chosen design keeps adapter policy in adapters and removes the nested lock
+protocol rather than extending its ownership tokens.

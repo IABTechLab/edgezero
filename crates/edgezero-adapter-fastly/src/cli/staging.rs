@@ -18,15 +18,16 @@ const FASTLY_API_MAX_TIME_SECS: u64 = 30;
 const CURL_EXIT_TIMEOUT: i32 = 28;
 
 use super::FASTLY_INSTALL_HINT;
-use super::provision_cloud::{SelectedFastlyService, effective_fastly_service_id};
+use super::provision_cloud::SelectedFastlyService;
 use super::push_cloud::{redact_stderr, strict_stdout};
 use super::run::{find_fastly_manifest, has_non_interactive};
-use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds};
+use edgezero_adapter::registry::{AdapterDeployContext, AdapterExecContext, DeployStoreIds};
 use edgezero_adapter::release::{VerifiedApplicationRelease, verify_application_release};
 use edgezero_core::env_config::{EnvConfig, merge_env_defaults};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::fmt::{self, Write as _};
+use std::fs;
 use std::io::{ErrorKind, Write as _};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -89,7 +90,10 @@ pub(super) struct ReleaseManagedDeployArgs {
     globals: Vec<String>,
 }
 
-struct FastlyApiToken(String);
+pub(super) struct FastlyApiToken {
+    value: String,
+    env: Vec<(String, String)>,
+}
 
 impl fmt::Debug for FastlyApiToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -99,7 +103,7 @@ impl fmt::Debug for FastlyApiToken {
 
 impl FastlyApiToken {
     fn as_str(&self) -> &str {
-        &self.0
+        &self.value
     }
 }
 
@@ -198,6 +202,8 @@ enum EditableVersionSource {
 #[derive(Debug)]
 struct ManagedDeployPlan {
     arguments: ReleaseManagedDeployArgs,
+    child_env: Vec<(String, String)>,
+    command_dir: tempfile::TempDir,
     links: LinkReconciliation,
     package_files_hash: String,
     package_sha256: String,
@@ -487,7 +493,7 @@ fn collect_paginated_store_inventory(
 fn fetch_complete_paginated_store_inventory(
     kind: ResourceKind,
     endpoint: &str,
-    token: &str,
+    token: &FastlyApiToken,
 ) -> Result<StoreInventory, String> {
     let first_path = format!("{endpoint}?limit=100");
     collect_paginated_store_inventory(kind, &first_path, |path| fastly_api_get(path, token))
@@ -608,6 +614,27 @@ fn plan_link_reconciliation(
     })
 }
 
+fn managed_startup_directory(root: &Path, manifest: &Path) -> Result<tempfile::TempDir, String> {
+    let command_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
+    if command_dir
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .starts_with(canonical_root)
+    {
+        return Err("TMPDIR must be outside the immutable application release".to_owned());
+    }
+    fs::copy(manifest, command_dir.path().join("fastly.toml"))
+        .map_err(|error| format!("prepare private Fastly startup manifest: {error}"))?;
+    Ok(command_dir)
+}
+
+struct FastlyCommandContext<'ctx> {
+    cwd: &'ctx Path,
+    env: &'ctx [(String, String)],
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the read-only checkpoint intentionally assembles every validated input into one reviewable plan"
@@ -615,6 +642,7 @@ fn plan_link_reconciliation(
 fn build_managed_deploy_plan(
     context: &AdapterDeployContext,
     args: &[String],
+    exec: &AdapterExecContext<'_>,
 ) -> Result<ManagedDeployPlan, String> {
     let arguments = parse_release_managed_deploy_args(args)?;
     let target = if context.staging {
@@ -622,7 +650,7 @@ fn build_managed_deploy_plan(
     } else {
         PublishTarget::Production
     };
-    let environment = effective_deploy_environment(context)?;
+    let environment = effective_deploy_environment(context, exec)?;
     let release_root = context
         .application_release_root
         .as_deref()
@@ -644,8 +672,8 @@ fn build_managed_deploy_plan(
         "fastly",
         1,
     )?;
-    let service_id = resolve_managed_plan_service_id(context, &release)?;
-    let token = FastlyApiToken(require_token()?);
+    let service_id = resolve_managed_plan_service_id(context, &release, exec)?;
+    let token = require_token_with_exec(exec)?;
     if token.as_str().is_empty() {
         return Err(format!(
             "{FASTLY_API_TOKEN_ENV} must be non-empty in the environment"
@@ -659,29 +687,28 @@ fn build_managed_deploy_plan(
             .map_err(|error| format!("invalid Fastly deploy environment: {error}"))?;
         validate_fastly_config_key(logical_id, &key, target == PublishTarget::Staging, false)?;
     }
-    let cwd = release
-        .adapter_manifest()
-        .parent()
-        .ok_or_else(|| "verified Fastly manifest has no parent directory".to_owned())?;
-    let package_files_hash = compute_package_files_hash(release.package(), cwd, token.as_str())?;
+    let command_dir = managed_startup_directory(release_root, release.adapter_manifest())?;
+    let command_context = FastlyCommandContext {
+        cwd: command_dir.path(),
+        env: exec.env(),
+    };
+    let cwd = &command_context;
+    let package_files_hash = compute_package_files_hash(release.package(), cwd, &token)?;
 
     let raw_config_inventory = run_fastly_json_capture(&["config-store", "list", "--json"], cwd)?;
     let config_inventory = parse_store_inventory(ResourceKind::Config, &raw_config_inventory)?;
-    let kv_inventory = fetch_complete_paginated_store_inventory(
-        ResourceKind::Kv,
-        "/resources/stores/kv",
-        token.as_str(),
-    )?;
+    let kv_inventory =
+        fetch_complete_paginated_store_inventory(ResourceKind::Kv, "/resources/stores/kv", &token)?;
     let secret_inventory = fetch_complete_paginated_store_inventory(
         ResourceKind::Secret,
         "/resources/stores/secret",
-        token.as_str(),
+        &token,
     )?;
     let inventories =
         ResourceInventories::from_inventories(config_inventory, kv_inventory, secret_inventory)?;
     let desired_links = desired_resource_links(&stores, &environment, &inventories)?;
 
-    let versions_raw = fastly_api_get(&format!("/service/{service_id}/version"), token.as_str())?;
+    let versions_raw = fastly_api_get(&format!("/service/{service_id}/version"), &token)?;
     let versions = parse_service_versions(&versions_raw)?;
     let selected_source = select_version_source(&versions)?;
     let source_version = match selected_source {
@@ -703,7 +730,7 @@ fn build_managed_deploy_plan(
     )?;
     let (source_links, links_snapshot) = parse_resource_links(&links_raw)?;
     let source_configuration =
-        read_version_configuration_snapshot_for(&service_id, token.as_str(), source_version)?;
+        read_version_configuration_snapshot_for(&service_id, &token, source_version)?;
 
     let links = plan_link_reconciliation(&desired_links, &source_links, &inventories)?;
 
@@ -751,6 +778,8 @@ fn build_managed_deploy_plan(
     let package_sha256 = release.package_sha256().to_owned();
 
     Ok(ManagedDeployPlan {
+        command_dir,
+        child_env: exec.env().to_vec(),
         arguments,
         links,
         package_files_hash,
@@ -768,8 +797,9 @@ fn build_managed_deploy_plan(
 pub(super) fn deploy_managed_with_context(
     context: &AdapterDeployContext,
     args: &[String],
+    exec: &AdapterExecContext<'_>,
 ) -> Result<(), String> {
-    let plan = build_managed_deploy_plan(context, args)?;
+    let plan = build_managed_deploy_plan(context, args, exec)?;
     execute_managed_deploy_plan(&plan)
 }
 
@@ -781,11 +811,11 @@ fn execute_managed_deploy_plan_with_emit(
     plan: &ManagedDeployPlan,
     emit: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
-    let cwd = plan
-        .release
-        .adapter_manifest()
-        .parent()
-        .ok_or_else(|| "verified Fastly manifest has no parent directory".to_owned())?;
+    let command_context = FastlyCommandContext {
+        cwd: plan.command_dir.path(),
+        env: &plan.child_env,
+    };
+    let cwd = &command_context;
     emit(&format!("package-sha256={}", plan.package_sha256));
     let version = prepare_managed_version(plan, cwd, emit)?;
 
@@ -871,7 +901,7 @@ fn execute_managed_deploy_plan_with_emit(
         ),
         PublishTarget::Production => fastly_api_put(
             &format!("/service/{}/version/{version}/activate", plan.service_id),
-            plan.token.as_str(),
+            &plan.token,
         )
         .map(|_status| ()),
     }
@@ -885,7 +915,7 @@ struct CapturedFastlyCommand {
 
 fn prepare_managed_version(
     plan: &ManagedDeployPlan,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64, String> {
     let package = plan.release.package().to_str().ok_or_else(|| {
@@ -947,7 +977,7 @@ fn prepare_managed_version(
 fn clone_managed_source(
     plan: &ManagedDeployPlan,
     source_version: u64,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64, String> {
     let raw = fastly_api_put_capture(
@@ -955,7 +985,7 @@ fn clone_managed_source(
             "/service/{}/version/{source_version}/clone",
             plan.service_id
         ),
-        plan.token.as_str(),
+        &plan.token,
     )?;
     let version = parse_cloned_version(&raw, &plan.service_id, source_version)?;
     emit(&format!("version={version}"));
@@ -976,7 +1006,7 @@ fn clone_managed_source(
 
     let versions_raw = fastly_api_get(
         &format!("/service/{}/version", plan.service_id),
-        plan.token.as_str(),
+        &plan.token,
     )?;
     let versions = parse_service_versions(&versions_raw)?;
     let draft = versions
@@ -1024,11 +1054,12 @@ fn parse_cloned_version(raw: &str, service_id: &str, source_version: u64) -> Res
 
 fn run_fastly_capture_outcome(
     fastly_args: &[String],
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
 ) -> Result<CapturedFastlyCommand, String> {
     let output = Command::new("fastly")
         .args(fastly_args)
-        .current_dir(cwd)
+        .current_dir(cwd.cwd)
+        .envs(cwd.env.iter().map(|(key, value)| (key, value)))
         .output()
         .map_err(|error| {
             if error.kind() == ErrorKind::NotFound {
@@ -1070,7 +1101,11 @@ fn parse_package_files_hash_output(output: &str) -> Result<String, String> {
     })
 }
 
-fn compute_package_files_hash(package: &Path, cwd: &Path, token: &str) -> Result<String, String> {
+fn compute_package_files_hash(
+    package: &Path,
+    cwd: &FastlyCommandContext<'_>,
+    token: &FastlyApiToken,
+) -> Result<String, String> {
     let package_path = package.to_str().ok_or_else(|| {
         "verified Fastly package path is not valid UTF-8 and cannot be hashed by the Fastly CLI"
             .to_owned()
@@ -1087,7 +1122,7 @@ fn compute_package_files_hash(package: &Path, cwd: &Path, token: &str) -> Result
         cwd,
     )?;
     if !outcome.success {
-        let redacted = outcome.combined.replace(token, "[REDACTED]");
+        let redacted = outcome.combined.replace(token.as_str(), "[REDACTED]");
         return Err(format!(
             "Fastly package hash command exited with status {}\n{}",
             outcome.status,
@@ -1118,7 +1153,7 @@ fn parse_package_metadata_files_hash(
 fn read_version_links(
     service_id: &str,
     version: u64,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
 ) -> Result<Vec<ExistingResourceLink>, String> {
     read_version_links_with_snapshot(service_id, version, cwd).map(|(links, _snapshot)| links)
 }
@@ -1126,7 +1161,7 @@ fn read_version_links(
 fn read_version_links_with_snapshot(
     service_id: &str,
     version: u64,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
 ) -> Result<(Vec<ExistingResourceLink>, serde_json::Value), String> {
     let service_arg = format!("--service-id={service_id}");
     let version_arg = format!("--version={version}");
@@ -1258,11 +1293,11 @@ fn expected_final_link_resources(
 fn revalidate_initial_draft_before_update(
     plan: &ManagedDeployPlan,
     snapshot: &InitialDraftSnapshot,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
 ) -> Result<(), String> {
     let versions_raw = fastly_api_get(
         &format!("/service/{}/version", plan.service_id),
-        plan.token.as_str(),
+        &plan.token,
     )?;
     let versions = parse_service_versions(&versions_raw)?;
     if select_version_source(&versions)? != VersionSource::InitialDraft(snapshot.version.number) {
@@ -1290,12 +1325,12 @@ fn revalidate_initial_draft_before_update(
 fn revalidate_active_source(
     plan: &ManagedDeployPlan,
     active_version: u64,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
     excluded_target: Option<u64>,
 ) -> Result<(), String> {
     let versions_raw = fastly_api_get(
         &format!("/service/{}/version", plan.service_id),
-        plan.token.as_str(),
+        &plan.token,
     )?;
     let versions = parse_service_versions(&versions_raw)?;
     let source_versions = source_versions_excluding(&versions, excluded_target);
@@ -1331,12 +1366,12 @@ fn require_source_configuration(
 fn revalidate_inactive_source(
     plan: &ManagedDeployPlan,
     snapshot: &InactiveSourceSnapshot,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
     excluded_target: Option<u64>,
 ) -> Result<(), String> {
     let versions_raw = fastly_api_get(
         &format!("/service/{}/version", plan.service_id),
-        plan.token.as_str(),
+        &plan.token,
     )?;
     let versions = parse_service_versions(&versions_raw)?;
     let source_versions = source_versions_excluding(&versions, excluded_target);
@@ -1384,11 +1419,11 @@ fn revalidate_managed_draft(
     version: u64,
     expected_links: &BTreeMap<ResourceLinkIdentity, String>,
     expected_configuration: &VersionConfigurationSnapshot,
-    cwd: &Path,
+    cwd: &FastlyCommandContext<'_>,
 ) -> Result<(), String> {
     let versions_raw = fastly_api_get(
         &format!("/service/{}/version", plan.service_id),
-        plan.token.as_str(),
+        &plan.token,
     )?;
     let versions = parse_service_versions(&versions_raw)?;
     let source_state = match &plan.version_source {
@@ -1417,7 +1452,7 @@ fn revalidate_managed_draft(
     require_exact_link_resources(expected_links, &links, "final draft")?;
     let package_raw = fastly_api_get(
         &format!("/service/{}/version/{version}/package", plan.service_id),
-        plan.token.as_str(),
+        &plan.token,
     )?;
     let package_files_hash =
         parse_package_metadata_files_hash(&package_raw, &plan.service_id, version)?;
@@ -1507,12 +1542,12 @@ fn read_version_configuration_snapshot(
     plan: &ManagedDeployPlan,
     version: u64,
 ) -> Result<VersionConfigurationSnapshot, String> {
-    read_version_configuration_snapshot_for(&plan.service_id, plan.token.as_str(), version)
+    read_version_configuration_snapshot_for(&plan.service_id, &plan.token, version)
 }
 
 fn read_version_configuration_snapshot_for(
     service_id: &str,
-    token: &str,
+    token: &FastlyApiToken,
     version: u64,
 ) -> Result<VersionConfigurationSnapshot, String> {
     let base = format!("/service/{service_id}/version/{version}");
@@ -1545,12 +1580,13 @@ fn read_version_configuration_snapshot_for(
 fn resolve_managed_plan_service_id(
     context: &AdapterDeployContext,
     release: &VerifiedApplicationRelease,
+    exec: &AdapterExecContext<'_>,
 ) -> Result<String, String> {
     if let Some(service_id) = context.service_id.as_deref() {
         validate_service_id(service_id)?;
         return Ok(service_id.to_owned());
     }
-    effective_fastly_service_id(release.adapter_manifest())?
+    effective_fastly_service_id_with_exec(release.adapter_manifest(), exec)?
         .map(SelectedFastlyService::into_id)
         .ok_or_else(|| {
             format!(
@@ -1559,10 +1595,14 @@ fn resolve_managed_plan_service_id(
         })
 }
 
-fn run_fastly_json_capture(args: &[&str], cwd: &Path) -> Result<String, String> {
+fn run_fastly_json_capture(
+    args: &[&str],
+    cwd: &FastlyCommandContext<'_>,
+) -> Result<String, String> {
     let output = Command::new("fastly")
         .args(args)
-        .current_dir(cwd)
+        .current_dir(cwd.cwd)
+        .envs(cwd.env.iter().map(|(key, value)| (key, value)))
         .output()
         .map_err(|error| {
             if error.kind() == ErrorKind::NotFound {
@@ -1644,7 +1684,7 @@ fn snapshot_initial_draft(
 
 fn snapshot_logging_providers(
     version_base: &str,
-    token: &str,
+    token: &FastlyApiToken,
 ) -> Result<Vec<LoggingProviderSnapshot>, String> {
     FASTLY_LOGGING_PROVIDER_KINDS
         .iter()
@@ -1915,12 +1955,21 @@ fn resolve_service_id(args: &[String]) -> Result<String, String> {
 
 pub(super) fn validate_effective_deploy_service_id(
     context: &AdapterDeployContext,
+    exec: &AdapterExecContext<'_>,
 ) -> Result<(), String> {
     if let Some(service_id) = context.service_id.as_deref() {
         return validate_service_id(service_id);
     }
     if let Some(manifest_path) = context.adapter_manifest_path.as_deref() {
-        return validate_deploy_service_id_for_manifest(context, manifest_path);
+        return validate_deploy_service_id_for_manifest(context, manifest_path, exec);
+    }
+    if let Some((_, id)) = exec
+        .env()
+        .iter()
+        .rev()
+        .find(|(key, _)| key == FASTLY_SERVICE_ID_ENV)
+    {
+        return validate_service_id(id);
     }
     match env::var(FASTLY_SERVICE_ID_ENV) {
         Ok(service_id) => validate_service_id(&service_id),
@@ -1934,16 +1983,22 @@ pub(super) fn validate_effective_deploy_service_id(
 pub(super) fn validate_deploy_service_id_for_manifest(
     context: &AdapterDeployContext,
     manifest_path: &Path,
+    exec: &AdapterExecContext<'_>,
 ) -> Result<(), String> {
     if let Some(service_id) = context.service_id.as_deref() {
         return validate_service_id(service_id);
     }
-    effective_fastly_service_id(manifest_path)?;
+    effective_fastly_service_id_with_exec(manifest_path, exec)?;
     Ok(())
 }
 
-fn effective_deploy_environment(context: &AdapterDeployContext) -> Result<EnvConfig, String> {
-    let variables = merge_env_defaults(context.variable_defaults.iter(), env::vars());
+fn effective_deploy_environment(
+    context: &AdapterDeployContext,
+    exec: &AdapterExecContext<'_>,
+) -> Result<EnvConfig, String> {
+    let mut resolved: BTreeMap<String, String> = env::vars().collect();
+    resolved.extend(exec.env().iter().cloned());
+    let variables = merge_env_defaults(context.variable_defaults.iter(), resolved);
     let environment = EnvConfig::from_vars(variables);
     for (kind, logical_ids) in [
         (ResourceKind::Config, &context.stores.config),
@@ -1981,10 +2036,48 @@ pub(super) fn validate_fastly_config_key(
     }
 }
 
-/// Read the required Fastly API token from the environment.
-pub(super) fn require_token() -> Result<String, String> {
-    env::var(FASTLY_API_TOKEN_ENV)
-        .map_err(|_err| format!("{FASTLY_API_TOKEN_ENV} must be set in the environment"))
+fn effective_fastly_service_id_with_exec(
+    path: &Path,
+    exec: &AdapterExecContext<'_>,
+) -> Result<Option<SelectedFastlyService>, String> {
+    let Some((_, environment_id)) = exec
+        .env()
+        .iter()
+        .rev()
+        .find(|(key, _)| key == FASTLY_SERVICE_ID_ENV)
+    else {
+        return super::provision_cloud::effective_fastly_service_id(path);
+    };
+    let manifest_id = super::provision_cloud::read_fastly_service_id(path)?;
+    super::provision_cloud::select_fastly_service_id(manifest_id, Some(environment_id.clone()))
+}
+
+pub(super) fn require_token_with_exec(
+    exec: &AdapterExecContext<'_>,
+) -> Result<FastlyApiToken, String> {
+    let value = exec
+        .env()
+        .iter()
+        .rev()
+        .find(|(key, _)| key == FASTLY_API_TOKEN_ENV)
+        .map(|(_, value)| value.clone())
+        .map_or_else(
+            || {
+                env::var(FASTLY_API_TOKEN_ENV).map_err(|_error| {
+                    format!("{FASTLY_API_TOKEN_ENV} must be set in the environment")
+                })
+            },
+            Ok,
+        )?;
+    Ok(FastlyApiToken {
+        value,
+        env: exec.env().to_vec(),
+    })
+}
+
+/// Read ambient credentials for standalone API actions.
+pub(super) fn require_token() -> Result<FastlyApiToken, String> {
+    require_token_with_exec(&AdapterExecContext::new())
 }
 
 /// Whether an HTTP status counts as healthy (2xx only).
@@ -2422,10 +2515,11 @@ where
 
 /// Run `fastly <args>` in `cwd`, inheriting stdio, and map a non-zero
 /// exit to an error.
-fn run_fastly_status(fastly_args: &[String], cwd: &Path) -> Result<(), String> {
+fn run_fastly_status(fastly_args: &[String], cwd: &FastlyCommandContext<'_>) -> Result<(), String> {
     let status = Command::new("fastly")
         .args(fastly_args)
-        .current_dir(cwd)
+        .current_dir(cwd.cwd)
+        .envs(cwd.env.iter().map(|(key, value)| (key, value)))
         .status()
         .map_err(|err| {
             if err.kind() == ErrorKind::NotFound {
@@ -2455,10 +2549,11 @@ fn run_fastly_status(fastly_args: &[String], cwd: &Path) -> Result<(), String> {
 /// config, so a `proxy = …` directive planted by an earlier same-job
 /// build step could exfiltrate the `Fastly-Key` header. `--connect-timeout`
 /// / `--max-time` bound the call.
-fn curl_config_capture(config: &str) -> Result<String, String> {
+fn curl_config_capture(config: &str, environment: &[(String, String)]) -> Result<String, String> {
     let connect_timeout = FASTLY_API_CONNECT_TIMEOUT_SECS.to_string();
     let max_time = FASTLY_API_MAX_TIME_SECS.to_string();
     let mut child = Command::new("curl")
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .args([
             "-q",
             "-sS",
@@ -2606,12 +2701,12 @@ fn validate_domain(domain: &str) -> Result<(), String> {
 /// reject 4xx/5xx but still accept a 3xx — whose (array-shaped) body could
 /// otherwise be parsed as version data. No `location` directive is set, so a
 /// redirect is never followed.
-fn fastly_api_get(path: &str, token: &str) -> Result<String, String> {
-    let header = curl_quote(&format!("Fastly-Key: {token}"));
+fn fastly_api_get(path: &str, token: &FastlyApiToken) -> Result<String, String> {
+    let header = curl_quote(&format!("Fastly-Key: {}", token.as_str()));
     let url = curl_quote(&format!("https://api.fastly.com{path}"));
     // `write-out` appends the status on its own trailing line AFTER the body.
     let config = format!("header = {header}\nurl = {url}\nwrite-out = \"\\n%{{http_code}}\"\n");
-    let out = curl_config_capture(&config)
+    let out = curl_config_capture(&config, &token.env)
         .map_err(|err| format!("Fastly API GET {path} failed: {err}"))?;
     let (body, status_line) = out
         .rsplit_once('\n')
@@ -2633,13 +2728,13 @@ fn fastly_api_get(path: &str, token: &str) -> Result<String, String> {
 /// activate/deactivate endpoints require `PUT` (not `POST`). Header and
 /// URL are escaped via `curl_quote`; the literal `request`, `output`,
 /// and `write-out` directives are fixed constants.
-fn fastly_api_put(path: &str, token: &str) -> Result<u16, String> {
-    let header = curl_quote(&format!("Fastly-Key: {token}"));
+fn fastly_api_put(path: &str, token: &FastlyApiToken) -> Result<u16, String> {
+    let header = curl_quote(&format!("Fastly-Key: {}", token.as_str()));
     let url = curl_quote(&format!("https://api.fastly.com{path}"));
     let config = format!(
         "request = \"PUT\"\nheader = {header}\nurl = {url}\noutput = \"/dev/null\"\nwrite-out = \"%{{http_code}}\"\n"
     );
-    let out = curl_config_capture(&config)?;
+    let out = curl_config_capture(&config, &token.env)?;
     let code: u16 = out.trim().parse().map_err(|err| {
         format!(
             "could not parse HTTP status from curl output {:?}: {err}",
@@ -2656,13 +2751,13 @@ fn fastly_api_put(path: &str, token: &str) -> Result<u16, String> {
 /// `PUT https://api.fastly.com<path>` and return a non-empty response body.
 /// This is used for mutations, such as cloning a version, whose response
 /// identifies the newly-created provider object needed for recovery.
-fn fastly_api_put_capture(path: &str, token: &str) -> Result<String, String> {
-    let header = curl_quote(&format!("Fastly-Key: {token}"));
+fn fastly_api_put_capture(path: &str, token: &FastlyApiToken) -> Result<String, String> {
+    let header = curl_quote(&format!("Fastly-Key: {}", token.as_str()));
     let url = curl_quote(&format!("https://api.fastly.com{path}"));
     let config = format!(
         "request = \"PUT\"\nheader = {header}\nurl = {url}\nwrite-out = \"\\n%{{http_code}}\"\n"
     );
-    let out = curl_config_capture(&config)?;
+    let out = curl_config_capture(&config, &token.env)?;
     let (body, status_line) = out
         .rsplit_once('\n')
         .ok_or_else(|| format!("Fastly API PUT {path}: no HTTP status in the curl output"))?;
@@ -2728,8 +2823,15 @@ pub(super) fn emit_active_version_for(
     service_id: &str,
     require_active: bool,
 ) -> Result<(), String> {
-    let token = require_token()?;
-    let json = fastly_api_get(&format!("/service/{service_id}/version"), &token)?;
+    emit_active_version_with_token(service_id, require_active, &require_token()?)
+}
+
+pub(super) fn emit_active_version_with_token(
+    service_id: &str,
+    require_active: bool,
+    token: &FastlyApiToken,
+) -> Result<(), String> {
+    let json = fastly_api_get(&format!("/service/{service_id}/version"), token)?;
     if let Some(version) = active_version_or_require(&json, require_active, service_id)? {
         log::info!("version={version}");
     } else {
@@ -2777,7 +2879,7 @@ fn active_version_or_require(
 pub(super) fn verify_version_active(
     service_id: &str,
     version: u64,
-    token: &str,
+    token: &FastlyApiToken,
     phase: &str,
 ) -> Result<(), String> {
     let json = fastly_api_get(&format!("/service/{service_id}/version"), token)?;
@@ -2874,7 +2976,10 @@ pub(super) fn healthcheck(args: &[String]) -> Result<(), String> {
         None
     } else {
         match env::var(FASTLY_API_TOKEN_ENV) {
-            Ok(token) if !token.is_empty() => Some(token),
+            Ok(value) if !value.is_empty() => Some(FastlyApiToken {
+                value,
+                env: Vec::new(),
+            }),
             _ => {
                 log::info!(
                     "no {FASTLY_API_TOKEN_ENV} available; production healthcheck is service-level (probes the live domain for service {service_id}, not specifically version {version})"
@@ -2883,7 +2988,7 @@ pub(super) fn healthcheck(args: &[String]) -> Result<(), String> {
             }
         }
     };
-    if let Some(token) = production_token.as_deref() {
+    if let Some(token) = production_token.as_ref() {
         verify_version_active(&service_id, version, token, "before probing")?;
     }
 
@@ -2894,7 +2999,7 @@ pub(super) fn healthcheck(args: &[String]) -> Result<(), String> {
         Ok(code) => {
             // Confirm `version` is STILL active, so a deploy that activated a newer
             // version during the probe+retries is not reported as a healthy `version`.
-            if let Some(token) = production_token.as_deref() {
+            if let Some(token) = production_token.as_ref() {
                 verify_version_active(&service_id, version, token, "after probing")?;
             }
             log::info!("status-code={code}");
@@ -3027,6 +3132,150 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     #[cfg(unix)]
     use tempfile::tempdir;
+    #[cfg(unix)]
+    #[test]
+    fn api_transport_uses_execution_path_marker_and_token() {
+        let _guard = super::super::path_mutation_guard().lock().unwrap();
+        let fallback = tempdir().unwrap();
+        fs::write(fallback.path().join("curl"), "#!/bin/sh\nexit 93\n").unwrap();
+        fs::set_permissions(
+            fallback.path().join("curl"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let _path = EnvOverride::set("PATH", fallback.path());
+        let selected = tempdir().unwrap();
+        fs::write(
+            selected.path().join("curl"),
+            r#"#!/bin/sh
+[ "$EDGEZERO_EXPLICIT_CURL_MARKER" = "selected" ] || exit 91
+config=$(/bin/cat)
+case "$config" in *'Fastly-Key: explicit-context-token'*) ;; *) exit 92 ;; esac
+printf '[]\n200'
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            selected.path().join("curl"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let variables = vec![
+            (
+                "PATH".to_owned(),
+                selected.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "FASTLY_API_TOKEN".to_owned(),
+                "explicit-context-token".to_owned(),
+            ),
+            (
+                "EDGEZERO_EXPLICIT_CURL_MARKER".to_owned(),
+                "selected".to_owned(),
+            ),
+        ];
+        let exec = AdapterExecContext::new().with_env(&variables);
+        assert_eq!(
+            fastly_api_get(
+                "/service/Selected/version",
+                &require_token_with_exec(&exec).unwrap()
+            )
+            .unwrap(),
+            "[]"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_native_startup_updates_only_the_external_copy() {
+        let root = tempdir().unwrap();
+        let manifest = root.path().join("fastly.toml");
+        let original = "name = 'demo'\n";
+        fs::write(&manifest, original).unwrap();
+        let startup = managed_startup_directory(root.path(), &manifest).unwrap();
+        let tools = tempdir().unwrap();
+        fs::write(
+            tools.path().join("fastly"),
+            "#!/bin/sh\nprintf 'manifest_version = 3\\n' >> fastly.toml\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            tools.path().join("fastly"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let variables = vec![(
+            "PATH".to_owned(),
+            tools.path().to_string_lossy().into_owned(),
+        )];
+        let command_context = FastlyCommandContext {
+            cwd: startup.path(),
+            env: &variables,
+        };
+        assert!(
+            run_fastly_capture_outcome(&[], &command_context)
+                .unwrap()
+                .success
+        );
+        assert_eq!(fs::read_to_string(&manifest).unwrap(), original);
+        assert!(
+            fs::read_to_string(startup.path().join("fastly.toml"))
+                .unwrap()
+                .contains("manifest_version")
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_native_commands_and_selection_use_explicit_execution_environment() {
+        let _guard = super::super::path_mutation_guard().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("fastly.toml");
+        fs::write(&manifest, "name = 'demo'\n").unwrap();
+        let key = "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME";
+        let variables = vec![
+            (
+                "FASTLY_API_TOKEN".to_owned(),
+                "explicit-context-token".to_owned(),
+            ),
+            ("FASTLY_SERVICE_ID".to_owned(), "ContextService".to_owned()),
+            (key.to_owned(), "context_config".to_owned()),
+        ];
+        let exec = AdapterExecContext::new().with_env(&variables);
+        assert_eq!(
+            require_token_with_exec(&exec).unwrap().as_str(),
+            "explicit-context-token"
+        );
+        assert_eq!(
+            effective_fastly_service_id_with_exec(&manifest, &exec)
+                .unwrap()
+                .unwrap()
+                .into_id(),
+            "ContextService"
+        );
+        let context = AdapterDeployContext {
+            stores: DeployStoreIds {
+                config: vec!["app_config".to_owned()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_deploy_environment(&context, &exec)
+                .unwrap()
+                .store_name("config", "app_config"),
+            "context_config"
+        );
+        let cwd = FastlyCommandContext {
+            cwd: dir.path(),
+            env: exec.env(),
+        };
+        // The command context keeps the provider-selected directory independent of the CLI root.
+        assert_eq!(cwd.cwd, dir.path());
+        assert_eq!(cwd.env, variables);
+    }
+
     #[test]
     fn probe_with_retries_treats_zero_retry_as_one_attempt() {
         let mut calls: i32 = 0;
@@ -3391,16 +3640,27 @@ mod tests {
         };
         assert_eq!(
             FastlyCliAdapter
-                .preflight_deploy(&context, &owned(&["--comment", "release"]))
+                .preflight_deploy(
+                    &context,
+                    &owned(&["--comment", "release"]),
+                    &edgezero_adapter::registry::AdapterExecContext::new()
+                )
                 .expect("safe manifest-command argument"),
             DeployOwnership::ManifestCommand
         );
         FastlyCliAdapter
-            .preflight_deploy(&context, &owned(&["-tsecret"]))
+            .preflight_deploy(
+                &context,
+                &owned(&["-tsecret"]),
+                &edgezero_adapter::registry::AdapterExecContext::new(),
+            )
             .expect_err("reserved scan must run before store-free manifest dispatch");
         assert_eq!(
-            FastlyCliAdapter
-                .preflight_deploy(&context, &owned(&["--package", "manifest-package.tar.gz"]),),
+            FastlyCliAdapter.preflight_deploy(
+                &context,
+                &owned(&["--package", "manifest-package.tar.gz"]),
+                &edgezero_adapter::registry::AdapterExecContext::new()
+            ),
             Ok(DeployOwnership::ManifestCommand),
             "store-free manifest commands retain provider package passthrough"
         );
@@ -3421,7 +3681,11 @@ mod tests {
             owned(&["-papp.tar.gz"]),
         ] {
             let error = FastlyCliAdapter
-                .preflight_deploy(&context, &args)
+                .preflight_deploy(
+                    &context,
+                    &args,
+                    &edgezero_adapter::registry::AdapterExecContext::new(),
+                )
                 .expect_err("the immutable release owns the package path");
             assert!(error.contains("--package/-p"), "{args:?}: {error}");
         }
@@ -3435,21 +3699,33 @@ mod tests {
             ..AdapterDeployContext::default()
         };
         assert_eq!(
-            FastlyCliAdapter.preflight_deploy(&direct, &[]),
+            FastlyCliAdapter.preflight_deploy(
+                &direct,
+                &[],
+                &edgezero_adapter::registry::AdapterExecContext::new()
+            ),
             Ok(DeployOwnership::ManifestCommand)
         );
 
         let mut managed = direct.clone();
         managed.application_release_root = Some(PathBuf::from("release"));
         assert_eq!(
-            FastlyCliAdapter.preflight_deploy(&managed, &[]),
+            FastlyCliAdapter.preflight_deploy(
+                &managed,
+                &[],
+                &edgezero_adapter::registry::AdapterExecContext::new()
+            ),
             Ok(DeployOwnership::AdapterManaged)
         );
 
         managed = direct.clone();
         managed.staging = true;
         assert_eq!(
-            FastlyCliAdapter.preflight_deploy(&managed, &[]),
+            FastlyCliAdapter.preflight_deploy(
+                &managed,
+                &[],
+                &edgezero_adapter::registry::AdapterExecContext::new()
+            ),
             Ok(DeployOwnership::AdapterManaged)
         );
 
@@ -3470,7 +3746,11 @@ mod tests {
             managed = direct.clone();
             managed.stores = stores;
             assert_eq!(
-                FastlyCliAdapter.preflight_deploy(&managed, &[]),
+                FastlyCliAdapter.preflight_deploy(
+                    &managed,
+                    &[],
+                    &edgezero_adapter::registry::AdapterExecContext::new()
+                ),
                 Ok(DeployOwnership::AdapterManaged)
             );
         }
@@ -3524,7 +3804,11 @@ mod tests {
         };
 
         FastlyCliAdapter
-            .finalize_deploy(&context, Some("version=8"))
+            .finalize_deploy(
+                &context,
+                Some("version=8"),
+                &edgezero_adapter::registry::AdapterExecContext::new(),
+            )
             .expect("active version finalization");
         assert!(
             marker.exists(),
@@ -3532,7 +3816,11 @@ mod tests {
         );
 
         let error = FastlyCliAdapter
-            .finalize_deploy(&context, Some("version=9"))
+            .finalize_deploy(
+                &context,
+                Some("version=9"),
+                &edgezero_adapter::registry::AdapterExecContext::new(),
+            )
             .expect_err("a version from another service or deployment must fail closed");
         assert!(error.contains('8') && error.contains('9'), "{error}");
     }
@@ -3625,8 +3913,8 @@ mod tests {
             ..AdapterDeployContext::default()
         };
 
-        let environment =
-            effective_deploy_environment(&context).expect("valid effective environment");
+        let environment = effective_deploy_environment(&context, &AdapterExecContext::new())
+            .expect("valid effective environment");
         assert_eq!(
             environment.store_name("config", "app_config"),
             "parent_config",
@@ -3672,8 +3960,9 @@ mod tests {
         invalid_selector
             .variable_defaults
             .insert(selector.to_owned(), String::new());
-        let selector_error = effective_deploy_environment(&invalid_selector)
-            .expect_err("a present empty selector must not fall back to the logical id");
+        let selector_error =
+            effective_deploy_environment(&invalid_selector, &AdapterExecContext::new())
+                .expect_err("a present empty selector must not fall back to the logical id");
         assert!(
             selector_error.contains(selector),
             "error names invalid selector: {selector_error}"
@@ -3684,8 +3973,9 @@ mod tests {
         invalid_parent
             .variable_defaults
             .insert(selector.to_owned(), "valid_manifest_selector".to_owned());
-        let parent_error = effective_deploy_environment(&invalid_parent)
-            .expect_err("an invalid parent selector must not fall back to a valid default");
+        let parent_error =
+            effective_deploy_environment(&invalid_parent, &AdapterExecContext::new())
+                .expect_err("an invalid parent selector must not fall back to a valid default");
         assert!(
             parent_error.contains(selector),
             "error names parent selector: {parent_error}"

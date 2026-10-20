@@ -70,7 +70,10 @@ pub fn build(extra_args: &[String], ctx: &AdapterExecContext<'_>) -> Result<Path
 }
 
 pub(super) fn deploy(extra_args: &[String], exec: &AdapterExecContext<'_>) -> Result<(), String> {
-    let context = super::staging::legacy_deploy_context(extra_args, false);
+    let mut context = super::staging::legacy_deploy_context(extra_args, false);
+    if context.adapter_manifest_path.is_none() {
+        context.adapter_manifest_path = exec.adapter_manifest().map(Path::to_path_buf);
+    }
     deploy_with_context(&context, extra_args, exec)
 }
 
@@ -81,10 +84,11 @@ pub fn serve(extra_args: &[String], ctx: &AdapterExecContext<'_>) -> Result<(), 
     let manifest = cli_support::declared_or_discovered_manifest(ctx, || {
         find_fastly_manifest(cli_support::discovery_base(ctx)?.as_path())
     })?;
-    let manifest_dir = manifest
-        .parent()
-        .ok_or_else(|| "fastly manifest has no parent directory".to_owned())?;
-
+    if manifest.file_name().and_then(|name| name.to_str()) != Some("fastly.toml") {
+        return Err("Fastly compute serve builds from fastly.toml; select a manifest named fastly.toml in edgezero.toml for serving".to_owned());
+    }
+    super::local_vendor::validate_native_layout_args(extra_args)?;
+    let manifest_dir = manifest.parent().ok_or("Fastly manifest has no parent")?;
     let mut command = Command::new("fastly");
     command
         .args(["compute", "serve"])
@@ -253,13 +257,7 @@ pub(super) fn deploy_with_context(
     exec: &AdapterExecContext<'_>,
 ) -> Result<(), String> {
     let manifest_path = resolve_deploy_manifest_path(context)?;
-    validate_deploy_service_id_for_manifest(context, &manifest_path)?;
-    let manifest_dir = manifest_path.parent().ok_or_else(|| {
-        format!(
-            "fastly manifest path {} has no parent directory",
-            manifest_path.display()
-        )
-    })?;
+    validate_deploy_service_id_for_manifest(context, &manifest_path, exec)?;
     let without_manifest = args_without_flag_value(extra_args, "--manifest-path");
     let mut forwarded = args_without_flag_value(&without_manifest, "--service-id");
     scan_reserved_deploy_args(&forwarded)?;
@@ -267,17 +265,21 @@ pub(super) fn deploy_with_context(
         forwarded.extend(["--service-id".to_owned(), service_id.to_owned()]);
     }
 
-    let status = Command::new("fastly")
+    super::local_vendor::validate_native_layout_args(&forwarded)?;
+    let private = super::local_vendor::PrivateManifest::new(&manifest_path)?;
+    let mut command = Command::new("fastly");
+    command
         .args(build_compute_deploy_args(&forwarded))
-        .current_dir(manifest_dir)
-        .envs(exec.env().iter().map(|(key, value)| (key, value)))
+        .envs(exec.env().iter().map(|(key, value)| (key, value)));
+    private.configure(&mut command);
+    let status = command
         .status()
         .map_err(|err| format!("failed to run fastly CLI: {err}"))?;
     if !status.success() {
         return Err(format!("fastly compute deploy failed with status {status}"));
     }
 
-    Ok(())
+    private.merge_service_id()
 }
 
 /// Build the argv for `fastly compute deploy`, appending

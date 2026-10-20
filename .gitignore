@@ -35,6 +35,7 @@ wrangler.toml
 # the compute manifest + `[local_server]` Viceroy state; per-machine
 # secret entries and setup blocks must not be shared via git.
 fastly.toml
+fastly.edgezero-*.toml
 
 # Fastly local config-push lock and staging temp files (sidecars next to the
 # manifest). `examples/app-demo` has a `fastly.toml`, so `config push --local`

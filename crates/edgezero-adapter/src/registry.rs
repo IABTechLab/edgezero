@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, PoisonError, RwLock};
 
+use crate::local::{AdapterLocalContext, AdapterLocalLayout};
+
 static REGISTRY: LazyLock<RwLock<HashMap<String, &'static dyn Adapter>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -671,6 +673,7 @@ pub trait Adapter: Sync + Send {
         &self,
         _context: &AdapterDeployContext,
         _args: &[String],
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<DeployOwnership, String> {
         Ok(DeployOwnership::ManifestCommand)
     }
@@ -740,6 +743,7 @@ pub trait Adapter: Sync + Send {
         &self,
         _context: &AdapterDeployContext,
         _command_output: Option<&str>,
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -808,6 +812,22 @@ pub trait Adapter: Sync + Send {
 
     /// Name used to reference the adapter (case-insensitive).
     fn name(&self) -> &'static str;
+
+    /// Describe local CLI files without filesystem I/O or provider-name
+    /// dispatch in the caller. The default describes the declared manifest;
+    /// adapters supply their own sidecars, defaults, and serve env inputs.
+    ///
+    /// # Errors
+    /// Returns an error when the declared layout cannot be supported.
+    #[inline]
+    fn local_layout(
+        &self,
+        context: &AdapterLocalContext<'_>,
+    ) -> Result<AdapterLocalLayout, String> {
+        Ok(context
+            .manifest()
+            .map_or_else(AdapterLocalLayout::default, AdapterLocalLayout::new))
+    }
 
     /// Reject a config `(key, body)` that this adapter cannot store, BEFORE any
     /// provider I/O. Called by `config push` ahead of the remote read, so an
@@ -1392,7 +1412,9 @@ mod tests {
     fn default_deploy_preflight_keeps_manifest_command() {
         let context = AdapterDeployContext::default();
         assert_eq!(
-            FIRST.preflight_deploy(&context, &[]).unwrap(),
+            FIRST
+                .preflight_deploy(&context, &[], &AdapterExecContext::new())
+                .unwrap(),
             DeployOwnership::ManifestCommand
         );
         assert!(context.application_manifest_path.is_none());

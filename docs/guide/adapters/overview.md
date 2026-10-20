@@ -209,3 +209,34 @@ background tasks or prove cleanup after a terminating provider trap.
 Roll out retention only after the application's isolation, refresh, and bounded
 memory workload checks pass. Provider eviction can force initialization on any
 request, so correctness must not depend on reaching the configured reuse limit.
+
+## Adapter CLI Ownership
+
+Each adapter implements its provider commands and policy behind the neutral
+`edgezero-adapter` registry. The CLI loads common arguments and manifests,
+selects a registered adapter, coordinates transactions, and reports results.
+It does not dispatch provider behavior by adapter name.
+
+Implement `Adapter::local_layout(&AdapterLocalContext)` for project-relative
+manifest/artifact paths and an optional serve env file. The context carries the
+selected crate and component too. Declare env artifacts as
+`LocalArtifactKind::Env` so previews redact values regardless of filename. The
+CLI validates every declared path against the original filesystem before
+staging, and uses the same local transaction for previews and real writes.
+The default hook describes only the declared manifest.
+
+Adapter blueprints own `tool_pins`, `install_notes`, `local_ignore_patterns`,
+command templates, and logging defaults. Logging endpoint templates accept
+`{crate}`, `{crate_dir}`, `{manifest}`, `{manifest_dir}`, and `{project_mod}`.
+Use `CommandTemplates::emit_commands = false` when generated shell overrides
+would bypass manifest-aware registry execution.
+
+`execute`, `deploy`, `preflight_deploy`, and `finalize_deploy` receive
+`AdapterExecContext`. Apply its resolved environment to provider processes and
+API credential lookup while preserving the adapter-selected directory. Explicit
+manifest/crate/component paths take precedence over ambient discovery.
+
+Provision/config writes use short Rust-owned transactions. A deployment shell
+may compose those commands without holding a parent project lock. Arbitrary
+shell overrides that write files directly must coordinate those writes
+independently; they do not participate in the Rust transaction automatically.

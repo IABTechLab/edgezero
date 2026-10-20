@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **Adapter CLI execution and lifecycle contexts.** `Adapter::execute` takes
+  `&AdapterExecContext`, and `deploy` takes both `&AdapterDeployContext` and
+  `&AdapterExecContext`. `preflight_deploy` and `finalize_deploy` now also receive
+  execution context. Apply `exec.env()` to every child process and credential
+  lookup while retaining the adapter's selected working directory. Build
+  contexts with `AdapterExecContext::new().with_env(...).with_cwd(...)`; honor
+  declared manifest/crate/component paths instead of rediscovering them.
+- **Adapter-owned local CLI metadata.** Implement `Adapter::local_layout` to
+  describe provision artifacts and the optional serve env file. Paths are
+  project-relative and receive the manifest, crate, and component declarations
+  through `AdapterLocalContext`. Mark secret-bearing env files with
+  `LocalArtifactKind::Env`, including custom filenames. The default describes
+  only the declared manifest. `AdapterBlueprint` literals now require
+  `tool_pins`, `install_notes`, and `local_ignore_patterns`; use empty slices
+  when unnecessary. Logging endpoints support the command template vocabulary
+  plus `{project_mod}`. `CommandTemplates` also requires `emit_commands`: choose
+  `false` when registry execution must honor the adapter manifest.
+- **Explicit config cloud target.** `AdapterPushContext::cloud_target` and
+  `.with_cloud_target(bool)` replace deploy-command inference. Set
+  `[adapters.<name>.adapter].cloud = true` for a cloud target and use the context
+  builder instead of the removed deploy-command context field.
+
 - **`edgezero-adapter::Adapter::provision` trait method changed shape.** Was
   `fn provision(&self, root, adapter_manifest, component, stores, dry_run) -> Result<Vec<String>, String>`
   with an `Ok(Vec::new())` default. Is now
@@ -48,6 +70,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is running.
 
 ### Fixed
+
+- Preserve quoted multiline env records and original line endings during
+  provisioning. Readers, writers, and preview redaction share dotenv grammar;
+  generated values are encoded losslessly or rejected explicitly.
+- Targeted provision/config commands validate the selected adapter's policy;
+  whole-project config validation still checks all registered adapters. Derived
+  artifacts are checked in the original tree before previews are staged.
+- Remove inherited project-lock borrowing and deploy-wide shell locks. Rust
+  provision/config transactions hold real exclusive locks. Native Fastly deploy
+  writes a private manifest and merges only `service_id`, preserving unrelated
+  concurrent edits and refusing conflicting service changes. Immutable managed
+  deploys use a private native startup directory and forward execution context
+  to both Fastly and curl. Native Fastly serve requires a `fastly.toml` basename.
+- Reject symlinked Cloudflare local persistence before reads as well as writes;
+  Wrangler can initialize local state while reading.
 
 - Fastly `service_id` no longer lands under `[local_server]` on
   re-provision; the merged `fastly.toml` correctly carries it at the

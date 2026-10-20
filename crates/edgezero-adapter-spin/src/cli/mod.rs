@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use ctor::ctor;
 use edgezero_adapter::cli_support;
 use edgezero_adapter::cli_support::run_native_cli;
+use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout, LocalArtifactKind};
 use edgezero_adapter::registry::{
     Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
     AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
@@ -25,6 +26,16 @@ mod runtime_config;
 static SPIN_ADAPTER: SpinCliAdapter = SpinCliAdapter;
 
 static SPIN_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
+    local_ignore_patterns: &["spin.toml", "runtime-config.toml", ".spin/"],
+    tool_pins: &[],
+    install_notes: &[
+        "Spin is not asdf-managed in this scaffold; install via",
+        "https://spinframework.dev/install",
+        "Requires Spin 4.1 or newer: spin-sdk 7 imports",
+        "wasi:http/types@0.3.0, which Spin 4.0.x does not provide.",
+        "On an older runtime the component builds and its tests",
+        "pass, then the wasm linker rejects it at startup.",
+    ],
     id: "spin",
     display_name: "Spin (Fermyon)",
     crate_suffix: "adapter-spin",
@@ -134,6 +145,7 @@ impl Adapter for SpinCliAdapter {
         &self,
         _context: &AdapterDeployContext,
         _args: &[String],
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<DeployOwnership, String> {
         Ok(DeployOwnership::ManifestCommand)
     }
@@ -154,6 +166,7 @@ impl Adapter for SpinCliAdapter {
         &self,
         _context: &AdapterDeployContext,
         _output: Option<&str>,
+        _exec: &AdapterExecContext<'_>,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -225,6 +238,24 @@ impl Adapter for SpinCliAdapter {
         // under both kinds resolves to one underlying store with
         // silent write-collisions. CLI validate rejects.
         &["kv", "config"]
+    }
+
+    fn local_layout(
+        &self,
+        context: &AdapterLocalContext<'_>,
+    ) -> Result<AdapterLocalLayout, String> {
+        let manifest = context.manifest().unwrap_or("spin.toml");
+        let parent = Path::new(manifest)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        let layout = AdapterLocalLayout::new(manifest)
+            .with_artifact(parent.join("runtime-config.toml"), LocalArtifactKind::Text)
+            .with_artifact(parent.join(".env"), LocalArtifactKind::Env);
+        Ok(if context.manifest().is_some() {
+            layout.with_serve_env(parent.join(".env"))
+        } else {
+            layout
+        })
     }
 
     fn name(&self) -> &'static str {

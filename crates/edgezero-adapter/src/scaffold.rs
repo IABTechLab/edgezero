@@ -7,6 +7,9 @@ static BLUEPRINT_REGISTRY: LazyLock<RwLock<HashMap<String, &'static AdapterBluep
 /// Complete blueprint describing how the CLI should scaffold the adapter.
 pub struct AdapterBlueprint {
     pub commands: CommandTemplates,
+    pub tool_pins: &'static [&'static str],
+    pub local_ignore_patterns: &'static [&'static str],
+    pub install_notes: &'static [&'static str],
     pub crate_suffix: &'static str,
     pub dependencies: &'static [DependencySpec],
     pub dependency_crate: &'static str,
@@ -111,6 +114,9 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     static BLUEPRINT_ALPHA: AdapterBlueprint = AdapterBlueprint {
+        local_ignore_patterns: &[],
+        tool_pins: &[],
+        install_notes: &[],
         commands: CommandTemplates {
             build: "build",
             deploy: "deploy",
@@ -154,6 +160,9 @@ mod tests {
     };
 
     static BLUEPRINT_BETA: AdapterBlueprint = AdapterBlueprint {
+        local_ignore_patterns: &[],
+        tool_pins: &[],
+        install_notes: &[],
         commands: CommandTemplates {
             build: "build",
             deploy: "deploy",

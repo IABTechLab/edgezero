@@ -30,6 +30,7 @@
 //! only parses file → overlay for local dev consumption at
 //! `edgezero serve` startup.
 
+use edgezero_adapter::env_records::{decode_value, records};
 use std::fs;
 use std::path::Path;
 
@@ -57,39 +58,17 @@ use std::path::Path;
 /// line carries a NUL / `=` in the key or a NUL in the value.
 pub(crate) fn parse_env_overlay(path: &Path) -> Result<Vec<(String, String)>, String> {
     let raw = fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
-    let mut out: Vec<(String, String)> = Vec::new();
-    for (line_no_zero, line) in raw.lines().enumerate() {
-        let line_no = line_no_zero.saturating_add(1);
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((key_raw, val_raw)) = trimmed.split_once('=') else {
+    if raw.contains('\0') {
+        return Err(format!("{}: env file contains a NUL byte", path.display()));
+    }
+    let mut out = Vec::new();
+    for record in records(&raw) {
+        let Some(entry) = record.assignment.filter(|entry| !entry.commented) else {
             continue;
         };
-        let key = key_raw.trim();
-        if key.is_empty() {
-            continue;
-        }
-        if key.as_bytes().contains(&0) {
-            return Err(format!(
-                "{}:{line_no}: env-file key contains a NUL byte, which is invalid on the \
-                 target platform",
-                path.display()
-            ));
-        }
-        let trimmed_val = val_raw.trim();
-        let value = trimmed_val
-            .strip_prefix('"')
-            .and_then(|stripped| stripped.strip_suffix('"'))
-            .unwrap_or(trimmed_val);
-        if value.as_bytes().contains(&0) {
-            return Err(format!(
-                "{}:{line_no}: env-file value for `{key}` contains a NUL byte",
-                path.display()
-            ));
-        }
-        out.push((key.to_owned(), value.to_owned()));
+        let value = decode_value(entry)
+            .map_err(|error| format!("{}:{}: {error}", path.display(), record.line))?;
+        out.push((entry.key.to_owned(), value));
     }
     Ok(out)
 }
@@ -107,6 +86,29 @@ mod tests {
         let mut file = File::create(&path).expect("create .env");
         file.write_all(contents.as_bytes()).expect("write");
         path
+    }
+
+    #[test]
+    fn multiline_values_remain_literal_and_do_not_inject_assignments() {
+        let dir = TempDir::new().unwrap();
+        for quote in ['\'', '"', '`'] {
+            let path = write_env_file(
+                &dir,
+                &format!(
+                    "TOKEN={quote}first\nINJECTED=value\n$(touch file) $VAR{quote}\nNEXT=ok\n"
+                ),
+            );
+            assert_eq!(
+                parse_env_overlay(&path).unwrap(),
+                vec![
+                    (
+                        "TOKEN".to_owned(),
+                        "first\nINJECTED=value\n$(touch file) $VAR".to_owned()
+                    ),
+                    ("NEXT".to_owned(), "ok".to_owned()),
+                ]
+            );
+        }
     }
 
     #[test]

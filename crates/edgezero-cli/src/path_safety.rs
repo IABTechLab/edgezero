@@ -2,6 +2,9 @@
 //! manifest-declared paths and let adapters write files through
 //! them. See spec §"Path containment (MUST)".
 
+use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout};
+use edgezero_adapter::registry::Adapter;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -343,6 +346,58 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
         out.push(".");
     }
     out
+}
+
+/// Resolve and validate every adapter-owned local input/output before staging.
+pub(crate) fn local_layout(
+    root: &Path,
+    adapter: &dyn Adapter,
+    manifest: Option<&str>,
+    crate_path: Option<&str>,
+    component: Option<&str>,
+) -> Result<AdapterLocalLayout, String> {
+    let context = AdapterLocalContext::new(manifest, crate_path, component);
+    let layout = adapter.local_layout(&context)?;
+    let mut kinds = BTreeMap::new();
+    for artifact in &layout.artifacts {
+        if let Some(previous) = kinds.insert(&artifact.path, artifact.kind)
+            && previous != artifact.kind
+        {
+            return Err(format!(
+                "adapter declares conflicting content kinds for {}",
+                artifact.path.display()
+            ));
+        }
+    }
+    for path in layout
+        .artifacts
+        .iter()
+        .map(|artifact| &artifact.path)
+        .chain(layout.manifest.iter())
+        .chain(layout.serve_env.iter())
+    {
+        let relative = path
+            .to_str()
+            .ok_or_else(|| "adapter layout path is not UTF-8".to_owned())?;
+        assert_provision_paths_safe(root, Some(relative), None)?;
+        reject_symlink_components(root, &root.join(path), "an adapter-declared local artifact")?;
+        match fs::symlink_metadata(root.join(path)) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(format!(
+                    "adapter artifact {} must be a regular file",
+                    path.display()
+                ));
+            }
+            Err(error) if error.kind() != ErrorKind::NotFound => {
+                return Err(format!(
+                    "inspect adapter artifact {}: {error}",
+                    path.display()
+                ));
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    Ok(layout)
 }
 
 #[cfg(test)]

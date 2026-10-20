@@ -659,3 +659,26 @@ entry point and removing retained state, not merely setting a request limit of o
 
 - Learn about [Cloudflare Workers](/guide/adapters/cloudflare) as an alternative deployment target
 - Explore [Configuration](/guide/configuration) for manifest details
+
+## Native CLI Manifest Writes
+
+Registry-based native deploy uses a private startup manifest and a uniquely
+named `fastly.edgezero-*.toml` beside the selected source manifest. The adapter
+owns Fastly's `--dir`/`-C` and `--env` selectors; choose the source through
+`edgezero.toml`. Relative package/setup inputs retain the selected manifest's
+original directory. After a successful native deploy, the adapter merges only
+`service_id` under its manifest lock. Concurrent unrelated edits survive; a
+conflicting service change fails without overwriting it. A vendor process that
+outlives its parent can write only its private copy. Abrupt termination can
+leave an ignored private snapshot for later cleanup.
+
+Managed immutable-release deployment runs native commands in an external
+startup directory containing a private copy of the verified manifest. Fastly
+startup upgrades cannot alter the release. Both Fastly and curl receive the
+resolved execution environment, including explicit credentials and selectors.
+
+Native `serve` performs Fastly's own build and requires a source file named
+`fastly.toml`; custom basenames fail explicitly. Its build does not use deploy's
+private environment selector. Generated shell command overrides remain native
+provider commands and follow the transaction responsibilities described in the
+[adapter CLI contract](./overview#adapter-cli-ownership).

@@ -7,6 +7,7 @@ use std::process::id as process_id;
 use ctor::ctor;
 use edgezero_adapter::cli_support;
 use edgezero_adapter::cli_support::run_native_cli;
+use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout};
 use edgezero_adapter::registry::{
     Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
     AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
@@ -23,6 +24,7 @@ use crate::chunked_config::{
 };
 
 mod gc;
+mod local_vendor;
 mod provision_cloud;
 mod provision_local;
 mod push_cloud;
@@ -30,10 +32,10 @@ mod push_local;
 mod run;
 mod staging;
 use staging::{
-    deploy_managed_with_context, emit_active_version_for, owns_managed_deploy,
-    parse_fastly_version, parse_release_managed_deploy_args, require_token,
-    scan_reserved_deploy_args, validate_effective_deploy_service_id, validate_fastly_config_key,
-    validate_service_id, verify_version_active,
+    deploy_managed_with_context, owns_managed_deploy, parse_fastly_version,
+    parse_release_managed_deploy_args, scan_reserved_deploy_args,
+    validate_effective_deploy_service_id, validate_fastly_config_key, validate_service_id,
+    verify_version_active,
 };
 #[cfg(test)]
 mod test_support;
@@ -41,6 +43,14 @@ mod test_support;
 static FASTLY_ADAPTER: FastlyCliAdapter = FastlyCliAdapter;
 
 static FASTLY_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
+    local_ignore_patterns: &[
+        "fastly.toml",
+        "fastly.edgezero-*.toml",
+        ".*.edgezero-lock",
+        ".*.edgezero-*.tmp",
+    ],
+    tool_pins: &["fastly 16.0.0", "viceroy 0.21.0"],
+    install_notes: &[],
     id: "fastly",
     display_name: "Fastly Compute@Edge",
     crate_suffix: "adapter-fastly",
@@ -63,7 +73,7 @@ static FASTLY_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
         emit_commands: true,
     },
     logging: LoggingDefaults {
-        endpoint: Some("stdout"),
+        endpoint: Some("{project_mod}_log"),
         level: "info",
         echo_stdout: Some(true),
     },
@@ -186,8 +196,9 @@ impl Adapter for FastlyCliAdapter {
         &self,
         context: &AdapterDeployContext,
         args: &[String],
+        exec: &AdapterExecContext<'_>,
     ) -> Result<DeployOwnership, String> {
-        validate_effective_deploy_service_id(context)?;
+        validate_effective_deploy_service_id(context, exec)?;
         if owns_managed_deploy(context) {
             parse_release_managed_deploy_args(args)?;
             Ok(DeployOwnership::AdapterManaged)
@@ -211,6 +222,7 @@ impl Adapter for FastlyCliAdapter {
         &self,
         context: &AdapterDeployContext,
         command_output: Option<&str>,
+        exec: &AdapterExecContext<'_>,
     ) -> Result<(), String> {
         if context.staging {
             return Ok(());
@@ -221,7 +233,7 @@ impl Adapter for FastlyCliAdapter {
         };
         validate_service_id(service_id)?;
         if let Some(version) = command_output.and_then(parse_fastly_version) {
-            let token = require_token()?;
+            let token = staging::require_token_with_exec(exec)?;
             verify_version_active(
                 service_id,
                 version,
@@ -231,7 +243,7 @@ impl Adapter for FastlyCliAdapter {
             log::info!("version={version}");
             return Ok(());
         }
-        emit_active_version_for(service_id, true).map_err(|error| {
+        staging::emit_active_version_with_token(service_id, true, &staging::require_token_with_exec(exec)?).map_err(|error| {
             format!(
                 "deploy succeeded but the activated version could not be resolved from the deploy output or Fastly API: {error}"
             )
@@ -245,9 +257,9 @@ impl Adapter for FastlyCliAdapter {
         exec: &AdapterExecContext<'_>,
     ) -> Result<(), String> {
         if owns_managed_deploy(context) {
-            deploy_managed_with_context(context, args)
+            deploy_managed_with_context(context, args, exec)
         } else {
-            validate_effective_deploy_service_id(context)?;
+            validate_effective_deploy_service_id(context, exec)?;
             scan_reserved_deploy_args(args)?;
             run::deploy_with_context(context, args, exec)
         }
@@ -304,6 +316,14 @@ impl Adapter for FastlyCliAdapter {
         dry_run: bool,
     ) -> Result<Vec<String>, String> {
         gc::gc_fastly_config_store(store.platform.as_str(), older_than_secs, dry_run)
+    }
+
+    fn local_layout(
+        &self,
+        context: &AdapterLocalContext<'_>,
+    ) -> Result<AdapterLocalLayout, String> {
+        let manifest = context.manifest().unwrap_or("fastly.toml");
+        Ok(AdapterLocalLayout::new(manifest))
     }
 
     fn name(&self) -> &'static str {

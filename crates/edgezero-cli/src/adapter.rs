@@ -82,9 +82,7 @@ impl From<Action> for AdapterAction {
 ///   1. Parent env -- an operator's `KEY=v edgezero serve` wins over
 ///      everything. `Command` has no inherit-then-override per key, so
 ///      a parent-set key is simply never pushed here and the child
-///      inherits it untouched. EXCEPTION: the provision-lock
-///      advertisement keys ([`is_lock_advertisement_key`]) always
-///      override, so a nested deploy advertises its OWN lock.
+///      inherits it untouched.
 ///   2. The `.env` overlay (Spin's `<spin_dir>/.env`, Axum's
 ///      `.edgezero/.env`).
 ///   3. Manifest `[environment.variables]` -- a DEFAULT, not an
@@ -101,13 +99,8 @@ fn build_child_env(
 ) -> Result<Vec<(String, String)>, String> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push = |key: &str, value: String| {
-        // Parent wins: never shadow a key the operator exported -- EXCEPT
-        // the provision-lock advertisement. A nested deploy MUST advertise
-        // ITS OWN lock path/token; if we deferred to an inherited ancestor
-        // advertisement, the child's nested provision would see the wrong
-        // path/token and dead-lock on this deploy's non-reentrant lock
-        // instead of borrowing it.
-        if !is_lock_advertisement_key(key) && env::var_os(key).is_some() {
+        // The child inherits operator-exported values unchanged.
+        if env::var_os(key).is_some() {
             return;
         }
         out.retain(|(existing, _)| existing != key);
@@ -138,15 +131,6 @@ fn build_child_env(
         assert_required_secrets_present(adapter_name, env, &out)?;
     }
     Ok(out)
-}
-
-/// The provision-lock advertisement keys a nested deploy must be able to
-/// OVERRIDE in the child env (rather than defer to an inherited ancestor
-/// value). Kept next to `build_child_env`'s precedence rule so the two
-/// don't drift.
-fn is_lock_advertisement_key(key: &str) -> bool {
-    use crate::provision_lock::{LOCK_ENV, LOCK_TOKEN_ENV, SIBLING_DEPTH_ENV};
-    key == LOCK_ENV || key == LOCK_TOKEN_ENV || key == SIBLING_DEPTH_ENV
 }
 
 /// Every `[environment.secrets]` binding must resolve to a value the
@@ -461,10 +445,21 @@ pub fn deploy(
     env_overlay: &[(String, String)],
 ) -> Result<(), String> {
     assert_adapter_declaration_consistent(manifest_loader, adapter_name)?;
+    let environment = manifest_loader.map(|loader| loader.manifest().environment_for(adapter_name));
+    let lifecycle_bind = manifest_loader.map_or((None, None), |loader| {
+        adapter_bind_from_manifest(loader.manifest(), adapter_name)
+    });
+    let child_env = build_child_env(
+        adapter_name,
+        environment.as_ref(),
+        lifecycle_bind,
+        env_overlay,
+    )?;
+    let lifecycle_exec = AdapterExecContext::new().with_env(&child_env);
     let registered_adapter = adapter_registry::get_adapter(adapter_name);
     let ownership = registered_adapter
         .map_or(Ok(DeployOwnership::ManifestCommand), |registered| {
-            registered.preflight_deploy(context, adapter_args)
+            registered.preflight_deploy(context, adapter_args, &lifecycle_exec)
         })?;
 
     if ownership != DeployOwnership::AdapterManaged && context.application_release_root.is_some() {
@@ -516,7 +511,7 @@ pub fn deploy(
             env_overlay,
         )?;
         if let Some(finalizer) = registered_adapter {
-            finalizer.finalize_deploy(context, Some(&output))?;
+            finalizer.finalize_deploy(context, Some(&output), &lifecycle_exec)?;
         }
         return Ok(());
     }
@@ -528,7 +523,7 @@ pub fn deploy(
     with_exec_context(adapter_name, manifest_loader, env_overlay, |exec| {
         fallback_adapter.deploy(context, adapter_args, exec)
     })?;
-    fallback_adapter.finalize_deploy(context, None)
+    fallback_adapter.finalize_deploy(context, None, &lifecycle_exec)
 }
 
 fn manifest_command<'manifest>(

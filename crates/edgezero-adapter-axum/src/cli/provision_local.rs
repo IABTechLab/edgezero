@@ -1,3 +1,4 @@
+use edgezero_adapter::env_records::encode_value;
 use std::fs;
 use std::path::Path;
 
@@ -38,7 +39,7 @@ pub(super) fn provision(
             .map_err(|err| format!("create {}: {err}", dot_edgezero.display()))?;
     }
     let env_path = dot_edgezero.join(".env");
-    let (name_lines, comment_lines) = build_axum_env_lines(stores);
+    let (name_lines, comment_lines) = build_axum_env_lines(stores)?;
     // Managed `__NAME` overlay lines go through the CONVERGING upsert so a
     // reprovision after a platform-name change lands the new value instead
     // of retaining the stale one. The commented `__KEY` placeholders are
@@ -84,7 +85,9 @@ pub(super) fn provision(
 /// Returns `(name_lines, comment_lines)`: the `__NAME` overlay lines
 /// (converging upsert path) and the commented `__KEY` placeholders
 /// (operator-owned, insert-only append path) split apart.
-fn build_axum_env_lines(stores: &ProvisionStores<'_>) -> (Vec<String>, Vec<String>) {
+fn build_axum_env_lines(
+    stores: &ProvisionStores<'_>,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let mut name_lines: Vec<String> = Vec::new();
     for (kind, kind_stores) in [
         ("KV", stores.kv),
@@ -93,7 +96,7 @@ fn build_axum_env_lines(stores: &ProvisionStores<'_>) -> (Vec<String>, Vec<Strin
     ] {
         for store in kind_stores {
             let logical_upper = store.logical.to_ascii_uppercase();
-            let platform = &store.platform;
+            let platform = encode_value(&store.platform, false)?;
             name_lines.push(format!(
                 "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
             ));
@@ -107,7 +110,7 @@ fn build_axum_env_lines(stores: &ProvisionStores<'_>) -> (Vec<String>, Vec<Strin
             "# EDGEZERO__STORES__CONFIG__{logical_upper}__KEY={logical}_staging"
         ));
     }
-    (name_lines, comment_lines)
+    Ok((name_lines, comment_lines))
 }
 
 #[cfg(test)]
