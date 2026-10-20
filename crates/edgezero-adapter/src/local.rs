@@ -57,6 +57,8 @@ pub enum LocalArtifactKind {
     Text,
     /// Environment assignments whose values must be redacted in previews.
     Env,
+    /// TOML whose scalar values and comments must be removed from previews.
+    SensitiveToml,
 }
 
 /// A local provision output, relative to the application root.
@@ -102,9 +104,19 @@ impl AdapterLocalLayout {
     where
         P: Into<PathBuf>,
     {
+        Self::new_with_kind(manifest, LocalArtifactKind::Text)
+    }
+
+    /// Start with an adapter-selected preview policy for its manifest.
+    #[must_use]
+    #[inline]
+    pub fn new_with_kind<P>(manifest: P, kind: LocalArtifactKind) -> Self
+    where
+        P: Into<PathBuf>,
+    {
         let path = manifest.into();
         Self {
-            artifacts: vec![LocalArtifact::new(path.clone(), LocalArtifactKind::Text)],
+            artifacts: vec![LocalArtifact::new(path.clone(), kind)],
             manifest: Some(path),
             serve_env: None,
         }

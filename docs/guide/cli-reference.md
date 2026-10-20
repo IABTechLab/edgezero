@@ -598,7 +598,9 @@ edgezero provision --adapter <name> [--manifest <path>] [--local] [--dry-run]
   performing it. Combines with `--local`: `provision --local
 --dry-run` stages every write into a tempdir and prints a diff
   report; the worktree stays byte-identical. No file writes, no
-  shell-outs.
+  shell-outs. Adapter-declared sensitive TOML previews redact scalar values
+  and omit comments; env-file previews redact assignment values. Changes hidden
+  by redaction still produce a change notice.
 
 All adapter manifests (`axum.toml`, `wrangler.toml`, `fastly.toml`,
 `spin.toml`, `runtime-config.toml`) are gitignored, so teammates

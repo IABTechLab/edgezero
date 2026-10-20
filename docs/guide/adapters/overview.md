@@ -220,8 +220,12 @@ It does not dispatch provider behavior by adapter name.
 Implement `Adapter::local_layout(&AdapterLocalContext)` for project-relative
 manifest/artifact paths and an optional serve env file. The context carries the
 selected crate and component too. Declare env artifacts as
-`LocalArtifactKind::Env` so previews redact values regardless of filename. The
-CLI validates every declared path against the original filesystem before
+`LocalArtifactKind::Env` so previews redact values regardless of filename.
+Declare credential-bearing TOML as `LocalArtifactKind::SensitiveToml`; previews
+retain table/key/array structure while removing scalar values and comments.
+Use `AdapterLocalLayout::new_with_kind` to apply that policy to the manifest.
+Malformed sensitive TOML produces a fixed redaction marker. The CLI validates
+every declared path against the original filesystem before
 staging, and uses the same local transaction for previews and real writes.
 The default hook describes only the declared manifest.
 

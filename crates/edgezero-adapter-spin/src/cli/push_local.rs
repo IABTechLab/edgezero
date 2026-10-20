@@ -40,7 +40,7 @@
 //! above is a heads-up, not a guarantee.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, absolute};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -174,7 +174,6 @@ fn normalise_lexical(path: &Path) -> PathBuf {
 /// # Errors
 /// Returns an error when the resolved db is not under the crate root.
 fn assert_sqlite_write_in_tree(crate_root: &Path, db_path: &Path) -> Result<(), String> {
-    use std::path::absolute;
     let root =
         normalise_lexical(&absolute(crate_root).unwrap_or_else(|_| crate_root.to_path_buf()));
     let db = normalise_lexical(&absolute(db_path).unwrap_or_else(|_| db_path.to_path_buf()));
@@ -228,13 +227,27 @@ pub(super) fn resolve_sqlite_path_guarded(
     runtime_config_dir: &Path,
     explicit_path: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let db_path = resolve_sqlite_path(spin_manifest_dir, runtime_config_dir, explicit_path);
+    let normalized_root = normalise_lexical(
+        &absolute(crate_root).map_err(|error| format!("resolve Spin crate directory: {error}"))?,
+    );
+    let db_path = absolute(resolve_sqlite_path(
+        spin_manifest_dir,
+        runtime_config_dir,
+        explicit_path,
+    ))
+    .map_err(|error| format!("resolve Spin SQLite database: {error}"))?;
     // Walk symlinks from the CRATE ROOT, not the manifest's own dir: a
     // nested manifest (`crates/server/config/spin.toml`) can resolve the db
     // to `crates/server/.spin/...`, ABOVE the manifest dir -- guarding from
     // the manifest dir would skip the check entirely for that layout.
-    guard_sqlite_path_symlinks(crate_root, &db_path)?;
-    Ok(db_path)
+    guard_sqlite_path_symlinks(&normalized_root, &db_path)?;
+    // Check raw in-crate components before folding a `symlink/..` away.
+    // Then guard and return the normalized destination: runtime-config's
+    // directory may precede the crate via `config/../crates/server/...`.
+    // Readers and writers must open this exact guarded path.
+    let normalized_db = normalise_lexical(&db_path);
+    guard_sqlite_path_symlinks(&normalized_root, &normalized_db)?;
+    Ok(normalized_db)
 }
 
 /// Tracks whether the compat warning has already fired this session
@@ -706,8 +719,12 @@ fn write_sqlite(
     // an explicit relative path anchors at the runtime-config dir), then
     // guard symlinked components from the CRATE ROOT so a nested layout's
     // db (which sits outside the manifest's own dir) is still covered.
-    let db_path = resolve_sqlite_path(spin_manifest_dir, runtime_config_dir, explicit_path);
-    guard_sqlite_path_symlinks(crate_root, &db_path)?;
+    let db_path = resolve_sqlite_path_guarded(
+        crate_root,
+        spin_manifest_dir,
+        runtime_config_dir,
+        explicit_path,
+    )?;
     // The `path` string can be clean-relative yet still escape when the
     // BASE it anchors against is external -- e.g. `--runtime-config
     // /tmp/runtime-config.toml` with `path = "config.db"` resolves to
@@ -796,6 +813,7 @@ pub(super) fn read_sqlite_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use std::path::PathBuf;
     use std::str;
     use tempfile::tempdir;
@@ -1733,6 +1751,67 @@ mod tests {
     /// A symlinked INTERMEDIATE component (`.spin`) must be rejected --
     /// the final-component guard alone would let `create_dir_all` follow
     /// it off-tree.
+    #[cfg(unix)]
+    #[test]
+    fn relative_runtime_config_cannot_bypass_sqlite_symlink_guard() {
+        use std::os::unix::fs::symlink;
+        let cwd = env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let crate_root = dir.path().join("crate");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&crate_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, crate_root.join(".spin")).unwrap();
+        let relative_runtime_dir = crate_root.strip_prefix(&cwd).unwrap();
+        for dry_run in [true, false] {
+            let error = write_sqlite(
+                &crate_root,
+                &crate_root,
+                relative_runtime_dir,
+                Some(Path::new(".spin/config.db")),
+                "settings",
+                "settings",
+                &[("key".to_owned(), "value".to_owned())],
+                dry_run,
+            )
+            .expect_err("relative runtime-config must not skip component checks");
+            assert!(error.contains("symlink"), "{error}");
+            assert!(!outside.join("config.db").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_runtime_config_reads_use_the_same_sqlite_guard() {
+        use std::os::unix::fs::symlink;
+        let cwd = env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let root = dir.path().join("crate");
+        fs::create_dir_all(&root).unwrap();
+        symlink(dir.path(), root.join(".spin")).unwrap();
+        let relative = root.strip_prefix(&cwd).unwrap();
+        resolve_sqlite_path_guarded(&root, &root, relative, Some(Path::new(".spin/config.db")))
+            .expect_err("reads must guard relative runtime-config paths too");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_guard_rejects_symlinks_before_parent_components() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("crate");
+        fs::create_dir_all(&root).unwrap();
+        symlink(dir.path(), root.join("linked")).unwrap();
+        let error = resolve_sqlite_path_guarded(
+            &root,
+            &root,
+            &root,
+            Some(Path::new("linked/../config.db")),
+        )
+        .expect_err("do not fold away a symlink before checking it");
+        assert!(error.contains("symlink"), "{error}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolve_sqlite_path_guarded_rejects_symlinked_intermediate() {

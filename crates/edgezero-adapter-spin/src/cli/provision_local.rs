@@ -6,6 +6,7 @@
 use edgezero_adapter::env_records::encode_value;
 use std::fs;
 use std::path::Path;
+use toml_edit::DocumentMut;
 
 use edgezero_adapter::env_file::{
     EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, reject_symlinked_target,
@@ -39,8 +40,6 @@ pub(super) fn provision(
     stores: &ProvisionStores<'_>,
     dry_run: bool,
 ) -> Result<ProvisionOutcome, String> {
-    use toml_edit::DocumentMut;
-
     let spin_rel = adapter_manifest_path.unwrap_or("spin.toml");
     let spin_path = manifest_root.join(spin_rel);
     let spin_dir = spin_path.parent().unwrap_or(manifest_root);
@@ -71,9 +70,7 @@ pub(super) fn provision(
     // 1. spin.toml: append platform labels to [component.<id>].key_value_stores.
     let spin_raw = fs::read_to_string(&spin_path)
         .map_err(|err| format!("failed to read {}: {err}", spin_path.display()))?;
-    let mut spin_doc: DocumentMut = spin_raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", spin_path.display()))?;
+    let mut spin_doc = parse_local_toml(&spin_raw, &spin_path)?;
     let mut spin_changed = false;
     let needs_component = !stores.kv.is_empty() || !stores.config.is_empty();
     // Resolve/refresh the component whenever there are stores to append
@@ -103,9 +100,7 @@ pub(super) fn provision(
     // 2. runtime-config.toml: append [key_value_store.<platform>] blocks.
     let rc_raw = fs::read_to_string(&rc_path)
         .map_err(|err| format!("failed to read {}: {err}", rc_path.display()))?;
-    let mut rc_doc: DocumentMut = rc_raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", rc_path.display()))?;
+    let mut rc_doc = parse_local_toml(&rc_raw, &rc_path)?;
     let mut rc_changed = false;
     for store in stores.kv.iter().chain(stores.config.iter()) {
         if append_key_value_store_block(&mut rc_doc, &store.platform)? {
@@ -175,6 +170,15 @@ pub(super) fn provision(
         env_changed,
     );
     Ok(ProvisionOutcome::from_status_lines(status_lines))
+}
+
+fn parse_local_toml(raw: &str, path: &Path) -> Result<DocumentMut, String> {
+    raw.parse().map_err(|_error| {
+        format!(
+            "failed to parse {} (parse details redacted)",
+            path.display()
+        )
+    })
 }
 
 /// Build one status line per touched file so the dry-run preview is
@@ -410,8 +414,6 @@ pub(super) fn provision_typed(
     typed_secrets: &[TypedSecretEntry<'_>],
     dry_run: bool,
 ) -> Result<ProvisionOutcome, String> {
-    use toml_edit::DocumentMut;
-
     let spin_rel = adapter_manifest_path.unwrap_or("spin.toml");
     let spin_path = manifest_root.join(spin_rel);
     let env_path = spin_path.parent().unwrap_or(manifest_root).join(".env");
@@ -425,9 +427,7 @@ pub(super) fn provision_typed(
 
     let spin_raw = fs::read_to_string(&spin_path)
         .map_err(|err| format!("failed to read {}: {err}", spin_path.display()))?;
-    let mut spin_doc: DocumentMut = spin_raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", spin_path.display()))?;
+    let mut spin_doc = parse_local_toml(&spin_raw, &spin_path)?;
 
     // Resolve the component id ONCE — if unresolvable (multi-component
     // with no selector, or a bad explicit selector), abort BEFORE
@@ -767,6 +767,40 @@ mod tests {
     // not arbitrary strings.
     const TEST_KV_ID: &str = "sessions";
     const TEST_KV_ID_ALT: &str = "cache";
+
+    #[test]
+    fn local_provision_parse_errors_redact_values() {
+        let dir = tempdir().unwrap();
+        let spin = dir.path().join("spin.toml");
+        let runtime = dir.path().join("runtime-config.toml");
+        let stores = ProvisionStores {
+            config: &[],
+            kv: &[],
+            secrets: &[],
+        };
+        for invalid_spin in [true, false] {
+            fs::write(&spin, "[component.demo]\nsource = 'demo.wasm'\n").unwrap();
+            fs::write(&runtime, "").unwrap();
+            let invalid_path = if invalid_spin { &spin } else { &runtime };
+            let original = "value = 'PRIVATE_PARSE_SENTINEL' broken\n";
+            fs::write(invalid_path, original).unwrap();
+            let error =
+                super::provision(dir.path(), Some("spin.toml"), Some("demo"), &stores, false)
+                    .unwrap_err();
+            assert!(error.contains("parse"), "{error}");
+            assert!(!error.contains("PRIVATE_PARSE_SENTINEL"), "{error}");
+            if invalid_spin {
+                let typed_error =
+                    super::provision_typed(dir.path(), Some("spin.toml"), Some("demo"), &[], false)
+                        .unwrap_err();
+                assert!(
+                    !typed_error.contains("PRIVATE_PARSE_SENTINEL"),
+                    "{typed_error}"
+                );
+            }
+            assert_eq!(fs::read_to_string(invalid_path).unwrap(), original);
+        }
+    }
 
     #[test]
     fn reject_inline_component_tables_rejects_inline_parent() {

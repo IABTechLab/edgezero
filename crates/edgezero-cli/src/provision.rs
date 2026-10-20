@@ -8,7 +8,7 @@
 //! each `edgezero-adapter-*` crate's `Adapter::provision` impl, not
 //! here.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -56,7 +56,7 @@ use validator::Validate;
 pub(crate) struct DryRunAllowList {
     /// (`project_path`, `staged_path`) pairs the driver diffs.
     pub pairs: Vec<(PathBuf, PathBuf)>,
-    pub env_paths: BTreeSet<PathBuf>,
+    pub kinds: BTreeMap<PathBuf, LocalArtifactKind>,
 }
 
 /// # Errors
@@ -1220,15 +1220,13 @@ fn resolve_dry_run_allow_list(
         context.component(),
     )?;
     let mut pairs = Vec::new();
-    let mut env_paths = BTreeSet::new();
+    let mut kinds = BTreeMap::new();
     for artifact in layout.artifacts {
         let project = manifest_root.join(&artifact.path);
-        if artifact.kind == LocalArtifactKind::Env {
-            env_paths.insert(project.clone());
-        }
+        kinds.insert(project.clone(), artifact.kind);
         pairs.push((project, staged_root.join(&artifact.path)));
     }
-    Ok(DryRunAllowList { pairs, env_paths })
+    Ok(DryRunAllowList { pairs, kinds })
 }
 
 /// Permission delta (`project_mode`, `staged_mode`) between a project file
@@ -1335,30 +1333,17 @@ pub(crate) fn render_dry_run_report(
             }
             continue;
         }
-        // Env / secret carriage files (`.env`, `.dev.vars`) hold
-        // operator-authored secret values. `context_radius(2)` scopes
-        // context to two lines around each hunk, but if provision
-        // appends new lines at EOF the LAST two pre-existing lines
-        // still surface as unchanged context — which for a
-        // `.dev.vars` populated with real production secrets means
-        // those secrets show up in CI logs, screen recordings, and
-        // terminal scrollback. Redact both sides through a
-        // `KEY=<redacted>` filter for env-shaped paths BEFORE
-        // computing the diff. Comment lines and blank lines pass
-        // through as-is so structural drift is still visible.
-        let is_env_like = allow_list.env_paths.contains(proj_path);
-        let old_render = if is_env_like {
-            redact_env_body_for_diff(&old)
-        } else {
-            old.clone()
-        };
-        let new_render = if is_env_like {
-            redact_env_body_for_diff(&new)
-        } else {
-            new.clone()
-        };
+        // Context lines carry credentials too. Apply the adapter-selected
+        // format policy to both sides before computing any diff context.
+        let kind = allow_list
+            .kinds
+            .get(proj_path)
+            .copied()
+            .unwrap_or(LocalArtifactKind::Text);
+        let old_render = render_artifact_body(&old, kind);
+        let new_render = render_artifact_body(&new, kind);
         if old_render == new_render {
-            // Diff was purely value churn on secret files. Emit a
+            // Only redacted contents changed. Emit a
             // single line so the operator knows something changed
             // without leaking the specific keys or values.
             let path_display = proj_path.display();
@@ -1367,7 +1352,7 @@ pub(crate) fn render_dry_run_report(
             out.push_str(&path_display.to_string());
             out.push_str("\n+++ ");
             out.push_str(&path_display.to_string());
-            out.push_str("\n@@ (redacted: env / secret carriage file -- values differ) @@\n");
+            out.push_str("\n@@ (redacted: local artifact -- contents differ) @@\n");
             continue;
         }
         let diff = TextDiff::from_lines(&old_render, &new_render);
@@ -1382,6 +1367,46 @@ pub(crate) fn render_dry_run_report(
         );
     }
     out
+}
+
+fn render_artifact_body(body: &str, kind: LocalArtifactKind) -> String {
+    match kind {
+        LocalArtifactKind::Text => body.to_owned(),
+        LocalArtifactKind::Env => redact_env_body_for_diff(body),
+        LocalArtifactKind::SensitiveToml => {
+            let Ok(mut value) = body.parse::<toml::Value>() else {
+                return "# <redacted TOML contents>\n".to_owned();
+            };
+            redact_toml_values(&mut value);
+            // Serializing fresh values drops comments and decoration that can
+            // also contain credentials. Never fall back to original bytes.
+            toml::to_string_pretty(&value)
+                .unwrap_or_else(|_error| "# <redacted TOML contents>\n".to_owned())
+        }
+        _ => "# <redacted artifact contents>\n".to_owned(),
+    }
+}
+
+fn redact_toml_values(value: &mut toml::Value) {
+    match value {
+        toml::Value::Table(table) => {
+            for (_, child) in table.iter_mut() {
+                redact_toml_values(child);
+            }
+        }
+        toml::Value::Array(values) => {
+            for child in values {
+                redact_toml_values(child);
+            }
+        }
+        toml::Value::String(_)
+        | toml::Value::Integer(_)
+        | toml::Value::Float(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Datetime(_) => {
+            *value = toml::Value::String("<redacted>".to_owned());
+        }
+    }
 }
 
 /// Redact entire logical values, including malformed and stashed multiline values.
@@ -1704,7 +1729,7 @@ mod tests {
     };
     use edgezero_core::app_config::{SecretField, SecretKind, SecretPathSegment};
     use std::borrow::Cow;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::env;
     use std::fs;
     use std::io;
@@ -3097,7 +3122,7 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(proj.clone(), staged.clone())],
-            env_paths: BTreeSet::new(),
+            kinds: BTreeMap::new(),
         };
         let outcome = ProvisionOutcome::from_status_lines(vec![]);
         let report = render_dry_run_report(temp.path(), temp.path(), &allow_list, &outcome, None);
@@ -3121,7 +3146,7 @@ ids = ["default"]
         fs::write(&staged, "name = \"before\"\n").expect("write staged");
         let allow_list = DryRunAllowList {
             pairs: vec![(proj.clone(), staged.clone())],
-            env_paths: BTreeSet::new(),
+            kinds: BTreeMap::new(),
         };
         let pristine = capture_pristine_snapshot(&allow_list);
 
@@ -3175,7 +3200,7 @@ ids = ["default"]
         ]);
         let allow_list = DryRunAllowList {
             pairs: vec![],
-            env_paths: BTreeSet::new(),
+            kinds: BTreeMap::new(),
         };
         let report = render_dry_run_report(temp.path(), temp.path(), &allow_list, &outcome, None);
         assert!(
@@ -3284,7 +3309,7 @@ ids = ["default"]
         ]);
         let allow_list = DryRunAllowList {
             pairs: vec![],
-            env_paths: BTreeSet::new(),
+            kinds: BTreeMap::new(),
         };
         let report = render_dry_run_report(project, staged, &allow_list, &outcome, None);
         assert!(
@@ -3394,6 +3419,68 @@ ids = ["default"]
             assert!(error.contains("symlink"), "dry_run={dry_run}: {error}");
         }
         assert!(!outside.path().join("untouched").exists());
+    }
+
+    #[test]
+    fn native_toml_previews_redact_values_comments_and_malformed_input() {
+        use crate::test_support::LAYOUT_TEST_ADAPTER;
+        let _guard = manifest_guard().lock().unwrap();
+        adapter_registry::register_adapter(&LAYOUT_TEST_ADAPTER);
+        for adapter in ["fastly", "spin", "cloudflare", "__layout_test__"] {
+            for original in [
+                "[[local_server.secret_stores.vault]]\nkey='token'\ndata='PRIVATE_PREVIEW_SENTINEL'\n",
+                "[key_value_store.redis]\ntype='redis'\nurl='redis://user:PRIVATE_PREVIEW_SENTINEL@localhost/'\n",
+                "[nested]\nvalues=[{password='PRIVATE_PREVIEW_SENTINEL'}, ['PRIVATE_ARRAY_SENTINEL']]\n",
+                "[variables]\ntoken='''PRIVATE_PREVIEW_SENTINEL\nPRIVATE_CONTINUATION_SENTINEL'''\n",
+                "name='demo'\n# PRIVATE_COMMENT_SENTINEL\n",
+                "password='PRIVATE_PREVIEW_SENTINEL' broken\n",
+            ] {
+                let project = TempDir::new().unwrap();
+                let staged = TempDir::new().unwrap();
+                let context = AdapterLocalContext::new(
+                    Some("crate/custom.provider"),
+                    Some("crate"),
+                    Some("sensitive"),
+                );
+                let allow =
+                    resolve_dry_run_allow_list(project.path(), staged.path(), adapter, &context)
+                        .unwrap();
+                for (source, destination) in &allow.pairs {
+                    if allow.kinds.get(source) == Some(&LocalArtifactKind::Env) {
+                        continue;
+                    }
+                    fs::create_dir_all(source.parent().unwrap()).unwrap();
+                    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                    fs::write(source, original).unwrap();
+                    fs::write(
+                        destination,
+                        format!("{original}\n[added]\nvalue='PRIVATE_ADDED_SENTINEL'\n"),
+                    )
+                    .unwrap();
+                }
+                let report = render_dry_run_report(
+                    project.path(),
+                    staged.path(),
+                    &allow,
+                    &ProvisionOutcome::default(),
+                    None,
+                );
+                assert!(!report.contains("SENTINEL"), "{adapter}: {report}");
+                if original.parse::<toml::Value>().is_ok() {
+                    assert!(
+                        report.contains("added"),
+                        "structural changes must remain visible: {report}"
+                    );
+                } else {
+                    assert!(report.contains("redacted"), "{report}");
+                }
+                for (source, _) in &allow.pairs {
+                    if source.exists() {
+                        assert_eq!(fs::read_to_string(source).unwrap(), original);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -4804,12 +4891,13 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(project_env.clone(), staged_env.clone())],
-            env_paths: [
+            kinds: [
                 project.path().join(".env"),
                 project.path().join(".dev.vars"),
                 project.path().join(".edgezero/.env"),
             ]
             .into_iter()
+            .map(|path| (path, LocalArtifactKind::Env))
             .collect(),
         };
         let outcome = adapter_registry::ProvisionOutcome::default();
@@ -4846,12 +4934,13 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(project_env.clone(), staged_env.clone())],
-            env_paths: [
+            kinds: [
                 project.path().join(".env"),
                 project.path().join(".dev.vars"),
                 project.path().join(".edgezero/.env"),
             ]
             .into_iter()
+            .map(|path| (path, LocalArtifactKind::Env))
             .collect(),
         };
         let outcome = adapter_registry::ProvisionOutcome::default();
@@ -4861,16 +4950,15 @@ ids = ["default"]
         assert!(!report.contains("old-secret"), "old value leaked: {report}");
         assert!(!report.contains("new-secret"), "new value leaked: {report}");
         assert!(
-            report.contains("(redacted:") && report.contains("values differ"),
+            report.contains("(redacted:") && report.contains("contents differ"),
             "value-only churn must surface a single redacted-header line: {report}"
         );
     }
 
     #[test]
     fn dry_run_diff_leaves_non_env_files_unredacted() {
-        // Only `.env` / `.dev.vars` are treated as secret carriage.
-        // Every other file (adapter manifests, JSON config, etc.)
-        // must diff normally so operators can see the actual changes.
+        // Ordinary Text policy remains available regardless of file suffix.
+        // The adapter, rather than a filename heuristic, selects redaction.
         let project = TempDir::new().expect("project dir");
         let staged = TempDir::new().expect("staged dir");
         let project_toml = project.path().join("spin.toml");
@@ -4881,12 +4969,13 @@ ids = ["default"]
 
         let allow_list = DryRunAllowList {
             pairs: vec![(project_toml.clone(), staged_toml.clone())],
-            env_paths: [
+            kinds: [
                 project.path().join(".env"),
                 project.path().join(".dev.vars"),
                 project.path().join(".edgezero/.env"),
             ]
             .into_iter()
+            .map(|path| (path, LocalArtifactKind::Env))
             .collect(),
         };
         let outcome = adapter_registry::ProvisionOutcome::default();

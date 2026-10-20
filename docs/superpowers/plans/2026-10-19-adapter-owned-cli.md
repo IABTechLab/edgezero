@@ -1,5 +1,73 @@
 # Adapter-owned CLI implementation plan
 
+## Follow-up review repairs (2026-10-20)
+
+The user approved fixing the six reproduced review findings and the existing
+Spin SQLite guard gap. Implement centrally in the existing repair worktree;
+proposal and verification agents remain read-only.
+
+- [x] Add failing root-crate containment and child-environment regressions.
+      In `edgezero-cli/src/path_safety.rs`, accept normalized `crate = "."`
+      after the existing relative-path/traversal/symlink gates. In
+      `edgezero-cli/src/adapter.rs`, absolutize the effective application
+      manifest child env value before changing cwd. Preserve unset behavior
+      and parent env. Verify shell, registry, and lifecycle paths.
+- [x] Add failing Spin symlink regressions for the conventional target copy
+      and relative runtime-config SQLite path. In adapter `cli/run.rs`, guard
+      the copy destination before directory creation or copy. In
+      `cli/push_local.rs`, normalize absolute paths before the component walk
+      and use the guarded path for subsequent filesystem operations. Retain
+      explicit read-path behavior and write containment checks.
+- [x] Add failing Fastly base/typed provision exclusion and malformed-TOML
+      sentinel tests. Acquire `ManifestLock` before reading, hold it through
+      `atomically_replace_file`, and reuse its resolved target. Direct adapter
+      dry-runs must leave no lock sidecar. Keep project-to-manifest lock order.
+      Redact parser diagnostics in new native provision paths which could
+      expose input. Confirm restrictive modes survive.
+- [x] Add failing native-manifest dry-run sentinel regressions. Extend the
+      neutral artifact contract with `SensitiveToml` and a typed constructor.
+      Fastly, Spin, and Cloudflare declare the policy in their own layouts.
+      Shared preview code parses TOML, redacts every scalar, drops comments,
+      and serializes only the redacted structure. Invalid input produces a
+      fixed marker. Redact both diff sides; retain value-only change notices.
+      Test nested/array/multiline/comment values and a fifth registered adapter.
+- [x] Observe each reported-bug regression fail before its fix, then run scoped tests
+      after each source batch. Run workspace tests, formatting, strict
+      all-feature Clippy, combined provider compilation, adapter WASM checks,
+      examples/fixture/generated-project checks, and docs checks. Rebuild the
+      CLI and replay the review fixtures. Hand off a read-only regression
+      review; fix confirmed findings before pushing.
+- [ ] Update the decision record, commit and push to the existing PR branch,
+      and verify all GitHub checks including CodeQL on the exact final head.
+      Leave merge and reviewer approval to maintainers.
+
+The format policy was chosen over provider-specific redaction callbacks:
+adapters retain ownership while complete scalar/comment removal covers future
+credential fields. Shared child-env normalization avoids expanding the core
+manifest model for this bounded cwd bug. Existing Fastly locking and atomic
+replacement replace the unlocked writers without another lock scheme.
+
+Read-only proposals from `design_lock_lifetime`, `review2_orchestration`, and
+`review2_local_adapters` selected existing locking/atomic helpers, a neutral
+format policy, and normalization at the shared child-env boundary. Their
+implementation reviews confirmed lock lifetime and fail-closed rendering. The
+path reviewer reproduced an additional `config/../crates/server` SQLite bypass
+in the first fix; a failing public-adapter regression now covers dry-run,
+write, and read. The final resolver checks raw in-crate symlinks before folding
+parent components, then guards and returns the normalized destination.
+Implementation remained centralized; `merge_build_audit` handles independent
+verification and the original CLI reproductions are replayed separately.
+
+Follow-up local verification passed all 18 gates, including workspace tests,
+strict all-feature Clippy, provider WASM combinations, demo and reusable-app
+fixtures, and generated-project compilation. Docs lint, format, and build
+passed; deployment action contracts reported 639 passes, zero failures, and
+five existing Linux-only skips on macOS. Seven original CLI replays confirmed
+redaction, source preservation, root-crate handling, runtime-root selection,
+and outside-artifact protection. Four native deployment replays passed with
+unchanged immutable bundles. Publication and exact-head GitHub checks remain
+a final live PR check; no merge or review dismissal is authorized.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans
 > to implement this plan centrally, task by task. Investigation/review agents
 > remain read-only; do not edit overlapping files in parallel.

@@ -53,11 +53,20 @@ pub(super) fn provision(
             fastly_path.display()
         ));
     }
-    let raw = fs::read_to_string(&fastly_path)
+    let lock = (!dry_run)
+        .then(|| ManifestLock::acquire(&fastly_path))
+        .transpose()?;
+    let target = lock
+        .as_ref()
+        .map_or(fastly_path.as_path(), ManifestLock::target);
+    let raw = fs::read_to_string(target)
         .map_err(|err| format!("failed to read {}: {err}", fastly_path.display()))?;
-    let mut doc: DocumentMut = raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", fastly_path.display()))?;
+    let mut doc: DocumentMut = raw.parse().map_err(|_err| {
+        format!(
+            "failed to parse {} (parse details redacted)",
+            fastly_path.display()
+        )
+    })?;
 
     let mut status_lines: Vec<String> = Vec::new();
 
@@ -110,8 +119,7 @@ pub(super) fn provision(
     }
 
     if !dry_run {
-        fs::write(&fastly_path, doc.to_string())
-            .map_err(|err| format!("failed to write {}: {err}", fastly_path.display()))?;
+        atomically_replace_file(target, &raw, &doc.to_string())?;
     }
 
     Ok(ProvisionOutcome::from_status_lines(status_lines))
@@ -135,11 +143,20 @@ pub(super) fn provision_typed(
             fastly_path.display()
         ));
     }
-    let raw = fs::read_to_string(&fastly_path)
+    let lock = (!dry_run)
+        .then(|| ManifestLock::acquire(&fastly_path))
+        .transpose()?;
+    let target = lock
+        .as_ref()
+        .map_or(fastly_path.as_path(), ManifestLock::target);
+    let raw = fs::read_to_string(target)
         .map_err(|err| format!("failed to read {}: {err}", fastly_path.display()))?;
-    let mut doc: toml_edit::DocumentMut = raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", fastly_path.display()))?;
+    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|_err| {
+        format!(
+            "failed to parse {} (parse details redacted)",
+            fastly_path.display()
+        )
+    })?;
 
     let mut status_lines: Vec<String> = Vec::new();
     let mut appended = 0_usize;
@@ -167,8 +184,7 @@ pub(super) fn provision_typed(
     }
 
     if !dry_run && appended > 0 {
-        fs::write(&fastly_path, doc.to_string())
-            .map_err(|err| format!("failed to write {}: {err}", fastly_path.display()))?;
+        atomically_replace_file(target, &raw, &doc.to_string())?;
     }
 
     Ok(ProvisionOutcome::from_status_lines(status_lines))
@@ -597,6 +613,154 @@ mod tests {
     // store ids the fastly adapter operates on, not arbitrary strings.
     const TEST_KV_ID: &str = "sessions";
     const TEST_CONFIG_ID: &str = "app_config";
+
+    #[test]
+    fn local_provision_parse_errors_redact_values() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fastly.toml");
+        let original = "name = 'demo'\nvalue = 'PRIVATE_PARSE_SENTINEL' broken\n";
+        fs::write(&path, original).unwrap();
+        let stores = ProvisionStores {
+            config: &[],
+            kv: &[],
+            secrets: &[],
+        };
+        for result in [
+            provision(dir.path(), Some("fastly.toml"), &stores, None, false),
+            provision_typed(dir.path(), Some("fastly.toml"), &[], false),
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.contains("parse"), "{error}");
+            assert!(!error.contains("PRIVATE_PARSE_SENTINEL"), "{error}");
+        }
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_provision_preserves_modes_and_dry_run_creates_no_lock() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for typed in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("custom.toml");
+            let original = "name='demo'\n";
+            fs::write(&path, original).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let config = [ResolvedStoreId::from_logical("settings")];
+            let stores = ProvisionStores {
+                config: &config,
+                kv: &[],
+                secrets: &[],
+            };
+            for dry_run in [true, false] {
+                if typed {
+                    provision_typed(
+                        dir.path(),
+                        Some("custom.toml"),
+                        &[TypedSecretEntry::new("vault", "token", "api_token")],
+                        dry_run,
+                    )
+                    .unwrap();
+                } else {
+                    provision(dir.path(), Some("custom.toml"), &stores, None, dry_run).unwrap();
+                }
+                if dry_run {
+                    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+                    assert!(!dir.path().join(".custom.toml.edgezero-lock").exists());
+                }
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_provision_waits_for_manifest_lock_before_reading() {
+        use std::env;
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "EDGEZERO_LOCAL_PROVISION_LOCK_CHILD";
+        if let Some(child_root) = env::var_os(CHILD) {
+            let root = Path::new(&child_root);
+            fs::write(root.join("ready"), "").unwrap();
+            if env::var_os("EDGEZERO_LOCAL_PROVISION_TYPED").is_some() {
+                provision_typed(
+                    root,
+                    Some("custom.toml"),
+                    &[TypedSecretEntry::new("vault", "token", "api_token")],
+                    false,
+                )
+                .unwrap();
+            } else {
+                let config = [ResolvedStoreId::from_logical("settings")];
+                let stores = ProvisionStores {
+                    config: &config,
+                    kv: &[],
+                    secrets: &[],
+                };
+                provision(root, Some("custom.toml"), &stores, None, false).unwrap();
+            }
+            return;
+        }
+        for typed in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("custom.toml");
+            let before = "name = 'demo'\n";
+            fs::write(&path, before).unwrap();
+            let guard = ManifestLock::acquire(&path).unwrap();
+            let mut command = Command::new(env::current_exe().unwrap());
+            command.args(["--exact", "cli::provision_local::tests::local_provision_waits_for_manifest_lock_before_reading", "--nocapture"])
+                .env(CHILD, dir.path()).env_remove("EDGEZERO_LOCAL_PROVISION_TYPED")
+                .stdout(Stdio::null());
+            if typed {
+                command.env("EDGEZERO_LOCAL_PROVISION_TYPED", "1");
+            }
+            let mut child = command.spawn().unwrap();
+            let started = Instant::now();
+            while !dir.path().join("ready").exists() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "child did not start"
+                );
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "child exited before readiness"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            let (send, receive) = mpsc::channel();
+            let waiter = thread::spawn(move || {
+                let _sent = send.send(child.wait().unwrap());
+            });
+            let early = receive.recv_timeout(Duration::from_millis(200));
+            let blocked = matches!(early, Err(mpsc::RecvTimeoutError::Timeout));
+            let current = fs::read_to_string(guard.target()).unwrap();
+            atomically_replace_file(
+                guard.target(),
+                &current,
+                "name = 'demo'\nservice_id = 'NewService'\n",
+            )
+            .unwrap();
+            drop(guard);
+            let status =
+                early.unwrap_or_else(|_| receive.recv_timeout(Duration::from_secs(10)).unwrap());
+            waiter.join().unwrap();
+            assert!(status.success());
+            assert!(
+                blocked,
+                "base/typed local provision bypassed the manifest lock"
+            );
+            let after = fs::read_to_string(&path).unwrap();
+            let doc: toml_edit::DocumentMut = after.parse().unwrap();
+            assert_eq!(doc["service_id"].as_str(), Some("NewService"));
+            assert!(after.contains(if typed { "api_token" } else { "settings" }));
+        }
+    }
 
     /// A shell script named `fastly` that exits non-zero and prints an
     /// unambiguous diagnostic to stderr — installed on `$PATH` to

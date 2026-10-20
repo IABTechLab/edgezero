@@ -49,9 +49,12 @@ pub(super) fn read_namespace_id(path: &Path, binding: &str) -> Result<Option<Str
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
     };
-    let doc: DocumentMut = raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let doc: DocumentMut = raw.parse().map_err(|_err| {
+        format!(
+            "failed to parse {} (parse details redacted)",
+            path.display()
+        )
+    })?;
     let id = match doc.get("kv_namespaces") {
         Some(Item::ArrayOfTables(arr)) => arr.iter().find_map(|table| {
             if table.get("binding").and_then(Item::as_str) == Some(binding) {
@@ -99,9 +102,12 @@ pub(super) fn check_kv_namespaces_writeback_shape(path: &Path) -> Result<(), Str
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
     };
-    let doc: DocumentMut = raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let doc: DocumentMut = raw.parse().map_err(|_err| {
+        format!(
+            "failed to parse {} (parse details redacted)",
+            path.display()
+        )
+    })?;
     match doc.get("kv_namespaces") {
         None | Some(Item::ArrayOfTables(_)) => Ok(()),
         Some(Item::Value(Value::Array(_))) => Err(format!(
@@ -180,9 +186,12 @@ pub(super) fn upsert_kv_namespace(path: &Path, binding: &str, id: &str) -> Resul
         Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
         Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
     };
-    let mut doc: DocumentMut = raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let mut doc: DocumentMut = raw.parse().map_err(|_err| {
+        format!(
+            "failed to parse {} (parse details redacted)",
+            path.display()
+        )
+    })?;
 
     let entry = doc
         .entry("kv_namespaces")
@@ -265,9 +274,12 @@ pub(super) fn provision(
     }
     let raw = fs::read_to_string(&wrangler_path)
         .map_err(|err| format!("failed to read {}: {err}", wrangler_path.display()))?;
-    let mut doc: DocumentMut = raw
-        .parse()
-        .map_err(|err| format!("failed to parse {}: {err}", wrangler_path.display()))?;
+    let mut doc: DocumentMut = raw.parse().map_err(|_err| {
+        format!(
+            "failed to parse {} (parse details redacted)",
+            wrangler_path.display()
+        )
+    })?;
 
     let mut status_lines: Vec<String> = Vec::new();
     for store in stores.kv.iter().chain(stores.config.iter()) {
@@ -481,6 +493,7 @@ mod tests {
     use super::super::path_mutation_guard;
     use super::super::run::synthesise_wrangler_toml;
     use super::*;
+
     use edgezero_adapter::env_file::EDGEZERO_PROVISION_HEADER;
     use edgezero_adapter::registry::{
         Adapter as _, AdapterDeployedState, ProvisionMode, ProvisionStores, ResolvedStoreId,
@@ -493,6 +506,23 @@ mod tests {
     const TEST_KV_ID: &str = "sessions";
     const TEST_CONFIG_ID: &str = "app_config";
     const TEST_SECRET_ID: &str = "default";
+
+    #[test]
+    fn local_provision_parse_errors_redact_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wrangler.toml");
+        let original = "[vars]\ntoken='PRIVATE_PARSE_SENTINEL' broken\n";
+        fs::write(&path, original).unwrap();
+        let stores = ProvisionStores {
+            config: &[],
+            kv: &[],
+            secrets: &[],
+        };
+        let error = provision(dir.path(), Some("wrangler.toml"), &stores, None, false).unwrap_err();
+        assert!(error.contains("parse"), "{error}");
+        assert!(!error.contains("PRIVATE_PARSE_SENTINEL"), "{error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
 
     /// A wrangler shim that fails loudly if invoked. Used by
     /// `provision_local_zero_cloud_calls` to prove local-mode

@@ -7,7 +7,7 @@ use edgezero_core::manifest::{Manifest, ManifestLoader, ResolvedEnvironment};
 use std::env;
 use std::fmt;
 use std::io::{self, BufRead as _, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, absolute};
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -129,6 +129,22 @@ fn build_child_env(
 
     if let Some(env) = environment {
         assert_required_secrets_present(adapter_name, env, &out)?;
+    }
+    // Preserve the selected file when an adapter or shell changes cwd. This
+    // control value must replace an inherited relative spelling in the child.
+    let effective_selector = env::var("EDGEZERO_MANIFEST").ok().or_else(|| {
+        out.iter()
+            .find(|(key, _)| key == "EDGEZERO_MANIFEST")
+            .map(|(_, value)| value.clone())
+    });
+    if let Some(selector) = effective_selector {
+        let absolute_selector = absolute(selector)
+            .map_err(|error| format!("resolve application manifest path: {error}"))?;
+        let value = absolute_selector
+            .to_str()
+            .ok_or("application manifest path is not UTF-8")?;
+        out.retain(|(key, _)| key != "EDGEZERO_MANIFEST");
+        out.push(("EDGEZERO_MANIFEST".to_owned(), value.to_owned()));
     }
     Ok(out)
 }
@@ -775,7 +791,9 @@ mod tests {
     use crate::test_support::manifest_guard;
     use edgezero_core::manifest::{ManifestLoader, ResolvedEnvironmentBinding};
     use edgezero_core::test_env::EnvOverride;
-    use std::path::{Path, PathBuf};
+    use std::path::{Path, PathBuf, absolute};
+    use std::process::Command;
+    use std::{env, fs};
 
     #[test]
     fn deploy_rejects_application_release_for_non_managed_adapter() {
@@ -925,6 +943,85 @@ mod tests {
         env.iter()
             .find(|(existing, _)| existing == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn child_manifest_selector_is_absolute_before_changing_directory() {
+        let _lock = manifest_guard().lock().expect("env lock");
+        let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", "config/project.local.toml");
+        let overlay = [("EDGEZERO_MANIFEST".to_owned(), "ignored.toml".to_owned())];
+        let resolved = build_child_env("test-adapter", None, (None, None), &overlay)
+            .expect("child environment");
+        let expected = absolute("config/project.local.toml").unwrap();
+        assert_eq!(
+            value_for(&resolved, "EDGEZERO_MANIFEST"),
+            expected.to_str(),
+            "the inherited selector must be replaced before an adapter changes cwd"
+        );
+        assert_eq!(
+            env::var("EDGEZERO_MANIFEST").unwrap(),
+            "config/project.local.toml"
+        );
+    }
+
+    #[test]
+    fn child_manifest_selector_from_overlay_is_absolute() {
+        let _lock = manifest_guard().lock().expect("env lock");
+        let _manifest = EnvOverride::remove("EDGEZERO_MANIFEST");
+        let overlay = [(
+            "EDGEZERO_MANIFEST".to_owned(),
+            "config/from-overlay.toml".to_owned(),
+        )];
+        let resolved = build_child_env("test-adapter", None, (None, None), &overlay).unwrap();
+        assert_eq!(
+            value_for(&resolved, "EDGEZERO_MANIFEST"),
+            absolute("config/from-overlay.toml").unwrap().to_str()
+        );
+        assert!(env::var_os("EDGEZERO_MANIFEST").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_manifest_selector_survives_shell_and_registry_child_cwd() {
+        let _lock = manifest_guard().lock().unwrap();
+        let cwd = env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let root = dir.path().join("config");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("project.local.toml");
+        let body = "[app]\nname='selected'\n";
+        fs::write(&path, body).unwrap();
+        let selector = path.strip_prefix(&cwd).unwrap().to_str().unwrap();
+        let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", selector);
+        let loader = ManifestLoader::from_path(&path).unwrap();
+        let command = "cat \"$EDGEZERO_MANIFEST\"";
+        let shell_output = super::build_shell_command(
+            command,
+            &root,
+            "test-adapter",
+            None,
+            (None, None),
+            &[],
+            &[],
+        )
+        .unwrap()
+        .output()
+        .unwrap();
+        assert!(shell_output.status.success());
+        assert_eq!(shell_output.stdout, body.as_bytes());
+        super::with_exec_context("test-adapter", Some(&loader), &[], |exec| {
+            let output = Command::new("sh")
+                .args(["-c", command])
+                .current_dir(exec.cwd().unwrap())
+                .envs(exec.env().iter().map(|(key, value)| (key, value)))
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, body.as_bytes());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(env::var("EDGEZERO_MANIFEST").unwrap(), selector);
     }
 
     #[test]

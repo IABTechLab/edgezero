@@ -1,5 +1,29 @@
 # Adapter-owned CLI behavior and local-state correctness
 
+## Follow-up review requirements (2026-10-20)
+
+The second independent review reproduced six remaining defects and one
+existing Spin path-guard gap. The authorized repair preserves the adapter
+boundary and introduces no provider identity dispatch in the CLI.
+
+Adapters classify native manifests with credential-bearing contents as
+`SensitiveToml`. Shared preview code retains TOML table/key/array structure,
+redacts all scalar values, and drops comments. It never falls back to raw
+input or parser diagnostics. Both sides of a diff receive the same policy.
+Local provision errors likewise omit source excerpts.
+
+Every Fastly manifest read/modify/write, including base and typed local
+provision, holds the existing `ManifestLock` from before the read through
+atomic replacement. Native deploy and local writers serialize on that lock.
+Direct adapter dry-runs remain read-only.
+
+Normalize the effective application manifest child env value before any
+shell/adapter changes cwd, without mutating the parent environment. Root
+adapter crates declared as `crate = "."` remain valid for default and explicit
+manifest selectors. Spin validates conventional artifact destinations and
+normalizes SQLite paths before its intermediate-symlink guard, using the same
+guarded path for filesystem operations.
+
 ## Approved direction
 
 PR #287 is conflict-free and its checks pass at `334dd8e9`, but the deep
@@ -34,8 +58,8 @@ decide whether their requested semantics are supported.
 Add a pure registry hook returning a local layout from neutral, declared
 manifest/crate/component inputs. Paths are project-relative; no hook performs
 I/O. The layout contains the manifest path, provision artifacts, and an optional
-serve environment-file path. Each artifact declares its content kind (`Text`
-or `Env`) so generic reporting does not recognize provider filenames.
+serve environment-file path. Each artifact declares its content kind (`Text`,
+`Env`, or `SensitiveToml`) so generic reporting does not recognize provider filenames.
 
 The default hook describes the declared manifest without sidecars. Built-in
 adapters supply their own defaults and artifacts. A third-party adapter can

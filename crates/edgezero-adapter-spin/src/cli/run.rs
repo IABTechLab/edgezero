@@ -253,6 +253,7 @@ fn refresh_conventional_source(
     if is_same_existing_file(artifact, &source_path) {
         return Ok(());
     }
+    reject_symlink_components(workspace_root, &source_path)?;
     if let Some(parent) = source_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
@@ -872,6 +873,40 @@ mod tests {
         let ctx = AdapterExecContext::new().with_env(&env);
         let located = locate_artifact(workspace, &manifest_dir, "demo", &[], &ctx).unwrap();
         assert_eq!(located, artifact);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn conventional_source_refresh_rejects_symlinked_destinations() {
+        use std::os::unix::fs::symlink;
+        for link_directory in [true, false] {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("workspace");
+            let outside = dir.path().join("outside");
+            fs::create_dir_all(&workspace).unwrap();
+            fs::create_dir_all(&outside).unwrap();
+            let fresh = workspace.join("fresh.wasm");
+            fs::write(&fresh, "fresh").unwrap();
+            let destination = workspace
+                .join("target")
+                .join(TARGET_TRIPLE)
+                .join("release/demo.wasm");
+            let victim = if link_directory {
+                symlink(&outside, workspace.join("target")).unwrap();
+                outside.join(TARGET_TRIPLE).join("release/demo.wasm")
+            } else {
+                fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                let victim = outside.join("operator.wasm");
+                symlink(&victim, &destination).unwrap();
+                victim
+            };
+            fs::create_dir_all(victim.parent().unwrap()).unwrap();
+            fs::write(&victim, "operator bytes").unwrap();
+            let error = refresh_conventional_source(&workspace, "demo.wasm", &fresh)
+                .expect_err("every conventional destination component must be guarded");
+            assert!(error.contains("symlink"), "{error}");
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "operator bytes");
+        }
     }
 
     #[test]

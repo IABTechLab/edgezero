@@ -248,8 +248,11 @@ impl Adapter for SpinCliAdapter {
         let parent = Path::new(manifest)
             .parent()
             .unwrap_or_else(|| Path::new(""));
-        let layout = AdapterLocalLayout::new(manifest)
-            .with_artifact(parent.join("runtime-config.toml"), LocalArtifactKind::Text)
+        let layout = AdapterLocalLayout::new_with_kind(manifest, LocalArtifactKind::SensitiveToml)
+            .with_artifact(
+                parent.join("runtime-config.toml"),
+                LocalArtifactKind::SensitiveToml,
+            )
             .with_artifact(parent.join(".env"), LocalArtifactKind::Env);
         Ok(if context.manifest().is_some() {
             layout.with_serve_env(parent.join(".env"))
@@ -1015,6 +1018,7 @@ pub(super) fn env_mutation_guard() -> &'static Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use tempfile::tempdir;
 
     #[test]
@@ -1072,6 +1076,59 @@ mod tests {
     // not arbitrary strings.
     const TEST_KV_ID: &str = "sessions";
     const TEST_COMPONENT_ID: &str = "demo";
+
+    #[cfg(unix)]
+    #[test]
+    fn local_sqlite_rejects_symlinks_after_runtime_config_parent_components() {
+        use std::os::unix::fs::symlink;
+        let cwd = env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let root = dir.path();
+        let crate_root = root.join("crates/server");
+        let outside = root.join("outside");
+        fs::create_dir_all(&crate_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(crate_root.join("Cargo.toml"), "[package]\nname='server'\n").unwrap();
+        symlink(&outside, crate_root.join(".spin")).unwrap();
+        let runtime_config = root.join("config/runtime-config.toml");
+        fs::write(
+            &runtime_config,
+            "[key_value_store.settings]\ntype='spin'\npath='../crates/server/.spin/config.db'\n",
+        )
+        .unwrap();
+        let relative_config = runtime_config.strip_prefix(&cwd).unwrap();
+        let context = AdapterPushContext::new()
+            .with_local(true)
+            .with_runtime_config_path(relative_config);
+        let store = ResolvedStoreId::new("settings", "settings");
+        for dry_run in [true, false] {
+            let error = SpinCliAdapter
+                .push_config_entries_local(
+                    root,
+                    Some("crates/server/spin.toml"),
+                    None,
+                    &store,
+                    &[("key".to_owned(), "value".to_owned())],
+                    &context,
+                    dry_run,
+                )
+                .expect_err("parent components must not skip the SQLite guard");
+            assert!(error.contains("symlink"), "{error}");
+            assert!(!outside.join("config.db").exists());
+        }
+        let Err(error) = SpinCliAdapter.read_config_entry_local(
+            root,
+            Some("crates/server/spin.toml"),
+            None,
+            &store,
+            "key",
+            &context,
+        ) else {
+            panic!("the read path must apply the same SQLite guard");
+        };
+        assert!(error.contains("symlink"), "{error}");
+    }
 
     #[test]
     fn read_config_entry_local_rejects_non_sqlite_backend() {

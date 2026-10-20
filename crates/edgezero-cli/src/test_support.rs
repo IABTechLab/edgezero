@@ -147,7 +147,12 @@ impl Adapter for LayoutTestAdapter {
                 "{}.credentials",
                 context.component().ok_or("custom component required")?
             ));
-        Ok(AdapterLocalLayout::new(manifest)
+        let kind = if context.component() == Some("sensitive") {
+            LocalArtifactKind::SensitiveToml
+        } else {
+            LocalArtifactKind::Text
+        };
+        Ok(AdapterLocalLayout::new_with_kind(manifest, kind)
             .with_artifact(&sidecar, LocalArtifactKind::Env)
             .with_serve_env(sidecar))
     }

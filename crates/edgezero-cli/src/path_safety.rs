@@ -82,10 +82,9 @@ fn assert_provision_paths_impl(
     // `crates/cf/wrangler.toml` -- which does NOT start with
     // ".". Skip Step 1's containment check in that case; the
     // absolute + `..` rejection below already guarantees the
-    // candidate sits under cwd, and Step 2 (manifest-inside-
-    // crate) compares two paths that BOTH go through the same
-    // normalisation so the leading-dot strip cancels out
-    // there. The relative-root test fixtures
+    // candidate sits under cwd. Step 2 handles a root crate in the same
+    // way; other crate/manifest paths compare after normalization.
+    // The relative-root test fixtures
     // (`accepts_relative_root_default`,
     // `accepts_empty_root_string_as_dot`) only pass with this
     // short-circuit in place.
@@ -242,7 +241,7 @@ fn assert_provision_paths_impl(
     };
     let crate_resolved = lexical_normalize(&root.join(Path::new(crate_raw)));
     let manifest_resolved = lexical_normalize(&root.join(Path::new(manifest_raw)));
-    if !manifest_resolved.starts_with(&crate_resolved) {
+    if crate_resolved != Path::new(".") && !manifest_resolved.starts_with(&crate_resolved) {
         return Err(format!(
             "[adapters.<name>.adapter].manifest `{manifest_raw}` must \
              resolve inside [adapters.<name>.adapter].crate `{crate_raw}`; \
@@ -426,6 +425,22 @@ mod tests {
         let err =
             assert_provision_paths_contained(Path::new("."), None, Some("../escape")).unwrap_err();
         assert!(err.contains("must not contain `..` traversal"), "{err}");
+    }
+
+    #[test]
+    fn root_adapter_crate_accepts_relative_manifest_paths() {
+        for root in [".", "", "./"] {
+            for crate_path in [".", "./"] {
+                for manifest in ["axum.toml", "./axum.toml", "config/adapter.toml"] {
+                    assert_provision_paths_contained(
+                        Path::new(root),
+                        Some(manifest),
+                        Some(crate_path),
+                    )
+                    .expect("a root crate contains project-relative manifests");
+                }
+            }
+        }
     }
 
     #[test]

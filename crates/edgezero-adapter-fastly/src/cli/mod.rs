@@ -7,7 +7,7 @@ use std::process::id as process_id;
 use ctor::ctor;
 use edgezero_adapter::cli_support;
 use edgezero_adapter::cli_support::run_native_cli;
-use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout};
+use edgezero_adapter::local::{AdapterLocalContext, AdapterLocalLayout, LocalArtifactKind};
 use edgezero_adapter::registry::{
     Adapter, AdapterAction, AdapterDeployContext, AdapterDeployedState, AdapterExecContext,
     AdapterPushContext, DeployOwnership, ProvisionMode, ProvisionOutcome, ProvisionStores,
@@ -323,7 +323,10 @@ impl Adapter for FastlyCliAdapter {
         context: &AdapterLocalContext<'_>,
     ) -> Result<AdapterLocalLayout, String> {
         let manifest = context.manifest().unwrap_or("fastly.toml");
-        Ok(AdapterLocalLayout::new(manifest))
+        Ok(AdapterLocalLayout::new_with_kind(
+            manifest,
+            LocalArtifactKind::SensitiveToml,
+        ))
     }
 
     fn name(&self) -> &'static str {

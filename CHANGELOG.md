@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describe provision artifacts and the optional serve env file. Paths are
   project-relative and receive the manifest, crate, and component declarations
   through `AdapterLocalContext`. Mark secret-bearing env files with
-  `LocalArtifactKind::Env`, including custom filenames. The default describes
+  `LocalArtifactKind::Env`, including custom filenames, and credential-bearing
+  TOML with `LocalArtifactKind::SensitiveToml`. The default describes
   only the declared manifest. `AdapterBlueprint` literals now require
   `tool_pins`, `install_notes`, and `local_ignore_patterns`; use empty slices
   when unnecessary. Logging endpoints support the command template vocabulary
@@ -70,6 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is running.
 
 ### Fixed
+
+- Redact native TOML values and comments in local provisioning previews and
+  omit source excerpts from native provision parse errors. Serialize Fastly
+  local provision with deploy writeback under the same manifest lock.
+- Preserve relative application-manifest selection across child working
+  directories, accept root adapter crates, and guard Spin artifact copies and
+  SQLite paths against intermediate symlinks, including paths containing `..`.
 
 - Preserve quoted multiline env records and original line endings during
   provisioning. Readers, writers, and preview redaction share dotenv grammar;

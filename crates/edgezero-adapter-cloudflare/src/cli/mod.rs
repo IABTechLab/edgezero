@@ -258,8 +258,10 @@ impl Adapter for CloudflareCliAdapter {
         let parent = Path::new(manifest)
             .parent()
             .unwrap_or_else(|| Path::new(""));
-        Ok(AdapterLocalLayout::new(manifest)
-            .with_artifact(parent.join(".dev.vars"), LocalArtifactKind::Env))
+        Ok(
+            AdapterLocalLayout::new_with_kind(manifest, LocalArtifactKind::SensitiveToml)
+                .with_artifact(parent.join(".dev.vars"), LocalArtifactKind::Env),
+        )
     }
 
     fn name(&self) -> &'static str {
