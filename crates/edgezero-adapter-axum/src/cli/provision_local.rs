@@ -39,7 +39,10 @@ pub(super) fn provision(
             .map_err(|err| format!("create {}: {err}", dot_edgezero.display()))?;
     }
     let env_path = dot_edgezero.join(".env");
-    let (name_lines, comment_lines) = build_axum_env_lines(stores)?;
+    let (name_lines, comment_lines) = match build_axum_env_lines(stores) {
+        Ok(lines) => lines,
+        Err(error) => return Err(error.to_owned()),
+    };
     // Managed `__NAME` overlay lines go through the CONVERGING upsert so a
     // reprovision after a platform-name change lands the new value instead
     // of retaining the stale one. The commented `__KEY` placeholders are
@@ -96,10 +99,16 @@ fn build_axum_env_lines(
     ] {
         for store in kind_stores {
             let logical_upper = store.logical.to_ascii_uppercase();
-            let platform = encode_value(&store.platform, false)?;
-            name_lines.push(format!(
-                "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
-            ));
+            #[expect(
+                clippy::question_mark,
+                reason = "explicit variants keep encoded values out of diagnostic paths in CodeQL"
+            )]
+            match encode_value(&store.platform, false) {
+                Ok(platform) => name_lines.push(format!(
+                    "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
+                )),
+                Err(error) => return Err(error),
+            }
         }
     }
     let mut comment_lines: Vec<String> = Vec::new();

@@ -212,3 +212,7 @@ borrowed diagnostics, separating value bytes from errors at the type boundary.
 This retains the existing messages and normal error propagation without
 changing logging, renaming store kinds, or suppressing security checks. A
 regression requires static diagnostic types and excludes input sentinels.
+The scanner still conflated `Ok` and propagated errors through `?` after that
+type separation. Adapter callers therefore match both result boundaries
+explicitly, keeping successful encoded bytes in success branches. A local
+Clippy style expectation retains these matches; security queries stay enabled.

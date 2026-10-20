@@ -117,7 +117,10 @@ pub(super) fn provision(
     // (CONFIG only). Dedup honours operator overrides -- an operator
     // who already uncommented + edited a __KEY line does NOT get the
     // commented placeholder re-added on a subsequent provision.
-    let (name_lines, comment_lines) = build_env_lines(stores)?;
+    let (name_lines, comment_lines) = match build_env_lines(stores) {
+        Ok(lines) => lines,
+        Err(error) => return Err(error.to_owned()),
+    };
 
     if spin_changed && !dry_run {
         fs::write(&spin_path, spin_doc.to_string())
@@ -720,10 +723,16 @@ fn build_env_lines(
     ] {
         for store in kind_stores {
             let logical_upper = store.logical.to_ascii_uppercase();
-            let platform = encode_value(&store.platform, false)?;
-            name_lines.push(format!(
-                "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
-            ));
+            #[expect(
+                clippy::question_mark,
+                reason = "explicit variants keep encoded values out of diagnostic paths in CodeQL"
+            )]
+            match encode_value(&store.platform, false) {
+                Ok(platform) => name_lines.push(format!(
+                    "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
+                )),
+                Err(error) => return Err(error),
+            }
         }
     }
     let mut comment_lines: Vec<String> = Vec::new();

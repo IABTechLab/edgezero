@@ -324,7 +324,10 @@ pub(super) fn provision(
         .parent()
         .unwrap_or(manifest_root)
         .join(".dev.vars");
-    let (name_lines, comment_lines) = build_dev_vars_lines(stores)?;
+    let (name_lines, comment_lines) = match build_dev_vars_lines(stores) {
+        Ok(lines) => lines,
+        Err(error) => return Err(error.to_owned()),
+    };
     // Managed `__NAME` overlay lines go through the CONVERGING upsert so a
     // reprovision after a platform-name change lands the new value. The
     // commented `__KEY` placeholders are operator-owned and stay on the
@@ -380,10 +383,16 @@ fn build_dev_vars_lines(
     ] {
         for store in kind_stores {
             let logical_upper = store.logical.to_ascii_uppercase();
-            let platform = encode_value(&store.platform, true)?;
-            name_lines.push(format!(
-                "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
-            ));
+            #[expect(
+                clippy::question_mark,
+                reason = "explicit variants keep encoded values out of diagnostic paths in CodeQL"
+            )]
+            match encode_value(&store.platform, true) {
+                Ok(platform) => name_lines.push(format!(
+                    "EDGEZERO__STORES__{kind}__{logical_upper}__NAME={platform}"
+                )),
+                Err(error) => return Err(error),
+            }
         }
     }
     let mut comment_lines: Vec<String> = Vec::new();
