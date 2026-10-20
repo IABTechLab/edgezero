@@ -111,7 +111,7 @@ async fn progress(ctx: RequestContext) -> Result<Response, EdgeError> {
             "host_signal":state.host_signal, "body_kind_before":before,
             "bytes_read":body.len(), "method":ctx.method().as_str(), "qualification":false}));
     }
-    if case.starts_with("coding-") {
+    if case.starts_with("coding-") || case.starts_with("relay-") {
         return coding_probe(ctx, &case).await;
     }
     if case.starts_with("marker-") {
@@ -342,7 +342,7 @@ async fn marker_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
 async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeError> {
     let fields: Vec<_> = case.split('-').collect();
     let [
-        "coding",
+        kind @ ("coding" | "relay"),
         coding @ ("gzip" | "deflate" | "br"),
         mode @ ("buffered" | "streamed"),
         status @ ("200" | "206"),
@@ -390,11 +390,16 @@ async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
     } else {
         request
     };
-    let response = ctx
-        .http_client()
-        .ok_or_else(probe_failure)?
-        .send(request)
-        .await?;
+    let client = ctx.http_client().ok_or_else(probe_failure)?;
+    let client = if *kind == "relay" {
+        client.with_proxy_marker(false)
+    } else {
+        client
+    };
+    let response = client.send(request).await?;
+    if *kind == "relay" {
+        return response.into_response();
+    }
     let status = response.status().as_u16();
     let encoding = response
         .headers()
@@ -503,6 +508,158 @@ mod tests {
             .header("x-fixture-backend", target)
             .body(Body::empty())
             .unwrap()
+    }
+
+    struct RelayClient {
+        polls: Arc<AtomicUsize>,
+        calls: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl edgezero_core::OutboundHttpClient for RelayClient {
+        async fn send(
+            &self,
+            request: OutboundRequest,
+        ) -> Result<edgezero_core::OutboundResponse, EdgeError> {
+            let parts = request.into_parts();
+            self.calls.lock().unwrap().push(json!({
+                "marker":format!("{:?}",parts.proxy_marker),"mode":format!("{:?}",parts.response_mode),
+                "decoding":format!("{:?}",parts.response_decoding),"encoded":parts.max_encoded_response_bytes,
+                "decoded":parts.max_decoded_response_bytes,"decoder":parts.max_decoder_bytes,
+                "timeout":parts.timeout.map(|t|t.as_millis()),"cache":format!("{:?}",parts.cache_policy),
+                "accept_encoding":parts.headers["accept-encoding"].to_str().unwrap(),"uri":parts.uri.to_string(),
+            }));
+            let raw = parts.response_decoding == ResponseDecoding::Original
+                || parts.uri.path().ends_with("206");
+            let bytes = if raw {
+                Bytes::from_static(&[255, 0, 128])
+            } else {
+                Bytes::from_static(b"decoded")
+            };
+            let body = if matches!(parts.response_mode, edgezero_core::ResponseMode::Streamed) {
+                let polls = Arc::clone(&self.polls);
+                Body::from_stream(futures::stream::once(async move {
+                    polls.fetch_add(1, Ordering::SeqCst);
+                    Ok(bytes)
+                }))
+            } else {
+                Body::from_bytes(bytes)
+            };
+            let mut headers = edgezero_core::http::HeaderMap::new();
+            headers.insert("content-type", "application/octet-stream".parse().unwrap());
+            headers.insert("etag", "\"fixture\"".parse().unwrap());
+            if raw {
+                headers.insert("content-encoding", "gzip".parse().unwrap());
+                headers.insert("content-length", "3".parse().unwrap());
+            }
+            Ok(edgezero_core::OutboundResponse::new(
+                parts.method,
+                if parts.uri.path().ends_with("206") {
+                    edgezero_core::http::StatusCode::PARTIAL_CONTENT
+                } else {
+                    edgezero_core::http::StatusCode::OK
+                },
+                headers,
+                body,
+                edgezero_core::MonotonicClock::default(),
+                edgezero_core::ContentTypeProvenance::SingleTextUnchanged,
+            ))
+        }
+
+        fn start_batch_until(
+            &self,
+            requests: Vec<OutboundRequest>,
+            _observation_cutoff: Deadline,
+        ) -> edgezero_core::OutboundBatch {
+            edgezero_core::OutboundBatch::cutoff(requests.len())
+        }
+    }
+
+    #[test]
+    fn relay_handoff_preserves_bytes_and_stream_ownership_with_matching_policy() {
+        for mode in ["streamed", "buffered"] {
+            for (choice, status) in [
+                ("original", "200"),
+                ("original", "206"),
+                ("decode", "206"),
+                ("decode", "200"),
+            ] {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                let client = edgezero_core::HttpClient::with_client(RelayClient {
+                    polls: Arc::clone(&polls),
+                    calls: Arc::clone(&calls),
+                });
+                let router = router(Arc::new(Fake::default()), json!({}), None);
+                let target = format!("http://127.0.0.1:1234/coding/gzip/{status}");
+                for prefix in ["relay", "coding"] {
+                    let case = format!("{prefix}-gzip-{mode}-{status}-{choice}");
+                    let mut request = request(&case, &target);
+                    request.extensions_mut().insert(client.clone());
+                    let before = polls.load(Ordering::SeqCst);
+                    let response = block_on(router.oneshot(request)).unwrap();
+                    if prefix == "relay" {
+                        assert_eq!(response.status().as_str(), status);
+                        assert_eq!(response.headers()["etag"], "\"fixture\"");
+                        assert_eq!(polls.load(Ordering::SeqCst), before);
+                        assert_eq!(
+                            matches!(response.body(), Body::Stream(_)),
+                            mode == "streamed"
+                        );
+                    }
+                    let raw = choice == "original" || status == "206";
+                    let expected = if raw {
+                        Bytes::from_static(&[255, 0, 128])
+                    } else {
+                        Bytes::from_static(b"decoded")
+                    };
+                    let bytes = block_on(response.into_body().into_bytes_bounded(4096)).unwrap();
+                    if prefix == "relay" {
+                        assert_eq!(bytes, expected);
+                    } else {
+                        assert_eq!(
+                            serde_json::from_slice::<Value>(&bytes).unwrap()["bytes"],
+                            json!(expected.as_ref())
+                        );
+                    }
+                }
+                let recorded = calls.lock().unwrap();
+                assert_eq!(recorded.len(), 2);
+                assert_eq!(recorded[0]["marker"], "Off");
+                assert_eq!(recorded[1]["marker"], "On");
+                let mut relay = recorded[0].clone();
+                relay["marker"] = json!("On");
+                assert_eq!(relay, recorded[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn relay_rejects_invalid_cases_and_targets_before_client_lookup() {
+        let router = router(Arc::new(Fake::default()), json!({}), None);
+        for target in [
+            "https://example.com/coding/gzip/200",
+            "http://example.com:1234/coding/gzip/200",
+            "http://127.0.0.1/coding/gzip/200",
+            "http://127.0.0.1:1234/coding/gzip/200?q=1",
+            "http://127.0.0.1:1234/other",
+        ] {
+            let response =
+                block_on(router.oneshot(request("relay-gzip-streamed-200-original", target)))
+                    .unwrap();
+            assert_eq!(response.status(), 400);
+        }
+        for case in [
+            "relay-gzip-other-200-original",
+            "relay-gzip-streamed-201-original",
+            "relay-unknown-streamed-200-original",
+            "relay-gzip-streamed-200-other",
+        ] {
+            let response =
+                block_on(router.oneshot(request(case, "http://127.0.0.1:1234/coding/gzip/200")))
+                    .unwrap();
+            assert_eq!(response.status(), 400);
+        }
     }
 
     #[test]

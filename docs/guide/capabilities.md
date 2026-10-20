@@ -447,8 +447,12 @@ Original-coding policy is wired through all four adapters. Local controlled-orig
 gzip/deflate/Brotli on Axum, pinned Viceroy 0.21.0, Spin 4.1 and workerd 2026-09-10, in buffered and
 streamed modes, including 206 and Decode controls. These are working-tree characterizations, not
 hosted qualification. The [Cloudflare record](../audits/evidence/2026-10-20-cloudflare-outbound.json)
-retains exact build tools, served artifacts and compatibility settings. Its coding checks report
-outbound bytes as JSON; encoded downstream relay framing remains unproved. No capability is promoted.
+retains exact build tools, served artifacts and compatibility settings. The subsequent
+[relay record](../audits/evidence/2026-10-20-outbound-relay.json) goes beyond JSON reports: 24 actual
+downstream relay cases per local runtime preserve encoded bytes and surviving representation
+fields through the standard converters. Decode controls verify plain output. Host-selected framing
+is allowed; any observed Content-Length must match captured bytes. These finite local cases do not
+qualify hosted behavior, exact deadlines, cancellation or universal wire framing. No capability is promoted.
 
 ## Batch Timing
 

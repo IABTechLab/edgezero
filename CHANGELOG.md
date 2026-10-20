@@ -73,6 +73,10 @@ separately from the portable API and must be considered when declaring required 
 
 ### Outbound HTTP And Batches
 
+- Verify actual downstream encoded relay through all four local entrypoints: 24 cases per
+  adapter across gzip/deflate/Brotli, buffered/streamed modes, Original/206 preservation and
+  Decode controls. Capture binary wire payloads without decoding, retain representation metadata
+  and origin receipts, and reject conflicting framing. Keep hosted qualification separate.
 - Retain local Cloudflare workerd 2026-09-10 characterization: 24 coding, 46 marker, five
   scheduling and five HTTP/1 framing checks. Require the original Workers body signal in framing
   assertions and continue independent scheduling checks after policy-probe failures. Record exact
@@ -98,7 +102,7 @@ separately from the portable API and must be considered when declaring required 
   every 206 response now retains original coding, even with Decode selected. Keep normalization
   precedence, identity decoded caps, encoded/final limits, bodyless handling and provenance.
   Relay demo/templates select Original; JSON fanout keeps Decode. Local Axum/Viceroy/Spin/workerd
-  probes do not constitute hosted qualification; encoded downstream relay evidence remains pending.
+  probes do not constitute hosted qualification; hosted relay evidence remains pending.
 - Add the portable `OutboundFuture` / `OutboundTime` foundation for pairing the application
   clock with an adapter-owned wakeup factory. Preserve absolute deadlines across early wakes,
   yield cooperatively, propagate timer errors unchanged, reject observed clock regression and

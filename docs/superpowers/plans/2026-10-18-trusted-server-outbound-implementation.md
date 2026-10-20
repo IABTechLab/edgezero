@@ -20,7 +20,8 @@ native and Viceroy passed the exercised cases. Spin's initial response-owned fai
 existing egress bug: early successful host observation aborted pending body work. That internal
 bug is fixed without changing the outbound/public APIs; all local Spin cases and isolated controls
 now pass. Cloudflare's subsequent local workerd run passes the exercised coding, marker,
-scheduling and framing cases; downstream encoded relay proof remains open. Protocol/hosted/context legs and
+scheduling and framing cases. A subsequent local relay run also passes on all four entrypoints.
+Protocol/hosted/context legs and
 Fastly-policy approvals remain pending. The requester's scoped reply authorizes the exact G4 API
 digest, with approving maintainer name supplied as AG. P1's core paired-time and ownership foundations have started, not
 the full client/adapter hard migration. Baseline is PR 275 at
@@ -110,8 +111,10 @@ The previously retained runtime characterization records remain historical sourc
 - [x] Exercise gzip/deflate/Brotli through pinned local Viceroy and Spin origins: 24 checks per target,
       both response modes, Original/200, Original/206, Decode/206 and Decode/200 controls.
 - [x] Align relay demo/template requests with Original while keeping JSON fanout on Decode.
+- [x] Exercise actual encoded downstream relay through all four local entrypoints, including
+      workerd manual egress, both response modes and Decode controls; retain wire bytes and metadata.
 - [ ] Complete the head-first hard cut, full adapter normalization/limit matrices, Fastly mixed-batch
-      host proof, Cloudflare downstream relay proof and hosted qualification before closing P1/P3.
+      host proof and hosted qualification before closing P1/P3.
 
 This original-coding slice preceded the marker checkpoint below and does not implement eager dispatch or redirect following. It
 does not adopt EZ-5.9/5.10's optional metadata changes or bypass the failed Fastly readiness gate.
@@ -168,7 +171,8 @@ submission-time history and its Interfaces digest is unchanged.
 - [x] Retain separate initial and strengthened source snapshots, raw events, JS/WASM/runtime/tool
       hashes and effective compatibility settings in the
       [new record](../../audits/evidence/2026-10-20-cloudflare-outbound.json).
-- [ ] Complete downstream encoded relay proof, full head-first/eager/follow integration and
+- [x] Complete the independent local downstream encoded relay proof in the checkpoint below.
+- [ ] Complete full head-first/eager/follow integration and
       hosted/protocol/context/cancellation qualification before closing their parent tasks.
 
 This dated checkpoint supersedes earlier Cloudflare tool-unavailable status only for the local
@@ -186,6 +190,48 @@ review found no defect in the strengthened harness or final local observations. 
 review verified 27 file hashes, 16 embedded payload hashes, 23 final source hashes and the unchanged
 approval/requirements digests; it found no remaining defect in this checkpoint. It did not rerun
 the broader CI commands, whose results above are from the central verification run.
+
+### P3 Downstream Relay Checkpoint
+
+- [x] Reuse the validated coding fixture and current transport; return `into_response()` before
+      collection. Keep coding JSON reports unchanged and disable markers only on the relay clone.
+- [x] Prove zero source polls before streamed handoff, exact buffered/streamed bytes, request
+      policy parity and isolated target rejection with a private recording client.
+- [x] Capture binary TCP payloads without UTF-8 conversion or decoding, enforcing a 256-byte cap
+      before append and preserving truncation as failure. Run negative wire assertions for changed
+      bytes, missing metadata, stale coding, invalid lengths and conflicting framing.
+- [x] Run 24 actual downstream relay cases on each local runtime, keeping the existing 80 base
+      cases. Retain 24 ordered relay receipts per target and all four group results.
+- [x] Retain the [relay evidence](../../audits/evidence/2026-10-20-outbound-relay.json), including
+      all 96 relay observations, selected source/artifact/runtime hashes and compatibility settings.
+- [ ] Finish head-first/eager/follow integration, full normalization/limit matrices and exact-commit
+      hosted qualification before closing P3 or its parent phase.
+
+The final all-runtime command exited zero: 104 base checks and 113 asserted base origin receipts per
+adapter. Spin additionally retains its two SDK header and four response-stream controls. This is a
+working-tree characterization at base `0250edc9`, not qualification of that commit. No production
+adapter or API changed, no compatibility path was added, and Fastly G2 remains failed. Local relay
+does not prove forwarding actual inbound GET/HEAD bodies or the new eager APIs.
+
+Both read-only investigations kept P2 with atomic P1: current clock-only constructors and lazy
+implementer sends cannot satisfy the approved support-first/time/head boundary by partial hooks.
+The independent P3 proof was selected instead of adding unused foundations or weakening that cut.
+Future P1 rediscovery must include the new fully qualified test implementation
+`impl edgezero_core::OutboundHttpClient for RelayClient`; the frozen approval inventory remains
+submission-time history. Scoped spec and reader/validator reviews found no blocking defect. The
+remaining nonblocking diagnostic gap is explicit: reader failures are fatal and group-labelled
+but can precede per-case relay records.
+
+Checkpoint verification passed: all five root Rust gates, 14 fixture-core and 41 harness tests,
+native fixture clippy/format, and progress-enabled fixture clippy on all three WASM targets. Docs
+format/lint/build, the docs/legacy guards, decoder/map dependency audits, 18 evidence-checker tests
+and inventory validation passed. The legacy guard first caught a test-double parameter retaining
+the old cutoff spelling; it was renamed and the scoped tests, guard and complete four-runtime
+suite were rerun. Evidence now points to that final source/run; the earlier passing runtime record
+is retained only as diagnostic history. Production sources and lockfiles remain unchanged.
+Independent evidence review verified all 96 relay passes, 96 ordered receipts, 42 selected source
+hashes and eight embedded texts. Its documentation nit was corrected: truncation tests cover
+fixed/chunked bodies; exact-cap and overflow tests cover all three framing modes.
 
 The requirements' EZ-14.6 correction makes an expired application absolute deadline take
 precedence over idle expiry, including a tie and late observation of both expiries. It changes

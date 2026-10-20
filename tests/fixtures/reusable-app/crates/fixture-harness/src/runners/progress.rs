@@ -22,6 +22,7 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
         let outcomes = check_groups(|group| match group {
             "coding" => coding_checks(name, port, records),
             "marker" => marker_checks(name, port, records),
+            "relay" => relay_checks(name, port, records),
             _ => checks(name, port, &revision, records),
         });
         for (group, result) in &outcomes {
@@ -70,8 +71,117 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
     )
 }
 
-fn check_groups(mut check: impl FnMut(&str) -> Result<()>) -> [(&'static str, Result<()>); 3] {
-    ["coding", "marker", "progress-and-framing"].map(|group| (group, check(group)))
+fn check_groups(mut check: impl FnMut(&str) -> Result<()>) -> [(&'static str, Result<()>); 4] {
+    ["coding", "marker", "relay", "progress-and-framing"].map(|group| (group, check(group)))
+}
+
+fn validate_relay_response(reply: &Value, coding: &str, status: u16, raw: bool) -> Result<()> {
+    let fields = reply["headers"].as_array().ok_or("missing relay headers")?;
+    let values = |name: &str| {
+        fields
+            .iter()
+            .filter(|field| {
+                field[0]
+                    .as_str()
+                    .is_some_and(|field| field.eq_ignore_ascii_case(name))
+            })
+            .map(|field| field[1].as_str().ok_or("non-text relay header"))
+            .collect::<std::result::Result<Vec<_>, _>>()
+    };
+    let expected = if raw {
+        net::coding_body(coding)?
+    } else {
+        b"raw coding probe\n"
+    };
+    require(
+        reply["status"] == status && reply["body_bytes"] == json!(expected),
+        "relay wire bytes/status mismatch",
+    )?;
+    require(
+        values("x-edgezero-proxy")?.is_empty(),
+        "relay added a synthetic proxy marker",
+    )?;
+    let encoding = values("content-encoding")?;
+    require(
+        if raw {
+            encoding == [coding]
+        } else {
+            encoding.is_empty()
+        },
+        "relay wire coding mismatch",
+    )?;
+    if raw {
+        for (name, value) in net::coding_representation_headers(coding, status)? {
+            require(
+                values(name)? == [value.as_str()],
+                "relay representation metadata changed",
+            )?;
+        }
+    }
+    let length = values("content-length")?;
+    let transfer = values("transfer-encoding")?;
+    require(
+        length.len() <= 1 && transfer.len() <= 1 && (length.is_empty() || transfer.is_empty()),
+        "ambiguous relay wire framing",
+    )?;
+    if let Some(length) = length.first() {
+        require(
+            length.parse::<usize>()? == expected.len(),
+            "relay wire length mismatch",
+        )?;
+    }
+    if let Some(transfer) = transfer.first() {
+        require(
+            transfer.eq_ignore_ascii_case("chunked"),
+            "unsupported relay wire framing",
+        )?;
+    }
+    Ok(())
+}
+
+fn relay_checks(name: &str, port: u16, records: &mut Records) -> Result<()> {
+    let backend = Backend::start()?;
+    let mut expected_receipts = Vec::new();
+    for coding in ["gzip", "deflate", "br"] {
+        for mode in ["buffered", "streamed"] {
+            for (choice, status) in [
+                ("original", 200),
+                ("original", 206),
+                ("decode", 206),
+                ("decode", 200),
+            ] {
+                let case = format!("relay-{coding}-{mode}-{status}-{choice}");
+                let path = format!("/coding/{coding}/{status}");
+                let response = net::binary_request(
+                    port,
+                    &format!("/progress/{case}"),
+                    &token(),
+                    Some(&backend.url(&path)),
+                )?;
+                let result = validate_relay_response(
+                    &response,
+                    coding,
+                    status,
+                    choice == "original" || status == 206,
+                );
+                records.push(json!({"event":"outbound-relay","adapter":name,"case":case,
+                    "status":if result.is_ok(){"pass"}else{"fail"},"error":result.as_ref().err().map(ToString::to_string),
+                    "client":response,"qualification":false}))?;
+                result?;
+                expected_receipts.push(path);
+            }
+        }
+    }
+    let receipts = backend.receipts.lock().unwrap().clone();
+    let result = require(
+        receipts == expected_receipts && receipts.len() == 24,
+        "relay origin receipts mismatch",
+    );
+    records.push(
+        json!({"event":"outbound-relay-coverage","adapter":name,"attempted":24,"receipts":receipts,
+        "status":if result.is_ok(){"pass"}else{"fail"},"qualification":false}),
+    )?;
+    result
 }
 
 fn marker_checks(name: &str, port: u16, records: &mut Records) -> Result<()> {
@@ -621,9 +731,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn relay_wire_assertions_reject_recoding_and_missing_representation_fields() {
+        let mut headers = json!([
+            ["content-encoding", "gzip"],
+            ["content-length", "37"],
+            ["content-type", "application/octet-stream"],
+            ["etag", "\"coding-probe\""],
+            ["last-modified", "Tue, 20 Oct 2026 00:00:00 GMT"],
+            ["vary", "Accept-Encoding"],
+            ["accept-ranges", "bytes"],
+            ["cache-control", "max-age=60"],
+            [
+                "content-digest",
+                "sha-256=:BkzflHMq10MSCPDB7aAGrb3zFOrrCTOp44/5RdKVon4=:"
+            ],
+            ["content-range", "bytes 0-36/37"]
+        ]);
+        let reply =
+            json!({"status":206,"headers":headers,"body_bytes":net::coding_body("gzip").unwrap()});
+        validate_relay_response(&reply, "gzip", 206, true).unwrap();
+        for change in [
+            "body",
+            "encoding",
+            "length",
+            "metadata",
+            "range",
+            "marker",
+            "status",
+            "ambiguous-framing",
+        ] {
+            let mut broken = reply.clone();
+            match change {
+                "body" => broken["body_bytes"] = json!([0, 1]),
+                "encoding" => broken["headers"][0][1] = json!("br"),
+                "length" => broken["headers"][1][1] = json!("1"),
+                "metadata" => {
+                    broken["headers"].as_array_mut().unwrap().remove(3);
+                }
+                "range" => {
+                    broken["headers"].as_array_mut().unwrap().pop();
+                }
+                "marker" => broken["headers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(["x-edgezero-proxy", "cloudflare"])),
+                "status" => broken["status"] = json!(200),
+                "ambiguous-framing" => broken["headers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(["transfer-encoding", "chunked"])),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_relay_response(&broken, "gzip", 206, true).is_err(),
+                "{change}"
+            );
+        }
+        headers.as_array_mut().unwrap().retain(|field| {
+            !matches!(
+                field[0].as_str(),
+                Some("content-encoding" | "content-range")
+            )
+        });
+        for field in headers.as_array_mut().unwrap() {
+            if field[0] == "content-length" {
+                field[1] = json!("17");
+            }
+        }
+        let decoded = json!({"status":200,"headers":headers,"body_bytes":b"raw coding probe\n"});
+        validate_relay_response(&decoded, "gzip", 200, false).unwrap();
+        let mut stale = decoded.clone();
+        stale["headers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(["content-encoding", "gzip"]));
+        assert!(validate_relay_response(&stale, "gzip", 200, false).is_err());
+    }
+
+    #[test]
     fn progress_groups_keep_later_observations_after_policy_failures() {
-        for mask in 0..8 {
-            let failed: Vec<_> = ["coding", "marker", "progress-and-framing"]
+        for mask in 0..16 {
+            let failed: Vec<_> = ["coding", "marker", "relay", "progress-and-framing"]
                 .into_iter()
                 .enumerate()
                 .filter_map(|(index, group)| (mask & (1 << index) != 0).then_some(group))
@@ -637,7 +825,10 @@ mod tests {
                     Ok(())
                 }
             });
-            assert_eq!(visited, ["coding", "marker", "progress-and-framing"]);
+            assert_eq!(
+                visited,
+                ["coding", "marker", "relay", "progress-and-framing"]
+            );
             let errors: Vec<_> = outcomes
                 .iter()
                 .filter_map(|(group, result)| {

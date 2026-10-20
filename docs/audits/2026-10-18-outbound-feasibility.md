@@ -335,3 +335,36 @@ confirmed delivery. Encoded downstream relay framing, cancellation/deadline qual
 HTTP/2/3, scheduler-context rejection and hosted execution remain open. Cloudflare capability
 assignments are unchanged. Fastly G2 remains failed; no B, H(K), slack removal or readiness waiver
 is approved. The frozen API-only approval digest is unchanged.
+
+## Actual Downstream Relay Checkpoint
+
+The [relay record](evidence/2026-10-20-outbound-relay.json) supersedes the earlier local downstream
+relay-proof gap, not the hosted qualification gap. The final all-runtime command exited zero on
+Axum, workerd 2026-09-10, Viceroy 0.21.0 and Spin 4.1.0. Each adapter passed 24 actual downstream
+relay cases and the existing 80 base checks, with 113 asserted base origin receipts. Spin also
+retained its six SDK/header/stream controls. All 96 relay observations and 96 ordered relay origin
+receipts are embedded, together with the 72 scheduling receipts; full raw-event files and binaries
+are identified by hash but remain local, not release assets.
+
+The relay shares coding target validation, caps and the existing client. It returns
+`OutboundResponse::into_response()` directly, without collecting or reporting JSON. A shared TCP
+reader captures at most 256 binary body bytes and performs no content decoding. Boundary tests
+cover fixed, chunked and close-delimited overflow and exact-cap acceptance, plus fixed/chunked truncation. Reader
+failures cannot pass the suite; their remaining diagnostic limitation is that they can occur before
+a per-case record, although the group still records failure.
+
+For each target, 18 Original/206 cases preserved the deterministic gzip/deflate/Brotli bytes and
+surviving Content-Type, ETag, Last-Modified, Vary, Accept-Ranges, Cache-Control, Content-Digest and
+206 Content-Range fields. The fixtures' digest values match their encoded bytes. Six Decode/200
+controls delivered the expected plain bytes without Content-Encoding. Wire Content-Length, when
+present, matched delivered bytes; the validator allows host-selected chunked or close-delimited
+framing and rejects conflicting framing. This does not adopt optional decoded-metadata SHOULDs or
+promise universal wire Content-Length retention. Cloudflare's outbound manual fetch and downstream
+manual encoding have now been exercised together on local workerd.
+
+Source snapshots identify base `0250edc9` plus the three changed fixture files. No production adapter,
+public API, pin, capability, approved Interfaces digest or Fastly engine changed. Core fixture tests
+prove streamed handoff does not poll the payload and relay marker-off does not mutate the original
+coding client. These are constructed outbound GETs, not actual ingress GET/HEAD forwarding. Full
+head-first/eager/follow migration, scheduler-context and cancellation/deadline cases, HTTP/2/3 and
+hosted frozen-candidate qualification remain open. Fastly G2 remains failed without waiver.

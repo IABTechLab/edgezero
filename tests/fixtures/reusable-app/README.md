@@ -121,6 +121,28 @@ The retained local run uses `WRANGLER_LOG_PATH` in its temporary tool directory 
 `WRANGLER_SEND_METRICS=false`; Wrangler runs `dev --local` with loopback-only listening and local
 fixture bindings. It neither deploys a Worker nor accesses production bindings.
 
+### Encoded Downstream Relay
+
+The same `outbound-progress` suite now adds 24 `relay-*` cases per adapter. They share the coding
+probe's validated loopback target and outbound caps, disable only synthetic marker insertion on
+the cloned client, and return `OutboundResponse::into_response()` directly. No body collection or
+JSON report substitutes for downstream transmission. The TCP reader captures binary payloads
+without UTF-8 conversion or content decoding, with a 256-byte capture cap. Tests cover exact-cap
+and overflow for fixed, chunked and close-delimited payloads, plus fixed/chunked truncation.
+
+The matrix crosses gzip/deflate/Brotli, buffered/streamed output, Original/200, Original/206,
+Decode/206 and Decode/200. The 18 raw cases retain original bytes and surviving representation
+fields, including range metadata; six decode controls verify plain bytes. Wire framing cannot
+contain conflicting Content-Length/Transfer-Encoding. Host chunking is allowed, and any observed
+Content-Length must match the delivered bytes.
+
+Each runtime now runs 104 base checks and asserts 113 base origin receipts. Spin additionally runs
+two SDK header controls and four response-stream comparison controls, producing 110 client
+completions. Relay coverage retains its exact 24 ordered origin receipts. All 16 group-failure
+combinations preserve independent execution and overall failure. A reader error remains fatal and
+group-labelled, but may precede a per-case relay record. These local cases do not prove inbound
+GET/HEAD forwarding, new eager/head-first APIs, hosted qualification or Fastly readiness.
+
 ## Opt-in Hosted Response Qualification
 
 The default-off `qualification` feature selects a synthetic application through the standard

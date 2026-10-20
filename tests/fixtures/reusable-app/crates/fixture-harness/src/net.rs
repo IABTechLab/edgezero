@@ -213,7 +213,7 @@ fn serve(
         let body = coding_body(coding)?;
         write!(
             stream,
-            "HTTP/1.1 {status} {}\r\nContent-Encoding: {coding}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status} {}\r\nContent-Encoding: {coding}\r\nContent-Length: {}\r\nConnection: close\r\n",
             if status == "206" {
                 "Partial Content"
             } else {
@@ -221,6 +221,10 @@ fn serve(
             },
             body.len()
         )?;
+        for (name, value) in coding_representation_headers(coding, status.parse()?)? {
+            write!(stream, "{name}: {value}\r\n")?;
+        }
+        stream.write_all(b"\r\n")?;
         stream.write_all(body)?;
         return Ok(());
     }
@@ -326,6 +330,32 @@ pub fn coding_body(coding: &str) -> Result<&'static [u8]> {
     }
 }
 
+pub fn coding_representation_headers(
+    coding: &str,
+    status: u16,
+) -> Result<Vec<(&'static str, String)>> {
+    let digest = match coding {
+        "gzip" => "BkzflHMq10MSCPDB7aAGrb3zFOrrCTOp44/5RdKVon4=",
+        "deflate" => "8VYiRs57HGMrKxE4DDr7KClv+uCe8a9YdPsXzEiK3q0=",
+        "br" => "nI5tLQUWd+A4M5qx6/4gCIB6dLeWM/EcfwAg0GqQnBQ=",
+        _ => return Err("unknown coding fixture".into()),
+    };
+    let mut fields = vec![
+        ("content-type", "application/octet-stream".to_owned()),
+        ("etag", "\"coding-probe\"".to_owned()),
+        ("last-modified", "Tue, 20 Oct 2026 00:00:00 GMT".to_owned()),
+        ("vary", "Accept-Encoding".to_owned()),
+        ("accept-ranges", "bytes".to_owned()),
+        ("cache-control", "max-age=60".to_owned()),
+        ("content-digest", format!("sha-256=:{digest}:")),
+    ];
+    if status == 206 {
+        let length = coding_body(coding)?.len();
+        fields.push(("content-range", format!("bytes 0-{}/{length}", length - 1)));
+    }
+    Ok(fields)
+}
+
 pub fn malformed_request(port: u16, token: &str) -> Result<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -344,7 +374,17 @@ pub fn request(
     backend: Option<&str>,
     signal: Option<&Signal>,
 ) -> Result<Value> {
-    request_with_framing(port, path, token, backend, signal, None)
+    request_with_framing(port, path, token, backend, signal, None, Capture::Text)
+}
+
+#[derive(Clone, Copy)]
+enum Capture {
+    Text,
+    Binary,
+}
+
+pub fn binary_request(port: u16, path: &str, token: &str, backend: Option<&str>) -> Result<Value> {
+    request_with_framing(port, path, token, backend, None, None, Capture::Binary)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -376,6 +416,7 @@ pub fn framed_request(port: u16, framing: Framing) -> Result<Value> {
         None,
         None,
         Some(framing),
+        Capture::Text,
     )
 }
 
@@ -386,6 +427,7 @@ fn request_with_framing(
     backend: Option<&str>,
     signal: Option<&Signal>,
     framing: Option<Framing>,
+    capture: Capture,
 ) -> Result<Value> {
     let start = Instant::now();
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
@@ -436,8 +478,16 @@ fn request_with_framing(
     let header_ns = start.elapsed().as_nanos() as u64;
     let mut first_byte_ns = None;
     let mut bytes = Vec::new();
+    let capture_limit = match capture {
+        Capture::Text => usize::MAX,
+        Capture::Binary => 256,
+    };
     let outcome = (|| -> Result<()> {
         let mut read_part = |reader: &mut BufReader<TcpStream>, count: usize| -> Result<()> {
+            require(
+                count <= capture_limit.saturating_sub(bytes.len()),
+                "response exceeds fixture capture limit",
+            )?;
             if count == 0 {
                 return Ok(());
             }
@@ -491,7 +541,22 @@ fn request_with_framing(
                 if let Some(signal) = signal {
                     release(signal);
                 }
-                reader.read_to_end(&mut bytes)?;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let capacity = capture_limit
+                        .saturating_sub(bytes.len())
+                        .saturating_add(1)
+                        .min(buffer.len());
+                    let read = reader.read(&mut buffer[..capacity])?;
+                    if read == 0 {
+                        break;
+                    }
+                    require(
+                        read <= capture_limit.saturating_sub(bytes.len()),
+                        "response exceeds fixture capture limit",
+                    )?;
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
             }
         }
         Ok(())
@@ -503,13 +568,110 @@ fn request_with_framing(
             reason: error.to_string(),
         }));
     }
-    let event = json!({"event":"client_completed","token":token,"status":status,"headers":headers,"body":String::from_utf8(bytes)?,"header_ns":header_ns,"first_byte_ns":first_byte_ns.unwrap_or(header_ns),"complete_ns":start.elapsed().as_nanos() as u64});
+    let mut event = json!({"event":"client_completed","token":token,"status":status,"headers":headers,"header_ns":header_ns,"first_byte_ns":first_byte_ns.unwrap_or(header_ns),"complete_ns":start.elapsed().as_nanos() as u64});
+    match capture {
+        Capture::Text => event["body"] = json!(String::from_utf8(bytes)?),
+        Capture::Binary => event["body_bytes"] = json!(bytes),
+    }
     CLIENT_EVENTS.lock().unwrap().push(event.clone());
     Ok(event)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binary_reply(wire: Vec<u8>) -> Result<Value> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            socket.write_all(&wire).unwrap();
+        });
+        let result = binary_request(port, "/relay", "binary-test", None);
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn binary_capture_preserves_encoded_bytes_without_utf8_or_decoding() {
+        let backend = Backend::start().unwrap();
+        for coding in ["gzip", "deflate", "br"] {
+            let response = binary_request(
+                backend.port,
+                &format!("/coding/{coding}/200"),
+                "coding",
+                None,
+            )
+            .unwrap();
+            assert_eq!(response["status"], 200);
+            assert_eq!(response["body_bytes"], json!(coding_body(coding).unwrap()));
+            assert!(response["body"].is_null());
+        }
+    }
+
+    #[test]
+    fn binary_capture_bounds_fixed_chunked_and_close_delimited_payloads() {
+        for size in [256, 257] {
+            for framing in ["fixed", "chunked", "close"] {
+                let header = match framing {
+                    "fixed" => format!("Content-Length: {size}\r\n"),
+                    "chunked" => "Transfer-Encoding: chunked\r\n".to_owned(),
+                    _ => String::new(),
+                };
+                let mut wire =
+                    format!("HTTP/1.1 200 OK\r\n{header}Connection: close\r\n\r\n").into_bytes();
+                if framing == "chunked" {
+                    wire.extend(format!("{size:x}\r\n").as_bytes());
+                }
+                wire.extend(std::iter::repeat_n(255, size));
+                if framing == "chunked" {
+                    wire.extend(b"\r\n0\r\n\r\n");
+                }
+                let result = binary_reply(wire);
+                if size == 256 {
+                    assert_eq!(
+                        result.unwrap()["body_bytes"],
+                        json!(vec![255; size]),
+                        "{framing}"
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
+                    assert!(
+                        partial.reason.contains("capture limit"),
+                        "{framing}: {partial}"
+                    );
+                    assert!(partial.body.len() <= 256);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binary_capture_preserves_truncation_as_failure() {
+        for framing in [
+            "Content-Length: 5\r\n\r\nabc",
+            "Transfer-Encoding: chunked\r\n\r\n5\r\nabc",
+        ] {
+            let wire = format!("HTTP/1.1 200 OK\r\n{framing}").into_bytes();
+            let error = binary_reply(wire).unwrap_err();
+            let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
+            assert_eq!(partial.status, 200);
+            assert_eq!(partial.body, b"abc");
+        }
+    }
+
     #[test]
     fn progress_response_gate_waits_for_client_release() {
         let backend = Backend::start_gated_progress().unwrap();
