@@ -1,0 +1,1134 @@
+use std::env;
+use std::fs;
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use edgezero_adapter::cli_support::{
+    self, find_manifest_upwards, find_workspace_root, path_distance, read_package_name,
+};
+use edgezero_adapter::registry::AdapterExecContext;
+use edgezero_core::addr;
+use edgezero_core::manifest::ManifestLoader;
+use toml::Value;
+use walkdir::WalkDir;
+
+#[derive(Debug)]
+struct AxumProject {
+    addr: SocketAddr,
+    axum_host: Option<String>,
+    axum_manifest: PathBuf,
+    axum_port: Option<u16>,
+    cargo_manifest: PathBuf,
+    crate_dir: PathBuf,
+    crate_name: String,
+    env_host: Option<String>,
+    env_port: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct EdgezeroAxumConfig {
+    host: Option<String>,
+    port: Option<u16>,
+}
+
+/// Emit the baseline `axum.toml` contents for a fresh scaffold /
+/// clean-clone bootstrap.
+///
+/// `crate_name` is the adapter crate's package name (typically
+/// `<app>-adapter-axum`).
+///
+/// `crate_dir` is the RELATIVE path from the manifest's parent
+/// directory to the crate root (the dir carrying `Cargo.toml`).
+/// The scaffold convention `crates/<crate>/axum.toml` uses `"."`
+/// (manifest lives at the crate root). A nested manifest like
+/// `crates/server/config/axum.toml` needs `".."` — otherwise the
+/// axum-adapter loader looks for `config/Cargo.toml` and fails
+/// discovery.
+///
+/// All other fields use dev-server defaults the operator can
+/// edit; provision's merge path never touches this file after
+/// the first write, so operator edits (custom host, non-default
+/// port) survive.
+pub(super) fn synthesise_axum_toml(crate_name: &str, crate_dir: &str) -> String {
+    use toml_edit::{DocumentMut, Item, Table, value};
+
+    // Built through `toml_edit`, never raw string interpolation: a crate
+    // name or directory carrying a quote, backslash, or newline would
+    // otherwise emit a file that isn't valid TOML. `toml_edit` escapes
+    // the values for us.
+    let mut doc = DocumentMut::new();
+    doc.decor_mut().set_prefix("# edgezero-provision: v1\n");
+    let mut adapter = Table::new();
+    adapter.insert("crate", value(crate_name));
+    adapter.insert("crate_dir", value(crate_dir));
+    adapter.insert("host", value("127.0.0.1"));
+    adapter.insert("port", value(8787_i64));
+    doc.insert("adapter", Item::Table(adapter));
+    doc.to_string()
+}
+
+pub(super) fn build(extra_args: &[String], ctx: &AdapterExecContext<'_>) -> Result<(), String> {
+    let project = locate_project(ctx)?;
+    run_cargo(&project, "build", extra_args, ctx)
+}
+
+pub(super) fn serve(extra_args: &[String], ctx: &AdapterExecContext<'_>) -> Result<(), String> {
+    let project = locate_project(ctx)?;
+    run_cargo(&project, "run", extra_args, ctx)
+}
+
+pub(super) fn deploy(_extra_args: &[String]) -> Result<(), String> {
+    Err("Axum adapter does not define a deploy command. Extend your workspace manifest with one if needed.".into())
+}
+
+fn locate_project(ctx: &AdapterExecContext<'_>) -> Result<AxumProject, String> {
+    let manifest = cli_support::declared_or_discovered_manifest(ctx, || {
+        find_axum_manifest(&cli_support::discovery_base(ctx)?)
+    })?;
+    let project = read_axum_project(&manifest)?;
+    // `axum.toml`'s `crate_dir` is operator-editable. Refuse to spawn
+    // cargo against it until we've confirmed it neither escapes the
+    // project nor contradicts the authoritative declared `.crate`.
+    validate_axum_crate_dir(ctx, &manifest, &project)?;
+    Ok(project)
+}
+
+/// Guard the operator-editable `axum.toml` `crate_dir` BEFORE `run_cargo`
+/// spawns cargo with `--manifest-path <crate_dir>/Cargo.toml` and
+/// `current_dir(<crate_dir>)`. `crate_dir` is CANONICALISED (it must
+/// already exist -- `read_axum_project` verified its `Cargo.toml`), which
+/// resolves BOTH `..` traversal AND symlinks to a real path, so this one
+/// check covers conflicts, `..` escapes, and symlink escapes:
+///   - when the CLI supplied the authoritative declared `.crate`
+///     (`ctx.adapter_crate()`), the resolved `crate_dir` MUST canonicalise
+///     to the same directory -- an operator who hand-edits `crate_dir` to
+///     a different crate (or symlinks it elsewhere) is refused rather than
+///     silently building that crate;
+///   - standalone (no declared `.crate`), `crate_dir` must stay under the
+///     workspace root, so a traversing/symlinked value can't point cargo
+///     at a crate outside the project.
+fn validate_axum_crate_dir(
+    ctx: &AdapterExecContext<'_>,
+    manifest: &Path,
+    project: &AxumProject,
+) -> Result<(), String> {
+    let crate_canon = project.crate_dir.canonicalize().map_err(|err| {
+        format!(
+            "cannot resolve axum.toml `crate_dir` `{}`: {err}",
+            project.crate_dir.display()
+        )
+    })?;
+    if let Some(declared) = ctx.adapter_crate() {
+        let declared_canon = declared.canonicalize().map_err(|err| {
+            format!(
+                "cannot resolve tracked `[adapters.axum.adapter].crate` `{}`: {err}",
+                declared.display()
+            )
+        })?;
+        if crate_canon != declared_canon {
+            return Err(format!(
+                "axum.toml `crate_dir` resolves to `{}`, but the tracked \
+                 `[adapters.axum.adapter].crate` points at `{}`. The declared crate is \
+                 authoritative; refusing to build a different crate. Fix `crate_dir` in axum.toml \
+                 (or `.crate` in edgezero.toml) so they agree.",
+                crate_canon.display(),
+                declared_canon.display()
+            ));
+        }
+    } else {
+        let manifest_dir = manifest.parent().unwrap_or_else(|| Path::new("."));
+        let root = find_workspace_root(manifest_dir);
+        let root_canon = root.canonicalize().unwrap_or(root);
+        if !crate_canon.starts_with(&root_canon) {
+            return Err(format!(
+                "axum.toml `crate_dir` resolves to `{}`, which is OUTSIDE the project (`{}`). \
+                 Refusing to run cargo against a crate outside the workspace.",
+                crate_canon.display(),
+                root_canon.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_cargo(
+    project: &AxumProject,
+    subcommand: &str,
+    extra_args: &[String],
+    ctx: &AdapterExecContext<'_>,
+) -> Result<(), String> {
+    let resolution = resolve_subprocess_addr(project)?;
+    for warning in &resolution.warnings {
+        log::warn!("[edgezero] {warning}");
+    }
+
+    let bind_addr = resolution.addr;
+    let display = project.crate_dir.display();
+    log::info!(
+        "[edgezero] Axum {subcommand} ({}) in {display} ({bind_addr})",
+        project.crate_name
+    );
+    let mut command = Command::new("cargo");
+    command.arg(subcommand);
+    command.arg("--manifest-path");
+    command.arg(
+        project
+            .cargo_manifest
+            .to_str()
+            .ok_or_else(|| format!("invalid manifest path {}", project.cargo_manifest.display()))?,
+    );
+    command.args(extra_args);
+    command.current_dir(&project.crate_dir);
+    // Child env from the registry-fallback context (the provision-
+    // written `.env` overlay + manifest `[environment.variables]`).
+    // Applied BEFORE the canonical HOST/PORT below so this adapter's
+    // richer address resolution (which reads axum.toml + edgezero.toml)
+    // wins on those two keys. Empty when dispatched via the manifest
+    // `commands.serve` shell path, so behaviour there is unchanged.
+    for (key, value) in ctx.env() {
+        command.env(key, value);
+    }
+    // Canonical HOST/PORT fall back to this adapter's address resolution
+    // (axum.toml + edgezero.toml). But the resolved CONTEXT environment
+    // (`.edgezero/.env` overlay + manifest `[environment.variables]`,
+    // applied above) has HIGHER precedence and must reach the child
+    // UNCHANGED -- `resolve_subprocess_addr` only reads the process env, so
+    // it can't see a ctx-provided value. Set the derived address ONLY when
+    // ctx did not already provide it, or the ctx value would silently lose
+    // to axum.toml. The runtime's `EnvConfig` reads only the `EDGEZERO__*`
+    // form (see `crates/edgezero-core/src/env_config.rs`).
+    let ctx_sets = |name: &str| ctx.env().iter().any(|(key, _)| key == name);
+    if !ctx_sets("EDGEZERO__ADAPTER__HOST") {
+        command.env("EDGEZERO__ADAPTER__HOST", bind_addr.ip().to_string());
+    }
+    if !ctx_sets("EDGEZERO__ADAPTER__PORT") {
+        command.env("EDGEZERO__ADAPTER__PORT", bind_addr.port().to_string());
+    }
+    let status = command
+        .status()
+        .map_err(|err| format!("failed to run cargo {subcommand}: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("cargo {subcommand} failed with status {status}"))
+    }
+}
+
+fn resolve_subprocess_addr(project: &AxumProject) -> Result<addr::BindAddrResolution, String> {
+    let axum_only = resolve_subprocess_addr_from_parts(
+        project.env_host.as_deref(),
+        project.env_port.as_deref(),
+        None,
+        None,
+        project.axum_host.as_deref(),
+        project.axum_port,
+    );
+    debug_assert_eq!(
+        project.addr, axum_only.addr,
+        "cached AxumProject.addr must match a fresh axum-only resolution"
+    );
+
+    let edgezero = load_edgezero_axum_config(&project.axum_manifest)?;
+    Ok(resolve_subprocess_addr_from_parts(
+        project.env_host.as_deref(),
+        project.env_port.as_deref(),
+        edgezero.as_ref().and_then(|cfg| cfg.host.as_deref()),
+        edgezero.as_ref().and_then(|cfg| cfg.port),
+        project.axum_host.as_deref(),
+        project.axum_port,
+    ))
+}
+
+fn resolve_subprocess_addr_from_parts(
+    env_host: Option<&str>,
+    env_port: Option<&str>,
+    edgezero_host: Option<&str>,
+    edgezero_port: Option<u16>,
+    axum_host: Option<&str>,
+    axum_port: Option<u16>,
+) -> addr::BindAddrResolution {
+    let mut warnings = Vec::new();
+    let host = resolve_subprocess_host(env_host, edgezero_host, axum_host, &mut warnings);
+    let port = resolve_subprocess_port(env_port, edgezero_port, axum_port, &mut warnings);
+
+    addr::BindAddrResolution {
+        addr: SocketAddr::from((host, port)),
+        warnings,
+    }
+}
+
+fn resolve_subprocess_host(
+    env_host: Option<&str>,
+    edgezero_host: Option<&str>,
+    axum_host: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> IpAddr {
+    if let Some(value) = env_host {
+        match value.parse() {
+            Ok(host) => return host,
+            Err(_) => warnings.push(format!(
+                "EDGEZERO__ADAPTER__HOST={value:?} is not a valid IP address (hostnames like \"localhost\" are not supported); falling back"
+            )),
+        }
+    }
+
+    if let Some(value) = edgezero_host {
+        match value.parse() {
+            Ok(host) => return host,
+            Err(_) => warnings.push(format!(
+                "configured host={value:?} in edgezero.toml is not a valid IP address (hostnames like \"localhost\" are not supported); falling back"
+            )),
+        }
+    }
+
+    if let Some(value) = axum_host {
+        match value.parse() {
+            Ok(host) => return host,
+            Err(_) => warnings.push(format!(
+                "configured host={value:?} in axum.toml is not a valid IP address (hostnames like \"localhost\" are not supported); falling back"
+            )),
+        }
+    }
+
+    addr::DEFAULT_HOST
+}
+
+fn resolve_subprocess_port(
+    env_port: Option<&str>,
+    edgezero_port: Option<u16>,
+    axum_port: Option<u16>,
+    warnings: &mut Vec<String>,
+) -> u16 {
+    if let Some(value) = env_port {
+        match value.parse::<u16>() {
+            Ok(0) => warnings.push(
+                "EDGEZERO__ADAPTER__PORT=\"0\" is not supported (would bind to a random OS port); falling back".to_owned(),
+            ),
+            Ok(port) => return port,
+            Err(_) => warnings.push(format!(
+                "EDGEZERO__ADAPTER__PORT={value:?} is not a valid port number; falling back"
+            )),
+        }
+    }
+
+    match edgezero_port {
+        Some(0) => warnings.push(
+            "configured port=0 in edgezero.toml is not supported (would bind to a random OS port); falling back".to_owned(),
+        ),
+        Some(port) => return port,
+        None => {}
+    }
+
+    match axum_port {
+        Some(0) => warnings.push(
+            "configured port=0 in axum.toml is not supported (would bind to a random OS port); falling back".to_owned(),
+        ),
+        Some(port) => return port,
+        None => {}
+    }
+
+    addr::DEFAULT_PORT
+}
+
+fn load_edgezero_axum_config(axum_manifest: &Path) -> Result<Option<EdgezeroAxumConfig>, String> {
+    let Some(start_dir) = axum_manifest.parent() else {
+        return Ok(None);
+    };
+
+    let Some(manifest_path) = find_manifest_upwards(start_dir, "edgezero.toml") else {
+        return Ok(None);
+    };
+
+    let manifest = ManifestLoader::from_path(&manifest_path)
+        .map_err(|err| format!("failed to load {}: {err}", manifest_path.display()))?;
+    let Some(adapter) = manifest.manifest().adapters.get("axum") else {
+        return Ok(None);
+    };
+
+    Ok(Some(EdgezeroAxumConfig {
+        host: adapter.adapter.host.clone(),
+        port: adapter.adapter.port,
+    }))
+}
+
+fn find_axum_manifest(start: &Path) -> Result<PathBuf, String> {
+    if let Some(found) = find_manifest_upwards(start, "axum.toml") {
+        return Ok(found);
+    }
+
+    let root = find_workspace_root(start);
+    let mut candidates: Vec<PathBuf> = WalkDir::new(&root)
+        .follow_links(true)
+        .max_depth(8)
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| {
+            path.file_name().is_some_and(|name| name == "axum.toml")
+                && path
+                    .parent()
+                    .is_some_and(|dir| dir.join("Cargo.toml").exists())
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return Err("could not locate axum.toml".into());
+    }
+
+    candidates.sort_by_key(|path| {
+        let parent = path.parent().unwrap_or(Path::new(""));
+        path_distance(start, parent)
+    });
+
+    Ok(candidates.remove(0))
+}
+
+fn read_axum_project(manifest: &Path) -> Result<AxumProject, String> {
+    // Per the spec hard-cutoff: only the canonical
+    // `EDGEZERO__ADAPTER__HOST` / `EDGEZERO__ADAPTER__PORT` env
+    // vars are honoured. The pre-rewrite `EDGEZERO_HOST` /
+    // `EDGEZERO_PORT` shim is gone -- the core runtime stopped
+    // reading those names, and keeping the axum wrapper compatible
+    // with them silently revived a precedence path the rest of
+    // the codebase had cut. Operators with legacy CI scripts must
+    // rename to the canonical form.
+    let env_host = env::var("EDGEZERO__ADAPTER__HOST").ok();
+    let env_port = env::var("EDGEZERO__ADAPTER__PORT").ok();
+    read_axum_project_with_env(manifest, env_host.as_deref(), env_port.as_deref())
+}
+
+fn read_axum_project_with_env(
+    manifest: &Path,
+    env_host: Option<&str>,
+    env_port: Option<&str>,
+) -> Result<AxumProject, String> {
+    let contents = fs::read_to_string(manifest)
+        .map_err(|err| format!("failed to read {}: {err}", manifest.display()))?;
+    let value: Value = toml::from_str(&contents)
+        .map_err(|err| format!("failed to parse {}: {err}", manifest.display()))?;
+
+    let adapter = value
+        .get("adapter")
+        .and_then(Value::as_table)
+        .ok_or_else(|| format!("adapter table missing in {}", manifest.display()))?;
+
+    let crate_dir_rel = adapter
+        .get("crate_dir")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("adapter.crate_dir missing in {}", manifest.display()))?;
+
+    let manifest_dir = manifest.parent().unwrap_or_else(|| Path::new("."));
+    let crate_dir = manifest_dir.join(crate_dir_rel);
+    let cargo_manifest = crate_dir.join("Cargo.toml");
+    if !cargo_manifest.exists() {
+        return Err(format!(
+            "Cargo.toml missing at {} referenced by {}",
+            cargo_manifest.display(),
+            manifest.display()
+        ));
+    }
+
+    let crate_name = adapter.get("crate").and_then(Value::as_str).map_or_else(
+        || {
+            read_package_name(&cargo_manifest).unwrap_or_else(|_| {
+                crate_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("axum-adapter")
+                    .to_owned()
+            })
+        },
+        ToOwned::to_owned,
+    );
+
+    let config_host = adapter
+        .get("host")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let config_port = match adapter.get("port").and_then(Value::as_integer) {
+        Some(port_value) => Some(u16::try_from(port_value).map_err(|err| {
+            format!(
+                "adapter.port in {} must be between 0 and 65535 ({err})",
+                manifest.display()
+            )
+        })?),
+        None => None,
+    };
+
+    let resolution =
+        addr::resolve_bind_addr(env_host, env_port, config_host.as_deref(), config_port);
+    for warning in &resolution.warnings {
+        log::warn!("[edgezero] {warning} (in {})", manifest.display());
+    }
+
+    Ok(AxumProject {
+        addr: resolution.addr,
+        axum_host: config_host,
+        axum_manifest: manifest.to_path_buf(),
+        axum_port: config_port,
+        cargo_manifest,
+        crate_dir,
+        crate_name,
+        env_host: env_host.map(str::to_owned),
+        env_port: env_port.map(str::to_owned),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use edgezero_adapter::cli_support::find_manifest_upwards;
+    use std::net::Ipv6Addr;
+    use tempfile::tempdir;
+
+    #[test]
+    fn synthesise_axum_toml_emits_parseable_baseline() {
+        let rendered = synthesise_axum_toml("demo-adapter-axum", ".");
+        assert!(
+            rendered.starts_with("# edgezero-provision: v1\n"),
+            "provision marker retained: {rendered}"
+        );
+        let doc: toml_edit::DocumentMut = rendered.parse().expect("baseline must be valid TOML");
+        assert_eq!(doc["adapter"]["crate"].as_str(), Some("demo-adapter-axum"));
+        assert_eq!(doc["adapter"]["crate_dir"].as_str(), Some("."));
+        assert_eq!(doc["adapter"]["host"].as_str(), Some("127.0.0.1"));
+        assert_eq!(doc["adapter"]["port"].as_integer(), Some(8787));
+    }
+
+    #[test]
+    fn synthesise_axum_toml_escapes_toml_significant_names() {
+        // A quote/backslash in the app (hence crate) name must not break
+        // out of the string and emit an unparseable manifest.
+        let rendered = synthesise_axum_toml("we\"ird\\name", "../up");
+        let doc: toml_edit::DocumentMut = rendered
+            .parse()
+            .expect("a pathological crate name must still produce valid TOML");
+        assert_eq!(
+            doc["adapter"]["crate"].as_str(),
+            Some("we\"ird\\name"),
+            "value round-trips through escaping: {rendered}"
+        );
+        assert_eq!(doc["adapter"]["crate_dir"].as_str(), Some("../up"));
+    }
+
+    fn project_with_crate_dir(crate_dir: PathBuf) -> AxumProject {
+        AxumProject {
+            addr: SocketAddr::new(addr::DEFAULT_HOST, addr::DEFAULT_PORT),
+            axum_host: None,
+            axum_manifest: PathBuf::new(),
+            axum_port: None,
+            cargo_manifest: crate_dir.join("Cargo.toml"),
+            crate_dir,
+            crate_name: "demo".to_owned(),
+            env_host: None,
+            env_port: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_cargo_lets_ctx_env_host_port_win_over_axum_resolution() {
+        use edgezero_core::test_env::PathPrepend;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempdir().unwrap();
+        let crate_dir = dir.path().join("crate");
+        fs::create_dir_all(&crate_dir).unwrap();
+        fs::write(crate_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+
+        // A fake `cargo` that records the HOST/PORT env it was handed.
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let env_log = dir.path().join("child_env.txt");
+        let script = format!(
+            "#!/bin/sh\nprintf 'HOST=%s\\nPORT=%s\\n' \"$EDGEZERO__ADAPTER__HOST\" \"$EDGEZERO__ADAPTER__PORT\" > '{}'\nexit 0\n",
+            env_log.display()
+        );
+        let cargo = bin.join("cargo");
+        fs::write(&cargo, script).unwrap();
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+        let _path = PathPrepend::new(&bin);
+
+        // The project's own resolution derives 9.9.9.9:1234 from axum.toml.
+        let mut project = project_with_crate_dir(crate_dir.clone());
+        project.addr = SocketAddr::new("9.9.9.9".parse().unwrap(), 1234);
+        project.axum_host = Some("9.9.9.9".to_owned());
+        project.axum_port = Some(1234);
+
+        // The resolved context env sets DIFFERENT values -- they must reach
+        // the child UNCHANGED (they have higher precedence than axum.toml).
+        let env = [
+            ("EDGEZERO__ADAPTER__HOST".to_owned(), "1.2.3.4".to_owned()),
+            ("EDGEZERO__ADAPTER__PORT".to_owned(), "5678".to_owned()),
+        ];
+        let ctx = AdapterExecContext::new().with_env(&env);
+        run_cargo(&project, "build", &[], &ctx).expect("fake cargo runs");
+
+        let logged = fs::read_to_string(&env_log).unwrap();
+        assert!(
+            logged.contains("HOST=1.2.3.4"),
+            "ctx HOST must reach the child unchanged, not lose to axum.toml: {logged}"
+        );
+        assert!(
+            logged.contains("PORT=5678"),
+            "ctx PORT must reach the child unchanged, not lose to axum.toml: {logged}"
+        );
+    }
+
+    #[test]
+    fn validate_axum_crate_dir_rejects_conflict_with_declared_crate() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("crates/server")).unwrap();
+        fs::create_dir_all(root.join("crates/other")).unwrap();
+        // axum.toml points crate_dir at `crates/other`, but the tracked
+        // `.crate` is `crates/server` -- the declared crate wins.
+        let project = project_with_crate_dir(root.join("crates/other"));
+        let declared = root.join("crates/server");
+        let ctx = AdapterExecContext::new().with_adapter_crate(&declared);
+        let err = validate_axum_crate_dir(&ctx, &root.join("axum.toml"), &project)
+            .expect_err("crate_dir conflicting with declared .crate must be refused");
+        assert!(
+            err.contains("authoritative") && err.contains("crate_dir"),
+            "error explains the conflict: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_axum_crate_dir_accepts_matching_declared_crate() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("crates/server")).unwrap();
+        let crate_dir = root.join("crates/server");
+        let ctx = AdapterExecContext::new().with_adapter_crate(&crate_dir);
+        validate_axum_crate_dir(
+            &ctx,
+            &root.join("crates/server/config/axum.toml"),
+            &project_with_crate_dir(crate_dir.clone()),
+        )
+        .expect("crate_dir matching the declared .crate is fine");
+    }
+
+    #[test]
+    fn validate_axum_crate_dir_rejects_escape_outside_workspace() {
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        // Workspace root under `base`; the escape target is a sibling of
+        // the workspace (so it exists for canonicalize but is off-tree).
+        let ws = base.join("ws");
+        fs::create_dir_all(ws.join("proj")).unwrap();
+        fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::create_dir_all(base.join("outside")).unwrap();
+        // No declared `.crate` (standalone). `..` climbs out of the ws.
+        let escaping = ws.join("proj/../../outside");
+        let project = project_with_crate_dir(escaping);
+        let ctx = AdapterExecContext::new();
+        let err = validate_axum_crate_dir(&ctx, &ws.join("proj/axum.toml"), &project)
+            .expect_err("a crate_dir escaping the workspace must be refused");
+        assert!(err.contains("OUTSIDE"), "error explains the escape: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_axum_crate_dir_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        let ws = base.join("ws");
+        fs::create_dir_all(ws.join("proj")).unwrap();
+        fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
+        // Symlink target lives OUTSIDE the workspace; canonicalize
+        // resolves the link to it, so containment must reject.
+        let outside = base.join("outside-crate");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, ws.join("proj/link")).unwrap();
+        let project = project_with_crate_dir(ws.join("proj/link"));
+        let ctx = AdapterExecContext::new();
+        let err = validate_axum_crate_dir(&ctx, &ws.join("proj/axum.toml"), &project)
+            .expect_err("a symlinked crate_dir escaping the workspace must be refused");
+        assert!(err.contains("OUTSIDE"), "error explains the escape: {err}");
+    }
+
+    #[test]
+    fn read_axum_project_loads_defaults() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.crate_name, "demo");
+        assert_eq!(project.crate_dir, root);
+        assert_eq!(project.cargo_manifest, root.join("Cargo.toml"));
+        assert_eq!(project.addr.port(), addr::DEFAULT_PORT);
+        assert_eq!(project.addr.ip(), addr::DEFAULT_HOST);
+    }
+
+    #[test]
+    fn find_manifest_upwards_locates_parent() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let nested = root.join("nested/level");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("Cargo.toml"), "[workspace]").unwrap();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\n",
+        )
+        .unwrap();
+
+        let found = find_manifest_upwards(&nested, "axum.toml").expect("manifest");
+        assert_eq!(found, root.join("axum.toml"));
+    }
+
+    #[test]
+    fn read_axum_project_uses_custom_port() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nport = 4001\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.addr.port(), 4001);
+    }
+
+    #[test]
+    fn read_axum_project_rejects_invalid_port() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nport = 70000\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let result = read_axum_project_with_env(&root.join("axum.toml"), None, None);
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(err) => assert!(err.contains("must be between 0 and 65535")),
+        }
+    }
+
+    #[test]
+    fn read_axum_project_zero_port_falls_back_to_default() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nport = 0\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.addr.port(), addr::DEFAULT_PORT);
+    }
+
+    #[test]
+    fn read_axum_project_rejects_negative_port() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nport = -1\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let result = read_axum_project_with_env(&root.join("axum.toml"), None, None);
+        result.unwrap_err();
+    }
+
+    #[test]
+    fn read_axum_project_rejects_missing_adapter_table() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("axum.toml"), "[other]\nkey = \"value\"\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let result = read_axum_project_with_env(&root.join("axum.toml"), None, None);
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(err) => assert!(err.contains("adapter table missing")),
+        }
+    }
+
+    #[test]
+    fn read_axum_project_rejects_missing_crate_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("axum.toml"), "[adapter]\ncrate = \"demo\"\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let result = read_axum_project_with_env(&root.join("axum.toml"), None, None);
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(err) => assert!(err.contains("crate_dir missing")),
+        }
+    }
+
+    #[test]
+    fn read_axum_project_rejects_missing_cargo_toml() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let subdir = root.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \"subdir\"\n",
+        )
+        .unwrap();
+        // No Cargo.toml in subdir
+
+        let result = read_axum_project_with_env(&root.join("axum.toml"), None, None);
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(err) => assert!(err.contains("Cargo.toml missing")),
+        }
+    }
+
+    #[test]
+    fn read_axum_project_falls_back_to_package_name() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // No crate key in adapter table
+        fs::write(root.join("axum.toml"), "[adapter]\ncrate_dir = \".\"\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"my-package\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.crate_name, "my-package");
+    }
+
+    #[test]
+    fn read_axum_project_with_relative_crate_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let adapter_dir = root.join("crates/my-adapter");
+        fs::create_dir_all(&adapter_dir).unwrap();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"my-adapter\"\ncrate_dir = \"crates/my-adapter\"\n",
+        )
+        .unwrap();
+        fs::write(
+            adapter_dir.join("Cargo.toml"),
+            "[package]\nname = \"my-adapter\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.crate_name, "my-adapter");
+        assert_eq!(project.crate_dir, adapter_dir);
+    }
+
+    #[test]
+    fn read_axum_project_accepts_max_valid_port() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nport = 65535\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.addr.port(), u16::MAX);
+    }
+
+    #[test]
+    fn read_axum_project_accepts_min_valid_port() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nport = 1\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.addr.port(), 1);
+    }
+
+    #[test]
+    fn read_axum_project_defaults_host_to_localhost() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.addr.ip(), addr::DEFAULT_HOST);
+    }
+
+    #[test]
+    fn read_axum_project_uses_custom_host() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nhost = \"0.0.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.addr.ip(), IpAddr::from([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn read_axum_project_invalid_host_falls_back_to_default() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nhost = \"not-an-ip\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let project =
+            read_axum_project_with_env(&root.join("axum.toml"), None, None).expect("project");
+        assert_eq!(project.addr.ip(), addr::DEFAULT_HOST);
+    }
+
+    #[test]
+    fn find_axum_manifest_returns_error_when_not_found() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // Create an empty directory with a Cargo.toml but no axum.toml
+        fs::write(root.join("Cargo.toml"), "[workspace]").unwrap();
+
+        let result = find_axum_manifest(root);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("could not locate axum.toml"));
+    }
+
+    #[test]
+    fn find_axum_manifest_finds_in_current_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Cargo.toml"), "[workspace]").unwrap();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\n",
+        )
+        .unwrap();
+
+        let found = find_axum_manifest(root).expect("manifest");
+        assert_eq!(found, root.join("axum.toml"));
+    }
+
+    #[test]
+    fn find_axum_manifest_finds_closest() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let nested = root.join("level1/level2");
+        fs::create_dir_all(&nested).unwrap();
+
+        // Create axum.toml at root
+        fs::write(root.join("Cargo.toml"), "[workspace]").unwrap();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"root\"\ncrate_dir = \".\"\n",
+        )
+        .unwrap();
+
+        // Create axum.toml at level1
+        fs::write(
+            root.join("level1/Cargo.toml"),
+            "[package]\nname = \"level1\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("level1/axum.toml"),
+            "[adapter]\ncrate = \"level1\"\ncrate_dir = \".\"\n",
+        )
+        .unwrap();
+
+        // Search from level2, should find level1's axum.toml (closer)
+        let found = find_axum_manifest(&nested).expect("manifest");
+        assert_eq!(found, root.join("level1/axum.toml"));
+    }
+
+    #[test]
+    fn deploy_returns_error() {
+        let result = deploy(&[]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("does not define a deploy command")
+        );
+    }
+
+    #[test]
+    fn read_axum_project_env_overrides_config() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("axum.toml"),
+            "[adapter]\ncrate = \"demo\"\ncrate_dir = \".\"\nhost = \"127.0.0.1\"\nport = 3000\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let result =
+            read_axum_project_with_env(&root.join("axum.toml"), Some("0.0.0.0"), Some("9999"));
+
+        let project = result.expect("project");
+        assert_eq!(project.addr.ip(), IpAddr::from([0, 0, 0, 0]));
+        assert_eq!(project.addr.port(), 9999);
+    }
+
+    #[test]
+    fn resolve_subprocess_addr_prefers_edgezero_manifest_over_axum_manifest() {
+        let resolution = resolve_subprocess_addr_from_parts(
+            None,
+            None,
+            Some("0.0.0.0"),
+            Some(4000),
+            Some("127.0.0.1"),
+            Some(3000),
+        );
+
+        assert_eq!(resolution.addr, SocketAddr::from(([0, 0, 0, 0], 4000)));
+        assert!(resolution.warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_subprocess_addr_falls_back_to_axum_manifest_when_edgezero_missing() {
+        let resolution =
+            resolve_subprocess_addr_from_parts(None, None, None, None, Some("0.0.0.0"), Some(3000));
+
+        assert_eq!(resolution.addr, SocketAddr::from(([0, 0, 0, 0], 3000)));
+        assert!(resolution.warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_subprocess_addr_env_overrides_both_manifests() {
+        let resolution = resolve_subprocess_addr_from_parts(
+            Some("::1"),
+            Some("9000"),
+            Some("0.0.0.0"),
+            Some(4000),
+            Some("127.0.0.1"),
+            Some(3000),
+        );
+
+        assert_eq!(
+            resolution.addr,
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 9000))
+        );
+        assert!(resolution.warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_subprocess_addr_invalid_edgezero_host_falls_back_to_axum_host() {
+        let resolution = resolve_subprocess_addr_from_parts(
+            None,
+            None,
+            Some("invalid-host"),
+            Some(4000),
+            Some("0.0.0.0"),
+            Some(3000),
+        );
+
+        assert_eq!(resolution.addr, SocketAddr::from(([0, 0, 0, 0], 4000)));
+        assert_eq!(resolution.warnings.len(), 1);
+    }
+
+    #[test]
+    fn resolve_subprocess_addr_edgezero_zero_port_falls_back_to_axum_port() {
+        let resolution = resolve_subprocess_addr_from_parts(
+            None,
+            None,
+            Some("127.0.0.1"),
+            Some(0),
+            Some("0.0.0.0"),
+            Some(3000),
+        );
+
+        assert_eq!(resolution.addr, SocketAddr::from(([127, 0, 0, 1], 3000)));
+        assert_eq!(resolution.warnings.len(), 1);
+    }
+}

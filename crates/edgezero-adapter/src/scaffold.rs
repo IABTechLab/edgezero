@@ -7,6 +7,9 @@ static BLUEPRINT_REGISTRY: LazyLock<RwLock<HashMap<String, &'static AdapterBluep
 /// Complete blueprint describing how the CLI should scaffold the adapter.
 pub struct AdapterBlueprint {
     pub commands: CommandTemplates,
+    pub tool_pins: &'static [&'static str],
+    pub local_ignore_patterns: &'static [&'static str],
+    pub install_notes: &'static [&'static str],
     pub crate_suffix: &'static str,
     pub dependencies: &'static [DependencySpec],
     pub dependency_crate: &'static str,
@@ -35,6 +38,13 @@ pub struct CommandTemplates {
     pub build: &'static str,
     pub deploy: &'static str,
     pub serve: &'static str,
+    /// Whether the generator emits an `[adapters.<id>.commands]` shell block.
+    /// When `false`, `build`/`serve`/`deploy` dispatch through the registry
+    /// adapter instead -- which reads the adapter's own manifest (e.g. Axum's
+    /// `axum.toml` `crate_dir`). A shell `commands` block would take
+    /// precedence over that dispatch and bypass the manifest, so adapters
+    /// whose build/serve must honour their manifest opt OUT here.
+    pub emit_commands: bool,
 }
 
 /// Describes a dependency entry inserted into an adapter crate manifest.
@@ -104,10 +114,14 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     static BLUEPRINT_ALPHA: AdapterBlueprint = AdapterBlueprint {
+        local_ignore_patterns: &[],
+        tool_pins: &[],
+        install_notes: &[],
         commands: CommandTemplates {
             build: "build",
             deploy: "deploy",
             serve: "serve",
+            emit_commands: true,
         },
         crate_suffix: "adapter-alpha",
         dependencies: &[DependencySpec {
@@ -146,10 +160,14 @@ mod tests {
     };
 
     static BLUEPRINT_BETA: AdapterBlueprint = AdapterBlueprint {
+        local_ignore_patterns: &[],
+        tool_pins: &[],
+        install_notes: &[],
         commands: CommandTemplates {
             build: "build",
             deploy: "deploy",
             serve: "serve",
+            emit_commands: true,
         },
         crate_suffix: "adapter-beta",
         dependencies: &[],

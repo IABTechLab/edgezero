@@ -116,9 +116,11 @@ name = "fixture-app"
 
 [adapters.fastly.adapter]
 manifest = "adapter/fastly.toml"
+crate = "adapter"
 
 [adapters.spin.adapter]
 manifest = "adapter/spin.toml"
+crate = "adapter"
 TOML
   if [[ "$mode" == store-aware ]]; then
     cat >>edgezero.toml <<'TOML'
@@ -154,6 +156,7 @@ version = "0.1.0"
 source = "fixture.wasm"
 TOML
 
+  printf '\n.edgezero/\n' >>.gitignore
   cargo generate-lockfile
   git add -A
   git commit -q -m fixture

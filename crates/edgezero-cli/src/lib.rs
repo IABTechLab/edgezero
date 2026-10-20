@@ -25,16 +25,34 @@ mod adapter;
 mod auth;
 #[cfg(feature = "cli")]
 mod config;
+#[cfg(feature = "cli")]
+mod copy_tree;
 #[cfg(all(feature = "cli", feature = "demo-example"))]
 mod demo_server;
 #[cfg(feature = "cli")]
 mod diff;
 #[cfg(feature = "cli")]
+mod env_file;
+#[cfg(feature = "cli")]
 mod generator;
+#[cfg(feature = "cli")]
+mod path_safety;
 #[cfg(feature = "cli")]
 mod provision;
 #[cfg(feature = "cli")]
+mod provision_lock;
+#[cfg(feature = "cli")]
 mod scaffold;
+#[cfg(all(test, feature = "cli"))]
+mod shared_test_guards;
+/// CLI stream-discipline helpers -- `stdout_line`, `info_line`,
+/// `prompt`. Every stdout/stderr write in the `edgezero` binary
+/// (and in the scaffolded downstream binaries that reuse this
+/// crate) MUST go through these so the workspace
+/// `clippy::print_stderr` / `clippy::print_stdout` restrictions
+/// still catch accidental prints elsewhere as real bugs.
+#[cfg(feature = "cli")]
+pub mod stream;
 #[cfg(all(test, feature = "cli"))]
 mod test_support;
 
@@ -52,16 +70,17 @@ pub use config::{
     run_config_validate, run_config_validate_typed,
 };
 #[cfg(feature = "cli")]
-pub use provision::run_provision;
+pub use provision::{run_provision, run_provision_typed};
 
 #[cfg(feature = "cli")]
 use args::{
     ActiveVersionArgs, BuildArgs, DeployArgs, HealthcheckArgs, NewArgs, RollbackArgs, ServeArgs,
 };
-#[cfg(feature = "cli")]
-use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds};
+use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds, get_adapter};
 #[cfg(feature = "cli")]
 use edgezero_core::manifest::{Manifest, ManifestLoader, StoreDeclaration};
+#[cfg(feature = "cli")]
+use path_safety::assert_provision_paths_safe;
 #[cfg(feature = "cli")]
 use std::collections::BTreeMap;
 #[cfg(feature = "cli")]
@@ -98,24 +117,16 @@ impl log::Log for CliLogger {
 
     #[inline]
     fn log(&self, record: &log::Record<'_>) {
+        use crate::stream::{info_line, stdout_line};
         if !self.enabled(record.metadata()) {
             return;
         }
         match record.level() {
             log::Level::Error | log::Level::Warn => {
-                #[expect(
-                    clippy::print_stderr,
-                    reason = "CLI UX output goes to stderr for warn/error"
-                )]
-                {
-                    eprintln!("{}", record.args());
-                }
+                info_line(&format!("{}", record.args()));
             }
             log::Level::Info => {
-                #[expect(clippy::print_stdout, reason = "CLI UX output goes to stdout for info")]
-                {
-                    println!("{}", record.args());
-                }
+                stdout_line(&format!("{}", record.args()));
             }
             log::Level::Debug | log::Level::Trace => {}
         }
@@ -144,6 +155,11 @@ pub fn init_cli_logger() {
 pub fn run_build(args: &BuildArgs) -> Result<(), String> {
     let manifest = load_manifest_optional()?;
     ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
+    // Same absolute-path / `..` / symlink guard `serve` and provision
+    // apply -- `build` and `deploy` dispatch the declared adapter
+    // manifest too, so a poisoned `[adapters.<name>.adapter].manifest`
+    // must not steer them at an out-of-tree project either.
+    assert_adapter_declared_paths_safe(manifest.as_ref(), &args.adapter)?;
     if let Some(loader) = &manifest {
         log_store_bindings(&args.adapter, loader);
     }
@@ -153,6 +169,28 @@ pub fn run_build(args: &BuildArgs) -> Result<(), String> {
         manifest.as_ref(),
         &args.adapter_args,
     )
+}
+
+/// Run the shared absolute-path / `..` / symlink guard on the
+/// `[adapters.<name>.adapter]` `manifest` + `crate` strings before any
+/// dispatch that resolves them. No-op when no manifest is loaded or the
+/// adapter isn't declared.
+#[cfg(feature = "cli")]
+fn assert_adapter_declared_paths_safe(
+    manifest: Option<&ManifestLoader>,
+    adapter: &str,
+) -> Result<(), String> {
+    if let Some(loader) = manifest
+        && let Some(root) = loader.manifest().root()
+        && let Some((_key, adapter_cfg)) = loader.manifest().adapter_entry(adapter)
+    {
+        assert_provision_paths_safe(
+            root,
+            adapter_cfg.adapter.manifest.as_deref(),
+            adapter_cfg.adapter.crate_path.as_deref(),
+        )?;
+    }
+    Ok(())
 }
 
 /// Deploy the project to a target edge adapter.
@@ -187,6 +225,7 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
 
     let manifest = load_manifest_optional()?;
     ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
+    assert_adapter_declared_paths_safe(manifest.as_ref(), &args.adapter)?;
     let manifest_stores = manifest.as_ref().map(|loader| &loader.manifest().stores);
     let declared_ids = |declaration: Option<&StoreDeclaration>| {
         declaration
@@ -228,6 +267,7 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
         adapter_manifest_path_error.as_deref(),
         manifest.as_ref(),
         &args.adapter_args,
+        &[],
     )
 }
 
@@ -437,15 +477,7 @@ pub fn run_rollback(args: &RollbackArgs) -> Result<(), String> {
         passthrough.push("--rollback-to".to_owned());
         passthrough.push(target.to_owned());
     } else {
-        return Err(
-            "a production rollback requires --rollback-to (the version to re-activate). Fastly \
-             exposes no metadata to infer it, so it must be captured before the deploy that \
-             superseded it -- run `active-version` (it prints `version=<N>`) before deploying, \
-             or wire the deploy-fastly GitHub action's `previous-version` output. If it was \
-             never captured, choose the target from the service's version history -- Fastly \
-             cannot identify it for you. Pass --staging to deactivate a staged version instead."
-                .to_owned(),
-        );
+        // The selected adapter determines whether an implicit rollback is supported.
     }
     adapter::execute(&args.adapter, adapter::Action::Rollback, None, &passthrough)
 }
@@ -488,12 +520,85 @@ pub fn run_active_version(args: &ActiveVersionArgs) -> Result<(), String> {
 pub fn run_serve(args: &ServeArgs) -> Result<(), String> {
     let manifest = load_manifest_optional()?;
     ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
-    adapter::execute(
+
+    // Adapter-scoped env-file load: `axum` reads `.edgezero/.env`,
+    // `spin` reads the `.env` next to the resolved `spin.toml`.
+    // `cloudflare` and `fastly` read their own files (`.dev.vars`,
+    // `[local_server.*]`) via their emulators and need no CLI-side
+    // help.
+    //
+    // Spin's env path is derived from
+    // `[adapters.spin.adapter].manifest` (see
+    // `resolve_serve_env_file`), so an operator-authored poisoned
+    // manifest string like `manifest = "/etc/spin.toml"` or
+    // `manifest = "../../../secrets/env"` would resolve to an
+    // out-of-tree `.env` that the parser would happily read and
+    // hand to the spawned adapter. Run the same absolute-path +
+    // `..` traversal + symlink-component guard provision and
+    // config already use before touching the resolved path.
+    //
+    // The overlay is threaded into the spawned child via
+    // `Command::env` (see `adapter::execute_with_env_overlay`)
+    // rather than `std::env::set_var`. On Unix `setenv` /
+    // `getenv` are not thread-safe: a downstream multithreaded
+    // process calling `run_serve` from one thread while another
+    // thread reads `std::env::var` observes a torn read. Passing
+    // the overlay through `Command::env` keeps every mutation on
+    // the `Command`'s private map — no shared state, no race.
+    assert_adapter_declared_paths_safe(manifest.as_ref(), &args.adapter)?;
+    let mut env_overlay: Vec<(String, String)> = Vec::new();
+    if let Some(loader) = manifest.as_ref()
+        && let Some(root) = loader.manifest().root()
+    {
+        let manifest_data = loader.manifest();
+        if let Some(env_path) = resolve_serve_env_file(manifest_data, &args.adapter, root)? {
+            // The env-file chain (e.g. `<root>/.edgezero/.env`) is NOT
+            // covered by `assert_adapter_declared_paths_safe`, which only
+            // guards the declared `.manifest` / `.crate`. Guard it
+            // UNCONDITIONALLY -- the walk stops at the first missing
+            // component, so even with NO `.env` it still rejects a
+            // symlinked `.edgezero` directory, which Axum reads
+            // `local-config-*.json` from at request time. Gating this on
+            // `.env` existing left that config read able to follow a
+            // symlink off-tree and inject externally-controlled values.
+            use edgezero_adapter::env_file::reject_symlink_components;
+            reject_symlink_components(root, &env_path)?;
+            if env_path.exists() {
+                env_overlay = env_file::parse_env_overlay(&env_path)?;
+            }
+        }
+    }
+
+    adapter::execute_with_env_overlay(
         &args.adapter,
         adapter::Action::Serve,
         manifest.as_ref(),
         &[],
+        &env_overlay,
     )
+}
+
+/// Resolve serve inputs through the selected adapter's local layout.
+#[cfg(feature = "cli")]
+fn resolve_serve_env_file(
+    manifest: &Manifest,
+    adapter_name: &str,
+    manifest_root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let Some((_, cfg)) = manifest.adapter_entry(adapter_name) else {
+        return Ok(None);
+    };
+    let Some(adapter) = get_adapter(adapter_name) else {
+        return Ok(None);
+    };
+    let layout = path_safety::local_layout(
+        manifest_root,
+        adapter,
+        cfg.adapter.manifest.as_deref(),
+        cfg.adapter.crate_path.as_deref(),
+        cfg.adapter.component.as_deref(),
+    )?;
+    Ok(layout.serve_env.map(|path| manifest_root.join(path)))
 }
 
 /// Create a new `EdgeZero` app skeleton.
@@ -533,17 +638,7 @@ fn store_bindings_message(adapter_name: &str, manifest: &ManifestLoader) -> Opti
     // returned by a function whose name contains "secret" (it can't tell
     // metadata from secret material), and adapters/operators can read the
     // binding name from their own `edgezero.toml` if they need to verify it.
-    let message = match adapter_name {
-        "axum" => {
-            "[edgezero] secrets enabled for axum -- ensure the required environment variables are set for local runs"
-        }
-        "cloudflare" => {
-            "[edgezero] secrets enabled for cloudflare -- ensure the required secret bindings exist in wrangler"
-        }
-        _ => {
-            "[edgezero] secrets enabled -- ensure the configured secret store is provisioned on the target platform"
-        }
-    };
+    let message = "[edgezero] secrets enabled -- ensure the configured secret store is provisioned on the target platform";
 
     Some(message.to_owned())
 }
@@ -582,6 +677,7 @@ fn ensure_adapter_defined(
 }
 
 #[cfg(feature = "cli")]
+/// Load the explicit application manifest, or the default when present.
 fn load_manifest_optional() -> Result<Option<ManifestLoader>, String> {
     let (path, explicit) = env::var("EDGEZERO_MANIFEST").map_or_else(
         |_| (PathBuf::from("edgezero.toml"), false),
@@ -603,7 +699,10 @@ fn load_manifest_optional() -> Result<Option<ManifestLoader>, String> {
 #[cfg(feature = "cli")]
 mod tests {
     use super::*;
-    use crate::test_support::{BASIC_MANIFEST, EnvOverride, manifest_guard};
+    use crate::test_support::{
+        BASIC_MANIFEST, EnvOverride, LAYOUT_TEST_ADAPTER, PROVISION_MANIFEST, manifest_guard,
+    };
+    use edgezero_adapter::registry::AdapterExecContext;
     use edgezero_adapter::registry::{
         self as adapter_registry, Adapter, AdapterAction, DeployOwnership,
     };
@@ -619,6 +718,52 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
     use tempfile::TempDir;
 
+    const SPIN_MANIFEST_LOWER: &str = r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "crates/spin/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = "echo"
+"#;
+
+    const SPIN_MANIFEST_MIXED_CASE: &str = r#"
+[app]
+name = "demo-app"
+
+[adapters.Spin.adapter]
+crate = "crates/spin"
+manifest = "crates/spin/spin.toml"
+
+[adapters.Spin.commands]
+build = "echo"
+deploy = "echo"
+serve = "echo"
+"#;
+
+    /// Nested-manifest fixture: `[adapters.spin.adapter].manifest`
+    /// points at a sub-directory inside `.crate`. Provision writes
+    /// `.env` next to the resolved `spin.toml`
+    /// (`crates/spin/config/.env`) — `run_serve` must load from
+    /// the same path.
+    const SPIN_MANIFEST_NESTED: &str = r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "crates/spin/config/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = "echo"
+"#;
     const PREFLIGHT_MANIFEST_COMMAND: usize = 0;
     const PREFLIGHT_ADAPTER_MANAGED: usize = 1;
     const PREFLIGHT_ERROR: usize = 2;
@@ -639,7 +784,25 @@ mod tests {
         reason = "the recording adapter exercises only deploy preflight, deploy dispatch, and finalization"
     )]
     impl Adapter for RecordingDeployAdapter {
-        fn deploy(&self, context: &AdapterDeployContext, _args: &[String]) -> Result<(), String> {
+        fn provision(
+            &self,
+            _root: &Path,
+            _manifest: Option<&str>,
+            _component: Option<&str>,
+            _stores: &edgezero_adapter::ProvisionStores<'_>,
+            _deployed: Option<&edgezero_adapter::AdapterDeployedState>,
+            _mode: edgezero_adapter::ProvisionMode,
+            _dry_run: bool,
+        ) -> Result<edgezero_adapter::ProvisionOutcome, String> {
+            Ok(edgezero_adapter::ProvisionOutcome::default())
+        }
+
+        fn deploy(
+            &self,
+            context: &AdapterDeployContext,
+            _args: &[String],
+            _ctx: &AdapterExecContext<'_>,
+        ) -> Result<(), String> {
             *DEPLOY_CONTEXT
                 .lock()
                 .map_err(|err| format!("deploy context lock poisoned: {err}"))? =
@@ -648,7 +811,12 @@ mod tests {
             Ok(())
         }
 
-        fn execute(&self, action: AdapterAction, _args: &[String]) -> Result<(), String> {
+        fn execute(
+            &self,
+            action: AdapterAction,
+            _args: &[String],
+            _ctx: &AdapterExecContext<'_>,
+        ) -> Result<(), String> {
             if action == AdapterAction::Deploy {
                 return Err("managed deployment must call Adapter::deploy".to_owned());
             }
@@ -659,6 +827,7 @@ mod tests {
             &self,
             _context: &AdapterDeployContext,
             _command_output: Option<&str>,
+            _exec: &AdapterExecContext<'_>,
         ) -> Result<(), String> {
             DEPLOY_FINALIZE_CALLS.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -672,6 +841,7 @@ mod tests {
             &self,
             context: &AdapterDeployContext,
             _args: &[String],
+            _exec: &AdapterExecContext<'_>,
         ) -> Result<DeployOwnership, String> {
             *DEPLOY_PREFLIGHT_CONTEXT
                 .lock()
@@ -694,6 +864,71 @@ mod tests {
         *DEPLOY_PREFLIGHT_CONTEXT
             .lock()
             .expect("deploy preflight context lock") = None;
+    }
+
+    #[cfg(all(
+        unix,
+        feature = "edgezero-adapter-cloudflare",
+        feature = "edgezero-adapter-spin"
+    ))]
+    #[test]
+    fn registry_deploy_preserves_child_env_and_native_vendor_arguments() {
+        use edgezero_core::test_env::PathPrepend;
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = manifest_guard().lock().expect("manifest guard");
+        for (adapter, vendor, filename) in [
+            ("cloudflare", "wrangler", "wrangler.toml"),
+            ("spin", "spin", "spin.toml"),
+        ] {
+            let dir = TempDir::new().expect("temporary project");
+            let crate_dir = dir.path().join("crates/worker");
+            let config_dir = crate_dir.join("config");
+            fs::create_dir_all(&config_dir).expect("config directory");
+            fs::write(
+                crate_dir.join("Cargo.toml"),
+                "[package]\nname=\"worker\"\nversion=\"0.1.0\"\n",
+            )
+            .expect("crate manifest");
+            fs::write(config_dir.join(filename), "name = \"demo\"\n").expect("provider manifest");
+            let manifest = dir.path().join("edgezero.toml");
+            fs::write(&manifest, format!("[app]\nname=\"demo\"\n[adapters.{adapter}.adapter]\ncrate=\"crates/worker\"\nmanifest=\"crates/worker/config/{filename}\"\n[[environment.variables]]\nname=\"DEPLOY_MARKER\"\nenv=\"EDGEZERO_MERGE_DEPLOY_MARKER\"\nvalue=\"from-manifest\"\nadapters=[\"{adapter}\"]\n")).expect("application manifest");
+            let argv = dir.path().join("argv");
+            let child_env = dir.path().join("env");
+            let shim = dir.path().join(vendor);
+            fs::write(&shim, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"$EDGEZERO_MERGE_DEPLOY_MARKER\" > '{}'\n", argv.display(), child_env.display())).expect("vendor shim");
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("executable shim");
+            let _path = PathPrepend::new(dir.path());
+            let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+            run_deploy(&DeployArgs {
+                adapter: adapter.to_owned(),
+                application_release: None,
+                service_id: None,
+                staging: false,
+                adapter_args: vec!["--help".to_owned()],
+            })
+            .expect("registry deploy");
+            assert!(
+                !dir.path().join(".edgezero/provision.lock").exists(),
+                "deploy shells must not hold the project write lock"
+            );
+            let recorded = fs::read_to_string(argv).expect("recorded vendor arguments");
+            assert!(
+                !recorded.contains("--manifest-path"),
+                "private manifest directive reached {vendor}: {recorded}"
+            );
+            assert!(
+                recorded.lines().any(|arg| arg == "--help"),
+                "operator arguments reach {vendor}"
+            );
+            assert!(
+                recorded.contains(config_dir.join(filename).to_string_lossy().as_ref()),
+                "declared provider manifest reaches {vendor}"
+            );
+            assert_eq!(
+                fs::read_to_string(child_env).expect("child environment"),
+                "from-manifest"
+            );
+        }
     }
 
     #[test]
@@ -855,7 +1090,7 @@ mod tests {
         fs::write(
             &manifest_path,
             format!(
-                "[app]\nname = \"demo-app\"\n\n[stores.config]\nids = [\"app_config\"]\n\n[adapters.unregistered_test.adapter]\ncrate = \"crates/demo\"\n\n[adapters.unregistered_test.commands]\ndeploy = \"sh {}\"\n",
+                "[app]\nname = \"demo-app\"\n\n[stores.config]\nids = [\"app_config\"]\n\n[adapters.unregistered_test.adapter]\n\n[adapters.unregistered_test.commands]\ndeploy = \"sh {}\"\n",
                 script.display()
             ),
         )
@@ -883,6 +1118,7 @@ mod tests {
     fn deploy_preflight_adapter_managed_bypasses_manifest_command_and_receives_context() {
         let _lock = manifest_guard().lock().expect("manifest guard");
         reset_recording_deploy_adapter(PREFLIGHT_ADAPTER_MANAGED);
+        let _secret = EnvOverride::set("EDGEZERO_TEST_SECRET", "fixture-secret");
         let temp = TempDir::new().expect("temp dir");
         let marker = temp.path().join("manifest-deploy-ran");
         let adapter_dir = temp.path().join("nested/adapter");
@@ -1007,6 +1243,10 @@ deploy = "touch '{}'"
         })
         .expect("managed release deploy");
 
+        assert!(
+            !release.path().join(".edgezero").exists(),
+            "immutable release deployments must not add local project lock state"
+        );
         let context = DEPLOY_CONTEXT
             .lock()
             .expect("deploy context lock")
@@ -1183,7 +1423,7 @@ deploy = "touch '{}'"
         fs::write(
             &manifest_path,
             format!(
-                "[app]\nname = \"demo-app\"\n\n[adapters.recording_deploy_test.adapter]\ncrate = \"crates/demo\"\n\n[adapters.recording_deploy_test.commands]\ndeploy = \"touch '{}'\"\n",
+                "[app]\nname = \"demo-app\"\n\n[adapters.recording_deploy_test.adapter]\ncrate = \"crates/demo\"\nmanifest = \"crates/demo/config.toml\"\n\n[adapters.recording_deploy_test.commands]\ndeploy = \"touch '{}'\"\n",
                 marker.display()
             ),
         )
@@ -1477,10 +1717,10 @@ ids = ["MY_SECRETS"]
         );
 
         let axum = store_bindings_message("axum", &loader).expect("axum message");
-        assert!(axum.contains("environment variables"));
+        assert!(axum.contains("secret store"));
 
         let cloudflare = store_bindings_message("cloudflare", &loader).expect("cloudflare message");
-        assert!(cloudflare.contains("wrangler"));
+        assert!(cloudflare.contains("secret store"));
 
         let fastly = store_bindings_message("fastly", &loader).expect("fastly message");
         assert!(fastly.contains("secrets enabled"));
@@ -1490,5 +1730,633 @@ ids = ["MY_SECRETS"]
     fn store_bindings_message_is_absent_without_secret_store() {
         let loader = ManifestLoader::load_from_str("[app]\nname = \"x\"\n");
         assert!(store_bindings_message("fastly", &loader).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_adapter_serve_uses_its_own_env_sidecar() {
+        let _guard = manifest_guard().lock().unwrap();
+        adapter_registry::register_adapter(&LAYOUT_TEST_ADAPTER);
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("crate")).unwrap();
+        let body = "[app]\nname='demo'\n[adapters.__layout_test__.adapter]\ncrate='crate'\nmanifest='crate/provider.settings'\ncomponent='selected'\n[adapters.__layout_test__.commands]\nserve='printf %s \"$EDGEZERO_CUSTOM_LAYOUT_MARKER\" > served'\n";
+        let manifest = dir.path().join("edgezero.toml");
+        fs::write(&manifest, body).unwrap();
+        fs::write(
+            dir.path().join("crate/selected.credentials"),
+            "EDGEZERO_CUSTOM_LAYOUT_MARKER=`literal value`\n",
+        )
+        .unwrap();
+        let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+        run_serve(&ServeArgs {
+            adapter: "__layout_test__".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("served")).unwrap(),
+            "literal value"
+        );
+        for (component, message) in [
+            ("../../outside", "traversal"),
+            ("error", "custom layout rejected"),
+        ] {
+            let loader = ManifestLoader::load_from_str(
+                &body.replace("component='selected'", &format!("component='{component}'")),
+            );
+            let error = resolve_serve_env_file(loader.manifest(), "__layout_test__", dir.path())
+                .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn resolve_serve_env_file_axum_returns_dot_edgezero_dot_env() {
+        // axum's `.env` lives under `<manifest_root>/.edgezero/.env`
+        // — the target the line writer produces.
+        let loader = ManifestLoader::load_from_str(PROVISION_MANIFEST);
+        let root = PathBuf::from("/tmp/proj");
+        let resolved = resolve_serve_env_file(loader.manifest(), "axum", &root)
+            .expect("valid adapter layout")
+            .expect("axum arm returns Some");
+        assert_eq!(resolved, root.join(".edgezero").join(".env"));
+    }
+
+    #[test]
+    fn resolve_serve_env_file_spin_derives_env_from_manifest_parent() {
+        // spin's `.env` lives next to the resolved `spin.toml` — the
+        // target the line writer produces — derived from the required
+        // `[adapters.spin.adapter].manifest`.
+        let loader = ManifestLoader::load_from_str(SPIN_MANIFEST_LOWER);
+        let root = PathBuf::from("/tmp/proj");
+        let resolved = resolve_serve_env_file(loader.manifest(), "spin", &root)
+            .expect("valid adapter layout")
+            .expect("spin arm returns Some");
+        assert_eq!(resolved, root.join("crates/spin").join(".env"));
+    }
+
+    #[test]
+    fn resolve_serve_env_file_spin_without_manifest_returns_none() {
+        // `.manifest` is required for spin (build/deploy/provision/config
+        // all reject its absence). run_serve must NOT fall back to
+        // `.crate`/root -- that would look for `.env` in the wrong
+        // directory. A crate-only spin adapter resolves to None.
+        let loader = ManifestLoader::load_from_str(
+            "[app]\nname = \"demo-app\"\n\n[adapters.spin.adapter]\ncrate = \"crates/spin\"\n\n[adapters.spin.commands]\nbuild = \"echo\"\ndeploy = \"echo\"\nserve = \"echo\"\n",
+        );
+        let root = PathBuf::from("/tmp/proj");
+        assert!(
+            resolve_serve_env_file(loader.manifest(), "spin", &root)
+                .expect("valid adapter layout")
+                .is_none(),
+            "no `.manifest` => no serve env overlay (no legacy `.crate` fallback)"
+        );
+    }
+
+    #[test]
+    fn resolve_serve_env_file_spin_honors_nested_manifest_parent() {
+        // Regression: provision writes `.env` next to the resolved
+        // `spin.toml` (`spin_dir.join(".env")` in
+        // `edgezero-adapter-spin/src/cli/provision_local.rs`).
+        // With `[adapters.spin.adapter].manifest = "crates/spin/config/spin.toml"`,
+        // provision writes `crates/spin/config/.env`. run_serve
+        // MUST load from the same path — deriving from
+        // `.crate = "crates/spin"` alone would look at
+        // `crates/spin/.env` and miss every EDGEZERO__STORES__…__NAME
+        // + typed SPIN_VARIABLE_* line provision just wrote.
+        let loader = ManifestLoader::load_from_str(SPIN_MANIFEST_NESTED);
+        let root = PathBuf::from("/tmp/proj");
+        let resolved = resolve_serve_env_file(loader.manifest(), "spin", &root)
+            .expect("valid adapter layout")
+            .expect("spin arm returns Some");
+        assert_eq!(
+            resolved,
+            root.join("crates/spin/config").join(".env"),
+            "spin serve MUST load .env from the manifest's parent dir (matches provision's writeback path), NOT from the adapter crate root"
+        );
+    }
+
+    #[test]
+    fn resolve_serve_env_file_cloudflare_returns_none() {
+        // Wrangler reads `.dev.vars` itself; run_serve does not touch it.
+        let loader = ManifestLoader::load_from_str(BASIC_MANIFEST);
+        let root = PathBuf::from("/tmp/proj");
+        assert!(
+            resolve_serve_env_file(loader.manifest(), "cloudflare", &root)
+                .expect("valid adapter layout")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_serve_env_file_fastly_returns_none() {
+        // Fastly's emulator reads `[local_server.*]` blocks in
+        // `fastly.toml`; run_serve does not touch it.
+        let loader = ManifestLoader::load_from_str(BASIC_MANIFEST);
+        let root = PathBuf::from("/tmp/proj");
+        assert!(
+            resolve_serve_env_file(loader.manifest(), "fastly", &root)
+                .expect("valid adapter layout")
+                .is_none()
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_serve_rejects_absolute_spin_adapter_manifest_path() {
+        // Regression: `resolve_serve_env_file` derives Spin's `.env`
+        // path from `[adapters.spin.adapter].manifest.parent()` and
+        // `run_serve` then reads that file. A poisoned absolute
+        // manifest string like `/etc/spin.toml` would resolve to
+        // `/etc/.env` — `env_file::load_into_process_env` would
+        // read it and inject its lines into the process env,
+        // subsequently inherited by the spawned adapter. The path
+        // safety guard must fire BEFORE the read.
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        let poisoned = r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "/etc/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = "echo"
+"#;
+        fs::write(&manifest_path, poisoned).expect("write manifest");
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = ServeArgs {
+            adapter: "spin".to_owned(),
+        };
+        let err = run_serve(&args).expect_err(
+            "run_serve MUST refuse to resolve an absolute [adapters.spin.adapter].manifest",
+        );
+        assert!(
+            err.contains("must be a project-relative path"),
+            "path-safety guard must fire before the .env read: {err}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_build_rejects_absolute_adapter_manifest_path() {
+        // `build`/`deploy` dispatch the declared adapter manifest just
+        // like `serve`, so the same path-safety guard must fire.
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        let poisoned = "[app]\nname = \"demo-app\"\n\n[adapters.spin.adapter]\ncrate = \"crates/spin\"\nmanifest = \"/etc/spin.toml\"\n";
+        fs::write(&manifest_path, poisoned).expect("write manifest");
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = BuildArgs {
+            adapter: "spin".to_owned(),
+            adapter_args: Vec::new(),
+        };
+        let err = run_build(&args)
+            .expect_err("run_build MUST refuse an absolute [adapters.spin.adapter].manifest");
+        assert!(
+            err.contains("must be a project-relative path"),
+            "build path-safety guard must fire: {err}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_deploy_rejects_parent_traversal_in_adapter_manifest() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        let poisoned = "[app]\nname = \"demo-app\"\n\n[adapters.spin.adapter]\ncrate = \"crates/spin\"\nmanifest = \"../../../outside/spin.toml\"\n";
+        fs::write(&manifest_path, poisoned).expect("write manifest");
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = DeployArgs {
+            application_release: None,
+            adapter: "spin".to_owned(),
+            adapter_args: Vec::new(),
+            service_id: None,
+            staging: false,
+        };
+        let err =
+            run_deploy(&args).expect_err("run_deploy MUST refuse a `..`-traversing manifest path");
+        assert!(
+            err.contains("`..`"),
+            "deploy path-safety guard must fire: {err}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_serve_rejects_parent_traversal_in_spin_adapter_manifest() {
+        // Symmetric to the absolute-path guard: `..` in the
+        // manifest string would resolve `.env` above the project
+        // root. Must fire BEFORE the read.
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let manifest_path = temp.path().join("edgezero.toml");
+        let poisoned = r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "../../../outside/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = "echo"
+"#;
+        fs::write(&manifest_path, poisoned).expect("write manifest");
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = ServeArgs {
+            adapter: "spin".to_owned(),
+        };
+        let err = run_serve(&args)
+            .expect_err("run_serve MUST refuse a `..` traversal in the manifest string");
+        assert!(
+            err.contains("must not contain `..` traversal"),
+            "traversal guard must fire before the .env read: {err}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_serve_loads_env_file_into_process_env_before_spawning_child() {
+        // Contract test (spec §"Adapter-scoped env-file load"): the
+        // `.env` next to the resolved `spin.toml` must have its
+        // `KEY=VALUE` lines set into the process env BEFORE
+        // `adapter::execute` runs the manifest's serve command, so
+        // the SPAWNED CHILD sees the values.
+        //
+        // Test fidelity note: proving the parent process loaded the
+        // .env (via `env::var(marker_key)` after `run_serve`) is
+        // necessary but not sufficient — the spec asks for
+        // intercepting the spawned child's env. We achieve that
+        // here by making the serve command a small shell script
+        // that writes its OWN observed value of the marker to a
+        // file. The test then reads that file and asserts the
+        // child saw the same value the parent set.
+        //
+        // Prior to c38cb54 the resolver looked at `<crate>/.env`;
+        // the manifest below deliberately places `.env` under a
+        // nested manifest parent to prove the fix loads THAT file
+        // (not a same-named file under `.crate`).
+        let marker_key = "EDGEZERO_TEST_SERVE_ENV_LOADED_MARKER";
+        let marker_value = "spin-nested-manifest-parent";
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let _pre = EnvOverride::remove(marker_key);
+
+        let temp = TempDir::new().expect("temp dir");
+
+        // The child writes its observed marker value here. We pick
+        // a path INSIDE the tempdir so parallel test runs never
+        // collide, and thread it into the manifest's serve command
+        // string via `format!`.
+        let observed_path = temp.path().join("child_observed.txt");
+        let observed_path_display = observed_path.to_string_lossy();
+
+        let manifest_path = temp.path().join("edgezero.toml");
+        // Serve command: a `sh -c` script that writes the child's
+        // OWN view of $MARKER_KEY to `observed_path`. If the
+        // spawned child inherits nothing (i.e. `run_serve` did NOT
+        // load the .env before dispatch), the file will contain an
+        // empty value and the assertion below will fail with a
+        // useful diff.
+        let manifest_body = format!(
+            r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "crates/spin/config/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = 'sh -c "printf %s \"${{{marker_key}:-<unset>}}\" > {observed_path_display}"'
+"#,
+        );
+        fs::write(&manifest_path, &manifest_body).expect("write manifest");
+
+        // Provision writes `.env` next to the RESOLVED spin.toml
+        // (`crates/spin/config/.env` here). Seed one directly.
+        let env_dir = temp.path().join("crates/spin/config");
+        fs::create_dir_all(&env_dir).expect("mkdir nested spin dir");
+        let env_path = env_dir.join(".env");
+        fs::write(&env_path, format!("{marker_key}={marker_value}\n")).expect("seed nested .env");
+
+        // Also seed a decoy `.env` at the pre-fix location
+        // (`crates/spin/.env`) with a DIFFERENT value so a
+        // regression to the crate-based lookup surfaces as a
+        // wrong-value assertion in the CHILD-observed file, not a
+        // silent pass.
+        let decoy_dir = temp.path().join("crates/spin");
+        fs::create_dir_all(&decoy_dir).expect("mkdir spin crate");
+        let decoy_env = decoy_dir.join(".env");
+        fs::write(
+            &decoy_env,
+            format!("{marker_key}=THIS_MUST_NOT_BE_LOADED_from_crate_root\n"),
+        )
+        .expect("seed decoy .env");
+
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = ServeArgs {
+            adapter: "spin".to_owned(),
+        };
+        run_serve(&args).expect("run_serve must succeed with the sh-echo serve command");
+
+        // Child-side check (the spec's real ask): the spawned
+        // shell wrote its OWN view of $MARKER_KEY to disk. That
+        // value MUST match the .env's value — proving the child
+        // inherited the Command::env overlay before executing.
+        //
+        // Note: the load path
+        // now threads the overlay through Command::env instead of
+        // std::env::set_var, so the PARENT's env stays unchanged.
+        // A dedicated no-parent-mutation assertion lives in
+        // `run_serve_does_not_mutate_parent_process_env_yet_child_sees_env_file_value`
+        // below; this test intentionally stays focused on the
+        // manifest-parent .env resolution regression.
+        let child_observed =
+            fs::read_to_string(&observed_path).expect("child wrote observed marker");
+        assert_eq!(
+            child_observed,
+            marker_value,
+            "spawned serve child MUST see the marker from the nested-manifest-parent .env — \
+             got {child_observed:?} at {}",
+            observed_path.display()
+        );
+
+        // Sanity: this test intentionally poisons the decoy path;
+        // the child-observed assertion above proves the resolver
+        // preferred the manifest-derived nested path over it.
+        assert!(env_path.exists() && decoy_env.exists());
+    }
+
+    #[test]
+    fn resolve_serve_env_file_adapter_name_is_case_insensitive() {
+        // Manifest declares `[adapters.Spin]` (mixed case). Passing
+        // `--adapter spin` (or SPIN) must still resolve to the Spin
+        // arm's `<spin.toml parent>/.env` — the arm lowercases once and
+        // matches on the lowercase form.
+        let loader = ManifestLoader::load_from_str(SPIN_MANIFEST_MIXED_CASE);
+        let root = PathBuf::from("/tmp/proj");
+        let expected = root.join("crates/spin").join(".env");
+        assert_eq!(
+            resolve_serve_env_file(loader.manifest(), "spin", &root).expect("valid adapter layout"),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            resolve_serve_env_file(loader.manifest(), "SPIN", &root).expect("valid adapter layout"),
+            Some(expected)
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_serve_does_not_mutate_parent_process_env_yet_child_sees_env_file_value() {
+        // Regression: the pre-fix
+        // `env_file::load_into_process_env` wrote every KEY=VALUE
+        // pair via `std::env::set_var`. That's not thread-safe on
+        // Unix and can race with any concurrent reader in a
+        // multithreaded downstream process embedding
+        // `edgezero_cli::run_serve`.
+        //
+        // The current design threads the `.env` overlay through
+        // `Command::env` (see `env_file::parse_env_overlay` +
+        // `adapter::execute_with_env_overlay`), so the CHILD sees
+        // the file's values at exec time while the PARENT's shared
+        // `environ` stays untouched.
+        //
+        // This test seeds a nested Spin `.env` with a marker, runs
+        // `run_serve`, and asserts BOTH:
+        //   (a) the child's observed marker equals the .env value
+        //       (proving the overlay reached the spawned process),
+        //   (b) the parent's `env::var(marker_key)` is still None
+        //       (proving `run_serve` did NOT call `set_var`).
+        let marker_key = "EDGEZERO_TEST_SERVE_ENV_NO_PARENT_MUTATION_MARKER";
+        let marker_value = "child-only-do-not-leak-to-parent";
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        // Pre-condition: the marker MUST be unset in the parent, or
+        // `existing env wins` would drop the overlay and the test
+        // could pass vacuously.
+        let _pre = EnvOverride::remove(marker_key);
+
+        let temp = TempDir::new().expect("temp dir");
+        let observed_path = temp.path().join("child_observed.txt");
+        let observed_path_display = observed_path.to_string_lossy();
+        let manifest_path = temp.path().join("edgezero.toml");
+        let manifest_body = format!(
+            r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "crates/spin/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = 'sh -c "printf %s \"${{{marker_key}:-<unset>}}\" > {observed_path_display}"'
+"#,
+        );
+        fs::write(&manifest_path, &manifest_body).expect("write manifest");
+        let env_dir = temp.path().join("crates/spin");
+        fs::create_dir_all(&env_dir).expect("mkdir spin");
+        fs::write(
+            env_dir.join(".env"),
+            format!("{marker_key}={marker_value}\n"),
+        )
+        .expect("seed .env");
+
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = ServeArgs {
+            adapter: "spin".to_owned(),
+        };
+        run_serve(&args).expect("run_serve must succeed");
+
+        // (a) CHILD side — must see the marker.
+        let child_observed =
+            fs::read_to_string(&observed_path).expect("child wrote observed marker");
+        assert_eq!(
+            child_observed, marker_value,
+            "spawned child MUST inherit the .env overlay: got {child_observed:?}"
+        );
+
+        // (b) PARENT side — must NOT see the marker. This is the
+        // load-bearing thread-safety assertion.
+        let parent_observed = env::var(marker_key).ok();
+        assert!(
+            parent_observed.is_none(),
+            "run_serve MUST NOT mutate the parent process env; found `{marker_key}={parent_observed:?}`. \
+             Regression: `env_file::parse_env_overlay` bypassed and someone re-introduced \
+             `std::env::set_var` on the load path."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_serve_refuses_symlinked_env_file() {
+        // A symlinked `.env` in the serve env-file chain could inject
+        // externally-controlled values into the spawned child. run_serve
+        // must refuse it before parsing, and before the child spawns.
+        use std::os::unix::fs::symlink;
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let observed_path = temp.path().join("child_observed.txt");
+        let observed_path_display = observed_path.to_string_lossy();
+        let manifest_path = temp.path().join("edgezero.toml");
+        let manifest_body = format!(
+            r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "crates/spin/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = 'sh -c "printf ran > {observed_path_display}"'
+"#,
+        );
+        fs::write(&manifest_path, &manifest_body).expect("write manifest");
+        let env_dir = temp.path().join("crates/spin");
+        fs::create_dir_all(&env_dir).expect("mkdir spin");
+        // `.env` is a symlink to an out-of-tree file the operator does
+        // not control.
+        let outside = temp.path().join("attacker.env");
+        fs::write(&outside, "INJECTED=1\n").expect("write outside env");
+        symlink(&outside, env_dir.join(".env")).expect("symlink .env");
+
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = ServeArgs {
+            adapter: "spin".to_owned(),
+        };
+        let err = run_serve(&args).expect_err("a symlinked .env must be refused");
+        assert!(err.contains("symlink"), "error names the symlink: {err}");
+        assert!(
+            !observed_path.exists(),
+            "the child must NOT have spawned once the env chain was rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_serve_refuses_symlinked_edgezero_dir_even_without_env_file() {
+        // Regression: the symlink guard used to run only when `.env`
+        // existed. Axum reads `<root>/.edgezero/local-config-*.json` at
+        // request time, so a symlinked `.edgezero` must be refused even
+        // with NO `.env` inside it.
+        use std::os::unix::fs::symlink;
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let temp = TempDir::new().expect("temp dir");
+        let observed_path = temp.path().join("child_observed.txt");
+        let observed_path_display = observed_path.to_string_lossy();
+        let manifest_path = temp.path().join("edgezero.toml");
+        let manifest_body = format!(
+            r#"
+[app]
+name = "demo-app"
+
+[adapters.axum.adapter]
+crate = "crates/server"
+manifest = "crates/server/axum.toml"
+
+[adapters.axum.commands]
+build = "echo"
+deploy = "echo"
+serve = 'sh -c "printf ran > {observed_path_display}"'
+"#,
+        );
+        fs::write(&manifest_path, &manifest_body).expect("write manifest");
+        // `.edgezero` is a symlink to an out-of-tree dir holding config
+        // the operator does not control. Note: NO `.env` inside.
+        let outside = temp.path().join("attacker-edgezero");
+        fs::create_dir_all(&outside).expect("mkdir outside");
+        fs::write(
+            outside.join("local-config-app_config.json"),
+            "{\"greeting\":\"pwned\"}\n",
+        )
+        .expect("write outside config");
+        symlink(&outside, temp.path().join(".edgezero")).expect("symlink .edgezero");
+
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        let args = ServeArgs {
+            adapter: "axum".to_owned(),
+        };
+        let err = run_serve(&args).expect_err("a symlinked .edgezero must be refused");
+        assert!(err.contains("symlink"), "error names the symlink: {err}");
+        assert!(
+            !observed_path.exists(),
+            "the child must NOT have spawned once the .edgezero chain was rejected"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_serve_existing_parent_env_wins_over_env_file() {
+        // Same contract, opposite direction: when the parent env
+        // already has the key, the .env's value must NOT overlay.
+        // Serialised access to `EDGEZERO_TEST_SERVE_ENV_KEEP` via
+        // the manifest guard so a concurrent test can't observe
+        // torn state.
+        let marker_key = "EDGEZERO_TEST_SERVE_ENV_KEEP";
+        let parent_value = "from-parent";
+        let file_value = "from-dot-env-do-not-leak";
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let _pre = EnvOverride::set(marker_key, parent_value);
+
+        let temp = TempDir::new().expect("temp dir");
+        let observed_path = temp.path().join("child_observed.txt");
+        let observed_path_display = observed_path.to_string_lossy();
+        let manifest_path = temp.path().join("edgezero.toml");
+        let manifest_body = format!(
+            r#"
+[app]
+name = "demo-app"
+
+[adapters.spin.adapter]
+crate = "crates/spin"
+manifest = "crates/spin/spin.toml"
+
+[adapters.spin.commands]
+build = "echo"
+deploy = "echo"
+serve = 'sh -c "printf %s \"${{{marker_key}:-<unset>}}\" > {observed_path_display}"'
+"#,
+        );
+        fs::write(&manifest_path, &manifest_body).expect("write manifest");
+        let env_dir = temp.path().join("crates/spin");
+        fs::create_dir_all(&env_dir).expect("mkdir spin");
+        fs::write(env_dir.join(".env"), format!("{marker_key}={file_value}\n")).expect("seed .env");
+
+        let manifest_str = manifest_path.to_string_lossy().into_owned();
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest_str);
+        run_serve(&ServeArgs {
+            adapter: "spin".to_owned(),
+        })
+        .expect("run_serve must succeed");
+
+        let child_observed = fs::read_to_string(&observed_path).expect("child wrote observed");
+        assert_eq!(
+            child_observed, parent_value,
+            "parent env MUST win over .env overlay: got {child_observed:?}"
+        );
     }
 }

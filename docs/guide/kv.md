@@ -119,19 +119,23 @@ Timing logs are limited to derived metadata such as lengths, counts, booleans, a
 
 ### Local Development
 
+::: tip Adapter manifests are gitignored
+`axum.toml`, `wrangler.toml`, `fastly.toml`, `spin.toml`, and
+`runtime-config.toml` are all excluded by the workspace
+`.gitignore`. Regenerate each after cloning — and after adding a
+new store id — by re-running `<app-cli> provision --adapter <name>
+--local`; the local provisioner upserts new `[[kv_namespaces]]`
+/ `[local_server.kv_stores.*]` / `key_value_stores` entries and
+leaves your operator edits in place.
+:::
+
 - **Axum**: Uses a persistent `redb` embedded database under `.edgezero/`. Each distinct resolved store name gets its own file, `.edgezero/kv-<slug>-<hash>.redb`; ids that resolve to the same platform name share it. Data persists across restarts (add `.edgezero/` to your `.gitignore`).
-- **Fastly (Viceroy)**: Local Viceroy data uses a hand-authored
-  `[local_server.kv_stores]` entry. For a default physical name, `edgezero
-provision --adapter fastly` creates the remote store and writes only the
-  `[setup.kv_stores.<logical-id>]` block; the example below assumes `sessions`.
+- **Fastly (Viceroy)**: Requires a `[[local_server.kv_stores]]` entry per declared KV id for local development. `<app-cli> provision --adapter fastly --local` writes it into your local `fastly.toml`. The cloud-mode counterpart (`provision --adapter fastly`, no `--local`) writes the `[setup.kv_stores.<name>]` block that `fastly compute deploy` consumes on first deploy — split responsibilities so operators can iterate locally without touching setup metadata.
 
   ```toml
   [[local_server.kv_stores.sessions]]
   key = "__init__"
   data = ""
-
-  [setup.kv_stores.sessions]
-  description = "Application KV store"
   ```
 
   Select a different physical store per environment with
@@ -141,7 +145,7 @@ provision --adapter fastly` creates the remote store and writes only the
   writing a setup block. Managed deploy performs that link reconciliation on
   its unpublished target version.
 
-- **Cloudflare (Workerd)**: `edgezero provision --adapter cloudflare` creates the namespace and appends the `[[kv_namespaces]]` binding using the env-resolved platform name (`EDGEZERO__STORES__KV__<ID>__NAME` or the logical id by default). The example below shows what provision writes for a `sessions` id with no override:
+- **Cloudflare (Workerd)**: `<app-cli> provision --adapter cloudflare` creates the namespace and appends the `[[kv_namespaces]]` binding to your local `wrangler.toml` using the env-resolved platform name (`EDGEZERO__STORES__KV__<ID>__NAME` or the logical id by default). The example below shows what provision writes for a `sessions` id with no override:
 
   ```toml
   [[kv_namespaces]]
@@ -149,7 +153,7 @@ provision --adapter fastly` creates the remote store and writes only the
   id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"       # filled by provision
   ```
 
-  The `binding` name MUST match what the runtime opens — by default the logical id, otherwise the env override.
+  The `binding` name MUST match what the runtime opens — by default the logical id, otherwise the env override. `<app-cli> provision --adapter cloudflare --local` skips the `wrangler` shell-out and writes a placeholder `id`, which is enough for a local `wrangler dev` bootstrap; the cloud form fills the real namespace id in.
 
 - **Spin**: Requires a `key_value_stores` label in `spin.toml`.
 
@@ -158,7 +162,7 @@ provision --adapter fastly` creates the remote store and writes only the
   key_value_stores = ["default"]
   ```
 
-  The label MUST match what `EDGEZERO__STORES__KV__<ID>__NAME` resolves to (or the logical id when the variable is unset). Spin's local runtime auto-provisions the `"default"` label; custom labels require a Spin runtime config or cloud link. Example:
+  The label MUST match what `EDGEZERO__STORES__KV__<ID>__NAME` resolves to (or the logical id when the variable is unset). Spin's local runtime auto-provisions the `"default"` label; custom labels require a Spin runtime config or cloud link. `<app-cli> provision --adapter spin --local` writes both the `key_value_stores` entry into your local `spin.toml` and the matching `[key_value_store.<label>]` stanza into `runtime-config.toml`. Example:
 
   ```toml
   [stores.kv]
@@ -168,6 +172,36 @@ provision --adapter fastly` creates the remote store and writes only the
   ```
 
   `edgezero_adapter_spin::run_app` reads baked `[stores.*]` metadata + `EDGEZERO__*` env vars and opens the resolved Spin label per id. Low-level manual dispatch helpers (`dispatch`, `dispatch_with_kv_label`) bypass the env-config path.
+
+### Re-running provision after adding a store id
+
+`provision --local` is safe to re-run — bindings are upserted per
+label. To add a new logical store id to an existing project:
+
+```toml
+# edgezero.toml — add the new id
+[stores.kv]
+ids     = ["sessions", "cache", "rate_limits"]  # ← new id
+default = "sessions"
+```
+
+```bash
+# One command per adapter you target — provision only touches its own
+# local manifest + env file:
+my-app-cli provision --adapter cloudflare --local
+my-app-cli provision --adapter fastly     --local
+my-app-cli provision --adapter spin       --local
+my-app-cli provision --adapter axum       --local
+```
+
+Each re-run appends a fresh `[[kv_namespaces]] binding = "rate_limits"`
+/ `[local_server.kv_stores.rate_limits]` / `key_value_stores +=
+["rate_limits"]` entry and leaves everything else in place. Pair
+with `--dry-run` if you want to preview the diff before writing:
+
+```bash
+my-app-cli provision --adapter cloudflare --local --dry-run
+```
 
 ### Consistency
 
