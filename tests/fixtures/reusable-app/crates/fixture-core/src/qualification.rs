@@ -1,5 +1,6 @@
 //! Opt-in, synthetic hosted probes through standard application/adaptor lifecycles.
 
+mod overflow;
 pub mod progress;
 
 use std::pin::Pin;

@@ -143,6 +143,43 @@ combinations preserve independent execution and overall failure. A reader error 
 group-labelled, but may precede a per-case relay record. These local cases do not prove inbound
 GET/HEAD forwarding, new eager/head-first APIs, hosted qualification or Fastly readiness.
 
+### Request Overflow Characterization
+
+```sh
+scripts/smoke_test_reusable_app.sh --adapter all --suite outbound-overflow
+```
+
+This separate opt-in suite reuses the `progress` artifacts and standard entrypoints. Each target
+attempts ten cases: chunked ingress at 1023/1024/1025 bytes under a 1024-byte read cap,
+buffered and streamed uploads at 7/8/9 bytes under an 8-byte cap, and an ordinary upstream 413.
+Uploads use the injected production client, not the scheduling probes' direct SDK requests.
+Only response heads are observed; bodies are dropped unpolled. This neither enters Fastly's
+failed readiness path nor qualifies downstream relay or hosted behavior.
+
+Generated overflow must return the fixed 413 JSON category without Retry-After; an ordinary
+upstream 413 must retain its status and `Retry-After: 120` in the head report. Buffered overflow
+must not contact the origin on any adapter; streamed overflow must not contact it on Axum or
+Cloudflare. Fastly/Spin may instead close an incomplete upload. An explicitly observed zero-byte,
+pre-head EOF/reset is also recorded as TCP contact, not "no contact"; a missing receipt or partial
+head is not equivalent. Complete request framing, malformed fields, timeout, duplicate contact
+or over-cap bytes cannot pass as an abort.
+
+The dedicated origin has one joined worker, two retained connection receipts plus one overflow
+witness, a 256-byte body capture plus one witness, 16 KiB combined head/chunk/trailer metadata
+and 100 head fields. Each accepted socket has a two-second absolute read/write budget.
+Collection observes a further 100 ms before stopping new accepts and joining the worker; up to
+two already accepted socket budgets may remain. This is a finite observation, not proof that
+provider work can never resume. Client captures are bounded to 4 KiB and reads to six seconds.
+First-byte timing is explicitly unmeasured; header/completion times use the client clock.
+
+The retained local matrix passes all ten cases on Axum, Viceroy and Spin. On pinned local
+Wrangler/Miniflare/workerd, ingress overflow returns 413, but the following valid POST returns a
+proxy-generated 500 before fixture entry. A JavaScript-only body-cancellation control reproduces
+the follow-on failure without EdgeZero; the native connection-pool mechanism remains unproven.
+The suite retains the failure and exits 1, without retries, recovery sleeps, drains or capability
+promotion. See [the recorded evidence](../../../docs/audits/evidence/2026-10-21-outbound-overflow.json).
+Cloudflare recovery, generated-app fallback TCP, hosted HTTP/2 and end-to-end qualification remain open.
+
 ## Opt-in Hosted Response Qualification
 
 The default-off `qualification` feature selects a synthetic application through the standard
@@ -185,7 +222,10 @@ Prepare a target JSON object using actual recorded identities:
   "binary_sha256": "<64-character deployed artifact SHA-256>",
   "sdk": "worker 0.8.5",
   "runtime": { "unknown": "provider-unpublished" },
-  "compatibility": { "date": "<actual deployed date>", "flags": ["enable_request_signal", "enable_weak_ref"] },
+  "compatibility": {
+    "date": "<actual deployed date>",
+    "flags": ["enable_request_signal", "enable_weak_ref"]
+  },
   "deployment": "<independently recorded isolated deployment identity>",
   "max_probe_ms": 2000
 }

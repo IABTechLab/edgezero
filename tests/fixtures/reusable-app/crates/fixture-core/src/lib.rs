@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn probe_accepts_exact_body_bound_and_rejects_overflow() {
         let app = App::build::<FixtureApp>(edgezero_core::PlatformMetadata::default()).unwrap();
-        for (size, status) in [(1024 * 1024, 200), (1024 * 1024 + 1, 400)] {
+        for (size, status) in [(1024 * 1024, 200), (1024 * 1024 + 1, 413)] {
             let req = request_builder()
                 .uri("/probe/bounded")
                 .header("x-request-token", "bounded")

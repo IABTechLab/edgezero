@@ -40,9 +40,12 @@ new preserving primitive/report and its separately approved policy. No failed ga
 
 The independent [F2 checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f2-implementation-checkpoint-2026-10-21)
 implements typed 413 readers/uploads, zero-read declared-length rejection, retry-header
-suppression and aligned demo/scaffold fallback defaults. Core/SDK-seam and native TCP evidence
-do not close its remaining cross-runtime, hosted, generated-app and end-to-end legs. It does not
-waive G2 or change the exact approved P1 API migration.
+suppression and aligned demo/scaffold fallback defaults. The isolated local overflow suite now
+passes ten cases each on Axum, Viceroy and Spin. Cloudflare remains failed: after the ingress
+413, the next valid POST receives a proxy-generated 500 before fixture entry, also reproduced by
+a JavaScript-only control. Retained failures are not waived by the passing cases.
+Hosted, generated-app and end-to-end legs remain open. This does not waive G2 or change the exact
+approved P1 API migration; response heads are observed without polling Fastly response bodies.
 
 ### P1 Foundation Checkpoint
 

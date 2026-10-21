@@ -119,8 +119,22 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
       30 Cloudflare Node/WASM library tests, the targeted Fastly Viceroy upload test, demo and
       generator tests, docs format/lint/build, and the legacy/docs/dependency/evidence guards.
       The workspace TCP suite requires loopback permission; its approved rerun passes.
-- [ ] Complete actual Viceroy/workerd/Spin ingress and upload receipt cases, generated-app TCP
-      fallback proof, hosted Fastly HTTP/2, TS end-to-end and later F7b composition qualification.
+- [x] Add the isolated `outbound-overflow` suite through all four actual local entrypoints,
+      with ten independently attempted cases each, bounded TCP origin receipts and no retries.
+      Axum, Viceroy and Spin pass all ten. Fastly/Spin streamed overflow closes a TCP connection
+      before any HTTP head bytes; retain that explicit witness, not a claim of zero contact.
+- [x] Reject malformed/truncated metadata, missing head-state evidence, duplicate connections,
+      clean truncated uploads and collector errors in the evidence validator. Observe regression
+      failures before the fixes; 51 harness and 17 core fixture tests pass afterward.
+- [ ] Close the local Cloudflare recovery failure: three matrix runs return the ingress 413
+      followed by a proxy-generated 500 before the next request enters the fixture; the origin
+      receives no connection. An isolated JavaScript-only cancellation control reproduces the
+      follow-on failure without EdgeZero/Rust/WASM. This local runtime boundary is not repaired,
+      waived, silently retried or presented as hosted evidence. The precise native mechanism
+      remains unproven. Retain the failed runs and control inputs/results in the
+      [evidence record](../../audits/evidence/2026-10-21-outbound-overflow.json).
+- [ ] Complete generated-app TCP fallback proof, hosted Fastly HTTP/2, TS end-to-end and later
+      F7b composition qualification.
       Until those environment legs land, F2 and EZ-10 overall remain incomplete. Its implemented
       parts are confirmed present, not silently promoted; no other Follow-up becomes blocking.
 
@@ -128,6 +142,9 @@ Decision log: independent upload and rendering investigations selected shared bu
 plus localized cap-error changes, rather than rewriting provider transports. Separate SDK/runtime
 investigations confirmed Fastly readiness still loses source failures, including through
 `is_ready`; the failed G2 gate and cancelled dependent driver migration are unchanged.
+Independent harness and platform reviews additionally selected strict framing/correlation
+validation and a provider-only diagnostic control over transport changes or recovery workarounds.
+The local upload suite observes streamed response heads only and drops their bodies unpolled.
 
 ## F3: Cache, TLS and Authority Task Group
 

@@ -73,6 +73,11 @@ separately from the portable API and must be considered when declaring required 
 
 ### Outbound HTTP And Batches
 
+- Add a separate bounded local overflow characterization suite through all four standard
+  entrypoints. Preserve exact cap boundaries, typed 413/no-retry rendering and ordinary upstream
+  413 metadata. Axum, Viceroy and Spin pass; retain Cloudflare's post-overflow proxy failure,
+  reproduced independently by a JavaScript-only control. No hosted capability is promoted.
+
 - Return typed `EdgeError::PayloadTooLarge` (413) for inbound reader/extractor and outbound
   upload overflow, with non-wire `RequestBodyOverflowOrigin`. Reject oversized buffered uploads
   before every adapter dispatch; retain existing prebuffered or aborting stream behavior.

@@ -57,6 +57,43 @@ pub async fn dispatch(
     env: worker::Env,
     ctx: worker::Context,
 ) -> worker::Result<worker::Response> {
+    let probe = request
+        .path()
+        .strip_prefix("/progress/overflow/")
+        .filter(|case| {
+            matches!(
+                *case,
+                "inbound"
+                    | "buffered-7"
+                    | "buffered-8"
+                    | "buffered-9"
+                    | "streamed-7"
+                    | "streamed-8"
+                    | "streamed-9"
+                    | "upstream-413"
+            )
+        })
+        .map(str::to_owned)
+        .zip(
+            request
+                .headers()
+                .get("x-request-token")
+                .ok()
+                .flatten()
+                .filter(|token| {
+                    !token.is_empty()
+                        && token.len() <= 64
+                        && token
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                }),
+        );
+    if let Some((case, token)) = &probe {
+        worker::console_log!(
+            "{}",
+            json!({"event":"overflow-dispatch","phase":"entry","case":case,"token":token,"qualification":false})
+        );
+    }
     // Inspect the original object without cloning or consuming its body.
     let signal = json!({"source":"workerd-before-conversion", "body_absent":request.inner().body().is_none()});
     let returned = Arc::new(AtomicBool::new(false));
@@ -69,5 +106,12 @@ pub async fn dispatch(
     let response =
         edgezero_adapter_cloudflare::dispatch_app::<ProgressHooks>(&app, request, env, ctx).await;
     returned.store(true, Ordering::SeqCst);
+    if let Some((case, token)) = &probe {
+        worker::console_log!(
+            "{}",
+            json!({"event":"overflow-dispatch","phase":"return","case":case,"token":token,
+            "status":response.as_ref().ok().map(worker::Response::status_code),"outcome":if response.is_ok(){"response"}else{"error"},"qualification":false})
+        );
+    }
     response
 }

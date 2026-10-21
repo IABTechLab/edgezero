@@ -63,6 +63,7 @@ pub fn router(
         }))
         .get("/progress/{case}", progress)
         .post("/progress/{case}", progress)
+        .post("/progress/overflow/{case}", super::overflow::probe)
         .build()
 }
 
@@ -631,6 +632,51 @@ mod tests {
                 relay["marker"] = json!("On");
                 assert_eq!(relay, recorded[1]);
             }
+        }
+    }
+
+    #[test]
+    fn overflow_fixture_routes_exercise_the_real_inbound_reader() {
+        let router = router(Arc::new(Fake::default()), json!({}), None);
+        for len in [1023_usize, 1024, 1025] {
+            let request = edgezero_core::http::request_builder()
+                .method(Method::POST)
+                .uri("/progress/overflow/inbound")
+                .body(Body::stream(futures::stream::iter([Bytes::from(vec![
+                    b'x';
+                    len
+                ])])))
+                .unwrap();
+            let response = block_on(router.oneshot(request)).unwrap();
+            assert_eq!(response.status(), if len > 1024 { 413 } else { 200 });
+            let bytes = block_on(response.into_body().into_bytes_bounded(256)).unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            if len > 1024 {
+                assert_eq!(value["error"]["kind"], "payload_too_large");
+            } else {
+                assert_eq!(value["received"], len);
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_fixture_rejects_uncontrolled_targets_before_client_lookup() {
+        let router = router(Arc::new(Fake::default()), json!({}), None);
+        for target in [
+            "https://example.com/overflow/test/buffered-9",
+            "http://127.0.0.1/overflow/test/buffered-9",
+            "http://127.0.0.1:1234/other",
+            "http://127.0.0.1:1234/overflow/test/buffered-9?q=1",
+        ] {
+            let request = edgezero_core::http::request_builder()
+                .method(Method::POST)
+                .uri("/progress/overflow/buffered-9")
+                .header("x-request-token", "test")
+                .header("x-fixture-backend", target)
+                .body(Body::empty())
+                .unwrap();
+            let response = block_on(router.oneshot(request)).unwrap();
+            assert_eq!(response.status(), 400);
         }
     }
 

@@ -336,7 +336,7 @@ fn coding_checks(name: &str, port: u16, records: &mut Records) -> Result<()> {
     )
 }
 
-fn build(
+pub(super) fn build(
     name: &str,
     run: &Path,
     records: &mut Records,
