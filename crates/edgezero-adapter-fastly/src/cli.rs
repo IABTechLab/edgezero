@@ -80,19 +80,19 @@ static FASTLY_DEPENDENCIES: &[DependencySpec] = &[
     DependencySpec {
         key: "dep_edgezero_core_fastly",
         repo_crate: "crates/edgezero-core",
-        fallback: "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        fallback: "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_fastly",
         repo_crate: "crates/edgezero-adapter-fastly",
-        fallback: "edgezero-adapter-fastly = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false }",
+        fallback: "edgezero-adapter-fastly = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false }",
         features: &[],
     },
     DependencySpec {
         key: "dep_edgezero_adapter_fastly_wasm",
         repo_crate: "crates/edgezero-adapter-fastly",
-        fallback: "edgezero-adapter-fastly = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false, features = [\"fastly\"] }",
+        fallback: "edgezero-adapter-fastly = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-adapter-fastly\", default-features = false, features = [\"fastly\"] }",
         features: &["fastly"],
     },
 ];
@@ -2779,6 +2779,10 @@ impl TempFileGuard {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if let Some(path) = &self.path {
@@ -5229,7 +5233,7 @@ fn resolve_remote_config_store_id(name: &str) -> Result<Option<String>, String> 
         ConfigStoreLookup::Found(id) => Ok(Some(id)),
         ConfigStoreLookup::NotFound => Ok(None),
         ConfigStoreLookup::SchemaDrift(detail) => Err(format!(
-            "could not parse `fastly config-store list --json` output: {detail}.\n  The fastly CLI may have changed its JSON schema in a recent version. Please file a bug report at https://github.com/stackpop/edgezero/issues with the fastly CLI version (`fastly version`) and the raw stdout. Workaround: pin to a known-compatible fastly CLI version."
+            "could not parse `fastly config-store list --json` output: {detail}.\n  The fastly CLI may have changed its JSON schema in a recent version. Please file a bug report at https://github.com/IABTechLab/edgezero/issues with the fastly CLI version (`fastly version`) and the raw stdout. Workaround: pin to a known-compatible fastly CLI version."
         )),
     }
 }

@@ -129,7 +129,10 @@ pub fn init_logger(
 /// Logger setup failures and unavailable required stores return errors.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app<A: Hooks>(req: fastly::Request) -> Result<fastly::Response, fastly::Error> {
+pub fn run_app<A>(req: fastly::Request) -> Result<fastly::Response, fastly::Error>
+where
+    A: Hooks,
+{
     run_app_with_request_extensions::<A, _>(req, |_req, _extensions| {})
 }
 
@@ -170,11 +173,14 @@ where
 /// Returns an error if logger setup fails or the underlying handler returns an error.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app_with_config<A: Hooks>(
+pub fn run_app_with_config<A>(
     logging: &FastlyLogging,
     req: fastly::Request,
     config_store_name: Option<&str>,
-) -> Result<fastly::Response, fastly::Error> {
+) -> Result<fastly::Response, fastly::Error>
+where
+    A: Hooks,
+{
     if logging.use_fastly_logger && !A::owns_logging() {
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
@@ -346,7 +352,10 @@ mod retained_app_tests {
 #[cfg(feature = "fastly")]
 #[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
 #[inline]
-pub fn serve_app<A: Hooks>(serve: Serve) -> ServeSummary<fastly::Error> {
+pub fn serve_app<A>(serve: Serve) -> ServeSummary<fastly::Error>
+where
+    A: Hooks,
+{
     serve_app_with_request_extensions::<A, _>(serve, |_request, _extensions| {})
 }
 
