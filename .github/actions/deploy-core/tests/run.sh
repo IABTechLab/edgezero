@@ -1993,7 +1993,12 @@ test_action_output_contracts() {
       if [[ -z "$script" ]]; then
         # actions/cache declares cache-hit itself, not through a local script.
         # Ref pinning is enforced separately; accept only this documented output.
-        if [[ "$out_name" == cache-hit ]] && command -v yq >/dev/null 2>&1; then
+        if [[ "$out_name" == cache-hit ]]; then
+          if ! command -v yq >/dev/null 2>&1; then
+            fail "yq v4 is required to check $name_of output '$out_name'"
+            missing=$((missing + 1))
+            continue
+          fi
           local output_action
           output_action=$(STEP_ID="$step_id" yq -r '.runs.steps[] | select(.id == strenv(STEP_ID)) | .uses' "$action")
           case "${output_action%@*}" in actions/cache | actions/cache/restore) continue ;; esac

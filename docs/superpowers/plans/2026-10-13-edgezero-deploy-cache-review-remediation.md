@@ -1,5 +1,8 @@
 # Rust Cache Review Remediation Implementation Plan
 
+**Status:** Complete. Implementation and verification are recorded in PR #417.
+The checklists below preserve the original implementation sequence.
+
 > **For agentic workers:** Use superpowers:executing-plans for inline test-first
 > execution, with independent document and code review.
 

@@ -83,8 +83,9 @@ fully warm application build. Do not introduce a lockfile-only target fallback.
 Add `save-target`, default false, requiring `cache-target: true` when enabled.
 Read-only consumers use `actions/cache/restore`; opted-in writers use the combined
 cache action, whose post-job hook saves only after successful builds. Both use
-the same exact revision key and neither has target restore prefixes. CI fixtures
-save full targets only from main; the small cross-job seed explicitly saves.
+the same exact revision key and neither has target restore prefixes. Release
+fixtures reuse dependency sources and compiler outputs with target caching
+disabled; the small cross-job seed explicitly saves to verify exact restores.
 The deployer adopts the new contract and permits target writes only when its
 workflow ref is main, independently of the selected application source branch.
 

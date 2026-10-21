@@ -42,11 +42,11 @@ for job in cache-restore-smoke cache-new-revision-smoke; do
   [[ "$actual" == "$expected_identity" ]] || fail "$job does not reuse the seed fixture identity"
 done
 [[ "$(yq -r '.jobs."cache-restore-seed".steps[] | select(.id == "cache") | .with."save-target"' "$workflow")" == true ]] || fail 'seed does not opt into saving'
-# shellcheck disable=SC2016
-expected_save='${{ github.ref == '\''refs/heads/main'\'' }}'
 for job in fixture-release store-free-release; do
-  actual=$(JOB_ID="$job" yq -r '.jobs[strenv(JOB_ID)].steps[] | select(.uses == "./.github/actions/setup-rust-build-cache") | .with."save-target"' "$workflow")
-  [[ "$actual" == "$expected_save" ]] || fail "$job writes full target caches outside main"
+  actual=$(JOB_ID="$job" yq -r '.jobs[strenv(JOB_ID)].steps[] | select(.uses == "./.github/actions/setup-rust-build-cache") | .with."cache-target"' "$workflow")
+  [[ "$actual" == false ]] || fail "$job enables full target caching for a disposable fixture"
+  actual=$(JOB_ID="$job" yq -r '.jobs[strenv(JOB_ID)].steps[] | select(.uses == "./.github/actions/setup-rust-build-cache") | (.with."save-target" // false)' "$workflow")
+  [[ "$actual" == false ]] || fail "$job opts into saving full target caches"
 done
 fixture_script="$ACTION_DIR/../deploy-fastly/tests/make-smoke-fixture.sh"
 grep -Fq 'GIT_AUTHOR_DATE=2000-01-01T00:00:00Z GIT_COMMITTER_DATE=2000-01-01T00:00:00Z' "$fixture_script" || fail 'application fixture dates are not deterministic'

@@ -113,6 +113,7 @@ jobs:
 
   # Exercise source reuse and revision-isolated target caching across real jobs.
   # Run-specific compiler inputs prevent accidental hits from older smoke runs.
+  # The tiny per-run target archive lets downstream jobs verify exact restores.
   cache-restore-seed:
     runs-on: ubuntu-latest
     outputs:
@@ -260,9 +261,7 @@ jobs:
         uses: ./.github/actions/setup-rust-build-cache
         with:
           app-name: store-aware-fixture
-          cache-target: true
-          save-target: ${{ github.ref == 'refs/heads/main' }}
-          target-cache-revision: ${{ steps.fixture.outputs.revision }}
+          cache-target: false
           working-directory: fixture-app
 
       - name: Build the application-owned CLI once
@@ -321,9 +320,7 @@ jobs:
         uses: ./.github/actions/setup-rust-build-cache
         with:
           app-name: store-free-fixture
-          cache-target: true
-          save-target: ${{ github.ref == 'refs/heads/main' }}
-          target-cache-revision: ${{ steps.fixture.outputs.revision }}
+          cache-target: false
           working-directory: fixture-app
 
       - name: Build the store-free application CLI once

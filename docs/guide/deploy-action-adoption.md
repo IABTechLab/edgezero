@@ -106,10 +106,13 @@ In both modes, the action sets one stable app-specific `CARGO_TARGET_DIR` beneat
 `RUNNER_TEMP`, without a SHA or random invocation directory in the path. Native
 CLI and WASM builds share it; Cargo keeps target triples/profiles separate.
 `cache-target: false` disables remote target operations, not that stable
-directory, dependency caching, or sccache. Prefer one setup per application per
-job. An identical repeat skips remote restores and compiler-cache setup, so it
-cannot overwrite newer local build outputs. Changing workspace, source revision,
-lockfile or cache settings within that directory fails. With remote targets
+directory, dependency caching, or sccache. Use **one application per job**: setup
+sets job-wide target-directory variables, so setting up another application
+redirects subsequent builds into its directory. Put different applications in
+separate jobs. Prefer one setup call; an identical repeat skips remote restores
+and compiler-cache setup, preserving newer local build outputs. Changing
+workspace, source revision, lockfile or cache settings within that directory
+fails. With remote targets
 disabled, Git HEAD can identify local ownership when no revision was supplied;
 a non-Git workspace requires an explicit revision for repeat setup. Symlinks,
 control characters in paths and unowned target contents are rejected rather
@@ -118,8 +121,9 @@ than deleted.
 Outputs `source-cache-hit` and `target-cache-hit` indicate exact primary-key
 matches. A false source hit can still mean prefix reuse after a lockfile change;
 target hits are false when disabled or missing. Both hit outputs are false on
-an identical repeat because that call performs no restore. `source-cache-key`,
-`target-cache-key`, and `cargo-target-dir` expose the selected identities/path,
+an identical repeat because that call performs no restore. Read hit status from
+the first setup call. `source-cache-key`, `target-cache-key`, and
+`cargo-target-dir` expose the selected identities/path,
 and sccache logs compiler statistics at job completion. Branch-scoped GitHub
 cache access still applies: PR merge-ref caches cannot seed main or unrelated
 PRs. Trusted main builds warm the source/compiler caches accessible to later
@@ -139,8 +143,8 @@ It also changes build paths when remote target caching is disabled.
 4. Remove hard-coded `<application>/target/...` paths. Use `CARGO_TARGET_DIR` or
    `cargo-target-dir`; CLI and adapter builds now share this job-local directory
    even with `cache-target: false`, instead of fresh per-invocation CLI scratch.
-5. Prefer one setup per application per job; repeats must identify the same
-   source and use identical workspace, lockfile and cache settings.
+5. Use one application per job and prefer one setup call. Repeats must identify
+   the same source and use identical workspace, lockfile and cache settings.
 6. Expect a cold first target build after migration and for each new source SHA.
    Measure compiler hits and build duration instead of assuming all work is cached.
 
