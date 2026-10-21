@@ -164,19 +164,23 @@ fn validate_response(reply: &Value, case: &str, len: usize) -> Result<()> {
     )
 }
 
+fn check_inbound(adapter: &str, port: u16, records: &mut Records, len: usize) -> Result<bool> {
+    let token = token();
+    let response = wire::request(port, "inbound", &token, None, Some(len));
+    let validation = response
+        .as_ref()
+        .map_err(|error| error.to_string().into())
+        .and_then(|reply| validate_response(reply, "inbound", len));
+    records.push(json!({"event":"overflow-case","adapter":adapter,"case":format!("inbound-{len}"),"token":token,
+        "client":response.as_ref().ok(),"status":if validation.is_ok(){"pass"}else{"fail"},
+        "error":validation.as_ref().err().map(ToString::to_string),"qualification":false}))?;
+    Ok(validation.is_ok())
+}
+
 fn checks(adapter: &str, port: u16, records: &mut Records) -> Result<()> {
     let mut failed = false;
     for len in [1023_usize, 1024, 1025] {
-        let token = token();
-        let response = wire::request(port, "inbound", &token, None, Some(len));
-        let validation = response
-            .as_ref()
-            .map_err(|error| error.to_string().into())
-            .and_then(|reply| validate_response(reply, "inbound", len));
-        records.push(json!({"event":"overflow-case","adapter":adapter,"case":format!("inbound-{len}"),"token":token,
-            "client":response.as_ref().ok(),"status":if validation.is_ok(){"pass"}else{"fail"},
-            "error":validation.as_ref().err().map(ToString::to_string),"qualification":false}))?;
-        failed |= validation.is_err();
+        failed |= !check_inbound(adapter, port, records, len)?;
     }
     for case in [
         "buffered-7",
@@ -204,8 +208,10 @@ fn checks(adapter: &str, port: u16, records: &mut Records) -> Result<()> {
             "status":if validation.is_ok(){"pass"}else{"fail"},"error":validation.as_ref().err().map(ToString::to_string),"qualification":false}))?;
         failed |= validation.is_err();
     }
+    // Preserve the recorded overflow-to-upload recovery sequence before this exact EZ-10 case.
+    failed |= !check_inbound(adapter, port, records, 2048)?;
     records.push(
-        json!({"event":"overflow-coverage","adapter":adapter,"attempted":10,"qualification":false,
+        json!({"event":"overflow-coverage","adapter":adapter,"attempted":11,"qualification":false,
         "status":if failed{"fail"}else{"pass"}}),
     )?;
     require(!failed, "one or more overflow probes failed")
@@ -214,6 +220,27 @@ fn checks(adapter: &str, port: u16, records: &mut Records) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_kib_ingress_requires_fixed_overflow_without_retry_after() {
+        let reply = json!({"status":413,"headers":[],"body":serde_json::to_string(&json!({
+            "error":{"status":413,"kind":"payload_too_large","message":"request body too large"}
+        })).unwrap()});
+        validate_response(&reply, "inbound", 2048).unwrap();
+        let mut invalid = reply.clone();
+        invalid["status"] = json!(200);
+        assert!(validate_response(&invalid, "inbound", 2048).is_err());
+        invalid = reply.clone();
+        invalid["headers"] = json!([["ReTrY-AfTeR", "120"]]);
+        assert!(validate_response(&invalid, "inbound", 2048).is_err());
+        invalid = reply;
+        invalid["body"] = json!(
+            serde_json::to_string(&json!({"error":{"status":413,
+            "kind":"payload_too_large","message":"provider diagnostic"}}))
+            .unwrap()
+        );
+        assert!(validate_response(&invalid, "inbound", 2048).is_err());
+    }
 
     fn receipt(terminal: &str, length: usize) -> Value {
         json!({"head":{"method":"POST","target":"/overflow/test/streamed-9"},"head_state":"complete","head_bytes":64,

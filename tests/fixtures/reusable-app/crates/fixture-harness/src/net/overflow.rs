@@ -545,6 +545,51 @@ mod tests {
     }
 
     #[test]
+    fn dropping_origin_signals_stop_and_joins_the_worker_before_returning() {
+        use std::sync::mpsc;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let observed_stop = Arc::clone(&stop);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (exited_tx, exited_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            exited_tx.send(()).unwrap();
+            Ok(json!({}))
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let origin = UploadOrigin {
+            port: 0,
+            stop,
+            worker: Some(worker),
+        };
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(origin);
+            dropped_tx.send(()).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !observed_stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let signalled = observed_stop.load(Ordering::SeqCst);
+        let while_gated = dropped_rx.recv_timeout(Duration::from_millis(50));
+        // Release and join before assertions so a failed proof cannot strand the worker.
+        let released = release_tx.send(());
+        let exited = exited_rx.recv_timeout(Duration::from_secs(2));
+        let after_release = dropped_rx.recv_timeout(Duration::from_secs(2));
+        let joined = dropper.join();
+        assert!(signalled, "Drop must signal the collector to stop");
+        assert!(matches!(while_gated, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert!(released.is_ok());
+        assert!(exited.is_ok());
+        assert!(after_release.is_ok());
+        assert!(joined.is_ok());
+    }
+
+    #[test]
     fn third_connection_fails_the_bounded_collector_and_joins_it() {
         let origin = UploadOrigin::start().unwrap();
         let port = origin.port;

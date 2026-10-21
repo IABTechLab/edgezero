@@ -77,6 +77,10 @@ separately from the portable API and must be considered when declaring required 
   entrypoints. Preserve exact cap boundaries, typed 413/no-retry rendering and ordinary upstream
   413 metadata. Axum, Viceroy and Spin pass; retain Cloudflare's post-overflow proxy failure,
   reproduced independently by a JavaScript-only control. No hosted capability is promoted.
+- Add the exact 2 KiB chunked-ingress proof on all four local runtimes, preserve the original
+  overflow/recovery sequence, and exercise built-in JSON-extractor overflow with custom rendering
+  over Axum TCP. Prove collector drop waits for worker cleanup. Narrow Cloudflare's retained
+  recovery failure to the local front-proxy path without substituting a diagnostic entrypoint.
 - Exercise freshly generated Axum applications and the bundled demo over real TCP, including
   fixed/chunked fallback cap boundaries, exact 413/no-retry responses, canonical 405 Allow,
   stalled-read 408 responses and deferred unread-body/pipeline handling. Reuse the existing

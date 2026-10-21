@@ -150,8 +150,11 @@ scripts/smoke_test_reusable_app.sh --adapter all --suite outbound-overflow
 ```
 
 This separate opt-in suite reuses the `progress` artifacts and standard entrypoints. Each target
-attempts ten cases: chunked ingress at 1023/1024/1025 bytes under a 1024-byte read cap,
-buffered and streamed uploads at 7/8/9 bytes under an 8-byte cap, and an ordinary upstream 413.
+attempts eleven cases: chunked ingress at 1023/1024/1025 bytes under a 1024-byte read cap,
+buffered and streamed uploads at 7/8/9 bytes under an 8-byte cap, an ordinary upstream 413,
+then the exact 2048-byte chunked ingress case required by EZ-10. The original ten-case order is
+unchanged, including the overflow-to-next-upload recovery check; earlier failures do not skip
+the appended case.
 Uploads use the injected production client, not the scheduling probes' direct SDK requests.
 Only response heads are observed; bodies are dropped unpolled. This neither enters Fastly's
 failed readiness path nor qualifies downstream relay or hosted behavior.
@@ -172,12 +175,20 @@ two already accepted socket budgets may remain. This is a finite observation, no
 provider work can never resume. Client captures are bounded to 4 KiB and reads to six seconds.
 First-byte timing is explicitly unmeasured; header/completion times use the client clock.
 
-The retained local matrix passes all ten cases on Axum, Viceroy and Spin. On pinned local
+The retained local matrix passes all eleven cases on Axum, Viceroy and Spin. The exact 2048-byte
+ingress case passes on all four targets. On pinned local
 Wrangler/Miniflare/workerd, ingress overflow returns 413, but the following valid POST returns a
 proxy-generated 500 before fixture entry. A JavaScript-only body-cancellation control reproduces
 the follow-on failure without EdgeZero; the native connection-pool mechanism remains unproven.
 The suite retains the failure and exits 1, without retries, recovery sleeps, drains or capability
-promotion. See [the recorded evidence](../../../docs/audits/evidence/2026-10-21-outbound-overflow.json).
+promotion. See [the original evidence](../../../docs/audits/evidence/2026-10-21-outbound-overflow.json)
+and [the boundary/recovery checkpoint](../../../docs/audits/evidence/2026-10-21-overflow-boundaries.json).
+Omitting `Connection: close` does not eliminate the failure. Diagnostic requests sent directly
+to Wrangler's own user-worker listener recover for both the JavaScript control and the actual
+EdgeZero artifact. This narrows the failing boundary to the front-proxy path, not a proven native
+connection-pool mechanism. That diagnostic topology is not a replacement acceptance entrypoint.
+The collector's Drop test gates worker exit and mutation-checks that Drop waits for its join;
+it does not certify provider cancellation after the finite observation window.
 Cloudflare recovery, hosted HTTP/2 and end-to-end qualification remain open. The separate
 [generated-app/demo TCP proof](../../../docs/audits/evidence/2026-10-21-generated-fallback.json)
 passes through their unchanged Axum entrypoints: fixed/chunked 4 KiB boundaries on both fallback

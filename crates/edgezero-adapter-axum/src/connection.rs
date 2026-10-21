@@ -438,41 +438,90 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn chunked_overflow_keeps_pipelined_request_boundaries_and_error_policy() {
+        use edgezero_core::extractor::State;
+
         #[edgezero_core::action]
-        async fn capped(ctx: RequestContext) -> Result<&'static str, EdgeError> {
-            ctx.body_bytes(8).await?;
+        async fn capped(
+            ctx: RequestContext,
+            State(cap): State<usize>,
+        ) -> Result<&'static str, EdgeError> {
+            ctx.body_bytes(cap).await?;
             Ok("accepted")
         }
 
-        let router = RouterService::builder()
-            .post("/", capped)
-            .get("/healthy", |_ctx: RequestContext| async {
-                Ok::<_, EdgeError>("healthy")
-            })
-            .build();
-        let mut app = App::new(router);
-        app.set_error_response_renderer(|_| {
+        for (cap, len) in [(8_usize, 9_usize), (1024, 2048)] {
+            let router = RouterService::builder()
+                .with_state(cap)
+                .post("/", capped)
+                .get("/healthy", |_ctx: RequestContext| async {
+                    Ok::<_, EdgeError>("healthy")
+                })
+                .build();
+            let mut app = App::new(router);
+            app.set_error_response_renderer(|_| {
+                response_builder()
+                    .header("retry-after", "120")
+                    .body(Body::from("overflow"))
+                    .expect("error response")
+            });
+            let request = format!(
+                "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+                {len:x}\r\n{}\r\n0\r\n\r\n\
+                GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                "x".repeat(len),
+            );
+            let (wire, _exit) = exchange_with_wire(app, request).await;
+            assert!(wire.starts_with("HTTP/1.1 413"), "{wire}");
+            assert!(
+                !wire.to_ascii_lowercase().contains("retry-after:"),
+                "{wire}"
+            );
+            // Closing on unread bytes is valid; if reused, the following request must be intact.
+            if wire.matches("HTTP/1.1 ").count() > 1 {
+                assert!(wire.contains("HTTP/1.1 200"), "{wire}");
+                assert!(wire.ends_with("healthy"), "{wire}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_extractor_overflow_reaches_custom_renderer_without_retry_after() {
+        use edgezero_core::context::DEFAULT_INBOUND_JSON_BYTES;
+        use edgezero_core::extractor::Json;
+
+        #[edgezero_core::action]
+        async fn extracted(_value: Json<serde_json::Value>) -> Result<&'static str, EdgeError> {
+            Ok("accepted")
+        }
+
+        let mut app = App::new(RouterService::builder().post("/", extracted).build());
+        app.set_error_response_renderer(|error| {
+            assert_eq!(
+                error.request_body_overflow_origin(),
+                Some(edgezero_core::RequestBodyOverflowOrigin::Inbound)
+            );
             response_builder()
                 .header("retry-after", "120")
-                .body(Body::from("overflow"))
-                .expect("error response")
+                .body(Body::from("extractor overflow"))
+                .expect("custom error response")
         });
-        let request = concat!(
-            "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
-            "9\r\n123456789\r\n0\r\n\r\n",
-            "GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        let cap = DEFAULT_INBOUND_JSON_BYTES;
+        let body = serde_json::to_string(&serde_json::json!("x".repeat(cap - 1)))
+            .expect("valid oversized JSON string");
+        assert_eq!(body.len(), cap + 1);
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+            Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+            {:x}\r\n{body}\r\n0\r\n\r\n",
+            body.len(),
         );
-        let (wire, _exit) = exchange_with_wire(app, request.to_owned()).await;
+        let (wire, _exit) = exchange_with_wire(app, request).await;
         assert!(wire.starts_with("HTTP/1.1 413"), "{wire}");
+        assert!(wire.ends_with("extractor overflow"), "{wire}");
         assert!(
             !wire.to_ascii_lowercase().contains("retry-after:"),
             "{wire}"
         );
-        // Closing on unread bytes is valid; if reused, the following request must be intact.
-        if wire.matches("HTTP/1.1 ").count() > 1 {
-            assert!(wire.contains("HTTP/1.1 200"), "{wire}");
-            assert!(wire.ends_with("healthy"), "{wire}");
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]

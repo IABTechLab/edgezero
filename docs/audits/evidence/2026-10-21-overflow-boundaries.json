@@ -1,0 +1,2902 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-21",
+  "base_revision": "cda324d433877e5b46599aee0cd685df72372c68",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "status": "exact-local-boundaries-pass-cloudflare-recovery-open",
+  "scope": "EZ-10 acceptance 3 exact 2 KiB/1 KiB and Axum pipelining; acceptance 7 built-in JSON extractor/custom rendering; bounded collector Drop proof; local Cloudflare topology diagnosis only",
+  "production_runtime_logic_changed": false,
+  "original_record": {
+    "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/docs/audits/evidence/2026-10-21-outbound-overflow.json",
+    "bytes": 95534,
+    "sha256": "54d6d9919579b0d26f10776196238414e3f9c5b0e6a92b600c4a668de32787e1"
+  },
+  "frozen_api_plan": {
+    "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md",
+    "bytes": 65279,
+    "sha256": "c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80"
+  },
+  "requirements": {
+    "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+    "bytes": 389929,
+    "sha256": "5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec"
+  },
+  "source_snapshot_scope": "Selected checkout inputs at record creation, not a full frozen candidate. Runtime-relevant fixture sources match final E; subsequent Axum test-only extensions are verified separately, not included in fixture release builds.",
+  "source_sha256": {
+    "Cargo.toml": "527a6f29fd231afb35dea70ba3ec41b9c9e78ce52324cb20fe9ed6c75afb415b",
+    "Cargo.lock": "7f65719e408c31d4e6c32f2e168b00ace4f73de412ca6b5469b831bd151c04ac",
+    "tests/fixtures/reusable-app/Cargo.lock": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/net/overflow.rs": "85fd43259be523fa4eeb063aece98ad2bba641b0bf59516138abca88f63bd4bc",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/overflow.rs": "9fb78e32a856905e2f5958b50f1e33a129778c7c2c0aab6321fc5a9fbe6e3e8e",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/overflow.rs": "f9fa0f6b9417af2a59bf5ed60fbf4799c81d86b3457343620ebd2e8874f143ee",
+    "tests/fixtures/reusable-app/crates/fixture-cloudflare/src/progress.rs": "0ec7229f6a64b08b293a8138eda4bcb3ed711abd77dd2ab65227fb9ee3ed5cb0",
+    "crates/edgezero-core/src/body.rs": "304908d06d0cd7a1d846e3a6d36dc08e4e498728e06ae7c36050b8389f8fbb39",
+    "crates/edgezero-core/src/context.rs": "c9b9cca8120b1f81ba5e101272b9df654f459edbf10ea33759cfffd558b347ed",
+    "crates/edgezero-core/src/error.rs": "81d3b708862a18571235baa4dd03cd580b52af6807d092ba22f780ed28c22534",
+    "crates/edgezero-adapter-axum/src/connection.rs": "57553dc5c72d82cfc2d63fdbb2cef98b863833216be0b6dc32f19ab1ef706f18",
+    "crates/edgezero-adapter-axum/src/request.rs": "0c61c652c7e3455d35b9802b26b6118b68c678bdfe01cc1215c7a9ec931cddef",
+    "crates/edgezero-adapter-axum/src/outbound.rs": "5815144bd9720706379f90d2aa8aa2988af393e6e84360098e568f1c2079eb30",
+    "crates/edgezero-adapter-cloudflare/src/request.rs": "a755088e4e65e5af813335283ec3095c35b5982d1e9057ce58dd748aa03e6200",
+    "crates/edgezero-adapter-cloudflare/src/outbound.rs": "eedcf2bfdab0cd8d7d4aaf7ca6a7a41dfd10309566b9c0239e9e6ce0f6ac3392",
+    "crates/edgezero-adapter-fastly/src/request.rs": "c49b75fd52abacc1b2fb012cc357b3a0ce11f9b6a76397bef0f40114ab79d684",
+    "crates/edgezero-adapter-fastly/src/outbound.rs": "17edf76e5ca1dadc05f4013f282e443ee1309c4530c54f65412afa01d8463f40",
+    "crates/edgezero-adapter-spin/src/request.rs": "962e413a2009c82259405628b39976e4040dde6d1425ff5adfaf6ab0865b9d67",
+    "crates/edgezero-adapter-spin/src/outbound.rs": "8d98cff3dc724bf6a6c4c3b6b805b3bfb7631e3ff52cd3716745682170e19a61"
+  },
+  "sdk_versions": {
+    "fastly": "0.13.1",
+    "worker": "0.8.5",
+    "spin_sdk": "7.0.0",
+    "reqwest": "0.13.4",
+    "miniflare": "5.20260910.0-alpha",
+    "workerd": "1.20260910.1"
+  },
+  "tools": {
+    "WASM_BINDGEN_BIN": {
+      "path": "/private/tmp/edgezero-pr275-tools/wasm-bindgen-0.2.129/bin/wasm-bindgen",
+      "bytes": 6938208,
+      "sha256": "b86e33b3c64362c44d8807ed35797e6b8220dd0232b6b19743caf7c2c68a2284",
+      "version": "wasm-bindgen 0.2.129"
+    },
+    "WORKER_BUILD_BIN": {
+      "path": "/Users/ag/.asdf/installs/rust/1.98.1/bin/worker-build",
+      "bytes": 6149664,
+      "sha256": "dd7716c2d74637b5d8d2d3e4887252c7c3b8619f549cfb79e5715159bc86c2b0",
+      "version": "0.8.5"
+    },
+    "ESBUILD_BIN": {
+      "path": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+      "bytes": 10573778,
+      "sha256": "e2dc9a52440a2a34f09434a2f4843cb1e30f84e40dcf238976ec61ef8cd7f36a",
+      "version": "0.28.1"
+    },
+    "WASM_OPT_BIN": {
+      "path": "/Users/ag/Library/Caches/worker-build/wasm-opt-arm64-macos-130/bin/wasm-opt",
+      "bytes": 1676584,
+      "sha256": "fa49ec32a92b72b368b66f8f19d84e9adffeef002449e6a07cd95a3ed2612b41",
+      "version": "wasm-opt version 130 (version_130)"
+    },
+    "WRANGLER_BIN": {
+      "path": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+      "bytes": 3088,
+      "sha256": "780661a508810f3b65786895b1ca9aacbc4f55d329ae6b8c1e49ec8433569f77",
+      "version": "4.131.0"
+    },
+    "workerd": {
+      "path": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/@cloudflare/workerd-darwin-arm64/bin/workerd",
+      "bytes": 156374824,
+      "sha256": "eb132e3e489b47d804cc70b510a6da8f82dabec4748cdcdaba32a1a1c5c2e285",
+      "version": "workerd 2026-09-10",
+      "package_version": "1.20260910.1",
+      "identification_basis": "Wrangler's bundled workerd package default executable; MINIFLARE_WORKERD_PATH unset; package resolution and executable version verified, not an independent per-process attestation"
+    }
+  },
+  "cloudflare_compatibility": {
+    "date": "2026-04-22",
+    "flags": ["enable_request_signal", "enable_weak_ref"]
+  },
+  "matrix_command": "env SSL_CERT_FILE=/etc/ssl/cert.pem WASM_BINDGEN_BIN=/private/tmp/edgezero-pr275-tools/wasm-bindgen-0.2.129/bin/wasm-bindgen WORKER_BUILD_BIN=/Users/ag/.asdf/installs/rust/1.98.1/bin/worker-build ESBUILD_BIN=/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/@esbuild/darwin-arm64/bin/esbuild WASM_OPT_BIN=/Users/ag/Library/Caches/worker-build/wasm-opt-arm64-macos-130/bin/wasm-opt WRANGLER_BIN=/Users/ag/.asdf/installs/nodejs/24.12.0/bin/wrangler WRANGLER_LOG_PATH=/private/tmp/edgezero-pr275-wrangler-logs WRANGLER_SEND_METRICS=false CARGO_NET_OFFLINE=true scripts/smoke_test_reusable_app.sh --adapter all --suite outbound-overflow --output /private/tmp/edgezero-overflow-all-20261021-e",
+  "matrix": {
+    "output": "/private/tmp/edgezero-overflow-all-20261021-e",
+    "exit_code": 1,
+    "status": "failed-cloudflare-recovery-open",
+    "qualification": false,
+    "runtime_versions": [
+      {
+        "adapter": "fastly",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "viceroy 0.21.0"
+      },
+      {
+        "adapter": "cloudflare",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "4.131.0"
+      },
+      {
+        "adapter": "spin",
+        "event": "progress-runtime",
+        "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+      },
+      {
+        "adapter": "axum",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+      }
+    ],
+    "raw": [
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/events.jsonl",
+        "bytes": 69817,
+        "sha256": "f181ba0d596b9278a55642e35d606bf6ad8ee0711b6a013469209dc9b2821565"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/summary.json",
+        "bytes": 303,
+        "sha256": "9eabb63004810306629cff689f20a92743b4784c11fe0bdac11418150747c002"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/Cargo.lock",
+        "bytes": 84127,
+        "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e.log",
+        "bytes": 3894,
+        "sha256": "1a978a7f8868f9429819fe52dfc2d57d0b3a868373c6123885ac5a764bf0a051"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-axum/runtime.log",
+        "bytes": 604,
+        "sha256": "d0ad2b9d072146f1ba29fa30737144b642f84b0ae3a5fd8b39676e3f8b3948bb"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-cloudflare/runtime.log",
+        "bytes": 6201,
+        "sha256": "3e4ee510c36fa5c945cade8d3505775afd6ceb2ed67d1d9415f239fc055bf091"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-fastly/runtime.log",
+        "bytes": 331,
+        "sha256": "d9f7110a48a874bb23878548f32feab0b80b40fdaca57fa93cead170ff2ee0fc"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-spin/runtime.log",
+        "bytes": 1790,
+        "sha256": "27a9b071cfd01e2d89b9441bba8298681f02210132c4c0e3596f1da443fb6393"
+      }
+    ],
+    "artifacts": [
+      {
+        "adapter": "fastly",
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-fastly/artifacts/fixture-fastly-outbound-progress.wasm",
+        "bytes": 2190860,
+        "sha256": "66308adb388c4fa8c56de94cd6a0ab599cbe25146f33cba8276e181dc93cac7f"
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-cloudflare/artifacts/build/index_bg.wasm",
+        "bytes": 1718831,
+        "sha256": "53ddbfa80f8e6559f5db930f591db0ae0cf16b9c8bfb890bc773bf23254f4aa3"
+      },
+      {
+        "adapter": "spin",
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-spin/artifacts/fixture_spin.wasm",
+        "bytes": 2341405,
+        "sha256": "6a6f7a511755c2dc2230c810c9c7202326d3e29ebcfaadf830098c3b512873a6"
+      },
+      {
+        "adapter": "axum",
+        "path": "/private/tmp/edgezero-overflow-all-20261021-e/overflow-axum/artifacts/fixture-axum-outbound-progress",
+        "bytes": 8933824,
+        "sha256": "88ed8eaa05919d7e557b216315a9cdefe0c5ad345911d791239a7cd8e97c1a22"
+      }
+    ],
+    "coverage": [
+      {
+        "adapter": "fastly",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "cloudflare",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "fail"
+      },
+      {
+        "adapter": "spin",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "axum",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "pass"
+      }
+    ],
+    "cases": [
+      {
+        "adapter": "fastly",
+        "case": "inbound-1023",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1023}",
+          "complete_ns": 8094333,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 8075083,
+          "headers": [
+            ["content-type", "application/json"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a114933deb80-343f-0"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a114933deb80-343f-0"
+      },
+      {
+        "adapter": "fastly",
+        "case": "inbound-1024",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1024}",
+          "complete_ns": 273916,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 266958,
+          "headers": [
+            ["content-type", "application/json"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11493c07578-343f-1"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11493c07578-343f-1"
+      },
+      {
+        "adapter": "fastly",
+        "case": "inbound-1025",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 262583,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 255417,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a11493cb0498-343f-2"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11493cb0498-343f-2"
+      },
+      {
+        "adapter": "fastly",
+        "case": "buffered-7",
+        "client": {
+          "body": "{\"case\":\"buffered-7\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 5664959,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 5658875,
+          "headers": [
+            ["content-type", "application/json"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11493d597a0-343f-3"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 7,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52077"],
+                  ["content-length", "7"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a11493d597a0-343f-3/buffered-7",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 131,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11493d597a0-343f-3"
+      },
+      {
+        "adapter": "fastly",
+        "case": "buffered-8",
+        "client": {
+          "body": "{\"case\":\"buffered-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7810792,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7718750,
+          "headers": [
+            ["content-type", "application/json"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a1149ae38020-343f-4"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52080"],
+                  ["content-length", "8"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a1149ae38020-343f-4/buffered-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 131,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1149ae38020-343f-4"
+      },
+      {
+        "adapter": "fastly",
+        "case": "buffered-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 470959,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 459459,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a114a1d0dc98-343f-5"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 0,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a114a1d0dc98-343f-5"
+      },
+      {
+        "adapter": "fastly",
+        "case": "streamed-7",
+        "client": {
+          "body": "{\"case\":\"streamed-7\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7869250,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7861500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a114a85c8558-343f-6"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 7,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52085"],
+                  ["transfer-encoding", "chunked"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a114a85c8558-343f-6/streamed-7",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 140,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a114a85c8558-343f-6"
+      },
+      {
+        "adapter": "fastly",
+        "case": "streamed-8",
+        "client": {
+          "body": "{\"case\":\"streamed-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7887625,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7876875,
+          "headers": [
+            ["content-type", "application/json"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a114afa0b460-343f-7"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52088"],
+                  ["transfer-encoding", "chunked"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a114afa0b460-343f-7/streamed-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 140,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a114afa0b460-343f-7"
+      },
+      {
+        "adapter": "fastly",
+        "case": "streamed-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 645750,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 571583,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a114b6d61a40-343f-8"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 0,
+              "body_prefix": [],
+              "head": null,
+              "head_bytes": 0,
+              "head_state": "absent",
+              "terminal": "eof"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a114b6d61a40-343f-8"
+      },
+      {
+        "adapter": "fastly",
+        "case": "upstream-413",
+        "client": {
+          "body": "{\"case\":\"upstream-413\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":\"120\",\"upstream_status\":413}",
+          "complete_ns": 5310166,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 5254166,
+          "headers": [
+            ["content-type", "application/json"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:21 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a114bd4af328-343f-9"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52094"],
+                  ["content-length", "8"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a114bd4af328-343f-9/upstream-413",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 133,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a114bd4af328-343f-9"
+      },
+      {
+        "adapter": "fastly",
+        "case": "inbound-2048",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 528500,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 517750,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["date", "Wed, 21 Oct 2026 19:09:22 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a114c47d3458-343f-a"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a114c47d3458-343f-a"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "inbound-1023",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1023}",
+          "complete_ns": 106547875,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 105807834,
+          "headers": [
+            ["transfer-encoding", "chunked"],
+            ["content-type", "application/json"]
+          ],
+          "status": 200,
+          "token": "18e0a115baff0630-343f-b"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115baff0630-343f-b"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "inbound-1024",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1024}",
+          "complete_ns": 2386917,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 2187042,
+          "headers": [
+            ["transfer-encoding", "chunked"],
+            ["content-type", "application/json"]
+          ],
+          "status": 200,
+          "token": "18e0a115c161a708-343f-c"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115c161a708-343f-c"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "inbound-1025",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 2836250,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 2748166,
+          "headers": [
+            ["content-length", "86"],
+            ["content-type", "application/json"]
+          ],
+          "status": 413,
+          "token": "18e0a115c18ce940-343f-d"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115c18ce940-343f-d"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "buffered-7",
+        "client": {
+          "body": "Error: Network connection lost.\n    at async Object.fetch (file:///Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/miniflare/dist/src/workers/core/entry.worker.js:5216:22)",
+          "complete_ns": 6118625,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 6104250,
+          "headers": [
+            ["content-length", "201"],
+            ["content-type", "text/plain;charset=UTF-8"]
+          ],
+          "status": 500,
+          "token": "18e0a115c1bf2888-343f-e"
+        },
+        "error": "overflow probe status mismatch",
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 0,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "fail",
+        "token": "18e0a115c1bf2888-343f-e"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "buffered-8",
+        "client": {
+          "body": "{\"case\":\"buffered-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7870500,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7462333,
+          "headers": [
+            ["transfer-encoding", "chunked"],
+            ["content-type", "application/json"]
+          ],
+          "status": 200,
+          "token": "18e0a115c8f60568-343f-f"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["content-length", "8"],
+                  ["host", "127.0.0.1:52137"],
+                  ["accept-encoding", "identity"],
+                  ["cache-control", "no-cache"],
+                  ["pragma", "no-cache"],
+                  ["cf-worker", "reusable-app-fixture.example.com"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a115c8f60568-343f-f/buffered-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 219,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115c8f60568-343f-f"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "buffered-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 3031417,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 2433375,
+          "headers": [
+            ["content-length", "86"],
+            ["content-type", "application/json"]
+          ],
+          "status": 413,
+          "token": "18e0a115cf89d030-343f-10"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 0,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115cf89d030-343f-10"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "streamed-7",
+        "client": {
+          "body": "{\"case\":\"streamed-7\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7929416,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7549750,
+          "headers": [
+            ["transfer-encoding", "chunked"],
+            ["content-type", "application/json"]
+          ],
+          "status": 200,
+          "token": "18e0a115d68c5a88-343f-11"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 7,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["content-length", "7"],
+                  ["host", "127.0.0.1:52143"],
+                  ["accept-encoding", "identity"],
+                  ["cache-control", "no-cache"],
+                  ["pragma", "no-cache"],
+                  ["cf-worker", "reusable-app-fixture.example.com"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a115d68c5a88-343f-11/streamed-7",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 220,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115d68c5a88-343f-11"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "streamed-8",
+        "client": {
+          "body": "{\"case\":\"streamed-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 8446459,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 8045042,
+          "headers": [
+            ["transfer-encoding", "chunked"],
+            ["content-type", "application/json"]
+          ],
+          "status": 200,
+          "token": "18e0a115ddd62710-343f-12"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["content-length", "8"],
+                  ["host", "127.0.0.1:52146"],
+                  ["accept-encoding", "identity"],
+                  ["cache-control", "no-cache"],
+                  ["pragma", "no-cache"],
+                  ["cf-worker", "reusable-app-fixture.example.com"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a115ddd62710-343f-12/streamed-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 220,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115ddd62710-343f-12"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "streamed-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 4119833,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 3951250,
+          "headers": [
+            ["content-length", "86"],
+            ["content-type", "application/json"]
+          ],
+          "status": 413,
+          "token": "18e0a115e5282928-343f-13"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 0,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115e5282928-343f-13"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "upstream-413",
+        "client": {
+          "body": "{\"case\":\"upstream-413\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":\"120\",\"upstream_status\":413}",
+          "complete_ns": 6682083,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 6406708,
+          "headers": [
+            ["transfer-encoding", "chunked"],
+            ["content-type", "application/json"]
+          ],
+          "status": 200,
+          "token": "18e0a115ec1d49e8-343f-14"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["content-length", "8"],
+                  ["host", "127.0.0.1:52158"],
+                  ["accept-encoding", "identity"],
+                  ["cache-control", "no-cache"],
+                  ["pragma", "no-cache"],
+                  ["cf-worker", "reusable-app-fixture.example.com"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a115ec1d49e8-343f-14/upstream-413",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 222,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115ec1d49e8-343f-14"
+      },
+      {
+        "adapter": "cloudflare",
+        "case": "inbound-2048",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 3202167,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 3033458,
+          "headers": [
+            ["content-length", "86"],
+            ["content-type", "application/json"]
+          ],
+          "status": 413,
+          "token": "18e0a115f326c598-343f-15"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a115f326c598-343f-15"
+      },
+      {
+        "adapter": "spin",
+        "case": "inbound-1023",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1023}",
+          "complete_ns": 27063417,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 27048125,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:27 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a1160a6418f0-343f-16"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1160a6418f0-343f-16"
+      },
+      {
+        "adapter": "spin",
+        "case": "inbound-1024",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1024}",
+          "complete_ns": 527042,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 520250,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:27 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a1160c09ed38-343f-17"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1160c09ed38-343f-17"
+      },
+      {
+        "adapter": "spin",
+        "case": "inbound-1025",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 510625,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 501625,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:27 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a1160c188f50-343f-18"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1160c188f50-343f-18"
+      },
+      {
+        "adapter": "spin",
+        "case": "buffered-7",
+        "client": {
+          "body": "{\"case\":\"buffered-7\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 8639541,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 8633833,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:27 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a1160c282398-343f-19"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 7,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52178"],
+                  ["transfer-encoding", "chunked"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a1160c282398-343f-19/buffered-7",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 141,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1160c282398-343f-19"
+      },
+      {
+        "adapter": "spin",
+        "case": "buffered-8",
+        "client": {
+          "body": "{\"case\":\"buffered-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 5699166,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 5692125,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:27 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a116135724c0-343f-1a"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52181"],
+                  ["transfer-encoding", "chunked"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a116135724c0-343f-1a/buffered-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 141,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a116135724c0-343f-1a"
+      },
+      {
+        "adapter": "spin",
+        "case": "buffered-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 742791,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 730041,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:27 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a1161a2a84e0-343f-1b"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 0,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1161a2a84e0-343f-1b"
+      },
+      {
+        "adapter": "spin",
+        "case": "streamed-7",
+        "client": {
+          "body": "{\"case\":\"streamed-7\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7397000,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7383375,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:28 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11620f05c28-343f-1c"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 7,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52190"],
+                  ["transfer-encoding", "chunked"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a11620f05c28-343f-1c/streamed-7",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 141,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11620f05c28-343f-1c"
+      },
+      {
+        "adapter": "spin",
+        "case": "streamed-8",
+        "client": {
+          "body": "{\"case\":\"streamed-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 6627542,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 6612958,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:28 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11628462ae8-343f-1d"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52193"],
+                  ["transfer-encoding", "chunked"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a11628462ae8-343f-1d/streamed-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 141,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11628462ae8-343f-1d"
+      },
+      {
+        "adapter": "spin",
+        "case": "streamed-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 1663041,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 1639750,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:28 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a1162f4682c0-343f-1e"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 0,
+              "body_prefix": [],
+              "head": null,
+              "head_bytes": 0,
+              "head_state": "absent",
+              "terminal": "eof"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1162f4682c0-343f-1e"
+      },
+      {
+        "adapter": "spin",
+        "case": "upstream-413",
+        "client": {
+          "body": "{\"case\":\"upstream-413\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":\"120\",\"upstream_status\":413}",
+          "complete_ns": 6954792,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 6939875,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Wed, 21 Oct 2026 19:09:28 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11636192760-343f-1f"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["host", "127.0.0.1:52203"],
+                  ["transfer-encoding", "chunked"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a11636192760-343f-1f/upstream-413",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 143,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11636192760-343f-1f"
+      },
+      {
+        "adapter": "spin",
+        "case": "inbound-2048",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 1944458,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 1908917,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:28 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a1163d23f6e8-343f-20"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1163d23f6e8-343f-20"
+      },
+      {
+        "adapter": "axum",
+        "case": "inbound-1023",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1023}",
+          "complete_ns": 887083,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 853833,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["content-length", "56"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11756bc4c30-343f-21"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11756bc4c30-343f-21"
+      },
+      {
+        "adapter": "axum",
+        "case": "inbound-1024",
+        "client": {
+          "body": "{\"case\":\"inbound\",\"qualification\":false,\"received\":1024}",
+          "complete_ns": 226792,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 210834,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["content-length", "56"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11756e89fd8-343f-22"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11756e89fd8-343f-22"
+      },
+      {
+        "adapter": "axum",
+        "case": "inbound-1025",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 192209,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 176209,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a1175704f9a8-343f-23"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1175704f9a8-343f-23"
+      },
+      {
+        "adapter": "axum",
+        "case": "buffered-7",
+        "client": {
+          "body": "{\"case\":\"buffered-7\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7784875,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7774625,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["content-length", "105"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a117572114f8-343f-24"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 7,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["accept", "*/*"],
+                  ["host", "127.0.0.1:52251"],
+                  ["content-length", "7"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a117572114f8-343f-24/buffered-7",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 145,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a117572114f8-343f-24"
+      },
+      {
+        "adapter": "axum",
+        "case": "buffered-8",
+        "client": {
+          "body": "{\"case\":\"buffered-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 5631125,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 5612000,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["content-length", "105"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a1175e4033b8-343f-25"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["accept", "*/*"],
+                  ["host", "127.0.0.1:52254"],
+                  ["content-length", "8"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a1175e4033b8-343f-25/buffered-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 145,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1175e4033b8-343f-25"
+      },
+      {
+        "adapter": "axum",
+        "case": "buffered-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 256417,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 243959,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a11764b30ce8-343f-26"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 0,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11764b30ce8-343f-26"
+      },
+      {
+        "adapter": "axum",
+        "case": "streamed-7",
+        "client": {
+          "body": "{\"case\":\"streamed-7\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 7151167,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 7136708,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["content-length", "105"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a1176bc162c8-343f-27"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 7,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["accept", "*/*"],
+                  ["host", "127.0.0.1:52261"],
+                  ["content-length", "7"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a1176bc162c8-343f-27/streamed-7",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 145,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a1176bc162c8-343f-27"
+      },
+      {
+        "adapter": "axum",
+        "case": "streamed-8",
+        "client": {
+          "body": "{\"case\":\"streamed-8\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":null,\"upstream_status\":200}",
+          "complete_ns": 6656125,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 6642333,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["content-length", "105"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11772e42ef0-343f-28"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["accept", "*/*"],
+                  ["host", "127.0.0.1:52264"],
+                  ["content-length", "8"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a11772e42ef0-343f-28/streamed-8",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 145,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11772e42ef0-343f-28"
+      },
+      {
+        "adapter": "axum",
+        "case": "streamed-9",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 305333,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 285083,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:33 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a11779fce128-343f-29"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 0,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11779fce128-343f-29"
+      },
+      {
+        "adapter": "axum",
+        "case": "upstream-413",
+        "client": {
+          "body": "{\"case\":\"upstream-413\",\"outcome\":\"response\",\"qualification\":false,\"retry_after\":\"120\",\"upstream_status\":413}",
+          "complete_ns": 6640333,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 6631958,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["content-length", "108"],
+            ["date", "Wed, 21 Oct 2026 19:09:34 GMT"]
+          ],
+          "status": 200,
+          "token": "18e0a11780427480-343f-2a"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "origin": {
+          "accepted": 1,
+          "capture_bytes": 256,
+          "collection_complete": true,
+          "connections": [
+            {
+              "body_bytes": 8,
+              "body_prefix": [120, 120, 120, 120, 120, 120, 120, 120],
+              "head": {
+                "headers": [
+                  ["accept-encoding", "identity"],
+                  ["accept", "*/*"],
+                  ["host", "127.0.0.1:52269"],
+                  ["content-length", "8"]
+                ],
+                "method": "POST",
+                "target": "/overflow/18e0a11780427480-343f-2a/upstream-413",
+                "version": "HTTP/1.1"
+              },
+              "head_bytes": 147,
+              "head_state": "complete",
+              "reply_written": true,
+              "terminal": "complete"
+            }
+          ],
+          "origin_deadline_ms": 2000,
+          "overflow": false
+        },
+        "origin_collection_error": null,
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11780427480-343f-2a"
+      },
+      {
+        "adapter": "axum",
+        "case": "inbound-2048",
+        "client": {
+          "body": "{\"error\":{\"kind\":\"payload_too_large\",\"message\":\"request body too large\",\"status\":413}}",
+          "complete_ns": 318542,
+          "event": "client_completed",
+          "first_byte_ns": null,
+          "first_byte_timing": "not-measured",
+          "header_ns": 299000,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "86"],
+            ["connection", "close"],
+            ["date", "Wed, 21 Oct 2026 19:09:34 GMT"]
+          ],
+          "status": 413,
+          "token": "18e0a11787b79ab0-343f-2b"
+        },
+        "error": null,
+        "event": "overflow-case",
+        "qualification": false,
+        "status": "pass",
+        "token": "18e0a11787b79ab0-343f-2b"
+      }
+    ]
+  },
+  "earlier_expanded_run": {
+    "output": "/private/tmp/edgezero-overflow-all-20261021-d",
+    "exit_code": 1,
+    "status": "failed-cloudflare-recovery-open",
+    "qualification": false,
+    "runtime_versions": [
+      {
+        "adapter": "fastly",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "viceroy 0.21.0"
+      },
+      {
+        "adapter": "cloudflare",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "4.131.0"
+      },
+      {
+        "adapter": "spin",
+        "event": "progress-runtime",
+        "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+      },
+      {
+        "adapter": "axum",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+        "revision": "cda324d433877e5b46599aee0cd685df72372c68",
+        "source_state": "working-tree-characterization",
+        "version": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+      }
+    ],
+    "raw": [
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d/events.jsonl",
+        "bytes": 69823,
+        "sha256": "bd4dc40f2c6c91008fe1f11f3a91a29e99edaf9eea6fef9067d1a90fd1b8d0ba"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d/summary.json",
+        "bytes": 303,
+        "sha256": "9eabb63004810306629cff689f20a92743b4784c11fe0bdac11418150747c002"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d/Cargo.lock",
+        "bytes": 84127,
+        "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d.log",
+        "bytes": 4964,
+        "sha256": "b940f4757a7797cc36aaa03bd183f66a4ce8a001974b1a692581e105551f1ad6"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d/overflow-axum/runtime.log",
+        "bytes": 604,
+        "sha256": "f2b54fbc853c97531161a1ac6db42ce22420034a80982ed99679f2f005adb09e"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d/overflow-cloudflare/runtime.log",
+        "bytes": 6201,
+        "sha256": "a631338d3b784e24924f7e45a3eb591465df23278fe3d4b5323504d227bf4c6b"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d/overflow-fastly/runtime.log",
+        "bytes": 331,
+        "sha256": "d2ca7ca2174b83f362cd2442cae4fe3bcf433ddd1915a96a8a6ec948abc75fc0"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-all-20261021-d/overflow-spin/runtime.log",
+        "bytes": 1790,
+        "sha256": "dc661bcb239d42fe544fe62e072ea55c0cfb7b63d73e03583da1d8055a4487a8"
+      }
+    ],
+    "coverage": [
+      {
+        "adapter": "fastly",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "cloudflare",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "fail"
+      },
+      {
+        "adapter": "spin",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "axum",
+        "attempted": 11,
+        "event": "overflow-coverage",
+        "qualification": false,
+        "status": "pass"
+      }
+    ]
+  },
+  "controls": {
+    "source_inputs": [
+      {
+        "path": "/private/tmp/edgezero-overflow-cf-isolate.mjs",
+        "bytes": 6887,
+        "sha256": "f4d630f6e72fe7d299985d7b753b46a169aa0e6069aa4d7602ccba9afdfa28d8",
+        "text": "import { spawn } from 'node:child_process';\nimport { createRequire } from 'node:module';\nimport net from 'node:net';\nimport { readdir, open } from 'node:fs/promises';\nimport { setTimeout as delay } from 'node:timers/promises';\n\nconst mode = process.env.CONTROL_MODE ?? 'wrangler';\nconst connection = process.env.CONTROL_CONNECTION ?? 'close';\nif (!['wrangler', 'wrangler-user', 'miniflare', 'direct'].includes(mode) || !['close', 'omit'].includes(connection)) {\n  throw new Error('invalid diagnostic mode');\n}\nconst script = process.env.CONTROL_SCRIPT ?? '/private/tmp/edgezero-overflow-cf-sdkless.mjs';\nlet port = 55881;\nlet child;\nlet miniflare;\nlet logs = '';\nfunction append(bytes) { logs += String(bytes).slice(0, Math.max(0, 65536 - logs.length)); }\n\nasync function start() {\n  if (!mode.startsWith('wrangler')) {\n    const require = createRequire('/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/package.json');\n    const { Miniflare, Log, LogLevel, convertV4MiniflareOptions } = require('miniflare');\n    class CaptureLog extends Log {\n      log(message) { append(`${message}\\n`); }\n    }\n    miniflare = new Miniflare(convertV4MiniflareOptions({\n      name: 'cancellation-control', modules: true, scriptPath: script,\n      compatibilityDate: '2026-04-22', compatibilityFlags: ['enable_request_signal', 'enable_weak_ref'],\n      host: '127.0.0.1', port: mode === 'direct' ? 55882 : port,\n      unsafeDirectSockets: mode === 'direct' ? [{ host: '127.0.0.1', port }] : undefined,\n      cf: false, log: new CaptureLog(LogLevel.DEBUG),\n    }));\n    await miniflare.ready;\n    return;\n  }\n  const directory = '/private/tmp/edgezero-pr275-wrangler-logs';\n  const before = new Set(await readdir(directory));\n  child = spawn('/Users/ag/.asdf/installs/nodejs/24.12.0/bin/wrangler', [\n    'dev', script, '--config', '/private/tmp/edgezero-overflow-all-20261021-b/overflow-cloudflare/wrangler.toml',\n    '--port', String(port), '--ip', '127.0.0.1', '--local',\n    '--persist-to', '/private/tmp/edgezero-overflow-cf-control-state',\n  ], { env: { ...process.env, WRANGLER_SEND_METRICS: 'false', WRANGLER_LOG_PATH: '/private/tmp/edgezero-pr275-wrangler-logs' } });\n  child.stdout.on('data', append);\n  child.stderr.on('data', append);\n  for (let index = 0; index < 150 && !logs.includes('Ready on'); index++) {\n    if (child.exitCode !== null) throw new Error('runtime exited');\n    await delay(100);\n  }\n  if (!logs.includes('Ready on')) throw new Error('runtime startup timeout');\n  if (mode === 'wrangler-user') {\n    const files = (await readdir(directory)).filter(file => !before.has(file) && /^wrangler-.*\\.log$/.test(file));\n    if (files.length !== 1) throw new Error('ambiguous runtime log');\n    const handle = await open(`${directory}/${files[0]}`, 'r');\n    let text;\n    try {\n      const buffer = Buffer.alloc(65536);\n      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);\n      text = buffer.subarray(0, bytesRead).toString();\n    } finally { await handle.close(); }\n    const matches = [...text.matchAll(/\"userWorkerUrl\":\\{\"protocol\":\"http:\",\"hostname\":\"127\\.0\\.0\\.1\",\"port\":\"(\\d+)\"\\}/g)];\n    if (matches.length !== 1) throw new Error('ambiguous user worker address');\n    port = Number(matches[0][1]);\n    console.log(JSON.stringify({ event: 'diagnostic-boundary', mode, port, qualification: false }));\n  }\n}\n\nfunction complete(bytes) {\n  const boundary = bytes.indexOf('\\r\\n\\r\\n');\n  if (boundary < 0) return false;\n  const head = bytes.subarray(0, boundary).toString('latin1');\n  const body = bytes.subarray(boundary + 4);\n  const length = /^content-length: (\\d+)\\r?$/im.exec(head);\n  if (length) return body.length === Number(length[1]);\n  if (!/^transfer-encoding: chunked\\r?$/im.test(head)) throw new Error('unframed diagnostic response');\n  let position = 0;\n  while (true) {\n    const end = body.indexOf('\\r\\n', position);\n    if (end < 0) return false;\n    const line = body.subarray(position, end).toString('ascii');\n    if (!/^[0-9a-f]+$/i.test(line)) throw new Error('invalid diagnostic chunk');\n    const length = Number.parseInt(line, 16);\n    position = end + 2;\n    if (body.length < position + length + 2) return false;\n    if (body.subarray(position + length, position + length + 2).toString() !== '\\r\\n') throw new Error('invalid diagnostic framing');\n    position += length + 2;\n    if (length === 0) return body.length === position;\n  }\n}\n\nasync function request(label, length) {\n  const payload = length === null ? '' : `${length.toString(16)}\\r\\n${'x'.repeat(length)}\\r\\n0\\r\\n\\r\\n`;\n  const wire = `POST /progress/overflow/inbound HTTP/1.1\\r\\nHost: 127.0.0.1:${port}\\r\\nx-request-token: ${label}\\r\\n${connection === 'close' ? 'Connection: close\\r\\n' : ''}${length === null ? 'Content-Length: 0' : 'Transfer-Encoding: chunked'}\\r\\n\\r\\n${payload}`;\n  const started = performance.now();\n  try {\n    const reply = await new Promise((resolve, reject) => {\n      const socket = net.connect({ host: '127.0.0.1', port });\n      let bytes = Buffer.alloc(0);\n      const timer = setTimeout(() => socket.destroy(new Error('absolute diagnostic deadline')), 6000);\n      socket.once('close', () => clearTimeout(timer));\n      socket.once('connect', () => socket.write(wire));\n      socket.on('data', chunk => {\n        if (bytes.length + chunk.length > 8192) return socket.destroy(new Error('diagnostic capture bound'));\n        bytes = Buffer.concat([bytes, chunk]);\n        try {\n          if (complete(bytes)) { resolve(bytes.toString()); socket.destroy(); }\n        } catch (error) { socket.destroy(error); }\n      });\n      socket.once('error', reject);\n      socket.once('end', () => {\n        if (complete(bytes)) resolve(bytes.toString());\n        else reject(new Error('incomplete diagnostic response'));\n      });\n    });\n    console.log(JSON.stringify({ event: 'control-request', mode, connection, label, length, elapsed_ms: performance.now() - started, reply }));\n  } catch (error) {\n    console.log(JSON.stringify({ event: 'control-request', mode, connection, label, length, error: String(error) }));\n  }\n}\n\ntry {\n  await start();\n  for (const [label, length] of [\n    ['baseline', 1024], ['overflow-a', 1025], ['after-a', null], ['recover-a', null],\n    ['overflow-b', 1025], ['after-b', 1], ['recover-b', 1],\n    ['overflow-c', 1025], ['after-c', 1024], ['recover-c', 1024],\n  ]) await request(label, length);\n} finally {\n  if (miniflare) await miniflare.dispose();\n  if (child) {\n    const stopped = new Promise(resolve => child.once('close', resolve));\n    child.kill('SIGTERM');\n    let timer;\n    await Promise.race([stopped, new Promise(resolve => { timer = setTimeout(resolve, 5000); })]);\n    clearTimeout(timer);\n    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');\n    await stopped;\n  }\n  console.log(JSON.stringify({ event: 'runtime-log', mode, connection, logs }));\n}\n"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-cf-sdkless.mjs",
+        "bytes": 928,
+        "sha256": "54d218caa546f4b6e80fc355e053fde5708afebf79cb2499a3d5bb8cd4575b94",
+        "text": "export default {\n  async fetch(request) {\n    const token = request.headers.get('x-request-token');\n    console.log(JSON.stringify({ event: 'control-entry', token }));\n    let size = 0;\n    if (request.body) {\n      const reader = request.body.getReader();\n      while (true) {\n        const { value, done } = await reader.read();\n        if (done) break;\n        size += value.byteLength;\n        if (size > 1024) {\n          reader.cancel().catch(() => {});\n          console.log(JSON.stringify({ event: 'control-return', token, status: 413 }));\n          return new Response(JSON.stringify({ error: { kind: 'payload_too_large', message: 'request body too large', status: 413 } }), { status: 413 });\n        }\n      }\n      reader.releaseLock();\n    }\n    console.log(JSON.stringify({ event: 'control-return', token, status: 200 }));\n    return Response.json({ case: 'inbound', received: size, qualification: false });\n  }\n};\n"
+      }
+    ],
+    "results": [
+      {
+        "mode": "wrangler",
+        "connection": "close",
+        "script": "sdkless",
+        "exit_code": 0,
+        "qualification": false,
+        "command": "node /private/tmp/edgezero-overflow-cf-isolate.mjs",
+        "raw": {
+          "path": "/private/tmp/edgezero-overflow-cf-boundary-wrangler-close-final.jsonl",
+          "bytes": 8356,
+          "sha256": "17948227b7d3d632c7ad3b82685e9614467ee981cbf3c9c6fb3190ec5c104380"
+        },
+        "requests": [
+          {
+            "label": "baseline",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 17.977374999999938
+          },
+          {
+            "label": "overflow-a",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 1.9704169999999976
+          },
+          {
+            "label": "after-a",
+            "length": null,
+            "status": 500,
+            "elapsed_ms": 8.994374999999991
+          },
+          {
+            "label": "recover-a",
+            "length": null,
+            "status": 200,
+            "elapsed_ms": 1.244374999999991
+          },
+          {
+            "label": "overflow-b",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 1.6367079999999987
+          },
+          {
+            "label": "after-b",
+            "length": 1,
+            "status": 500,
+            "elapsed_ms": 1.0415840000000571
+          },
+          {
+            "label": "recover-b",
+            "length": 1,
+            "status": 200,
+            "elapsed_ms": 1.5214590000000499
+          },
+          {
+            "label": "overflow-c",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 2.1339159999999993
+          },
+          {
+            "label": "after-c",
+            "length": 1024,
+            "status": 500,
+            "elapsed_ms": 0.9695000000000391
+          },
+          {
+            "label": "recover-c",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 1.4685420000000704
+          }
+        ],
+        "runtime_events": [
+          {
+            "event": "control-entry",
+            "token": "baseline"
+          },
+          {
+            "event": "control-return",
+            "token": "baseline",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-a"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-a",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-a"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-a",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-b"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-b",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-b"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-b",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-c"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-c",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-c"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-c",
+            "status": 200
+          }
+        ],
+        "post_overflow_failures": 3,
+        "boundary": null
+      },
+      {
+        "mode": "wrangler",
+        "connection": "omit",
+        "script": "sdkless",
+        "exit_code": 0,
+        "qualification": false,
+        "command": "CONTROL_CONNECTION=omit node /private/tmp/edgezero-overflow-cf-isolate.mjs",
+        "raw": {
+          "path": "/private/tmp/edgezero-overflow-cf-boundary-wrangler-omit-final.jsonl",
+          "bytes": 8342,
+          "sha256": "57b2941fafb105710df5d4f257d770395d0f18b0a3d61e9be655f80c51ff13fd"
+        },
+        "requests": [
+          {
+            "label": "baseline",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 8.012499999999932
+          },
+          {
+            "label": "overflow-a",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 1.8470829999999978
+          },
+          {
+            "label": "after-a",
+            "length": null,
+            "status": 500,
+            "elapsed_ms": 1.5463750000000118
+          },
+          {
+            "label": "recover-a",
+            "length": null,
+            "status": 200,
+            "elapsed_ms": 1.329291000000012
+          },
+          {
+            "label": "overflow-b",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 2.0001250000000255
+          },
+          {
+            "label": "after-b",
+            "length": 1,
+            "status": 500,
+            "elapsed_ms": 0.9927500000000009
+          },
+          {
+            "label": "recover-b",
+            "length": 1,
+            "status": 200,
+            "elapsed_ms": 1.7725840000000517
+          },
+          {
+            "label": "overflow-c",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 2.856208000000038
+          },
+          {
+            "label": "after-c",
+            "length": 1024,
+            "status": 500,
+            "elapsed_ms": 0.994792000000075
+          },
+          {
+            "label": "recover-c",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 1.4197499999999081
+          }
+        ],
+        "runtime_events": [
+          {
+            "event": "control-entry",
+            "token": "baseline"
+          },
+          {
+            "event": "control-return",
+            "token": "baseline",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-a"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-a",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-a"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-a",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-b"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-b",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-b"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-b",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-c"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-c",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-c"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-c",
+            "status": 200
+          }
+        ],
+        "post_overflow_failures": 3,
+        "boundary": null
+      },
+      {
+        "mode": "wrangler-user",
+        "connection": "close",
+        "script": "sdkless",
+        "exit_code": 0,
+        "qualification": false,
+        "command": "CONTROL_MODE=wrangler-user node /private/tmp/edgezero-overflow-cf-isolate.mjs",
+        "raw": {
+          "path": "/private/tmp/edgezero-overflow-cf-boundary-user-sdkless-final.jsonl",
+          "bytes": 6934,
+          "sha256": "443d241b5a7a59d9531770344d2e36ce7615daf07adb346a8317c047227869d1"
+        },
+        "requests": [
+          {
+            "label": "baseline",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 22.604499999999916
+          },
+          {
+            "label": "overflow-a",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 1.9077499999999645
+          },
+          {
+            "label": "after-a",
+            "length": null,
+            "status": 200,
+            "elapsed_ms": 3.1105830000000196
+          },
+          {
+            "label": "recover-a",
+            "length": null,
+            "status": 200,
+            "elapsed_ms": 1.2927080000000615
+          },
+          {
+            "label": "overflow-b",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 1.9069159999999101
+          },
+          {
+            "label": "after-b",
+            "length": 1,
+            "status": 200,
+            "elapsed_ms": 1.6937920000000304
+          },
+          {
+            "label": "recover-b",
+            "length": 1,
+            "status": 200,
+            "elapsed_ms": 1.3045000000000755
+          },
+          {
+            "label": "overflow-c",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 1.1548329999999396
+          },
+          {
+            "label": "after-c",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 1.6749999999999545
+          },
+          {
+            "label": "recover-c",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 1.1340420000000222
+          }
+        ],
+        "runtime_events": [
+          {
+            "event": "control-entry",
+            "token": "baseline"
+          },
+          {
+            "event": "control-return",
+            "token": "baseline",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-a"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-a",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "after-a"
+          },
+          {
+            "event": "control-return",
+            "token": "after-a",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-a"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-a",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-b"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-b",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "after-b"
+          },
+          {
+            "event": "control-return",
+            "token": "after-b",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-b"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-b",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "overflow-c"
+          },
+          {
+            "event": "control-return",
+            "token": "overflow-c",
+            "status": 413
+          },
+          {
+            "event": "control-entry",
+            "token": "after-c"
+          },
+          {
+            "event": "control-return",
+            "token": "after-c",
+            "status": 200
+          },
+          {
+            "event": "control-entry",
+            "token": "recover-c"
+          },
+          {
+            "event": "control-return",
+            "token": "recover-c",
+            "status": 200
+          }
+        ],
+        "post_overflow_failures": 0,
+        "boundary": {
+          "event": "diagnostic-boundary",
+          "mode": "wrangler-user",
+          "port": 52719,
+          "qualification": false
+        }
+      },
+      {
+        "mode": "wrangler-user",
+        "connection": "close",
+        "script": "edgezero",
+        "exit_code": 0,
+        "qualification": false,
+        "command": "CONTROL_MODE=wrangler-user CONTROL_SCRIPT=/private/tmp/edgezero-overflow-all-20261021-e/overflow-cloudflare/artifacts/build/worker/shim.mjs node /private/tmp/edgezero-overflow-cf-isolate.mjs",
+        "raw": {
+          "path": "/private/tmp/edgezero-overflow-cf-boundary-user-edgezero-final.jsonl",
+          "bytes": 8725,
+          "sha256": "e28205350a26adf77544f80dde0df0adf7064271ef6cb4f408f2e4046d5d049d"
+        },
+        "requests": [
+          {
+            "label": "baseline",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 39.223499999999945
+          },
+          {
+            "label": "overflow-a",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 3.5598340000000235
+          },
+          {
+            "label": "after-a",
+            "length": null,
+            "status": 200,
+            "elapsed_ms": 6.690249999999992
+          },
+          {
+            "label": "recover-a",
+            "length": null,
+            "status": 200,
+            "elapsed_ms": 1.7121670000000222
+          },
+          {
+            "label": "overflow-b",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 1.6609589999999343
+          },
+          {
+            "label": "after-b",
+            "length": 1,
+            "status": 200,
+            "elapsed_ms": 2.093958999999927
+          },
+          {
+            "label": "recover-b",
+            "length": 1,
+            "status": 200,
+            "elapsed_ms": 2.251207999999906
+          },
+          {
+            "label": "overflow-c",
+            "length": 1025,
+            "status": 413,
+            "elapsed_ms": 3.2323750000000473
+          },
+          {
+            "label": "after-c",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 2.422584000000029
+          },
+          {
+            "label": "recover-c",
+            "length": 1024,
+            "status": 200,
+            "elapsed_ms": 3.5342500000000427
+          }
+        ],
+        "runtime_events": [
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "baseline"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 200,
+            "token": "baseline"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "overflow-a"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 413,
+            "token": "overflow-a"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "after-a"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 200,
+            "token": "after-a"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "recover-a"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 200,
+            "token": "recover-a"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "overflow-b"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 413,
+            "token": "overflow-b"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "after-b"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 200,
+            "token": "after-b"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "recover-b"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 200,
+            "token": "recover-b"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "overflow-c"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 413,
+            "token": "overflow-c"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "after-c"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 200,
+            "token": "after-c"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "phase": "entry",
+            "qualification": false,
+            "token": "recover-c"
+          },
+          {
+            "case": "inbound",
+            "event": "overflow-dispatch",
+            "outcome": "response",
+            "phase": "return",
+            "qualification": false,
+            "status": 200,
+            "token": "recover-c"
+          }
+        ],
+        "post_overflow_failures": 0,
+        "boundary": {
+          "event": "diagnostic-boundary",
+          "mode": "wrangler-user",
+          "port": 52749,
+          "qualification": false
+        }
+      }
+    ],
+    "earlier_observations": [
+      {
+        "raw": {
+          "path": "/private/tmp/edgezero-overflow-cf-isolate-wrangler-omit.jsonl",
+          "bytes": 7708,
+          "sha256": "fdeedc69ed9677ac0cbc6172260d577eb54fd22dae884ba17a505aeec30bbf1c"
+        },
+        "post_overflow_failures": 1,
+        "cycles": 3,
+        "note": "Earlier driver revision; retained to show intermittency, not replaced by final 3/3 failures."
+      },
+      {
+        "raw": {
+          "path": "/private/tmp/edgezero-overflow-cf-isolate-miniflare-close.jsonl",
+          "bytes": 929,
+          "sha256": "417f0ed0d22ba23fcf2b395a399d9f127570e854a50d6e1c18e1505db9b84374"
+        },
+        "exit_code": 1,
+        "status": "setup-failed-before-requests",
+        "qualification": false
+      },
+      {
+        "raw": {
+          "path": "/private/tmp/edgezero-overflow-cf-isolate-miniflare-close-b.jsonl",
+          "bytes": 2304,
+          "sha256": "ecee5eaae84743f78c2482379a83a264569ffbb2e58f87381fec927a514eca22"
+        },
+        "exit_code": 1,
+        "status": "setup-failed-before-requests",
+        "qualification": false
+      }
+    ],
+    "conclusion": "Observed failure narrows to the Wrangler front-proxy path: both header variants fail before worker entry, while SDKless and actual-artifact internal-listener controls recover. Native pooling/reuse mechanism unproven; direct listener is not the standard acceptance path and is not adopted as a repair."
+  },
+  "verification": {
+    "fixture_test_command": "cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core --all-features",
+    "logs": [
+      {
+        "path": "/private/tmp/edgezero-overflow-boundaries-fixture-tests-all.log",
+        "bytes": 6965,
+        "sha256": "ceef89bdb74a5aaa9d7bdb23598ea509e032659d323f56afe947f932df79c40f"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-boundaries-fixture-tests.log",
+        "bytes": 6073,
+        "sha256": "5296612d38967ed230a65dbf63c48b0c6d6f061be42dce7f00ac739891c59265"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-boundaries-fixture-clippy.log",
+        "bytes": 553,
+        "sha256": "2f7c0eadc991756a3a7cca02e0a00c31871ecd2ea7eb65002c0546452841f9b7"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-axum-boundaries-unit-c.log",
+        "bytes": 2005,
+        "sha256": "30dbf291f6f555838e1f1a12b19dd99695f49d10fcb1c740583d966246a46a47"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-boundaries-workspace-test-b.log",
+        "bytes": 175005,
+        "sha256": "39c57e2d67bced37c59c33a57fb24454a273b999b5ae4c6c48233ce2cc1530b2"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-boundaries-clippy-c.log",
+        "bytes": 621,
+        "sha256": "cb70face2abafb07e11cd901497ec844e9cf0e1db9e4cd4dec7dd5c0a3f06600"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-boundaries-feature-check-b.log",
+        "bytes": 621,
+        "sha256": "4fd9fdc56b449d306fd6ed89ecfd9fa70455826303f8e4c0806aab07ed676fb6"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-boundaries-spin-check.log",
+        "bytes": 382,
+        "sha256": "d0a142b8e9ccf91da4098e6e2f57d55c4d880a808977aed1bb4e8f385d783195"
+      },
+      {
+        "path": "/private/tmp/edgezero-overflow-drop-mutation.log",
+        "bytes": 1211,
+        "sha256": "438dcd937402d030d7ce0622c021953733ff987721024c62e8f2f6dd30a686c4"
+      }
+    ],
+    "rust_gates": [
+      "cargo fmt --all -- --check",
+      "cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings",
+      "cargo test --offline --locked --workspace --all-targets",
+      "cargo check --offline --locked --workspace --all-targets --features \"fastly cloudflare spin\"",
+      "cargo check --offline --locked -p edgezero-adapter-spin --target wasm32-wasip2 --features spin"
+    ],
+    "cases": [
+      "chunked_overflow_keeps_pipelined_request_boundaries_and_error_policy: original 9/8 and exact 2048/1024 over TCP",
+      "json_extractor_overflow_reaches_custom_renderer_without_retry_after: existing 8 MiB default cap plus one, valid json! string, typed inbound origin and custom wire body",
+      "dropping_origin_signals_stop_and_joins_the_worker_before_returning: stop signal, gated join, release and exit acknowledgement before assertions",
+      "two_kib_ingress_requires_fixed_overflow_without_retry_after: wrong status, case-insensitive retry header and changed public message rejected"
+    ],
+    "mutation": {
+      "change": "Temporarily remove UploadOrigin Drop join only; restored before final tests",
+      "exit_code": 101,
+      "expected_failure": "while_gated must be RecvTimeoutError::Timeout",
+      "restored_tests_exit_code": 0
+    },
+    "fixture_harness_tests": 53,
+    "fixture_core_tests": 17,
+    "axum_connection_tests": 14,
+    "core_tests": 793
+  },
+  "limitations": [
+    "No hosted/protocol/context qualification or exact-commit release evidence. Temporary artifacts/logs are local, not durable release assets.",
+    "Cloudflare standard-entrypoint recovery remains failed. No POST retry, recovery sleep, body drain, SDK upgrade or topology workaround was adopted.",
+    "The SDKless control cancels but does not release the overflow reader lock; it is not a lifecycle-equivalent Rust control. The separate actual EdgeZero artifact differential retains its real cancel-on-drop and lock release.",
+    "The 50 ms gated negative Drop assertion remains scheduler-sensitive; workers are explicitly released and joined before assertions. Client write operations remain individually bounded, not one total exchange wall-clock guarantee.",
+    "Collector receipts cover a finite observation window, not indefinite provider cancellation. Existing source/capture/deadline bounds are unchanged.",
+    "Fastly G2 still fails on the pinned readiness primitive. This checkpoint does not implement the full head-first/eager/follow hard cut, alter approved APIs, remove dispatch slack or promote capabilities.",
+    "Hosted Fastly HTTP/2, consumer end-to-end and later synthesized-header composition legs remain open."
+  ]
+}

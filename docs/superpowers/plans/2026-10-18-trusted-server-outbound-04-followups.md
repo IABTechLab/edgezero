@@ -126,6 +126,16 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
 - [x] Reject malformed/truncated metadata, missing head-state evidence, duplicate connections,
       clean truncated uploads and collector errors in the evidence validator. Observe regression
       failures before the fixes; 51 harness and 17 core fixture tests pass afterward.
+- [x] Append the exact 2048-byte chunked POST against a 1024-byte cap after the original ten-case
+      sequence. Both expanded local runs execute eleven cases per target: Axum, Viceroy and Spin
+      pass eleven; Cloudflare passes the exact-size case but retains the original next-POST failure.
+      Preserve the old failed evidence. Extend Axum's TCP pipeline test to cover both its original
+      9/8-byte boundary and the exact 2048/1024-byte case. A separate built-in `Json` extractor TCP
+      test exceeds its existing 8 MiB cap by one byte, reaches custom rendering as typed inbound
+      overflow, and returns 413 without Retry-After. Ordinary JSON is constructed with `json!`.
+- [x] Prove collector Drop signals stop and waits for a gated worker, then releases and joins
+      cleanly before assertions. Removing the join makes the new regression fail; restoring it
+      passes. This is SDK-owned harness cleanup, not a claim about provider resources.
 - [ ] Close the local Cloudflare recovery failure: three matrix runs return the ingress 413
       followed by a proxy-generated 500 before the next request enters the fixture; the origin
       receives no connection. An isolated JavaScript-only cancellation control reproduces the
@@ -133,6 +143,12 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
       waived, silently retried or presented as hosted evidence. The precise native mechanism
       remains unproven. Retain the failed runs and control inputs/results in the
       [evidence record](../../audits/evidence/2026-10-21-outbound-overflow.json).
+      Subsequent expanded runs retain that failure. Controlled front-proxy requests fail after
+      cancellation both with and without `Connection: close`; direct requests to Wrangler's own
+      user-worker listener recover for both JavaScript-only and actual EdgeZero artifacts.
+      This narrows the observed boundary, not the native cause. The direct listener is diagnostic
+      only and cannot replace the standard gate. Retain inputs, failed diagnostic setup attempts
+      and results in the [boundary record](../../audits/evidence/2026-10-21-overflow-boundaries.json).
 - [x] Verify the generated-app and demo TCP proof through their unchanged standard Axum
       entrypoints. The generated proof reuses the existing ignored workspace test, discovers
       the native executable from Cargo JSON and canonicalizes manifest aliases. A shared
@@ -163,6 +179,18 @@ decoder requirement changes. Existing CI steps execute the new checks without ad
 The demo step requires the fallback sentinel and forwards `--include-ignored` to both test
 listing and execution, preventing a later ignore annotation from silently skipping the proof.
 Seven guard regressions cover all selection modes, missing/zero tests and failure propagation.
+Independent acceptance and platform investigations selected the appended exact-size probe and
+gated Drop test over changing transports or SDK versions. The topology control reads only the
+generated loopback user-worker address from the private local runtime log; no proxy secret is
+published. Omitting a connection header, bypassing the proxy, delaying recovery, draining bodies
+or replaying POST is not adopted as a repair. Fastly G2 and the approved Interfaces digest remain
+unchanged.
+
+The boundary checkpoint passes all five root Rust gates, 53 harness and 17 qualification-enabled
+core fixture tests, fixture clippy, 14 Axum connection tests and docs format/lint/build. The 25
+nonzero/evidence guard tests and dependency/docs/legacy checks pass; the inventory remains
+unqualified. Independent acceptance, quality and evidence reviews found no remaining scoped
+defect. Both expanded local runtime matrices deliberately exit 1 for Cloudflare recovery.
 
 Generated/demo TCP commands (loopback permission required; generated dependencies must be cached
 for offline execution):
