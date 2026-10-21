@@ -662,8 +662,9 @@ where
 /// Dispatch with per-id store registries built from baked metadata.
 ///
 /// Cloudflare capability map:
-/// - KV (Multi): each declared id opens its own KV namespace binding via
-///   `EDGEZERO__STORES__KV__<ID>__NAME` (default = id).
+/// - KV (Multi): each declared id binds its KV namespace lazily via
+///   `EDGEZERO__STORES__KV__<ID>__NAME` (default = id). Opening occurs on
+///   first use, with a typed failure retained for that request only.
 /// - Config (Multi): each declared id opens its own KV namespace via
 ///   `EDGEZERO__STORES__CONFIG__<ID>__NAME`, read asynchronously.
 /// - Secrets (Single): one shared [`CloudflareSecretStore`] is registered
@@ -676,7 +677,7 @@ pub(crate) async fn dispatch_with_registries(
     inputs: RegistryInputs<'_>,
 ) -> Result<CfResponse, WorkerError> {
     let request_start = app.monotonic_now();
-    let kv_registry = build_kv_registry(&env, inputs.kv_meta, inputs.env_config)?;
+    let kv_registry = build_kv_registry(&env, inputs.kv_meta, inputs.env_config);
     let config_registry = build_config_registry(&env, inputs.config_meta, inputs.env_config);
     let secret_registry = build_secret_registry(&env, inputs.secret_meta, inputs.env_config);
     dispatch_with_handles(
@@ -705,9 +706,7 @@ pub(crate) fn resolve_kv_handle(
         Ok(store) => Ok(Some(KvHandle::new(Arc::new(store)))),
         Err(err) => {
             if kv_required {
-                return Err(WorkerError::RustError(format!(
-                    "KV binding '{kv_binding}' is explicitly configured but could not be opened: {err}"
-                )));
+                return Err(WorkerError::RustError(err.to_string()));
             }
             warn_missing_kv_binding_once(kv_binding, &err);
             Ok(None)
@@ -759,27 +758,21 @@ fn build_kv_registry(
     env: &Env,
     kv_meta: Option<StoreMetadata>,
     env_config: &EnvConfig,
-) -> Result<Option<KvRegistry>, WorkerError> {
-    let Some(meta) = kv_meta else {
-        return Ok(None);
-    };
+) -> Option<KvRegistry> {
+    let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
         let binding = env_config.store_name("kv", id);
-        // Required per-id: `[stores.kv]` is declared, so failure to open is a
-        // runtime error rather than a silent skip.
-        let Some(handle) = resolve_kv_handle(env, &binding, true)? else {
-            continue;
-        };
-        by_id.insert((*id).to_owned(), handle);
-    }
-    let default_id = meta.default.to_owned();
-    if !by_id.contains_key(&default_id) {
-        log::warn!(
-            "KV registry default id `{default_id}` could not be opened; dropping the KV registry"
+        by_id.insert(
+            (*id).to_owned(),
+            KvHandle::new(Arc::new(CloudflareKvStore::declared(
+                env.clone(),
+                id,
+                binding,
+            ))),
         );
     }
-    Ok(StoreRegistry::from_parts(by_id, default_id))
+    StoreRegistry::from_parts(by_id, meta.default.to_owned())
 }
 
 fn build_secret_registry(

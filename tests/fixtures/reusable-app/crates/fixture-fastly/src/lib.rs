@@ -299,7 +299,12 @@ impl Hooks for MeasuredApp {
         FixtureApp::routes()
     }
     fn stores() -> edgezero_core::app::StoresMetadata {
-        FixtureApp::stores()
+        let mut stores = FixtureApp::stores();
+        stores.kv = Some(edgezero_core::app::StoreMetadata {
+            default: "fixture_kv",
+            ids: &["fixture_kv", "missing_fixture_kv"],
+        });
+        stores
     }
     fn configure(app: &mut App) -> Result<(), EdgeError> {
         if PANIC_IN_CONSTRUCTOR.swap(false, Ordering::SeqCst) {
@@ -355,7 +360,7 @@ impl Hooks for MeasuredApp {
 
 /// Controlled fixture inputs exercise real adapter boundaries, not provider outages.
 pub fn faults() -> Result<(), Error> {
-    use edgezero_core::app::{StoreMetadata, StoresMetadata};
+    use edgezero_adapter_fastly::request::FastlyService;
     finish(serve_custom(
         serving(),
         |mut req: Request, retained: &mut Sandbox<App>| {
@@ -376,39 +381,37 @@ pub fn faults() -> Result<(), Error> {
                     Request::get("http://fault-origin/abort").send("fault-origin")?;
                 req.set_body(upstream.take_body());
             }
-            let stores = if path == "/recoverable-store-error" || path == "/terminal-store-error" {
-                StoresMetadata {
-                    kv: Some(StoreMetadata {
-                        default: "missing_fixture_store",
-                        ids: &["missing_fixture_store"],
-                    }),
-                    ..MeasuredApp::stores()
+            let prepare = |raw: &mut Request, extensions: &mut Extensions| {
+                if path == "/collect-error" || path == "/inbound-error" {
+                    raw.set_url(format!("http://example.com/probe{}", path));
                 }
-            } else {
-                MeasuredApp::stores()
+                extensions.insert(obs.clone());
             };
-            let result = send_request_with_registries_and_hooks(
-                app,
-                stores,
-                req,
-                |raw, extensions| {
-                    if path == "/collect-error" || path == "/inbound-error" {
-                        raw.set_url(format!("http://example.com/probe{}", path));
-                    }
-                    extensions.insert(obs.clone());
-                },
-                |response| {
-                    if path == "/collect-error" {
-                        *response.status_mut() = StatusCode::OK;
-                        *response.body_mut() = Body::from_stream(futures::stream::once(async {
-                            Err(EdgeError::internal(std::io::Error::other(
-                                "injected core stream failure",
-                            )))
-                        }));
-                    }
-                    response.status()
-                },
-            );
+            let finalize = |response: &mut CoreResponse| {
+                if path == "/collect-error" {
+                    *response.status_mut() = StatusCode::OK;
+                    *response.body_mut() = Body::from_stream(futures::stream::once(async {
+                        Err(EdgeError::internal(std::io::Error::other(
+                            "injected core stream failure",
+                        )))
+                    }));
+                }
+                response.status()
+            };
+            let result = if path == "/recoverable-store-error" || path == "/terminal-store-error" {
+                FastlyService::new(app)
+                    .with_kv("missing_fixture_store")
+                    .require_kv()
+                    .send_request_with_hooks(req, prepare, finalize)
+            } else {
+                send_request_with_registries_and_hooks(
+                    app,
+                    MeasuredApp::stores(),
+                    req,
+                    prepare,
+                    finalize,
+                )
+            };
             match result {
                 Ok(status) => {
                     if path == "/inbound-error" {

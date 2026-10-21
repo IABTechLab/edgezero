@@ -611,9 +611,10 @@ where
 /// Dispatch with per-id store registries built from baked metadata.
 ///
 /// Spin capability map:
-/// - KV: **Multi** — each declared id opens its own [`SpinKvStore`] under the
+/// - KV: **Multi** — each declared id lazily opens its [`SpinKvStore`] on use under the
 ///   label resolved from `EDGEZERO__STORES__KV__<ID>__NAME`. Optional
 ///   `EDGEZERO__STORES__KV__<ID>__MAX_LIST_KEYS` overrides the paging cap.
+///   A settled open failure is typed and retained for that request only.
 /// - Config: **Multi** — each declared id binds its own [`SpinConfigStore`]
 ///   under the label resolved from `EDGEZERO__STORES__CONFIG__<ID>__NAME`.
 ///   KV-backed under the hood (was variables-backed up through 2026-Q2).
@@ -628,7 +629,7 @@ pub(crate) async fn dispatch_with_registries(
     env: &EnvConfig,
 ) -> anyhow::Result<SpinResponse> {
     let request_start = app.monotonic_now();
-    let kv_registry = build_kv_registry(kv_meta, env).await?;
+    let kv_registry = build_kv_registry(kv_meta, env);
     let config_registry = build_config_registry(config_meta, env);
     let secret_registry = build_secret_registry(secret_meta, env);
     dispatch_with_handles(
@@ -687,13 +688,8 @@ fn synthesise_store_registries(
     (config_registry, kv_registry, secret_registry)
 }
 
-async fn build_kv_registry(
-    kv_meta: Option<StoreMetadata>,
-    env: &EnvConfig,
-) -> anyhow::Result<Option<KvRegistry>> {
-    let Some(meta) = kv_meta else {
-        return Ok(None);
-    };
+fn build_kv_registry(kv_meta: Option<StoreMetadata>, env: &EnvConfig) -> Option<KvRegistry> {
+    let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
         let label = env.store_name("kv", id);
@@ -701,23 +697,12 @@ async fn build_kv_registry(
             .store_setting("kv", id, "MAX_LIST_KEYS")
             .and_then(|raw| raw.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_LIST_KEYS);
-        match SpinKvStore::open_with_max_list_keys(&label, max_list_keys).await {
-            Ok(store) => {
-                by_id.insert((*id).to_owned(), KvHandle::new(Arc::new(store)));
-            }
-            Err(err) => {
-                // Required: `[stores.kv]` is declared, so a missing label is a
-                // configuration error rather than a silent degradation.
-                return Err(anyhow::anyhow!(
-                    "Spin KV store '{label}' (id `{id}`) is explicitly configured but could not be opened: {err}"
-                ));
-            }
-        }
+        by_id.insert(
+            (*id).to_owned(),
+            KvHandle::new(Arc::new(SpinKvStore::declared(id, label, max_list_keys))),
+        );
     }
-    // For Spin, KV open is required — any failure already returns Err
-    // above, so the default id is guaranteed to be in `by_id` here.
-    // `from_parts` keeps the API symmetric with the other adapters.
-    Ok(StoreRegistry::from_parts(by_id, meta.default.to_owned()))
+    StoreRegistry::from_parts(by_id, meta.default.to_owned())
 }
 
 fn build_config_registry(

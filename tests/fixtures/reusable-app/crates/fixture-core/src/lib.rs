@@ -14,6 +14,43 @@ static BUILDS: AtomicUsize = AtomicUsize::new(0);
 static ORDINAL: AtomicUsize = AtomicUsize::new(0);
 static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+static TELEMETRY: OnceLock<fn(&str)> = OnceLock::new();
+
+struct FixtureLogger;
+impl log::Log for FixtureLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            emit(
+                serde_json::json!({"event":"fixture_log","instance":instance_id(),
+                "level":record.level().to_string(),"target":record.target(),"message":record.args().to_string()}),
+            );
+        }
+    }
+    fn flush(&self) {}
+}
+
+pub fn init_fixture_logging(sink: fn(&str)) -> Result<(), EdgeError> {
+    static LOGGER: FixtureLogger = FixtureLogger;
+    static INSTALLED: OnceLock<Result<(), log::SetLoggerError>> = OnceLock::new();
+    TELEMETRY.get_or_init(|| sink);
+    INSTALLED
+        .get_or_init(|| log::set_logger(&LOGGER))
+        .as_ref()
+        .map_err(|_error| {
+            EdgeError::internal(std::io::Error::other("fixture logger installation failed"))
+        })?;
+    log::set_max_level(log::LevelFilter::Warn);
+    Ok(())
+}
+
+fn emit(event: serde_json::Value) {
+    if let Some(sink) = TELEMETRY.get() {
+        sink(&event.to_string());
+    }
+}
 
 pub fn instance_id() -> Option<&'static str> {
     INSTANCE.get().map(String::as_str)
@@ -93,6 +130,8 @@ impl Hooks for FixtureApp {
             .get("/probe/{id}", probe)
             .post("/probe/{id}", probe)
             .get("/bindings", bindings)
+            .get("/declared-kv/free", declared_kv_free)
+            .get("/declared-kv/{store}/{operation}", declared_kv)
             .get("/cookies", cookies)
             .get("/rendered-error", rendered_error)
             .get("/stream", backend)
@@ -102,20 +141,36 @@ impl Hooks for FixtureApp {
             .build()
     }
 }
-/// Swaps only the KV binding metadata to inject a required-binding failure.
-///
-/// Build and dispatch this app independently. Its default configuration leaves
-/// the healthy fixture's build counter unchanged.
-pub struct MissingBindingApp;
-impl Hooks for MissingBindingApp {
+/// Exercises an unused missing declaration beside a healthy default binding.
+pub struct DeclaredKvApp;
+impl Hooks for DeclaredKvApp {
+    fn configure(app: &mut App) -> Result<(), EdgeError> {
+        FixtureApp::configure(app)?;
+        app.set_ingress_admission_policy(|head| {
+            let token = head.headers().get("x-request-token").and_then(|value|value.to_str().ok()).unwrap_or("missing").to_owned();
+            edgezero_core::AdmissionDecision::Admit {
+                completion: edgezero_core::ResponseEgressCompletion::new(move |report| {
+                    emit(serde_json::json!({"event":"egress_terminal","instance":instance_id(),"token":token,
+                        "outcome":format!("{:?}",report.outcome),"body_kind":format!("{:?}",report.body_kind),
+                        "bytes_written":report.bytes_written,"fallback":report.fallback_disposition.map(|value|format!("{value:?}"))}));
+                }),
+                grant: edgezero_core::IngressGrant::empty(),
+                read_deadline: head.read_deadline_after(edgezero_core::DEFAULT_INBOUND_READ_BUDGET),
+            }
+        });
+        Ok(())
+    }
+    fn owns_logging() -> bool {
+        true
+    }
     fn routes() -> RouterService {
         FixtureApp::routes()
     }
     fn stores() -> StoresMetadata {
         let mut stores = FixtureApp::stores();
         stores.kv = Some(StoreMetadata {
-            default: "missing_fixture_kv",
-            ids: &["missing_fixture_kv"],
+            default: "fixture_kv",
+            ids: &["fixture_kv", "missing_fixture_kv"],
         });
         stores
     }
@@ -285,6 +340,43 @@ async fn bindings(ctx: RequestContext) -> Result<String, EdgeError> {
     .to_string())
 }
 
+#[action]
+async fn declared_kv_free(ctx: RequestContext) -> Result<String, EdgeError> {
+    let mut report = record(&ctx).await?;
+    report["declared_kv"] = serde_json::json!(ctx.kv_store("missing_fixture_kv").is_some());
+    report["default_kv"] = serde_json::json!(ctx.kv_store_default().is_some());
+    report["unknown_kv"] = serde_json::json!(ctx.kv_store("undeclared").is_some());
+    Ok(report.to_string())
+}
+
+#[action]
+async fn declared_kv(ctx: RequestContext) -> Result<String, EdgeError> {
+    let mut report = record(&ctx).await?;
+    let name = match ctx.path_params().get("store") {
+        Some("missing") => "missing_fixture_kv",
+        Some("linked") => "fixture_kv",
+        _ => return Err(EdgeError::bad_request("unknown controlled KV store")),
+    };
+    let store = ctx
+        .kv_store(name)
+        .ok_or_else(|| missing_binding("declared KV handle absent"))?;
+    let outcome = match ctx.path_params().get("operation") {
+        Some("read") => serde_json::json!(store.get::<String>("f8-key").await?),
+        Some("write") => {
+            store.put("f8-key", &"f8-value").await?;
+            serde_json::json!("written")
+        }
+        Some("delete") => {
+            store.delete("f8-key").await?;
+            serde_json::json!("deleted")
+        }
+        Some("list") => serde_json::json!(store.list_keys_page("f8-", None, 100).await?.keys),
+        _ => return Err(EdgeError::bad_request("unknown controlled KV operation")),
+    };
+    report["kv_outcome"] = outcome;
+    Ok(report.to_string())
+}
+
 struct ObserveRequest;
 #[async_trait::async_trait(?Send)]
 impl edgezero_core::middleware::Middleware for ObserveRequest {
@@ -300,6 +392,10 @@ impl edgezero_core::middleware::Middleware for ObserveRequest {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("missing");
             let observation = observe(candidate, None);
+            emit(
+                serde_json::json!({"event":"request_start","instance":observation.instance,
+                "ordinal":observation.ordinal,"token":candidate,"correlation":observation.correlation,"native_id":observation.native_id}),
+            );
             ctx.extensions_mut().insert(observation);
         }
         let lifetime = ctx.extensions().get::<ResponseLifetime>().cloned();

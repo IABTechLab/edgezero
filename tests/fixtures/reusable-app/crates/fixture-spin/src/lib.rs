@@ -9,10 +9,10 @@ use anyhow::Context as _;
 mod progress;
 use edgezero_core::app::{App, Hooks};
 #[cfg(not(feature = "qualification"))]
-use fixture_core::FixtureApp;
+use fixture_core::DeclaredKvApp as FixtureApp;
 #[cfg(feature = "qualification")]
 use fixture_core::qualification::QualificationApp as FixtureApp;
-use fixture_core::{MissingBindingApp, OtherApp, retained_app};
+use fixture_core::{OtherApp, retained_app};
 use spin_sdk::{
     http::{IntoResponse, Request},
     http_service,
@@ -20,6 +20,10 @@ use spin_sdk::{
 use std::sync::OnceLock;
 static APP: OnceLock<App> = OnceLock::new();
 static OTHER_APP: OnceLock<App> = OnceLock::new();
+
+fn telemetry(line: &str) {
+    eprintln!("{line}");
+}
 
 fn retained_app_for_dispatch<A: Hooks>(cell: &OnceLock<App>) -> anyhow::Result<&App> {
     retained_app::<A>(cell, edgezero_adapter_spin::SPIN_PLATFORM)
@@ -34,12 +38,13 @@ async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinRespo
     }
     if !FixtureApp::owns_logging() {
         drop(edgezero_adapter_spin::init_logger());
+    } else {
+        fixture_core::init_fixture_logging(telemetry)?;
     }
     let retained = std::env::var("FIXTURE_MODE").as_deref() == Ok("retained");
     if retained && req.uri().path() == "/binding-failure" {
-        let app = App::build::<MissingBindingApp>(edgezero_adapter_spin::SPIN_PLATFORM)
-            .context("application configuration failed")?;
-        let result = edgezero_adapter_spin::dispatch_app::<MissingBindingApp>(&app, req).await;
+        let result =
+            edgezero_adapter_spin::key_value_store::SpinKvStore::open("missing_fixture_kv").await;
         return match result {
             Err(error) => {
                 let body = serde_json::json!({"instance":fixture_core::instance_id(),"source":"injected_required_binding","error":format!("{error:#}")}).to_string();
@@ -52,7 +57,9 @@ async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinRespo
                         anyhow::anyhow!("fixture response conversion failed: {error:?}")
                     })
             }
-            Ok(response) => Ok(response),
+            Ok(_) => Err(anyhow::anyhow!(
+                "injected missing binding unexpectedly opened"
+            )),
         };
     }
     if req.uri().path() == "/bindings" {

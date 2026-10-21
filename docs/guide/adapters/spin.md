@@ -126,7 +126,8 @@ full rationale):
 - **TTL is unsupported.** Spin's `key_value::Store::set` accepts no
   expiry. `put_bytes_with_ttl` returns
   `KvError::Unsupported { operation: "put_bytes_with_ttl" }` (mapped to
-  HTTP 501); never silently strips the TTL.
+  HTTP 501) after a successful open; a failed declared binding returns its typed
+  `OpenFailed` reason first. It never silently strips the TTL.
 - **Listing is capped.** `Store::get_keys()` is unbounded, so the
   adapter materialises the key list, filters by prefix, sorts, and pages
   client-side. A `max_list_keys` cap (default `1000`, override via

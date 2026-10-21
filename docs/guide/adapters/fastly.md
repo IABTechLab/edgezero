@@ -497,8 +497,10 @@ Follow this order inside a callback:
 2. Resolve baked logging with `FastlyLogging::from(MyApp::logging_for("fastly"))`.
    Use `sandbox.setup_once` to guard successful logger setup independently from
    app construction. Failed setup leaves the guard unset; partial side effects
-   are not rolled back, so retries must be safe. The closed send helper opens fresh
-   logical store bindings after logger setup.
+   are not rolled back, so retries must be safe. The closed send helper installs fresh,
+   request-local logical KV bindings after logger setup, without opening unused stores.
+   First use opens once per request; failed declarations retain a typed handle rather than
+   failing KV-free routes. Explicit `FastlyService::require_kv()` remains fail-before-dispatch.
 3. Call `sandbox.initialize` with `App::build::<MyApp>(FASTLY_PLATFORM)` for a core
    app, mapping its typed error at the adapter boundary. Success fills the slot;
    failure leaves it empty and returns the error unchanged. Read the value

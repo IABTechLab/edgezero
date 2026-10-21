@@ -1726,6 +1726,11 @@ TS accepts that detached and fallback responses carry no TS headers on Fastly, a
 **Adapters:** Fastly MUST. Cloudflare and Spin SHOULD. Axum keeps its boot-time failure, which happens before it accepts any request.
 **Related:** EZ-17 (an explicitly required store keeps the "no response attempted" outcome).
 
+**Adoption decision (2026-10-21):** The requester approved including Cloudflare and Spin in
+the same implementation. EZ-20.7 and acceptance criterion 4 therefore apply to this delivery;
+Axum's boot-time policy remains unchanged. Local evidence does not replace criterion 5 or
+hosted outage/restoration qualification.
+
 #### Need
 
 TS's Fastly `Hooks::stores()` declares the KV store `trusted_server_kv` (`ts:crates/trusted-server-adapter-fastly/src/app.rs:1347-1362`; `ts:edgezero.toml:23-25`). Neither TS's `fastly.toml` (`ts:fastly.toml:25-42`) nor its Viceroy template (`ts:crates/trusted-server-integration-tests/fixtures/configs/viceroy-template.toml:9-59`) links it, and TS reads no EdgeZero KV store on Fastly (only Cloudflare and Spin call `kv_store_default()`, `ts:crates/trusted-server-adapter-cloudflare/src/platform.rs:613`, `ts:crates/trusted-server-adapter-spin/src/platform.rs:721`). Passing `stores()` to the canonical helper therefore fails every request except TS's health probe, which short-circuits first (`ts:crates/trusted-server-adapter-fastly/src/main.rs:173-176`). One unlinked store in a deployment would take down every route, including routes that never touch KV.
@@ -1761,9 +1766,9 @@ TS's Fastly `Hooks::stores()` declares the KV store `trusted_server_kv` (`ts:cra
 - Changing Axum's boot-time failure.
 - Changing config or secret store behavior.
 
-#### Open questions
+#### Resolved decision
 
-1. Should Cloudflare and Spin change in the same release? TS's preferred answer is yes, so the three serverless adapters share one rule for declared KV, as they already do for config.
+Cloudflare and Spin change with Fastly in the same release, following the adoption decision above.
 
 #### Interim for Trusted Server
 

@@ -71,6 +71,20 @@ separately from the portable API and must be considered when declaring required 
   a bounded HTTPS probe runner and a fail-closed correlated ownership-evidence validator.
   Compilation and local tests are not hosted qualification; no capability is promoted.
 
+### Declared KV Failure Bindings
+
+- Preserve all declared KV bindings on Fastly, Cloudflare and Spin without opening stores
+  before admission or routing. First use returns payload-free `KvError::OpenFailed` with
+  `KvStoreOpenFailure::{MissingBinding, InvalidConfiguration, Unavailable}` (500/500/503).
+- Share settled opening results within one request, retry on subsequent requests, and
+  deduplicate boot warnings by compiled logical ID without caching provider availability.
+  Spin cancellation leaves unfinished initialization retryable; operations release the
+  initialization lock before provider I/O. Validate Cloudflare namespace method shapes.
+- Retain explicit fail-before-dispatch required-store behavior and Axum startup semantics.
+  Add SDK/source-harness tests and real local runtime cases for unused declarations,
+  sanitized errors, warning deduplication, completion ownership and linked-store CRUD.
+  These do not qualify hosted outage recovery, KV allocation, or stronger capabilities.
+
 ### Outbound HTTP And Batches
 
 - Add a separate bounded local overflow characterization suite through all four standard

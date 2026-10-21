@@ -449,15 +449,57 @@ core `src/key_value_store.rs` and `store_registry.rs`; adapter tests and fixture
       `scripts/smoke_test_reusable_app.sh --adapter all --suite smoke` with nonzero case IDs and
       actual read/write/delete/list results. Apply the task lint card.
 
-- [ ] Add missing declaration versus declared-open-failure cases, provider StoreNotFound versus
+- [x] Add missing declaration versus declared-open-failure cases, provider StoreNotFound versus
       transient error, and unaffected status-route dispatch. Honor explicit `require_kv` where requested.
-- [ ] Preserve failed declarations as typed handles; defer opening/failure to actual use where
+- [x] Preserve failed declarations as typed handles; defer opening/failure to actual use where
       required. Do not retain transient availability errors as permanent absence or indiscriminately
       fail every request. Keep bounded extraction/secret/config behavior from the outbound baseline.
 - [ ] Test failed read/write/delete/list behavior and recovery on a later request with the binding
       restored. Source/provider error payloads remain off the wire and response completion still runs.
 - [ ] Run changed adapter unit/contract tests and required real runtime legs. Suggested commit:
       `fix: preserve declared KV bindings through provider open failure`.
+
+### F8 Implementation Checkpoint (2026-10-21)
+
+The requester explicitly adopted Cloudflare and Spin alongside Fastly. All three canonical
+registry paths now install declarations without provider opens. The first operation retains a
+settled result only in its request-local binding. `KvStoreOpenFailure` separates missing binding,
+invalid configuration and provider unavailability without storing provider text or resolved names;
+rendering is 500/500/503. Named/default declarations remain resolvable; unknown IDs remain absent.
+Explicit required-store failure still precedes prepare/delivery, and Axum startup is unchanged.
+
+Lovelace investigated SDK classification and ownership, proposing request-local initialization
+rather than per-operation opening because Fastly host handles have no Rust close operation.
+Ampere investigated async cancellation and runtime evidence. The selected Spin async mutex
+serializes only initialization; operations clone the owned handle and release that lock before I/O.
+Cancellation before settlement leaves the cell empty. Cloudflare checks callable namespace methods
+before the SDK's unchecked casts. Only warning membership for compiled IDs is global: no eviction,
+runtime labels, handles, or availability state survives requests. Implementation was centralized.
+
+Core fake-binding tests and SDK/source-harness tests distinguish scripted fresh-request recovery
+from real provider restoration. The local smoke fixtures retain the same strict
+`free/read/read/free` sequence, explicit instance identity, 0/1/1/1 warning receipts and actual
+completion reports, followed by separately attributed healthy-store CRUD. Each linked operation
+also needs one terminal report, and warning counts are rechecked after runtime shutdown.
+The sequential Cloudflare/Spin proof precedes overlap, which can create multiple runtime instances;
+it does not disable or relax the overlap checks. Retained failed runs remain evidence, not waivers.
+
+Verification passed all five root Rust gates (794 core tests), actual Cloudflare JS/WASM acquisition
+tests, Fastly WASI contracts, Spin source-harness cancellation/classification tests, fixture tests,
+and real-target clippy. The final four-runtime smoke run passes all 24 F8 request cases and all
+three post-shutdown warning checks, with no failed case. The overall smoke result is still exit 2:
+the separate Spin overlap observations remain unverified (per-request and retained in final C).
+Smoke probes after the
+new retained-prefix checks are warm, not cold-start benchmark evidence; benchmark ordering is unchanged.
+
+The checkpoint evidence records exact commands, source/tool/artifact hashes and outcomes in
+`docs/audits/evidence/2026-10-21-declared-kv.json`. Consumer acceptance criterion 5, actual provider
+outage/restoration and hosted qualification remain open. The untouched G2 failure still blocks
+dependent Fastly migration; no outbound API, SDK/decoder pin, capability or approved API digest
+changes in this independent follow-up.
+All 255 acceptance criteria and the reviewed leg set remain unchanged. The inventory records
+the implementation adoption separately; its formal release approvals and planned cutover commands
+are not promoted by these local smoke results.
 
 ## F9: Application Assembly and Axum Task Group
 

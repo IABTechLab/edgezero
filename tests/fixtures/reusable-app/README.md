@@ -440,6 +440,17 @@ ID and distinguish `fixture-logs ::` endpoint records from echoed stdout. The
 negative control verifies that naively wrapping `run_app` with an enabled global
 logger fails on its second installation.
 
+The retained serverless smoke fixtures also declare an unlinked KV ID alongside the
+healthy default. `/declared-kv/free`, two `/declared-kv/missing/read` requests, then
+`/declared-kv/free` must produce 200/500/500/200 in one observed instance, with warning
+counts 0/1/1/1. A separate linked-store write/read/list/delete sequence checks continuity.
+Each request has exactly one actual egress terminal; counts are checked again after
+runtime shutdown. Fastly endpoint receipts are distinguished from stdout echoes;
+Cloudflare/Spin use a fixture-owned logger with instance-tagged structured receipts.
+Fastly reports `Completed`, Cloudflare/Spin `HostHandoff`; neither qualifies peer delivery.
+SDK/source-harness tests separately cover all failed operations, typed reasons, and
+fresh-request recovery. Linked-store continuity is not a provider outage/restoration proof.
+
 The interrupted-upstream case waits until the client observes its partial body before
 releasing the backend abort, proving physical progressive delivery. The immediate
 zero-byte source-failure case instead requires exactly one response-scoped terminal

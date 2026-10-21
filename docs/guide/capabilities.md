@@ -199,6 +199,15 @@ than treating them as absent. The
 [configuration design](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/specs/2026-06-16-blob-app-config.md#632-bounded-capability-scoped-extraction-reads)
 defines the normative accounting, cancellation, error, and promotion requirements.
 
+Declared **KV** stores use a separate policy on Fastly, Cloudflare and Spin: registry
+construction performs no provider opens, every declared ID remains present, and first use
+returns a typed `KvError::OpenFailed` on failure. Missing/invalid bindings map to 500;
+provider unavailability maps to 503. Settled open results are request-local; only warning
+membership for compiled IDs survives requests. Explicit required-store opening remains
+fail-fast, while KV-free routes can serve normally. Axum startup behavior is unchanged.
+See [declared KV failures](./kv.md#declared-store-failures). This does not strengthen
+config-read or provider-allocation capabilities.
+
 Application assembly is fallible. `Hooks::configure(&mut App) -> Result<(), EdgeError>` runs after
 the runtime adapter installs `PlatformMetadata` and before EdgeZero request conversion, body
 polling, or dispatch. The hard-cut, core-owned `App::build::<A>(platform)` constructor requires

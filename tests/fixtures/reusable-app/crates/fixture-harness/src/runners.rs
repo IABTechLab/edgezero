@@ -422,6 +422,9 @@ fn fastly_variant(
                 json!({"variant":variant,"repetition":repetition,"assertion":"idle_fresh_initialization"}),
             ))?;
         }
+        if args.suite == "smoke" && variant == "c" {
+            declared_kv_checks("fastly", port, &log, records)?;
+        }
         let bindings = req(port, "/bindings")?;
         require(
             guest(&bindings)? == json!({"config":true,"kv":true,"secrets":true,"unknown":false}),
@@ -455,6 +458,14 @@ fn fastly_variant(
         }
         records.push(json!({"status":"pass","variant":variant,"repetition":repetition,"assertions":["initialization","isolation","cookies","rendered_error"]}))
     })();
+    let outcome = outcome.and_then(|()| {
+        if args.suite == "smoke" && variant == "c" {
+            let count = declared_kv_warning_count(&fs::read_to_string(&log)?);
+            records.push(json!({"event":"declared-kv-after-shutdown","adapter":"fastly","warnings":count,"qualification":false}))?;
+            require(count == 1, "declared KV warning repeated during teardown")?;
+        }
+        Ok(())
+    });
     settle(
         records,
         &log,
@@ -462,6 +473,183 @@ fn fastly_variant(
         json!({"adapter":"fastly"}),
         outcome,
     )
+}
+
+fn declared_kv_warning_count(text: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            line.starts_with("fixture-logs :: ")
+                && line.contains(
+                    "declared Fastly KV store 'missing_fixture_kv' failed to open: missing binding",
+                )
+        })
+        .count()
+}
+
+fn validate_declared_kv_lifecycle(
+    events: &[Value],
+    token: &str,
+    expected_instance: Option<&str>,
+    expected_outcome: &str,
+) -> Result<String> {
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "request_start" && event["token"] == token)
+        .collect();
+    let ends: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "egress_terminal" && event["token"] == token)
+        .collect();
+    require(
+        starts.len() == 1 && ends.len() == 1,
+        "declared KV request lost exactly-once lifecycle evidence",
+    )?;
+    let current = starts[0]["instance"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or("missing declared KV instance")?;
+    require(
+        expected_instance.is_none_or(|expected| expected == current),
+        "declared KV sandbox turnover: deduplication unverified",
+    )?;
+    require(
+        ends[0]["instance"] == starts[0]["instance"]
+            && ends[0]["outcome"] == expected_outcome
+            && ends[0]["body_kind"] == "Application"
+            && ends[0].get("fallback") == Some(&Value::Null),
+        "declared KV terminal disposition mismatch",
+    )?;
+    Ok(current.to_owned())
+}
+
+fn provider_kv_warning_count(text: &str, adapter: &str, instance: &str) -> usize {
+    let (platform, reason) = if adapter == "spin" {
+        ("Spin", "invalid binding configuration")
+    } else {
+        ("Cloudflare", "missing binding")
+    };
+    let message =
+        format!("declared {platform} KV store 'missing_fixture_kv' failed to open: {reason}");
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["event"] == "fixture_log"
+                && event["instance"] == instance
+                && event["level"] == "WARN"
+                && event["target"] == "edgezero::boot"
+                && event["message"] == message
+        })
+        .count()
+}
+
+fn declared_kv_checks(
+    adapter: &str,
+    port: u16,
+    log: &Path,
+    records: &mut Records,
+) -> Result<String> {
+    let mut instance = None;
+    for (path, status, warnings) in [
+        ("/declared-kv/free", 200, 0),
+        ("/declared-kv/missing/read", 500, 1),
+        ("/declared-kv/missing/read", 500, 1),
+        ("/declared-kv/free", 200, 1),
+    ] {
+        let token = token();
+        let response = net::request(port, path, &token, None, None)?;
+        require(response["status"] == status, "declared KV status mismatch")?;
+        if status == 200 {
+            let value = guest(&response)?;
+            require(
+                value["declared_kv"] == true
+                    && value["default_kv"] == true
+                    && value["unknown_kv"] == false
+                    && value["builds"] == 1,
+                "declared KV registry or retained application mismatch",
+            )?;
+        } else {
+            let body = response["body"]
+                .as_str()
+                .ok_or("missing declared KV error body")?;
+            let public: Value = serde_json::from_str(body)?;
+            require(
+                public
+                    == json!({"error":{"kind":"internal","message":"internal server error","status":500}}),
+                "declared KV error gained provider diagnostics",
+            )?;
+        }
+        let mut current = None;
+        await_evidence(|| {
+            current = Some(validate_declared_kv_lifecycle(
+                &logs(log),
+                &token,
+                instance.as_deref(),
+                if adapter == "fastly" {
+                    "Completed"
+                } else {
+                    "HostHandoff"
+                },
+            )?);
+            Ok(())
+        })?;
+        instance = current;
+        let text = fs::read_to_string(log)?;
+        let count = if adapter == "fastly" {
+            declared_kv_warning_count(&text)
+        } else {
+            provider_kv_warning_count(
+                &fs::read_to_string(log)?,
+                adapter,
+                instance.as_deref().ok_or("missing declared KV instance")?,
+            )
+        };
+        require(count == warnings, "declared KV warning count mismatch")?;
+        records.push(json!({"event":"declared-kv-case","adapter":adapter,"path":path,"token":token,"instance":instance,
+            "client":response,"warnings":count,"status":"pass","qualification":false}))?;
+    }
+    for (operation, expected) in [
+        ("write", json!("written")),
+        ("read", json!("f8-value")),
+        ("list", json!(["f8-key"])),
+        ("delete", json!("deleted")),
+    ] {
+        let response = req(port, &format!("/declared-kv/linked/{operation}"))?;
+        require(
+            guest(&response)?["kv_outcome"] == expected,
+            "linked KV operation failed after declared failure",
+        )?;
+        let token = response["token"]
+            .as_str()
+            .ok_or("missing linked KV token")?;
+        let mut linked_instance = None;
+        await_evidence(|| {
+            linked_instance = Some(validate_declared_kv_lifecycle(
+                &logs(log),
+                token,
+                None,
+                if adapter == "fastly" {
+                    "Completed"
+                } else {
+                    "HostHandoff"
+                },
+            )?);
+            Ok(())
+        })?;
+        records.push(json!({"event":"declared-kv-linked","adapter":adapter,"operation":operation,"instance":linked_instance,"client":response,"status":"pass","qualification":false}))?;
+    }
+    require(
+        if adapter == "fastly" {
+            declared_kv_warning_count(&fs::read_to_string(log)?)
+        } else {
+            provider_kv_warning_count(
+                &fs::read_to_string(log)?,
+                adapter,
+                instance.as_deref().ok_or("missing declared KV instance")?,
+            )
+        } == 1,
+        "declared KV warning repeated after successful linked operations",
+    )?;
+    instance.ok_or_else(|| "missing declared KV instance".into())
 }
 fn fastly_probes(
     args: &Args,
@@ -756,8 +944,24 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
         let mut command = provider_command(name, mode, &exe, &staged, &package, run, port)?;
         let log = run.join(format!("{name}-{mode}.log"));
         let mut failure = json!({"phase":"startup"});
-        let outcome = Process::start(&mut command, &log, port)
-            .and_then(|_process| provider_checks(name, mode, port, args, records, &mut failure));
+        let mut declared_instance = None;
+        let outcome = Process::start(&mut command, &log, port).and_then(|_process| {
+            // Establish single-instance dedup before overlap creates additional instances.
+            if args.suite == "smoke" && mode == "retained" && name != "axum" {
+                failure = json!({"phase":"declared_kv"});
+                declared_instance = Some(declared_kv_checks(name, port, &log, records)?);
+            }
+            provider_checks(name, mode, port, args, records, &mut failure)?;
+            Ok(())
+        });
+        let outcome = outcome.and_then(|()| {
+            if let Some(instance) = declared_instance {
+                let count = provider_kv_warning_count(&fs::read_to_string(&log)?, name, &instance);
+                require(count == 1, "declared KV warning repeated during shutdown")?;
+                records.push(json!({"event":"declared-kv-after-shutdown","adapter":name,"instance":instance,"warnings":count,"status":"pass","qualification":false}))?;
+            }
+            Ok(())
+        });
         settle(
             records,
             &log,
@@ -999,10 +1203,10 @@ fn provider_checks(
         )?;
         let failed_guest: Value = serde_json::from_str(failed["body"].as_str().unwrap())?;
         require(
-            failed_guest["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("missing_fixture_kv")),
-            "binding failure did not identify the injected missing KV binding",
+            failed_guest["error"].as_str().is_some_and(|error| {
+                error.starts_with("kv store open failed:") && !error.contains("missing_fixture_kv")
+            }),
+            "binding failure lost its sanitized open category",
         )?;
         let recovered = guest(&req(port, "/probe/after-binding-failure")?)?;
         require(
@@ -1259,6 +1463,99 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_kv_lifecycle_rejects_missing_duplicate_failed_and_cross_instance() {
+        let start = json!({"event":"request_start","token":"case","instance":"one"});
+        let end = json!({"event":"egress_terminal","token":"case","instance":"one","outcome":"Completed","body_kind":"Application","fallback":null});
+        let valid = vec![start.clone(), end.clone()];
+        assert_eq!(
+            validate_declared_kv_lifecycle(&valid, "case", Some("one"), "Completed").unwrap(),
+            "one"
+        );
+        assert!(
+            validate_declared_kv_lifecycle(&valid, "case", Some("other"), "Completed").is_err()
+        );
+        for invalid in [
+            vec![],
+            vec![start.clone()],
+            vec![end.clone()],
+            vec![start.clone(), start.clone(), end.clone()],
+            vec![start.clone(), end.clone(), end.clone()],
+        ] {
+            assert!(validate_declared_kv_lifecycle(&invalid, "case", None, "Completed").is_err());
+        }
+        for (field, value) in [
+            ("instance", json!("other")),
+            ("token", json!("other")),
+            ("outcome", json!("TransportError")),
+            ("outcome", json!("HostHandoff")),
+            ("body_kind", json!("Fallback")),
+            ("fallback", json!("Completed")),
+        ] {
+            let mut changed = end.clone();
+            changed[field] = value;
+            assert!(
+                validate_declared_kv_lifecycle(
+                    &[start.clone(), changed],
+                    "case",
+                    None,
+                    "Completed"
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn declared_kv_warning_counter_ignores_echoes_but_not_duplicates() {
+        let warning =
+            "declared Fastly KV store 'missing_fixture_kv' failed to open: missing binding";
+        assert_eq!(
+            declared_kv_warning_count(&format!("fixture-logs :: WARN {warning}\nWARN {warning}\n")),
+            1
+        );
+        assert_eq!(
+            declared_kv_warning_count(&format!(
+                "fixture-logs :: WARN {warning}\nfixture-logs :: WARN {warning}\n"
+            )),
+            2
+        );
+        assert_eq!(
+            declared_kv_warning_count("fixture-logs :: ordinary warning\n"),
+            0
+        );
+    }
+    #[test]
+    fn provider_warning_receipts_require_instance_target_and_exact_category() {
+        let valid = json!({"event":"fixture_log","instance":"one","level":"WARN","target":"edgezero::boot",
+            "message":"declared Spin KV store 'missing_fixture_kv' failed to open: invalid binding configuration"});
+        assert_eq!(
+            provider_kv_warning_count(&valid.to_string(), "spin", "one"),
+            1
+        );
+        assert_eq!(
+            provider_kv_warning_count(&valid.to_string(), "spin", "other"),
+            0
+        );
+        assert_eq!(
+            provider_kv_warning_count(&format!("{valid}\n{valid}\n"), "spin", "one"),
+            2
+        );
+        for (field, value) in [
+            ("target", "other"),
+            ("event", "other"),
+            ("level", "INFO"),
+            ("message", "provider-token"),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = json!(value);
+            assert_eq!(
+                provider_kv_warning_count(&invalid.to_string(), "spin", "one"),
+                0
+            );
+        }
+    }
     #[test]
     fn cargo_artifacts_select_the_fresh_executable_in_a_configured_target() {
         let output = concat!(

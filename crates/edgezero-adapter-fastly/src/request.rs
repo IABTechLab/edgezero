@@ -320,9 +320,9 @@ impl<'app> FastlyService<'app> {
 
     /// Open a Fastly KV Store by `name` and inject its handle.
     /// Non-required by default: an absent store logs once and
-    /// dispatch continues. Pair with `require_kv()` when the
-    /// manifest declares `[stores.kv]` and a missing store should
-    /// fail loudly.
+    /// dispatch continues. Pair with `require_kv()` to explicitly fail
+    /// before dispatch. Canonical metadata-driven declarations instead
+    /// open lazily and return typed failures only when used.
     #[must_use]
     #[inline]
     pub fn with_kv<S>(mut self, name: S) -> Self
@@ -523,13 +523,15 @@ where
 /// [`FastlyService`]'s bare-handle path binds `default_key: "default"` instead
 /// of the logical ID.
 ///
-/// KV failures escalate via `resolve_kv_handle`'s `kv_required=true` path;
-/// Failed declared config bindings remain typed failing handles, and secret
+/// Declared KV bindings open on first use, at most once per request, without blocking
+/// preparation or routes that ignore KV. Missing/invalid bindings fail at use with 500;
+/// transient open failures fail with 503. Explicit `FastlyService::require_kv()` still
+/// fails before dispatch. Failed declared config bindings remain typed failing handles, and secret
 /// bindings open their logical alias when extraction requests the value.
 ///
 /// # Errors
-/// Returns an error if a declared KV store cannot be opened, or if the
-/// underlying handler returns an error.
+/// Returns admission-abort or terminal delivery errors; declared KV opening errors are
+/// handled through the application's normal error response path when the store is used.
 #[inline]
 pub fn send_with_registries_and_hooks<State, Prepare, Finalize>(
     app: &App,
@@ -552,7 +554,7 @@ where
 /// Request registries, preparation, finalization, and body handles remain request-local.
 ///
 /// # Errors
-/// Returns store setup, admission-abort, or terminal delivery errors without sending a second response.
+/// Returns admission-abort or terminal delivery errors without sending a second response.
 #[inline]
 pub fn send_request_with_registries_and_hooks<State, Prepare, Finalize>(
     app: &App,
@@ -567,7 +569,7 @@ where
 {
     init_fastly_abi();
     let request_start = app.monotonic_now();
-    let kv_registry = build_kv_registry(stores.kv)?;
+    let kv_registry = build_kv_registry(stores.kv);
     let config_registry = build_config_registry(stores.config);
     let secret_registry = build_secret_registry(stores.secrets);
     let outcome = dispatch_with_handles(
@@ -629,26 +631,17 @@ fn synthesise_store_registries(
     (config_registry, kv_registry, secret_registry)
 }
 
-fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Result<Option<KvRegistry>, FastlyError> {
-    let Some(meta) = kv_meta else {
-        return Ok(None);
-    };
+fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Option<KvRegistry> {
+    let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
-        // KV is required: if `[stores.kv]` is declared, an id failing to open
-        // is a runtime error rather than a silent degradation.
-        let Some(handle) = resolve_kv_handle(id, true)? else {
-            continue;
-        };
-        by_id.insert((*id).to_owned(), handle);
-    }
-    let default_id = meta.default.to_owned();
-    if !by_id.contains_key(&default_id) {
-        log::warn!(
-            "KV registry default id `{default_id}` could not be opened; dropping the KV registry"
+        by_id.insert(
+            (*id).to_owned(),
+            KvHandle::new(Arc::new(FastlyKvStore::declared(id))),
         );
     }
-    Ok(StoreRegistry::from_parts(by_id, default_id))
+    let default_id = meta.default.to_owned();
+    StoreRegistry::from_parts(by_id, default_id)
 }
 
 fn build_config_registry(config_meta: Option<StoreMetadata>) -> Option<ConfigRegistry> {
@@ -913,9 +906,7 @@ fn resolve_kv_handle(
         Ok(store) => Ok(Some(KvHandle::new(Arc::new(store)))),
         Err(err) => {
             if kv_required {
-                return Err(FastlyError::msg(format!(
-                    "KV store '{kv_store_name}' is explicitly configured but could not be opened: {err}"
-                )));
+                return Err(FastlyError::new(err));
             }
             warn_missing_kv_store_once(kv_store_name, &err);
             Ok(None)
@@ -1031,6 +1022,83 @@ mod synthesis_tests {
 
     fn secret_handle() -> SecretHandle {
         SecretHandle::new(Arc::new(NoopSecretStore))
+    }
+
+    #[test]
+    fn declared_kv_registry_construction_never_opens_a_provider() {
+        let registry = build_kv_registry(Some(StoreMetadata {
+            default: "unlinked_f8_fixture",
+            ids: &["unlinked_f8_fixture"],
+        }))
+        .expect("declared registry");
+        assert!(registry.named("unlinked_f8_fixture").is_some());
+        assert!(registry.default().is_some());
+        assert!(build_kv_registry(None).is_none());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn declared_kv_open_failure_retains_binding_and_recovers() {
+        use edgezero_core::http::StatusCode;
+
+        let metadata = StoreMetadata {
+            default: "unlinked_f8_fixture",
+            ids: &["unlinked_f8_fixture"],
+        };
+        let registry = build_kv_registry(Some(metadata)).expect("declared registry");
+        assert!(registry.named("unlinked_f8_fixture").is_some());
+        assert!(registry.named("undeclared").is_none());
+        let handle = registry.default().expect("declared default binding");
+        let first_error =
+            executor::block_on(handle.get_bytes("marker")).expect_err("unlinked store");
+        assert_eq!(
+            EdgeError::from(first_error).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        for error in [
+            executor::block_on(handle.exists("marker")).unwrap_err(),
+            executor::block_on(handle.put_bytes("marker", Bytes::from_static(b"value")))
+                .unwrap_err(),
+            executor::block_on(handle.put_bytes_with_ttl(
+                "marker",
+                Bytes::from_static(b"value"),
+                Duration::from_mins(1),
+            ))
+            .unwrap_err(),
+            executor::block_on(handle.delete("marker")).unwrap_err(),
+            executor::block_on(handle.list_keys_page("", None, 1)).unwrap_err(),
+        ] {
+            assert_eq!(
+                EdgeError::from(error).status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn explicitly_required_kv_failure_precedes_prepare_and_delivery() {
+        let app = App::new(RouterService::builder().build());
+        let prepared = AtomicUsize::new(0);
+        let delivered = AtomicUsize::new(0);
+        let result = FastlyService::new(&app)
+            .with_kv("unlinked_f8_fixture")
+            .require_kv()
+            .run_request_with_hooks_for_test(
+                FastlyRequest::get("https://example.com/"),
+                |_, _| {
+                    prepared.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| (),
+                |_| {
+                    delivered.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            );
+        let error = result.expect_err("explicit required store fails before dispatch");
+        assert!(!error.to_string().contains("unlinked_f8_fixture"));
+        assert_eq!(prepared.load(Ordering::SeqCst), 0);
+        assert_eq!(delivered.load(Ordering::SeqCst), 0);
     }
 
     #[test]

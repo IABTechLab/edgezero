@@ -52,6 +52,16 @@ unread-body tests. Hosted and end-to-end legs remain open. This does not waive G
 exact approved P1 API migration; local upload response heads are observed without polling Fastly
 response bodies.
 
+### F8 Declared KV Checkpoint
+
+The requester adopted Fastly, Cloudflare and Spin together. The independent
+[F8 checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f8-implementation-checkpoint-2026-10-21)
+preserves declared KV handles without opening unused stores, provides payload-free typed
+500/503 opening failures and retries initialization on later requests. Only warning membership
+for compiled IDs survives requests. Explicit required-store and Axum startup policies remain.
+Local unit/runtime evidence is separate from consumer integration and hosted restoration.
+This follow-up does not unblock G2 or change the frozen P1 API migration.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

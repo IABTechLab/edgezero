@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
-  "source_digest": "5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec",
+  "source_digest": "86691fe7f0dfae0e489678f01eeb4385c9acdc238778801d700c7ef8585f2fd6",
   "status": "planned inventory; commands and applicability require owner review before activation",
   "external_prerequisites": [
     {
@@ -340,6 +340,7 @@
     {
       "id": "EZ-20.7 adopted@workerd",
       "status": "pending",
+      "implementation_adoption": "Requester approved same-release implementation on 2026-10-21; see docs/audits/evidence/2026-10-21-declared-kv.json. Local implementation evidence does not supply the separate release approval fields below.",
       "scope": [
         "EZ-20/acceptance/04@workerd"
       ],
@@ -353,6 +354,7 @@
     {
       "id": "EZ-20.7 adopted@spin",
       "status": "pending",
+      "implementation_adoption": "Requester approved same-release implementation on 2026-10-21; see docs/audits/evidence/2026-10-21-declared-kv.json. Local implementation evidence does not supply the separate release approval fields below.",
       "scope": [
         "EZ-20/acceptance/04@spin"
       ],
