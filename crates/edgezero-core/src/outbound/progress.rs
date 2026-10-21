@@ -378,13 +378,22 @@ mod tests {
 
     #[test]
     fn pending_readiness_preserves_original_nonclone_error() {
+        use crate::error_detail::{ProviderFailureDetail, ProviderFailurePhase, SpinFailureCause};
+
+        let detail = ProviderFailureDetail::Spin {
+            phase: ProviderFailurePhase::ResponseHeaders,
+            cause: SpinFailureCause::ConnectionRefused,
+        };
         for checked in [false, true] {
             let identity = Arc::new(());
             let counts = CompletionCounts::default();
             let calls = Rc::new(Cell::new(0));
             let mut pending = OutboundPending::new(
                 completion(
-                    Err(EdgeError::internal(IdentityError(Arc::clone(&identity)))),
+                    Err(EdgeError::internal_with_detail(
+                        IdentityError(Arc::clone(&identity)),
+                        detail,
+                    )),
                     &counts,
                     false,
                 ),
@@ -406,6 +415,7 @@ mod tests {
                 .downcast_ref::<IdentityError>()
                 .expect("original fixture identity");
             assert!(Arc::ptr_eq(&original.0, &identity));
+            assert_eq!(error.provider_failure_detail(), Some(&detail));
             assert_eq!(counts.polls.get(), 1);
             assert_eq!(counts.drops.get(), 1);
             assert_eq!(calls.get(), 1);

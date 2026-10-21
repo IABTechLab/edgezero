@@ -327,6 +327,40 @@ four adapter error/fallback paths and contracts.
 **Dependencies:** P1 and existing typed failure boundaries; D1a/D2/D3/D4 only for integration at
 the boundaries they change. Diagnostic types can land earlier. No D1b-D1d or F8/F9a prerequisite.
 
+#### F6a Foundation Checkpoint (2026-10-21)
+
+- [x] Add the text-free, fixed-size `ProviderFailureDetail` catalogs and safe numeric payloads
+      for the pinned SDKs. Adapter identity and cause share one enum; arbitrary provider strings
+      cannot be stored. Spin's documented six-value DNS allowlist projects other text to Unknown.
+- [x] Attach optional detail directly to gateway, timeout and internal errors; retain their
+      existing Display/message/status/kind/reason/wire contracts and original internal source.
+      Hard-migrate exact field patterns, without an error wrapper or compatibility variant.
+- [x] Demonstrate the retained-body diagnostic-loss regression, then preserve detail during sticky
+      error reconstruction. Cover codec/limit/rechunk/collection, batch partial failures and owned
+      pending readiness without changing existing deadline precedence or transport behavior.
+- [ ] Populate provider boundaries and observers, add actual SDK/token-bearing adapter regression
+      fixtures, then run the remaining full F6a acceptance legs and capability/evidence work below.
+
+The first three items are an independent core foundation, not completion of F6a/EZ-16. No adapter
+mapper or diagnostic capability is changed. Context replay retains the existing stringified
+internal source behavior; direct body/pending paths retain the original concrete error. Full P1
+hard migration, failed G2, F6c framing detail and hosted qualification remain separate gates.
+
+Checkpoint validation passed all five required Rust gates (27 workspace binaries, 2,103 tests,
+including 800 core tests), four compile-fail doctests, three actual-target WASM clippy checks,
+and native outbound contracts on all adapters. Viceroy passed 25 adapter contracts plus four
+core diagnostic tests; pinned Wasmtime 48.0.2 passed 35 Spin contracts. Cloudflare passed 32
+Node/WASM unit tests. Its browser contract attempts failed before test execution during local
+Safari/Firefox WebDriver initialization; that coverage is unverified, not a passing or hosted leg.
+Initial Fastly/Spin invocations lacked explicit runners; the correctly configured reruns above
+passed. Demo-core and reusable-fixture-core build checks, docs format/lint/build, dependency and
+legacy guards passed. The inventory remains 255 criteria / 511 planned legs, `qualified: false`.
+
+Independent SDK-catalog and core-flow investigations/proposals selected optional fields on the
+original variants, not a wrapper or a reconstructed pipeline error. Spec/quality reviews found no
+remaining foundation defect; their explicit getter assertions and outbound-collector coverage
+improvements were adopted. No SDK/dependency pins or capability claims changed.
+
 - [ ] Add token-bearing URLs/provider messages to regression fixtures. Assert wire bytes and
       existing Display/status/reasons do not change; retained body failures preserve diagnostic detail
       internally. Add framing-reason cases independent of provider text and policy-panic/deadline cases.

@@ -63,6 +63,18 @@ Outbound failures remain typed. Deadline expiry maps to `GatewayTimeout { cause 
 protocol, and codec failures map to inspectable `BadGatewayReason` values; resource limits use
 `ResponseLimitReason`. Applications do not need to classify errors by matching messages.
 
+`EdgeError::provider_failure_detail()` borrows optional, fixed-size provider evidence separately
+from that public classification. `ProviderFailureDetail` identifies the adapter and observation
+phase and holds only closed causes, numeric codes and I/O kinds, never provider text, URLs,
+headers or bodies. Spin DNS text recognizes only `NOERROR`, `FORMERR`, `SERVFAIL`, `NXDOMAIN`,
+`NOTIMP` and `REFUSED`; every other spelling is `Unknown`, while absent input remains absent.
+The `bad_gateway_with_detail`, `gateway_timeout_with_detail` and `internal_with_detail`
+constructors leave Display, messages, statuses, existing reasons and framework wire bytes unchanged.
+Detail survives body policies, buffered collection, retained body errors, pending handles and
+batch failures. Framework code does not log it; application logging and correlation remain policy.
+This is the diagnostic **foundation**: production adapter mappers do not populate it yet, and no
+provider-diagnostic capability or hosted qualification is claimed.
+
 `ResponseDecoding::Original` preserves encoded payload bytes and the representation headers
 that survive ordinary normalization. It does not restore hop-by-hop or invalid fields. Use it
 for relays; the demo and generated proxy handler do so. Other requests default to

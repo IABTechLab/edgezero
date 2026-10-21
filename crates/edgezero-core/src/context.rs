@@ -6,6 +6,7 @@ use crate::error::{
     BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin, ResponseLimitReason,
     StoreExtractionReason,
 };
+use crate::error_detail::ProviderFailureDetail;
 use crate::http::{Extensions, HeaderMap, Method, Request, RequestParts, Uri, Version};
 use crate::ingress::{AdmittedIngress, IngressGrant};
 use crate::outbound::HttpClient;
@@ -71,11 +72,11 @@ pub(crate) enum FallbackDrainOutcome {
 }
 
 enum StoredError {
-    BadGateway(String, BadGatewayReason),
+    BadGateway(String, BadGatewayReason, Option<ProviderFailureDetail>),
     BadRequest(String),
     ConfigOutOfDate(String, String),
-    GatewayTimeout(String, BudgetSource),
-    Internal(String),
+    GatewayTimeout(String, BudgetSource, Option<ProviderFailureDetail>),
+    Internal(String, Option<ProviderFailureDetail>),
     MethodNotAllowed(Method, Vec<Method>),
     NotFound(String),
     NotImplemented(String),
@@ -91,19 +92,30 @@ enum StoredError {
 
 impl StoredError {
     fn cancelled() -> Self {
-        Self::Internal("inbound body drain cancelled".to_owned())
+        Self::Internal("inbound body drain cancelled".to_owned(), None)
     }
 
     fn capture(error: EdgeError) -> Self {
         match error {
-            EdgeError::BadGateway { message, reason } => Self::BadGateway(message, reason),
+            EdgeError::BadGateway {
+                message,
+                reason,
+                provider_detail,
+            } => Self::BadGateway(message, reason, provider_detail),
             EdgeError::BadRequest { message } => Self::BadRequest(message),
             EdgeError::ConfigOutOfDate {
                 message,
                 field_path,
             } => Self::ConfigOutOfDate(message, field_path),
-            EdgeError::GatewayTimeout { message, cause } => Self::GatewayTimeout(message, cause),
-            EdgeError::Internal { source } => Self::Internal(source.to_string()),
+            EdgeError::GatewayTimeout {
+                message,
+                cause,
+                provider_detail,
+            } => Self::GatewayTimeout(message, cause, provider_detail),
+            EdgeError::Internal {
+                source,
+                provider_detail,
+            } => Self::Internal(source.to_string(), provider_detail),
             EdgeError::MethodNotAllowed { method, allowed } => {
                 Self::MethodNotAllowed(method, allowed)
             }
@@ -130,17 +142,28 @@ impl StoredError {
 
     fn to_edge_error(&self) -> EdgeError {
         match self {
-            Self::BadGateway(message, reason) => {
-                EdgeError::bad_gateway_with_reason(message.clone(), *reason)
-            }
+            Self::BadGateway(message, reason, detail) => match detail {
+                Some(evidence) => {
+                    EdgeError::bad_gateway_with_detail(message.clone(), *reason, *evidence)
+                }
+                None => EdgeError::bad_gateway_with_reason(message.clone(), *reason),
+            },
             Self::BadRequest(message) => EdgeError::bad_request(message.clone()),
             Self::ConfigOutOfDate(message, field_path) => {
                 EdgeError::config_out_of_date(message.clone(), field_path.clone())
             }
-            Self::GatewayTimeout(message, cause) => {
-                EdgeError::gateway_timeout_caused(message.clone(), *cause)
-            }
-            Self::Internal(rendered) => EdgeError::internal(anyhow::anyhow!(rendered.clone())),
+            Self::GatewayTimeout(message, cause, detail) => match detail {
+                Some(evidence) => {
+                    EdgeError::gateway_timeout_with_detail(message.clone(), *cause, *evidence)
+                }
+                None => EdgeError::gateway_timeout_caused(message.clone(), *cause),
+            },
+            Self::Internal(rendered, detail) => match detail {
+                Some(evidence) => {
+                    EdgeError::internal_with_detail(anyhow::anyhow!(rendered.clone()), *evidence)
+                }
+                None => EdgeError::internal(anyhow::anyhow!(rendered.clone())),
+            },
             Self::MethodNotAllowed(method, allowed) => EdgeError::MethodNotAllowed {
                 method: method.clone(),
                 allowed: allowed.clone(),
@@ -1060,6 +1083,74 @@ mod tests {
                 }
             ));
             assert_eq!(error.message(), "upstream body failed");
+        }
+    }
+
+    #[test]
+    fn provider_diagnostics_survive_sticky_body_replay() {
+        use crate::error_detail::{
+            FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::ConnectionRefused,
+        };
+        for source in [
+            EdgeError::bad_gateway_with_detail(
+                "fixed transport category",
+                BadGatewayReason::Transport,
+                detail,
+            ),
+            EdgeError::gateway_timeout_with_detail(
+                "fixed timeout category",
+                BudgetSource::PerCallTimeout,
+                detail,
+            ),
+            EdgeError::internal_with_detail(anyhow::anyhow!("fixed internal category"), detail),
+        ] {
+            let expected_display = source.to_string();
+            let expected_message = source.message();
+            let expected_kind = source.kind();
+            let expected_status = source.status();
+            let polls = Rc::new(Cell::new(0_u8));
+            let observed = Rc::clone(&polls);
+            let mut pending_error = Some(source);
+            let body = Body::from_stream(stream::poll_fn(move |_task| {
+                observed.set(observed.get().saturating_add(1));
+                Poll::Ready(pending_error.take().map(Err))
+            }));
+            let context = ctx("/body", body, PathParams::default());
+            for _ in 0_u8..2 {
+                let replayed =
+                    block_on(context.body_bytes(32)).expect_err("sticky provider failure");
+                assert_eq!(replayed.provider_failure_detail(), Some(&detail));
+                assert_eq!(replayed.kind(), expected_kind);
+                assert_eq!(replayed.status(), expected_status);
+                if let EdgeError::BadGateway { reason, .. } = &replayed {
+                    assert_eq!(*reason, BadGatewayReason::Transport);
+                }
+                if let EdgeError::GatewayTimeout { cause, .. } = &replayed {
+                    assert_eq!(*cause, BudgetSource::PerCallTimeout);
+                }
+                assert_eq!(replayed.to_string(), expected_display);
+                assert_eq!(replayed.message(), expected_message);
+            }
+            assert_eq!(
+                context
+                    .take_body()
+                    .expect_err("poisoned body")
+                    .provider_failure_detail(),
+                Some(&detail)
+            );
+            assert_eq!(
+                context
+                    .into_request()
+                    .expect_err("poisoned request body")
+                    .provider_failure_detail(),
+                Some(&detail)
+            );
+            assert_eq!(polls.get(), 1);
         }
     }
 

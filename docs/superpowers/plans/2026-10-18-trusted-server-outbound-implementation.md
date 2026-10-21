@@ -62,6 +62,15 @@ for compiled IDs survives requests. Explicit required-store and Axum startup pol
 Local unit/runtime evidence is separate from consumer integration and hosted restoration.
 This follow-up does not unblock G2 or change the frozen P1 API migration.
 
+### F6a Diagnostic Foundation Checkpoint
+
+The independent [F6a foundation](2026-10-18-trusted-server-outbound-04-followups.md#f6a-foundation-checkpoint-2026-10-21)
+adds fixed-size, text-free provider detail to existing gateway, timeout and internal errors,
+preserves public error behavior, and retains that detail through body policies, batches, pending
+handles and sticky body replay. Exact field patterns migrate without compatibility wrappers.
+Production SDK population, observers, capability claims and hosted diagnostic acceptance remain
+open. This does not change transport behavior, unblock Fastly G2 or complete P1/F6a.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

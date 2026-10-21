@@ -1331,7 +1331,7 @@ mod outbound_contract_tests {
             );
             let slot = results.slots[0].as_ref().expect("resolved slot");
 
-            let Err(EdgeError::Internal { source }) = &slot.outcome else {
+            let Err(EdgeError::Internal { source, .. }) = &slot.outcome else {
                 panic!("expected dispatch-slack failure, got {:?}", slot.outcome);
             };
             assert_eq!(

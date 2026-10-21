@@ -2131,7 +2131,7 @@ mod tests {
 
     use std::cell::Cell;
     use std::future::Future as _;
-    use std::io::Write as _;
+    use std::io::{Error as IoError, ErrorKind, Write as _};
     use std::num::NonZeroU64;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3146,6 +3146,96 @@ mod tests {
     }
 
     #[test]
+    fn provider_diagnostics_survive_response_body_policy_and_collection() {
+        use crate::error_detail::{
+            FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::IoError {
+                kind: ErrorKind::UnexpectedEof,
+            },
+        };
+        let plain = b"diagnostic body";
+        let mut gzip = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plain).expect("gzip");
+        let mut deflate = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(plain).expect("deflate");
+        let mut brotli = Vec::new();
+        let mut compressor = brotli::CompressorWriter::new(&mut brotli, 4096, 5, 21);
+        compressor.write_all(plain).expect("brotli");
+        drop(compressor);
+        for (coding, encoded) in [
+            ("identity", plain.to_vec()),
+            ("gzip", gzip.finish().expect("gzip finish")),
+            ("deflate", deflate.finish().expect("deflate finish")),
+            ("br", brotli),
+        ] {
+            for response_decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                    for error in [
+                        EdgeError::bad_gateway_with_detail(
+                            "source failed",
+                            BadGatewayReason::Transport,
+                            detail,
+                        ),
+                        EdgeError::gateway_timeout_with_detail(
+                            "source timed out",
+                            BudgetSource::RequestDeadline,
+                            detail,
+                        ),
+                        EdgeError::internal_with_detail(IoError::from_raw_os_error(42), detail),
+                    ] {
+                        let expected_display = error.to_string();
+                        let expected_message = error.message();
+                        let expected_kind = error.kind();
+                        let expected_status = error.status();
+                        let source =
+                            stream::iter([Ok(Bytes::copy_from_slice(&encoded)), Err(error)])
+                                .boxed_local();
+                        let mut headers = HeaderMap::new();
+                        headers.insert("content-encoding", HeaderValue::from_static(coding));
+                        let mut policy = body_policy();
+                        policy.max_chunk_bytes = NonZeroU64::new(2);
+                        policy.max_encoded_response_bytes = Some(512);
+                        policy.max_decoded_response_bytes = Some(512);
+                        policy.response_mode = ResponseMode::Buffered { max_bytes: 512 };
+                        policy.response_decoding = response_decoding;
+                        policy.status = status;
+                        let output = apply_response_body_policy(source, &mut headers, policy)
+                            .expect("policy");
+                        let retained = block_on(
+                            response_with_body(Body::from_stream(output)).into_bytes_bounded(512),
+                        )
+                        .expect_err("original source failure");
+                        assert_eq!(retained.provider_failure_detail(), Some(&detail));
+                        assert_eq!(retained.to_string(), expected_display);
+                        assert_eq!(retained.message(), expected_message);
+                        assert_eq!(retained.kind(), expected_kind);
+                        assert_eq!(retained.status(), expected_status);
+                        if let EdgeError::BadGateway { reason, .. } = &retained {
+                            assert_eq!(*reason, BadGatewayReason::Transport);
+                        }
+                        if let EdgeError::GatewayTimeout { cause, .. } = &retained {
+                            assert_eq!(*cause, BudgetSource::RequestDeadline);
+                        }
+                        if let Some(inner) = retained.inner() {
+                            assert_eq!(
+                                inner
+                                    .downcast_ref::<IoError>()
+                                    .expect("concrete source")
+                                    .raw_os_error(),
+                                Some(42_i32)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn body_policy_passthrough_preserves_headers_and_bypasses_decoded_limit_only() {
         for coding in ["unknown", "gzip, br", "gzip;"] {
             let mut headers = HeaderMap::new();
@@ -3764,13 +3854,30 @@ mod tests {
 
     #[test]
     fn batch_collection_preserves_driver_failure_and_completed_slots() {
+        use crate::error_detail::{
+            FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseHeaders,
+            cause: FastlyFailureCause::InternalError {
+                status: Some(-1_i32),
+            },
+        };
+        let mut completed = batch_item(1);
+        completed.result.outcome = Err(EdgeError::bad_gateway_with_detail(
+            "slot failed",
+            BadGatewayReason::Transport,
+            detail,
+        ));
         let batch = OutboundBatch::from_driver(
             3,
             stream::iter([
-                OutboundBatchDriverEvent::Item(batch_item(1)),
-                OutboundBatchDriverEvent::Failed(EdgeError::internal(anyhow::anyhow!(
-                    "Fastly omitted a pending handle from selection"
-                ))),
+                OutboundBatchDriverEvent::Item(completed),
+                OutboundBatchDriverEvent::Failed(EdgeError::internal_with_detail(
+                    anyhow::anyhow!("Fastly omitted a pending handle from selection"),
+                    detail,
+                )),
             ]),
         );
 
@@ -3782,6 +3889,17 @@ mod tests {
         assert!(matches!(failure.slots.first(), Some(None)));
         assert!(matches!(failure.slots.get(1), Some(Some(_))));
         assert!(matches!(failure.slots.get(2), Some(None)));
+        assert_eq!(failure.error.provider_failure_detail(), Some(&detail));
+        let retained = failure
+            .slots
+            .get(1)
+            .and_then(Option::as_ref)
+            .expect("completed slot")
+            .outcome
+            .as_ref()
+            .expect_err("original slot failure");
+        assert_eq!(retained.provider_failure_detail(), Some(&detail));
+        assert_eq!(retained.message(), "slot failed");
     }
 
     #[test]

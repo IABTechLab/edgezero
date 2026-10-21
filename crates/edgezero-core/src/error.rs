@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::body::Body;
 use crate::config_store::ConfigStoreError;
+use crate::error_detail::ProviderFailureDetail;
 use crate::http::{
     HeaderMap, HeaderValue, Method, Response, StatusCode,
     header::{ALLOW, CONTENT_TYPE, RETRY_AFTER},
@@ -143,6 +144,7 @@ pub enum EdgeError {
     BadGateway {
         message: String,
         reason: BadGatewayReason,
+        provider_detail: Option<ProviderFailureDetail>,
     },
     #[error("{message}")]
     BadRequest { message: String },
@@ -157,11 +159,13 @@ pub enum EdgeError {
     GatewayTimeout {
         message: String,
         cause: BudgetSource,
+        provider_detail: Option<ProviderFailureDetail>,
     },
     #[error("internal error: {source}")]
     Internal {
-        #[from]
+        #[source]
         source: AnyError,
+        provider_detail: Option<ProviderFailureDetail>,
     },
     #[error(
         "method {method} not allowed; allowed: {}",
@@ -217,6 +221,24 @@ impl EdgeError {
         EdgeError::BadGateway {
             message: message.into(),
             reason: BadGatewayReason::Unspecified,
+            provider_detail: None,
+        }
+    }
+
+    /// Adds text-free provider detail without changing the gateway's public classification.
+    #[inline]
+    pub fn bad_gateway_with_detail<S>(
+        message: S,
+        reason: BadGatewayReason,
+        detail: ProviderFailureDetail,
+    ) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::BadGateway {
+            message: message.into(),
+            reason,
+            provider_detail: Some(detail),
         }
     }
 
@@ -228,6 +250,7 @@ impl EdgeError {
         EdgeError::BadGateway {
             message: message.into(),
             reason,
+            provider_detail: None,
         }
     }
 
@@ -266,6 +289,7 @@ impl EdgeError {
         EdgeError::GatewayTimeout {
             message: message.into(),
             cause: BudgetSource::Unspecified,
+            provider_detail: None,
         }
     }
 
@@ -277,6 +301,24 @@ impl EdgeError {
         EdgeError::GatewayTimeout {
             message: message.into(),
             cause,
+            provider_detail: None,
+        }
+    }
+
+    /// Adds text-free provider detail without replacing the selected timeout cause.
+    #[inline]
+    pub fn gateway_timeout_with_detail<S>(
+        message: S,
+        cause: BudgetSource,
+        detail: ProviderFailureDetail,
+    ) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::GatewayTimeout {
+            message: message.into(),
+            cause,
+            provider_detail: Some(detail),
         }
     }
 
@@ -290,7 +332,7 @@ impl EdgeError {
     #[inline]
     pub fn inner(&self) -> Option<&AnyError> {
         match self {
-            EdgeError::Internal { source } => Some(source),
+            EdgeError::Internal { source, .. } => Some(source),
             EdgeError::BadGateway { .. }
             | EdgeError::BadRequest { .. }
             | EdgeError::ConfigOutOfDate { .. }
@@ -316,6 +358,19 @@ impl EdgeError {
     {
         EdgeError::Internal {
             source: error.into(),
+            provider_detail: None,
+        }
+    }
+
+    /// Retains the original internal source and its existing Display and wire behavior.
+    #[inline]
+    pub fn internal_with_detail<E>(error: E, detail: ProviderFailureDetail) -> Self
+    where
+        E: Into<AnyError>,
+    {
+        Self::Internal {
+            source: error.into(),
+            provider_detail: Some(detail),
         }
     }
 
@@ -366,7 +421,7 @@ impl EdgeError {
                     allowed_method_names(allowed)
                 )
             }
-            EdgeError::Internal { source } => format!("internal error: {source}"),
+            EdgeError::Internal { source, .. } => format!("internal error: {source}"),
             EdgeError::PayloadTooLarge { .. } => "request body too large".to_owned(),
         }
     }
@@ -406,6 +461,36 @@ impl EdgeError {
     #[inline]
     pub const fn payload_too_large(origin: RequestBodyOverflowOrigin) -> Self {
         Self::PayloadTooLarge { origin }
+    }
+
+    /// Borrows safe provider evidence. Rendering never serializes or formats this detail.
+    #[must_use]
+    #[inline]
+    pub const fn provider_failure_detail(&self) -> Option<&ProviderFailureDetail> {
+        match self {
+            Self::BadGateway {
+                provider_detail, ..
+            }
+            | Self::GatewayTimeout {
+                provider_detail, ..
+            }
+            | Self::Internal {
+                provider_detail, ..
+            } => provider_detail.as_ref(),
+            Self::BadRequest { .. }
+            | Self::ConfigOutOfDate { .. }
+            | Self::MethodNotAllowed { .. }
+            | Self::NotFound { .. }
+            | Self::NotImplemented { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::RequestHeaderFieldsTooLarge { .. }
+            | Self::RequestTimeout { .. }
+            | Self::ResponseTooLarge { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::StoreExtraction { .. }
+            | Self::UriTooLong { .. }
+            | Self::Validation { .. } => None,
+        }
     }
 
     /// Returns whether a request-byte cap fired while reading ingress or uploading outbound.
@@ -615,6 +700,13 @@ impl EdgeError {
     }
 }
 
+impl From<AnyError> for EdgeError {
+    #[inline]
+    fn from(source: AnyError) -> Self {
+        Self::internal(source)
+    }
+}
+
 impl From<ConfigStoreError> for EdgeError {
     #[inline]
     fn from(err: ConfigStoreError) -> Self {
@@ -788,9 +880,99 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_detail::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
     use crate::http::Method;
     use serde::ser;
+    use std::io::Error as IoError;
     use std::str;
+
+    #[test]
+    fn provider_diagnostics_never_change_public_errors() {
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::Send,
+            cause: FastlyFailureCause::ConnectionRefused,
+        };
+        let pairs = [
+            (
+                EdgeError::bad_gateway_with_reason(
+                    "upstream unavailable",
+                    BadGatewayReason::Unreachable,
+                ),
+                EdgeError::bad_gateway_with_detail(
+                    "upstream unavailable",
+                    BadGatewayReason::Unreachable,
+                    detail,
+                ),
+            ),
+            (
+                EdgeError::gateway_timeout_caused(
+                    "upstream timed out",
+                    BudgetSource::PerCallTimeout,
+                ),
+                EdgeError::gateway_timeout_with_detail(
+                    "upstream timed out",
+                    BudgetSource::PerCallTimeout,
+                    detail,
+                ),
+            ),
+            (
+                EdgeError::internal(anyhow::anyhow!("https://example.com/?token=secret")),
+                EdgeError::internal_with_detail(
+                    anyhow::anyhow!("https://example.com/?token=secret"),
+                    detail,
+                ),
+            ),
+        ];
+        for (plain, diagnosed) in pairs {
+            assert!(plain.provider_failure_detail().is_none());
+            assert_eq!(diagnosed.provider_failure_detail(), Some(&detail));
+            assert_eq!(plain.to_string(), diagnosed.to_string());
+            assert_eq!(plain.message(), diagnosed.message());
+            assert_eq!(plain.status(), diagnosed.status());
+            assert_eq!(plain.kind(), diagnosed.kind());
+            match (&plain, &diagnosed) {
+                (
+                    EdgeError::BadGateway { reason: left, .. },
+                    EdgeError::BadGateway { reason: right, .. },
+                ) => assert_eq!(left, right),
+                (
+                    EdgeError::GatewayTimeout { cause: left, .. },
+                    EdgeError::GatewayTimeout { cause: right, .. },
+                ) => assert_eq!(left, right),
+                (EdgeError::Internal { .. }, EdgeError::Internal { .. }) => assert_eq!(
+                    plain.inner().unwrap().to_string(),
+                    diagnosed.inner().unwrap().to_string()
+                ),
+                _ => panic!("diagnostic attachment must preserve the error variant"),
+            }
+            let before = plain.into_response().expect("plain response");
+            let after = diagnosed.into_response().expect("diagnosed response");
+            assert_eq!(before.status(), after.status());
+            assert_eq!(before.headers(), after.headers());
+            assert_eq!(before.body().as_bytes(), after.body().as_bytes());
+            assert!(
+                !str::from_utf8(after.body().as_bytes().expect("buffered wire"))
+                    .expect("wire text")
+                    .contains("secret")
+            );
+        }
+    }
+
+    #[test]
+    fn internal_from_anyhow_keeps_the_original_source_without_detail() {
+        let source = IoError::from_raw_os_error(42);
+        let error = EdgeError::from(anyhow::Error::new(source));
+        assert!(error.provider_failure_detail().is_none());
+        assert_eq!(
+            error
+                .inner()
+                .expect("source")
+                .downcast_ref::<IoError>()
+                .expect("original concrete source")
+                .raw_os_error(),
+            Some(42_i32)
+        );
+    }
 
     #[test]
     fn request_overflow_origins_share_one_fixed_wire_contract() {

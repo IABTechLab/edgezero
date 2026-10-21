@@ -431,7 +431,7 @@ mod tests {
             if mode == 3 {
                 fake.advance_to(deadline.instant());
             }
-            let Poll::Ready(Err(EdgeError::Internal { source })) = poll_wait(&mut wait, &wakes)
+            let Poll::Ready(Err(EdgeError::Internal { source, .. })) = poll_wait(&mut wait, &wakes)
             else {
                 panic!("timer failure must remain typed Internal");
             };

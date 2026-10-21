@@ -2187,6 +2187,7 @@ mod fastly_impl {
                 EdgeError::BadGateway {
                     message,
                     reason: BadGatewayReason::Unspecified,
+                    ..
                 } if message == DYNAMIC_BACKENDS_DISABLED_MESSAGE
             ));
 
@@ -2394,7 +2395,7 @@ mod fastly_impl {
                 .expect("past slack boundary");
             assert!(matches!(
                 dispatch_guard_at(started_at, budget, over_limit),
-                Err(EdgeError::Internal { source })
+                Err(EdgeError::Internal { source, .. })
                     if source.to_string() == DISPATCH_SLACK_MESSAGE
             ));
 
@@ -2442,7 +2443,7 @@ mod fastly_impl {
                 register_backend_with_batch_guard(Some(started_at), budget, &clock, register);
             assert!(matches!(
                 second,
-                Err(EdgeError::Internal { source })
+                Err(EdgeError::Internal { source, .. })
                     if source.to_string() == DISPATCH_SLACK_MESSAGE
             ));
             assert_eq!(registrations.get(), 1);

@@ -245,6 +245,15 @@ separately from the portable API and must be considered when declaring required 
   conversion; upstream/response-limit failures use 502 and exhausted exchange budgets use 504.
 - Use category-only public diagnostics for provider-backed failures so URLs, credentials, and
   provider error details cannot escape in framework HTTP error bodies.
+- Add fixed-size, text-free `ProviderFailureDetail` catalogs for the pinned adapters and
+  `EdgeError::provider_failure_detail()`. Explicit gateway/timeout/internal constructors attach
+  detail without changing Display, messages, statuses, typed reasons or wire bytes. Retain it
+  through response-body policies, buffered collection, pending handles, batch failures and sticky
+  request-body replay. Existing internal sources and `From<anyhow::Error>` remain intact.
+  Adapter population and hosted diagnostic qualification remain follow-up work.
+- Hard-cut exact field construction/matching of `EdgeError::{BadGateway, GatewayTimeout, Internal}`
+  to include `provider_detail: Option<ProviderFailureDetail>`; prefer semantic constructors and
+  `..` in patterns. No wrapper variant or compatibility error type is introduced.
 
 ### Ingress Admission And Routing
 

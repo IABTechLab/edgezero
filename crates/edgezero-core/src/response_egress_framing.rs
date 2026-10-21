@@ -196,7 +196,7 @@ fn limit_declared_stream(stream: BodyStream, length: u64) -> BodyStream {
 pub fn response_egress_body_length_error(
     error: &EdgeError,
 ) -> Option<ResponseEgressBodyLengthError> {
-    let EdgeError::Internal { source } = error else {
+    let EdgeError::Internal { source, .. } = error else {
         return None;
     };
     source

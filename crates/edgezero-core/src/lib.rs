@@ -24,6 +24,7 @@ pub mod config_store;
 pub mod context;
 pub mod env_config;
 pub mod error;
+pub mod error_detail;
 pub mod extractor;
 pub mod handler;
 pub mod http;
@@ -66,6 +67,11 @@ pub use edgezero_macros::{AppConfig, action, app};
 pub use error::{
     BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin,
     ResponseLimitReason, StoreExtractionReason,
+};
+pub use error_detail::{
+    AxumFailureCause, AxumFailureKind, CloudflareFailureCause, FastlyFailureCause,
+    ProviderFailureAdapter, ProviderFailureDetail, ProviderFailurePhase, SpinDnsRcode,
+    SpinFailureCause, SpinFieldSize,
 };
 pub use ingress::{
     AdmissionDecision, AdmittedIngress, BufferedIngressResponse, DEFAULT_INBOUND_READ_BUDGET,
