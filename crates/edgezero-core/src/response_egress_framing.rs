@@ -1,6 +1,7 @@
 use std::mem;
 
 use crate::body::{Body, BodyStream};
+use crate::error::suppress_overflow_retry_after;
 use crate::error::{BadGatewayDecodeReason, BadGatewayReason, EdgeError, ResponseLimitReason};
 use crate::http::header::{
     CONNECTION, CONTENT_LENGTH, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER,
@@ -77,6 +78,7 @@ pub fn prepare_response_egress(
     request_method: &Method,
     mut response: Response,
 ) -> Result<PreparedResponseEgress, ResponseEgressFramingError> {
+    suppress_overflow_retry_after(&mut response);
     let mut declared_length = parse_content_length(response.headers())?;
     if response.status().is_informational() {
         return Err(ResponseEgressFramingError::UnsupportedStatus);
@@ -236,6 +238,7 @@ pub fn response_egress_source_error_category(error: &EdgeError) -> &'static str 
         EdgeError::MethodNotAllowed { .. } => "method_not_allowed",
         EdgeError::NotFound { .. } => "not_found",
         EdgeError::NotImplemented { .. } => "not_implemented",
+        EdgeError::PayloadTooLarge { .. } => "payload_too_large",
         EdgeError::RequestHeaderFieldsTooLarge { .. } => "request_header_fields_too_large",
         EdgeError::RequestTimeout { .. } => "request_timeout",
         EdgeError::ResponseTooLarge { reason, .. } => match reason {
@@ -324,7 +327,8 @@ mod tests {
 
     use crate::body::Body;
     use crate::error::{BadGatewayDecodeReason, BadGatewayReason, EdgeError};
-    use crate::http::{Method, Response, StatusCode, response_builder};
+    use crate::http::{HeaderValue, Method, Response, StatusCode, response_builder};
+    use crate::response::IntoResponse as _;
 
     use super::{
         ResponseEgressBodyLengthError, ResponseEgressFramingError, prepare_response_egress,
@@ -341,6 +345,57 @@ mod tests {
         fn drop(&mut self) {
             self.0.set(self.0.get().saturating_add(1));
         }
+    }
+
+    #[test]
+    fn overflow_retry_suppression_survives_header_reinsertion_but_not_status_guessing() {
+        for origin in [
+            crate::RequestBodyOverflowOrigin::Inbound,
+            crate::RequestBodyOverflowOrigin::OutboundUpload,
+        ] {
+            let mut response = EdgeError::payload_too_large(origin)
+                .into_response()
+                .expect("response");
+            response
+                .headers_mut()
+                .append("retry-after", HeaderValue::from_static("120"));
+            response
+                .headers_mut()
+                .append("retry-after", HeaderValue::from_static("240"));
+            let prepared = prepare_response_egress(&Method::POST, response)
+                .expect("prepared")
+                .into_response();
+            assert_eq!(prepared.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(!prepared.headers().contains_key("retry-after"));
+        }
+        let upstream = response_builder()
+            .status(StatusCode::PAYLOAD_TOO_LARGE)
+            .header("retry-after", "120")
+            .body(Body::empty())
+            .expect("upstream response");
+        let prepared_upstream = prepare_response_egress(&Method::POST, upstream)
+            .expect("prepared")
+            .into_response();
+        assert_eq!(
+            prepared_upstream
+                .headers()
+                .get("retry-after")
+                .expect("upstream retry"),
+            "120"
+        );
+        let config = EdgeError::config_out_of_date("stale", "field")
+            .into_response()
+            .expect("config response");
+        let prepared_config = prepare_response_egress(&Method::POST, config)
+            .expect("prepared")
+            .into_response();
+        assert_eq!(
+            prepared_config
+                .headers()
+                .get("retry-after")
+                .expect("config retry"),
+            "60"
+        );
     }
 
     fn tracked_body(source_items: Vec<Result<Bytes, EdgeError>>, drops: &Rc<Cell<usize>>) -> Body {

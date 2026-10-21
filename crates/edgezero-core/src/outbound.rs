@@ -30,7 +30,10 @@ use crate::compression::{
     ContentEncoding, classify_content_encoding, decode_brotli_stream, decode_deflate_stream,
     decode_gzip_stream,
 };
-use crate::error::{BadGatewayDecodeReason, BadGatewayReason, EdgeError, ResponseLimitReason};
+use crate::error::{
+    BadGatewayDecodeReason, BadGatewayReason, EdgeError, RequestBodyOverflowOrigin,
+    ResponseLimitReason,
+};
 use crate::http::header::{
     CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST, PROXY_AUTHENTICATE,
     PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
@@ -1739,7 +1742,8 @@ pub fn rechunk_stream(mut source: BodyStream, optional_maximum: Option<NonZeroU6
 /// Validates the adapter-independent outbound method, body, and response-policy contract.
 ///
 /// # Errors
-/// Returns [`EdgeError::BadRequest`] when a common contract invariant is invalid. Individual
+/// Returns [`EdgeError::PayloadTooLarge`] for a buffered upload over its byte cap,
+/// or [`EdgeError::BadRequest`] when a common contract invariant is invalid. Individual
 /// adapters may reject additional target-specific constraints during request preparation.
 #[inline]
 pub fn validate_for_dispatch(request: &OutboundRequest) -> Result<(), EdgeError> {
@@ -1778,6 +1782,13 @@ pub fn validate_for_dispatch(request: &OutboundRequest) -> Result<(), EdgeError>
     if !(10..=30).contains(&request.max_brotli_window_bits) {
         return Err(EdgeError::bad_request(
             "max_brotli_window_bits must be between 10 and 30 inclusive",
+        ));
+    }
+    if let Body::Once(bytes) = &request.body
+        && u64::try_from(bytes.len()).map_or(true, |length| length > request.max_request_body_bytes)
+    {
+        return Err(EdgeError::payload_too_large(
+            RequestBodyOverflowOrigin::OutboundUpload,
         ));
     }
     Ok(())
@@ -4744,6 +4755,24 @@ mod tests {
                 ResponseBodyDisposition::FramingBodyless
             );
             assert_eq!(valid.get("content-length").expect("length"), "4294967296");
+        }
+    }
+
+    #[test]
+    fn buffered_upload_overflow_is_rejected_during_common_preflight() {
+        for len in [7_usize, 8, 9] {
+            let request = OutboundRequest::post("https://example.com/upload")
+                .expect("request")
+                .body(vec![b'x'; len])
+                .max_request_body_bytes(8);
+            let result = validate_for_dispatch(&request);
+            if len > 8 {
+                let error = result.expect_err("buffered overflow before dispatch");
+                assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                assert_eq!(error.kind(), "payload_too_large");
+            } else {
+                result.expect("within cap");
+            }
         }
     }
 

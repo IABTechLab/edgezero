@@ -36,6 +36,14 @@ hard-migration inventory and independent decisions, including the scoped API-onl
 approval attributed to AG. Dependent Fastly implementation still needs a
 new preserving primitive/report and its separately approved policy. No failed gate was waived.
 
+### F2 Overflow Checkpoint
+
+The independent [F2 checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f2-implementation-checkpoint-2026-10-21)
+implements typed 413 readers/uploads, zero-read declared-length rejection, retry-header
+suppression and aligned demo/scaffold fallback defaults. Core/SDK-seam and native TCP evidence
+do not close its remaining cross-runtime, hosted, generated-app and end-to-end legs. It does not
+waive G2 or change the exact approved P1 API migration.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

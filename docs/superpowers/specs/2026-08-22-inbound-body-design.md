@@ -662,7 +662,9 @@ Wrap the existing `Body::into_bytes_bounded` with context-level helpers:
 // crates/edgezero-core/src/context.rs
 impl RequestContext {
  /// Read the inbound request body into `Bytes`, bounded by `max`.
- /// Over-limit yields `Err(EdgeError::bad_request(..))` (400).
+ /// Over-limit yields `Err(EdgeError::PayloadTooLarge { origin: Inbound })` (413).
+ /// A single normalized Content-Length above the cap rejects without polling and remains
+ /// reusable at a larger cap. An already-expired read deadline wins with 408.
  ///
  /// **Takes `&self`** — `RequestContext` carries an internal body cache
  /// (an `unsync::OnceCell<Bytes>` style cell; single-threaded
@@ -764,6 +766,7 @@ the Fastly and Spin paths fully materialize the body too). This migration change
   enum StoredError {
       BadGateway         { message: String, reason: BadGatewayReason },
       BadRequest         { message: String },
+      PayloadTooLarge    { origin: RequestBodyOverflowOrigin },
       ConfigOutOfDate    { field_path: String, message: String },
       GatewayTimeout     { cause: BudgetSource, message: String }, // preserve typed cause
       Internal           { rendered: String }, // ALREADY-rendered source; no re-prefixing
@@ -802,6 +805,9 @@ the Fastly and Spin paths fully materialize the body too). This migration change
   (the callback's returned status is ignored) and a custom 405 renderer cannot remove or replace
   the canonical `Allow` field. The same centralized mandatory-header policy preserves
   `Retry-After: 60` for every effective `config_out_of_date` outcome after custom rendering.
+  Typed body-cap overflow has fixed public text and status 413; its inbound/upload origin is
+  inspectable only in Rust. A private response marker suppresses `Retry-After` after custom
+  rendering and again during final egress preparation, without stripping upstream 413 retry headers.
   Explicit
   `AdmissionDecision::Refuse` responses and the `on_exceeded`/`on_timeout` fallback responses
   bypass the renderer because the application supplied those complete responses directly. Raw
@@ -1009,7 +1015,7 @@ platform runtime or network.
 | Cancellation | A stream held at `Pending` leaves the cell `Draining`; dropping the first `body_bytes` future transitions it to the documented cancellation poison, and the next access returns that stored internal error. |
 | Reentrancy | While the first scripted drain is pending, a second body accessor returns `internal("body read already in progress")` without a `RefCell` panic. Resuming the first future can still complete and cache bytes. |
 | Consumption | `take_body` and `into_request` cover Initial, Cached, Draining, Poisoned, and Taken. Initial preserves a stream; Cached reassembles `Body::Once`; Taken deliberately produces an empty body only where specified. |
-| Extraction | JSON/form success, malformed input, default caps, explicit `Within` caps, and validator failures preserve their documented 400/validation behavior. Multiple extractors share the one cache. |
+| Extraction | JSON/form success, default caps and explicit `Within` caps share one cache. Overflow is typed 413; malformed input remains 400 and validator failures remain 422. Consumed overflow is sticky, while early declared-length and stricter cached-cap rejections remain reusable. |
 | Stored errors | `StoredError::capture` exhaustively covers all end-state `EdgeError` variants. Round-trips preserve variant fields, including `BadGatewayReason`, `BudgetSource`, `ResponseLimitReason`, and `StoreExtractionReason` plus its optional field path; `RequestTimeout` remains 408; `Internal` has the one documented source-chain loss without duplicating the `internal error:` prefix. |
 | Raw HTTP/1 framing (future acceptance criterion) | Axum raw-socket cases cover CL+TE in both orders, duplicate equal/unequal CL, comma-list CL, overflow/signed/malformed CL, repeated/non-final/unsupported TE, valid single CL, and valid terminal chunked framing. Rejections return 400, close the connection, invoke no admission callback, and poll no body. A `HeaderMap`-only unit test is insufficient, and no current adapter satisfies this row. |
 

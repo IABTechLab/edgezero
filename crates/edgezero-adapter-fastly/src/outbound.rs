@@ -1154,13 +1154,13 @@ mod fastly_impl {
             let bytes = item?;
             let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             let Some(next_total) = total.checked_add(length) else {
-                return Err(EdgeError::bad_request(
-                    "outbound request body size accounting overflow",
+                return Err(EdgeError::payload_too_large(
+                    edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                 ));
             };
             if next_total > maximum {
-                return Err(EdgeError::bad_request(
-                    "outbound request body exceeded configured limit",
+                return Err(EdgeError::payload_too_large(
+                    edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                 ));
             }
             resolve_stream_io_result(
@@ -1288,8 +1288,8 @@ mod fastly_impl {
     fn validate_request_body_length(bytes: &Bytes, maximum: u64) -> Result<(), EdgeError> {
         let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if length > maximum {
-            return Err(EdgeError::bad_request(
-                "outbound request body exceeded configured limit",
+            return Err(EdgeError::payload_too_large(
+                edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
             ));
         }
         Ok(())
@@ -2047,6 +2047,52 @@ mod fastly_impl {
                     .writes
                     .push(Bytes::copy_from_slice(bytes));
                 Ok(())
+            }
+        }
+
+        #[test]
+        fn streamed_upload_overflow_never_finishes_or_waits() {
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_secs(1));
+            let clock = constant_clock(start);
+            for len in [7_usize, 8, 9] {
+                let events = Arc::new(Mutex::new(UploadEvents::default()));
+                let writer = TestUploadWriter {
+                    events: Arc::clone(&events),
+                };
+                let source = stream::iter([
+                    Ok(Bytes::from_static(b"xxxx")),
+                    Ok(Bytes::from(vec![b'x'; len - 4])),
+                ])
+                .boxed_local();
+                let wait_events = Arc::clone(&events);
+                let result = block_on(complete_streamed_exchange(
+                    writer,
+                    source,
+                    8,
+                    budget,
+                    &clock,
+                    move || {
+                        wait_events.lock().expect("events").waits += 1;
+                        Ok(7_u8)
+                    },
+                ));
+                let observed = events.lock().expect("events");
+                if len > 8 {
+                    let error = result.expect_err("upload overflow");
+                    assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(
+                        error.request_body_overflow_origin(),
+                        Some(edgezero_core::RequestBodyOverflowOrigin::OutboundUpload)
+                    );
+                    assert_eq!(observed.finishes, 0);
+                    assert_eq!(observed.waits, 0);
+                    assert_eq!(observed.writes, [Bytes::from_static(b"xxxx")]);
+                } else {
+                    result.expect("within cap");
+                    assert_eq!(observed.finishes, 1);
+                    assert_eq!(observed.waits, 1);
+                }
             }
         }
 

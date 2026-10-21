@@ -16,7 +16,7 @@ use axum::extract::Path;
 use axum::http::HeaderValue;
 use axum::http::header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, HOST, SET_COOKIE};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use bytes::Bytes;
 use edgezero_adapter_axum::outbound::AxumOutboundClient;
 use edgezero_core::body::Body as CoreBody;
@@ -281,6 +281,63 @@ async fn batch_preflight_precedence_and_indices() {
             "GET/HEAD request must not carry a streamed body; emptiness cannot be determined without consuming the stream",
         ]
     );
+}
+
+#[tokio::test]
+async fn oversized_uploads_never_contact_origin_and_upstream_413_remains_a_response() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let origin = start_origin(Router::new().route(
+        "/upload",
+        post(move || {
+            let observed_calls = Arc::clone(&observed);
+            async move {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("retry-after", "120")
+                    .body(Body::empty())
+                    .expect("upstream response")
+            }
+        }),
+    ))
+    .await;
+    let client = AxumOutboundClient::try_new().expect("client");
+    for streamed in [false, true] {
+        let bytes = Bytes::from_static(b"123456789");
+        let body = if streamed {
+            CoreBody::stream(stream::iter([bytes]))
+        } else {
+            CoreBody::from(bytes)
+        };
+        let request = OutboundRequest::post(format!("{origin}/upload"))
+            .expect("request")
+            .body(body)
+            .max_request_body_bytes(8);
+        let error = client.send(request).await.expect_err("local overflow");
+        assert_eq!(
+            error.request_body_overflow_origin(),
+            Some(edgezero_core::RequestBodyOverflowOrigin::OutboundUpload)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    let request = OutboundRequest::post(format!("{origin}/upload"))
+        .expect("request")
+        .body("12345678")
+        .max_request_body_bytes(8);
+    let response = client.send(request).await.expect("ordinary upstream 413");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .expect("upstream retry"),
+        "120"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

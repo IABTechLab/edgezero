@@ -81,7 +81,7 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
 - [ ] Add cap-minus-one/exact/plus-one cases for every reader/extractor/upload; distinguish host
       framing rejection from host-delivered bytes. Test sticky consumed overflow, reusable early/cached
       cap rejection, already-expired inbound deadline, and unchanged malformed JSON/form errors.
-- [ ] Add a stable 413 category and typed inbound/upload origin, preserving public diagnostics and
+- [x] Add a stable 413 category and typed inbound/upload origin, preserving public diagnostics and
       sticky body state. Early normalized Content-Length refusal must not poison a later larger-cap
       read; 408 still wins if already expired. Update explicit demo/template fallback overflow responses.
 - [ ] Reject every buffered over-cap upload before dispatch. Keep Axum/Cloudflare bounded
@@ -92,6 +92,42 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
       The suppression takes precedence over F7's header decoration, never over a config-503 retry policy.
 - [ ] Run `cargo test -p edgezero-core`, four adapter contracts, and real ingress/pipelining cases.
       Add hosted HTTP/2 overflow evidence where required. Suggested commit: `feat: classify request overflow as payload too large`.
+
+### F2 Implementation Checkpoint (2026-10-21)
+
+- [x] Implement `PayloadTooLarge { origin }` and `RequestBodyOverflowOrigin::{Inbound,
+      OutboundUpload}` with fixed public text, typed access and sticky replay. Keep malformed
+      JSON/form at 400, admitted expiry at 408, and strict cached-cap rejection reusable.
+- [x] Refuse an oversized single normalized Content-Length without source polling or poisoning;
+      match admission's whitespace normalization and let an already-expired admitted deadline win.
+      Preserve source-error origins through uploads.
+- [x] Reject oversized buffered uploads in shared preflight on all four adapters. Replace the
+      adapters' own streamed-cap errors without changing their existing prebuffer/abort lifecycles.
+- [x] Keep a private overflow-origin marker through default/custom rendering and final egress
+      preparation. Suppress retry headers only for that typed cause; preserve config-503 and
+      unmarked upstream-413 retry policies. The original error overrides any marker returned by
+      a custom renderer, including when restoring config retry policy. Demo/scaffold fallback
+      defaults now select 413.
+- [x] Observe red/green core, Axum, Cloudflare Node/WASM and Fastly Viceroy/WASI tests. Exercise
+      cap-minus-one/exact/plus-one readers, extractors, preflight and upload seams. Verify Spin's
+      native exchange arbitration preserves the typed overflow. These are unit/SDK-seam results,
+      not actual hosted ingress/upload qualification.
+- [x] Run actual Axum chunked ingress plus a following pipelined request and custom renderer;
+      prove 413/no retry and correct reuse or connection close. Prove no origin contact for local
+      buffered/streamed overflow, and an ordinary upstream 413 retaining `Retry-After: 120`.
+- [x] Pass all five root Rust gates (793 core tests), all three real-target WASM clippy checks,
+      30 Cloudflare Node/WASM library tests, the targeted Fastly Viceroy upload test, demo and
+      generator tests, docs format/lint/build, and the legacy/docs/dependency/evidence guards.
+      The workspace TCP suite requires loopback permission; its approved rerun passes.
+- [ ] Complete actual Viceroy/workerd/Spin ingress and upload receipt cases, generated-app TCP
+      fallback proof, hosted Fastly HTTP/2, TS end-to-end and later F7b composition qualification.
+      Until those environment legs land, F2 and EZ-10 overall remain incomplete. Its implemented
+      parts are confirmed present, not silently promoted; no other Follow-up becomes blocking.
+
+Decision log: independent upload and rendering investigations selected shared buffered preflight
+plus localized cap-error changes, rather than rewriting provider transports. Separate SDK/runtime
+investigations confirmed Fastly readiness still loses source failures, including through
+`is_ready`; the failed G2 gate and cancelled dependent driver migration are unchanged.
 
 ## F3: Cache, TLS and Authority Task Group
 

@@ -3,7 +3,8 @@ use std::{cell::RefCell, collections::BTreeMap, env, mem};
 use crate::body::Body;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
-    BadGatewayReason, BudgetSource, EdgeError, ResponseLimitReason, StoreExtractionReason,
+    BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin, ResponseLimitReason,
+    StoreExtractionReason,
 };
 use crate::http::{Extensions, HeaderMap, Method, Request, RequestParts, Uri, Version};
 use crate::ingress::{AdmittedIngress, IngressGrant};
@@ -78,6 +79,7 @@ enum StoredError {
     MethodNotAllowed(Method, Vec<Method>),
     NotFound(String),
     NotImplemented(String),
+    PayloadTooLarge(RequestBodyOverflowOrigin),
     RequestHeaderFieldsTooLarge(String),
     RequestTimeout(String),
     ResponseTooLarge(String, ResponseLimitReason),
@@ -107,6 +109,7 @@ impl StoredError {
             }
             EdgeError::NotFound { path } => Self::NotFound(path),
             EdgeError::NotImplemented { message } => Self::NotImplemented(message),
+            EdgeError::PayloadTooLarge { origin } => Self::PayloadTooLarge(origin),
             EdgeError::RequestHeaderFieldsTooLarge { message } => {
                 Self::RequestHeaderFieldsTooLarge(message)
             }
@@ -144,6 +147,7 @@ impl StoredError {
             },
             Self::NotFound(path) => EdgeError::not_found(path.clone()),
             Self::NotImplemented(message) => EdgeError::not_implemented(message.clone()),
+            Self::PayloadTooLarge(origin) => EdgeError::payload_too_large(*origin),
             Self::RequestHeaderFieldsTooLarge(message) => {
                 EdgeError::request_header_fields_too_large(message.clone())
             }
@@ -203,12 +207,25 @@ impl RequestContext {
     /// Drains and caches the inbound body under the caller's byte cap.
     ///
     /// # Errors
-    /// Returns 400 on overflow, 408 on an admitted read deadline, and preserves a sticky
+    /// Returns 413 on overflow, 408 on an admitted read deadline, and preserves a sticky
     /// source error for every later accessor.
     #[inline]
     pub async fn body_bytes(&self, max: usize) -> Result<bytes::Bytes, EdgeError> {
         let body = {
             let mut state = self.body.borrow_mut();
+            if matches!(&*state, BodyState::Initial(_)) {
+                if let Err(error) = check_read_deadline(self.read_deadline, &self.monotonic_clock) {
+                    let stored = StoredError::capture(error);
+                    let returned = stored.to_edge_error();
+                    *state = BodyState::Poisoned(stored);
+                    return Err(returned);
+                }
+                if declared_body_exceeds(&self.parts.headers, max) {
+                    return Err(EdgeError::payload_too_large(
+                        RequestBodyOverflowOrigin::Inbound,
+                    ));
+                }
+            }
             match mem::replace(&mut *state, BodyState::Draining) {
                 BodyState::Cached(bytes) => {
                     let result = check_cached_body(&bytes, max);
@@ -345,7 +362,7 @@ impl RequestContext {
     /// Buffers at most `max` bytes and deserializes form-urlencoded data.
     ///
     /// # Errors
-    /// Returns 400 when the body is oversized or malformed, and preserves body drain errors.
+    /// Returns 413 on overflow, 400 on malformed input, and preserves body drain errors.
     #[inline]
     pub async fn form_within<T>(&self, max: usize) -> Result<T, EdgeError>
     where
@@ -396,7 +413,7 @@ impl RequestContext {
     /// Buffers at most `max` bytes and deserializes JSON.
     ///
     /// # Errors
-    /// Returns 400 when the body is oversized or malformed, and preserves body drain errors.
+    /// Returns 413 on overflow, 400 on malformed input, and preserves body drain errors.
     #[inline]
     pub async fn json_within<T>(&self, max: usize) -> Result<T, EdgeError>
     where
@@ -620,9 +637,31 @@ impl RequestContext {
 
 fn check_cached_body(bytes: &bytes::Bytes, max: usize) -> Result<bytes::Bytes, EdgeError> {
     if bytes.len() > max {
-        return Err(EdgeError::bad_request("request body too large"));
+        return Err(EdgeError::payload_too_large(
+            RequestBodyOverflowOrigin::Inbound,
+        ));
     }
     Ok(bytes.clone())
+}
+
+fn declared_body_exceeds(headers: &HeaderMap, max: usize) -> bool {
+    let mut values = headers.get_all("content-length").iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(raw) = value.to_str() else {
+        return false;
+    };
+    let text = raw.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    text.parse::<u64>().is_ok_and(|length| {
+        usize::try_from(length).map_or(true, |native_length| native_length > max)
+    })
 }
 
 fn check_read_deadline(
@@ -661,10 +700,12 @@ pub(crate) async fn drain_body(
                 };
                 let chunk = result?;
                 let next_len = buffered.len().checked_add(chunk.len()).ok_or_else(|| {
-                    EdgeError::bad_request("request body size accounting overflow")
+                    EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound)
                 })?;
                 if next_len > max {
-                    return Err(EdgeError::bad_request("request body too large"));
+                    return Err(EdgeError::payload_too_large(
+                        RequestBodyOverflowOrigin::Inbound,
+                    ));
                 }
                 buffered.extend_from_slice(&chunk);
             }
@@ -854,6 +895,104 @@ mod tests {
     }
 
     #[test]
+    fn declared_overflow_does_not_read_or_poison_the_body() {
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&polls);
+        let body = Body::stream(
+            stream::iter([Bytes::from_static(b"0123456789")])
+                .inspect(move |_| observed.set(observed.get().saturating_add(1))),
+        );
+        let mut ctx = ctx("/body", body, PathParams::default());
+        ctx.headers_mut()
+            .insert("content-length", HeaderValue::from_static("10"));
+
+        let error = block_on(ctx.body_bytes(5)).expect_err("declared overflow");
+        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(polls.get(), 0);
+        assert_eq!(ctx.body_kind(), BodyKind::Initial);
+        assert_eq!(block_on(ctx.body_bytes(10)).expect("larger cap").len(), 10);
+        assert_eq!(polls.get(), 1);
+    }
+
+    #[test]
+    fn padded_declared_length_rejects_without_consuming_the_body() {
+        let mut ctx = ctx("/body", Body::from("0123456789"), PathParams::default());
+        ctx.headers_mut()
+            .insert("content-length", HeaderValue::from_static(" 10 \t"));
+        assert_eq!(
+            block_on(ctx.body_bytes(5))
+                .expect_err("declared overflow")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(ctx.body_kind(), BodyKind::Initial);
+        assert_eq!(block_on(ctx.body_bytes(10)).expect("larger cap").len(), 10);
+    }
+
+    #[test]
+    fn expired_deadline_wins_over_declared_overflow_without_polling() {
+        let body = Body::from_stream(stream::poll_fn(
+            |_| -> Poll<Option<Result<Bytes, EdgeError>>> {
+                panic!("an expired reader must not poll its source")
+            },
+        ));
+        let mut ctx = ctx("/body", body, PathParams::default());
+        ctx.headers_mut()
+            .insert("content-length", HeaderValue::from_static("10"));
+        ctx.read_deadline = Some(Deadline::after(Duration::ZERO));
+
+        for cap in [5, 10] {
+            assert_eq!(
+                block_on(ctx.body_bytes(cap)).expect_err("expired").status(),
+                StatusCode::REQUEST_TIMEOUT
+            );
+        }
+        assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+    }
+
+    #[test]
+    fn readers_classify_consumed_overflow_before_payload_parsing() {
+        let json = serde_json::to_vec(&serde_json::json!("123456")).expect("JSON");
+        for (reader, bytes) in [
+            (0_u8, b"12345678".to_vec()),
+            (1, json),
+            (2, b"key=1234".to_vec()),
+        ] {
+            for cap in [7_usize, 8, 9] {
+                let ctx = ctx(
+                    "/body",
+                    Body::stream(stream::iter([Bytes::from(bytes.clone())])),
+                    PathParams::default(),
+                );
+                let result = match reader {
+                    0 => block_on(ctx.body_bytes(cap)).map(|_| ()),
+                    1 => block_on(ctx.json_within::<serde_json::Value>(cap)).map(|_| ()),
+                    _ => block_on(ctx.form_within::<BTreeMap<String, String>>(cap)).map(|_| ()),
+                };
+                if cap == 7 {
+                    let first = result.expect_err("overflow");
+                    let second = block_on(ctx.body_bytes(usize::MAX)).expect_err("sticky");
+                    assert_eq!(first.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(second.kind(), "payload_too_large");
+                    assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+                } else {
+                    result.expect("within cap");
+                    assert_eq!(
+                        block_on(ctx.body_bytes(7))
+                            .expect_err("cached cap")
+                            .status(),
+                        StatusCode::PAYLOAD_TOO_LARGE
+                    );
+                    assert_eq!(
+                        block_on(ctx.body_bytes(8)).expect("reusable cache").len(),
+                        8
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn body_bytes_drains_once_and_rechecks_each_callers_cap() {
         let polls = Rc::new(Cell::new(0_u8));
         let observed_polls = Rc::clone(&polls);
@@ -872,7 +1011,7 @@ mod tests {
             Bytes::from_static(b"ok")
         );
         let stricter = block_on(ctx.body_bytes(1)).expect_err("stricter cached cap");
-        assert_eq!(stricter.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(stricter.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(
             block_on(ctx.body_bytes(2)).expect("cached body remains usable"),
             Bytes::from_static(b"ok")
@@ -892,14 +1031,14 @@ mod tests {
 
         let first = block_on(ctx.body_bytes(3)).expect_err("overflow");
         let second = block_on(ctx.body_bytes(usize::MAX)).expect_err("sticky overflow");
-        assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(first.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(second.status(), first.status());
         assert_eq!(second.message(), first.message());
         assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
         assert_eq!(polls.get(), 1, "a poisoned source must not be polled again");
         assert_eq!(
             ctx.take_body().expect_err("poison survives take").status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::PAYLOAD_TOO_LARGE
         );
     }
 

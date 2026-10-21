@@ -680,8 +680,8 @@ mod worker_impl {
             Body::Once(bytes) => {
                 let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 if length > maximum {
-                    return Err(EdgeError::bad_request(
-                        "outbound request body exceeded configured limit",
+                    return Err(EdgeError::payload_too_large(
+                        edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     ));
                 }
                 budget_remaining(budget, &clock)?;
@@ -878,15 +878,15 @@ mod worker_impl {
                 };
                 let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 let Some(next_total) = total.checked_add(length) else {
-                    let error = EdgeError::bad_request(
-                        "outbound request body size accounting overflow",
+                    let error = EdgeError::payload_too_large(
+                        edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     );
                     yield Err(terminal_error_after_host_event(error, budget, &clock).await);
                     return;
                 };
                 if next_total > maximum {
-                    let error = EdgeError::bad_request(
-                        "outbound request body exceeded configured limit",
+                    let error = EdgeError::payload_too_large(
+                        edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     );
                     yield Err(terminal_error_after_host_event(error, budget, &clock).await);
                     return;
@@ -1069,6 +1069,45 @@ mod worker_impl {
                 deadline: Deadline::at_instant(start.checked_add(duration).expect("deadline")),
                 duration,
             }
+        }
+
+        #[wasm_bindgen_test]
+        async fn upload_cap_boundaries_preserve_typed_origins() {
+            let start = MonotonicInstant::now();
+            let budget = test_budget(start, Duration::from_secs(1));
+            for len in [7_usize, 8, 9] {
+                let clock = MonotonicClock::new(move || start);
+                let source = stream::iter([Ok(Bytes::from(vec![b'x'; len]))]).boxed_local();
+                let mut bounded = upload_stream(source, 8, budget, clock);
+                let result = bounded.next().await.expect("upload item");
+                if len > 8 {
+                    let error = result.expect_err("upload overflow");
+                    assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(
+                        error.request_body_overflow_origin(),
+                        Some(edgezero_core::RequestBodyOverflowOrigin::OutboundUpload)
+                    );
+                } else {
+                    assert_eq!(result.expect("body").len(), len);
+                }
+            }
+            let source_error =
+                EdgeError::payload_too_large(edgezero_core::RequestBodyOverflowOrigin::Inbound);
+            let mut source = upload_stream(
+                stream::iter([Err(source_error)]).boxed_local(),
+                8,
+                budget,
+                MonotonicClock::new(move || start),
+            );
+            let error = source
+                .next()
+                .await
+                .expect("item")
+                .expect_err("source overflow");
+            assert_eq!(
+                error.request_body_overflow_origin(),
+                Some(edgezero_core::RequestBodyOverflowOrigin::Inbound)
+            );
         }
 
         #[wasm_bindgen_test]

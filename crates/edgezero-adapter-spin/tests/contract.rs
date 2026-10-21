@@ -1789,6 +1789,26 @@ mod outbound_contract_tests {
     }
 
     #[test]
+    fn buffered_upload_cap_has_typed_preflight_boundaries() {
+        for len in [7_usize, 8, 9] {
+            let request = OutboundRequest::post("https://example.com/upload")
+                .expect("request")
+                .body(vec![b'x'; len])
+                .max_request_body_bytes(8);
+            let result = validate_batch_request_for_test(&request);
+            if len > 8 {
+                let error = result.expect_err("overflow before dispatch");
+                assert_eq!(
+                    error.request_body_overflow_origin(),
+                    Some(edgezero_core::RequestBodyOverflowOrigin::OutboundUpload)
+                );
+            } else {
+                result.expect("within cap");
+            }
+        }
+    }
+
+    #[test]
     fn batch_preflight_precedence_and_indices() {
         let requests = [
             request().body(Bytes::from_static(b"buffered")),

@@ -194,7 +194,7 @@ fn configure_app(app: &mut EdgeZeroApp) -> Result<(), EdgeError> {
                 max_body_bytes: FALLBACK_INGRESS_BODY_BYTES,
                 read_deadline: head.read_deadline_after(FALLBACK_INGRESS_READ_BUDGET),
                 on_exceeded: BufferedIngressResponse::text(
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::PAYLOAD_TOO_LARGE,
                     "request body too large\n",
                 ),
                 on_timeout: BufferedIngressResponse::text(
@@ -695,7 +695,7 @@ mod lifecycle_tests {
 
             assert_plain_text_response(
                 &response,
-                StatusCode::BAD_REQUEST,
+                StatusCode::PAYLOAD_TOO_LARGE,
                 b"request body too large\n",
             );
         }

@@ -299,6 +299,8 @@ mod tests {
     use crate::response::{AxumEgressBody, EgressConnection};
     use crate::service::AxumServiceState;
 
+    use edgezero_core::context::RequestContext;
+
     #[derive(Clone, Copy)]
     enum DeclaredTail {
         Clean,
@@ -394,6 +396,17 @@ mod tests {
         app: App,
         method: &str,
     ) -> (String, Result<ConnectionExit, hyper::Error>) {
+        exchange_with_wire(
+            app,
+            format!("{method} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await
+    }
+
+    async fn exchange_with_wire(
+        app: App,
+        request: String,
+    ) -> (String, Result<ConnectionExit, hyper::Error>) {
         LocalSet::new()
             .run_until(async {
                 let listener = TcpListener::bind("127.0.0.1:0")
@@ -409,12 +422,7 @@ mod tests {
                 });
                 let mut client = TcpStream::connect(address).await.expect("connect client");
                 client
-                    .write_all(
-                        format!(
-                            "{method} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-                        )
-                        .as_bytes(),
-                    )
+                    .write_all(request.as_bytes())
                     .await
                     .expect("write request");
                 let mut wire = Vec::new();
@@ -426,6 +434,45 @@ mod tests {
                 (String::from_utf8(wire).expect("ASCII response"), exit)
             })
             .await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chunked_overflow_keeps_pipelined_request_boundaries_and_error_policy() {
+        #[edgezero_core::action]
+        async fn capped(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            ctx.body_bytes(8).await?;
+            Ok("accepted")
+        }
+
+        let router = RouterService::builder()
+            .post("/", capped)
+            .get("/healthy", |_ctx: RequestContext| async {
+                Ok::<_, EdgeError>("healthy")
+            })
+            .build();
+        let mut app = App::new(router);
+        app.set_error_response_renderer(|_| {
+            response_builder()
+                .header("retry-after", "120")
+                .body(Body::from("overflow"))
+                .expect("error response")
+        });
+        let request = concat!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "9\r\n123456789\r\n0\r\n\r\n",
+            "GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        let (wire, _exit) = exchange_with_wire(app, request.to_owned()).await;
+        assert!(wire.starts_with("HTTP/1.1 413"), "{wire}");
+        assert!(
+            !wire.to_ascii_lowercase().contains("retry-after:"),
+            "{wire}"
+        );
+        // Closing on unread bytes is valid; if reused, the following request must be intact.
+        if wire.matches("HTTP/1.1 ").count() > 1 {
+            assert!(wire.contains("HTTP/1.1 200"), "{wire}");
+            assert!(wire.ends_with("healthy"), "{wire}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

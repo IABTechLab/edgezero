@@ -6,7 +6,7 @@ use futures_util::stream::{LocalBoxStream, Stream, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::error::EdgeError;
+use crate::error::{EdgeError, RequestBodyOverflowOrigin};
 
 pub type BodyStream = LocalBoxStream<'static, Result<Bytes, EdgeError>>;
 
@@ -83,13 +83,16 @@ impl Body {
     /// Works for both buffered and streaming variants.
     ///
     /// # Errors
-    /// Returns [`EdgeError::bad_request`] if the body exceeds `max_size` bytes; or [`EdgeError::internal`] if the upstream stream errors.
+    /// Returns [`EdgeError::PayloadTooLarge`] with inbound origin if the body exceeds
+    /// `max_size` bytes. Source errors retain their original category.
     #[inline]
     pub async fn into_bytes_bounded(self, max_size: usize) -> Result<Bytes, EdgeError> {
         match self {
             Body::Once(bytes) => {
                 if bytes.len() > max_size {
-                    return Err(EdgeError::bad_request("request body too large"));
+                    return Err(EdgeError::payload_too_large(
+                        RequestBodyOverflowOrigin::Inbound,
+                    ));
                 }
                 Ok(bytes)
             }
@@ -98,10 +101,12 @@ impl Body {
                 while let Some(result) = StreamExt::next(&mut stream).await {
                     let chunk = result?;
                     let next_len = buf.len().checked_add(chunk.len()).ok_or_else(|| {
-                        EdgeError::bad_request("request body size accounting overflow")
+                        EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound)
                     })?;
                     if next_len > max_size {
-                        return Err(EdgeError::bad_request("request body too large"));
+                        return Err(EdgeError::payload_too_large(
+                            RequestBodyOverflowOrigin::Inbound,
+                        ));
                     }
                     buf.extend_from_slice(&chunk);
                 }
@@ -224,6 +229,7 @@ impl From<String> for Body {
 mod tests {
     use super::*;
     use crate::error::ResponseLimitReason;
+    use crate::http::StatusCode;
     use futures::executor::block_on;
     use futures_util::stream;
     use std::cell::Cell;
@@ -334,6 +340,31 @@ mod tests {
     }
 
     #[test]
+    fn bounded_body_overflow_has_a_distinct_413_category() {
+        for len in [7_usize, 8, 9] {
+            for streamed in [false, true] {
+                let bytes = Bytes::from(vec![b'x'; len]);
+                let body = if streamed {
+                    Body::stream(stream::iter([bytes]))
+                } else {
+                    Body::from(bytes)
+                };
+                match block_on(body.into_bytes_bounded(8)) {
+                    Ok(collected) => {
+                        assert!(len <= 8, "overflow must not truncate into success");
+                        assert_eq!(collected.len(), len);
+                    }
+                    Err(error) => {
+                        assert_eq!(len, 9);
+                        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                        assert_eq!(error.kind(), "payload_too_large");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn body_bounded_checks_before_append() {
         let polls = Rc::new(Cell::new(0_usize));
         let observed = Rc::clone(&polls);
@@ -344,7 +375,12 @@ mod tests {
         .inspect(move |_| observed.set(observed.get().saturating_add(1)));
         let error =
             block_on(Body::from_stream(source).into_bytes_bounded(3)).expect_err("over limit");
-        assert!(matches!(error, EdgeError::BadRequest { .. }));
+        assert!(matches!(
+            error,
+            EdgeError::PayloadTooLarge {
+                origin: RequestBodyOverflowOrigin::Inbound
+            }
+        ));
         assert_eq!(polls.get(), 1);
     }
 

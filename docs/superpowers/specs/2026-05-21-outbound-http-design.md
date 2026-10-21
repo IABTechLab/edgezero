@@ -737,7 +737,8 @@ impl OutboundRequest {
  /// MAY pass the stream through to the platform natively (Fastly's
  /// `send_async_streaming`, Spin's WASI outgoing body) or buffer to
  /// `Bytes` within the cap before dispatch (Axum, Cloudflare). Over-cap
- /// during drain → `bad_request` (400) — a client-side misuse.
+ /// during drain → `PayloadTooLarge { origin: OutboundUpload }` (413).
+ /// Buffered over-cap bodies fail in shared preflight before any provider dispatch.
  /// Default `DEFAULT_OUTBOUND_REQUEST_BODY_BYTES = 8 MiB`.
     pub fn max_request_body_bytes(self, max: u64) -> Self;
 
@@ -1197,7 +1198,7 @@ impl OutboundResponse {
  /// `bad_gateway`; §3.4.1).
  ///
  /// This is NOT a thin wrapper over `Body::into_bytes_bounded` — that
- /// helper maps over-limit to `bad_request` (400), correct for inbound
+ /// helper maps over-limit to `payload_too_large` (413), correct for inbound
  /// bodies but wrong for an over-large upstream response. This method
  /// performs its own bounded drain (pre-append checked accounting)
  /// and maps over-cap to `response_too_large` with reason `BufferedBody`
@@ -2827,8 +2828,11 @@ decoded cap, while the independent encoded cap may reject it (§3.4.5). Adding
 the Phase 1a variants (every `match` arm and test matrix updated; neither reason nor the
 variant adds `Retry-After`/`field_path` to the wire). §5.4 pins resource-reason tests and
 keeps transport failure distinguishable from every limit outcome.
-- Request-body over-cap keeps its distinct existing outcome — `bad_request` (400),
-  a client-side misuse — unchanged.
+- Request-body over-cap is `PayloadTooLarge { origin }` (413), kind `payload_too_large`.
+  `RequestBodyOverflowOrigin::{Inbound, OutboundUpload}` is inspectable in Rust, not serialized.
+  Every cap uses the fixed public message `request body too large`. Generated overflow responses
+  suppress `Retry-After` after custom rendering and final egress preparation; this never strips
+  a surviving retry header from an ordinary upstream 413 or changes config-503 retry policy.
 
 **Pipeline order — resource and decoder work stay inside the absolute-deadline output
 wrapper.** After adapter-visible upstream header limits and bodyless disposition, payload layers compose
@@ -2938,7 +2942,7 @@ apply a distinct final collection cap later with
 Brotli-window/decoder-state limits in §3.4.5 also apply before or during streamed delivery.
 The bounded collection method does **not** delegate to
 `Body::into_bytes_bounded` directly — `Body::into_bytes_bounded` maps over-limit to
-`bad_request` (400), correct for the inbound body case but wrong for an over-large
+`payload_too_large` (413), correct for the inbound body case but wrong for an over-large
 upstream response. `OutboundResponse::into_bytes_bounded` performs its own bounded
 drain and maps over-cap to **`response_too_large`** (distinct kind, 502 — §3.4.1; NOT
 `bad_gateway`, so a consumer classifies it apart from transport). On adapters that
@@ -2974,6 +2978,9 @@ EdgeError::GatewayTimeout { message: String, cause: BudgetSource }  // -> 504  (
 // distinct machine-classifiable outcome, NOT collapsed into `bad_gateway` (§3.4.1):
 EdgeError::ResponseTooLarge { message: String, reason: ResponseLimitReason }
 // -> 502, kind "response_too_large"
+// Request byte caps have a separate fixed-message error; the origin is not serialized.
+EdgeError::PayloadTooLarge { origin: RequestBodyOverflowOrigin }
+// -> 413, kind "payload_too_large"
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -2995,6 +3002,10 @@ pub enum BadGatewayReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+pub enum RequestBodyOverflowOrigin { Inbound, OutboundUpload }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResponseLimitReason {
     BrotliWindow,
     BufferedBody,
@@ -3013,6 +3024,8 @@ pub fn bad_gateway_with_reason(
 ) -> Self;
 pub fn gateway_timeout(message: impl Into<String>) -> Self;              // cause = Unspecified
 pub fn gateway_timeout_caused(message: impl Into<String>, cause: BudgetSource) -> Self;
+pub const fn payload_too_large(origin: RequestBodyOverflowOrigin) -> Self;
+pub const fn request_body_overflow_origin(&self) -> Option<RequestBodyOverflowOrigin>;
 pub fn response_too_large(message: impl Into<String>) -> Self; // reason = Unspecified
 pub fn response_too_large_with_reason(
     message: impl Into<String>,
@@ -3047,6 +3060,7 @@ the third plus `ResponseLimitReason` in the same mechanical style.
 | Condition | `EdgeError` | HTTP status |
 | --- | --- | --- |
 | Invalid outbound URI (relative / no authority / bad scheme) | `bad_request` | 400 |
+| EdgeZero-owned inbound/request-upload byte-cap overflow | `payload_too_large`, typed `RequestBodyOverflowOrigin` (not serialized) | 413 |
 | Upstream unreachable before a response head (DNS / connect / TLS establishment / connection refusal) | `bad_gateway`, reason `Unreachable` when the adapter can establish it, else `Unspecified` | 502 |
 | Outbound transport failure after connection progress (request upload, response read, trailer/completion, connection termination) | `bad_gateway`, reason `Transport` when the adapter can establish it, else `Unspecified` | 502 |
 | Outbound protocol/framing/completion failure | `bad_gateway`, reason `Protocol` | 502 |
@@ -4668,7 +4682,7 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
      `reqwest::Body::wrap_stream` requires), so Axum drains a streamed request body
      into `Bytes` up to `req.max_request_body_bytes` (default 8 MiB) **before**
      constructing the reqwest request. Pre-append checked accounting per §3.4.1;
-     over-cap → `bad_request`. Every pull uses this absolute-deadline protocol:
+     over-cap → `payload_too_large` (413, `OutboundUpload`). Every pull uses this absolute-deadline protocol:
      (a) call `budget.deadline.remaining()` immediately before the pull and return
      attributed `gateway_timeout` if it is `None`; (b) race `source.next()` against
      `tokio::time::sleep(remaining)`; (c) when the source arm becomes ready, call
@@ -4743,7 +4757,7 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
      Expiry before dispatch returns `Err(gateway_timeout)` for the slot.
   2. **If the request body is `Body::Stream`, drain it to `Bytes` first.** Up to
      `req.max_request_body_bytes` (default 8 MiB), pre-append checked accounting;
-     over-cap → `bad_request`. Every pull uses the same absolute-deadline protocol
+     over-cap → `payload_too_large` (413, `OutboundUpload`). Every pull uses the same absolute-deadline protocol
      as Axum: read `remaining()` immediately before the pull and fail with an
      attributed `gateway_timeout` when absent; race `source.next()` against
      `worker::Delay::from(remaining)`; then, if the source arm becomes ready,
@@ -4900,7 +4914,7 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
   category, otherwise `Unspecified`; later transport failures → `Transport`; invalid
   visible upstream framing/completion → `Protocol`; shared JSON/gzip/deflate/Brotli failures →
   `Decode(Json)` / `Decode(Gzip)` / `Decode(Brotli)`; **request**-body over-cap →
-  `bad_request` (400); response-resource failures preserve their exact
+  `payload_too_large` (413, `OutboundUpload`); response-resource failures preserve their exact
   `ResponseLimitReason`. A provider error with no defensible narrower category uses
   `Unspecified`. Any completed exchange (incl. non-2xx) → `Ok`.
 - **Method / body preflight — no silent coercion.** The historical adapter mapped
@@ -5717,7 +5731,7 @@ fn start_batch_until(
   through `SendFailure` (§4.3); on success, feed chunks from the core stream to the
   `StreamingBody`, with these rules:
   - **Byte count cap.** Pre-append checked accounting against
-    `req.max_request_body_bytes` (default 8 MiB). Over-cap → `bad_request` (400) —
+    `req.max_request_body_bytes` (default 8 MiB). Over-cap → `payload_too_large` (413) —
     the `StreamingBody` is dropped without `finish()`, the `PendingRequest` is
     dropped, and the slot returns the error.
   - **Upload ownership and terminal results.** Keep both SDK handles owned until an
@@ -6149,7 +6163,7 @@ this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper. The
  // pre-append cap check against max_request_body_bytes (u64; no `as`, use try_from)
           let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
           if sent.checked_add(chunk_len).is_none_or(|total| total > max_req) {
-              return Err(EdgeError::bad_request("request body exceeded max_request_body_bytes"));
+              return Err(EdgeError::payload_too_large(RequestBodyOverflowOrigin::OutboundUpload));
           }
  // checked: bare `+=` trips `clippy::arithmetic_side_effects` (denied).
           sent = sent.saturating_add(chunk_len);
@@ -6318,7 +6332,8 @@ this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper. The
   `Ok(None)` to the trailers future; every other drop defaults to `Err`. The separate
   `request_done` result is awaited on full upload and retained on reader-gone as described
   above. The `max_request_body_bytes` cap (default 8 MiB) is enforced with pre-append
-  checked accounting inside the pump loop, `bad_request` on overflow.
+  checked accounting inside the pump loop, `payload_too_large` (413) on EdgeZero cap overflow.
+  Shared preflight rejects oversized buffered bodies before constructing or sending a WASI request.
 
   **`RequestOptions` do not bound the upload.** WASI 0.3 keeps `set-connect-timeout` /
   `set-first-byte-timeout` / `set-between-bytes-timeout`, but these are transport /
@@ -6378,11 +6393,12 @@ this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper. The
     destination-not-found/unavailable before a response head →
     **`bad_gateway_with_reason(.., Unreachable)` (502)**. Connection termination/read/write
     failure after connection progress uses **`Transport`**.
-  - Caller-controlled request-policy/size failures → **`bad_request` (400)**:
+  - Provider-reported caller-controlled request-policy/size failures → **`bad_request` (400)**:
     `HttpRequestDenied`, `HttpRequestBodySize`, `HttpRequestUriTooLong`,
     `HttpRequestHeaderSectionSize`, and `HttpRequestHeaderSize`. These can be caused by
     a requested target or limits exposed through the outbound API; reporting 500 would
-    misclassify caller input as an EdgeZero invariant failure.
+    misclassify caller input as an EdgeZero invariant failure. These provider error codes do
+    not prove an EdgeZero cap fired; its own upload counter returns typed 413 separately.
   - Adapter/core invariant failures → **`internal` (500)**:
     `HttpRequestLengthRequired` (the adapter owns framing),
     `HttpRequestMethodInvalid` / `HttpRequestUriInvalid` (core preflight must reject
@@ -6420,7 +6436,7 @@ this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper. The
     that we forgot to map trips the test (via a `#[deny(unreachable_patterns)]`-style
     round-trip or an explicit variant list), not silently defaults.
   - The separate wasi-timer we race the exchange against (§4.4) also yields
-    `gateway_timeout` on expiry. **request**-body over-cap → `bad_request` (400);
+    `gateway_timeout` on expiry. **request**-body over-cap → `payload_too_large` (413);
     **response**-body over-cap (decompressed) → `response_too_large` (distinct kind, 502, §3.4.1). Any
     completed exchange (incl. non-2xx) → `Ok`.
 - Spin requires `allowed_outbound_hosts`; the adapter renders it from
@@ -6592,7 +6608,7 @@ Each adapter crate tests its shipped conversion and classification seams.
 | Surface | Required assertions |
 | --- | --- |
 | Capability metadata | All four adapters return the exact twelve **outbound** cells in §3.5.2, including completion order, cancellation, slot isolation, cache bypass, authority override, complete resource accounting = Unsupported everywhere, Fastly outbound HTTP = BestEffort, Cloudflare header fidelity = BestEffort, and Spin deadline/upload/flexible-phase-budget = BestEffort. Tests do not assert that the shared enum has only twelve global variants; non-outbound cells belong to their own specs. A fixture adapter that relies on the trait default returns Unsupported. Because each adapter crate matches core's non-exhaustive `Capability` enum across a crate boundary, normal adapter compilation requires a wildcard; review asserts that its result is `_ => Unsupported`. A hypothetical future variant is a structural fail-closed invariant, not a value current Rust code can safely construct at runtime. |
-| Request conversion | Method/body/headers/full canonical URI survive conversion; normalized hop-by-hop fields cannot reappear; buffered and streamed request caps map to 400. Dot-segment/percent/numeric-host/IDNA cases use the exact core serialization rather than adapter reconstruction. Typed `EdgeError` request chunks survive adapter conversion; in-tree paths never route them through `from_external_stream`. |
+| Request conversion | Method/body/headers/full canonical URI survive conversion; normalized hop-by-hop fields cannot reappear; EdgeZero-owned buffered and streamed request caps map to typed 413 with upload origin. Buffered overflow rejects before dispatch. Dot-segment/percent/numeric-host/IDNA cases use the exact core serialization rather than adapter reconstruction. Typed `EdgeError` request chunks retain their original category and origin through adapter conversion; in-tree paths never route them through `from_external_stream`. |
 | Deadline anchoring and clock propagation | Every standard adapter installs its outbound client with the exact `App::monotonic_clock()` clone used by ingress; every low-level response constructor requires its caller to supply that clock explicitly. Every adapter captures one stored-clock snapshot as the first operation in `send`/`start_batch_until`, before normalization, preflight, or builder work. An injected clock advances during preparation and proves that elapsed time consumes the valid request's original budget; no path re-anchors or bypasses the client clock. Preflight slot elapsed, provider-error precedence, post-ready expiry, deferred upload/response streams, returned `OutboundResponse` bounded-until collection, and response-egress coordinator checks use that same handle. A backwards clock cannot enlarge `budget.duration`; a backwards terminal sample produces zero elapsed plus an internal invariant outcome. Invalid-request precedence remains the shared validator's result because validation still runs before budget selection. |
 | `start_batch_until` / `send_all_until` on every adapter | Run the production batch orchestration with injected transport/clock seams for Axum, Cloudflare, Fastly, and Spin. Empty input returns empty without dispatch; mixed valid/invalid slots retain exact input indices; preflight failures dispatch no work for that slot and never poll rejected source streams; GET/HEAD body errors precede batch-only errors; transport errors, cap failures, timeouts, and non-2xx responses preserve sibling outcomes without cancelling siblings. Assert every emitted slot carries its own elapsed time from the one method-entry snapshot through that slot's terminal point; advance the injected clock during preflight to prove that time is included. A same-tick terminal result may legitimately report zero. A slow sibling's later completion must not overwrite an earlier slot's elapsed value. Valid one-slot buffered batches match single-send outcome semantics while elapsed is asserted independently. Script reverse completion order on concurrent adapters; assert every eligible exchange is polled before a stalled sibling finishes. Assert cancellation retains already emitted items, reports unresolved indices, and does not consume a ready item when a `next()` future is dropped. Fastly tests dispatch-before-selection, selected-handle identity reassociation, all three reassociation failure diagnostics, exact error-to-driver-event propagation with previously collected slots, bounded groups, and immediate elapsed sampling after each preflight/dispatch/selected-body terminal result while retaining its documented BestEffort timing caveats. Backwards injected time produces zero plus an internal outcome, distinguishable from legitimate zero by outcome. |
 | Streamed fan-out usage | On Axum/Cloudflare/Spin, join per-request tasks containing both `send` and body consumption. Script a fast response whose body can finish before its deadline while a sibling's headers remain pending beyond it. Assert the fast body is consumed and succeeds before those sibling headers arrive. Joining only sends and delaying all body consumption must fail this regression. Fastly is excluded from this non-portable usage pattern. |
@@ -7071,7 +7087,8 @@ Adapter-specific work:
   trailers/completion future. Component-stream termination and caller-result
   `FutureWriteError` follow their separately specified policies rather than entering that
   classifier.
-  Caller-controlled request policy/size variants map to 400, core/adapter invariants to
+  Provider-reported caller-controlled request policy/size variants map to 400 (EdgeZero's
+  own upload-cap counter instead returns typed 413), core/adapter invariants to
   500, provider timeouts before absolute expiry to unattributed 504, errors observed at or
   after absolute expiry to attributed 504, and upstream failures to 502. The monotonic race
   returns a guest-visible timeout, while deadline and upload cancellation remain

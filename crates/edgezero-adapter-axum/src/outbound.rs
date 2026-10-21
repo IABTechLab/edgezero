@@ -233,8 +233,8 @@ async fn collect_request_body(
         Body::Once(bytes) => {
             let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             if length > maximum {
-                return Err(EdgeError::bad_request(
-                    "outbound request body exceeded configured limit",
+                return Err(EdgeError::payload_too_large(
+                    edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                 ));
             }
             budget_remaining(budget, clock)?;
@@ -255,13 +255,13 @@ async fn collect_request_body(
                 let bytes = item?;
                 let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 let Some(next_total) = total.checked_add(length) else {
-                    return Err(EdgeError::bad_request(
-                        "outbound request body size accounting overflow",
+                    return Err(EdgeError::payload_too_large(
+                        edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     ));
                 };
                 if next_total > maximum {
-                    return Err(EdgeError::bad_request(
-                        "outbound request body exceeded configured limit",
+                    return Err(EdgeError::payload_too_large(
+                        edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     ));
                 }
                 collected.extend_from_slice(&bytes);
@@ -543,6 +543,44 @@ mod clock_tests {
             deadline: Deadline::at_instant(start.checked_add(duration).expect("deadline")),
             duration,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_cap_boundaries_preserve_typed_origins() {
+        let start = MonotonicInstant::now();
+        let clock = MonotonicClock::new(move || start);
+        let budget = test_budget(start, Duration::from_secs(1));
+        for len in [7_usize, 8, 9] {
+            for streamed in [false, true] {
+                let bytes = Bytes::from(vec![b'x'; len]);
+                let body = if streamed {
+                    Body::stream(stream::iter([bytes]))
+                } else {
+                    Body::from(bytes)
+                };
+                let result = collect_request_body(body, 8, budget, &clock).await;
+                if len > 8 {
+                    let error = result.expect_err("upload overflow");
+                    assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(
+                        error.request_body_overflow_origin(),
+                        Some(edgezero_core::RequestBodyOverflowOrigin::OutboundUpload)
+                    );
+                } else {
+                    assert_eq!(result.expect("body").len(), len);
+                }
+            }
+        }
+        let source_error =
+            EdgeError::payload_too_large(edgezero_core::RequestBodyOverflowOrigin::Inbound);
+        let body = Body::from_stream(stream::iter([Err(source_error)]));
+        let error = collect_request_body(body, 8, budget, &clock)
+            .await
+            .expect_err("source overflow");
+        assert_eq!(
+            error.request_body_overflow_origin(),
+            Some(edgezero_core::RequestBodyOverflowOrigin::Inbound)
+        );
     }
 
     #[tokio::test]

@@ -399,6 +399,8 @@ detached normalized-ingress errors. EdgeZero reapplies mandatory protocol metada
 callback, including the error's status, so the status returned by the callback is ignored;
 canonical 405 responses therefore retain their sorted, deduplicated `Allow` field.
 Effective `config_out_of_date` responses retain `Retry-After: 60`.
+Typed request-body overflow responses always retain status 413 and lose `Retry-After`, even
+when a custom renderer adds it. This does not remove an upstream 413 response's retry policy.
 Explicit admission refusals and fallback `on_exceeded`/`on_timeout` responses are already complete
 application responses and bypass this renderer. Avoid serializing `error.to_string()` when the
 body must remain bounded or diagnostics must remain private.
@@ -590,12 +592,22 @@ async fn update_user(
 
 Extractors return `EdgeError` on failure, which automatically converts to appropriate HTTP responses:
 
-| Error                 | Status Code              |
-| --------------------- | ------------------------ |
-| JSON parse error      | 400 Bad Request          |
-| Validation error      | 422 Unprocessable Entity |
-| Missing path param    | 400 Bad Request          |
-| Type conversion error | 400 Bad Request          |
+| Error                  | Status Code              |
+| ---------------------- | ------------------------ |
+| JSON parse error       | 400 Bad Request          |
+| Body byte-cap overflow | 413 Payload Too Large    |
+| Inbound read deadline  | 408 Request Timeout      |
+| Validation error       | 422 Unprocessable Entity |
+| Missing path param     | 400 Bad Request          |
+| Type conversion error  | 400 Bad Request          |
+
+`body_bytes`, `json_within`, `form_within`, and the body extractors return
+`EdgeError::PayloadTooLarge` for overflow; malformed JSON or form input remains 400.
+`request_body_overflow_origin()` distinguishes `RequestBodyOverflowOrigin::Inbound` from
+`OutboundUpload` without parsing messages. The origin is not serialized. An oversized single
+normalized `Content-Length` rejects without reading, unless the read deadline has already
+expired (408). This early rejection and a stricter cached cap remain reusable at a larger cap;
+overflow while consuming a stream is sticky and never retries the source.
 
 For custom error handling, return `Result`:
 

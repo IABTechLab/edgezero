@@ -1945,6 +1945,55 @@ mod tests {
     }
 
     #[test]
+    fn body_extractors_preserve_overflow_category_at_every_boundary() {
+        for extractor in 0_u8..6 {
+            let cap = match extractor {
+                0 | 1 => DEFAULT_INBOUND_JSON_BYTES,
+                3 | 4 => DEFAULT_INBOUND_FORM_BYTES,
+                _ => 16,
+            };
+            for length in [cap - 1, cap, cap + 1] {
+                let body = if extractor <= 2 {
+                    let mut bytes =
+                        serde_json::to_vec(&serde_json::json!({"name": "demo"})).expect("JSON");
+                    bytes.resize(length, b' ');
+                    Body::from(bytes)
+                } else {
+                    Body::from(format!("username={}", "x".repeat(length - 9)))
+                };
+                let ctx = ctx(body, PathParams::default());
+                let result =
+                    match extractor {
+                        0 => block_on(Json::<Payload>::from_request(&ctx)).map(|_| ()),
+                        1 => block_on(ValidatedJson::<ValidatedPayload>::from_request(&ctx))
+                            .map(|_| ()),
+                        2 => block_on(ValidatedJsonWithin::<ValidatedPayload, 16>::from_request(
+                            &ctx,
+                        ))
+                        .map(|_| ()),
+                        3 => block_on(Form::<FormData>::from_request(&ctx)).map(|_| ()),
+                        4 => block_on(ValidatedForm::<ValidatedFormData>::from_request(&ctx))
+                            .map(|_| ()),
+                        _ => block_on(ValidatedFormWithin::<ValidatedFormData, 16>::from_request(
+                            &ctx,
+                        ))
+                        .map(|_| ()),
+                    };
+                if length > cap {
+                    let error = result.expect_err("overflow");
+                    assert_eq!(error.kind(), "payload_too_large");
+                    assert_eq!(
+                        error.request_body_overflow_origin(),
+                        Some(crate::RequestBodyOverflowOrigin::Inbound)
+                    );
+                } else {
+                    result.expect("within cap");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn json_extractor_parses_payload() {
         let body = Body::json(&Payload {
             name: "demo".into(),

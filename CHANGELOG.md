@@ -73,6 +73,13 @@ separately from the portable API and must be considered when declaring required 
 
 ### Outbound HTTP And Batches
 
+- Return typed `EdgeError::PayloadTooLarge` (413) for inbound reader/extractor and outbound
+  upload overflow, with non-wire `RequestBodyOverflowOrigin`. Reject oversized buffered uploads
+  before every adapter dispatch; retain existing prebuffered or aborting stream behavior.
+  Reject oversized normalized declared lengths without polling or poisoning reusable bodies;
+  expired inbound deadlines still win with 408 and consumed overflow stays sticky.
+  Suppress `Retry-After` on generated overflow after rendering and final egress preparation,
+  while preserving upstream 413 and config-503 retry policies. Align demo/scaffold fallback status.
 - Verify actual downstream encoded relay through all four local entrypoints: 24 cases per
   adapter across gzip/deflate/Brotli, buffered/streamed modes, Original/206 preservation and
   Decode controls. Capture binary wire payloads without decoding, retain representation metadata

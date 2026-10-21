@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use crate::body::Body;
 use crate::config_store::ConfigExtractionLimits;
-use crate::error::EdgeError;
+use crate::error::{
+    EdgeError, RequestBodyOverflowResponse, mark_body_overflow_response,
+    suppress_overflow_retry_after,
+};
 use crate::http::header::CONTENT_TYPE;
 use crate::http::{HeaderValue, Method, Request, Response, StatusCode};
 use crate::ingress::{
@@ -333,6 +336,7 @@ impl App {
 
     fn render_error_response(&self, error: EdgeError) -> Response {
         let status = error.status();
+        let overflow_origin = error.request_body_overflow_origin();
         let required_headers = match error.required_response_headers() {
             Ok(headers) => headers,
             Err(header_error) => return render_default_error_response(header_error),
@@ -340,6 +344,13 @@ impl App {
         let mut response = (self.error_response_renderer)(error);
         *response.status_mut() = status;
         response.headers_mut().extend(required_headers);
+        response
+            .extensions_mut()
+            .remove::<RequestBodyOverflowResponse>();
+        if let Some(origin) = overflow_origin {
+            mark_body_overflow_response(&mut response, origin);
+        }
+        suppress_overflow_retry_after(&mut response);
         response
     }
 
@@ -642,6 +653,7 @@ fn render_default_error_response(error: EdgeError) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use crate::response_egress_framing::prepare_response_egress;
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -2098,6 +2110,57 @@ mod tests {
             response.body().as_bytes().expect("buffered body"),
             b"bounded error"
         );
+    }
+
+    #[test]
+    fn custom_renderer_cannot_add_retry_after_to_body_overflow() {
+        let mut app = App::new(empty_router());
+        app.set_error_response_renderer(|error| {
+            assert_eq!(error.kind(), "payload_too_large");
+            response_builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("retry-after", "120")
+                .body(Body::from("bounded error"))
+                .expect("response")
+        });
+        let error = block_on(Body::from("over cap").into_bytes_bounded(1)).expect_err("overflow");
+        let response = app.render_error_response(error);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().get("retry-after").is_none());
+    }
+
+    #[test]
+    fn custom_renderer_overflow_marker_cannot_override_config_retry_policy() {
+        let mut app = App::new(empty_router());
+        app.set_error_response_renderer(|_| {
+            EdgeError::payload_too_large(crate::RequestBodyOverflowOrigin::Inbound)
+                .into_response()
+                .expect("renderer response")
+        });
+        for error in [
+            EdgeError::config_out_of_date("stale", "field"),
+            EdgeError::store_extraction(StoreExtractionReason::MissingSecret, "missing", None),
+        ] {
+            let response = app.render_error_response(error);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("retry-after")
+                    .expect("required retry"),
+                "60"
+            );
+            let prepared = prepare_response_egress(&Method::POST, response)
+                .expect("prepared")
+                .into_response();
+            assert_eq!(
+                prepared
+                    .headers()
+                    .get("retry-after")
+                    .expect("retry survives egress"),
+                "60"
+            );
+        }
     }
 
     #[test]

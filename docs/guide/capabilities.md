@@ -108,6 +108,10 @@ effective limits, accept-loop overshoot, parser storage assumptions, and respons
 safety policy. These controls do not supply independent raw-target/field-section accounting or
 the strict framing policy, so they do not promote either raw-ingress capability above.
 
+Inbound readers and body extractors return 413 for byte-cap overflow, 400 for malformed
+payloads, and 408 for an expired admitted read deadline. Demo and scaffold fallback policies
+select 413 for overflow and 408 for timeout; applications may select their own bounded responses.
+
 Admission is body-blind. An application may opt into `ReadBodyBeforeFallback` for pre-resolved
 404/405 requests when it needs body-limit precedence: clean EOF at or below the selected cap
 retains the canonical 404/405, the first byte over returns the application-selected buffered
@@ -400,6 +404,15 @@ Each `OutboundRequest` owns independent limits:
 | `max_brotli_window_bits`     | Brotli stream header checked before decoder allocation                                                      | 24      |
 | `max_decoder_bytes`          | Pinned policy charge for Brotli/gzip/deflate decoder state                                                  | 32 MiB  |
 | `max_chunk_bytes`            | Maximum emitted item size after decoding or passthrough                                                     | Unset   |
+
+Request upload overflow is `EdgeError::PayloadTooLarge` with typed `OutboundUpload` origin;
+inbound reader overflow carries `Inbound` instead. Buffered uploads over their cap reject
+before provider dispatch on every adapter. Axum and Cloudflare prebuffer streamed uploads
+within the cap before contacting the origin. Fastly and Spin may already have sent the head
+and a prefix, but overflow aborts the upload rather than completing a truncated request.
+An ordinary upstream 413 remains a response and may retain `Retry-After`. EdgeZero-generated
+typed cap errors cannot carry that header after custom rendering or final egress preparation.
+This is not a claim of hosted qualification; see the follow-up plan's remaining runtime legs.
 
 The encoded counter applies to every response path. The decoded counter applies to identity
 and gzip/deflate/Brotli data decoded by EdgeZero, but not to unknown, stacked, parameterized, or other

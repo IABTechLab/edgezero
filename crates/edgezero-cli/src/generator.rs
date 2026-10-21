@@ -1568,7 +1568,7 @@ unpinned = { path = "somewhere" }
                 && fallback.contains("max_body_bytes: FALLBACK_INGRESS_BODY_BYTES")
                 && fallback.contains(concat!(
                     "on_exceeded: BufferedIngressResponse::text( ",
-                    "StatusCode::BAD_REQUEST, ",
+                    "StatusCode::PAYLOAD_TOO_LARGE, ",
                     "\"request body too large\\n\", ),",
                 ))
                 && fallback.contains(concat!(
@@ -1595,13 +1595,13 @@ unpinned = { path = "somewhere" }
                     "request timeout\n",
                 ),
                 on_timeout: BufferedIngressResponse::text(
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::PAYLOAD_TOO_LARGE,
                     "request body too large\n",
                 ),
             }
             const FALLBACK_INGRESS_BODY_BYTES: usize = 4 * 1024;
             on_exceeded: BufferedIngressResponse::text(
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::PAYLOAD_TOO_LARGE,
                     "request body too large\n",
                 ),
             on_timeout: BufferedIngressResponse::text(

@@ -64,8 +64,8 @@ pub use config_store::{
 
 pub use edgezero_macros::{AppConfig, action, app};
 pub use error::{
-    BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError, ResponseLimitReason,
-    StoreExtractionReason,
+    BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin,
+    ResponseLimitReason, StoreExtractionReason,
 };
 pub use ingress::{
     AdmissionDecision, AdmittedIngress, BufferedIngressResponse, DEFAULT_INBOUND_READ_BUDGET,

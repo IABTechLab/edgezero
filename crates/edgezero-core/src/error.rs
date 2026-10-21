@@ -44,6 +44,14 @@ pub enum BudgetSource {
     Unspecified,
 }
 
+/// Where an EdgeZero-owned request-byte limit was exceeded; never serialized on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RequestBodyOverflowOrigin {
+    Inbound,
+    OutboundUpload,
+}
+
 /// Stable identity for a response resource limit enforced by `EdgeZero`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -168,6 +176,9 @@ pub enum EdgeError {
     NotFound { path: String },
     #[error("not implemented: {message}")]
     NotImplemented { message: String },
+    /// An EdgeZero-owned inbound or upload byte cap was exceeded. HTTP 413.
+    #[error("request body too large")]
+    PayloadTooLarge { origin: RequestBodyOverflowOrigin },
     #[error("{message}")]
     RequestHeaderFieldsTooLarge { message: String },
     #[error("{message}")]
@@ -190,6 +201,11 @@ pub enum EdgeError {
     UriTooLong { message: String },
     #[error("validation error: {message}")]
     Validation { message: String },
+}
+
+#[derive(Clone)]
+pub(crate) struct RequestBodyOverflowResponse {
+    _origin: RequestBodyOverflowOrigin,
 }
 
 impl EdgeError {
@@ -281,6 +297,7 @@ impl EdgeError {
             | EdgeError::GatewayTimeout { .. }
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
+            | EdgeError::PayloadTooLarge { .. }
             | EdgeError::RequestHeaderFieldsTooLarge { .. }
             | EdgeError::RequestTimeout { .. }
             | EdgeError::ResponseTooLarge { .. }
@@ -315,6 +332,7 @@ impl EdgeError {
             EdgeError::MethodNotAllowed { .. } => "method_not_allowed",
             EdgeError::NotFound { .. } => "not_found",
             EdgeError::NotImplemented { .. } => "not_implemented",
+            EdgeError::PayloadTooLarge { .. } => "payload_too_large",
             EdgeError::RequestHeaderFieldsTooLarge { .. } => "request_header_fields_too_large",
             EdgeError::RequestTimeout { .. } => "request_timeout",
             EdgeError::ResponseTooLarge { .. } => "response_too_large",
@@ -349,6 +367,7 @@ impl EdgeError {
                 )
             }
             EdgeError::Internal { source } => format!("internal error: {source}"),
+            EdgeError::PayloadTooLarge { .. } => "request body too large".to_owned(),
         }
     }
 
@@ -379,6 +398,24 @@ impl EdgeError {
     {
         EdgeError::NotImplemented {
             message: message.into(),
+        }
+    }
+
+    /// Constructs a request-byte overflow without cap-specific or provider diagnostics.
+    #[must_use]
+    #[inline]
+    pub const fn payload_too_large(origin: RequestBodyOverflowOrigin) -> Self {
+        Self::PayloadTooLarge { origin }
+    }
+
+    /// Returns whether a request-byte cap fired while reading ingress or uploading outbound.
+    #[must_use]
+    #[inline]
+    pub const fn request_body_overflow_origin(&self) -> Option<RequestBodyOverflowOrigin> {
+        if let Self::PayloadTooLarge { origin } = self {
+            Some(*origin)
+        } else {
+            None
         }
     }
 
@@ -467,6 +504,7 @@ impl EdgeError {
             EdgeError::NotFound { .. } => StatusCode::NOT_FOUND,
             EdgeError::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
             EdgeError::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
+            EdgeError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             EdgeError::StoreExtraction { reason, .. } => reason.wire_status(),
             EdgeError::UriTooLong { .. } => StatusCode::URI_TOO_LONG,
             EdgeError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -523,6 +561,7 @@ impl EdgeError {
             | Self::MethodNotAllowed { .. }
             | Self::NotFound { .. }
             | Self::NotImplemented { .. }
+            | Self::PayloadTooLarge { .. }
             | Self::RequestHeaderFieldsTooLarge { .. }
             | Self::RequestTimeout { .. }
             | Self::ResponseTooLarge { .. }
@@ -565,6 +604,7 @@ impl EdgeError {
             | EdgeError::MethodNotAllowed { .. }
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
+            | EdgeError::PayloadTooLarge { .. }
             | EdgeError::RequestHeaderFieldsTooLarge { .. }
             | EdgeError::RequestTimeout { .. }
             | EdgeError::ServiceUnavailable { .. }
@@ -620,6 +660,7 @@ impl IntoResponse for EdgeError {
             | EdgeError::MethodNotAllowed { .. }
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
+            | EdgeError::PayloadTooLarge { .. }
             | EdgeError::RequestHeaderFieldsTooLarge { .. }
             | EdgeError::RequestTimeout { .. }
             | EdgeError::ResponseTooLarge { .. }
@@ -652,7 +693,29 @@ impl IntoResponse for EdgeError {
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         response.headers_mut().extend(required_headers);
+        if let Some(origin) = self.request_body_overflow_origin() {
+            mark_body_overflow_response(&mut response, origin);
+        }
         Ok(response)
+    }
+}
+
+pub(crate) fn mark_body_overflow_response(
+    response: &mut Response,
+    origin: RequestBodyOverflowOrigin,
+) {
+    response
+        .extensions_mut()
+        .insert(RequestBodyOverflowResponse { _origin: origin });
+}
+
+pub(crate) fn suppress_overflow_retry_after(response: &mut Response) {
+    if response
+        .extensions()
+        .get::<RequestBodyOverflowResponse>()
+        .is_some()
+    {
+        response.headers_mut().remove(RETRY_AFTER);
     }
 }
 
@@ -728,6 +791,38 @@ mod tests {
     use crate::http::Method;
     use serde::ser;
     use std::str;
+
+    #[test]
+    fn request_overflow_origins_share_one_fixed_wire_contract() {
+        for origin in [
+            RequestBodyOverflowOrigin::Inbound,
+            RequestBodyOverflowOrigin::OutboundUpload,
+        ] {
+            let error = EdgeError::payload_too_large(origin);
+            assert_eq!(error.request_body_overflow_origin(), Some(origin));
+            assert_eq!(error.to_string(), "request body too large");
+            assert_eq!(error.message(), "request body too large");
+            assert!(error.inner().is_none());
+            assert!(error.store_extraction_reason().is_none());
+            let response = error.into_response().expect("response");
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(!response.headers().contains_key(RETRY_AFTER));
+            assert_eq!(
+                response
+                    .body()
+                    .to_json::<serde_json::Value>()
+                    .expect("JSON"),
+                json!({"error": {
+                    "status": 413_u16, "kind": "payload_too_large", "message": "request body too large"
+                }})
+            );
+        }
+        assert!(
+            EdgeError::bad_request("malformed payload")
+                .request_body_overflow_origin()
+                .is_none()
+        );
+    }
 
     #[test]
     fn bad_gateway_and_gateway_timeout_surface() {
@@ -991,6 +1086,7 @@ mod tests {
             | EdgeError::ServiceUnavailable { .. }
             | EdgeError::StoreExtraction { .. }
             | EdgeError::UriTooLong { .. }
+            | EdgeError::PayloadTooLarge { .. }
             | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
         }
     }

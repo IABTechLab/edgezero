@@ -588,8 +588,8 @@ mod spin_impl {
             let Some(next_total) = total.checked_add(length) else {
                 drop(stream_writer);
                 signal_upload_failure(result_writer, ErrorCode::HttpRequestBodySize(None)).await;
-                return Err(EdgeError::bad_request(
-                    "outbound request body size accounting overflow",
+                return Err(EdgeError::payload_too_large(
+                    edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                 ));
             };
             if next_total > maximum {
@@ -599,8 +599,8 @@ mod spin_impl {
                     ErrorCode::HttpRequestBodySize(Some(next_total)),
                 )
                 .await;
-                return Err(EdgeError::bad_request(
-                    "outbound request body exceeded configured limit",
+                return Err(EdgeError::payload_too_large(
+                    edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                 ));
             }
             let unwritten = stream_writer.write_all(bytes.to_vec()).await;
@@ -1755,7 +1755,9 @@ mod exchange_tests {
             Rc::clone(&send_drops),
         );
         let pump = ScriptedFuture::new(
-            [Poll::Ready(Err(EdgeError::bad_request("upload failed")))],
+            [Poll::Ready(Err(EdgeError::payload_too_large(
+                edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
+            )))],
             Rc::clone(&pump_polls),
             Rc::clone(&pump_drops),
         );
@@ -1767,7 +1769,12 @@ mod exchange_tests {
 
         let outcome = block_on(run_exchange(send, pump, done, map_host_error));
 
-        assert!(matches!(outcome, Err(EdgeError::BadRequest { .. })));
+        assert!(matches!(
+            outcome,
+            Err(EdgeError::PayloadTooLarge {
+                origin: edgezero_core::RequestBodyOverflowOrigin::OutboundUpload
+            })
+        ));
         assert_eq!(pump_polls.get(), 1);
         assert_eq!(send_polls.get(), 0);
         assert_eq!(done_polls.get(), 0);
