@@ -44,8 +44,10 @@ suppression and aligned demo/scaffold fallback defaults. The isolated local over
 passes ten cases each on Axum, Viceroy and Spin. Cloudflare remains failed: after the ingress
 413, the next valid POST receives a proxy-generated 500 before fixture entry, also reproduced by
 a JavaScript-only control. Retained failures are not waived by the passing cases.
-Hosted, generated-app and end-to-end legs remain open. This does not waive G2 or change the exact
-approved P1 API migration; response heads are observed without polling Fastly response bodies.
+The generated-app/demo Axum fallback leg also passes real TCP boundary, timeout and deferred
+unread-body tests. Hosted and end-to-end legs remain open. This does not waive G2 or change the
+exact approved P1 API migration; local upload response heads are observed without polling Fastly
+response bodies.
 
 ### P1 Foundation Checkpoint
 

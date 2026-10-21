@@ -178,7 +178,14 @@ proxy-generated 500 before fixture entry. A JavaScript-only body-cancellation co
 the follow-on failure without EdgeZero; the native connection-pool mechanism remains unproven.
 The suite retains the failure and exits 1, without retries, recovery sleeps, drains or capability
 promotion. See [the recorded evidence](../../../docs/audits/evidence/2026-10-21-outbound-overflow.json).
-Cloudflare recovery, generated-app fallback TCP, hosted HTTP/2 and end-to-end qualification remain open.
+Cloudflare recovery, hosted HTTP/2 and end-to-end qualification remain open. The separate
+[generated-app/demo TCP proof](../../../docs/audits/evidence/2026-10-21-generated-fallback.json)
+passes through their unchanged Axum entrypoints: fixed/chunked 4 KiB boundaries on both fallback
+routes, exact 413/no-retry output, 405 Allow, the five-second pending-read 408, and a request-looking
+body tail sent only after receiving the 413, followed by genuine health/recovery requests.
+Its bounded buffered-response reader uses `httparse`; malformed, ambiguous or incomplete framing
+cannot pass as connection-close recovery. These are local HTTP/1 observations, not hosted lifecycle
+or full resource certification. The existing generated-workspace and bundled-demo CI steps run them.
 
 ## Opt-in Hosted Response Qualification
 

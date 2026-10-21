@@ -15,10 +15,14 @@
 //! ```
 
 #[cfg(test)]
+#[path = "support/fallback_tcp.rs"]
+mod fallback_tcp;
+
+#[cfg(test)]
 mod tests {
     use std::env;
-    use std::path::Path;
-    use std::process::{Command, ExitStatus};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, ExitStatus, Stdio};
 
     fn require_listed_test(output: &str, sentinel: &str) -> Result<(), String> {
         let tests: Vec<_> = output
@@ -91,6 +95,82 @@ mod tests {
             .status()
             .unwrap_or_else(|err| panic!("run edgezero with {args:?}: {err}"));
         assert!(status.success(), "{expectation}");
+    }
+
+    fn generated_axum_binary(project: &Path) -> PathBuf {
+        let version_output = Command::new("rustc")
+            .arg("-vV")
+            .current_dir(project)
+            .output()
+            .expect("native Rust target");
+        assert!(
+            version_output.status.success(),
+            "rustc native target must be available"
+        );
+        let version = String::from_utf8(version_output.stdout).expect("rustc version");
+        let host = version
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .expect("rustc host triple");
+        let output = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--offline",
+                "--locked",
+                "-p",
+                "scaffold-probe-adapter-axum",
+                "--target",
+                host,
+                "--message-format=json-render-diagnostics",
+            ])
+            .current_dir(project)
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("build generated Axum entrypoint");
+        assert!(
+            output.status.success(),
+            "generated Axum entrypoint must build"
+        );
+        let manifest = project
+            .join("crates/scaffold-probe-adapter-axum/Cargo.toml")
+            .canonicalize()
+            .expect("generated Axum manifest");
+        let manifests: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_slice::<serde_json::Value>(line).expect("Cargo JSON record")
+            })
+            .filter(|record| {
+                record["reason"] == "compiler-artifact"
+                    && record["target"]["name"] == "scaffold-probe-adapter-axum"
+                    && record["target"]["kind"] == serde_json::json!(["bin"])
+                    && record["profile"]["test"] == false
+                    && record["manifest_path"].as_str().is_some_and(|path| {
+                        Path::new(path)
+                            .canonicalize()
+                            .is_ok_and(|candidate| candidate == manifest)
+                    })
+            })
+            .map(|record| {
+                PathBuf::from(
+                    record["executable"]
+                        .as_str()
+                        .expect("native binary executable"),
+                )
+            })
+            .collect();
+        assert_eq!(manifests.len(), 1, "one generated Axum executable");
+        manifests.into_iter().next().expect("generated Axum binary")
+    }
+
+    fn assert_generated_fallback_tcp(project: &Path) {
+        let binary = generated_axum_binary(project);
+        let state = tempfile::tempdir().expect("isolated generated runtime state");
+        let mut command = Command::new(binary);
+        command.current_dir(state.path());
+        super::fallback_tcp::assert_fallbacks(command, "generated", b"scaffold-probe app");
     }
 
     #[test]
@@ -237,5 +317,6 @@ mod tests {
                 &format!("generated {adapter} adapter should compile for {target}"),
             );
         }
+        assert_generated_fallback_tcp(&project);
     }
 }

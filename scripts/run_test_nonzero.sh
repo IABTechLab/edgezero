@@ -2,14 +2,16 @@
 
 set -eu
 
-ignored=
-if [ "${1:-}" = "--ignored" ]; then
-    ignored=--ignored
-    shift
-fi
+selection=
+case "${1:-}" in
+    --ignored|--include-ignored)
+        selection=$1
+        shift
+        ;;
+esac
 
 if [ "$#" -lt 2 ]; then
-    echo "usage: $0 [--ignored] <sentinel> <command...>" >&2
+    echo "usage: $0 [--ignored|--include-ignored] <sentinel> <command...>" >&2
     exit 2
 fi
 
@@ -18,8 +20,8 @@ shift
 listing=$(mktemp "${TMPDIR:-/tmp}/edgezero-tests.XXXXXX")
 trap 'rm -f "$listing"' EXIT HUP INT TERM
 
-if [ -n "$ignored" ]; then
-    "$@" -- --ignored --list >"$listing"
+if [ -n "$selection" ]; then
+    "$@" -- "$selection" --list >"$listing"
 else
     "$@" -- --list >"$listing"
 fi
@@ -45,8 +47,8 @@ awk -v sentinel="$sentinel" '
     }
 ' "$listing"
 
-if [ -n "$ignored" ]; then
-    "$@" -- --ignored
+if [ -n "$selection" ]; then
+    "$@" -- "$selection"
 else
     "$@"
 fi

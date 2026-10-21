@@ -133,8 +133,19 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
       waived, silently retried or presented as hosted evidence. The precise native mechanism
       remains unproven. Retain the failed runs and control inputs/results in the
       [evidence record](../../audits/evidence/2026-10-21-outbound-overflow.json).
-- [ ] Complete generated-app TCP fallback proof, hosted Fastly HTTP/2, TS end-to-end and later
-      F7b composition qualification.
+- [x] Verify the generated-app and demo TCP proof through their unchanged standard Axum
+      entrypoints. The generated proof reuses the existing ignored workspace test, discovers
+      the native executable from Cargo JSON and canonicalizes manifest aliases. A shared
+      bounded client checks fixed/chunked 4095/4096/4097-byte bodies on both 404/405 paths,
+      exact 413/no-retry output, 405 Allow, the five-second pending-read 408, and a body tail
+      sent only after receiving the complete 413, followed by genuine health/recovery requests.
+      Response completion is sampled separately from socket closure. Parser failures and
+      child-process exit cannot count as success. Both applications pass all 16 observations;
+      the generated workspace also passes its 22 core tests, strict host clippy and three WASM
+      compilation checks. Retain the first path-alias failure, successful raw logs, generated
+      source archive and native binaries in the [evidence record](../../audits/evidence/2026-10-21-generated-fallback.json).
+      This closes EZ-10's local generated/demo fallback leg, not F2 overall or hosted qualification.
+- [ ] Complete hosted Fastly HTTP/2, TS end-to-end and later F7b composition qualification.
       Until those environment legs land, F2 and EZ-10 overall remain incomplete. Its implemented
       parts are confirmed present, not silently promoted; no other Follow-up becomes blocking.
 
@@ -145,6 +156,21 @@ investigations confirmed Fastly readiness still loses source failures, including
 Independent harness and platform reviews additionally selected strict framing/correlation
 validation and a provider-only diagnostic control over transport changes or recovery workarounds.
 The local upload suite observes streamed response heads only and drops their bodies unpolled.
+The generator and application-lifecycle investigations selected the existing build gate plus
+one shared test-only HTTP parser/client rather than another generated application or custom
+server. `httparse = 1.10.1` is a CLI dev dependency only; no normal dependency or audited SDK/
+decoder requirement changes. Existing CI steps execute the new checks without adding job names.
+The demo step requires the fallback sentinel and forwards `--include-ignored` to both test
+listing and execution, preventing a later ignore annotation from silently skipping the proof.
+Seven guard regressions cover all selection modes, missing/zero tests and failure propagation.
+
+Generated/demo TCP commands (loopback permission required; generated dependencies must be cached
+for offline execution):
+
+```sh
+CARGO_NET_OFFLINE=true scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds
+scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
+```
 
 ## F3: Cache, TLS and Authority Task Group
 

@@ -48,6 +48,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 edgezero-core = { workspace = true, features = ["test-utils"] }
+httparse = { workspace = true }
 tempfile = { workspace = true }
 
 [features]

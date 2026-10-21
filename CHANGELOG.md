@@ -77,6 +77,11 @@ separately from the portable API and must be considered when declaring required 
   entrypoints. Preserve exact cap boundaries, typed 413/no-retry rendering and ordinary upstream
   413 metadata. Axum, Viceroy and Spin pass; retain Cloudflare's post-overflow proxy failure,
   reproduced independently by a JavaScript-only control. No hosted capability is promoted.
+- Exercise freshly generated Axum applications and the bundled demo over real TCP, including
+  fixed/chunked fallback cap boundaries, exact 413/no-retry responses, canonical 405 Allow,
+  stalled-read 408 responses and deferred unread-body/pipeline handling. Reuse the existing
+  generated-project CI gate and demo contract tests; require the fallback sentinel and execute
+  ignored demo tests explicitly. No application policies are replaced.
 
 - Return typed `EdgeError::PayloadTooLarge` (413) for inbound reader/extractor and outbound
   upload overflow, with non-wire `RequestBodyOverflowOrigin`. Reject oversized buffered uploads

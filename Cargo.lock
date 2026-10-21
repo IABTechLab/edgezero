@@ -849,6 +849,7 @@ dependencies = [
  "edgezero-core",
  "futures",
  "handlebars",
+ "httparse",
  "log",
  "proc-macro2",
  "serde",

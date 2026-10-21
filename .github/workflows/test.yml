@@ -135,9 +135,11 @@ jobs:
         if: matrix.suite == 'workspace'
         run: cargo test --workspace --all-targets
 
-      - name: Bundled demo logging contract
+      - name: Bundled demo logging and fallback TCP contracts
         if: matrix.suite == 'cli'
-        run: scripts/run_test_nonzero.sh demo_respects_off_without_hiding_terminal_errors cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
+        run: |
+          node --test scripts/run_test_nonzero.test.mjs
+          scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
 
       - name: Run native outbound adapter contracts
         if: matrix.suite == 'workspace'
@@ -186,7 +188,7 @@ jobs:
             bash scripts/check_adapter_feature_matrix.sh "${adapter}" native
           done
 
-      - name: Verify a generated project compiles
+      - name: Verify generated project builds and fallback TCP policy
         if: matrix.suite == 'cli'
         run: scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds
 

@@ -2,6 +2,10 @@
 #![cfg(all(feature = "cli", feature = "demo-example"))]
 
 #[cfg(test)]
+#[path = "support/fallback_tcp.rs"]
+mod fallback_tcp;
+
+#[cfg(test)]
 mod tests {
     use std::net::TcpListener;
     use std::process::Command;
@@ -57,5 +61,13 @@ mod tests {
             stderr.contains("[edgezero] demo server error: failed to bind"),
             "{stderr}"
         );
+    }
+
+    #[test]
+    fn demo_fallbacks_enforce_body_cap_over_tcp() {
+        let state = tempfile::tempdir().expect("isolated demo runtime state");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_edgezero"));
+        command.arg("demo").current_dir(state.path());
+        super::fallback_tcp::assert_fallbacks(command, "demo", b"app-demo app");
     }
 }
