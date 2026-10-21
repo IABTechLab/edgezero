@@ -2689,7 +2689,7 @@ test_fastly_logical_link_documentation() {
       yq eval '.' "$example_workflow"
     local uses action_input
     for action in deploy-fastly config-push-fastly healthcheck-fastly rollback-fastly; do
-      uses="stackpop/edgezero/.github/actions/$action@<ref>"
+      uses="IABTechLab/edgezero/.github/actions/$action@<ref>"
       assert_equals "example has exactly one structural $action step" \
         1 "$(yq eval "[.jobs.deploy.steps[] | select(.uses == \"$uses\")] | length" "$example_workflow")"
       action_input=$(yq eval -r \

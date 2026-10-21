@@ -412,8 +412,8 @@ after push B reconstructs envelope B, not A.
 
 ## Reference
 
-- Spec: [`docs/superpowers/specs/2026-06-16-blob-app-config.md`](https://github.com/stackpop/edgezero)
-- Implementation plan: [`docs/superpowers/plans/2026-06-17-blob-app-config.md`](https://github.com/stackpop/edgezero)
+- Spec: [`docs/superpowers/specs/2026-06-16-blob-app-config.md`](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/specs/2026-06-16-blob-app-config.md)
+- Implementation plan: [`docs/superpowers/plans/2026-06-17-blob-app-config.md`](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/plans/2026-06-17-blob-app-config.md)
 - Extractor source: `crates/edgezero-core/src/extractor.rs`
 - CLI push entry point: `crates/edgezero-cli/src/config.rs::run_config_push_typed`
 - CLI diff entry point: `crates/edgezero-cli/src/config.rs::run_config_diff_typed`
