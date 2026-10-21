@@ -52,7 +52,7 @@ EdgeZero actions to one reviewed full commit SHA:
 
 - name: Set up Rust build cache
   id: rust-cache
-  uses: stackpop/edgezero/.github/actions/setup-rust-build-cache@<ref>
+  uses: IABTechLab/edgezero/.github/actions/setup-rust-build-cache@<ref>
   with:
     app-name: example-app
     cache-target: true
