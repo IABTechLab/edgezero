@@ -233,7 +233,11 @@ mod tests {
 
     #[test]
     fn app_can_be_retained_in_a_shared_owner() {
-        fn assert_send_sync<T: Send + Sync>() {}
+        fn assert_send_sync<T>()
+        where
+            T: Send + Sync,
+        {
+        }
         assert_send_sync::<App>();
     }
 

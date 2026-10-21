@@ -3,7 +3,7 @@
 - **Status:** Draft for edgezero maintainer review
 - **Date:** 2026-07-02
 - **Author:** trusted-server team (spec), to be implemented by an **edgezero** developer
-- **Target repo:** `github.com/stackpop/edgezero` (crates `edgezero-core`, `edgezero-macros`)
+- **Target repo:** `github.com/IABTechLab/edgezero` (crates `edgezero-core`, `edgezero-macros`)
 - **Consumed by:** trusted-server "move completely to EdgeZero" migration; nothing in trusted-server can start until these two upstream primitives land
 
 ---

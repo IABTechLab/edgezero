@@ -1701,7 +1701,7 @@ cache_key_for() {
     RUNNER_OS=Linux RUNNER_ARCH=X64 \
     EDGEZERO__ACTION__ROOT="$REPO_ROOT" \
     EDGEZERO__PROJECT__WORKING_DIRECTORY="${CK_WORKDIR:-app}" \
-    EDGEZERO__PROJECT__RUST_TOOLCHAIN="${CK_TOOLCHAIN:-1.95.0}" \
+    EDGEZERO__PROJECT__RUST_TOOLCHAIN="${CK_TOOLCHAIN:-1.98.1}" \
     EDGEZERO__PROJECT__TARGET="${CK_TARGET:-wasm32-wasip1}" \
     EDGEZERO__APP__CLI__VERSION="${CK_CLI_VERSION:-1.0.0}" \
     EDGEZERO__BUILD__CACHE="${CK_CACHE:-false}" \
@@ -1885,7 +1885,7 @@ run_resolve_in() {
     RUNNER_OS=Linux RUNNER_ARCH=X64 \
     EDGEZERO__ACTION__ROOT="$REPO_ROOT" \
     EDGEZERO__PROJECT__WORKING_DIRECTORY=app \
-    EDGEZERO__PROJECT__RUST_TOOLCHAIN=1.95.0 \
+    EDGEZERO__PROJECT__RUST_TOOLCHAIN=1.98.1 \
     EDGEZERO__PROJECT__TARGET=wasm32-wasip1 \
     EDGEZERO__PROJECT__MANIFEST="${BND_MANIFEST:-}" \
     bash "$CORE_SCRIPTS/resolve-project.sh"
@@ -2666,7 +2666,7 @@ test_fastly_logical_link_documentation() {
       yq eval '.' "$example_workflow"
     local uses action_input
     for action in deploy-fastly config-push-fastly healthcheck-fastly rollback-fastly; do
-      uses="stackpop/edgezero/.github/actions/$action@<ref>"
+      uses="IABTechLab/edgezero/.github/actions/$action@<ref>"
       assert_equals "example has exactly one structural $action step" \
         1 "$(yq eval "[.jobs.deploy.steps[] | select(.uses == \"$uses\")] | length" "$example_workflow")"
       action_input=$(yq eval -r \
