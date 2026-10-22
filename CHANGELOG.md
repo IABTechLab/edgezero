@@ -261,8 +261,14 @@ separately from the portable API and must be considered when declaring required 
   if a deadline, cancellation or fallback wins. Recording changes no polling, clocks, terminal
   precedence or wire bytes. Rendered application errors and transport-only failures are not
   source failures. Exact report literals must add the new optional field; no compatibility
-  shape remains. Typed framing reasons, diagnostic capability publication and hosted qualification
-  remain follow-up work.
+  shape remains. Diagnostic capability publication and hosted qualification remain follow-up work.
+- Retain precommit response framing rules in `ResponseEgressReport::framing_failures`, with
+  independent first-observed application/fallback slots using the existing `ResponseEgressFramingError`.
+  Use shared attempt-owned normalization on all four adapters, including fallback and Axum
+  revalidation, and log only fixed rule text at error level. Add `EdgeError::response_framing_error()`
+  for an already-owned internal cause. Preserve Display, statuses, fallback bytes, terminal
+  precedence, source categories, clocks and ownership. Exact report literals must add the new
+  carrier; no compatibility report shape is retained. Consumer and hosted qualification remain open.
 - Correct Fastly lifecycle test-helper gating so plain `fastly` WASM unit builds retain the
   required-store failure regression without enabling `test-utils` or changing production behavior.
 - Hard-cut exact field construction/matching of `EdgeError::{BadGateway, BadRequest, GatewayTimeout, Internal}`

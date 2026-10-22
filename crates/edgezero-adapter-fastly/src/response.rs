@@ -18,7 +18,7 @@ use edgezero_core::response_egress::{
     ResponseEgressFallbackDisposition, ResponseEgressOutcome, ResponseEgressPolicy,
 };
 use edgezero_core::response_egress_framing::{
-    PreparedResponseEgress, prepare_response_egress, response_egress_source_error_category,
+    PreparedResponseEgress, response_egress_source_error_category,
 };
 use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
 use futures::executor;
@@ -313,10 +313,9 @@ where
         .checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
         .unwrap_or(fallback_started_at);
     let fallback_response = fallback_response(original_cause);
-    let prepared = match prepare_response_egress(request_method, fallback_response) {
+    let prepared = match attempt.prepare_response(request_method, fallback_response) {
         Ok(prepared) => prepared,
         Err(_error) => {
-            log::error!("response-egress fallback framing failed");
             attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
             return Err(DeliveryError::Conversion);
         }
@@ -621,6 +620,7 @@ pub(crate) fn parse_uri(uri: &str) -> Result<Uri, EdgeError> {
 
 #[cfg(test)]
 mod tests {
+    use edgezero_core::response_egress_framing::prepare_response_egress;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -899,6 +899,37 @@ mod tests {
     }
 
     #[test]
+    fn framing_observer_preserves_each_typed_reason() {
+        use edgezero_core::response_egress_framing::test_support::{
+            FRAMING_RULES, framing_fixture,
+        };
+        for reason in FRAMING_RULES {
+            for detached in [false, true] {
+                let fixture =
+                    executor::block_on(framing_fixture(reason, detached)).expect("fixture");
+                let state = Rc::new(RefCell::new(SinkState::default()));
+                let mut committer = MockCommitter::new(Rc::clone(&state));
+                assert_eq!(send_egress_with(fixture.envelope, &mut committer), Ok(()));
+                let snapshot = state.borrow();
+                assert_eq!(snapshot.commits.len(), 1);
+                assert_eq!(snapshot.commits[0].0, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(snapshot.accepted, INTERNAL_FALLBACK_BODY);
+                let completed = fixture.completed.lock().expect("completion");
+                assert_eq!(completed.len(), 1);
+                assert_eq!(completed[0].framing_failures.application(), Some(reason));
+                assert_eq!(completed[0].framing_failures.fallback(), None);
+                assert_eq!(completed[0].outcome, ResponseEgressOutcome::ConversionError);
+                let observed = fixture.observed.lock().expect("observer");
+                if detached {
+                    assert!(observed.is_empty());
+                } else {
+                    assert_eq!(*observed, *completed);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
         use edgezero_core::error::BadGatewayReason;
         use edgezero_core::error_detail::{
@@ -968,6 +999,8 @@ mod tests {
                     .source_failure
                     .as_ref()
                     .expect("source observation");
+                assert_eq!(reports[0].framing_failures.application(), None);
+                assert_eq!(reports[0].framing_failures.fallback(), None);
                 assert_eq!(failure.category(), "bad_gateway_transport");
                 assert_eq!(
                     failure.provider_failure_detail(),
@@ -1487,6 +1520,8 @@ mod tests {
             reports[0].fallback_disposition,
             Some(ResponseEgressFallbackDisposition::Completed)
         );
+        assert_eq!(reports[0].framing_failures.application(), None);
+        assert_eq!(reports[0].framing_failures.fallback(), None);
     }
 
     #[test]
@@ -1637,6 +1672,8 @@ mod tests {
             reports[0].fallback_disposition,
             Some(ResponseEgressFallbackDisposition::Completed)
         );
+        assert_eq!(reports[0].framing_failures.application(), None);
+        assert_eq!(reports[0].framing_failures.fallback(), None);
     }
 
     #[test]

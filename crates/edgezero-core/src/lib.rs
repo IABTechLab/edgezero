@@ -110,12 +110,14 @@ pub use response_egress::{
     DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead,
     RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET, ResponseEgressAttempt, ResponseEgressBeginFailure,
     ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressDeadline,
-    ResponseEgressEnvelope, ResponseEgressFallbackDisposition, ResponseEgressHead,
-    ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressOutcome,
-    ResponseEgressPolicy, ResponseEgressPolicyCallback, ResponseEgressReport,
-    ResponseEgressResource, ResponseEgressResourceInstallError, ResponseEgressSourceFailure,
-    default_response_egress_policy,
+    ResponseEgressEnvelope, ResponseEgressFallbackDisposition, ResponseEgressFramingFailures,
+    ResponseEgressHead, ResponseEgressObserver, ResponseEgressObserverHandle,
+    ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressPolicyCallback,
+    ResponseEgressReport, ResponseEgressResource, ResponseEgressResourceInstallError,
+    ResponseEgressSourceFailure, default_response_egress_policy,
 };
+#[doc(inline)]
+pub use response_egress_framing::ResponseEgressFramingError;
 pub use router::{ResolvedDispatch, RouteId, RouteInfo, RouteMetadata, RouteResolution};
 pub use time::{
     BATCH_DISPATCH_SLACK_MAX, DEADLINE_FAR_FUTURE, DEFAULT_NO_DEADLINE_BUDGET, Deadline,

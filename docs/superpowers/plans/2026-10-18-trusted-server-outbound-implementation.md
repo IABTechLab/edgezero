@@ -74,8 +74,16 @@ error/deadline arbitration. The [preparation checkpoint](2026-10-18-trusted-serv
 adds request-only Cloudflare and Spin resource-setter diagnostics. The
 [source-observer checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f6a-source-observer-checkpoint-2026-10-21)
 retains the first observed body-source failure in completion/observer reports without changing
-terminal precedence. Typed framing reasons, capability claims and hosted acceptance remain open.
+terminal precedence. Capability claims and hosted acceptance remain open.
 This does not change transport behavior, unblock Fastly G2 or complete P1/F6a.
+
+### F6c Framing Checkpoint
+
+The independent [typed framing checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f6c-framing-checkpoint-2026-10-21)
+retains the existing framing rules in separate application/fallback report slots and fixed-text
+error-level logs. Shared attempt-owned normalization covers all four adapters without changing
+wire bytes or postcommit source categories. This is not consumer or hosted qualification and
+does not unblock Fastly G2 or the remaining outbound cutover.
 
 ### P1 Foundation Checkpoint
 

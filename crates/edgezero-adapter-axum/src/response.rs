@@ -18,8 +18,7 @@ use edgezero_core::response_egress::{
     ResponseEgressFallbackDisposition, ResponseEgressOutcome,
 };
 use edgezero_core::response_egress_framing::{
-    PreparedResponseEgress, ResponseEgressBodyLengthError, prepare_response_egress,
-    response_egress_source_error_category,
+    PreparedResponseEgress, ResponseEgressBodyLengthError, response_egress_source_error_category,
 };
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::StreamExt as _;
@@ -640,7 +639,8 @@ async fn validate_empty_stream(
             .await
             .map_err(|_elapsed| ResponseEgressOutcome::DeadlineExceeded)??;
     }
-    prepare_response_egress(request_method, response)
+    attempt
+        .prepare_response(request_method, response)
         .map_err(|_error| ResponseEgressOutcome::ConversionError)
 }
 
@@ -688,7 +688,7 @@ fn prepare_fallback(
         return detached_fallback(request_method, cause);
     };
     let fallback = fallback_response(cause);
-    let Ok(prepared) = prepare_response_egress(request_method, fallback) else {
+    let Ok(prepared) = attempt.prepare_response(request_method, fallback) else {
         attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
         return detached_fallback(request_method, cause);
     };
@@ -869,6 +869,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn framing_observer_preserves_each_typed_reason() {
+        use edgezero_core::response_egress_framing::test_support::{
+            FRAMING_RULES, framing_fixture,
+        };
+        for reason in FRAMING_RULES {
+            for detached in [false, true] {
+                let fixture = framing_fixture(reason, detached).await.expect("fixture");
+                let connection = EgressConnection::default();
+                let response = super::prepare_egress_response(fixture.envelope, &connection).await;
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                let mut pinned = Box::pin(response.into_body());
+                let mut bytes = Vec::new();
+                while let Some(frame) = poll_future(|cx| pinned.as_mut().poll_frame(cx)).await {
+                    bytes.extend_from_slice(
+                        frame.expect("fallback frame").data_ref().expect("data"),
+                    );
+                }
+                drop(pinned);
+                assert_eq!(bytes, INTERNAL_FALLBACK_BODY);
+                let completed = fixture.completed.lock().expect("completion");
+                assert_eq!(completed.len(), 1);
+                assert_eq!(completed[0].framing_failures.application(), Some(reason));
+                assert_eq!(completed[0].framing_failures.fallback(), None);
+                assert_eq!(completed[0].outcome, ResponseEgressOutcome::ConversionError);
+                let observed = fixture.observed.lock().expect("observer");
+                if detached {
+                    assert!(observed.is_empty());
+                } else {
+                    assert_eq!(*observed, *completed);
+                }
+                assert!(connection.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
         let detail = ProviderFailureDetail::Axum {
             phase: ProviderFailurePhase::ResponseBodyRead,
@@ -939,6 +975,8 @@ mod tests {
                     .source_failure
                     .as_ref()
                     .expect("source observation");
+                assert_eq!(reports[0].framing_failures.application(), None);
+                assert_eq!(reports[0].framing_failures.fallback(), None);
                 assert_eq!(failure.category(), "bad_gateway_transport");
                 assert_eq!(
                     failure.provider_failure_detail(),

@@ -98,6 +98,12 @@ It awaits the production I/O helper inside the existing async HTTP export; the s
 test export cannot wait on SDK timers. The probe creates no downstream writer and does not qualify
 hosted delivery or change capability claims. Its test utilities are enabled only by `progress`.
 
+Each progress target also runs `/progress/framing-trailers` through its ordinary App/converter.
+The client must receive the unchanged 500 fallback with no sentinel leakage in headers or body.
+On Viceroy the harness additionally requires one `UnsupportedTrailers` terminal report and the
+matching error-level fixed-rule log, rejecting leaked sentinel text anywhere in captured logs.
+This is local framing-diagnostic evidence, not hosted response-lifetime qualification.
+
 Five raw HTTP/1 inputs exercise absent framing, explicit zero length, terminating chunks, and
 nonempty fixed/chunked controls. Host snapshots do not consume or replace body data. Native raw
 signals are unavailable at the existing entrypoint; Spin hints are explicitly not raw framing

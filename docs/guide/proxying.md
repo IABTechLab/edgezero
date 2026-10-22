@@ -97,9 +97,21 @@ This is not the terminal cause: deadline or cancellation may win after a source 
 ready, and an application-body observation remains tagged `Application` through fallback delivery.
 Recording adds no clock samples, source polls, callbacks or wire diagnostics. Rendered application
 errors delivered successfully, clean EOF, and transport-only failures do not invent source errors.
-Exact report literals must add `source_failure: None` when there is no observation; there is no
-old-shape compatibility API. Typed framing reasons, diagnostic capability publication and hosted
-qualification remain open; this checkpoint does not strengthen transport guarantees.
+Precommit normalization rejections appear separately in `report.framing_failures.application()`
+and `.fallback()`, each an optional `ResponseEgressFramingError`. The first rule wins per body
+kind, so a failed fallback cannot hide the application rule or overwrite its own earlier rule.
+Recording and fixed-text error-level logging are initial-only; no header values or body bytes are logged.
+After writing or termination, normalization still returns its original result without recording a
+precommit observation.
+`EdgeError::response_framing_error()` also reads this enum when an internal error already owns it.
+Policy, deadline, host-head and source failures do not invent framing rules. Postcommit stream
+length failures keep their existing source categories, not a new precommit classification.
+
+Exact report literals must add `source_failure: None` and `framing_failures: Default::default()`
+when there is no observation. There is no old-shape compatibility API. Stock fallbacks are
+framing-valid; invalid-fallback attribution is verified directly at the shared normalization
+boundary, not claimed as an observed adapter-generated failure. Diagnostic capability publication
+and hosted qualification remain open; these diagnostics do not strengthen transport guarantees.
 
 `ResponseDecoding::Original` preserves encoded payload bytes and the representation headers
 that survive ordinary normalization. It does not restore hop-by-hop or invalid fields. Use it

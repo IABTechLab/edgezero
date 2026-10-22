@@ -55,8 +55,13 @@ fn complete(mut pending: PendingRequest) -> Job {
     })
 }
 
+fn telemetry(line: &str) {
+    eprintln!("{line}");
+}
+
 fn main() -> Result<(), fastly::Error> {
     fastly::init();
+    fixture_core::init_fixture_logging(telemetry)?;
     let mut request = fastly::Request::from_client();
     let signal = json!({"source":"fastly-sdk-before-conversion", "has_body":request.has_body(),
         "known_length":request.try_get_body_mut().and_then(fastly::Body::known_length)});

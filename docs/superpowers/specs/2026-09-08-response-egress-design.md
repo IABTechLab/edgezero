@@ -204,6 +204,7 @@ pub struct ResponseEgressReport {
     pub body_kind: ResponseEgressBodyKind,
     pub elapsed: Duration,
     pub fallback_disposition: Option<ResponseEgressFallbackDisposition>,
+    pub framing_failures: ResponseEgressFramingFailures,
     pub outcome: ResponseEgressOutcome,
     pub request_start: MonotonicInstant,
     pub route: Option<RouteMetadata>,
@@ -211,6 +212,13 @@ pub struct ResponseEgressReport {
 }
 
 pub struct ResponseEgressSourceFailure { /* fixed-size, text-free, Copy snapshot */ }
+
+pub struct ResponseEgressFramingFailures { /* two fixed optional existing framing-rule enums */ }
+
+impl ResponseEgressFramingFailures {
+    pub fn application(&self) -> Option<ResponseEgressFramingError>;
+    pub fn fallback(&self) -> Option<ResponseEgressFramingError>;
+}
 
 impl ResponseEgressSourceFailure {
     pub fn body_kind(&self) -> ResponseEgressBodyKind;
@@ -339,7 +347,23 @@ failure keeps its `Application` tag even if fallback is delivered. A successfull
 rendered application error, clean EOF or transport-only failure does not create a source failure.
 All four converters record before post-ready arbitration, including inside the Cloudflare/Spin
 source races; no unobserved error is reconstructed. Exact report literals must add the optional
-field. This does not implement typed framing reasons or strengthen capability/evidence claims.
+field.
+
+`ResponseEgressAttempt::prepare_response(method, response)` delegates to the existing normalizer
+once and records the first actual precommit rejection in the application or fallback framing slot.
+The fallback tag is selected before normalization. Both slots survive into the same completion
+and observer report. Writing/terminal calls still return the original normalization result but
+reject recording and logging of precommit observations. Logging includes only the existing enum's
+fixed text and body kind at error level. The capture itself samples no clock, polls no source,
+allocates no metadata and changes no terminal outcome. The normalizer and logging backend retain
+their own allocation behavior. All lifecycle-owned normalization calls, including fallback and
+Axum revalidation, use this wrapper. Policy/deadline/host conversion failures without a rejected
+framing rule leave both slots empty. Postcommit length errors remain source errors. The public
+root export names the existing enum; `EdgeError::response_framing_error()` only downcasts an
+already-owned internal source. Display, wire errors and fallback bytes remain unchanged.
+Report literals must supply `framing_failures`, empty by default. Current stock fallbacks are
+framing-valid; direct invalid-fallback normalization tests establish attribution, not an actual
+adapter-generated failure. Capability/evidence claims are not strengthened.
 
 The response-scoped completion runs before the global observer. Each completion child and the
 observer are isolated by independent unwind boundaries: a completion panic is logged with a

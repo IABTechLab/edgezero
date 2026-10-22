@@ -22,7 +22,7 @@ use edgezero_core::response_egress::{
     ResponseEgressFallbackDisposition, ResponseEgressOutcome, ResponseEgressPolicy,
 };
 use edgezero_core::response_egress_framing::{
-    PreparedResponseEgress, prepare_response_egress, response_egress_source_error_category,
+    PreparedResponseEgress, response_egress_source_error_category,
 };
 use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
 use futures_util::StreamExt as _;
@@ -999,7 +999,8 @@ where
     let fallback_deadline = started_at
         .checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
         .unwrap_or(started_at);
-    let prepared = prepare_response_egress(request_method, fallback_response(original_cause))
+    let prepared = attempt
+        .prepare_response(request_method, fallback_response(original_cause))
         .map_err(|_error| {
             attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
             DeliveryError::from_outcome(original_cause)
@@ -1157,6 +1158,7 @@ mod race_tests {
 
 #[cfg(test)]
 mod tests {
+    use edgezero_core::response_egress_framing::prepare_response_egress;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::future::pending;
@@ -1463,6 +1465,41 @@ mod tests {
     }
 
     #[test]
+    fn framing_observer_preserves_each_typed_reason() {
+        use edgezero_core::response_egress_framing::test_support::{
+            FRAMING_RULES, framing_fixture,
+        };
+        for reason in FRAMING_RULES {
+            for detached in [false, true] {
+                let fixture = block_on(framing_fixture(reason, detached)).expect("fixture");
+                let method = fixture.envelope.request_method().clone();
+                let Err(failure) = fixture.envelope.begin() else {
+                    panic!("framing rejection")
+                };
+                let (attempt, clock, cause) = failure.into_parts();
+                let state = Rc::new(RefCell::new(MockState::default()));
+                let mut committer = MockCommitter::new(Rc::clone(&state));
+                let response = start_fallback(&method, cause, attempt, &clock, &mut committer)
+                    .expect("fallback");
+                assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+                committer.run_task();
+                assert_eq!(state.borrow().accepted, INTERNAL_FALLBACK_BODY);
+                let completed = fixture.completed.lock().expect("completion");
+                assert_eq!(completed.len(), 1);
+                assert_eq!(completed[0].framing_failures.application(), Some(reason));
+                assert_eq!(completed[0].framing_failures.fallback(), None);
+                assert_eq!(completed[0].outcome, ResponseEgressOutcome::ConversionError);
+                let observed = fixture.observed.lock().expect("observer");
+                if detached {
+                    assert!(observed.is_empty());
+                } else {
+                    assert_eq!(*observed, *completed);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
         use edgezero_core::error::BadGatewayReason;
         use edgezero_core::error_detail::{
@@ -1529,6 +1566,8 @@ mod tests {
                     .source_failure
                     .as_ref()
                     .expect("source observation");
+                assert_eq!(reports[0].framing_failures.application(), None);
+                assert_eq!(reports[0].framing_failures.fallback(), None);
                 assert_eq!(failure.category(), "bad_gateway_transport");
                 assert_eq!(
                     failure.provider_failure_detail(),

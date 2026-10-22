@@ -3095,9 +3095,24 @@ discard a ready error. Terminal precedence, byte accounting, source polling and 
 are unchanged. An application observation keeps its original tag through fallback delivery;
 successful delivery of a rendered application error is not a source failure. Unobserved errors,
 clean EOF and transport-only failures carry no invented snapshot. Report field construction is a
-hard cut. Typed framing reasons, diagnostic capability publication and hosted acceptance remain
-tracked by F6a/F6c in the Trusted Server adoption plan; no capability promotion or hosted-
-qualification claim is made.
+hard cut.
+
+The framing checkpoint exposes the existing six `ResponseEgressFramingError` rules through
+`ResponseEgressReport::framing_failures.application()` and `.fallback()`. Two fixed optional slots
+retain the first actual precommit normalization rejection per body kind. The shared attempt-owned
+normalization wrapper is used by `begin()`, all four fallback preparers and Axum's empty-stream
+revalidation. It logs the same enum's fixed text at error level and returns the original error;
+header values, body bytes and provider text are excluded. Recording/logging are initial-only;
+writing/terminal calls still return the unchanged normalization result. Metadata capture adds no clock read,
+source poll, callback or allocation; existing normalization and backend-dependent logging costs
+remain. Policy panics, deadline normalization, SDK head rejection and postcommit source failures
+gain no invented framing reason. Existing streamed length errors retain their source categories.
+`EdgeError::response_framing_error()` downcasts an already-owned internal source without changing
+Display or wire rendering. Exact report construction must supply the new carrier, with its empty
+default when no rejection was observed; no compatibility shape is provided. Stock fallbacks cannot
+currently violate these rules, so direct fallback-tagged normalizer tests are not adapter-invalid-
+fallback evidence. Diagnostic capability publication, consumer acceptance and hosted qualification
+remain tracked by F6a/F6c; no capability promotion is made.
 
 | Condition | `EdgeError` | HTTP status |
 | --- | --- | --- |

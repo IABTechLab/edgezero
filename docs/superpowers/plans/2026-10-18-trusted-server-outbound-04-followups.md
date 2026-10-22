@@ -555,7 +555,7 @@ four adapter normalizer/converter/fallback paths and contracts.
 
 **Dependencies:** F6a and existing response framing policy; independent of F6b.
 
-- [ ] Add one exact assertion per existing `ResponseEgressFramingError` variant:
+- [x] Add one exact assertion per existing `ResponseEgressFramingError` variant:
       `ContentLengthMismatch`, `InvalidConnectionHeader`, `InvalidContentLength`, `UnsupportedStatus`,
       `UnsupportedTrailers`, and `UnsupportedTunnel`, rather than string matching. Drive each through the actual
       normalizer/converter on Axum, Cloudflare, Fastly and Spin, and routed/detached/fallback paths
@@ -568,6 +568,83 @@ four adapter normalizer/converter/fallback paths and contracts.
       correct category, never flattened into generic transport/conversion or policy-panic failure.
       Existing framing rejection stays a green control; newly retained typed observation must fail
       before implementation and pass afterward. Suggested commit: `feat: preserve typed egress framing diagnostics`.
+
+#### F6c Framing Checkpoint (2026-10-21)
+
+- [x] Reuse the existing six-rule enum in a fixed, two-slot report carrier. Preserve the first
+      application and fallback reasons independently, without altering source diagnostics.
+- [x] Route attempt-owned normalization through one recorder on core begin, all four fallback
+      preparers and Axum empty-stream revalidation. Log only fixed enum text and body kind at
+      error level; preserve Display, status, fallback bytes, clocks and source/terminal ownership.
+- [x] Publish the existing enum at the crate root and a downcast-only `EdgeError` accessor.
+      Hard-migrate exact report literals to the new carrier; add no legacy report or error shape.
+- [x] Reproduce missing typed observations in core and each native converter, then pass all six
+      rules through actual routed/refused App dispatch and existing fallback coordinators.
+      Preserve exactly-once completion, routed observation and detached observer exclusion.
+- [x] Verify the local Viceroy routed-trailers case has the fixed error-level log, typed terminal
+      report and unchanged 500 fallback. Strengthen the probe against additional leaking logs and
+      response headers, not merely absence of leakage in the matching safe event.
+- [x] Finish quality review, negative controls and broad current-tree Rust/WASM/docs verification
+      before committing this checkpoint.
+- [ ] Complete consumer Viceroy acceptance and any separately required hosted qualification.
+      Do not promote capabilities or treat this checkpoint as full outbound-cutover completion.
+
+Turing mapped the shared coordinator's enum loss and reviewed the bounded carrier/accessor;
+Heisenberg mapped converter test seams and fallback reachability. Their proposals favored one
+attempt-owned wrapper over per-adapter duplicated recording or a global first-error slot, which
+would hide a fallback's independent rule. Implementation remains centralized. No approved
+Interfaces, frozen policies, SDK/decoder pins or capability claims change.
+
+The six-rule matrix uses the unchanged normalizer through actual App dispatch. Fastly and Axum
+exercise their converters directly; Cloudflare and Spin exercise failed `begin()` followed by
+their real fallback coordinator with existing mock committers. Detached refusals retain the
+completion but deliberately invoke no global observer. Stock 500/504 fallbacks cannot currently
+violate these framing rules, so all-six fallback-tagged core normalizer controls establish
+attribution only, not an observed adapter-invalid-fallback failure. Postcommit streamed length
+errors remain their original source categories and are not relabeled as precommit framing rules.
+
+Core controls retain simultaneous application/fallback observations, first-per-slot behavior,
+terminal rejection, independent source evidence and no recording-time clock/callback activity.
+Accessor fixtures compare unchanged Display, status, headers and exact body bytes for all six
+rules, and reject postcommit length-error misclassification. Policy, deadline, source and SDK
+head-preparation controls must not invent framing observations. The initial expired-policy test
+incorrectly assumed normalization rejects expired deadlines; that fixture was corrected to the
+existing valid-expired policy contract without changing production precedence.
+
+The local progress fixture adds one routed `Trailer` rejection on all four targets. Viceroy's
+fixture logger exposes the actual core error-level event; its global observer records only the
+bounded typed framing snapshot and terminal metadata. Wire and log validators reject the private
+sentinel anywhere in the captured response or diagnostics. Mutation fixtures cover an extra
+leaking event, a leaking response header, missing/duplicate reports and changed outcomes. This is
+local characterization, not hosted delivery or resource-accounting certification.
+
+Quality review reproduced and corrected an initial-only boundary omission in the new recorder:
+normalization after writing had begun could manufacture a precommit observation. The failing
+writing-state regression now passes; capture and logging are initial-only, while normalization
+still runs and returns the same result. Both independent quality reviews passed after this fix,
+the exact wire comparisons, negative controls and strengthened leak validators.
+
+All five Rust gates passed: 27 workspace binaries, 2,126 tests, zero failures and one existing
+ignored test, including 811 core tests. All three actual-target WASM clippy checks passed.
+Cloudflare's Node/WASM suite passed 42 tests including the nonzero framing sentinel; Viceroy
+passed 173 Fastly library tests and 25 contracts; pinned Wasmtime passed 35 Spin contracts and
+12 SDK resource tests. All four native outbound contract suites passed (17/4/2/3 tests). Core
+doctests, the public-error nonzero sentinel, all seven eight-leg feature matrices, 48 demo-core
+tests, 57 harness tests, 17 qualification-core tests and fixture clippy passed. Docs format,
+lint/build, dependency/legacy guards and all 18 evidence-checker tests passed. Inventory remains
+255 criteria / 511 planned legs, qualified false.
+
+The hardened local progress suites passed on all four runtimes. Viceroy evidence is retained in
+`.runs/18e0c3d1b2fa2300-154c5-0`; Axum and Spin in `.runs/18e0c3e91b527738-16686-0` and
+`.runs/18e0c3d1fe532360-155d1-0`. Cloudflare's first attempt retained an unsupported tool-version
+record (`.runs/18e0c3e91a822ee8-166f3-0`); the next retained esbuild 0.21.5's import-syntax failure
+(`.runs/18e0c41c99850f20-f5a-0`). The successful `.runs/18e0c58f04ba70a0-6123-0` uses existing
+cached wasm-bindgen 0.2.129, esbuild 0.28.2, wasm-opt 130 and Wrangler 4.131.0, with explicit
+binary overrides and automatic installation disabled. No dependency repin, generated JavaScript
+rewrite, alternate entrypoint or hosted deployment was used. Historical failures remain failures.
+These are working-tree characterization runs, not a frozen acceptance claim. Consumer Viceroy
+acceptance, hosted qualification, diagnostic capability publication, full P1 and failed Fastly G2
+remain open; the approved Interfaces and frozen policies remain unchanged.
 
 ## F7: Response Framing and Header Task Group
 

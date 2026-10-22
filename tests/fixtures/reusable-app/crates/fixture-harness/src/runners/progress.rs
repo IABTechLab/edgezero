@@ -31,6 +31,12 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
                 "error":result.as_ref().err().map(ToString::to_string),"qualification":false}))?;
         }
         let checked = outcomes.into_iter().try_for_each(|(_, result)| result);
+        let checked = if name == "fastly" {
+            checked.and(await_evidence(|| {
+                require(!fs::read_to_string(&log)?.contains("private-token-secret"), "private sentinel escaped into runtime diagnostics")?;
+                validate_framing_evidence(&logs(&log))
+            }))
+        } else { checked };
         if name!="spin" {return checked;}
         let expected:Vec<_> = records.values.iter().filter(|e|e["event"]=="response-stream-control" && e["status"]=="pass"
             && e["case"].as_str().is_some_and(|case|case.starts_with("sdk-stream-")))
@@ -572,6 +578,7 @@ fn validate_empty_signal(name: &str, framing: net::Framing, probe: &Value) -> Re
 }
 
 fn checks(name: &str, port: u16, revision: &str, records: &mut Records) -> Result<()> {
+    framing_checks(name, port, records)?;
     if name == "spin" {
         source_diagnostic_checks(port, records)?;
     }
@@ -665,6 +672,60 @@ fn checks(name: &str, port: u16, revision: &str, records: &mut Records) -> Resul
             && origin_requests == 18
             && (name != "spin" || control_passes == 4),
         "SDK progress or empty-body characterization has failed cases; see recorded observations",
+    )
+}
+
+fn framing_checks(name: &str, port: u16, records: &mut Records) -> Result<()> {
+    let reply = net::request(port, "/progress/framing-trailers", &token(), None, None)?;
+    let result = validate_framing_wire(&reply);
+    records.push(
+        json!({"event":"framing-rule", "adapter":name, "reason":"UnsupportedTrailers",
+        "client":reply,"status":if result.is_ok(){"pass"}else{"fail"},"qualification":false}),
+    )?;
+    result
+}
+
+fn validate_framing_wire(reply: &Value) -> Result<()> {
+    require(
+        reply["status"] == 500
+            && reply["body"] == "internal server error"
+            && !reply.to_string().contains("private-token-secret"),
+        "framing fallback wire contract changed",
+    )
+}
+
+fn validate_framing_evidence(events: &[Value]) -> Result<()> {
+    require(
+        !events
+            .iter()
+            .any(|event| event.to_string().contains("private-token-secret")),
+        "private sentinel escaped into captured diagnostics",
+    )?;
+    let reports: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "framing-terminal")
+        .collect();
+    require(
+        reports.len() == 1
+            && reports[0]["application"] == "UnsupportedTrailers"
+            && reports[0]["fallback"].is_null()
+            && reports[0]["outcome"] == "ConversionError"
+            && reports[0]["body_kind"] == "Fallback"
+            && reports[0]["disposition"] == "Completed"
+            && reports[0]["bytes_written"] == 21,
+        "missing or altered framing terminal report",
+    )?;
+    require(
+        events.iter().any(|event| {
+            event["event"] == "fixture_log"
+                && event["level"] == "ERROR"
+                && event["target"] == "edgezero_core::response_egress"
+                && event["message"].as_str().is_some_and(|message| {
+                    message.contains("response trailers are unsupported")
+                        && !message.contains("secret")
+                })
+        }),
+        "missing bounded framing error log",
     )
 }
 
@@ -941,6 +1002,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn framing_evidence_requires_exact_report_and_bounded_error_log() {
+        let events = vec![
+            json!({"event":"framing-terminal", "application":"UnsupportedTrailers",
+            "fallback":null,"outcome":"ConversionError","body_kind":"Fallback","disposition":"Completed","bytes_written":21}),
+            json!({"event":"fixture_log","level":"ERROR","target":"edgezero_core::response_egress",
+                "message":"response-egress Application framing validation failed before commit: response trailers are unsupported"}),
+        ];
+        validate_framing_evidence(&events).unwrap();
+        for (index, key, value) in [
+            (0, "application", json!("InvalidContentLength")),
+            (0, "fallback", json!("UnsupportedTrailers")),
+            (0, "outcome", json!("DeadlineExceeded")),
+            (0, "disposition", json!("Aborted")),
+            (0, "bytes_written", json!(0)),
+            (1, "level", json!("DEBUG")),
+            (
+                1,
+                "message",
+                json!("response trailers are unsupported private-token-secret"),
+            ),
+        ] {
+            let mut altered = events.clone();
+            altered[index][key] = value;
+            assert!(validate_framing_evidence(&altered).is_err());
+        }
+        assert!(validate_framing_evidence(&[]).is_err());
+        let mut duplicate = events.clone();
+        duplicate.push(events[0].clone());
+        assert!(validate_framing_evidence(&duplicate).is_err());
+        let mut additional_leak = events;
+        additional_leak.push(json!({"event":"fixture_log", "message":"private-token-secret"}));
+        assert!(validate_framing_evidence(&additional_leak).is_err());
+        let reply = json!({"status":500,"body":"internal server error","headers":[["content-type","text/plain"]]});
+        validate_framing_wire(&reply).unwrap();
+        let mut leaked_header = reply;
+        leaked_header["headers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(["x-private", "private-token-secret"]));
+        assert!(validate_framing_wire(&leaked_header).is_err());
     }
 
     #[test]

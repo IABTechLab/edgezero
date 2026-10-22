@@ -9,7 +9,8 @@ use crate::error::EdgeError;
 use crate::error_detail::ProviderFailureDetail;
 use crate::http::{HeaderMap, Method, Response, StatusCode, Version};
 use crate::response_egress_framing::{
-    PreparedResponseEgress, prepare_response_egress, response_egress_source_error_category,
+    PreparedResponseEgress, ResponseEgressFramingError, prepare_response_egress,
+    response_egress_source_error_category,
 };
 use crate::router::RouteMetadata;
 use crate::time::{DEADLINE_FAR_FUTURE, Deadline, MonotonicClock, MonotonicInstant};
@@ -292,6 +293,27 @@ pub enum ResponseEgressFallbackDisposition {
     Completed,
 }
 
+/// Independent, bounded precommit framing observations for the application and fallback body.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ResponseEgressFramingFailures {
+    application: Option<ResponseEgressFramingError>,
+    fallback: Option<ResponseEgressFramingError>,
+}
+
+impl ResponseEgressFramingFailures {
+    #[must_use]
+    #[inline]
+    pub const fn application(&self) -> Option<ResponseEgressFramingError> {
+        self.application
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn fallback(&self) -> Option<ResponseEgressFramingError> {
+        self.fallback
+    }
+}
+
 /// Bounded terminal report for one response-conversion attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponseEgressReport {
@@ -299,6 +321,8 @@ pub struct ResponseEgressReport {
     pub bytes_written: u64,
     pub elapsed: Duration,
     pub fallback_disposition: Option<ResponseEgressFallbackDisposition>,
+    /// First precommit framing rejection for each body kind; never a wire diagnostic.
+    pub framing_failures: ResponseEgressFramingFailures,
     pub outcome: ResponseEgressOutcome,
     pub request_start: MonotonicInstant,
     pub route: Option<RouteMetadata>,
@@ -648,7 +672,7 @@ impl ResponseEgressEnvelope {
             self.request_start,
             self.route.as_ref(),
         );
-        let attempt = ResponseEgressAttempt::new(
+        let mut attempt = ResponseEgressAttempt::new(
             &head,
             egress_started_at,
             self.completion,
@@ -685,8 +709,7 @@ impl ResponseEgressEnvelope {
                 },
             )),
         };
-        let Ok(prepared) = prepare_response_egress(&self.request_method, self.response) else {
-            log::error!("response-egress framing validation failed before commit");
+        let Ok(prepared) = attempt.prepare_response(&self.request_method, self.response) else {
             return Err(Box::new(ResponseEgressBeginFailure {
                 attempt,
                 cause: ResponseEgressOutcome::ConversionError,
@@ -795,6 +818,7 @@ pub struct ResponseEgressAttempt {
     egress_started_at: MonotonicInstant,
     fallback_cause: Option<ResponseEgressOutcome>,
     fallback_disposition: Option<ResponseEgressFallbackDisposition>,
+    framing_failures: ResponseEgressFramingFailures,
     observer: ResponseEgressObserverHandle,
     request_start: MonotonicInstant,
     route: Option<RouteMetadata>,
@@ -920,6 +944,7 @@ impl ResponseEgressAttempt {
             clock,
             completion,
             egress_started_at,
+            framing_failures: ResponseEgressFramingFailures::default(),
             fallback_cause: None,
             fallback_disposition: None,
             observer,
@@ -928,6 +953,34 @@ impl ResponseEgressAttempt {
             source_failure: None,
             state: AttemptState::Initial,
         }
+    }
+
+    /// Normalizes one response and retains its first precommit framing error per body kind.
+    /// Recording and logging are initial-only; writing/terminal calls still normalize and return
+    /// the original result without manufacturing a precommit observation.
+    ///
+    /// # Errors
+    /// Returns the original framing error. Recording changes no clock, polling or terminal state.
+    #[inline]
+    pub fn prepare_response(
+        &mut self,
+        request_method: &Method,
+        response: Response,
+    ) -> Result<PreparedResponseEgress, ResponseEgressFramingError> {
+        prepare_response_egress(request_method, response).inspect_err(|reason| {
+            if !matches!(self.state, AttemptState::Initial) {
+                return;
+            }
+            let slot = match self.body_kind {
+                ResponseEgressBodyKind::Application => &mut self.framing_failures.application,
+                ResponseEgressBodyKind::Fallback => &mut self.framing_failures.fallback,
+            };
+            slot.get_or_insert(*reason);
+            log::error!(
+                "response-egress {:?} framing validation failed before commit: {reason}",
+                self.body_kind
+            );
+        })
     }
 
     /// Retains the first body-source error without changing state, clocks or terminal outcome.
@@ -997,6 +1050,7 @@ impl ResponseEgressAttempt {
             body_kind: self.body_kind,
             elapsed,
             fallback_disposition: self.fallback_disposition,
+            framing_failures: self.framing_failures,
             outcome,
             request_start: self.request_start,
             route: self.route.clone(),
@@ -1155,6 +1209,7 @@ mod tests {
             bytes_written: 0,
             elapsed: Duration::ZERO,
             fallback_disposition: None,
+            framing_failures: ResponseEgressFramingFailures::default(),
             outcome: ResponseEgressOutcome::Completed,
             request_start,
             route: None,
@@ -1339,6 +1394,228 @@ mod tests {
         let reports = observer.reports();
         assert_eq!(reports.len(), 1);
         assert!(reports[0].source_failure.is_none());
+    }
+
+    #[test]
+    fn framing_observer_preserves_each_typed_reason() {
+        use crate::response_egress_framing::test_support::{FRAMING_RULES, framing_fixture};
+        use futures::executor::block_on;
+
+        for reason in FRAMING_RULES {
+            for detached in [false, true] {
+                let fixture = block_on(framing_fixture(reason, detached)).expect("fixture");
+                let Err(failure) = fixture.envelope.begin() else {
+                    panic!("framing must reject the response")
+                };
+                let (mut attempt, clock, cause) = failure.into_parts();
+                assert_eq!(cause, ResponseEgressOutcome::ConversionError);
+                assert!(attempt.begin_fallback(cause));
+                assert!(attempt.begin_writing());
+                assert!(
+                    attempt
+                        .finish_fallback(ResponseEgressFallbackDisposition::Completed, clock.now())
+                );
+                let completed = fixture.completed.lock().expect("completion");
+                assert_eq!(completed.len(), 1);
+                assert_eq!(completed[0].framing_failures.application(), Some(reason));
+                assert_eq!(completed[0].framing_failures.fallback(), None);
+                assert!(completed[0].source_failure.is_none());
+                assert!(!format!("{:?}", completed[0]).contains("secret"));
+                let observed = fixture.observed.lock().expect("observer");
+                if detached {
+                    assert!(observed.is_empty());
+                } else {
+                    assert_eq!(*observed, *completed);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn framing_observations_preserve_both_body_slots_without_sampling_the_clock() {
+        use crate::response_egress_framing::test_support::framing_response;
+
+        let now = MonotonicInstant::now();
+        let observer = RecordingObserver::default();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let clock_reads = Arc::clone(&reads);
+        let clock = MonotonicClock::new(move || {
+            clock_reads.fetch_add(1, Ordering::SeqCst);
+            now
+        });
+        let headers = HeaderMap::new();
+        let mut attempt = ResponseEgressAttempt::new(
+            &head(&headers, now, None),
+            now,
+            ResponseEgressCompletion::empty(),
+            ResponseEgressObserverHandle::new(observer.clone()),
+            clock,
+        );
+        assert!(attempt.record_source_error(&EdgeError::bad_gateway("private token=secret")));
+        for reason in [
+            ResponseEgressFramingError::InvalidContentLength,
+            ResponseEgressFramingError::UnsupportedStatus,
+        ] {
+            let (method, response) = framing_response(reason);
+            assert_eq!(
+                attempt.prepare_response(&method, response).err(),
+                Some(reason)
+            );
+        }
+        assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
+        let reason = ResponseEgressFramingError::UnsupportedTrailers;
+        let (method, response) = framing_response(reason);
+        assert_eq!(
+            attempt.prepare_response(&method, response).err(),
+            Some(reason)
+        );
+        let (later_method, later_response) =
+            framing_response(ResponseEgressFramingError::UnsupportedStatus);
+        assert_eq!(
+            attempt
+                .prepare_response(&later_method, later_response)
+                .err(),
+            Some(ResponseEgressFramingError::UnsupportedStatus)
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert!(observer.reports().is_empty());
+        assert!(attempt.begin_writing());
+        assert!(attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, now));
+        let (terminal_method, terminal_response) =
+            framing_response(ResponseEgressFramingError::UnsupportedTunnel);
+        assert_eq!(
+            attempt
+                .prepare_response(&terminal_method, terminal_response)
+                .err(),
+            Some(ResponseEgressFramingError::UnsupportedTunnel)
+        );
+        drop(attempt);
+        let reports = observer.reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0].framing_failures.application(),
+            Some(ResponseEgressFramingError::InvalidContentLength)
+        );
+        assert_eq!(reports[0].framing_failures.fallback(), Some(reason));
+        assert_eq!(
+            reports[0]
+                .source_failure
+                .expect("source observation")
+                .category(),
+            "bad_gateway_unspecified"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn framing_fallback_slot_retains_each_rule_from_the_real_normalizer() {
+        use crate::response_egress_framing::test_support::{FRAMING_RULES, framing_response};
+        for reason in FRAMING_RULES {
+            let now = MonotonicInstant::now();
+            let observer = RecordingObserver::default();
+            let mut attempt = attempt(&observer, now);
+            assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
+            let (method, response) = framing_response(reason);
+            assert_eq!(
+                attempt.prepare_response(&method, response).err(),
+                Some(reason)
+            );
+            assert!(attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, now));
+            let report = observer.reports().remove(0);
+            assert_eq!(report.framing_failures.application(), None);
+            assert_eq!(report.framing_failures.fallback(), Some(reason));
+            assert_eq!(report.body_kind, ResponseEgressBodyKind::Fallback);
+            assert_eq!(report.outcome, ResponseEgressOutcome::ConversionError);
+            assert!(report.source_failure.is_none());
+        }
+    }
+
+    #[test]
+    fn expired_policy_does_not_invent_a_framing_reason() {
+        let now = MonotonicInstant::now();
+        let observer = RecordingObserver::default();
+        let method = Method::GET;
+        let response = Response::new(Body::from("valid"));
+        let envelope = ResponseEgressEnvelope::new(
+            response,
+            ResponseEgressRequestMetadata::new(method, now, None),
+            ResponseEgressCompletion::empty(),
+            Arc::new(move |_, _| ResponseEgressPolicy {
+                write_deadline: Deadline::at_instant(now),
+            }),
+            ResponseEgressObserverHandle::new(observer.clone()),
+            MonotonicClock::new(move || now),
+        );
+        let Ok((_prepared, policy, mut attempt, clock)) = envelope.begin() else {
+            panic!("valid expired policy remains valid")
+        };
+        assert!(policy.write_deadline.is_expired_at(clock.now()));
+        assert!(attempt.terminate(ResponseEgressOutcome::DeadlineExceeded, now));
+        assert_eq!(
+            observer.reports()[0].framing_failures,
+            ResponseEgressFramingFailures::default()
+        );
+    }
+
+    #[test]
+    fn framing_rejection_after_terminal_does_not_create_an_observation() {
+        use crate::response_egress_framing::test_support::framing_response;
+        let now = MonotonicInstant::now();
+        let observer = RecordingObserver::default();
+        let mut attempt = attempt(&observer, now);
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(now));
+        let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers);
+        assert_eq!(
+            attempt.prepare_response(&method, response).err(),
+            Some(ResponseEgressFramingError::UnsupportedTrailers)
+        );
+        assert_eq!(
+            attempt.framing_failures,
+            ResponseEgressFramingFailures::default()
+        );
+        drop(attempt);
+        assert_eq!(observer.reports().len(), 1);
+        assert_eq!(
+            observer.reports()[0].framing_failures,
+            ResponseEgressFramingFailures::default()
+        );
+    }
+
+    #[test]
+    fn writing_attempt_does_not_mislabel_a_late_normalization_error() {
+        use crate::response_egress_framing::test_support::framing_response;
+        let now = MonotonicInstant::now();
+        let observer = RecordingObserver::default();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let clock_reads = Arc::clone(&reads);
+        let clock = MonotonicClock::new(move || {
+            clock_reads.fetch_add(1, Ordering::SeqCst);
+            now
+        });
+        let headers = HeaderMap::new();
+        let mut attempt = ResponseEgressAttempt::new(
+            &head(&headers, now, None),
+            now,
+            ResponseEgressCompletion::empty(),
+            ResponseEgressObserverHandle::new(observer.clone()),
+            clock,
+        );
+        assert!(attempt.begin_writing());
+        let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers);
+        assert_eq!(
+            attempt.prepare_response(&method, response).err(),
+            Some(ResponseEgressFramingError::UnsupportedTrailers)
+        );
+        assert!(observer.reports().is_empty());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert!(attempt.terminate(ResponseEgressOutcome::SourceError, now));
+        drop(attempt);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            observer.reports()[0].framing_failures,
+            ResponseEgressFramingFailures::default()
+        );
     }
 
     #[test]
@@ -2215,6 +2492,10 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].body_kind, ResponseEgressBodyKind::Fallback);
         assert_eq!(reports[0].bytes_written, 0);
+        assert_eq!(
+            reports[0].framing_failures,
+            ResponseEgressFramingFailures::default()
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use edgezero_core::http::{Method, Response, Uri, response_builder};
 use edgezero_core::outbound::{
     OutboundCachePolicy, OutboundProxyMarker, OutboundRequest, ResponseDecoding,
 };
+use edgezero_core::response_egress::{ResponseEgressObserver, ResponseEgressReport};
 use edgezero_core::router::RouterService;
 use edgezero_core::time::{Deadline, MonotonicInstant};
 use edgezero_core::{Body, EdgeError, action};
@@ -44,6 +45,24 @@ struct State {
 }
 
 struct HandlerReturned(Arc<AtomicBool>);
+
+struct FramingObserver;
+
+impl ResponseEgressObserver for FramingObserver {
+    fn complete(&self, report: &ResponseEgressReport) {
+        if report.framing_failures.application().is_some()
+            || report.framing_failures.fallback().is_some()
+        {
+            eprintln!(
+                "{}",
+                json!({"event":"framing-terminal", "application":report.framing_failures.application().map(|reason|format!("{reason:?}")),
+                "fallback":report.framing_failures.fallback().map(|reason|format!("{reason:?}")),
+                "outcome":format!("{:?}",report.outcome),"body_kind":format!("{:?}",report.body_kind),
+                "bytes_written":report.bytes_written,"disposition":report.fallback_disposition.map(|value|format!("{value:?}")),"qualification":false})
+            );
+        }
+    }
+}
 impl Drop for HandlerReturned {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
@@ -61,6 +80,7 @@ pub fn router(
             host_signal,
             dispatch_returned,
         }))
+        .get("/progress/framing-trailers", framing_trailers)
         .get("/progress/{case}", progress)
         .post("/progress/{case}", progress)
         .post("/progress/overflow/{case}", super::overflow::probe)
@@ -73,11 +93,21 @@ pub fn application(
     dispatch_returned: Option<Arc<AtomicBool>>,
     platform: edgezero_core::PlatformMetadata,
 ) -> App {
-    App::with_name_and_platform(
+    let mut app = App::with_name_and_platform(
         router(runtime, host_signal, dispatch_returned),
         "outbound-progress-probe",
         platform,
-    )
+    );
+    app.set_response_egress_observer(FramingObserver);
+    app
+}
+
+#[action]
+async fn framing_trailers() -> Result<Response, EdgeError> {
+    response_builder()
+        .header("trailer", "private-token-secret")
+        .body(Body::from("private-token-secret"))
+        .map_err(EdgeError::internal)
 }
 
 pub fn probe_failure() -> EdgeError {

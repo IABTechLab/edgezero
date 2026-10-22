@@ -12,6 +12,7 @@ use crate::http::{
     header::{ALLOW, CONTENT_TYPE, RETRY_AFTER},
 };
 use crate::response::{IntoResponse, response_with_body};
+use crate::response_egress_framing::ResponseEgressFramingError;
 
 /// Stable identity for an EdgeZero-owned upstream decode failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -555,6 +556,16 @@ impl EdgeError {
         Ok(headers)
     }
 
+    /// Reads an owned precommit framing reason without formatting its source or changing wire errors.
+    #[must_use]
+    #[inline]
+    pub fn response_framing_error(&self) -> Option<ResponseEgressFramingError> {
+        let Self::Internal { source, .. } = self else {
+            return None;
+        };
+        source.downcast_ref::<ResponseEgressFramingError>().copied()
+    }
+
     #[inline]
     pub fn response_too_large<S>(message: S) -> Self
     where
@@ -903,6 +914,49 @@ mod tests {
     use serde::ser;
     use std::io::Error as IoError;
     use std::str;
+
+    #[test]
+    fn framing_detail_preserves_each_existing_display_and_wire_error() {
+        use crate::response_egress_framing::{
+            ResponseEgressBodyLengthError, response_egress_body_length_error,
+            test_support::FRAMING_RULES,
+        };
+        for reason in FRAMING_RULES {
+            let error = EdgeError::internal(reason);
+            assert_eq!(error.response_framing_error(), Some(reason));
+            assert_eq!(error.to_string(), format!("internal error: {reason}"));
+            assert_eq!(error.kind(), "internal");
+            let response = error.into_response().expect("response");
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let ordinary = EdgeError::internal(anyhow::anyhow!("private token=secret"))
+                .into_response()
+                .expect("ordinary response");
+            assert_eq!(response.status(), ordinary.status());
+            assert_eq!(response.headers(), ordinary.headers());
+            let (Body::Once(actual), Body::Once(expected)) =
+                (response.into_body(), ordinary.into_body())
+            else {
+                panic!("buffered wire error")
+            };
+            assert_eq!(actual, expected);
+        }
+        assert!(
+            EdgeError::internal(anyhow::anyhow!("private token=secret"))
+                .response_framing_error()
+                .is_none()
+        );
+        for length_error in [
+            ResponseEgressBodyLengthError::Exceeded,
+            ResponseEgressBodyLengthError::Incomplete,
+        ] {
+            let error = EdgeError::internal(length_error);
+            assert_eq!(error.response_framing_error(), None);
+            assert_eq!(
+                response_egress_body_length_error(&error),
+                Some(length_error)
+            );
+        }
+    }
 
     #[test]
     fn provider_diagnostics_never_change_public_errors() {

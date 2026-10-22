@@ -1,3 +1,8 @@
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+#[path = "response_egress_framing_test_support.rs"]
+pub mod test_support;
+
 use std::mem;
 
 use crate::body::{Body, BodyStream};
