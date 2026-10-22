@@ -3067,6 +3067,16 @@ I/O, and Spin request completion project only closed causes, numeric codes and I
 text is never copied into this field. Existing error text, status, kind, typed reason and wire
 envelopes remain unchanged, including host-rejected request errors that already mapped to 400.
 
+`Capability::OutboundFailureDiagnostics` (`outbound-failure-diagnostics`) publishes this existing
+SDK-boundary projection: Fastly/Spin are Native; Axum/Cloudflare are BestEffort. Native preserves
+typed causes/codes exposed by the pinned SDK, not information hidden by its host. Viceroy can
+expose only an internal cause where hosted Fastly may supply a connection-refused cause. Axum's
+reqwest predicates/optional I/O kind and Cloudflare's allowlisted exception names do not promise
+complete network cause attribution. Catalogs live in `edgezero_core::error_detail`; opaque causes
+remain Unknown and absent codes stay absent. Framework provider-detail logging, if added, must
+be debug or lower; currently it is application-owned. Publication does not close full EZ-16/P1,
+failed Fastly G2, consumer acceptance or hosted qualification, or alter other capability levels.
+
 An existing deadline check can still replace a ready error with its selected timeout, but preserves
 the observed error's diagnostic field. Pure timer wins, successful operations observed late and
 clean EOF carry no invented cause. Core bounded collection follows the same rule without changing
@@ -3380,6 +3390,8 @@ pub enum Capability {
                                      // buffered body, and streamed body yields.
                                      // Cross-slot selection/drain delay is owned by
                                      // OutboundBatchSlotIsolation.
+    OutboundFailureDiagnostics,      // text-free cause/phase and available numeric SDK detail;
+                                     // Fastly/Spin Native, Axum/Cloudflare BestEffort.
     OutboundFlexiblePhaseBudget,     // the total budget is one elastic pool rather
                                      // than a rigid provider-specific phase split.
     OutboundHeaderFidelity,          // request field lines survive transport conversion;
@@ -3796,6 +3808,7 @@ Capability matrix (all four adapters):
 | `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] |
 | `outbound-header-fidelity` | Native | BestEffort⁸ | Native | BestEffort⁸ |
 | `outbound-deadlines` | Native | BestEffort⁸ | BestEffort¹ | BestEffort⁸ |
+| `outbound-failure-diagnostics` | BestEffort | BestEffort | Native | Native |
 | `outbound-flexible-phase-budget` | Native | Native | BestEffort⁵ | BestEffort⁵ |
 | `streamed-upload-deadlines` | Native | BestEffort⁸ | BestEffort² | BestEffort⁸ |
 | `lazy-streamed-response-passthrough` | Native³ | Native | BestEffort⁶ | BestEffort⁷ |
@@ -4789,6 +4802,7 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
 - `capability()` per §3.5.2: `outbound-http` = `Native`,
   `outbound-complete-resource-accounting` = `Unsupported`,
   `outbound-header-fidelity` = `Native`, `outbound-deadlines` = `Native`,
+  `outbound-failure-diagnostics` = `BestEffort` (reqwest predicates and optional I/O evidence),
   `outbound-flexible-phase-budget` = `Native` (Axum's reqwest exposes a single total
   timeout, not a phase split), `outbound-batch-slot-isolation` = `Native`,
   `streamed-upload-deadlines` = `Native`, `lazy-streamed-response-passthrough` =
@@ -5007,7 +5021,7 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
   `Content-Length` retention is part of Cloudflare's documented
   `outbound-header-fidelity = BestEffort` deviation; the app-visible header decision and
   raw encoded payload remain deterministic.
-- `capability()` follows the twelve-row matrix in §3.5.2. `outbound-http`,
+- `capability()` follows the outbound matrix in §3.5.2. `outbound-http`,
   `outbound-flexible-phase-budget` (single `worker::Delay` for the total race, no per-phase
   split), `outbound-batch-slot-isolation`, `outbound-batch-completion-order`,
   `outbound-cache-bypass`, and `lazy-streamed-response-passthrough` are `Native`.
@@ -5015,6 +5029,7 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
   `streamed-upload-deadlines` are `BestEffort` because the owned abort path lacks deployed
   host-observed cancellation evidence. `outbound-header-fidelity` is independently
   `BestEffort` because workerd removes raw-octet/field-line information before the guest,
+  `outbound-failure-diagnostics` is `BestEffort` because Fetch exposes limited exception kinds,
   and `outbound-complete-resource-accounting` is `Unsupported`.
   Cloudflare's WASM single-threaded guest carries no
   `Send` constraint, so `worker::Body::from_stream` consumes the core `Body::Stream`
@@ -5906,6 +5921,7 @@ fn start_batch_until(
   guard runs; since `capability()` is static and cannot distinguish those paths,
   the honest value is `BestEffort`, so a `required outbound-deadlines` correctly hard-fails
   on Fastly rather than fooling the gate),
+  `outbound-failure-diagnostics` = `Native` for available typed SDK causes and numeric fields,
   `outbound-flexible-phase-budget` = `BestEffort` (footnote 5 — rigid 1/4 connect +
   3/4 first-byte split per §4.3 can fail a request that would have fit within the
   total budget), `outbound-batch-slot-isolation` = `BestEffort` (footnote 4 — sequential
@@ -6498,11 +6514,12 @@ this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper. The
     completed exchange (incl. non-2xx) → `Ok`.
 - Spin requires `allowed_outbound_hosts`; the adapter renders it from
   `[capabilities.outbound].hosts` per §3.5.4 when generating `spin.toml`.
-- `capability()` per §3.5.2 reports the exact twelve outbound-cell tuple (additional
+- `capability()` per §3.5.2 reports the exact outbound-cell tuple (additional
   non-outbound capability variants are owned by their respective specifications):
   `outbound-http` = `Native`, `outbound-header-fidelity` = `BestEffort` (footnote 8),
   `outbound-complete-resource-accounting` = `Unsupported`,
   `outbound-deadlines` = `BestEffort` (footnote 8),
+  `outbound-failure-diagnostics` = `Native` for available typed WASI causes and numeric fields,
   `outbound-flexible-phase-budget` = `BestEffort` (footnote 5: request-option setters may
   be unsupported and leave earlier host defaults), `outbound-batch-slot-isolation` = `Native`,
   `streamed-upload-deadlines` = `BestEffort` (footnote 8), and
@@ -6664,7 +6681,7 @@ Each adapter crate tests its shipped conversion and classification seams.
 
 | Surface | Required assertions |
 | --- | --- |
-| Capability metadata | All four adapters return the exact twelve **outbound** cells in §3.5.2, including completion order, cancellation, slot isolation, cache bypass, authority override, complete resource accounting = Unsupported everywhere, Fastly outbound HTTP = BestEffort, Cloudflare header fidelity = BestEffort, and Spin deadline/upload/flexible-phase-budget = BestEffort. Tests do not assert that the shared enum has only twelve global variants; non-outbound cells belong to their own specs. A fixture adapter that relies on the trait default returns Unsupported. Because each adapter crate matches core's non-exhaustive `Capability` enum across a crate boundary, normal adapter compilation requires a wildcard; review asserts that its result is `_ => Unsupported`. A hypothetical future variant is a structural fail-closed invariant, not a value current Rust code can safely construct at runtime. |
+| Capability metadata | All four adapters return the exact **outbound** matrix cells in §3.5.2, including completion order, cancellation, slot isolation, cache bypass, authority override, complete resource accounting = Unsupported everywhere, failure diagnostics = Native on Fastly/Spin and BestEffort on Axum/Cloudflare, Fastly outbound HTTP = BestEffort, Cloudflare header fidelity = BestEffort, and Spin deadline/upload/flexible-phase-budget = BestEffort. Tests do not assert a fixed global enum count; non-outbound cells belong to their own specs. A fixture adapter that relies on the trait default returns Unsupported. Because each adapter crate matches core's non-exhaustive `Capability` enum across a crate boundary, normal adapter compilation requires a wildcard; review asserts that its result is `_ => Unsupported`. A hypothetical future variant is a structural fail-closed invariant, not a value current Rust code can safely construct at runtime. |
 | Request conversion | Method/body/headers/full canonical URI survive conversion; normalized hop-by-hop fields cannot reappear; EdgeZero-owned buffered and streamed request caps map to typed 413 with upload origin. Buffered overflow rejects before dispatch. Dot-segment/percent/numeric-host/IDNA cases use the exact core serialization rather than adapter reconstruction. Typed `EdgeError` request chunks retain their original category and origin through adapter conversion; in-tree paths never route them through `from_external_stream`. |
 | Deadline anchoring and clock propagation | Every standard adapter installs its outbound client with the exact `App::monotonic_clock()` clone used by ingress; every low-level response constructor requires its caller to supply that clock explicitly. Every adapter captures one stored-clock snapshot as the first operation in `send`/`start_batch_until`, before normalization, preflight, or builder work. An injected clock advances during preparation and proves that elapsed time consumes the valid request's original budget; no path re-anchors or bypasses the client clock. Preflight slot elapsed, provider-error precedence, post-ready expiry, deferred upload/response streams, returned `OutboundResponse` bounded-until collection, and response-egress coordinator checks use that same handle. A backwards clock cannot enlarge `budget.duration`; a backwards terminal sample produces zero elapsed plus an internal invariant outcome. Invalid-request precedence remains the shared validator's result because validation still runs before budget selection. |
 | `start_batch_until` / `send_all_until` on every adapter | Run the production batch orchestration with injected transport/clock seams for Axum, Cloudflare, Fastly, and Spin. Empty input returns empty without dispatch; mixed valid/invalid slots retain exact input indices; preflight failures dispatch no work for that slot and never poll rejected source streams; GET/HEAD body errors precede batch-only errors; transport errors, cap failures, timeouts, and non-2xx responses preserve sibling outcomes without cancelling siblings. Assert every emitted slot carries its own elapsed time from the one method-entry snapshot through that slot's terminal point; advance the injected clock during preflight to prove that time is included. A same-tick terminal result may legitimately report zero. A slow sibling's later completion must not overwrite an earlier slot's elapsed value. Valid one-slot buffered batches match single-send outcome semantics while elapsed is asserted independently. Script reverse completion order on concurrent adapters; assert every eligible exchange is polled before a stalled sibling finishes. Assert cancellation retains already emitted items, reports unresolved indices, and does not consume a ready item when a `next()` future is dropped. Fastly tests dispatch-before-selection, selected-handle identity reassociation, all three reassociation failure diagnostics, exact error-to-driver-event propagation with previously collected slots, bounded groups, and immediate elapsed sampling after each preflight/dispatch/selected-body terminal result while retaining its documented BestEffort timing caveats. Backwards injected time produces zero plus an internal outcome, distinguishable from legitimate zero by outcome. |
@@ -6948,12 +6965,12 @@ Outbound-facing changes:
   existing error envelope and does not serialize any reason/provenance field. Their wire
   messages, plus `Internal`, are fixed category strings; detailed provider diagnostics and
   request targets are not serialized.
-- `Manifest` gains the twelve outbound capabilities and
+- `Manifest` gains the outbound matrix capabilities and
   `[capabilities.outbound].hosts`. Existing non-outbound capability and store schemas are
   unchanged. The depth-independent misplaced-`capabilities` rejection is intentionally
   fail-closed.
 - `Adapter` gains the defaulted `capability()` method. Each in-tree adapter returns all
-  twelve matrix values and ends its non-exhaustive match with
+  outbound matrix values and ends its non-exhaustive match with
   `_ => CapabilitySupport::Unsupported`.
 - Capability enforcement uses outbound-scoped `execute_runtime(..)` and
   `execute_capture_runtime(..)`, which share one helper that gates `build` / `serve` / `deploy` /
@@ -6970,7 +6987,7 @@ Outbound-facing changes:
   because Fastly's service entitlement is not statically provable; single-target apps may
   declare it required on an adapter whose matrix cell satisfies the gate.
   Spin's generated platform manifest consumes the canonical outbound host list.
-- `docs/guide/capabilities.md` documents all twelve outbound capabilities, the support
+- `docs/guide/capabilities.md` documents all outbound capabilities, the support
   matrix, and each BestEffort caveat, and is linked from the VitePress sidebar because
   runtime diagnostics point to that published page.
 
@@ -7043,7 +7060,7 @@ the durable anchors.
   this specification; any local test fixture affected by the global `Body::from_stream`
   signature change switches to the appropriate explicit constructor without changing
   behavior.
-- `src/manifest.rs` adds the twelve outbound capabilities,
+- `src/manifest.rs` adds the outbound matrix capabilities,
   `ManifestCapabilities`, `ManifestOutboundCapability`, host validation, misplaced
   nested-`capabilities` rejection, and the three-state baked-manifest contract.
   Runtime and baked parse paths run the same validation/finalization logic.
@@ -7064,7 +7081,7 @@ the durable anchors.
   `edgezero-core`. This creates no cycle: core depends on macros, while neither core nor
   macros depends on `edgezero-adapter`.
 - `src/registry.rs` adds the defaulted `Adapter::capability()` method. In-tree
-  overrides return all twelve outbound matrix cells and use a final
+  overrides return all outbound matrix cells and use a final
   `_ => Unsupported` arm for the non-exhaustive enum. Update the trait rustdoc that
   currently promises the crate remains dependency-free from core. No store/provision
   API changes belong to this spec.
@@ -7083,7 +7100,7 @@ the durable anchors.
 - Rename each outbound provider module/client from `proxy` / `*ProxyClient` to
   `outbound` / `*OutboundClient`; implement both response modes, request preflight,
   method-aware `OutboundResponse` construction, request and response normalization,
-  independent encoded/decoded/final-buffer caps, typed decoder errors, and the exact twelve outbound-cell
+  independent encoded/decoded/final-buffer caps, typed decoder errors, and the exact outbound-cell
   capability tuple. Before the native request consumes `OutboundRequestParts`, retain the
   originating method, response mode, and every response-resource setting in the owned
   response-conversion state; no adapter may reconstruct or default those values after send.
@@ -7196,7 +7213,7 @@ Adapter-specific work:
   promote it to `required` when its selected adapter satisfies the matrix. Spin's generated
   platform manifest renders the canonical outbound host list.
 - Update public proxying, handler, architecture, streaming, and adapter docs. Add
-  `docs/guide/capabilities.md` with all twelve outbound capabilities and sidebar
+  `docs/guide/capabilities.md` with all outbound capabilities and sidebar
   navigation.
 - Build one generated project and the excluded `examples/app-demo` workspace so
   template/example drift cannot hide behind the root workspace build. The generated
@@ -7222,7 +7239,7 @@ Adapter-specific work:
 - Required local gates are the repository `CLAUDE.md` commands, all adapter WASM
   target checks, the generated-project compile plus explicit nonzero core-test execution,
   and the app-demo build. Phase 7 adds deterministic legacy-API and published-capability
-  document checks; the latter compares all twelve rows/support values and requires exactly
+  document checks; the latter compares all outbound rows/support values and requires exactly
   one VitePress sidebar link. Documentation-only edits use Markdown/link/diff verification
   rather than rebuilding Rust.
 

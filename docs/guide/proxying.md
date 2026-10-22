@@ -110,8 +110,11 @@ length failures keep their existing source categories, not a new precommit class
 Exact report literals must add `source_failure: None` and `framing_failures: Default::default()`
 when there is no observation. There is no old-shape compatibility API. Stock fallbacks are
 framing-valid; invalid-fallback attribution is verified directly at the shared normalization
-boundary, not claimed as an observed adapter-generated failure. Diagnostic capability publication
-and hosted qualification remain open; these diagnostics do not strengthen transport guarantees.
+boundary, not claimed as an observed adapter-generated failure.
+[`outbound-failure-diagnostics`](/guide/capabilities#provider-failure-diagnostics) reports Native
+for Fastly/Spin SDK-cause projection and BestEffort for Axum/Cloudflare's reduced visibility.
+Hosted qualification and the remaining outbound migration remain open; these diagnostics do not
+strengthen transport guarantees.
 
 `ResponseDecoding::Original` preserves encoded payload bytes and the representation headers
 that survive ordinary normalization. It does not restore hop-by-hop or invalid fields. Use it

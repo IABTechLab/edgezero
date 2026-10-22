@@ -998,6 +998,36 @@ mod tests {
     }
 
     #[test]
+    fn provider_failure_diagnostics_capability_gate() {
+        for adapter in [
+            &NATIVE_ADAPTER,
+            &BOUNDED_ADAPTER,
+            &BEST_EFFORT_ADAPTER,
+            &UNSUPPORTED_ADAPTER,
+        ] {
+            register_adapter(adapter);
+            for disposition in ["required", "optional"] {
+                let loader = capability_manifest(&format!(
+                    "{disposition} = [\"outbound-failure-diagnostics\"]"
+                ));
+                let result = ensure_capabilities(
+                    adapter.name,
+                    ManifestContract::from_opt(Some(loader.manifest())),
+                );
+                let accepted = disposition == "optional"
+                    || matches!(
+                        adapter.support,
+                        CapabilitySupport::Native | CapabilitySupport::BoundedCooperative
+                    );
+                assert_eq!(result.is_ok(), accepted, "{}: {result:?}", adapter.name);
+                if let Err(error) = result {
+                    assert!(error.contains("outbound-failure-diagnostics"), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn capability_gate_accepts_native_and_bounded_required_support() {
         register_adapter(&NATIVE_ADAPTER);
         register_adapter(&BOUNDED_ADAPTER);

@@ -15,7 +15,7 @@
 - Adapter dispatch has both `execute(..)` and `execute_capture(..)` entry points.
 - The action set includes staged deploy, version emission, healthcheck, and rollback in
   addition to build/serve/deploy/auth.
-- The outbound design declares exactly twelve **outbound** capabilities. The matrix and its
+- The outbound design declares the **outbound** capability matrix. Its rows and
   footnotes in spec §3.5.2 are the only authority for those support levels; other specs may
   add non-outbound cells to the shared enum.
 

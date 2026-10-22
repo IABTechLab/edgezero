@@ -2041,6 +2041,7 @@ impl Adapter for FastlyCliAdapter {
             Capability::IngressAdmission
             | Capability::OutboundAuthorityOverride
             | Capability::OutboundCacheBypass
+            | Capability::OutboundFailureDiagnostics
             | Capability::OutboundHeaderFidelity => CapabilitySupport::Native,
             Capability::ConfigReadDeadlines
             | Capability::InboundReadDeadlines
@@ -6914,6 +6915,10 @@ mod tests {
                 CapabilitySupport::Native,
             ),
             (Capability::OutboundDeadlines, CapabilitySupport::BestEffort),
+            (
+                Capability::OutboundFailureDiagnostics,
+                CapabilitySupport::Native,
+            ),
             (
                 Capability::OutboundFlexiblePhaseBudget,
                 CapabilitySupport::BestEffort,

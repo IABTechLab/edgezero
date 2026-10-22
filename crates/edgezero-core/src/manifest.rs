@@ -97,6 +97,9 @@ pub enum Capability {
     OutboundCacheBypass,
     OutboundCompleteResourceAccounting,
     OutboundDeadlines,
+    /// Retains text-free provider causes at existing SDK failure boundaries.
+    /// Does not recover causes hidden by the provider or qualify hosted transport behavior.
+    OutboundFailureDiagnostics,
     OutboundFlexiblePhaseBudget,
     OutboundHeaderFidelity,
     OutboundHttp,
@@ -135,6 +138,7 @@ impl Capability {
             Self::OutboundCacheBypass => "outbound-cache-bypass",
             Self::OutboundCompleteResourceAccounting => "outbound-complete-resource-accounting",
             Self::OutboundDeadlines => "outbound-deadlines",
+            Self::OutboundFailureDiagnostics => "outbound-failure-diagnostics",
             Self::OutboundFlexiblePhaseBudget => "outbound-flexible-phase-budget",
             Self::OutboundHeaderFidelity => "outbound-header-fidelity",
             Self::OutboundHttp => "outbound-http",
@@ -1666,6 +1670,33 @@ env = "APP_TOKEN"
 "#;
 
     #[test]
+    fn provider_failure_diagnostics_capability_round_trip() {
+        let name = "outbound-failure-diagnostics";
+        let capability: Capability =
+            serde_json::from_value(serde_json::json!(name)).expect("diagnostic capability");
+        assert_eq!(capability.as_str(), name);
+        assert_eq!(
+            serde_json::to_value(capability).unwrap(),
+            serde_json::json!(name)
+        );
+
+        for disposition in ["required", "optional"] {
+            let source = format!("[capabilities]\n{disposition} = [\"{name}\"]\n");
+            let loader = ManifestLoader::try_load_from_str(&source).expect("diagnostic manifest");
+            let serialized = toml::to_string(loader.manifest()).expect("serialize manifest");
+            let reparsed = ManifestLoader::try_load_from_str(&serialized).expect("round trip");
+            let declared = &reparsed.manifest().capabilities;
+            let (selected, other) = if disposition == "required" {
+                (&declared.required, &declared.optional)
+            } else {
+                (&declared.optional, &declared.required)
+            };
+            assert_eq!(selected, &[capability]);
+            assert!(other.is_empty());
+        }
+    }
+
+    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "the exhaustive capability parse-and-validation table is clearer in one test"
@@ -1687,6 +1718,7 @@ required = [
     "outbound-cache-bypass",
     "outbound-complete-resource-accounting",
     "outbound-deadlines",
+    "outbound-failure-diagnostics",
     "outbound-flexible-phase-budget",
     "outbound-header-fidelity",
     "outbound-http",
@@ -1718,6 +1750,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             Capability::OutboundCacheBypass,
             Capability::OutboundCompleteResourceAccounting,
             Capability::OutboundDeadlines,
+            Capability::OutboundFailureDiagnostics,
             Capability::OutboundFlexiblePhaseBudget,
             Capability::OutboundHeaderFidelity,
             Capability::OutboundHttp,
@@ -1753,6 +1786,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             "outbound-cache-bypass",
             "outbound-complete-resource-accounting",
             "outbound-deadlines",
+            "outbound-failure-diagnostics",
             "outbound-flexible-phase-budget",
             "outbound-header-fidelity",
             "outbound-http",

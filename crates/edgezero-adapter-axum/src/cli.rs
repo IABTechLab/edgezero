@@ -139,6 +139,7 @@ impl Adapter for AxumCliAdapter {
     fn capability(&self, capability: Capability) -> CapabilitySupport {
         match capability {
             Capability::ConfigReadDeadlines
+            | Capability::OutboundFailureDiagnostics
             | Capability::ResponseEgressAbort
             | Capability::ResponseEgressBackpressure
             | Capability::ResponseEgressCompletion
@@ -898,6 +899,10 @@ mod tests {
                 CapabilitySupport::Native,
             ),
             (Capability::OutboundDeadlines, CapabilitySupport::Native),
+            (
+                Capability::OutboundFailureDiagnostics,
+                CapabilitySupport::BestEffort,
+            ),
             (
                 Capability::OutboundFlexiblePhaseBudget,
                 CapabilitySupport::Native,

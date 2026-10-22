@@ -261,7 +261,12 @@ separately from the portable API and must be considered when declaring required 
   if a deadline, cancellation or fallback wins. Recording changes no polling, clocks, terminal
   precedence or wire bytes. Rendered application errors and transport-only failures are not
   source failures. Exact report literals must add the new optional field; no compatibility
-  shape remains. Diagnostic capability publication and hosted qualification remain follow-up work.
+  shape remains. Hosted qualification remains follow-up work.
+- Publish `outbound-failure-diagnostics`: Native for Fastly/Spin's existing typed SDK-cause
+  projection and BestEffort for Axum/Cloudflare's reduced cause visibility. Manifest parsing,
+  required/optional gates, adapter support and published matrices use the same capability.
+  This adds no transport guarantee, reconstructs no host-hidden cause and does not complete
+  hosted qualification or the remaining outbound migration.
 - Retain precommit response framing rules in `ResponseEgressReport::framing_failures`, with
   independent first-observed application/fallback slots using the existing `ResponseEgressFramingError`.
   Use shared attempt-owned normalization on all four adapters, including fallback and Axum

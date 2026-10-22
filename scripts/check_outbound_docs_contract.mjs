@@ -144,6 +144,7 @@ const expectedOutboundRows = [
   ],
   ['outbound-header-fidelity', 'Native', 'BestEffort', 'Native', 'BestEffort'],
   ['outbound-deadlines', 'Native', 'BestEffort', 'BestEffort', 'BestEffort'],
+  ['outbound-failure-diagnostics', 'BestEffort', 'BestEffort', 'Native', 'Native'],
   [
     'outbound-flexible-phase-budget',
     'Native',
@@ -844,6 +845,16 @@ if (JSON.stringify(actualMemoryRows) !== JSON.stringify(expectedMemoryRows)) {
   )
 }
 const normalizedCapabilitySource = capabilitySource.replaceAll(/\s+/gu, ' ')
+for (const fragment of [
+  'SDK failure evidence, not stronger transport guarantees',
+  'pinned Viceroy can report an internal cause',
+  'Framework code does not log provider detail',
+  'Local SDK/Node/WASI fixtures are not hosted qualification',
+]) {
+  if (!normalizedCapabilitySource.includes(fragment)) {
+    fail(`provider diagnostic capability is missing its scope: ${fragment}`)
+  }
+}
 for (const requiredFragment of [
   'six simultaneous outbound connections',
   'it is not an inbound population bound',
@@ -1137,6 +1148,13 @@ try {
 } catch (error) {
   fail(`cannot read ${outboundSpecPath}: ${error.message}`)
 }
+if (
+  !outboundSpecSource.includes(
+    '| `outbound-failure-diagnostics` | BestEffort | BestEffort | Native | Native |'
+  )
+) {
+  fail('outbound specification is missing the SDK-projection diagnostic matrix row')
+}
 
 if (!outboundSpecSource.includes('## 2. Historical implementation baseline')) {
   fail(
@@ -1349,6 +1367,9 @@ if (
   outboundImplementationIndexSource.includes('all downstream phases stay') ||
   outboundImplementationIndexSource.includes(
     'exactly seven **outbound** capabilities'
+  ) ||
+  outboundImplementationIndexSource.includes(
+    'exactly twelve **outbound** capabilities'
   ) ||
   outboundImplementationIndexSource.includes(
     'block_in_place` + `Handle::block_on'

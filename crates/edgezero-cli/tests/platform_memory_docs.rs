@@ -168,6 +168,31 @@ mod tests {
     }
 
     #[test]
+    fn failure_diagnostics_matrix_matches_adapters() {
+        use edgezero_adapter::registry::get_adapter;
+        use edgezero_core::{Capability, CapabilitySupport};
+
+        let capability: Capability =
+            serde_json::from_value(serde_json::json!("outbound-failure-diagnostics"))
+                .expect("diagnostic capability");
+        let mut cells = vec![format!("`{}`", capability.as_str())];
+        for (name, expected) in [
+            ("axum", CapabilitySupport::BestEffort),
+            ("cloudflare", CapabilitySupport::BestEffort),
+            ("fastly", CapabilitySupport::Native),
+            ("spin", CapabilitySupport::Native),
+        ] {
+            let actual = get_adapter(name)
+                .expect("registered adapter")
+                .capability(capability);
+            assert_eq!(actual, expected, "{name}");
+            cells.push(format!("{actual:?}"));
+        }
+        let row = cells.join("|");
+        assert!(guide_contains_row(&row), "missing diagnostic row: {row}");
+    }
+
+    #[test]
     fn platform_resource_table_matches_adapter_constants() {
         assert_documented_platform("Axum", edgezero_adapter_axum::AXUM_PLATFORM);
         assert_documented_platform(

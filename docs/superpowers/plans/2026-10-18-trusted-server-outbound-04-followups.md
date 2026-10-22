@@ -524,6 +524,44 @@ evidence and the failed Fastly G2 remain open.
       present while token-bearing public wire/Display/status snapshots remain unchanged. Run four
       adapter error contracts and the task lint card. Suggested commit: `feat: retain bounded log-only provider diagnostics`.
 
+#### F6a Capability Publication Checkpoint (2026-10-22)
+
+- [x] Add `OutboundFailureDiagnostics` / `outbound-failure-diagnostics` to the canonical
+      manifest enum, serialization and existing four adapter capability tables. Publish Native
+      for Fastly/Spin SDK-cause projection and BestEffort for Axum/Cloudflare's limited visibility.
+- [x] Add manifest round-trip, required/optional gate and actual registered-adapter/document-row
+      regressions. Reproduce unknown-variant, missing-row and Unsupported-versus-BestEffort
+      failures before filling their implementation. Keep future capabilities fail-closed.
+- [x] Align the public guide, proxying guide, normative design, matrix checker and changelog.
+      Document closed catalog ownership, Unknown/absent codes, API-boundary phase semantics,
+      wire privacy and the distinction between diagnostic projection and hosted cause evidence.
+- [x] Complete current-tree Rust/WASM/docs verification and independent review before committing.
+- [ ] Complete the remaining full EZ-16 acceptance and consumer/hosted qualification separately.
+      Keep the full P1 migration and failed Fastly G2 open.
+
+Erdos mapped the canonical enum, existing generic gate and adapter tables; Beauvoir reviewed
+catalog visibility and publication scope. Both proposals selected the existing capability
+mechanism rather than a new runtime query or diagnostic validator. Implementation is centralized.
+Native means retaining available pinned-SDK causes/codes, not recovering Viceroy-hidden causes
+or promising client delivery. Local SDK/Node/WASI fixtures remain local evidence. Earlier dated
+checkpoints retain their historical capability-publication status; this checkpoint supersedes
+that status only. No transport behavior, SDK/decoder pins, frozen policy or approved Interfaces
+digest changes, and no compatibility API is added.
+
+All five required Rust gates passed: 27 workspace binaries, 2,130 passing tests, zero failures
+and one existing ignored generated-workspace test, including 812 core tests. All three real-target
+WASM clippy checks, Fastly CLI-only/no-default clippy, four core compile-fail doctests and 48
+demo-core tests passed. The actual registered-adapter/doc-row and required/optional gate tests
+executed. Docs format/lint/build, dependency/legacy guards and the 18 evidence-checker tests
+passed; inventory validation remains 255 criteria / 511 planned legs, qualified false.
+The first workspace run could not bind TCP listeners inside the sandbox; the complete rerun
+with local socket access passed. A wrong initial Axum test filter selected zero tests and was
+not accepted as evidence; the correctly named nonzero regression proved the missing support arm.
+Spec review found one stale numeric capability count in the active implementation index; it now
+references matrix rows, with a regression guard. Revised spec and quality reviews passed.
+No new SDK/runtime/hosted probes or generated-workspace execution are claimed for this metadata
+publication; earlier diagnostic projection evidence retains its own revision and scope.
+
 ### Task F6b: Fastly Delivery Reports and Safe Replacement
 
 **Files:** Core `src/response_egress.rs`; Fastly `src/request.rs`, `response.rs`, `lifecycle.rs`,

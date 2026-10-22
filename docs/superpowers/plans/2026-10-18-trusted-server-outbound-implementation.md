@@ -85,6 +85,15 @@ error-level logs. Shared attempt-owned normalization covers all four adapters wi
 wire bytes or postcommit source categories. This is not consumer or hosted qualification and
 does not unblock Fastly G2 or the remaining outbound cutover.
 
+### F6a Capability Publication Checkpoint
+
+The independent [capability publication checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f6a-capability-publication-checkpoint-2026-10-22)
+adds `outbound-failure-diagnostics` to manifest parsing, existing gates and four adapter tables.
+Fastly/Spin are Native for available typed SDK-cause projection; Axum/Cloudflare are BestEffort
+because provider visibility is incomplete. Published matrices are checked against the registered
+adapters. This does not recover host-hidden causes or close full EZ-16/P1, consumer/hosted
+qualification or failed Fastly G2. All transport, deadline and delivery guarantees remain unchanged.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

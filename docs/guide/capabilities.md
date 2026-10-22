@@ -256,6 +256,7 @@ not included. These limitations block whole-response-lifetime certification.
 | `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] |
 | `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                            | BestEffort[^spin-header-fidelity] |
 | `outbound-deadlines`                    | Native                            | BestEffort⁸                       | BestEffort¹                       | BestEffort⁸                       |
+| `outbound-failure-diagnostics`          | BestEffort                        | BestEffort                        | Native                            | Native                            |
 | `outbound-flexible-phase-budget`        | Native                            | Native                            | BestEffort⁵                       | BestEffort⁵                       |
 | `streamed-upload-deadlines`             | Native                            | BestEffort⁸                       | BestEffort²                       | BestEffort⁸                       |
 | `lazy-streamed-response-passthrough`    | Native³                           | Native                            | BestEffort⁶                       | BestEffort⁷                       |
@@ -316,6 +317,41 @@ it preserves the visible header semantics used by the client.
 ⁹ Fastly outbound HTTP uses dynamic backends, which must be enabled on the deployed service.
 The CLI cannot currently prove that entitlement. If disabled, dispatch returns a typed 502
 with the documented enablement diagnostic.
+
+## Provider Failure Diagnostics
+
+`outbound-failure-diagnostics` describes retention of available SDK failure evidence, not
+stronger transport guarantees. Read it with `EdgeError::provider_failure_detail()`; the closed
+catalogs are `AxumFailureKind`, `CloudflareFailureCause`, `FastlyFailureCause`, and
+`SpinFailureCause` in `edgezero_core::error_detail`.
+
+Fastly and Spin report `Native`: their existing SDK failure boundaries project typed causes and
+available numeric payloads without provider text. Fastly retains backend/send causes, DNS codes,
+TLS alert IDs, HTTP/2 frame/error codes, platform statuses and I/O kinds where supplied. Spin
+retains WASI error codes, DNS info codes, TLS alert IDs and size limits, plus preparation errors.
+Spin's text-only DNS rcode accepts only `NOERROR`, `FORMERR`, `SERVFAIL`, `NXDOMAIN`, `NOTIMP`,
+and `REFUSED`; other values become `Unknown`. A provider-hidden cause is not reconstructed:
+pinned Viceroy can report an internal cause where hosted Fastly may expose connection refusal.
+
+Axum and Cloudflare report `BestEffort` because their providers expose incomplete cause detail.
+Axum retains reqwest kind/connect/timeout predicates and an I/O kind when discoverable through
+its source chain. Cloudflare retains only allowlisted `AbortError`/`TypeError` exception names;
+SDK-erased or unrecognized causes remain `Unknown`. Neither promises complete DNS/TLS attribution.
+
+`Unknown` describes an observed opaque/unrecognized cause; absent optional codes remain absent.
+Timer-only expiry, late success, clean EOF and local validation do not invent provider evidence.
+The phase identifies the observed API boundary, not whether request bytes were sent. Detail is
+fixed-size and text-free: it carries no URLs, header values, body bytes or provider messages, and
+does not change framework wire responses or existing error classification. Framework code does
+not log provider detail; any future framework logging must be debug or lower. Application logging
+and correlation remain application-owned. Fixed framing-rule error logs are separate.
+
+This row publishes the implemented SDK projection, not full EZ-16 acceptance, the remaining
+head-first/eager/follow migration, hosted cause provenance, cancellation or client delivery.
+Local SDK/Node/WASI fixtures are not hosted qualification; the failed Fastly readiness gate
+remains open. Existing deadline, delivery and resource-accounting capability levels are unchanged.
+Applications that tolerate reduced detail can declare this capability optional; requiring it
+accepts Fastly/Spin and rejects the BestEffort Axum/Cloudflare cells.
 
 ## Outbound Content-Type Provenance
 
