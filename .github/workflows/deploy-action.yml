@@ -186,6 +186,18 @@ jobs:
           lookup-only: true
           fail-on-cache-miss: true
 
+      # Cache availability checks can return successfully before applying
+      # fail-on-cache-miss. Only an exact lookup hit establishes publication.
+      - name: Require exact target seed publication
+        env:
+          TARGET_SEED_FIRST_HIT: ${{ steps.target-verify-1.outputs.cache-hit }}
+          TARGET_SEED_SECOND_HIT: ${{ steps.target-verify-2.outputs.cache-hit }}
+        run: |
+          if [[ "$TARGET_SEED_FIRST_HIT" != true && "$TARGET_SEED_SECOND_HIT" != true ]]; then
+            echo '::error::target seed was not verified with an exact cache hit after two attempts'
+            exit 1
+          fi
+
   cache-restore-smoke:
     needs: cache-restore-seed
     runs-on: ubuntu-latest
