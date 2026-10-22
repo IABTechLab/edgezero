@@ -2164,9 +2164,18 @@ mod tests {
             response.body().as_bytes().unwrap(),
             b"private parse failure"
         );
+    }
 
+    #[test]
+    fn geo_legacy_dispatch_ignores_forged_extensions() {
+        use crate::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+        use crate::params::PathParams;
+        let forged = GeoOutcome::Selected {
+            provider: GeoProviderId::new("forged").unwrap(),
+            status: GeoStatus::Error(GeoError::ProviderFailure),
+        };
         let mut unmanaged = request_builder().body(Body::empty()).unwrap();
-        unmanaged.extensions_mut().insert(selected());
+        unmanaged.extensions_mut().insert(forged.clone());
         assert_eq!(
             RequestContext::new(unmanaged, PathParams::default()).geo(),
             &GeoOutcome::NoSelection
@@ -2183,7 +2192,7 @@ mod tests {
             .uri("/legacy")
             .body(Body::empty())
             .unwrap();
-        legacy_request.extensions_mut().insert(selected());
+        legacy_request.extensions_mut().insert(forged.clone());
         let legacy_head = IngressHeadParts::from_request(
             &legacy_request,
             IngressHeadAccounting::HostManaged,
