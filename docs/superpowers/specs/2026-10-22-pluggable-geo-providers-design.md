@@ -1,10 +1,10 @@
 # Pluggable Geo providers
 
-- Status: Proposed architecture, revised after scope and contract review. No implementation or deployment acceptance is claimed.
+- Status: implemented and locally verified. The implementation plan records test evidence. Cloud deployment and downstream acceptance remain separate and unproven.
 - Date: 2026-10-22
 - Owning issue: [EdgeZero #432](https://github.com/IABTechLab/edgezero/issues/432), under [#391](https://github.com/IABTechLab/edgezero/issues/391).
 - Initial deployment: CloudFront through an HTTPS, origin-secret-gated ALB to network-isolated native Axum.
-- Planning baseline: EdgeZero `5426ea65`. Integrate checked native ingress from [PR #409 at `66a05e25bee674ced69387467acec3c87b06c8b6`](https://github.com/IABTechLab/edgezero/tree/66a05e25bee674ced69387467acec3c87b06c8b6). It is not present in this worktree. Review any later ingress revision explicitly; do not implement another forwarding-header parser.
+- Planning baseline: EdgeZero `5426ea65`. Checked native ingress from [PR #409 at `66a05e25bee674ced69387467acec3c87b06c8b6`](https://github.com/IABTechLab/edgezero/tree/66a05e25bee674ced69387467acec3c87b06c8b6) was reconciled by adapting its own commit delta onto the newer native-store stack. Current asynchronous egress and connection ownership remain intact. The separate #407 buffered JSON-cap/body-carrier feature was not imported. No second forwarding parser was added.
 - Composition reference: [native startup lifecycle](2026-10-05-axum-production-startup-lifecycle-design.md). Geo remains separate from [native store providers](2026-10-07-native-store-providers-design.md) and [PR #414](https://github.com/IABTechLab/edgezero/pull/414).
 
 ## 1. Outcome and scope
@@ -13,7 +13,7 @@ Applications obtain an estimated country and optional first-level subdivision th
 
 The first implementation includes portable outcomes, a synchronous provider contract, explicit native selection, the CloudFront provider, a request accessor, focused tests and deployment guidance. Application-supplied providers use the same narrow, local-only contract. No local GeoIP database or external lookup service is included.
 
-This deliberately narrows #432. Split or update that issue before implementation scheduling; its local-database requirements remain deferred, not satisfied by CloudFront support. Trusted Server adoption is a separate follow-up, not an EdgeZero delivery step.
+This deliberately narrows #432. Its local-database, reader-IP input and database-lifecycle requirements are tracked separately in [#438](https://github.com/IABTechLab/edgezero/issues/438), not satisfied by CloudFront support. The split is recorded on #432. Trusted Server adoption is a separate follow-up, not an EdgeZero delivery step.
 
 Required invariants:
 
@@ -195,7 +195,7 @@ Before claiming the CloudFront deployment is safe, exercise the actual distribut
 
 An incorrectly configured ALB behind an otherwise matching socket peer is an external trust failure, not something local parser tests can detect. A failed deployment check blocks production use of the declared policy; it does not authorize fallback or broader header trust.
 
-Downstream policy tests remain a separate adoption gate. Neither local provider tests nor deployed origin protection proves that an application handles unknown geography safely. No runtime, deployment or downstream acceptance is claimed by this document.
+Downstream policy tests remain a separate adoption gate. Neither local provider tests nor deployed origin protection proves that an application handles unknown geography safely. The implementation plan records local runtime evidence; this design claims no cloud deployment or downstream acceptance.
 
 ## 10. Delivery order and deferred work
 

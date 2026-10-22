@@ -1,10 +1,10 @@
 # Pluggable Geo providers implementation plan
 
-- Status: implementation started. Stage 1 portable values and provider contract pass focused checks. Stage 0 ingress reconciliation remains blocked; native integration and deployment acceptance have not begun.
+- Status: full local implementation and verification complete. Draft publication is authorized on top of native celld #422. Cloud deployment, local GeoIP #438 and downstream adoption remain separate.
 - Governing spec: [Pluggable Geo providers](../specs/2026-10-22-pluggable-geo-providers-design.md).
 - Planning baseline: `5426ea65f642beafc59e6b4a4d198220d3c20e57`, branch `feature/pluggable-geo-providers`.
-- Reviewed spec SHA-256: `12eeada53b62663923531fa43e27aac08386df1c97dbc3b66a032b504c7f9f2b`. The spec is untracked at planning time. Recheck its contents and hash before implementation.
-- Required ingress reference: [#409 at `66a05e25bee674ced69387467acec3c87b06c8b6`](https://github.com/IABTechLab/edgezero/tree/66a05e25bee674ced69387467acec3c87b06c8b6). Its Git object was inspected locally; its changes are not integrated into this worktree.
+- Reviewed design SHA-256: `12eeada53b62663923531fa43e27aac08386df1c97dbc3b66a032b504c7f9f2b`. It matched before implementation. Final spec SHA-256: `7de048a373628d552a7e0e450e0b2f97d8927cf52ce88345348cd7722dcc6502`. Final edits update status, prerequisite reconciliation and the #438 scope link without expanding the provider contract.
+- Ingress reference: [#409 at `66a05e25bee674ced69387467acec3c87b06c8b6`](https://github.com/IABTechLab/edgezero/tree/66a05e25bee674ced69387467acec3c87b06c8b6). Its checked-ingress contract is reconciled in `5da2000f`, not merged as an old tree. The distinct #407 body feature is excluded explicitly below.
 - Authority: the user authorized full implementation, commits, push and a draft pull request stacked on native celld on 2026-10-22. AWS deployment and downstream adoption remain separate acceptance work.
 
 ## 1. Outcome and limits
@@ -109,11 +109,11 @@ One implementation owner should handle core/native dispatch integration. Indepen
 ### Work
 
 - [x] Read repository instructions, record HEAD/status and recompute the governing spec hash. Preserve uncommitted spec/plan and unrelated work. HEAD is still `5426ea65f642beafc59e6b4a4d198220d3c20e57`; the spec hash matches the reviewed hash above. Initially only the untracked spec and plan were present.
-- [ ] Arrange the #432 scope update or separate GeoIP follow-up before implementation scheduling. Do not mark the local-database requirements satisfied by this feature.
-- [ ] Integrate an approved #409 revision as a prerequisite, or stop native implementation until that integration is available. Review its reconciliation separately from Geo. The pinned commit is a behavioral reference, not permission to copy old files over current ones.
-- [ ] Preserve current `NativeSourcePlan`, native store overrides, asynchronous store preparation, current logging behavior and the reconciled body/lifecycle/egress ownership. The pinned branch and HEAD diverge beyond Geo; whole-file replacement would discard newer work.
-- [ ] Confirm original head accounting, missing-peer cleanup, checked proxy normalization, forwarding-header removal, native diagnostics and category-only framework error behavior survive the reconciliation.
-- [ ] Record the resulting integration revision and the exact baseline checks below. If integration uses a later #409 revision, inspect its changed contract rather than relying on this plan's old line numbers.
+- [x] Split the local GeoIP/database/input-contract work into #438 and record the narrowed initial scope on #432. CloudFront does not satisfy that follow-up.
+- [x] Reconcile the pinned #409 checked-ingress delta with explicit preservation of the newer native-store, async EOF and Connections owners. The narrower reconciliation is reviewed below; only the separate #407 buffered JSON-cap/body-carrier feature is excluded. No old whole-file replacement or second forwarding parser was used.
+- [x] Preserve current `NativeSourcePlan`, native store overrides, asynchronous store preparation, current logging behavior and the reconciled body/lifecycle/egress ownership. The pinned branch and HEAD diverge beyond Geo; whole-file replacement would discard newer work.
+- [x] Confirm original head accounting, missing-peer cleanup, checked proxy normalization, forwarding-header removal, native diagnostics and category-only framework error behavior survive the reconciliation.
+- [x] Record the resulting integration revision and the exact baseline checks below. If integration uses a later #409 revision, inspect its changed contract rather than relying on this plan's old line numbers.
 
 Useful inspection commands, not merge instructions:
 
@@ -179,12 +179,12 @@ Files: new Axum `peer_networks.rs` and `geo.rs`; reconciled `proxy.rs`; Axum mod
 
 ### Work
 
-- [ ] Extract #409's existing literal-network validation and matching into a crate-private `PeerNetworks` type. Preserve its 256-entry and 16-KiB input budgets, accounting before deduplication, network truncation, mapped-address normalization, and rejection of whole-family unions as well as `/0`.
-- [ ] Delegate ordinary `TrustedProxyPolicy` to that helper without changing its public API, forwarding-family semantics or empty-policy behavior. Do not move forwarding interpretation into the helper.
-- [ ] Add opaque `ProtectedCloudFrontAlb` with a nonempty `PeerNetworks` and one credential-header name. It contains no credential value, distribution-authentication claim or AWS handle.
-- [ ] Use one bounded header-name rule: a valid literal HTTP token, at most 128 ASCII bytes, beginning with `x-` after case normalization. Reject `x-forwarded-*`, `x-real-ip`, `x-amz-*`, `x-amzn-*`, `x-edge-*`, and native request/correlation-ID header names. Standard transport, authorization, cookie and CloudFront Geo names are excluded by the custom-name rule. Do not trim malformed names into validity.
-- [ ] Keep the configured header name, network contents and parser input out of errors and `Debug`; emit fixed configuration categories and bounded counts only. Guide examples use a dedicated name such as `x-origin-verify-<random-suffix>`.
-- [ ] Add a private request-bound admission helper that compares the actual socket peer with the protected policy. It must not accept `ConnectInfo`, `AxumRequestContext`, public checked metadata, effective reader IP or forwarding values as evidence.
+- [x] Extract #409's existing literal-network validation and matching into a crate-private `PeerNetworks` type. Preserve its 256-entry and 16-KiB input budgets, accounting before deduplication, network truncation, mapped-address normalization, and rejection of whole-family unions as well as `/0`.
+- [x] Delegate ordinary `TrustedProxyPolicy` to that helper without changing its public API, forwarding-family semantics or empty-policy behavior. Do not move forwarding interpretation into the helper.
+- [x] Add opaque `ProtectedCloudFrontAlb` with a nonempty `PeerNetworks` and one credential-header name. It contains no credential value, distribution-authentication claim or AWS handle.
+- [x] Use one bounded header-name rule: a valid literal HTTP token, at most 128 ASCII bytes, beginning with `x-` after case normalization. Reject `x-forwarded-*`, `x-real-ip`, `x-amz-*`, `x-amzn-*`, `x-edge-*`, and native request/correlation-ID header names. Standard transport, authorization, cookie and CloudFront Geo names are excluded by the custom-name rule. Do not trim malformed names into validity.
+- [x] Keep the configured header name, network contents and parser input out of errors and `Debug`; emit fixed configuration categories and bounded counts only. Guide examples use a dedicated name such as `x-origin-verify-<random-suffix>`.
+- [x] Add a private request-bound admission helper that compares the actual socket peer with the protected policy. It must not accept `ConnectInfo`, `AxumRequestContext`, public checked metadata, effective reader IP or forwarding values as evidence.
 
 ### Tests
 
@@ -205,12 +205,12 @@ Files: core `app.rs`, `ingress.rs`, `context.rs`; tests in those modules and, if
 
 ### Work
 
-- [ ] Add private Geo outcome storage to `AdmittedIngress`, defaulting to `NoSelection` in every ordinary/fallback admission constructor. Add only a crate-private consuming installation method for core dispatch code.
-- [ ] Add `App::dispatch_admitted_with_geo(prepared, request, detail, outcome)`, preserving the pinned `FrameworkErrorDetail` parameter and classified failure behavior. This is the explicit public cross-crate handoff, not a public native trust witness.
-- [ ] Factor existing admitted dispatch methods through the same implementation with `NoSelection`. Preserve their signatures and existing rendering, response metadata, completion, grant and fallback behavior.
-- [ ] Install the owned outcome into private admitted state before passing it through the existing router path. The router's public signature need not change.
-- [ ] Transfer the result into a private `RequestContext` field in `new_routed`; add only `geo(&self) -> &GeoOutcome`. `RequestContext::new` explicitly defaults to `NoSelection` regardless of public extensions.
-- [ ] Do not preserve Geo by placing it in extensions when converting a context back into an ordinary request. Constructing a later unmanaged context creates a new no-selection dispatch. Keep existing body transfer semantics intact.
+- [x] Add private Geo outcome storage to `AdmittedIngress`, defaulting to `NoSelection` in every ordinary/fallback admission constructor. Add only a crate-private consuming installation method for core dispatch code.
+- [x] Add `App::dispatch_admitted_with_geo(prepared, request, detail, outcome)`, preserving the pinned `FrameworkErrorDetail` parameter and classified failure behavior. This is the explicit public cross-crate handoff, not a public native trust witness.
+- [x] Factor existing admitted dispatch methods through the same implementation with `NoSelection`. Preserve their signatures and existing rendering, response metadata, completion, grant and fallback behavior.
+- [x] Install the owned outcome into private admitted state before passing it through the existing router path. The router's public signature need not change.
+- [x] Transfer the result into a private `RequestContext` field in `new_routed`; add only `geo(&self) -> &GeoOutcome`. `RequestContext::new` explicitly defaults to `NoSelection` regardless of public extensions.
+- [x] Do not preserve Geo by placing it in extensions when converting a context back into an ordinary request. Constructing a later unmanaged context creates a new no-selection dispatch. Keep existing body transfer semantics intact.
 
 ### Tests
 
@@ -233,14 +233,14 @@ Files: Axum `geo.rs`, `run_options.rs`, `dev_server.rs`, `service.rs`, `lib.rs` 
 
 ### Work
 
-- [ ] Add `geo-cloudfront = ["axum"]` without adding it to default features, AWS aggregates, CLI features or generated templates. Keep the selection enum and supplied-provider support under native Axum, not the implementation feature.
-- [ ] Add one private Geo selection field to `AxumRunOptions`, initialized to `Off` by every constructor. Add consuming `with_geo(selection)` and read-only `geo_capability()`; do not read any new environment variables.
-- [ ] Validate typed policy/identity and implementation availability through one pure validation function shared by capability inspection and runner setup. `CloudFront` without its feature returns a fixed unavailable-implementation category, never `Off`.
-- [ ] Represent a supplied provider with `Arc<dyn GeoProvider + Send + Sync>`, without requiring provider `Clone`. Keep the ID and policy on the same enum variant. The capability description contains only off/selected identity/source facts, not the provider or credential name.
-- [ ] Run Geo validation synchronously at the start of `run_production_selected`, before `run_local` creates runtime/signal resources. Keep existing store validation/preparation sequencing and initializer cancellation behavior.
-- [ ] Construct the stateless built-in provider locally and carry validated composition alongside the existing private prepared resources into `AxumServiceState`. Do not put it in `App`, request extensions or `PreparedStores`. Do not add an async preparation step.
-- [ ] Preserve every development/unconfigured entrypoint with off composition. The explicit options path is the only new selection path.
-- [ ] Demonstrate capability inspection by capturing the owned result of `finalized_options.geo_capability()?` in the existing initializer closure, then moving those same finalized options into the runner. The runner validates again. No initializer signature or global capability registry changes.
+- [x] Add `geo-cloudfront = ["axum"]` without adding it to default features, AWS aggregates, CLI features or generated templates. Keep the selection enum and supplied-provider support under native Axum, not the implementation feature.
+- [x] Add one private Geo selection field to `AxumRunOptions`, initialized to `Off` by every constructor. Add consuming `with_geo(selection)` and read-only `geo_capability()`; do not read any new environment variables.
+- [x] Validate typed policy/identity and implementation availability through one pure validation function shared by capability inspection and runner setup. `CloudFront` without its feature returns a fixed unavailable-implementation category, never `Off`.
+- [x] Represent a supplied provider with `Arc<dyn GeoProvider + Send + Sync>`, without requiring provider `Clone`. Keep the ID and policy on the same enum variant. The capability description contains only off/selected identity/source facts, not the provider or credential name.
+- [x] Run Geo validation synchronously at the start of `run_production_selected`, before `run_local` creates runtime/signal resources. Keep existing store validation/preparation sequencing and initializer cancellation behavior.
+- [x] Construct the stateless built-in provider locally and carry validated composition alongside the existing private prepared resources into `AxumServiceState`. Do not put it in `App`, request extensions or `PreparedStores`. Do not add an async preparation step.
+- [x] Preserve every development/unconfigured entrypoint with off composition. The explicit options path is the only new selection path.
+- [x] Demonstrate capability inspection by capturing the owned result of `finalized_options.geo_capability()?` in the existing initializer closure, then moving those same finalized options into the runner. The runner validates again. No initializer signature or global capability registry changes.
 
 ### Tests
 
@@ -264,10 +264,10 @@ Files: Axum `geo/cloudfront.rs`, with unit tests; shared values remain in core.
 
 ### Work
 
-- [ ] Implement the stateless built-in `GeoProvider` behind `geo-cloudfront`. It accepts only the two bounded assertion slots and returns a `GeoResolution`.
-- [ ] Map absent country plus absent subdivision to missing metadata. A subdivision without country is invalid. Any invalid slot makes the whole result invalid.
-- [ ] Delegate country/subdivision normalization to the shared validated constructors. A valid country with absent subdivision is a located country-only result. Never repair an unsupported country or malformed subdivision.
-- [ ] Keep provider selection, source admission, provider ID and provenance outside the provider implementation. It performs no header lookup, HTTP status choice, logging policy or fallback.
+- [x] Implement the stateless built-in `GeoProvider` behind `geo-cloudfront`. It accepts only the two bounded assertion slots and returns a `GeoResolution`.
+- [x] Map absent country plus absent subdivision to missing metadata. A subdivision without country is invalid. Any invalid slot makes the whole result invalid.
+- [x] Delegate country/subdivision normalization to the shared validated constructors. A valid country with absent subdivision is a located country-only result. Never repair an unsupported country or malformed subdivision.
+- [x] Keep provider selection, source admission, provider ID and provenance outside the provider implementation. It performs no header lookup, HTTP status choice, logging policy or fallback.
 
 ### Tests
 
@@ -289,15 +289,15 @@ Files: reconciled Axum `service.rs`, `geo.rs` and service tests. Keep the unmana
 
 ### Work and exact ordering
 
-- [ ] Preserve #409's clock, native request guard, drain gate and actual-peer replacement/removal behavior. These early hooks receive no raw headers; do not change lifecycle timing merely to add Geo.
-- [ ] Split the unpolled request. Compute the original normalized-head validation/summary result before removing headers, so credential bytes and duplicate fields still count against limits.
-- [ ] Remove every instance of the configured credential header from live parts. Then handle the saved validation result. No callback that can observe the request or its headers may run before removal, including future callbacks added to this path. Do not retain values or reflect the name in validation diagnostics.
-- [ ] Run the existing checked forwarding normalization/removal and admission on sanitized parts. Keep #409's original count/byte summary. Refused, aborted, invalid-ingress and draining paths perform no Geo resolution.
-- [ ] After admission, use only the runner-owned `remote_addr` and selected protected policy to create the private request-bound witness. Off returns `NoSelection`; missing/nonmatching peer returns selected `UntrustedIngress`. Neither path inspects Geo values or calls a provider.
-- [ ] With a witness, inspect both original Geo header names in the still-owned parts. Admission received a cloned immutable head, so it cannot have changed these values. Detect duplicates and oversize input without collecting values or copying more than two/three bytes. Do not retain another raw HeaderMap.
-- [ ] Invoke the selected provider exactly once, including both-absent and invalid-slot inputs. Wrap its result with the selection-owned ID and, for located results, source/trust basis. Perform this before `dispatch_prepared` conversion/dispatch; later conversion failures do not retry resolution.
-- [ ] Pass the owned outcome separately through `dispatch_prepared` to `App::dispatch_admitted_with_geo`, retaining `FrameworkErrorDetail::CategoryOnly` and the existing native egress owner.
-- [ ] Do not expose the witness, policy, provider handle or a mutable outcome to request extensions, middleware, finalizers or the unmanaged converter.
+- [x] Preserve #409's clock, native request guard, drain gate and actual-peer replacement/removal behavior. These early hooks receive no raw headers; do not change lifecycle timing merely to add Geo.
+- [x] Split the unpolled request. Compute the original normalized-head validation/summary result before removing headers, so credential bytes and duplicate fields still count against limits.
+- [x] Remove every instance of the configured credential header from live parts. Then handle the saved validation result. No callback that can observe the request or its headers may run before removal, including future callbacks added to this path. Do not retain values or reflect the name in validation diagnostics.
+- [x] Run the existing checked forwarding normalization/removal and admission on sanitized parts. Keep #409's original count/byte summary. Refused, aborted, invalid-ingress and draining paths perform no Geo resolution.
+- [x] After admission, use only the runner-owned `remote_addr` and selected protected policy to create the private request-bound witness. Off returns `NoSelection`; missing/nonmatching peer returns selected `UntrustedIngress`. Neither path inspects Geo values or calls a provider.
+- [x] With a witness, inspect both original Geo header names in the still-owned parts. Admission received a cloned immutable head, so it cannot have changed these values. Detect duplicates and oversize input without collecting values or copying more than two/three bytes. Do not retain another raw HeaderMap.
+- [x] Invoke the selected provider exactly once, including both-absent and invalid-slot inputs. Wrap its result with the selection-owned ID and, for located results, source/trust basis. Perform this before `dispatch_prepared` conversion/dispatch; later conversion failures do not retry resolution.
+- [x] Pass the owned outcome separately through `dispatch_prepared` to `App::dispatch_admitted_with_geo`, retaining `FrameworkErrorDetail::CategoryOnly` and the existing native egress owner.
+- [x] Do not expose the witness, policy, provider handle or a mutable outcome to request extensions, middleware, finalizers or the unmanaged converter.
 
 ### Tests
 
@@ -324,14 +324,14 @@ Files: existing native production fixture/tests; existing portable adapter contr
 
 ### Work
 
-- [ ] Add programmatic fixture modes for off, compiled-out CloudFront, enabled CloudFront, supplied provider, invalid policy and provider failure. Fixture-only CLI/environment knobs must not become production Geo selectors.
-- [ ] Use a no-store fixture profile so a CloudFront-only application proves it needs no config/data roots or AWS settings. Reuse existing `env_clear`, child output capture, readiness polling and shutdown helpers.
-- [ ] Add raw-header request support through the existing socket helper. Use a real loopback listener and a matching `/32` policy for successful source admission. Use a different policy range for real-peer rejection. Missing-peer and forged-extension cases remain private service tests.
-- [ ] Observe normalized outcomes and credential absence in a test handler. Do not turn test observation into built-in Geo response headers or a public diagnostics endpoint.
-- [ ] Test the same public `CloudFront` selector in feature-disabled and enabled fixture builds. Disabled selection must exit nonzero before readiness/initializer and never bind the selected port.
-- [ ] Prove a supplied provider works with the CloudFront implementation feature disabled. This distinguishes pluggable composition from availability of the built-in parser.
-- [ ] Retain local initializer, cancellation, shutdown, refused/aborted ingress and store-preparation regression checks. Match the existing terminal call counts rather than introducing another completion owner.
-- [ ] Add a no-selection assertion to existing Fastly, Cloudflare and Spin dispatch contracts. For Fastly's existing preparer, insert a forged Geo outcome into scratch extensions and verify no-selection at the handler. Preserve callback ordering and signatures; do not implement platform Geo.
+- [x] Add programmatic fixture modes for off, compiled-out CloudFront, enabled CloudFront, supplied provider, invalid policy and provider failure. Fixture-only CLI/environment knobs must not become production Geo selectors.
+- [x] Use a no-store fixture profile so a CloudFront-only application proves it needs no config/data roots or AWS settings. Reuse existing `env_clear`, child output capture, readiness polling and shutdown helpers.
+- [x] Add raw-header request support through the existing socket helper. Use a real loopback listener and a matching `/32` policy for successful source admission. Use a different policy range for real-peer rejection. Missing-peer and forged-extension cases remain private service tests.
+- [x] Observe normalized outcomes and credential absence in a test handler. Do not turn test observation into built-in Geo response headers or a public diagnostics endpoint.
+- [x] Test the same public `CloudFront` selector in feature-disabled and enabled fixture builds. Disabled selection must exit nonzero before readiness/initializer and never bind the selected port.
+- [x] Prove a supplied provider works with the CloudFront implementation feature disabled. This distinguishes pluggable composition from availability of the built-in parser.
+- [x] Retain local initializer, cancellation, shutdown, refused/aborted ingress and store-preparation regression checks. Match the existing terminal call counts rather than introducing another completion owner.
+- [x] Add a no-selection assertion to existing Fastly, Cloudflare and Spin dispatch contracts. For Fastly's existing preparer, insert a forged Geo outcome into scratch extensions and verify no-selection at the handler. Preserve callback ordering and signatures; do not implement platform Geo.
 
 ### Checks
 
@@ -353,21 +353,21 @@ A real native listener proves the local path, supplied-provider composition and 
 
 ### Documentation
 
-- [ ] Add `docs/guide/native-geo.md`, link it from the Axum guide and navigation. Include programmatic examples for off, CloudFront, supplied provider, startup capability capture and application handling of every outcome. Keep the same snippets in native module rustdoc and execute its doc tests; use `no_run`, not `ignore`, for examples that would start a server. Compare the guide snippets with those compiled examples before acceptance.
-- [ ] Describe the selected HTTPS CloudFront/ALB path, dedicated origin credential, default-deny listener, CloudFront prefix-list restriction and target security-group isolation. Distinguish declared infrastructure protection from runtime source attestation.
-- [ ] Show the exact supported credential-header naming rule and a value-only rotation sequence. Renaming requires coordinated stop/reconfigure/restart. Redact both name and value in operational output.
-- [ ] Require explicit configuration of the two CloudFront-generated headers, not generic viewer-header forwarding or static geographic values. Explain the AWS-network missing-subdivision case and the required spoofing test.
-- [ ] Require `CachingDisabled`, zero error-caching TTLs for cacheable application-error statuses and no other shared reuse of these responses. No Geo-aware cache-key recipe or automatic cache mutation is added.
-- [ ] Link the AWS sources already recorded in the spec. If their behavior has changed by implementation time, review the difference before modifying the chosen contract.
-- [ ] Keep Trusted Server adoption and VPC origins in deferred-work notes, not executable steps in this feature.
+- [x] Add `docs/guide/native-geo.md`, link it from the Axum guide and navigation. Include programmatic examples for off, CloudFront, supplied provider, startup capability capture and application handling of every outcome. Keep the same snippets in native module rustdoc and execute its doc tests; use `no_run`, not `ignore`, for examples that would start a server. Compare the guide snippets with those compiled examples before acceptance.
+- [x] Describe the selected HTTPS CloudFront/ALB path, dedicated origin credential, default-deny listener, CloudFront prefix-list restriction and target security-group isolation. Distinguish declared infrastructure protection from runtime source attestation.
+- [x] Show the exact supported credential-header naming rule and a value-only rotation sequence. Renaming requires coordinated stop/reconfigure/restart. Redact both name and value in operational output.
+- [x] Require explicit configuration of the two CloudFront-generated headers, not generic viewer-header forwarding or static geographic values. Explain the AWS-network missing-subdivision case and the required spoofing test.
+- [x] Require `CachingDisabled`, zero error-caching TTLs for cacheable application-error statuses and no other shared reuse of these responses. No Geo-aware cache-key recipe or automatic cache mutation is added.
+- [x] Link the AWS sources already recorded in the spec. If their behavior has changed by implementation time, review the difference before modifying the chosen contract.
+- [x] Keep Trusted Server adoption and VPC origins in deferred-work notes, not executable steps in this feature.
 
 ### Feature and dependency checks
 
-- [ ] Add `scripts/check_geo_dependency_contract.sh` using the repository's shell/Cargo-tree conventions. It must fail on missing expected data, not merely print graphs.
-- [ ] Compare isolated native normal dependency sets with `axum` versus `geo-cloudfront`: the new feature adds implementation code but should add no third-party runtime dependencies. Assert it is absent from defaults and present when explicitly selected.
-- [ ] Inspect core and all three WASM adapter normal graphs for new Axum/native-runtime/AWS SDK leakage. Preserve the existing native-store graph checks rather than adding Geo to a store registry or changing store feature semantics.
-- [ ] Add CI steps for the enabled Geo unit suite, disabled-feature sentinel, supplied-provider sentinel, real hosting sentinel and dependency script. Existing default workspace tests do not exercise the opt-in implementation, and all-features tests do not prove disabled behavior.
-- [ ] Run the new no-selection assertions through the existing WASM contract-test jobs and their runtime runners. Keep them attached to established dispatch sentinels rather than adding a separate deployment harness.
+- [x] Add `scripts/check_geo_dependency_contract.sh` using the repository's shell/Cargo-tree conventions. It must fail on missing expected data, not merely print graphs.
+- [x] Compare isolated native normal dependency sets with `axum` versus `geo-cloudfront`: the new feature adds implementation code but should add no third-party runtime dependencies. Assert it is absent from defaults and present when explicitly selected.
+- [x] Inspect core and all three WASM adapter normal graphs for new Axum/native-runtime/AWS SDK leakage. Preserve the existing native-store graph checks rather than adding Geo to a store registry or changing store feature semantics.
+- [x] Add CI steps for the enabled Geo unit suite, disabled-feature sentinel, supplied-provider sentinel, real hosting sentinel and dependency script. Existing default workspace tests do not exercise the opt-in implementation, and all-features tests do not prove disabled behavior.
+- [x] Run the new no-selection assertions through the existing WASM contract-test jobs and their runtime runners. Keep them attached to established dispatch sentinels rather than adding a separate deployment harness.
 
 ### Exit gate
 
@@ -427,66 +427,72 @@ This stage requires separate authorization and access to an isolated CloudFront/
 
 Any failure blocks production use of the declared protected policy. Do not work around it by trusting additional headers or adding fallback providers. Trusted Server policy-path tests remain a separate downstream adoption task even after these checks pass.
 
-## 16. Evidence record and completion checklist
+## 16. Final evidence and completion
 
-Populate this table during implementation, not with assumptions from planning:
+### Tested source and reconciliation
 
-| Check | Tested revision and feature set | Result | Elapsed | Evidence |
+The implementation is committed as `d5ec14ed` and `5da2000f` on top of native celld `5426ea65`, with the final test-only split at `56eab85fee2499d46984b077fc9e167693bd4e67`. Remaining publication edits affect only this evidence record and design status. No production source changed after the native all-feature check. The final workspace suite, real-hosting suites and WASM runtime contracts cover the final test state.
+
+The pinned #409 branch shares merge-base `5527b58e` with the native celld stack but its checked-ingress implementation was absent here. Two read-only investigations compared direct-delta adaptation and selective reimplementation. The selected approach adapted only #409's own commit delta, reused its parser/counters/tests and extracted its bounded peer-network matcher. Newer native stores, local non-Send initialization, `Connections`/`FuturesUnordered`, ingress/config bounds and asynchronous EOF/zero-length validation remain authoritative. No old tree was copied over newer files.
+
+The separate #407 managed Body carrier, `JsonBodyLimit` setting and 413-cap behavior are intentionally not imported. Native JSON error privacy instead travels through private admitted/context state. Only #407-dependent cap/carrier tests and claims are excluded; checked ingress, original-head limits, routing/JSON privacy, terminal ownership and TLS proxy fixture tests are retained. This is checked-ingress reconciliation, not full #409-plus-#407 parity.
+
+The required #409 sentinels `owned_peer_checked_metadata_precedes_all_managed_consumers` and `original_forwarding_head_overages_reject_before_stripping_or_body_poll` pass in the native unit suites. A read-only correctness review found no remaining implementation findings. Its credential-error ordering concern was fixed before acceptance: save original validation Result, remove all credential occurrences, then handle the saved Result. Direct rejected-head and managed overage regressions execute that path.
+
+### Local checks
+
+All Cargo commands below used Rust/Cargo 1.95.0 and locked dependencies. The workspace test process used stdin from `/dev/null`, matching noninteractive CI consent tests. Logs are local temporary artifacts, not durable CI records. Rows run before `56eab85f` retain their evidence because that commit only split an already-passing core test into two tests; the production implementation is unchanged. The final workspace suite retests both.
+
+| Check | Tested features/state | Result | Elapsed | Local evidence |
 | --- | --- | --- | --- | --- |
-| Reconciled #409 baseline | `5426ea65`, reference `66a05e25` | Blocked, not integrated | Not applicable | Branch comparison described below; only existing core ingress baseline ran |
-| Portable values, stage 1 | `5426ea65` + fingerprinted working files below; default core features | Pass, 6 Geo tests | 0.630 s | `/tmp/geo-types-tests.log`, nonzero sentinel command below |
-| Core regression suite | Same stage 1 state; default core features | Pass, 745 unit + 2 integration + 5 doctests; 13 existing doctests ignored | 3.734 s | `/tmp/geo-core-tests.log` |
-| Core Clippy and rustdoc | Same stage 1 state; all core targets for Clippy | Pass, warnings denied | 10.288 s / 2.088 s | `/tmp/geo-core-clippy.log`, `/tmp/geo-core-doc.log` |
-| Portable core WASM compilation | Same stage 1 implementation; three WASM targets below | Pass, compile-only | 21.898 / 18.664 / 8.741 s | `/tmp/geo-core-wasm32-*.log`; not adapter runtime proof |
-| Immutable request handoff, stage 3 | Not implemented | Not run | Not recorded | Still requires reconciled dispatch APIs |
-| Policy/parser and feature-disabled selection | Not recorded | Not run | Not recorded | Not recorded |
-| Real native hosting and supplied provider | Not recorded | Not run | Not recorded | Not recorded |
-| Workspace, dependencies and WASM | Not recorded | Not run | Not recorded | Not recorded |
-| Published guide and examples | Not recorded | Not run | Not recorded | Not recorded |
-| Actual CloudFront/ALB deployment | Not recorded | Not run | Not recorded | Separate authorized evidence |
-| Trusted Server adoption | Outside this change | Not run | Not recorded | Separate downstream task |
+| `cargo test --locked --workspace --all-targets` | `56eab85f`, workspace defaults | 2,115 passed, 6 existing ignored, none failed | 55.754 s | `/tmp/geo-workspace-tests-final.log` |
+| Native `--all-targets --all-features` tests | `5da2000f`, all native providers + Geo | 422 passed across 8 suites, including 367 units, 6 AWS/mixed startup, 4 celld startup and 32 hosting | 182.120 s | `/tmp/geo-native-all-features-tests.log` |
+| Enabled native library | `--no-default-features --features geo-cloudfront` | 322 passed; parser and managed-resolution sentinels included | 13.192 s | `/tmp/geo-final-enabled-units.log` |
+| Disabled native library | `--no-default-features --features axum` | 323 passed; resource-precedence, supplied and policy paths included | 19.779 s | `/tmp/geo-final-disabled-units.log` |
+| Final core Geo regressions | Final test split, `--lib geo_` | 3 passed, including immutable roundtrip and legacy-forgery cases | 17.64 s compile | `/tmp/geo-core-final-regressions.log` |
+| Final enabled real hosting | `56eab85f`, `--no-default-features --features geo-cloudfront,test-utils` | Nonzero sentinel and full suite, 32 passed | 50.890 s | `/tmp/geo-final-enabled-hosting.log` |
+| Final disabled/supplied real hosting | `56eab85f`, `--no-default-features --features axum,test-utils` | Full suite, 33 passed; both unavailable and supplied-without-built-in sentinels logged | 16.919 s | `/tmp/geo-final-disabled-hosting.log` |
+| Workspace Clippy | `--workspace --all-targets --all-features -- -D warnings` | Pass after splitting the long core regression | 27.72 s | `/tmp/geo-workspace-clippy.log` |
+| Native disabled Clippy | `--no-default-features --features axum --lib -- -D warnings` | Pass, including absent-implementation cfg | 2.14 s | `/tmp/geo-final-disabled-clippy.log` |
+| Workspace feature compilation | `--all-targets --features "fastly cloudflare spin"` | Pass | 78 s | `/tmp/geo-feature-compilation.log` |
+| Minimal native / bindings-only | No defaults; then `native-bindings` only | Both pass | 3 / 4 s | `/tmp/geo-native-{minimal,bindings-only}.log` |
+| Three WASM target checks | Fastly wasip1, Cloudflare unknown-unknown, Spin wasip2; adapter feature only | All pass, compile-only | 11 / 32 / 39 s | `/tmp/geo-*-wasm-check.log` |
+| Fastly WASM contracts | Viceroy 0.21.0, `fastly,test-utils` on wasip1 | 24 runtime tests passed; preparer/closed-lifecycle sentinel separately passed | 35 / 6 s | `/tmp/geo-fastly-{wasm,preparer}-runtime.log` |
+| Cloudflare WASM contracts | wasm-bindgen-test-runner 0.2.128, Node 24.12.0, `cloudflare,test-utils` | 29 runtime tests passed | 59 s | `/tmp/geo-cloudflare-wasm-runtime.log` |
+| Spin WASM contracts | Wasmtime 48.0.2, async component/P3/HTTP enabled, `spin,test-utils` on wasip2 | 35 runtime tests passed, including managed Geo-forgery case | 32 s | `/tmp/geo-spin-wasm-runtime.log` |
+| Geo / native-store dependency scripts | Isolated normal graphs from final manifests/locks | Both pass; Geo adds no third-party runtime package relative to Axum | 2 / 6 s | `/tmp/geo-{dependency-final,native-store-dependency}.log` |
+| Native Geo public doc tests | `--features geo-cloudfront --doc` | 5 passed, including all four guide examples | 4.16 s compile + 2.16 s doc harness | `/tmp/geo-native-doc-tests-final.log` |
+| Workspace rustdoc | `RUSTDOCFLAGS='-D warnings'`, all features, no deps | Pass | 64 s | `/tmp/geo-workspace-rustdoc.log` |
+| App-demo workspace | Final consumer lock, all targets | 54 passed, none failed | 170.338 s | `/tmp/geo-demo-tests.log` |
+| Reusable native consumer | Final consumer lock, `-p fixture-axum` | Pass | 109.243 s | `/tmp/geo-reusable-check.log` |
+| Published docs | Locked npm dependencies; lint, format, site build | All pass, exact guide/rustdoc snippets matched | 3.272 / 2.912 / 8.401 s | `/tmp/geo-docs-{lint,format,build}.log` |
+| Dependency-script failure cases | 16 mocked success/failure graph scenarios | All pass; real graphs also checked above | 3.206 s | `/tmp/geo-docs-dependency-mocks.log` |
+| Formatting, whitespace and internal links | `cargo fmt --all -- --check`, `git diff --check`, local Markdown checks | Pass | Not separately timed | Final coordinator checks |
 
-### Implementation checkpoint, 2026-10-22
+The runtime contract commands use the existing `scripts/run_test_nonzero.sh` harness with their established dispatch sentinels. Fastly used the official Viceroy 0.21.0 binary, archive SHA-256 `52ed3c3ed59d926c81015d637509942c3195443c02c2eebbded9125484336a9e`; the installed 0.17.0 binary was not used. Cloudflare used the absolute installed 0.2.128 runner rather than an unconfigured mise shim. Spin used `wasmtime run -W component-model-async=y -S p3=y -S http=y`.
 
-Only the independent stage 1 core contract was implemented ahead of ingress reconciliation. This is an explicit sequencing exception for inert portable types, not satisfaction of the stage 0 exit gate. No request path uses Geo yet. Native stages, dispatch handoff and feature selection remain blocked on a separately reviewed #409 integration.
+### Dependencies and proof limits
 
-The pinned ingress branch has merge-base `5527b58e2a7cb6307d5c7a8926cd5dfc6f4f8b4a` with HEAD. Its core/Axum tree differs across 52 files, including newer native-store code missing from that branch. Whole-file replacement is unsafe. No merge, cherry-pick or replacement was attempted. The #432 scope update or separate GeoIP issue is still pending; no GitHub issue was changed.
+The root lockfile adds only four dependency edges for reconciled #409 runtime/test support. Each excluded consumer lockfile adds only two native dependency edges; no package versions were changed. Minimum compatible `getrandom = "0.4.2"` and `ipnet = "2.12.0"` constraints preserve independently locked consumer patch versions instead of forcing unrelated downgrades and WASI dependency churn. Root tests use the pinned lock's 0.4.2/2.12.0; app-demo tests also prove its existing 0.4.3/2.12.2 lock. These are ingress prerequisites, not new Geo feature dependencies. The portable country allowlist is checked in with source revision, attribution and checksums, with no runtime dataset download.
 
-Before Geo edits, `cargo test --locked -p edgezero-core --lib ingress::` passed 7 tests, with a 30.69 s build, recorded in `/tmp/geo-baseline-ingress.log`. This is not the reconciled #409 baseline. The Geo regression suite first failed compilation due to absent contract types, recorded in `/tmp/geo-red.log`, then passed after implementation.
+The Geo graph script explicitly permits the existing Cloudflare `worker 0.8.5 -> tokio 1.52.3` normal edge only with empty Tokio features. Native runtime/network companions or changed versions/features still fail. This baseline is not newly introduced native-runtime leakage.
 
-Implemented files and final SHA-256 values:
+The six normally ignored workspace tests are existing generated-consumer or real-service acceptance harnesses. They were not silently selected or treated as passes: generated celld/default-off/restart, real celld TLS with explicit modified binary, generated DynamoDB lifecycle, generated-workspace compilation, native AWS emulator services, and generated native AWS build/startup qualification. The final demo/reusable builds and native mixed-provider startup tests pass, but do not replace those external harnesses. No manual `edgezero serve` run or actual cloud deployment was performed.
 
-- `crates/edgezero-core/src/geo.rs`: `1b82be241a120d17eb00c9a9cfac554d67f84be938f77d853a1640d52386d0a6`.
-- `crates/edgezero-core/src/geo/country_codes.rs`: `de5fd4d147008d47db626e9694e85678410e7009a2becf8e823fd104b64f55ff`.
-- `crates/edgezero-core/src/lib.rs`: `1c147a21c2f39c8045eedd5d422b27b24bc831b23d12d5c6e82a523a84adc3e8`.
+Published docs dependencies report seven existing audit vulnerabilities, two moderate and five high, in their unchanged lockfile. No unrelated dependency upgrades were attempted. ShellCheck was unavailable; Bash syntax, 16 failure-case regressions and actual graph execution passed. Existing ignored core rustdoc examples remain ignored; the new Geo examples execute.
 
-Executed commands:
+### Safety evidence and separate acceptance
 
-```sh
-scripts/run_test_nonzero.sh geo_country_codes_normalize_and_reject_unsupported cargo test --locked -p edgezero-core --lib geo::
-cargo test --locked -p edgezero-core
-cargo clippy --locked -p edgezero-core --all-targets -- -D warnings
-RUSTDOCFLAGS='-D warnings' cargo doc --locked -p edgezero-core --no-deps
-cargo check --locked -p edgezero-core --target wasm32-wasip1
-cargo check --locked -p edgezero-core --target wasm32-unknown-unknown
-cargo check --locked -p edgezero-core --target wasm32-wasip2
-cargo fmt --all -- --check
-git diff --check
-```
+1. **Protected source ownership.** Runtime evidence now proves actual-peer policy matching, missing/nonmatching peer rejection despite forged public metadata, distinct ordinary proxy trust, stripping before callbacks/error handling, original-head accounting, and exactly-once resolution only for admitted trusted requests. Evidence is the managed-resolution sentinel and both final real-hosting suites. This proves the local declared-policy boundary, not an ALB listener rule.
+2. **Immutable and partial outcomes.** Executed core and real-hosting tests prove consumers share one outcome across header/extension mutation, same-type app-state injection and cleared extensions. Managed context roundtrip and legacy dispatch reset to NoSelection. Country-only, syntax-valid unknown subdivisions, missing/error distinctions, source failures, cancellation/drop/failing egress and no fallback retain their defined behavior. Portable runtime tests prove raw or forged Geo metadata cannot select a source.
 
-All commands passed on Rust/Cargo 1.95.0. WASM compilation preceded a rustdoc-only example addition; the implementation it checked is unchanged. No dependency, manifest or lockfile changes were needed. Formatting and whitespace checks passed; timings were not recorded for those two checks. Logs are local temporary files, not durable CI artifacts.
+Actual ALB credential enforcement, network isolation, alternate-path denial, CloudFront header replacement including missing subdivision, value rotation and shared-cache isolation remain unproven until separately authorized deployment checks in section 15. Trusted Server policy translation and interpretation are outside this change. Deferred local databases and reader-IP input extension are tracked in [#438](https://github.com/IABTechLab/edgezero/issues/438), with the initial split recorded on [#432](https://github.com/IABTechLab/edgezero/issues/432#issuecomment-6349594498).
 
-Country data is pinned to `datasets/country-list@ca393dfa16db21ce07be77902c1c129d63c86d9f`. The table records the source CSV checksum and attribution. Only the 249 code elements were extracted and sorted; no country names or upstream software were copied. ISO's code-use statement and the upstream README/attribution were inspected. Tests check the extracted snapshot checksum, uniqueness, ordering, count, all 676 two-letter combinations and their lowercase equivalents.
+Completion:
 
-For the two safety assumptions in section 1, this checkpoint proves only that the portable model preserves partial geography and bounded errors. Executed constructor tests cover country-only and syntax-valid unknown subdivisions, and input tests prove bounded copies and raw-byte debug redaction. Source admission is still unproven; its next check is the protected-policy and real-peer suite after ingress reconciliation. Permission interpretation remains unproven and belongs to downstream policy tests.
-
-No workspace-wide, adapter, real-hosting, WASM-runtime, cloud or downstream acceptance is claimed. Those checks remain in their later stages.
-
-Completion requires:
-
-- [ ] Every implementation stage has its focused proof and no unchecked prerequisite was silently bypassed.
-- [ ] Default-off, no-fallback and unknown/error distinctions survive real dispatch.
-- [ ] Provider objects, source admission and outcomes each have one owner; public request mutation cannot rewrite a managed outcome.
-- [ ] Existing store preparation, native lifecycle, framework error privacy and portable adapter behavior are preserved.
-- [ ] Deployment and downstream acceptance are reported separately from local implementation.
-- [ ] The final handoff lists files, checks/outcomes and everything unverified. No unrelated changes, automatic deployment or unrequested commit/push are included.
+- [x] Full local implementation has its focused and integration proof; the #409/#407 prerequisite distinction is explicit.
+- [x] Default-off, no-fallback and unknown/error distinctions survive real native dispatch.
+- [x] Provider objects, source admission and outcomes each have one owner; public request mutation cannot rewrite a live managed outcome.
+- [x] Existing store preparation, native lifecycle, framework error privacy and portable adapter behavior are preserved.
+- [x] Deployment, database and downstream acceptance remain separate from local implementation.
+- [x] User-authorized commits and draft publication target `feat/native-celld-stores`, on top of #422; no unrelated edits or automatic deployment are included.
