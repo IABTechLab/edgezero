@@ -1991,6 +1991,18 @@ test_action_output_contracts() {
 
       script=$(awk -v want="$step_id" '$1 == want { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$scripts")
       if [[ -z "$script" ]]; then
+        # actions/cache declares cache-hit itself, not through a local script.
+        # Ref pinning is enforced separately; accept only this documented output.
+        if [[ "$out_name" == cache-hit ]]; then
+          if ! command -v yq >/dev/null 2>&1; then
+            fail "yq v4 is required to check $name_of output '$out_name'"
+            missing=$((missing + 1))
+            continue
+          fi
+          local output_action
+          output_action=$(STEP_ID="$step_id" yq -r '.runs.steps[] | select(.id == strenv(STEP_ID)) | .uses' "$action")
+          case "${output_action%@*}" in actions/cache | actions/cache/restore) continue ;; esac
+        fi
         fail "$name_of output '$out_name' names step '$step_id', which runs no script"
         missing=$((missing + 1))
         continue
@@ -2292,6 +2304,17 @@ test_fastly_smoke_release_contract() {
     grep -Fq './.github/actions/setup-rust-build-cache' <<<"$cache_restore"
   assert_succeeds "cache restore verifies a marker created by the seed job" \
     grep -Fq 'restore-marker' <<<"$cache_restore"
+  local cache_call missing_revisions revision_smoke
+  cache_call='.jobs[] | .steps[]? | select(.uses == "./.github/actions/setup-rust-build-cache")'
+  missing_revisions=$(yq eval -r "$cache_call | select(.with.\"cache-target\" == true and .with.\"target-cache-revision\" == null) | .name" "$workflow")
+  assert_equals "all target cache callers supply their source revision" "" "$missing_revisions"
+  revision_smoke=$(yq eval -r '.jobs."cache-new-revision-smoke"' "$workflow")
+  assert_succeeds "new-revision smoke checks target artifact isolation" \
+    grep -Fq 'target-cache-hit' <<<"$revision_smoke"
+  assert_succeeds "new-revision smoke checks source cache reuse" \
+    grep -Fq 'source-cache-hit' <<<"$revision_smoke"
+  assert_succeeds "new-revision smoke checks compiler reuse for both targets" \
+    grep -Fq 'assert-compiler-reuse.sh' <<<"$revision_smoke"
   for obsolete in cache-smoke-capture.sh cache-smoke-assert.sh cache-smoke-assert-no-restore.sh; do
     assert_fails "obsolete deploy-time cache helper is removed ($obsolete)" \
       test -e "$ACTIONS_DIR/deploy-core/tests/$obsolete"
