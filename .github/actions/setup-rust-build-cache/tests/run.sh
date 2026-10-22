@@ -143,3 +143,4 @@ printf 'setup-rust-build-cache action tests passed\n'
 bash "$ACTION_DIR/tests/revision.sh"
 bash "$ACTION_DIR/tests/review.sh"
 bash "$ACTION_DIR/tests/fixture.sh"
+bash "$ACTION_DIR/tests/seed.sh"

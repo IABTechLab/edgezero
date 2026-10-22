@@ -30,8 +30,7 @@ grep -Fxq 'fixture-id=417-1' "$WORK_DIR/seed/output" || fail 'seed does not expo
 if grep -q 'cargo clean' "$ACTION_DIR/tests/assert-compiler-reuse.sh"; then fail 'reuse probe accepts same-job rebuilds'; fi
 workflow="$ACTION_DIR/../../workflows/deploy-action.yml"
 seed=$(yq -r '.jobs."cache-restore-seed".steps[] | select(.name == "Seed native and WASM compiler outputs") | .run' "$workflow")
-# shellcheck disable=SC2016 # Assert the literal shell command in workflow metadata.
-[[ "$seed" == *'cargo build --locked --lib --target "$host"'* && "$seed" == *'cargo build --locked --lib --target wasm32-wasip1'* ]] || fail 'seed job does not compile both targets'
+[[ "$seed" == 'bash .github/actions/setup-rust-build-cache/tests/seed-compiler-cache.sh' ]] || fail 'seed does not verify compiler publication'
 for job in cache-restore-seed cache-restore-smoke cache-new-revision-smoke; do
   JOB_ID="$job" yq -e '.jobs[strenv(JOB_ID)].steps[] | select(.name == "Install native and WASM compiler targets") | .run == "bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh"' "$workflow" >/dev/null || fail "$job does not share its Rust toolchain"
 done
@@ -41,7 +40,16 @@ for job in cache-restore-smoke cache-new-revision-smoke; do
   actual=$(JOB_ID="$job" yq -r '.jobs[strenv(JOB_ID)].steps[] | select(.id == "fixture") | .env.CACHE_FIXTURE_ID' "$workflow")
   [[ "$actual" == "$expected_identity" ]] || fail "$job does not reuse the seed fixture identity"
 done
-[[ "$(yq -r '.jobs."cache-restore-seed".steps[] | select(.id == "cache") | .with."save-target"' "$workflow")" == true ]] || fail 'seed does not opt into saving'
+[[ "$(yq -r '.jobs."cache-restore-seed".steps[] | select(.id == "cache") | .with."save-target"' "$workflow")" == false ]] || fail 'seed relies on unverified post-job saving'
+for job in fixture-release store-free-release; do
+  actual=$(JOB_ID="$job" yq -r '.jobs[strenv(JOB_ID)].needs // [] | length' "$workflow")
+  [[ "$actual" == 0 ]] || fail "$job depends on cache probe availability"
+done
+for attempt in 1 2; do
+  STEP_ID="target-save-$attempt" yq -e '.jobs."cache-restore-seed".steps[] | select(.id == strenv(STEP_ID)) | .uses == "actions/cache/save@v5"' "$workflow" >/dev/null || fail 'missing explicit target save'
+  STEP_ID="target-verify-$attempt" yq -e '.jobs."cache-restore-seed".steps[] | select(.id == strenv(STEP_ID)) | .with."lookup-only" == true' "$workflow" >/dev/null || fail 'target publication is not verified'
+done
+yq -e '.jobs."cache-restore-seed".steps[] | select(.id == "target-verify-2") | .with."fail-on-cache-miss" == true' "$workflow" >/dev/null || fail 'exhausted target publication retries stay green'
 for job in fixture-release store-free-release; do
   actual=$(JOB_ID="$job" yq -r '.jobs[strenv(JOB_ID)].steps[] | select(.uses == "./.github/actions/setup-rust-build-cache") | .with."cache-target"' "$workflow")
   [[ "$actual" == false ]] || fail "$job enables full target caching for a disposable fixture"
