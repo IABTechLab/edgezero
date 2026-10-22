@@ -151,6 +151,66 @@ jobs:
       - name: Seed native and WASM compiler outputs
         run: bash .github/actions/setup-rust-build-cache/tests/seed-compiler-cache.sh
 
+      # Sources otherwise save only in a warning-only post-job hook. Verify
+      # them before allowing the source-restore consumer to start. The combined
+      # action may later attempt an immutable duplicate save on an initial miss.
+      - name: Save seed source cache
+        id: source-save-1
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache.outputs.source-cache-key }}
+      - name: Verify seed source publication
+        id: source-verify-1
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache.outputs.source-cache-key }}
+          lookup-only: true
+      - name: Back off before retrying source publication
+        if: steps.source-verify-1.outputs.cache-hit != 'true'
+        run: sleep 60
+      - name: Retry seed source cache save
+        id: source-save-2
+        if: steps.source-verify-1.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache.outputs.source-cache-key }}
+      - name: Require seed source publication
+        id: source-verify-2
+        if: steps.source-verify-1.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache.outputs.source-cache-key }}
+          lookup-only: true
+          fail-on-cache-miss: true
+
+      # Cache availability checks can return successfully before applying
+      # fail-on-cache-miss. Only an exact lookup hit establishes publication.
+      - name: Require exact source seed publication
+        env:
+          CACHE_SEED_FIRST_HIT: ${{ steps.source-verify-1.outputs.cache-hit }}
+          CACHE_SEED_SECOND_HIT: ${{ steps.source-verify-2.outputs.cache-hit }}
+        run: |
+          if [[ "$CACHE_SEED_FIRST_HIT" != true && "$CACHE_SEED_SECOND_HIT" != true ]]; then
+            echo '::error::source seed was not verified with an exact cache hit after two attempts'
+            exit 1
+          fi
+
       # Cache save warnings do not fail the action. Verify publication explicitly
       # so a throttled seed cannot report success and fail both consumer jobs.
       - name: Save seed target cache
@@ -190,10 +250,10 @@ jobs:
       # fail-on-cache-miss. Only an exact lookup hit establishes publication.
       - name: Require exact target seed publication
         env:
-          TARGET_SEED_FIRST_HIT: ${{ steps.target-verify-1.outputs.cache-hit }}
-          TARGET_SEED_SECOND_HIT: ${{ steps.target-verify-2.outputs.cache-hit }}
+          CACHE_SEED_FIRST_HIT: ${{ steps.target-verify-1.outputs.cache-hit }}
+          CACHE_SEED_SECOND_HIT: ${{ steps.target-verify-2.outputs.cache-hit }}
         run: |
-          if [[ "$TARGET_SEED_FIRST_HIT" != true && "$TARGET_SEED_SECOND_HIT" != true ]]; then
+          if [[ "$CACHE_SEED_FIRST_HIT" != true && "$CACHE_SEED_SECOND_HIT" != true ]]; then
             echo '::error::target seed was not verified with an exact cache hit after two attempts'
             exit 1
           fi
