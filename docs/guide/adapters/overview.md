@@ -208,9 +208,14 @@ retained by its caller; each adapter still controls how requests arrive:
 | Spin       | Build on each invocation                 | Concrete cache and `dispatch_app` on a compatible host                                     |
 | Axum       | Build once at server startup             | Already retains the app and router                                                         |
 
-The canonical assembly path is `App::build::<A>(PLATFORM) -> Result<App, EdgeError>`.
-It installs platform metadata before calling fallible `Hooks::configure` and rejects
-successful configuration that changes that metadata. Retain only a successfully
+Hook-based assembly uses `App::build::<A>(PLATFORM) -> Result<App, EdgeError>`.
+`Hooks::routes` is fallible: its error skips configuration and is returned unchanged.
+Applications that have built their own router use `App::from_router::<A>(router, PLATFORM)`
+to apply the same name, configuration and platform check, without rebuilding routes.
+Both paths install platform metadata before calling fallible `Hooks::configure` and reject
+successful configuration that changes that metadata. `App::state::<T>()` borrows the
+router's registered state, also available during configuration; retrieve an `Arc<S>`
+registration as that exact type. Retain only a successfully
 configured app; never cache an initialization error or publish a partial app.
 Cloudflare uses `dispatch_app::<A>(&app, req, env, ctx)`; Spin uses
 `dispatch_app::<A>(&app, req)` and returns a raw `SpinResponse`. Neither builds an

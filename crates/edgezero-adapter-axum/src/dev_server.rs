@@ -716,8 +716,8 @@ mod tests {
             Err(EdgeError::service_unavailable("configuration unavailable"))
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -734,8 +734,8 @@ mod tests {
             Err(EdgeError::service_unavailable("stop before listening"))
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -752,8 +752,8 @@ mod tests {
             true
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -770,8 +770,8 @@ mod tests {
             }
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -918,6 +918,33 @@ mod tests {
 
         let error = result.expect_err("configuration must fail before listener bind");
         assert_eq!(error.to_string(), "application configuration failed");
+        assert_eq!(bind_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn failing_routes_prevent_configuration_and_listener_boundary() {
+        struct FailingRoutes;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests route failure at adapter assembly boundary"
+        )]
+        impl Hooks for FailingRoutes {
+            fn configure(_app: &mut App) -> Result<(), EdgeError> {
+                Err(EdgeError::bad_request("configure must not run"))
+            }
+            fn routes() -> Result<RouterService, EdgeError> {
+                Err(EdgeError::service_unavailable("route state unavailable"))
+            }
+        }
+        let bind_calls = AtomicUsize::new(0);
+        let result = build_app_for_dispatch::<FailingRoutes>().map(|_app| {
+            bind_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        let error = result.expect_err("route failure must precede the listener boundary");
+        assert_eq!(
+            error.downcast_ref::<EdgeError>().unwrap().status().as_u16(),
+            503
+        );
         assert_eq!(bind_calls.load(Ordering::SeqCst), 0);
     }
 

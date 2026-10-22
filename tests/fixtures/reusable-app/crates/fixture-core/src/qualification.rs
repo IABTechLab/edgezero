@@ -111,11 +111,11 @@ impl Hooks for QualificationApp {
         Ok(())
     }
 
-    fn routes() -> RouterService {
-        RouterService::builder()
+    fn routes() -> Result<RouterService, EdgeError> {
+        Ok(RouterService::builder()
             .get("/qualification/{case}", response_probe)
             .route("/qualification/{case}", Method::HEAD, response_probe)
-            .build()
+            .build())
     }
 }
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 struct SlowInitialization;
 impl Hooks for SlowInitialization {
-    fn routes() -> RouterService {
+    fn routes() -> Result<RouterService, EdgeError> {
         fixture_fastly::MeasuredApp::routes()
     }
     fn stores() -> StoresMetadata {

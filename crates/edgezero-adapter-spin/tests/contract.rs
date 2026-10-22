@@ -79,8 +79,8 @@ mod tests {
             Err(EdgeError::service_unavailable("configuration unavailable"))
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 

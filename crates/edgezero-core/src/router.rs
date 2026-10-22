@@ -599,6 +599,16 @@ impl RouterService {
     pub fn routes(&self) -> Vec<RouteInfo> {
         self.inner.route_index.to_vec()
     }
+
+    /// Borrows state registered with [`RouterBuilder::with_state`] without cloning or rebuilding it.
+    #[must_use]
+    #[inline]
+    pub fn state<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.inner.state_extensions.get::<T>()
+    }
 }
 
 async fn fallback_terminal_response(

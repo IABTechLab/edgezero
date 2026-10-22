@@ -375,7 +375,7 @@ impl Hooks for MeasuredApp {
         }
     }
 
-    fn routes() -> edgezero_core::router::RouterService {
+    fn routes() -> Result<edgezero_core::router::RouterService, EdgeError> {
         FixtureApp::routes()
     }
     fn stores() -> edgezero_core::app::StoresMetadata {

@@ -25,12 +25,12 @@ fn spawn_owned(
 }
 
 impl Hooks for NativeProgressApp {
-    fn routes() -> RouterService {
-        progress::router(
+    fn routes() -> Result<RouterService, EdgeError> {
+        Ok(progress::router(
             Arc::new(NativeRuntime),
             serde_json::json!({"source":"not-exposed-by-native-entrypoint","known_empty":null}),
             None,
-        )
+        ))
     }
 }
 

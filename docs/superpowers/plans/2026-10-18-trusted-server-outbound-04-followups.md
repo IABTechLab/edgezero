@@ -881,6 +881,93 @@ No F9b or D1b-D1d prerequisite. These scheduling scopes do not change the releas
       identity pass. Run macros and four adapter assembly contracts plus applicable retained-instance
       fixtures and the task lint card. Suggested commit: `feat: assemble and retain only complete applications`.
 
+#### F9a Assembly Foundation Checkpoint (2026-10-22)
+
+- [x] Hard-cut `Hooks::routes` and macro-generated `build_router` to Result. Return route errors
+      unchanged and skip configuration. Migrate every handwritten implementation and direct
+      generated-router caller, including the excluded demo and reusable-fixture workspaces.
+- [x] Share one configured assembly path through `App::from_router::<A>(router, platform)`.
+      Apply name/configure/platform checks once, without rebuilding the supplied router, while
+      preserving configuration-error precedence and the complete metadata comparison.
+- [x] Borrow typed state from the router's existing registry through `App::state` and
+      `RouterService::state`. Preserve exact-type lookup, shared interiors and last-write-wins.
+      Prove configuration-derived head limits and canonical State extraction use that source.
+- [x] Exercise real `Sandbox<App>` route failure, configuration failure, partial-state release,
+      subsequent success and retained state identity. Keep the existing success-only mechanism.
+- [x] Finish scoped spec/quality reviews and all root, actual-target, demo/generator/fixture,
+      documentation and dependency verification before committing the foundation.
+- [ ] Implement app-free canonical Fastly assembly-error delivery and standard retained retry
+      integration, then execute the required runtime/consumer cases. No entrypoint error-serving
+      change or full F9a/EZ-22 acceptance is claimed by this foundation.
+- [ ] Record explicit applicability before claiming the optional macro fallible-state and
+      single-request Fastly/Cloudflare/Spin failure-response SHOULD acceptance cases.
+
+Rawls mapped macro emission and callers; Herschel mapped retained assembly and provider delivery.
+Both proposed one shared configured core path and state access through existing Extensions.
+The chosen macro helper itself returns Result rather than keeping an infallible helper wrapped
+only at the trait boundary. Existing low-level App constructors remain tools, not compatibility
+wrappers. SDK/decoder pins, the approved Interfaces, frozen policies and outbound transports are
+unchanged. Fastly G2, P1 cutover and consumer/hosted qualification retain their separate gates.
+
+Both scoped reviews passed. Quality review identified two additional test gaps, now covered:
+the original internal error object is retained across route and both configuration paths, and
+all adapter assembly boundaries reject a failed route build before configuration (Axum also
+preserves its pre-bind boundary). Real Sandbox tests prove partial-state release and successful
+state identity, not HTTP serving-loop recovery. Rawls' verification handoff found incomplete
+generated-project output and missing standalone receipts; the generated gate subsequently
+completed, fresh demo tests/lints ran, and exact commands/exit results are recorded below.
+
+Local verification used Rust 1.98.1, with no SDK/decoder repin. Relative to base
+`5968cac4e0d18964adebb5e261595431e613cd2a`, the 22 changed Rust/template files have aggregate
+SHA-256 `f406cc0fcb7c15b9dd612fb1436ef48890d79875146b092db52a7891e3b4efd0`.
+The aggregate hashes the concatenation of sorted `SHA256(file)`, two spaces, repository-relative
+path and LF for each changed `.rs`/`.hbs` file. This identifies local implementation inputs,
+not a hosted qualification artifact or a release approval. Frozen policy and lockfiles are unchanged.
+
+All five root gates completed with exit 0: formatting, strict workspace clippy, workspace tests,
+feature compilation and Spin target compilation. Workspace tests passed 2,147 cases across 27
+binaries, zero failures and one existing ignored generated-workspace case; core passed 818.
+That ignored gate was separately executed and passed native/three-WASM compilation, generated-core
+tests and fallback TCP checks. All three actual-target WASM clippy checks passed. Viceroy 0.21.0
+passed 180 library tests and 25 contracts, including the real assembled-app retention case.
+Demo-core passed 48 tests and strict clippy; all three demo WASM checks passed. Fixture-core's
+17 qualification tests, fixture host/Axum/Fastly clippy and all four fixture target checks passed.
+Strict public rustdoc, four core compile-fail doctests, docs format/lint/build, dependency/shared-pin,
+legacy/docs guards and 18 evidence-checker tests passed. Inventory remains 255 criteria / 511
+planned legs, qualified false. Early type/import/lint failures remain in the local logs and are
+superseded by explicit successful reruns, not treated as passing evidence.
+
+Exact primary commands below completed with exit 0; `--offline --locked` preserves the selected
+workspace inputs. Native TCP and Viceroy commands ran with local socket permission. These are
+foundation regression/characterization results only; no new hosted probe or capability is claimed.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --offline --locked --workspace --all-targets
+cargo check --offline --locked --workspace --all-targets --features 'fastly cloudflare spin'
+cargo check --offline --locked -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
+cargo clippy --offline --locked -p edgezero-adapter-fastly --target wasm32-wasip1 --all-targets --features fastly,cli,test-utils -- -D warnings
+cargo clippy --offline --locked -p edgezero-adapter-cloudflare --target wasm32-unknown-unknown --all-targets --features cloudflare,cli,test-utils -- -D warnings
+cargo clippy --offline --locked -p edgezero-adapter-spin --target wasm32-wasip2 --all-targets --features spin,cli,test-utils -- -D warnings
+cargo clippy --offline --locked -p edgezero-adapter-fastly --no-default-features --features cli --all-targets -- -D warnings
+SSL_CERT_FILE=/etc/ssl/cert.pem CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run' cargo test --offline --locked -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly,test-utils --lib --test contract
+scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds
+scripts/run_test_nonzero.sh assembly_errors_preserve_the_original_internal_source cargo test --offline --locked -p edgezero-core --lib
+scripts/run_test_nonzero.sh failed_app_assembly_retries_without_retaining_partial_state cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --lib
+cargo test --offline --locked --manifest-path examples/app-demo/Cargo.toml -p app-demo-core
+cargo clippy --offline --locked --manifest-path examples/app-demo/Cargo.toml -p app-demo-core --all-targets --all-features -- -D warnings
+cargo fmt --all --manifest-path examples/app-demo/Cargo.toml -- --check
+cargo fmt --all --manifest-path tests/fixtures/reusable-app/Cargo.toml -- --check
+cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-core -p fixture-harness --all-targets --features fixture-core/qualification -- -D warnings
+cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-axum --all-targets -- -D warnings
+cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-fastly --target wasm32-wasip1 --all-targets -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --offline --locked --workspace --all-features --no-deps
+node scripts/check_outbound_docs_contract.mjs
+bash scripts/check_outbound_legacy_api.sh
+node scripts/check_serde_json_map_contract.mjs
+```
+
 ### Task F9b: Policy-Aware Axum Servers and Test Helpers
 
 **Files:** Axum `src/dev_server.rs`, `service.rs`, `test_utils.rs`, `src/lib.rs`, TCP/contract tests;

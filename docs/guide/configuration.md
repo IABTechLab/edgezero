@@ -714,6 +714,11 @@ edgezero_core::app!(
 The `state` expression is emitted inside the generated `build_router()`, which
 runs once per request on the default Fastly, Cloudflare and Spin entry points, so
 keep it cheap. Build the heavy value once and hand out clones.
+Both `build_router()` and the generated `Hooks::routes()` now return
+`Result<RouterService, EdgeError>`. Pass a successfully built manual router to
+`App::from_router::<YourApp>(router, platform)` to apply the same configuration
+as hook-based assembly. `App::state::<T>()` reads its existing registration during
+configuration or from entrypoint code; it does not initialize state again.
 
 See [Sharing app state](/guide/handlers#sharing-app-state) for how handlers
 read `state`, and [Owning your own logging](/guide/adapters/fastly#owning-your-own-logging)

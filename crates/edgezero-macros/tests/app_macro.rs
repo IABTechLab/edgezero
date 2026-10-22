@@ -12,12 +12,21 @@ edgezero_core::app!(
 
 #[cfg(test)]
 mod tests {
+    use edgezero_core::EdgeError;
     use edgezero_core::app::Hooks as _;
     use edgezero_core::manifest::LogLevel;
+    use edgezero_core::router::RouterService;
 
     #[test]
     fn app_macro_emits_owns_logging_true() {
         assert!(super::OwnedLoggingApp::owns_logging());
+    }
+
+    #[test]
+    fn app_macro_routes_and_generated_builder_are_fallible() {
+        let routes: Result<RouterService, EdgeError> = super::OwnedLoggingApp::routes();
+        let built: Result<RouterService, EdgeError> = super::build_router();
+        assert_eq!(routes.unwrap().routes(), built.unwrap().routes());
     }
 
     #[test]
@@ -43,8 +52,20 @@ mod configured_app {
     use edgezero_core::ingress::{AdmissionDecision, IngressBeginOutcome, IngressHeadParts};
     use edgezero_core::response_egress::ResponseEgressCompletion;
     use edgezero_core::time::MonotonicInstant;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static STATE_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+    fn app_state() -> Arc<AtomicUsize> {
+        STATE_BUILDS.fetch_add(1, Ordering::SeqCst);
+        Arc::new(AtomicUsize::new(0))
+    }
 
     fn configure_app(app: &mut App) -> Result<(), edgezero_core::EdgeError> {
+        app.state::<Arc<AtomicUsize>>()
+            .ok_or_else(|| edgezero_core::EdgeError::service_unavailable("missing app state"))?
+            .fetch_add(1, Ordering::SeqCst);
         app.set_config_extraction_limits(ConfigExtractionLimits::default())?;
         app.set_ingress_admission_policy(|_| {
             let mut response = Response::new(Body::empty());
@@ -60,13 +81,21 @@ mod configured_app {
     edgezero_core::app!(
         "tests/fixtures/owns_logging.toml",
         ConfiguredApp,
-        configure = configure_app
+        configure = configure_app,
+        state = app_state()
     );
 
     #[test]
     fn app_macro_configure_callback_installs_ingress_policy() {
         let app = App::build::<ConfiguredApp>(edgezero_core::PlatformMetadata::default())
             .expect("configured app");
+        assert_eq!(STATE_BUILDS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            app.state::<Arc<AtomicUsize>>()
+                .unwrap()
+                .load(Ordering::SeqCst),
+            1
+        );
         let head = IngressHeadParts::new(
             Method::GET,
             Uri::from_static("/"),

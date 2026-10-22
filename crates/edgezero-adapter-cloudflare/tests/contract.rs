@@ -85,8 +85,8 @@ mod tests {
             ))
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -260,8 +260,8 @@ mod tests {
             reason = "exercise default Hooks metadata and construction"
         )]
         impl Hooks for TestApp {
-            fn routes() -> RouterService {
-                build_test_app().router().clone()
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(build_test_app().router().clone())
             }
         }
         let app = App::build::<TestApp>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)

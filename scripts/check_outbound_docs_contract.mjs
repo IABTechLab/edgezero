@@ -1091,6 +1091,16 @@ if (
   )
 }
 const routingGuideSource = readFileSync(routingGuidePath, 'utf8')
+for (const requiredFragment of [
+  'Hooks::routes() -> Result<RouterService, EdgeError>',
+  'App::from_router::<A>(router, PLATFORM)',
+  'App::state::<T>() -> Option<&T>',
+  "router's existing state registry",
+]) {
+  if (!handlersGuideSource.includes(requiredFragment)) {
+    fail(`handlers guide is missing application assembly contract: ${requiredFragment}`)
+  }
+}
 if (
   !routingGuideSource.includes('App::build::<A>(platform)') ||
   routingGuideSource.includes('build_app')

@@ -123,8 +123,8 @@ impl Hooks for FixtureApp {
         app.set_name("fixture");
         Ok(())
     }
-    fn routes() -> RouterService {
-        RouterService::builder()
+    fn routes() -> Result<RouterService, EdgeError> {
+        Ok(RouterService::builder()
             .middleware(ObserveRequest)
             .with_state(Arc::new(AtomicUsize::new(0)))
             .get("/probe/{id}", probe)
@@ -138,7 +138,7 @@ impl Hooks for FixtureApp {
             .get("/stream-error", backend)
             .get("/overlap/{id}", overlap)
             .get("/origin/{id}", backend)
-            .build()
+            .build())
     }
 }
 /// Exercises an unused missing declaration beside a healthy default binding.
@@ -163,7 +163,7 @@ impl Hooks for DeclaredKvApp {
     fn owns_logging() -> bool {
         true
     }
-    fn routes() -> RouterService {
+    fn routes() -> Result<RouterService, EdgeError> {
         FixtureApp::routes()
     }
     fn stores() -> StoresMetadata {
@@ -176,8 +176,8 @@ impl Hooks for DeclaredKvApp {
     }
 }
 impl Hooks for OtherApp {
-    fn routes() -> RouterService {
-        RouterService::builder().get("/other", other).build()
+    fn routes() -> Result<RouterService, EdgeError> {
+        Ok(RouterService::builder().get("/other", other).build())
     }
 }
 
@@ -439,8 +439,8 @@ mod tests {
                 }
             }
 
-            fn routes() -> RouterService {
-                RouterService::builder().build()
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
             }
         }
 
@@ -466,8 +466,8 @@ mod tests {
                 Ok(())
             }
 
-            fn routes() -> RouterService {
-                RouterService::builder().build()
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
             }
         }
 

@@ -33,8 +33,8 @@ pub trait ProbeRuntime: Send + Sync {
 
 pub struct ProgressHooks;
 impl Hooks for ProgressHooks {
-    fn routes() -> RouterService {
-        RouterService::builder().build()
+    fn routes() -> Result<RouterService, EdgeError> {
+        Ok(RouterService::builder().build())
     }
 }
 

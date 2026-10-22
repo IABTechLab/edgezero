@@ -230,6 +230,81 @@ mod tests {
     }
 
     #[test]
+    fn failed_app_assembly_retries_without_retaining_partial_state() {
+        use edgezero_core::EdgeError;
+        use edgezero_core::app::{App as AssembledApp, Hooks};
+        use edgezero_core::router::RouterService;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static BUILDS: AtomicUsize = AtomicUsize::new(0);
+        static CONFIGURES: AtomicUsize = AtomicUsize::new(0);
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct StateProbe;
+        struct RetryHooks;
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for StateProbe {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests route and configure failure retention"
+        )]
+        impl Hooks for RetryHooks {
+            fn configure(app: &mut AssembledApp) -> Result<(), EdgeError> {
+                if app.state::<Arc<StateProbe>>().is_none() {
+                    return Err(EdgeError::service_unavailable("registered state missing"));
+                }
+                if CONFIGURES.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(EdgeError::service_unavailable("configuration unavailable"));
+                }
+                Ok(())
+            }
+
+            fn routes() -> Result<RouterService, EdgeError> {
+                if BUILDS.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(EdgeError::service_unavailable("routes unavailable"));
+                }
+                Ok(RouterService::builder()
+                    .with_state(Arc::new(StateProbe))
+                    .build())
+            }
+        }
+
+        let mut sandbox = Sandbox::<AssembledApp>::default();
+        for (attempt, message) in [(1, "routes unavailable"), (2, "configuration unavailable")] {
+            let error = sandbox
+                .initialize(|| AssembledApp::build::<RetryHooks>(crate::FASTLY_PLATFORM))
+                .unwrap_err();
+            assert_eq!(error.message(), message);
+            assert!(sandbox.state().is_none());
+            assert_eq!(sandbox.initialization_attempts(), attempt);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        sandbox
+            .initialize(|| AssembledApp::build::<RetryHooks>(crate::FASTLY_PLATFORM))
+            .unwrap();
+        let retained = Arc::clone(sandbox.state().unwrap().state::<Arc<StateProbe>>().unwrap());
+        sandbox
+            .initialize::<EdgeError, _>(|| panic!("successful app must not be rebuilt"))
+            .unwrap();
+        assert_eq!(sandbox.initialization_attempts(), 3);
+        assert_eq!(BUILDS.load(Ordering::SeqCst), 3);
+        assert_eq!(CONFIGURES.load(Ordering::SeqCst), 2);
+        assert!(Arc::ptr_eq(
+            &retained,
+            sandbox.state().unwrap().state::<Arc<StateProbe>>().unwrap()
+        ));
+        drop(retained);
+        drop(sandbox);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn failed_setup_can_retry_without_initializing_the_app() {
         let mut sandbox = Sandbox::<App>::default();
         assert_eq!(sandbox.setup_once(|| Err("not ready")), Err("not ready"));

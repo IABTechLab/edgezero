@@ -837,7 +837,7 @@ mod tests {
 
     #[test]
     fn introspection_routes_are_wired() {
-        let router = crate::build_router();
+        let router = crate::build_router().expect("demo router");
 
         // manifest: 200 + JSON body whose [app].name is "app-demo".
         let manifest_req = request_builder()
@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     fn state_demo_handler_reads_app_state_through_macro_router() {
         // build_router() is macro-generated and now calls `.with_state(crate::app_state())`.
-        let service = crate::build_router();
+        let service = crate::build_router().expect("demo router");
 
         let request = request_builder()
             .method(Method::GET)

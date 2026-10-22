@@ -102,6 +102,20 @@ separately from the portable API and must be considered when declaring required 
   and generated applications retain the unchanged standard entrypoints. Local runtime
   characterization does not qualify hosted delivery or promote capabilities.
 
+### Fallible Application Assembly Foundation
+
+- Hard-cut `Hooks::routes` and macro-generated `build_router` to
+  `Result<RouterService, EdgeError>`. Route/state assembly failures return unchanged,
+  skip configuration and never produce a partially configured application.
+- Add `App::from_router::<A>` for externally built routes, applying the same name,
+  configuration and complete platform-metadata check once. Raw constructors remain
+  low-level tools, not compatibility assembly wrappers.
+- Add borrowed `App::state::<T>` and `RouterService::state::<T>` access to the existing
+  registry. Configuration, entrypoints and request extractors share registered interiors.
+- Migrate adapter contracts, demo, generator and reusable fixtures. Verify real
+  successful-only `Sandbox<App>` retention after route and configuration failures.
+  Entrypoint assembly-error delivery and hosted qualification remain separate follow-ups.
+
 ### Outbound HTTP And Batches
 
 - Add a separate bounded local overflow characterization suite through all four standard

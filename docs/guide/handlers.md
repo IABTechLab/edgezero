@@ -374,13 +374,35 @@ callback cheap for the same adapter-lifecycle reasons as `state = <expr>` above.
 error prevents EdgeZero request conversion, body polling, and dispatch; Axum also fails before
 binding its listener.
 
-`App::build::<A>(PLATFORM) -> Result<App, EdgeError>` is the canonical assembly
-path. It installs the selected platform before calling `Hooks::configure` and
-rejects a successful configuration that replaces that metadata. Publish or retain
+`App::build::<A>(PLATFORM) -> Result<App, EdgeError>` is the hook-based assembly
+path. `Hooks::routes() -> Result<RouterService, EdgeError>` builds routes and their
+state first; its original error skips configuration and produces no app. The
+macro-generated `build_router()` also returns `Result`, without an infallible
+compatibility helper.
+
+For state loaded from provider bindings, asynchronous reads or explicit settings,
+build the router yourself, then call `App::from_router::<A>(router, PLATFORM)`.
+It does not call `A::routes`: it applies the same application name, configuration
+and complete platform-metadata check as `App::build`, exactly once. Raw constructors
+such as `App::new` do not apply hooks and are not substitutes for this assembly path.
+
+`App::state::<T>() -> Option<&T>` borrows the exact registered type from the
+router's existing state registry, without a request, copying the value or rebuilding
+it. Configuration may read state before choosing policies. For `with_state(Arc<S>)`,
+read `state::<Arc<S>>()`; handlers' `State<Arc<S>>` shares those same interiors.
+Missing types return `None`, and repeated registration of one type remains
+last-write-wins. `RouterService::state` exposes the same borrowed view.
+
+Both assembly paths install the selected platform before calling `Hooks::configure`
+and reject a successful configuration that replaces that metadata. Publish or retain
 only the completed successful app, never an initialization error. Retaining the app
 does not retain request admission grants, registries, bodies, or response-egress
 resources; those are fresh for every dispatch. See
 [application retention](/guide/adapters/overview#opt-in-application-retention).
+
+This assembly foundation does not change entrypoint failure responses. Fastly's
+canonical assembly-failure delivery/retry integration remains a separate step;
+Axum still fails startup before binding a listener.
 
 Use the synchronous error renderer when framework and handler errors must use an application-owned,
 fixed-size wire body:

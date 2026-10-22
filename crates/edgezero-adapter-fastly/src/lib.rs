@@ -349,8 +349,8 @@ mod platform_tests {
             }
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -360,5 +360,27 @@ mod platform_tests {
             .expect("configured application");
 
         assert_eq!(app.platform(), crate::FASTLY_PLATFORM);
+    }
+
+    #[test]
+    fn application_route_failure_preserves_target_error() {
+        struct RouteFailure;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests typed route failure at target assembly"
+        )]
+        impl Hooks for RouteFailure {
+            fn configure(_app: &mut App) -> Result<(), EdgeError> {
+                Err(EdgeError::bad_request("configuration must not run"))
+            }
+            fn routes() -> Result<RouterService, EdgeError> {
+                Err(EdgeError::service_unavailable("route state unavailable"))
+            }
+        }
+        let Err(error) = super::build_target_app::<RouteFailure>() else {
+            panic!("route failure must prevent target application assembly");
+        };
+        assert_eq!(error.status().as_u16(), 503);
+        assert_eq!(error.message(), "route state unavailable");
     }
 }

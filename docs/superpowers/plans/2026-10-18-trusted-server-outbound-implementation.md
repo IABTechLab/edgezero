@@ -103,6 +103,14 @@ replacement is permitted only before any attempt or after confirmed non-commitme
 Viceroy characterization is separate from hosted qualification; F9a assembly failure integration,
 consumer acceptance, full EZ-17 and failed Fastly G2 remain open.
 
+### F9a Assembly Foundation Checkpoint
+
+The independent [F9a assembly foundation](2026-10-18-trusted-server-outbound-04-followups.md#f9a-assembly-foundation-checkpoint-2026-10-22)
+hard-cuts route assembly to Result, shares configured manual-router assembly, and exposes state
+from the existing router registry. It does not change outbound transport or entrypoint failure
+responses. Canonical Fastly assembly-error delivery/retry integration, optional SHOULD decisions
+and full EZ-22 consumer/runtime acceptance remain separate work.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

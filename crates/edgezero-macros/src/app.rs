@@ -266,7 +266,7 @@ fn build_hooks_tokens(
         pub struct #app_ident;
 
         impl edgezero_core::app::Hooks for #app_ident {
-            fn routes() -> edgezero_core::router::RouterService {
+            fn routes() -> Result<edgezero_core::router::RouterService, edgezero_core::error::EdgeError> {
                 build_router()
             }
 
@@ -374,13 +374,13 @@ pub fn expand_app(input: TokenStream) -> TokenStream {
 
         #hooks_tokens
 
-        pub fn build_router() -> edgezero_core::router::RouterService {
+        pub fn build_router() -> Result<edgezero_core::router::RouterService, edgezero_core::error::EdgeError> {
             let mut builder = edgezero_core::router::RouterService::builder();
             builder = builder.with_manifest_json(#manifest_json_lit);
             #state_call
             #(#middleware_tokens)*
             #(#route_tokens)*
-            builder.build()
+            Ok(builder.build())
         }
     };
 

@@ -604,6 +604,7 @@ mod tests {
     use edgezero_adapter::registry::{
         self as adapter_registry, Adapter, AdapterAction, DeployOwnership,
     };
+    use edgezero_core::EdgeError;
     use edgezero_core::app::Hooks;
     use edgezero_core::manifest::{BakedManifest, Manifest, ManifestLoader};
     use edgezero_core::router::RouterService;
@@ -645,8 +646,8 @@ mod tests {
             )
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 

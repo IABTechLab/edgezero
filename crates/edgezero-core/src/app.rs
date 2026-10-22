@@ -144,25 +144,18 @@ impl App {
 
     /// Construct an application from hooks after installing target metadata.
     ///
-    /// This is the sole adapter-facing assembly path. Application hooks observe the installed
-    /// platform; successful configuration must preserve its complete metadata.
+    /// Route failure skips configuration. Both this and [`App::from_router`] configure only
+    /// after installing the selected platform, whose complete metadata must be preserved.
     ///
     /// # Errors
-    /// Returns the typed configuration error, or an internal error when configuration replaces
+    /// Returns the typed route/configuration error, or an internal error when configuration replaces
     /// the selected platform metadata, without exposing a partially configured app.
     #[inline]
     pub fn build<A>(platform: PlatformMetadata) -> Result<Self, EdgeError>
     where
         A: Hooks,
     {
-        let mut app = Self::with_name_and_platform(A::routes(), A::name(), platform);
-        A::configure(&mut app)?;
-        if app.platform() != platform {
-            return Err(EdgeError::internal(anyhow::anyhow!(
-                "application configuration changed adapter-selected platform metadata"
-            )));
-        }
-        Ok(app)
+        Self::from_router::<A>(A::routes()?, platform)
     }
 
     #[must_use]
@@ -284,6 +277,33 @@ impl App {
             }
             IngressBeginOutcome::Aborted => Ok(IngressDispatchOutcome::Aborted),
         }
+    }
+
+    /// Assembles an application from routes and state built by the caller.
+    ///
+    /// Applies the same name, configuration and platform check as [`App::build`], exactly once,
+    /// without invoking `A::routes`. Finish asynchronous/provider-specific state loading first.
+    /// Only a completely configured application is returned or eligible for retention.
+    ///
+    /// # Errors
+    /// Returns the original configuration error, or an internal error if successful configuration
+    /// replaces the selected platform metadata.
+    #[inline]
+    pub fn from_router<A>(
+        router: RouterService,
+        platform: PlatformMetadata,
+    ) -> Result<Self, EdgeError>
+    where
+        A: Hooks,
+    {
+        let mut app = Self::with_name_and_platform(router, A::name(), platform);
+        A::configure(&mut app)?;
+        if app.platform() != platform {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "application configuration changed adapter-selected platform metadata"
+            )));
+        }
+        Ok(app)
     }
 
     #[must_use]
@@ -484,7 +504,21 @@ impl App {
         self.response_egress_policy = Arc::new(policy);
     }
 
-    /// Construct a new application with the provided router and name.
+    /// Borrows the registered state of exactly this type from the router's shared registry.
+    ///
+    /// Configuration, entrypoints and [`crate::extractor::State`] use this same source.
+    /// Register shared values as `Arc<T>` and retrieve that exact type; no state is rebuilt here.
+    #[must_use]
+    #[inline]
+    pub fn state<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.router.state::<T>()
+    }
+
+    /// Construct a low-level application without invoking hooks.
+    /// Use [`App::from_router`] to apply application configuration to a supplied router.
     #[inline]
     pub fn with_name<S>(router: RouterService, name: S) -> Self
     where
@@ -493,7 +527,8 @@ impl App {
         Self::with_name_and_platform(router, name, PlatformMetadata::default())
     }
 
-    /// Construct a new application with the provided router, name, and target metadata.
+    /// Construct a low-level application with name/metadata but without invoking hooks.
+    /// Use [`App::from_router`] for fully configured manual application assembly.
     #[must_use]
     #[inline]
     pub fn with_name_and_platform<S>(
@@ -618,8 +653,12 @@ pub trait Hooks {
         false
     }
 
-    /// Build the router service for the application.
-    fn routes() -> RouterService;
+    /// Build routes and their application-owned state.
+    ///
+    /// # Errors
+    /// Returns the original state/route assembly error. [`App::build`] skips configuration and
+    /// returns no application on failure; callers must not retain an error-response router.
+    fn routes() -> Result<RouterService, EdgeError>;
 
     /// Portable store metadata for the application.
     ///
@@ -746,8 +785,8 @@ mod tests {
         reason = "test stub — only `routes` is overridden; every other Hooks method intentionally uses its trait default"
     )]
     impl Hooks for DefaultHooks {
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
 
         fn stores() -> StoresMetadata {
@@ -764,8 +803,8 @@ mod tests {
             Err(EdgeError::service_unavailable("configuration unavailable"))
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -790,8 +829,8 @@ mod tests {
             }
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -801,12 +840,12 @@ mod tests {
     )]
     impl Hooks for ReplacingHooks {
         fn configure(app: &mut App) -> Result<(), EdgeError> {
-            *app = App::new(Self::routes());
+            *app = App::new(Self::routes()?);
             Ok(())
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -816,14 +855,14 @@ mod tests {
     )]
     impl Hooks for ReplacingFailingHooks {
         fn configure(app: &mut App) -> Result<(), EdgeError> {
-            *app = App::new(Self::routes());
+            *app = App::new(Self::routes()?);
             Err(EdgeError::service_unavailable(
                 "replacement configuration failed",
             ))
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -843,8 +882,8 @@ mod tests {
             Ok(())
         }
 
-        fn routes() -> RouterService {
-            RouterService::builder().build()
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
         }
     }
 
@@ -862,12 +901,12 @@ mod tests {
             "hooks-name"
         }
 
-        fn routes() -> RouterService {
+        fn routes() -> Result<RouterService, EdgeError> {
             async fn handler(_ctx: RequestContext) -> Result<String, EdgeError> {
                 Ok("ok".to_owned())
             }
 
-            RouterService::builder().get("/test", handler).build()
+            Ok(RouterService::builder().get("/test", handler).build())
         }
 
         fn stores() -> StoresMetadata {
@@ -1028,6 +1067,239 @@ mod tests {
         let response = block_on(app.router().clone().call(request)).expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.body().as_bytes().expect("buffered"), b"ok");
+    }
+
+    #[test]
+    fn route_assembly_failure_skips_configuration_and_preserves_typed_error() {
+        struct RouteFailure;
+        static CONFIGURE_CALLS: AtomicUsize = AtomicUsize::new(0);
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests route failure before configure"
+        )]
+        impl Hooks for RouteFailure {
+            fn configure(_app: &mut App) -> Result<(), EdgeError> {
+                CONFIGURE_CALLS.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn routes() -> Result<RouterService, EdgeError> {
+                Err(EdgeError::service_unavailable("route state unavailable"))
+            }
+        }
+        let Err(error) = App::build::<RouteFailure>(PlatformMetadata::default()) else {
+            panic!("failed route assembly must not produce an app");
+        };
+        assert!(matches!(&error, EdgeError::ServiceUnavailable { message }
+            if message == "route state unavailable"));
+        assert_eq!(CONFIGURE_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn assembly_errors_preserve_the_original_internal_source() {
+        use std::sync::OnceLock;
+        static IDENTITY: OnceLock<Arc<SourceIdentity>> = OnceLock::new();
+        #[derive(Debug, thiserror::Error)]
+        #[error("private assembly source")]
+        struct SourceIdentity;
+        struct RouteFailure;
+        struct ConfigureFailure;
+
+        fn original_error() -> EdgeError {
+            EdgeError::internal(Arc::clone(IDENTITY.get().unwrap()))
+        }
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests original route error source"
+        )]
+        impl Hooks for RouteFailure {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Err(original_error())
+            }
+        }
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests original configure error source"
+        )]
+        impl Hooks for ConfigureFailure {
+            fn configure(_app: &mut App) -> Result<(), EdgeError> {
+                Err(original_error())
+            }
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
+            }
+        }
+
+        let identity = Arc::new(SourceIdentity);
+        IDENTITY.set(Arc::clone(&identity)).unwrap();
+        let platform = PlatformMetadata::default();
+        for result in [
+            App::build::<RouteFailure>(platform),
+            App::build::<ConfigureFailure>(platform),
+            App::from_router::<ConfigureFailure>(RouterService::builder().build(), platform),
+        ] {
+            let Err(error) = result else {
+                panic!("assembly must return the original failure");
+            };
+            let original = error
+                .inner()
+                .unwrap()
+                .downcast_ref::<Arc<SourceIdentity>>()
+                .unwrap();
+            assert!(Arc::ptr_eq(&identity, original));
+        }
+    }
+
+    #[test]
+    fn assembled_state_is_shared_with_configuration_and_canonical_dispatch() {
+        use crate::extractor::State;
+        struct StateHooks;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests manual-router assembly and state"
+        )]
+        impl Hooks for StateHooks {
+            fn configure(app: &mut App) -> Result<(), EdgeError> {
+                let count = app
+                    .state::<Arc<AtomicUsize>>()
+                    .ok_or_else(|| EdgeError::service_unavailable("missing registered state"))?;
+                count.fetch_add(1, Ordering::SeqCst);
+                let target_bytes = *app
+                    .state::<u64>()
+                    .ok_or_else(|| EdgeError::service_unavailable("missing request limit"))?;
+                app.set_ingress_head_limits(
+                    IngressHeadLimits::default().with_max_request_target_bytes(target_bytes)?,
+                );
+                app.set_name("configured from state");
+                Ok(())
+            }
+
+            fn routes() -> Result<RouterService, EdgeError> {
+                Err(EdgeError::service_unavailable("manual router required"))
+            }
+        }
+        #[crate::action]
+        async fn state_handler(State(count): State<Arc<AtomicUsize>>) -> Result<String, EdgeError> {
+            Ok(count.fetch_add(1, Ordering::SeqCst).to_string())
+        }
+        let original = Arc::new(AtomicUsize::new(99));
+        let registered = Arc::new(AtomicUsize::new(0));
+        let router = RouterService::builder()
+            .with_state(Arc::clone(&original))
+            .with_state(Arc::clone(&registered))
+            .with_state(64_u64)
+            .get("/state", state_handler)
+            .build();
+        let router_clone = router.clone();
+        let app = App::from_router::<StateHooks>(router, PlatformMetadata::default()).unwrap();
+        assert_eq!(app.name(), "configured from state");
+        assert_eq!(app.ingress_head_limits().max_request_target_bytes(), 64);
+        assert!(Arc::ptr_eq(
+            app.state::<Arc<AtomicUsize>>().unwrap(),
+            &registered
+        ));
+        assert!(Arc::ptr_eq(
+            router_clone.state::<Arc<AtomicUsize>>().unwrap(),
+            &registered
+        ));
+        assert!(app.state::<String>().is_none());
+        assert_eq!(registered.load(Ordering::SeqCst), 1);
+        let request = request_builder().uri("/state").body(Body::empty()).unwrap();
+        let Ok(IngressDispatchOutcome::Response(envelope)) = block_on(app.dispatch_ingress(
+            request,
+            app.monotonic_now(),
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        )) else {
+            panic!("state route must produce a response");
+        };
+        let Ok((prepared, _, mut attempt, clock)) = envelope.begin() else {
+            panic!("state response must be valid");
+        };
+        let response = prepared.into_response();
+        assert_eq!(response.body().as_bytes().unwrap(), b"1");
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(clock.now()));
+        assert_eq!(registered.load(Ordering::SeqCst), 2);
+        assert_eq!(original.load(Ordering::SeqCst), 99);
+    }
+
+    #[test]
+    fn manual_router_assembly_matches_hook_name_and_configuration() {
+        struct NamedHooks;
+        static CONFIGURE_CALLS: AtomicUsize = AtomicUsize::new(0);
+        #[expect(clippy::missing_trait_methods, reason = "tests both assembly paths")]
+        impl Hooks for NamedHooks {
+            fn configure(_app: &mut App) -> Result<(), EdgeError> {
+                CONFIGURE_CALLS.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn name() -> &'static str {
+                "assembled app"
+            }
+
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
+            }
+        }
+        let platform = PlatformMetadata::new(
+            PlatformFact::unknown(PlatformUnknownReason::OperatorConfigured),
+            PlatformFact::unknown(PlatformUnknownReason::OperatorConfigured),
+            PlatformFact::unknown(PlatformUnknownReason::OperatorConfigured),
+        );
+        let from_hooks = App::build::<NamedHooks>(platform).unwrap();
+        assert_eq!(CONFIGURE_CALLS.load(Ordering::SeqCst), 1);
+        let from_router =
+            App::from_router::<NamedHooks>(NamedHooks::routes().unwrap(), platform).unwrap();
+        assert_eq!(CONFIGURE_CALLS.load(Ordering::SeqCst), 2);
+        for app in [from_hooks, from_router] {
+            assert_eq!(app.name(), "assembled app");
+            assert_eq!(app.platform(), platform);
+        }
+    }
+
+    #[test]
+    fn manual_router_assembly_keeps_platform_checks_and_configuration_error_precedence() {
+        let platform = PlatformMetadata::new(
+            PlatformFact::unknown(PlatformUnknownReason::OperatorConfigured),
+            PlatformFact::unknown(PlatformUnknownReason::ProviderUnpublished),
+            PlatformFact::unknown(PlatformUnknownReason::OperatorConfigured),
+        );
+        for (result, status) in [
+            (
+                App::from_router::<ReplacingHooks>(RouterService::builder().build(), platform),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                App::from_router::<ReplacingFailingHooks>(
+                    RouterService::builder().build(),
+                    platform,
+                ),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                App::from_router::<MemoryPreservingReplacingHooks>(
+                    RouterService::builder().build(),
+                    platform,
+                ),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let Err(error) = result else {
+                panic!("invalid configuration must not assemble an app");
+            };
+            assert_eq!(error.status(), status);
+            if status == StatusCode::SERVICE_UNAVAILABLE {
+                assert_eq!(error.message(), "replacement configuration failed");
+            } else {
+                assert_eq!(
+                    error.to_string(),
+                    "internal error: application configuration changed adapter-selected platform metadata"
+                );
+            }
+        }
     }
 
     #[test]

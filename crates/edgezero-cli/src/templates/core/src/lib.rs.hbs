@@ -182,7 +182,9 @@ mod lifecycle_tests {
 
     #[test]
     fn manifest_route_classes_reach_route_resolution() {
-        let resolved = crate::build_router().resolve(&Method::GET, "/proxy/status/200");
+        let resolved = crate::build_router()
+            .expect("generated router")
+            .resolve(&Method::GET, "/proxy/status/200");
         let RouteResolution::Matched(metadata) = resolved.resolution().clone() else {
             panic!("proxy route must resolve");
         };

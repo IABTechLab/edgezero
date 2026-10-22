@@ -3789,6 +3789,16 @@ to the core-owned `App::build::<A>(platform)` before `Hooks::configure` runs. Ap
 cannot replace this assembly step. `App::platform()` therefore
 supports startup resource validation without linking CLI registration code into runtime artifacts.
 
+Application assembly preserves the same platform contract for externally built routers through
+`App::from_router::<A>(router, platform)`. Hook-based `App::build` first obtains the fallible
+`Hooks::routes() -> Result<RouterService, EdgeError>` and delegates to that shared assembly path.
+Route failure returns unchanged and skips configuration. Both paths install the application
+name and selected platform before configuring exactly once, and reject a changed platform only
+after successful configuration. Borrowed `App::state::<T>()` and `RouterService::state::<T>()`
+read the existing registered state, including during configuration; they create no second registry.
+The macro-generated `build_router` also returns Result, and callers must handle its failure.
+This foundation changes no outbound dispatch or entrypoint assembly-error serving policy.
+
 **Publication order:** adding the trait/default does not immediately advertise the matrix.
 Each in-tree adapter inherits `Unsupported` until its outbound implementation, deterministic
 contracts, and any required host evidence land. That adapter's exact override is committed
