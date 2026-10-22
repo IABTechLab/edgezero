@@ -138,7 +138,7 @@ jobs:
         with:
           app-name: cache-restore-smoke-v2
           cache-target: true
-          save-target: true
+          save-target: false
           target-cache-revision: ${{ steps.fixture.outputs.revision }}
           working-directory: cache-restore-fixture
 
@@ -149,12 +149,51 @@ jobs:
           printf '%s\n' 'edgezero-source-cache-smoke-v2' >"$HOME/.cargo/git/db/edgezero-source-cache-smoke-v2"
 
       - name: Seed native and WASM compiler outputs
-        working-directory: cache-restore-fixture
+        run: bash .github/actions/setup-rust-build-cache/tests/seed-compiler-cache.sh
+
+      # Cache save warnings do not fail the action. Verify publication explicitly
+      # so a throttled seed cannot report success and fail both consumer jobs.
+      - name: Save seed target cache
+        id: target-save-1
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.cache.outputs.cargo-target-dir }}
+          key: ${{ steps.cache.outputs.target-cache-key }}
+      - name: Verify seed target publication
+        id: target-verify-1
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.cache.outputs.cargo-target-dir }}
+          key: ${{ steps.cache.outputs.target-cache-key }}
+          lookup-only: true
+      - name: Back off before retrying target publication
+        if: steps.target-verify-1.outputs.cache-hit != 'true'
+        run: sleep 60
+      - name: Retry seed target cache save
+        id: target-save-2
+        if: steps.target-verify-1.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.cache.outputs.cargo-target-dir }}
+          key: ${{ steps.cache.outputs.target-cache-key }}
+      - name: Require seed target publication
+        id: target-verify-2
+        if: steps.target-verify-1.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.cache.outputs.cargo-target-dir }}
+          key: ${{ steps.cache.outputs.target-cache-key }}
+          lookup-only: true
+          fail-on-cache-miss: true
+
+      - name: Assert target seed is available
+        env:
+          TARGET_SEED_AVAILABLE: ${{ steps.target-verify-1.outputs.cache-hit == 'true' || steps.target-verify-2.outputs.cache-hit == 'true' }}
         run: |
-          host=$(rustc -vV | sed -n 's/^host: //p')
-          test -n "$host"
-          cargo build --locked --lib --target "$host"
-          cargo build --locked --lib --target wasm32-wasip1
+          if [[ "$TARGET_SEED_AVAILABLE" != true ]]; then
+            echo '::error::target seed was not published after two attempts'
+            exit 1
+          fi
 
   cache-restore-smoke:
     needs: cache-restore-seed
@@ -232,6 +271,7 @@ jobs:
   # Build the store-aware application once. Its production/staging matrix and
   # lifecycle actions consume these exact CLI, package, and manifest bytes.
   fixture-release:
+    needs: [cache-restore-smoke, cache-new-revision-smoke]
     runs-on: ubuntu-latest
     outputs:
       app-release-sha256: ${{ steps.release.outputs.archive-sha256 }}
@@ -291,6 +331,7 @@ jobs:
   # This is a separate application release because its bundled edgezero.toml
   # declares no stores. It is built once and is never varied by a deployer.
   store-free-release:
+    needs: [cache-restore-smoke, cache-new-revision-smoke]
     runs-on: ubuntu-latest
     outputs:
       app-release-sha256: ${{ steps.release.outputs.archive-sha256 }}
