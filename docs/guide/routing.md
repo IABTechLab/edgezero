@@ -245,9 +245,61 @@ let ingress = request.extensions()
 
 If the hook consumes the body and returns `Ok(None)`, the handler receives only
 what remains unless the hook replaces the body. Generated `app!` applications
-cannot install a hook through the macro or modify the built router. Use a
-hand-written `Hooks::routes()` returning a configured `RouterService`, as in
-`tests/fixtures/request-fidelity/src/lib.rs`.
+cannot install a hook through the macro or modify the built router. A
+hand-written `Hooks` implementation does not inherit the generated metadata.
+Keep `app!` in a separate module and delegate stores, logging, name and
+application configuration:
+
+```rust
+use edgezero_core::app::{App, Hooks, StoresMetadata};
+use edgezero_core::manifest::{ManifestLoader, ResolvedLoggingConfig};
+
+mod manifest_app {
+    edgezero_core::app!("edgezero.toml", ManifestApp);
+}
+use manifest_app::ManifestApp;
+
+pub struct HookedApp;
+
+impl Hooks for HookedApp {
+    fn build_app() -> App {
+        let mut app = App::with_name(Self::routes(), Self::name());
+        Self::configure(&mut app);
+        app
+    }
+
+    fn routes() -> RouterService {
+        let manifest = ManifestLoader::load_from_str(include_str!("../edgezero.toml"));
+        RouterService::builder()
+            .pre_dispatch_hook(ExampleHook)
+            .with_manifest_json(
+                serde_json::to_string(manifest.manifest()).expect("valid manifest"),
+            )
+            // Re-register every manifest route and middleware here, in order.
+            // Repeat any app!(..., state = ...) registration with .with_state(...).
+            .build()
+    }
+
+    fn stores() -> StoresMetadata { ManifestApp::stores() }
+    fn logging_for(adapter: &str) -> ResolvedLoggingConfig {
+        ManifestApp::logging_for(adapter)
+    }
+    fn owns_logging() -> bool { ManifestApp::owns_logging() }
+    fn name() -> &'static str { ManifestApp::name() }
+    fn configure(app: &mut App) { ManifestApp::configure(app); }
+}
+```
+
+This outline assumes `src/lib.rs` beside a root `edgezero.toml` and a direct
+`serde_json` dependency. Adjust the `include_str!` path to the source file.
+Use `HookedApp` as the adapter entry point. Its `routes()` must explicitly
+re-register **all routes, manifest middleware and configured state**; delegating
+metadata alone does not preserve them. `with_manifest_json` above preserves
+manifest introspection and parses/serializes the manifest when constructing the
+router. This manual duplication must stay synchronized with `app!` and the
+manifest. The complete executable example and regression tests are in
+`crates/edgezero-macros/tests/hooked_app.rs`. The store-free ingress fixture is
+not a metadata-preserving example for manifest applications.
 
 Consult [adapter ingress capabilities](./adapters/overview#inbound-request-fidelity)
 before classifying a request using its target or duplicate headers.

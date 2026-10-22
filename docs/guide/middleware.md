@@ -58,7 +58,8 @@ middleware = [
 ]
 ```
 
-Middleware are applied in order before routes are matched.
+Middleware runs in registration order after a route matches, before its handler.
+Use a pre-dispatch hook for work that must happen before route lookup.
 
 ### Programmatically
 

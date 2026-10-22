@@ -14,6 +14,11 @@ The isolated Cargo workspace and npm lock pin fixture dependencies. Install
 Viceroy 0.21.0, Spin 4.1.0, worker-build 0.8.5 and wasm-bindgen CLI 0.2.128.
 The fixture manifest's `[package.metadata.request-fidelity]` is authoritative for
 Spin CLI and worker-build versions; the runner and CI read those pins.
+The runner uses `WASM_BINDGEN_BIN` when set, otherwise resolves `wasm-bindgen`
+from `PATH`, checks it against the fixture Cargo lock, and passes its absolute
+path to worker-build. An invalid override fails instead of falling back to a
+download. After `npm ci`, the runner requires the local esbuild binary, checks
+its npm-locked version, and passes it as `ESBUILD_BIN`.
 Wrangler 4.83.0 and its local workerd are installed by `npm ci`. Each runtime
 uses its own target directory, an ephemeral loopback port, bounded readiness
 and an owned process group that is cleaned up on success, failure or interruption.
@@ -34,8 +39,7 @@ cp /tmp/request-fidelity-observations.json tests/fixtures/request-fidelity/obser
 
 Recording a single platform emits only that platform; replacing the baseline
 with that output would discard the other platforms. A failed run may leave an
-empty output file. All 56 cases were freshly source-built and rerun with the versions above;
-the ordinary comparison matched the checked-in baseline.
+empty output file.
 A passing regression run includes explicitly reported unsupported cases; it
 does not establish consumer compliance or production wire preservation.
 Axum's real TCP ingress cases live alongside its request converter tests.

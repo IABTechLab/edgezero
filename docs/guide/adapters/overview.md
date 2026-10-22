@@ -198,8 +198,8 @@ values. Aggregate count equality cannot prove per-name multiplicity, and full
 global order is not established. Production verification remains pending.
 The matrix below shows observed runtime behavior, not `RequestIngress` guarantees.
 
-Local evidence below uses the listed SDK/runtime versions and freshly built
-raw HTTP/1.1 fixtures. All 56 recorded cases were rerun with the refreshed pins.
+The table reflects the checked-in `observations.json`;
+`./scripts/test-request-fidelity.sh all` compares against it exactly.
 These results describe the tested local runtimes; they do not establish
 production-edge behavior.
 

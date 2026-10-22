@@ -157,7 +157,7 @@ impl HeaderFidelity {
     }
 }
 
-/// Bounded validated origin facts supplied by a trusted adapter source.
+/// Bounded validated origin facts established by the adapter.
 ///
 /// Syntax validation does not make a forwarded header trustworthy. Adapters
 /// must establish provenance before calling the constructor.
@@ -342,7 +342,7 @@ impl RequestIngress {
         }
     }
 
-    /// Borrow the validated origin, when its trusted source is available.
+    /// Borrow the validated origin, when an adapter-established source is available.
     #[inline]
     #[must_use]
     pub const fn origin(&self) -> Option<&InboundOrigin> {

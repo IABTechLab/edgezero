@@ -73,7 +73,9 @@ jobs:
       # deploy fixture). A mismatch only surfaces as a confusing
       # "trait bound not satisfied" in a deploy smoke job, so gate it here.
       - name: Shared dependency pins agree
-        run: ./scripts/check_shared_dep_pins.sh
+        run: |
+          ./scripts/check_shared_dep_pins.sh
+          bash scripts/test_shared_dep_pins.sh
 
       - name: Nested AppConfig audit
         if: matrix.suite == 'cli'
@@ -337,15 +339,36 @@ jobs:
           ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
         run: cargo test -p edgezero-adapter-fastly --features fastly --target wasm32-wasip1 --lib
 
+      - name: Read fixture worker-build pin
+        if: matrix.adapter == 'cloudflare'
+        id: worker-build-pin
+        shell: bash
+        run: |
+          version="$(awk '/^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") } in_pins && $1 == "worker-build" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The pinned release has no Linux prebuilt. Keep its compiled executable
+      # separate from Cargo's broad bin cache and verify it on every restore.
+      - name: Cache pinned worker-build executable
+        if: matrix.adapter == 'cloudflare'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/worker-build
+          key: worker-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.worker-build-pin.outputs.version }}
+
       - name: Install lock-matched worker-build
         if: matrix.adapter == 'cloudflare'
         shell: bash
+        env:
+          VERSION: ${{ steps.worker-build-pin.outputs.version }}
         run: |
-          version="$(awk '$1 == "worker-build" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.toml)"
-          test -n "$version"
-          if [[ "$(worker-build --version 2>/dev/null || true)" != "$version" ]]; then
-            cargo install worker-build --version "$version" --locked --force
+          install_dir="$RUNNER_TEMP/worker-build"
+          if [[ "$("$install_dir/bin/worker-build" --version 2>/dev/null || true)" != "$VERSION" ]]; then
+            cargo install worker-build --version "$VERSION" --locked --root "$install_dir" --force
           fi
+          test "$("$install_dir/bin/worker-build" --version)" = "$VERSION"
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
 
       - name: Install pinned Spin HTTP runtime
         if: matrix.adapter == 'spin'

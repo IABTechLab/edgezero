@@ -110,6 +110,8 @@ done
 
 # Fixture SDKs must use the same resolved packages as the workspace. Check
 # both the exact manifest pins and the isolated lockfile, not just SDK majors.
+# SDK pins intentionally accept only spaced inline tables (`name = { ... }`);
+# other Cargo spellings fail closed rather than bypassing this guard.
 locked_version_in() {
   awk -v package="$2" '
     $0 == "[[package]]" { name=""; next }
@@ -126,11 +128,15 @@ fixture_lock="tests/fixtures/request-fidelity/Cargo.lock"
 for package in fastly worker wasm-bindgen spin-sdk; do
   want="$(locked_version_in Cargo.lock "$package")"
   pin="$(awk -v package="$package" '
-    $1 == package && $2 == "=" {
-      if (match($0, /version[[:space:]]*=[[:space:]]*"=[^"]+"/)) {
+    { sub(/[[:space:]]*#.*/, "") }
+    /^\[/ { in_deps=($0 == "[dependencies]") }
+    in_deps && $1 == package && $2 == "=" {
+      count++
+      if (match($0, /[,{][[:space:]]*version[[:space:]]*=[[:space:]]*"=[^"]+"/)) {
         version=substr($0, RSTART, RLENGTH)
         sub(/^[^"]*"=/, "", version); sub(/"$/, "", version)
-        count++; found=version
+        sub(/^[[:space:]]+/, "", version)
+        found=version
       }
     }
     END { if (count == 1) print found }
@@ -147,7 +153,13 @@ done
 
 # worker-build's release must match the fixture's Worker SDK, but its pin is
 # declared once in metadata and consumed by CI and the native runner.
-worker_build="$(awk '$1 == "worker-build" { gsub(/"/, "", $3); print $3; exit }' "$fixture_manifest")"
+worker_build="$(awk '
+  /^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") }
+  in_pins && $1 == "worker-build" && $2 == "=" {
+    value=$3; gsub(/"/, "", value); count++; found=value
+  }
+  END { if (count == 1) print found }
+' "$fixture_manifest")"
 worker_version="$(locked_version_in Cargo.lock worker)"
 if [[ -z "$worker_build" || "$worker_build" != "$worker_version" ]]; then
   echo "$fixture_manifest: violation: worker-build $worker_build, workspace worker is $worker_version"

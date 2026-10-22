@@ -151,7 +151,12 @@ struct OwnedProcess {
 impl OwnedProcess {
     fn spawn(command: &mut Command) -> io::Result<Self> {
         command.process_group(0).stdin(Stdio::null());
-        let child = command.spawn()?;
+        let child = command.spawn().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("{}: {error}", command.get_program().to_string_lossy()),
+            )
+        })?;
         let group = child.id();
         Ok(Self { child, group })
     }
@@ -207,10 +212,70 @@ fn command(fixture: &Path, program: &str, arguments: &[&str]) -> Command {
         .args(arguments)
         .current_dir(fixture)
         .env("WRANGLER_SEND_METRICS", "false");
-    if program == "worker-build" {
-        command.env("ESBUILD_BIN", fixture.join("node_modules/.bin/esbuild"));
+    command
+}
+
+fn configure_worker_build(
+    command: &mut Command,
+    fixture: &Path,
+    bindgen: &Path,
+    cancelled: &Cancelled,
+) -> io::Result<()> {
+    let lock: toml::Value = toml::from_str(&fs::read_to_string(fixture.join("Cargo.lock"))?)
+        .map_err(io::Error::other)?;
+    let versions: Vec<_> = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|package| package.get("name").and_then(toml::Value::as_str) == Some("wasm-bindgen"))
+        .filter_map(|package| package.get("version").and_then(toml::Value::as_str))
+        .collect();
+    let [version] = versions.as_slice() else {
+        return Err(io::Error::other(
+            "fixture lock requires one wasm-bindgen version",
+        ));
+    };
+    let bindgen = bindgen.canonicalize().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("wasm-bindgen {}: {error}", bindgen.display()),
+        )
+    })?;
+    verify_version(fixture, &bindgen.to_string_lossy(), version, cancelled)?;
+    let esbuild = fixture.join("node_modules/.bin/esbuild");
+    let esbuild = esbuild.canonicalize().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "npm-locked esbuild {}: {error}; run npm ci",
+                esbuild.display()
+            ),
+        )
+    })?;
+    let npm_lock: Value = serde_json::from_slice(&fs::read(fixture.join("package-lock.json"))?)
+        .map_err(io::Error::other)?;
+    let version = npm_lock
+        .pointer("/packages/node_modules~1esbuild/version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("missing npm-locked esbuild version"))?;
+    let actual = run_command(
+        fixture,
+        &esbuild.to_string_lossy(),
+        &["--version"],
+        cancelled,
+        true,
+    )?;
+    if actual.trim() != version {
+        return Err(io::Error::other(format!(
+            "esbuild requires version {version}; found {:?}",
+            actual.trim()
+        )));
     }
     command
+        .env("WASM_BINDGEN_BIN", bindgen)
+        .env("ESBUILD_BIN", esbuild);
+    Ok(())
 }
 
 fn run_command(
@@ -222,6 +287,18 @@ fn run_command(
 ) -> io::Result<String> {
     check_cancelled(cancelled)?;
     let mut command = command(fixture, program, arguments);
+    if program == "worker-build" && arguments != ["--version"] {
+        let bindgen = if let Some(path) = env::var_os("WASM_BINDGEN_BIN") {
+            PathBuf::from(path)
+        } else {
+            env::split_paths(&env::var_os("PATH").unwrap_or_default())
+                .map(|directory| directory.join("wasm-bindgen"))
+                .find(|path| path.is_file())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
+                    "wasm-bindgen not found on PATH; install the fixture-locked CLI or set WASM_BINDGEN_BIN"))?
+        };
+        configure_worker_build(&mut command, fixture, &bindgen, cancelled)?;
+    }
     // A file avoids pipe backpressure while waiting interruptibly for build tools.
     let mut output = tempfile::tempfile()?;
     command.stdout(output.try_clone()?);
@@ -255,7 +332,8 @@ fn verify_version(
     };
     if actual != expected {
         return Err(io::Error::other(format!(
-            "{program} requires version {expected}"
+            "{program} requires version {expected}; found {actual:?} (output: {:?})",
+            output.trim()
         )));
     }
     Ok(())
@@ -271,7 +349,7 @@ fn fixture_tool_pin(fixture: &Path, tool: &str) -> io::Result<String> {
         .and_then(|pins| pins.get(tool))
         .and_then(toml::Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| io::Error::other("missing fixture tool pin"))
+        .ok_or_else(|| io::Error::other(format!("missing fixture tool pin: {tool}")))
 }
 
 fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()> {
@@ -336,8 +414,9 @@ fn with_runtime_log<T>(
     output: &mut impl Write,
 ) -> io::Result<T> {
     if result.is_err()
-        && let Ok(log) = fs::read_to_string(log_path)
+        && let Ok(log) = fs::read(log_path)
     {
+        let log = String::from_utf8_lossy(&log);
         let _result = writeln!(output, "{log}");
     }
     result
@@ -1120,6 +1199,134 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn missing_program_diagnostic_names_the_executable() {
+        let program = "/missing-edgezero-runtime";
+        let error = OwnedProcess::spawn(&mut Command::new(program))
+            .err()
+            .expect("missing program must fail");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains(program));
+    }
+
+    #[test]
+    fn version_diagnostic_includes_expected_and_actual() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("tool directory");
+        let tool = directory.path().join("fixture-tool");
+        std::fs::write(&tool, "#!/bin/sh\necho 'fixture-tool 9.9.9'\n").expect("binary");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let error = super::verify_version(
+            directory.path(),
+            &tool.to_string_lossy(),
+            "expected-pin",
+            &cancelled,
+        )
+        .expect_err("wrong tool version");
+        assert!(error.to_string().contains("expected-pin"));
+        assert!(error.to_string().contains("9.9.9"));
+    }
+
+    #[test]
+    fn missing_tool_pin_names_the_tool() {
+        let directory = tempfile::tempdir().expect("temporary fixture");
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[package]\nname = 'fixture'\n",
+        )
+        .expect("manifest");
+        let error =
+            super::fixture_tool_pin(directory.path(), "worker-build").expect_err("missing pin");
+        assert!(error.to_string().contains("worker-build"));
+    }
+
+    #[test]
+    fn non_utf8_runtime_logs_are_printed_lossily() {
+        let directory = tempfile::tempdir().expect("temporary log");
+        let path = directory.path().join("runtime.log");
+        std::fs::write(&path, b"before\xffafter").expect("log bytes");
+        let mut output = Vec::new();
+        let error = super::with_runtime_log(
+            Err::<(), _>(io::Error::other("original failure")),
+            &path,
+            &mut output,
+        )
+        .expect_err("original error");
+        assert_eq!(error.to_string(), "original failure");
+        assert_eq!(
+            String::from_utf8(output).expect("lossy log"),
+            "before\u{fffd}after\n"
+        );
+    }
+
+    #[test]
+    fn worker_build_requires_locked_local_tools() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let fixture = directory.path();
+        std::fs::write(
+            fixture.join("Cargo.lock"),
+            "[[package]]\nname = 'wasm-bindgen'\nversion = '0.2.128'\n",
+        )
+        .expect("lock");
+        std::fs::write(
+            fixture.join("package-lock.json"),
+            r#"{"packages":{"node_modules/esbuild":{"version":"0.27.3"}}}"#,
+        )
+        .expect("npm lock");
+        let bindgen = fixture.join("wasm-bindgen");
+        std::fs::write(&bindgen, "#!/bin/sh\necho 'wasm-bindgen 0.2.128'\n").expect("binary");
+        std::fs::set_permissions(&bindgen, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut command = Command::new("worker-build");
+        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
+            .expect_err("missing npm-locked esbuild must not trigger a download");
+        assert!(error.to_string().contains("esbuild"));
+        let esbuild = fixture.join("node_modules/.bin/esbuild");
+        std::fs::create_dir_all(esbuild.parent().expect("parent")).expect("bin directory");
+        std::fs::write(&esbuild, "#!/bin/sh\necho '0.27.3'\n").expect("binary");
+        std::fs::set_permissions(&esbuild, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
+            .expect("pinned tools");
+        let envs: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs[std::ffi::OsStr::new("WASM_BINDGEN_BIN")],
+            Some(
+                bindgen
+                    .canonicalize()
+                    .expect("canonical binary")
+                    .as_os_str()
+            )
+        );
+        assert_eq!(
+            envs[std::ffi::OsStr::new("ESBUILD_BIN")],
+            Some(
+                esbuild
+                    .canonicalize()
+                    .expect("canonical binary")
+                    .as_os_str()
+            )
+        );
+        std::fs::write(&esbuild, "#!/bin/sh\necho '0.28.1'\n").expect("wrong esbuild");
+        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
+            .expect_err("reject unlocked esbuild");
+        assert!(error.to_string().contains("0.28.1"));
+        std::fs::write(&esbuild, "#!/bin/sh\necho '0.27.3'\n").expect("restore esbuild");
+        std::fs::write(&bindgen, "#!/bin/sh\necho 'wasm-bindgen 0.2.127'\n").expect("wrong tool");
+        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
+            .expect_err("reject wrong bindgen");
+        assert!(error.to_string().contains("0.2.127"));
+        std::fs::remove_file(&bindgen).expect("remove tool");
+        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
+            .expect_err("missing override must fail instead of downloading");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("wasm-bindgen"));
+    }
 
     #[test]
     fn diagnostic_failures_preserve_the_original_runtime_error() {

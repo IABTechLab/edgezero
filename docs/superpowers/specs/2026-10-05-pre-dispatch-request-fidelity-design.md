@@ -10,7 +10,7 @@
 
 Applications need to intercept a reserved namespace independently of the registered method/path routes, before router-owned state, introspection, request context and middleware run. A consumer must be able to authenticate a reserved request and return its own complete response even when its method has no registered handler.
 
-At the historical planning baseline the router performed `find_route` first. Middleware therefore cannot reliably authenticate a reserved request before router-generated 404/405 errors. Adapter conversion also changes information that a strict consumer may need: Cloudflare previously reduced extension methods to GET and previously converted Worker UTF-8 strings as ByteString; some runtimes normalize URLs or combine repeated fields before EdgeZero sees them.
+At the historical planning baseline the router performed `find_route` first. Middleware therefore cannot reliably authenticate a reserved request before router-generated 404/405 errors. Adapter conversion also changes information that a strict consumer may need: Cloudflare previously reduced extension methods to GET; header values were already copied as UTF-8 strings, with invalid values failing as internal errors; some runtimes normalize URLs or combine repeated fields before EdgeZero sees them.
 
 Provide one optional generic pre-dispatch hook, preserve runtime-visible method/target/header data without additional avoidable loss, and expose explicit fidelity information. Preserve the concrete `RouterService` and existing routes when no hook is installed. This is toolkit infrastructure, not an implementation of Trusted Server tracing.
 
@@ -43,7 +43,7 @@ Excluded: trace routes/cookies/schema/CSP/authentication policy, EC/EID processi
 This table describes the pre-implementation checkout, not current dependencies.
 The matching plan records current pins and verification requirements.
 
-| Surface    | Planning source                                                           | Consequence                                                                                                                                                            |
+| Surface    | Planning source                                                          | Consequence                                                                                                                                                            |
 | ---------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Router     | `crates/edgezero-core/src/router.rs`, `RouterInner::dispatch`            | Lookup precedes state/introspection/context/middleware; no interception hook exists.                                                                                   |
 | Bootstrap  | `crates/edgezero-core/src/app.rs`; `crates/edgezero-macros/src/app.rs`   | `Hooks::routes`, `App` and generated routers use `RouterService`; retain that type.                                                                                    |
@@ -51,7 +51,7 @@ The matching plan records current pins and verification requirements.
 | Cloudflare | `crates/edgezero-adapter-cloudflare/src/request.rs`, `into_core_request` | `req.method()` is a closed Workers enum; extension methods become GET. `req.url()` parses the runtime URL again. Header entries become Rust strings. Body is buffered. |
 | Axum       | `crates/edgezero-adapter-axum/src/request.rs`                            | `Request::from_parts` preserves the incoming `http::Uri` and `HeaderMap`. Hyper may already reject/fold fields; JSON bodies are buffered.                              |
 | Spin       | `crates/edgezero-adapter-spin/src/request.rs`                            | SDK request parts contain runtime URI and byte-oriented headers. Original wire interleaving is already unavailable in `HeaderMap`. Body is buffered.                   |
-| Pins       | `Cargo.lock`                                                             | The planning checkout pinned Worker 0.8.3, Fastly 0.12.1 and wasm-bindgen 0.2.122. The matching plan supersedes these pins with the dependency refresh.             |
+| Pins       | `Cargo.lock`                                                             | The planning checkout pinned Worker 0.8.3, Fastly 0.12.1 and wasm-bindgen 0.2.122. The matching plan supersedes these pins with the dependency refresh.                |
 
 Fastly SDK `RequestHandle::get_url` calls `uri_get` then `Url::parse`. Its request handle getter is private; the public consuming handle round trip rebuilds the request without original client provenance, changing IP/TLS/original-header accessors. It is not an acceptable raw-target workaround. A safe borrowed SDK accessor is an external prerequisite for an original-target claim.
 
@@ -140,7 +140,7 @@ Do not turn optional target-capture failure into an unrelated new ordinary-reque
 - Preserve `req.get_method()` and existing byte-oriented repeated header conversion.
 - Add a reusable `capture_request_ingress(&fastly::Request) -> RequestIngress` helper in the Fastly request module. A consumer calls it before native health/debug shortcuts or mutations. Record the raw-target capture result before reading the SDK URL. With the current missing accessor, retain `NotExposed`, then recover canonical origin separately from the runtime URL plus exactly one valid, consistent Host on a native client request. URL normalization is acceptable for origin acquisition only; it never proves original pathname preservation. Use `RuntimeUri` provenance and do not infer HTTP from missing TLS metadata. Supplied snapshots remain caller assertions and are retained through subsequent mutation.
 - With current SDK, mark original target unavailable or runtime-normalized/unknown; do not call `get_url_str` “raw”.
-- Obtain a reviewed safe SDK accessor that borrows the original request, reads the runtime target before `Url::parse` and preserves client provenance. Pin the resolved compatible SDK revision/version; do not fabricate one or add a local Cargo-cache patch.
+- Future work: once a reviewed safe SDK accessor exists that borrows the original request, reads the runtime target before `Url::parse` and preserves client provenance, pin its compatible SDK revision/version and add evidence. Do not fabricate one or add a local Cargo-cache patch.
 - Do not use consuming handle round trips, clone_without_body, raw pointers or a new unsafe fastly-sys wrapper to bypass the SDK gate.
 - After the accessor exists, parse scheme/authority without normalizing the captured path. Prove encoded separators/dot segments/repeated separators survive in metadata and that client IP/TLS accessors retain behavior.
 - Runtime header bytes and same-name order must be tested. `get_original_header_names()` and `get_original_header_count()` expose name order and total count, not original field/value association. Local Viceroy lowercases and deduplicates names. Report global order Unknown pending production verification; aggregate count equality cannot prove per-name multiplicity. Do not reconstruct fields from mismatched/FIFO guesses.
@@ -189,7 +189,7 @@ Initial investigation, not a verified release matrix:
 | Original field multiplicity        | Runtime proof required                | Fetch coalescing can make it unavailable               | Per-field parser limits, especially Content-Length | Runtime/SDK proof required   |
 | Original global wire order         | Not implied by grouped iteration      | Unavailable after sorted/combined entries              | Not retained by HeaderMap                          | Not retained by HeaderMap    |
 
-The release matrix records established guarantees and unresolved limits. Unknown is a valid conservative metadata value; it does not prove preservation or satisfy a consumer requirement for original-wire equality.
+The release matrix records observed behavior and unresolved limits. Unknown is a valid conservative metadata value; it does not prove preservation or satisfy a consumer requirement for original-wire equality.
 
 Two completion claims are distinct:
 
