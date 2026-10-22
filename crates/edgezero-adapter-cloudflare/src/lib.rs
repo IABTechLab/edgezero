@@ -23,6 +23,9 @@ pub mod request;
 pub mod response;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 pub mod secret_store;
+#[cfg(test)]
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+mod test_runtime;
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::app::StoresMetadata;

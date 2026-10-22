@@ -572,6 +572,9 @@ fn validate_empty_signal(name: &str, framing: net::Framing, probe: &Value) -> Re
 }
 
 fn checks(name: &str, port: u16, revision: &str, records: &mut Records) -> Result<()> {
+    if name == "spin" {
+        source_diagnostic_checks(port, records)?;
+    }
     let control_passes = if name == "spin" {
         response_controls(name, port, revision, records)?
     } else {
@@ -663,6 +666,27 @@ fn checks(name: &str, port: u16, revision: &str, records: &mut Records) -> Resul
             && (name != "spin" || control_passes == 4),
         "SDK progress or empty-body characterization has failed cases; see recorded observations",
     )
+}
+
+fn source_diagnostic_checks(port: u16, records: &mut Records) -> Result<()> {
+    let reply = net::request(
+        port,
+        "/progress/sdk-source-diagnostics",
+        &token(),
+        None,
+        None,
+    )?;
+    let probe = guest(&reply)?;
+    let result = require(
+        reply["status"] == 200
+            && probe == json!({"source_diagnostics":"pass", "cases":8, "qualification":false}),
+        "Spin SDK source diagnostic race changed",
+    );
+    records.push(
+        json!({"event":"source-diagnostic-race", "adapter":"spin", "cases":8,
+        "status":if result.is_ok(){"pass"}else{"fail"}, "client":reply, "qualification":false}),
+    )?;
+    result
 }
 
 fn response_controls(

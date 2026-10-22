@@ -207,6 +207,15 @@ pub struct ResponseEgressReport {
     pub outcome: ResponseEgressOutcome,
     pub request_start: MonotonicInstant,
     pub route: Option<RouteMetadata>,
+    pub source_failure: Option<ResponseEgressSourceFailure>,
+}
+
+pub struct ResponseEgressSourceFailure { /* fixed-size, text-free, Copy snapshot */ }
+
+impl ResponseEgressSourceFailure {
+    pub fn body_kind(&self) -> ResponseEgressBodyKind;
+    pub fn category(&self) -> &'static str;
+    pub fn provider_failure_detail(&self) -> Option<&ProviderFailureDetail>;
 }
 
 pub struct ResponseEgressCompletion { /* non-clone callback owner */ }
@@ -319,6 +328,18 @@ a terminal report. Standard adapters must call `begin()` exactly once for every 
 response requires `begin()`, which first transfers the completion into the attempt. Dropping an
 unbegun envelope is permitted only as cancellation before transmission; it releases the resource
 without exposing the response or inventing a report.
+
+`ResponseEgressAttempt::record_source_error(&EdgeError)` records only the first converter-observed
+body-source error as a fixed category, copied optional provider detail and observation-time body
+kind. It performs no clock read, allocation, source poll, state transition or callback. A first
+observation without provider detail cannot be replaced by a later one, and a terminal attempt
+rejects recording. Completion and observer receive the same snapshot. The snapshot is not the
+terminal cause: existing deadline/cancellation precedence still wins, and an application-source
+failure keeps its `Application` tag even if fallback is delivered. A successfully delivered
+rendered application error, clean EOF or transport-only failure does not create a source failure.
+All four converters record before post-ready arbitration, including inside the Cloudflare/Spin
+source races; no unobserved error is reconstructed. Exact report literals must add the optional
+field. This does not implement typed framing reasons or strengthen capability/evidence claims.
 
 The response-scoped completion runs before the global observer. Each completion child and the
 observer are isolated by independent unwind boundaries: a completion panic is logged with a

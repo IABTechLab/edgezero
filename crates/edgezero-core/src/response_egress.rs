@@ -5,8 +5,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use crate::error::EdgeError;
+use crate::error_detail::ProviderFailureDetail;
 use crate::http::{HeaderMap, Method, Response, StatusCode, Version};
-use crate::response_egress_framing::{PreparedResponseEgress, prepare_response_egress};
+use crate::response_egress_framing::{
+    PreparedResponseEgress, prepare_response_egress, response_egress_source_error_category,
+};
 use crate::router::RouteMetadata;
 use crate::time::{DEADLINE_FAR_FUTURE, Deadline, MonotonicClock, MonotonicInstant};
 
@@ -298,6 +302,40 @@ pub struct ResponseEgressReport {
     pub outcome: ResponseEgressOutcome,
     pub request_start: MonotonicInstant,
     pub route: Option<RouteMetadata>,
+    /// First converter-observed body-source error, independent of the terminal outcome.
+    pub source_failure: Option<ResponseEgressSourceFailure>,
+}
+
+/// Text-free snapshot of a body-source error observed during response conversion.
+///
+/// This is observation evidence, not the terminal cause. A deadline/cancellation can still win,
+/// and an application-body observation remains tagged as such when fallback delivery follows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseEgressSourceFailure {
+    body_kind: ResponseEgressBodyKind,
+    category: &'static str,
+    provider_detail: Option<ProviderFailureDetail>,
+}
+
+impl ResponseEgressSourceFailure {
+    #[must_use]
+    #[inline]
+    pub const fn body_kind(&self) -> ResponseEgressBodyKind {
+        self.body_kind
+    }
+
+    /// Returns the existing fixed source-error category, never its message or provider text.
+    #[must_use]
+    #[inline]
+    pub const fn category(&self) -> &'static str {
+        self.category
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn provider_failure_detail(&self) -> Option<&ProviderFailureDetail> {
+        self.provider_detail.as_ref()
+    }
 }
 
 type ResponseEgressCompletionCallback = Box<dyn FnOnce(&ResponseEgressReport) + Send + 'static>;
@@ -760,6 +798,7 @@ pub struct ResponseEgressAttempt {
     observer: ResponseEgressObserverHandle,
     request_start: MonotonicInstant,
     route: Option<RouteMetadata>,
+    source_failure: Option<ResponseEgressSourceFailure>,
     state: AttemptState,
 }
 
@@ -886,8 +925,26 @@ impl ResponseEgressAttempt {
             observer,
             request_start: head.request_start(),
             route: head.route().cloned(),
+            source_failure: None,
             state: AttemptState::Initial,
         }
+    }
+
+    /// Retains the first body-source error without changing state, clocks or terminal outcome.
+    ///
+    /// Returns false after an observation or terminal transition. Missing provider detail is
+    /// meaningful and is never replaced by evidence from a later source or fallback body.
+    #[inline]
+    pub fn record_source_error(&mut self, error: &EdgeError) -> bool {
+        if self.source_failure.is_some() || matches!(self.state, AttemptState::Terminal(_)) {
+            return false;
+        }
+        self.source_failure = Some(ResponseEgressSourceFailure {
+            body_kind: self.body_kind,
+            category: response_egress_source_error_category(error),
+            provider_detail: error.provider_failure_detail().copied(),
+        });
+        true
     }
 
     /// Terminalizes an attempt with the supplied outcome.
@@ -943,6 +1000,7 @@ impl ResponseEgressAttempt {
             outcome,
             request_start: self.request_start,
             route: self.route.clone(),
+            source_failure: self.source_failure,
         };
         self.state = AttemptState::Terminal(report);
         if let AttemptState::Terminal(terminal_report) = &self.state {
@@ -1008,6 +1066,8 @@ mod tests {
 
     use super::*;
     use crate::body::Body;
+    use crate::error::{BadGatewayReason, EdgeError};
+    use crate::error_detail::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
     use crate::http::{HeaderMap, HeaderValue, Method, StatusCode, Version, response_builder};
     use crate::router::RouteMetadata;
     use crate::time::{DEADLINE_FAR_FUTURE, Deadline, MonotonicClock, MonotonicInstant};
@@ -1098,6 +1158,7 @@ mod tests {
             outcome: ResponseEgressOutcome::Completed,
             request_start,
             route: None,
+            source_failure: None,
         }
     }
 
@@ -1114,6 +1175,170 @@ mod tests {
             ResponseEgressObserverHandle::new(observer.clone()),
             MonotonicClock::default(),
         )
+    }
+
+    #[test]
+    fn provider_diagnostics_reach_completion_and_observer_without_terminal_changes() {
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::ConnectionTerminated,
+        };
+        for with_detail in [false, true] {
+            for (fallback_stage, observed_body, terminal_outcome) in [
+                (
+                    0_u8,
+                    ResponseEgressBodyKind::Application,
+                    ResponseEgressOutcome::SourceError,
+                ),
+                (
+                    1,
+                    ResponseEgressBodyKind::Application,
+                    ResponseEgressOutcome::ConversionError,
+                ),
+                (
+                    2,
+                    ResponseEgressBodyKind::Fallback,
+                    ResponseEgressOutcome::ConversionError,
+                ),
+            ] {
+                let observer = RecordingObserver::default();
+                let completed = Arc::new(Mutex::new(Vec::new()));
+                let completed_reports = Arc::clone(&completed);
+                let started_at = MonotonicInstant::now();
+                let headers = HeaderMap::new();
+                let mut attempt = ResponseEgressAttempt::new(
+                    &head(&headers, started_at, None),
+                    started_at,
+                    ResponseEgressCompletion::new(move |report| {
+                        completed_reports
+                            .lock()
+                            .expect("completed reports")
+                            .push(report.clone());
+                    }),
+                    ResponseEgressObserverHandle::new(observer.clone()),
+                    MonotonicClock::new(move || started_at),
+                );
+                if fallback_stage == 2 {
+                    assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
+                }
+                let error = if with_detail {
+                    EdgeError::bad_gateway_with_detail(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                        detail,
+                    )
+                } else {
+                    EdgeError::bad_gateway_with_reason(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                    )
+                };
+                assert!(attempt.record_source_error(&error));
+                assert!(
+                    !attempt.record_source_error(&EdgeError::bad_gateway_with_detail(
+                        "different-secret",
+                        BadGatewayReason::Unreachable,
+                        ProviderFailureDetail::Fastly {
+                            phase: ProviderFailurePhase::Send,
+                            cause: FastlyFailureCause::DnsTimeout
+                        },
+                    ))
+                );
+                if fallback_stage == 1 {
+                    assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
+                }
+                assert!(attempt.begin_writing());
+                if fallback_stage == 0 {
+                    assert!(attempt.terminate(ResponseEgressOutcome::SourceError, started_at));
+                } else {
+                    assert!(
+                        attempt.finish_fallback(
+                            ResponseEgressFallbackDisposition::Completed,
+                            started_at
+                        )
+                    );
+                }
+                assert!(!attempt.record_source_error(&error));
+                assert!(!attempt.terminate(ResponseEgressOutcome::TransportError, started_at));
+                drop(attempt);
+                let reports = observer.reports();
+                assert_eq!(reports.len(), 1);
+                assert_eq!(*completed.lock().expect("completion"), reports);
+                let failure = reports[0].source_failure.as_ref().expect("source failure");
+                assert_eq!(failure.category(), "bad_gateway_transport");
+                assert_eq!(
+                    failure.provider_failure_detail(),
+                    with_detail.then_some(&detail)
+                );
+                assert_eq!(failure.body_kind(), observed_body);
+                assert!(!format!("{failure:?}").contains("secret"));
+                assert_eq!(reports[0].outcome, terminal_outcome);
+                assert_eq!(reports[0].bytes_written, 0);
+                assert_eq!(reports[0].elapsed, Duration::ZERO);
+            }
+        }
+    }
+
+    #[test]
+    fn recording_source_failure_has_no_clock_or_terminal_side_effects() {
+        for writing in [false, true] {
+            let now = MonotonicInstant::now();
+            let reads = Arc::new(AtomicUsize::new(0));
+            let clock_reads = Arc::clone(&reads);
+            let clock = MonotonicClock::new(move || {
+                clock_reads.fetch_add(1, Ordering::SeqCst);
+                now
+            });
+            let observer = RecordingObserver::default();
+            let headers = HeaderMap::new();
+            let mut attempt = ResponseEgressAttempt::new(
+                &head(&headers, now, None),
+                now,
+                ResponseEgressCompletion::empty(),
+                ResponseEgressObserverHandle::new(observer.clone()),
+                clock,
+            );
+            if writing {
+                assert!(attempt.begin_writing());
+            }
+            assert!(
+                attempt.record_source_error(&EdgeError::internal(anyhow::anyhow!(
+                    "provider-secret-token"
+                )))
+            );
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            assert!(observer.reports().is_empty());
+            drop(attempt);
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+            let reports = observer.reports();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(
+                reports[0].outcome,
+                if writing {
+                    ResponseEgressOutcome::TransportError
+                } else {
+                    ResponseEgressOutcome::ConversionError
+                }
+            );
+            let failure = reports[0].source_failure.as_ref().expect("source failure");
+            assert_eq!(failure.category(), "internal");
+            assert!(failure.provider_failure_detail().is_none());
+            assert!(!format!("{failure:?}").contains("secret"));
+        }
+    }
+
+    #[test]
+    fn terminal_without_source_failure_rejects_later_observation() {
+        let observer = RecordingObserver::default();
+        let now = MonotonicInstant::now();
+        let mut attempt = attempt(&observer, now);
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(now));
+        assert!(!attempt.record_source_error(&EdgeError::bad_gateway("later-secret")));
+        drop(attempt);
+        let reports = observer.reports();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].source_failure.is_none());
     }
 
     #[test]

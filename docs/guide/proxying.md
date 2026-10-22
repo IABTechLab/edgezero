@@ -87,8 +87,19 @@ Spin preserves all five header-error categories and the rejected timeout option,
 `Other` messages. Unit-returning target setters record component rejection without fabricating
 an HTTP transport error code. Unsupported timeout options remain advisory successes.
 Shared response-header conversion is not labeled as request preparation, and local validation
-does not invent provider evidence. Observer/framing integration, diagnostic capability publication
-and hosted qualification remain open; this checkpoint does not strengthen transport guarantees.
+does not invent provider evidence.
+
+Response completion callbacks and observers receive the same immutable
+`ResponseEgressReport::source_failure` snapshot. It retains only the first converter-observed
+body-source error's fixed category, optional provider detail and observation-time body kind.
+A first error without provider detail is still an observation; later errors cannot replace it.
+This is not the terminal cause: deadline or cancellation may win after a source error becomes
+ready, and an application-body observation remains tagged `Application` through fallback delivery.
+Recording adds no clock samples, source polls, callbacks or wire diagnostics. Rendered application
+errors delivered successfully, clean EOF, and transport-only failures do not invent source errors.
+Exact report literals must add `source_failure: None` when there is no observation; there is no
+old-shape compatibility API. Typed framing reasons, diagnostic capability publication and hosted
+qualification remain open; this checkpoint does not strengthen transport guarantees.
 
 `ResponseDecoding::Original` preserves encoded payload bytes and the representation headers
 that survive ordinary normalization. It does not restore hop-by-hop or invalid fields. Use it

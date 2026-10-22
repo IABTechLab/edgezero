@@ -132,6 +132,7 @@ trait CloudflareEgressIo {
         source: &mut BodyStream,
         deadline: Deadline,
         clock: &MonotonicClock,
+        attempt: &mut ResponseEgressAttempt,
     ) -> Result<Option<Result<Bytes, EdgeError>>, IoFailureKind>;
 
     fn preflight(&self, deadline: Deadline, clock: &MonotonicClock) -> Result<(), IoFailureKind>;
@@ -183,10 +184,11 @@ where
     ensure_deadline(deadline, clock)?;
     let mut source = body_source(body);
     loop {
-        let next = io
-            .next_body(&mut source, deadline, clock)
-            .await
-            .map_err(IoFailureKind::delivery_error)?;
+        let observed = io.next_body(&mut source, deadline, clock, attempt).await;
+        if let Ok(Some(Err(error))) = &observed {
+            attempt.record_source_error(error);
+        }
+        let next = observed.map_err(IoFailureKind::delivery_error)?;
         ensure_deadline(deadline, clock)?;
         let Some(item) = next else {
             break;
@@ -441,7 +443,8 @@ mod platform {
     use std::future::Future;
     use std::sync::Arc;
 
-    use edgezero_core::response_egress::ResponseEgressEnvelope;
+    use edgezero_core::response_egress::{ResponseEgressAttempt, ResponseEgressEnvelope};
+    use futures_util::FutureExt as _;
     use futures_util::StreamExt as _;
     use futures_util::future::{Either, select};
     use worker::js_sys::{BigInt, Uint8Array};
@@ -670,9 +673,23 @@ mod platform {
             source: &mut BodyStream,
             deadline: Deadline,
             clock: &MonotonicClock,
+            attempt: &mut ResponseEgressAttempt,
         ) -> Result<Option<Result<Bytes, EdgeError>>, IoFailureKind> {
             Delay::from(Duration::ZERO).await;
-            match race_operation(|| source.next(), deadline, clock, &self.signal).await {
+            match race_operation(
+                || {
+                    source.next().inspect(move |item| {
+                        if let Some(Err(error)) = item {
+                            attempt.record_source_error(error);
+                        }
+                    })
+                },
+                deadline,
+                clock,
+                &self.signal,
+            )
+            .await
+            {
                 RaceEvent::Cancelled => Err(IoFailureKind::Cancelled),
                 RaceEvent::Deadline => Err(IoFailureKind::Deadline),
                 RaceEvent::Operation {
@@ -799,12 +816,179 @@ mod platform {
     mod race_tests {
         use std::cell::Cell;
         use std::rc::Rc;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+        use edgezero_core::error::BadGatewayReason;
+        use edgezero_core::error_detail::{
+            CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+        use edgezero_core::http::Version;
+        use edgezero_core::response_egress::{
+            ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressHead,
+            ResponseEgressObserverHandle, ResponseEgressOutcome, ResponseEgressReport,
+        };
         use edgezero_core::time::MonotonicInstant;
-        use futures_util::future;
+        use futures_util::{future, stream};
         use wasm_bindgen_test::wasm_bindgen_test;
 
         use super::*;
+        use crate::test_runtime::NumericTimeoutGuard;
+
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum SourceCase {
+            AlreadyAborted,
+            AlreadyExpired,
+            Eof,
+            Ready,
+            ReadyAborted,
+            ReadyExpired,
+        }
+
+        async fn observed_source(
+            case: SourceCase,
+            with_detail: bool,
+        ) -> (ResponseEgressReport, usize) {
+            let controller = web_sys::AbortController::new().expect("controller");
+            if case == SourceCase::AlreadyAborted {
+                controller.abort();
+            }
+            let now = MonotonicInstant::now();
+            let deadline = now.checked_add(Duration::from_secs(10)).expect("deadline");
+            let expired = Arc::new(AtomicBool::new(case == SourceCase::AlreadyExpired));
+            let clock_expired = Arc::clone(&expired);
+            let clock = MonotonicClock::new(move || {
+                if clock_expired.load(Ordering::SeqCst) {
+                    deadline
+                } else {
+                    now
+                }
+            });
+            let polls = Arc::new(AtomicUsize::new(0));
+            let source_polls = Arc::clone(&polls);
+            let body_controller = controller.clone();
+            let mut source = if case == SourceCase::Eof {
+                stream::empty().boxed_local()
+            } else {
+                stream::once(async move {
+                    source_polls.fetch_add(1, Ordering::SeqCst);
+                    expired.store(case == SourceCase::ReadyExpired, Ordering::SeqCst);
+                    if case == SourceCase::ReadyAborted {
+                        body_controller.abort();
+                    }
+                    let detail = ProviderFailureDetail::Cloudflare {
+                        phase: ProviderFailurePhase::ResponseBodyRead,
+                        cause: CloudflareFailureCause::TypeError,
+                    };
+                    Err(if with_detail {
+                        EdgeError::bad_gateway_with_detail(
+                            "provider-secret-token",
+                            BadGatewayReason::Transport,
+                            detail,
+                        )
+                    } else {
+                        EdgeError::bad_gateway_with_reason(
+                            "provider-secret-token",
+                            BadGatewayReason::Transport,
+                        )
+                    })
+                })
+                .boxed_local()
+            };
+            let reports = Arc::new(Mutex::new(Vec::new()));
+            let completed = Arc::clone(&reports);
+            let headers = HeaderMap::new();
+            let head = ResponseEgressHead::new(
+                StatusCode::OK,
+                Version::HTTP_11,
+                &headers,
+                None,
+                now,
+                None,
+            );
+            let mut attempt = ResponseEgressAttempt::new(
+                &head,
+                now,
+                ResponseEgressCompletion::new(move |report| {
+                    completed.lock().expect("reports").push(report.clone());
+                }),
+                ResponseEgressObserverHandle::default(),
+                clock.clone(),
+            );
+            assert!(attempt.begin_writing());
+            let mut io = WorkersEgressIo {
+                signal: controller.signal().into(),
+                writer: None,
+            };
+            let timers = NumericTimeoutGuard::install();
+            let result = io
+                .next_body(
+                    &mut source,
+                    Deadline::at_instant(deadline),
+                    &clock,
+                    &mut attempt,
+                )
+                .await;
+            drop(timers);
+            let outcome = match result {
+                Ok(Some(Err(_))) => ResponseEgressOutcome::SourceError,
+                Ok(None) => ResponseEgressOutcome::Completed,
+                Err(IoFailureKind::Deadline) => ResponseEgressOutcome::DeadlineExceeded,
+                Err(IoFailureKind::Cancelled) => ResponseEgressOutcome::RequestCancelled,
+                _ => panic!("unexpected source result"),
+            };
+            assert!(attempt.terminate(outcome, clock.now()));
+            drop(attempt);
+            let retained = reports.lock().expect("reports");
+            assert_eq!(retained.len(), 1);
+            (retained[0].clone(), polls.load(Ordering::SeqCst))
+        }
+
+        #[wasm_bindgen_test]
+        async fn provider_diagnostics_survive_real_source_race_preemption() {
+            for case in [
+                SourceCase::AlreadyAborted,
+                SourceCase::AlreadyExpired,
+                SourceCase::Eof,
+                SourceCase::Ready,
+                SourceCase::ReadyAborted,
+                SourceCase::ReadyExpired,
+            ] {
+                for with_detail in [false, true] {
+                    let (report, polls) = observed_source(case, with_detail).await;
+                    let observed = matches!(
+                        case,
+                        SourceCase::Ready | SourceCase::ReadyAborted | SourceCase::ReadyExpired
+                    );
+                    assert_eq!(polls, usize::from(observed));
+                    assert_eq!(
+                        report.outcome,
+                        match case {
+                            SourceCase::AlreadyAborted | SourceCase::ReadyAborted =>
+                                ResponseEgressOutcome::RequestCancelled,
+                            SourceCase::AlreadyExpired | SourceCase::ReadyExpired =>
+                                ResponseEgressOutcome::DeadlineExceeded,
+                            SourceCase::Eof => ResponseEgressOutcome::Completed,
+                            SourceCase::Ready => ResponseEgressOutcome::SourceError,
+                        }
+                    );
+                    assert_eq!(report.source_failure.is_some(), observed);
+                    if let Some(failure) = report.source_failure {
+                        assert_eq!(failure.category(), "bad_gateway_transport");
+                        assert_eq!(failure.body_kind(), ResponseEgressBodyKind::Application);
+                        let expected = ProviderFailureDetail::Cloudflare {
+                            phase: ProviderFailurePhase::ResponseBodyRead,
+                            cause: CloudflareFailureCause::TypeError,
+                        };
+                        assert_eq!(
+                            failure.provider_failure_detail(),
+                            with_detail.then_some(&expected)
+                        );
+                        assert!(!format!("{failure:?}").contains("secret"));
+                    }
+                }
+            }
+        }
 
         #[wasm_bindgen_test]
         async fn response_egress_preflight_precedes_writer_operation() {
@@ -914,6 +1098,7 @@ mod tests {
             source: &mut BodyStream,
             _deadline: Deadline,
             _clock: &MonotonicClock,
+            _attempt: &mut ResponseEgressAttempt,
         ) -> Result<Option<Result<Bytes, EdgeError>>, IoFailureKind> {
             Ok(source.next().await)
         }
@@ -1044,6 +1229,91 @@ mod tests {
     fn policy(deadline: MonotonicInstant) -> ResponseEgressPolicy {
         ResponseEgressPolicy {
             write_deadline: Deadline::at_instant(deadline),
+        }
+    }
+
+    #[test]
+    fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
+        use edgezero_core::error::BadGatewayReason;
+        use edgezero_core::error_detail::{
+            CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let detail = ProviderFailureDetail::Cloudflare {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: CloudflareFailureCause::TypeError,
+        };
+        for with_detail in [false, true] {
+            for late in [false, true] {
+                let now = MonotonicInstant::now();
+                let deadline = now.checked_add(Duration::from_secs(10)).expect("deadline");
+                let expired = Arc::new(AtomicBool::new(false));
+                let clock_expired = Arc::clone(&expired);
+                let clock = MonotonicClock::new(move || {
+                    if clock_expired.load(Ordering::SeqCst) {
+                        deadline
+                    } else {
+                        now
+                    }
+                });
+                let error = if with_detail {
+                    EdgeError::bad_gateway_with_detail(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                        detail,
+                    )
+                } else {
+                    EdgeError::bad_gateway_with_reason(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                    )
+                };
+                let body = Body::from_stream(stream::once(async move {
+                    expired.store(late, Ordering::SeqCst);
+                    Err(error)
+                }));
+                let observer = RecordingObserver::default();
+                let mut attempt = attempt(&observer, now);
+                assert!(attempt.begin_writing());
+                let (committer, state) = MockCommitter::new();
+                let io = MockIo {
+                    close_error: None,
+                    preflight_error: None,
+                    state: Rc::clone(&state),
+                    writes: committer.writes,
+                };
+                let result = block_on(transmit_committed(
+                    body,
+                    policy(deadline),
+                    attempt,
+                    clock,
+                    EgressKind::Application,
+                    io,
+                ));
+                assert!(result.is_err());
+                let reports = observer.reports();
+                assert_eq!(reports.len(), 1);
+                assert_eq!(
+                    reports[0].outcome,
+                    if late {
+                        ResponseEgressOutcome::DeadlineExceeded
+                    } else {
+                        ResponseEgressOutcome::SourceError
+                    }
+                );
+                let failure = reports[0]
+                    .source_failure
+                    .as_ref()
+                    .expect("source observation");
+                assert_eq!(failure.category(), "bad_gateway_transport");
+                assert_eq!(
+                    failure.provider_failure_detail(),
+                    with_detail.then_some(&detail)
+                );
+                assert!(!format!("{failure:?}").contains("secret"));
+                assert_eq!(state.borrow().aborts, 1);
+            }
         }
     }
 

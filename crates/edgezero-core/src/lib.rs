@@ -113,7 +113,8 @@ pub use response_egress::{
     ResponseEgressEnvelope, ResponseEgressFallbackDisposition, ResponseEgressHead,
     ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressOutcome,
     ResponseEgressPolicy, ResponseEgressPolicyCallback, ResponseEgressReport,
-    ResponseEgressResource, ResponseEgressResourceInstallError, default_response_egress_policy,
+    ResponseEgressResource, ResponseEgressResourceInstallError, ResponseEgressSourceFailure,
+    default_response_egress_policy,
 };
 pub use router::{ResolvedDispatch, RouteId, RouteInfo, RouteMetadata, RouteResolution};
 pub use time::{

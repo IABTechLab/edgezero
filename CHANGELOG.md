@@ -255,8 +255,14 @@ separately from the portable API and must be considered when declaring required 
   timeout, including bounded response collection. Record Cloudflare constructor/header/setup
   failures and Spin's five header errors, typed timeout-option rejections and unit-returning
   target rejections as `RequestPreparation`. Keep SDK-erased causes Unknown, advisory timeout
-  options successful, and shared response conversion unmodified. Observer/framing integration,
-  diagnostic capability publication and hosted qualification remain follow-up work.
+  options successful, and shared response conversion unmodified. Retain the first observed
+  body-source failure in `ResponseEgressReport::source_failure` on all four adapters. Completion
+  and observer receive the same bounded category/provider snapshot and original body tag, even
+  if a deadline, cancellation or fallback wins. Recording changes no polling, clocks, terminal
+  precedence or wire bytes. Rendered application errors and transport-only failures are not
+  source failures. Exact report literals must add the new optional field; no compatibility
+  shape remains. Typed framing reasons, diagnostic capability publication and hosted qualification
+  remain follow-up work.
 - Correct Fastly lifecycle test-helper gating so plain `fastly` WASM unit builds retain the
   required-store failure regression without enabling `test-utils` or changing production behavior.
 - Hard-cut exact field construction/matching of `EdgeError::{BadGateway, BadRequest, GatewayTimeout, Internal}`

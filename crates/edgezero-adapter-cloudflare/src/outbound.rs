@@ -1106,6 +1106,7 @@ mod worker_impl {
         use std::sync::{Arc, Mutex};
         use std::task::Poll;
 
+        use crate::test_runtime::NumericTimeoutGuard;
         use edgezero_core::error::BudgetSource;
         use edgezero_core::http::header::CONTENT_TYPE;
         use edgezero_core::outbound::ContentTypeProvenance;
@@ -1559,45 +1560,6 @@ mod worker_impl {
                 assert_eq!(before.status(), after.status());
                 assert_eq!(before.headers(), after.headers());
                 assert_eq!(before.body().as_bytes(), after.body().as_bytes());
-            }
-        }
-
-        #[derive(Debug)]
-        struct NumericTimeoutGuard {
-            original: JsValue,
-        }
-
-        impl NumericTimeoutGuard {
-            fn install() -> Self {
-                let scope = global();
-                let key = JsValue::from_str("setTimeout");
-                let original = Reflect::get(&scope, &key).expect("original timeout function");
-                // Node timer handles coerce to numeric IDs accepted by both timer APIs.
-                let factory = Function::new_with_args(
-                    "original",
-                    "return (...args) => Number(original.apply(globalThis, args));",
-                );
-                let numeric = factory
-                    .call1(&JsValue::UNDEFINED, &original)
-                    .expect("numeric timeout wrapper");
-                assert!(
-                    Reflect::set(&scope, &key, &numeric).expect("install numeric timeout wrapper")
-                );
-                Self { original }
-            }
-        }
-
-        #[expect(
-            clippy::missing_trait_methods,
-            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
-        )]
-        impl Drop for NumericTimeoutGuard {
-            fn drop(&mut self) {
-                drop(Reflect::set(
-                    &global(),
-                    &JsValue::from_str("setTimeout"),
-                    &self.original,
-                ));
             }
         }
 

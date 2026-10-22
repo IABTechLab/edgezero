@@ -3081,9 +3081,23 @@ exception and gains no invented exception detail. Shared response-header convers
 Spin records all five HeaderError categories, the rejected `SpinTimeoutOption`, and explicit
 component rejection from unit-returning target setters without fabricating an ErrorCode. Neither
 Other strings nor local validation failures become provider evidence, and NotSupported timeout
-options still succeed. Observer/framing integration, diagnostic capability publication and hosted
-acceptance remain tracked by F6a/F6c in the Trusted Server adoption plan; no capability promotion
-or hosted-qualification claim is made.
+options still succeed.
+
+The source-observer checkpoint adds `ResponseEgressReport::source_failure`, an optional, text-free
+`ResponseEgressSourceFailure` snapshot shared unchanged by per-response completion and the global
+observer. Its getters expose the existing static source-error category, copied optional
+`ProviderFailureDetail`, and observation-time body kind. Recording is first-wins even when provider
+detail is absent, never allocates or samples the clock, and cannot change a terminal attempt.
+All four converters record an observed body-source error before existing post-read deadline or
+cancellation arbitration, including zero-length validation and EOF lookahead where those paths
+poll the source. Cloudflare and Spin record inside their existing source-read race, before it can
+discard a ready error. Terminal precedence, byte accounting, source polling and delivery ownership
+are unchanged. An application observation keeps its original tag through fallback delivery;
+successful delivery of a rendered application error is not a source failure. Unobserved errors,
+clean EOF and transport-only failures carry no invented snapshot. Report field construction is a
+hard cut. Typed framing reasons, diagnostic capability publication and hosted acceptance remain
+tracked by F6a/F6c in the Trusted Server adoption plan; no capability promotion or hosted-
+qualification claim is made.
 
 | Condition | `EdgeError` | HTTP status |
 | --- | --- | --- |

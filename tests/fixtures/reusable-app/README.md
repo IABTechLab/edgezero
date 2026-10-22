@@ -92,6 +92,12 @@ receipt timestamps and consumer poll counts are checked without comparing guest/
 epochs. A response-owned stream must reach the client before the gated origin can complete.
 Fastly's synchronous SDK dispatch and guest sleep are not a background guest executor proof.
 
+The Spin progress suite also runs `/progress/sdk-source-diagnostics`: eight SDK source-race
+cases check EOF, pre-expiry, ready errors with/without provider detail and deadline equality.
+It awaits the production I/O helper inside the existing async HTTP export; the synchronous WASI
+test export cannot wait on SDK timers. The probe creates no downstream writer and does not qualify
+hosted delivery or change capability claims. Its test utilities are enabled only by `progress`.
+
 Five raw HTTP/1 inputs exercise absent framing, explicit zero length, terminating chunks, and
 nonempty fixed/chunked controls. Host snapshots do not consume or replace body data. Native raw
 signals are unavailable at the existing entrypoint; Spin hints are explicitly not raw framing

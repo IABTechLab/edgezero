@@ -487,6 +487,9 @@ where
         Body::Stream(mut source) => loop {
             ensure_deadline(deadline, clock)?;
             let next = executor::block_on(source.next());
+            if let Some(Err(error)) = &next {
+                attempt.record_source_error(error);
+            }
             ensure_deadline(deadline, clock)?;
             match next {
                 Some(Ok(bytes)) => {
@@ -896,6 +899,95 @@ mod tests {
     }
 
     #[test]
+    fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
+        use edgezero_core::error::BadGatewayReason;
+        use edgezero_core::error_detail::{
+            FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::ConnectionTerminated,
+        };
+        for with_detail in [false, true] {
+            for late in [false, true] {
+                let now = MonotonicInstant::now();
+                let policy = future_policy(now);
+                let deadline = policy.write_deadline.instant();
+                let expired = Arc::new(AtomicBool::new(false));
+                let clock_expired = Arc::clone(&expired);
+                let clock = MonotonicClock::new(move || {
+                    if clock_expired.load(Ordering::SeqCst) {
+                        deadline
+                    } else {
+                        now
+                    }
+                });
+                let error = if with_detail {
+                    EdgeError::bad_gateway_with_detail(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                        detail,
+                    )
+                } else {
+                    EdgeError::bad_gateway_with_reason(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                    )
+                };
+                let body = Body::from_stream(stream::once(async move {
+                    expired.store(late, Ordering::SeqCst);
+                    Err(error)
+                }));
+                let observer = RecordingObserver::default();
+                let mut attempt = attempt(&observer, now);
+                let state = Rc::new(RefCell::new(SinkState::default()));
+                let mut committer = MockCommitter::new(Rc::clone(&state));
+                let result = transmit_prepared(
+                    prepared(body),
+                    policy,
+                    &mut attempt,
+                    &clock,
+                    TransmitKind::Application,
+                    &mut committer,
+                );
+                assert!(result.is_err());
+                drop(attempt);
+                let reports = observer.reports();
+                assert_eq!(reports.len(), 1);
+                assert_eq!(
+                    reports[0].outcome,
+                    if late {
+                        ResponseEgressOutcome::DeadlineExceeded
+                    } else {
+                        ResponseEgressOutcome::SourceError
+                    }
+                );
+                let failure = reports[0]
+                    .source_failure
+                    .as_ref()
+                    .expect("source observation");
+                assert_eq!(failure.category(), "bad_gateway_transport");
+                assert_eq!(
+                    failure.provider_failure_detail(),
+                    with_detail.then_some(&detail)
+                );
+                assert!(!format!("{failure:?}").contains("secret"));
+                assert_eq!(
+                    state
+                        .borrow()
+                        .events
+                        .iter()
+                        .filter(|event| **event == "abandon")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn zero_write_write_error_source_error_and_finish_error_abort_once() {
         let cases = [
             (
@@ -940,6 +1032,10 @@ mod tests {
             assert!(matches!(result, Err(TransmitFailure::Postcommit(_))));
             assert_eq!(reports.len(), 1);
             assert_eq!(reports[0].outcome, expected);
+            assert_eq!(
+                reports[0].source_failure.is_some(),
+                expected == ResponseEgressOutcome::SourceError
+            );
             let expected_terminal = if finish_error { "finish" } else { "abandon" };
             assert_eq!(state.borrow().events.last(), Some(&expected_terminal));
         }

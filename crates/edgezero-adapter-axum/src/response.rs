@@ -482,6 +482,9 @@ impl HttpBody for AxumEgressBody {
         }
 
         let next = this.poll_chunk(cx);
+        if let (Some(active), Poll::Ready(Some(Err(error)))) = (&mut this.active, &next) {
+            active.attempt.record_source_error(error);
+        }
         if !matches!(next, Poll::Pending) {
             if let Some(outcome) = this.requested_failure() {
                 this.fail(outcome);
@@ -536,7 +539,7 @@ pub(crate) async fn prepare_egress_response(
 ) -> Response<AxumEgressBody> {
     let request_method = egress.request_method().clone();
     match egress.begin() {
-        Ok((prepared, policy, attempt, clock)) => {
+        Ok((prepared, policy, mut attempt, clock)) => {
             if policy.write_deadline.is_expired_at(clock.now()) {
                 return prepare_fallback(
                     &request_method,
@@ -551,6 +554,7 @@ pub(crate) async fn prepare_egress_response(
                 &request_method,
                 policy.write_deadline,
                 &clock,
+                &mut attempt,
             )
             .await
             {
@@ -596,6 +600,7 @@ async fn validate_empty_stream(
     request_method: &Method,
     deadline: Deadline,
     clock: &MonotonicClock,
+    attempt: &mut ResponseEgressAttempt,
 ) -> Result<PreparedResponseEgress, ResponseEgressOutcome> {
     if !prepared.transmits_body() || prepared.declared_length() != Some(0) {
         return Ok(prepared);
@@ -611,6 +616,9 @@ async fn validate_empty_stream(
                     return Err(ResponseEgressOutcome::DeadlineExceeded);
                 }
                 let next = source.next().await;
+                if let Some(Err(error)) = &next {
+                    attempt.record_source_error(error);
+                }
                 if deadline.is_expired_at(clock.now()) {
                     return Err(ResponseEgressOutcome::DeadlineExceeded);
                 }
@@ -734,25 +742,36 @@ const fn fallback_parts(cause: ResponseEgressOutcome) -> (StatusCode, &'static [
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
     use std::time::Duration;
 
     use bytes::Bytes;
+    use edgezero_core::action;
+    use edgezero_core::app::App;
     use edgezero_core::body::Body;
-    use edgezero_core::http::{HeaderMap, Method, StatusCode, Version, response_builder};
+    use edgezero_core::error::{BadGatewayReason, EdgeError};
+    use edgezero_core::error_detail::{
+        AxumFailureCause, AxumFailureKind, ProviderFailureDetail, ProviderFailurePhase,
+    };
+    use edgezero_core::extractor::State;
+    use edgezero_core::http::{
+        HeaderMap, Method, Response as CoreResponse, StatusCode, Version, request_builder,
+        response_builder,
+    };
+    use edgezero_core::ingress::{IngressDispatchOutcome, IngressFraming, IngressHeadAccounting};
     use edgezero_core::response_egress::{
-        ResponseEgressAttempt, ResponseEgressCompletion, ResponseEgressHead,
-        ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressOutcome,
-        ResponseEgressReport,
+        ResponseEgressAttempt, ResponseEgressBodyKind, ResponseEgressCompletion,
+        ResponseEgressHead, ResponseEgressObserver, ResponseEgressObserverHandle,
+        ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressReport,
     };
     use edgezero_core::response_egress_framing::prepare_response_egress;
-    use edgezero_core::router::RouteMetadata;
+    use edgezero_core::router::{RouteMetadata, RouterService};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
-    use futures_util::FutureExt as _;
     use futures_util::future::poll_fn as poll_future;
     use futures_util::stream::{pending, poll_fn as poll_stream};
+    use futures_util::{FutureExt as _, StreamExt as _, stream};
     use http_body::Body as _;
 
     use super::{
@@ -762,6 +781,55 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct RecordingObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
+
+    #[derive(Clone)]
+    struct SourceCase {
+        declared: u64,
+        expired: Arc<AtomicBool>,
+        late: bool,
+    }
+
+    #[action]
+    async fn failing_response(State(case): State<SourceCase>) -> Result<CoreResponse, EdgeError> {
+        let source = stream::once(async move {
+            case.expired.store(case.late, Ordering::SeqCst);
+            Err(EdgeError::bad_gateway_with_detail(
+                "provider-secret-token",
+                BadGatewayReason::Transport,
+                ProviderFailureDetail::Axum {
+                    phase: ProviderFailurePhase::ResponseBodyRead,
+                    cause: AxumFailureCause {
+                        kind: AxumFailureKind::Decode,
+                        is_connect: false,
+                        is_timeout: false,
+                        io_kind: None,
+                    },
+                },
+            ))
+        });
+        let prefix = stream::iter((case.declared != 0).then(|| Ok(Bytes::from_static(b"x"))));
+        response_builder()
+            .header("content-length", case.declared)
+            .body(Body::from_stream(prefix.chain(source)))
+            .map_err(EdgeError::internal)
+    }
+
+    #[action]
+    async fn rendered_failure() -> Result<CoreResponse, EdgeError> {
+        Err(EdgeError::bad_gateway_with_detail(
+            "provider-secret-token",
+            BadGatewayReason::Transport,
+            ProviderFailureDetail::Axum {
+                phase: ProviderFailurePhase::Send,
+                cause: AxumFailureCause {
+                    kind: AxumFailureKind::Request,
+                    is_connect: false,
+                    is_timeout: false,
+                    io_kind: None,
+                },
+            },
+        ))
+    }
 
     impl ResponseEgressObserver for RecordingObserver {
         fn complete(&self, report: &ResponseEgressReport) {
@@ -798,6 +866,222 @@ mod tests {
             ResponseEgressObserverHandle::new(observer.clone()),
             MonotonicClock::default(),
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
+        let detail = ProviderFailureDetail::Axum {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: AxumFailureCause {
+                kind: AxumFailureKind::Decode,
+                is_connect: false,
+                is_timeout: false,
+                io_kind: None,
+            },
+        };
+        for with_detail in [false, true] {
+            for late in [false, true] {
+                let now = MonotonicInstant::now();
+                let deadline = now.checked_add(Duration::from_secs(10)).expect("deadline");
+                let expired = Arc::new(AtomicBool::new(false));
+                let clock_expired = Arc::clone(&expired);
+                let clock = MonotonicClock::new(move || {
+                    if clock_expired.load(Ordering::SeqCst) {
+                        deadline
+                    } else {
+                        now
+                    }
+                });
+                let error = if with_detail {
+                    EdgeError::bad_gateway_with_detail(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                        detail,
+                    )
+                } else {
+                    EdgeError::bad_gateway_with_reason(
+                        "provider-secret-token",
+                        BadGatewayReason::Transport,
+                    )
+                };
+                let source = stream::once(async move {
+                    expired.store(late, Ordering::SeqCst);
+                    Err(error)
+                });
+                let observer = RecordingObserver::default();
+                let connection = EgressConnection::default();
+                let Ok(body) = AxumEgressBody::application(
+                    Body::from_stream(source),
+                    Deadline::at_instant(deadline),
+                    clock,
+                    attempt(&observer, now),
+                    &connection,
+                ) else {
+                    panic!("body registration")
+                };
+                let mut pinned = Box::pin(body);
+                poll_future(|cx| pinned.as_mut().poll_frame(cx))
+                    .await
+                    .expect("failure frame")
+                    .expect_err("source failure");
+                drop(pinned);
+                let reports = observer.0.lock().expect("reports");
+                assert_eq!(reports.len(), 1);
+                assert_eq!(
+                    reports[0].outcome,
+                    if late {
+                        ResponseEgressOutcome::DeadlineExceeded
+                    } else {
+                        ResponseEgressOutcome::SourceError
+                    }
+                );
+                let failure = reports[0]
+                    .source_failure
+                    .as_ref()
+                    .expect("source observation");
+                assert_eq!(failure.category(), "bad_gateway_transport");
+                assert_eq!(
+                    failure.provider_failure_detail(),
+                    with_detail.then_some(&detail)
+                );
+                assert!(!format!("{failure:?}").contains("secret"));
+                assert!(connection.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_diagnostics_survive_zero_length_fallback_and_final_eof_lookahead() {
+        for declared in [0, 1] {
+            for late in [false, true] {
+                let now = MonotonicInstant::now();
+                let deadline = now.checked_add(Duration::from_secs(10)).expect("deadline");
+                let expired = Arc::new(AtomicBool::new(false));
+                let clock_expired = Arc::clone(&expired);
+                let mut app = App::new(
+                    RouterService::builder()
+                        .with_state(SourceCase {
+                            declared,
+                            expired,
+                            late,
+                        })
+                        .get("/", failing_response)
+                        .build(),
+                );
+                app.set_monotonic_clock(MonotonicClock::new(move || {
+                    if clock_expired.load(Ordering::SeqCst) {
+                        deadline
+                    } else {
+                        now
+                    }
+                }));
+                app.set_response_egress_policy(move |_, _| ResponseEgressPolicy {
+                    write_deadline: Deadline::at_instant(deadline),
+                });
+                let observer = RecordingObserver::default();
+                app.set_response_egress_observer(observer.clone());
+                let request = request_builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request");
+                let outcome = app
+                    .dispatch_ingress(
+                        request,
+                        now,
+                        IngressHeadAccounting::HostManaged,
+                        IngressFraming::HostManaged,
+                    )
+                    .await
+                    .expect("dispatch");
+                let IngressDispatchOutcome::Response(envelope) = outcome else {
+                    panic!("response envelope")
+                };
+                let connection = EgressConnection::default();
+                let response = super::prepare_egress_response(*envelope, &connection).await;
+                let mut pinned = Box::pin(response.into_body());
+                while let Some(frame) = poll_future(|cx| pinned.as_mut().poll_frame(cx)).await {
+                    if frame.is_err() {
+                        break;
+                    }
+                }
+                drop(pinned);
+                let reports = observer.0.lock().expect("reports");
+                assert_eq!(reports.len(), 1);
+                assert_eq!(
+                    reports[0].outcome,
+                    if late {
+                        ResponseEgressOutcome::DeadlineExceeded
+                    } else if declared == 0 {
+                        ResponseEgressOutcome::ConversionError
+                    } else {
+                        ResponseEgressOutcome::SourceError
+                    }
+                );
+                assert_eq!(
+                    reports[0].body_kind,
+                    if declared == 0 {
+                        ResponseEgressBodyKind::Fallback
+                    } else {
+                        ResponseEgressBodyKind::Application
+                    }
+                );
+                let failure = reports[0].source_failure.as_ref().expect("observed source");
+                assert_eq!(failure.body_kind(), ResponseEgressBodyKind::Application);
+                assert_eq!(failure.category(), "bad_gateway_transport");
+                assert!(matches!(
+                    failure.provider_failure_detail(),
+                    Some(ProviderFailureDetail::Axum {
+                        phase: ProviderFailurePhase::ResponseBodyRead,
+                        cause: AxumFailureCause {
+                            kind: AxumFailureKind::Decode,
+                            is_connect: false,
+                            is_timeout: false,
+                            io_kind: None
+                        },
+                    })
+                ));
+                assert!(connection.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rendered_application_error_is_not_a_body_source_failure() {
+        let observer = RecordingObserver::default();
+        let mut app = App::new(RouterService::builder().get("/", rendered_failure).build());
+        app.set_response_egress_observer(observer.clone());
+        let request = request_builder()
+            .uri("/")
+            .body(Body::empty())
+            .expect("request");
+        let outcome = app
+            .dispatch_ingress(
+                request,
+                MonotonicInstant::now(),
+                IngressHeadAccounting::HostManaged,
+                IngressFraming::HostManaged,
+            )
+            .await
+            .expect("dispatch");
+        let IngressDispatchOutcome::Response(envelope) = outcome else {
+            panic!("response envelope")
+        };
+        let connection = EgressConnection::default();
+        let response = super::prepare_egress_response(*envelope, &connection).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let mut pinned = Box::pin(response.into_body());
+        let mut bytes = Vec::new();
+        while let Some(frame) = poll_future(|cx| pinned.as_mut().poll_frame(cx)).await {
+            bytes.extend_from_slice(frame.expect("rendered frame").data_ref().expect("data"));
+            assert!(bytes.len() <= 1024);
+        }
+        drop(pinned);
+        assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
+        let reports = observer.0.lock().expect("reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].outcome, ResponseEgressOutcome::HostHandoff);
+        assert!(reports[0].source_failure.is_none());
+        assert!(connection.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -857,6 +1141,7 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].bytes_written, 5);
         assert_eq!(reports[0].outcome, ResponseEgressOutcome::HostHandoff);
+        assert!(reports[0].source_failure.is_none());
         assert!(connection.is_empty());
     }
 

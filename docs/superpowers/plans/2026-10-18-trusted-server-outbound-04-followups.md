@@ -455,6 +455,62 @@ validation remains 255 criteria / 511 planned legs, qualified false. No dependen
 frozen API file or approved Interfaces digest changed. Hosted/browser acceptance, full P1 and
 the failed Fastly G2 remain open.
 
+#### F6a Source-Observer Checkpoint (2026-10-21)
+
+- [x] Retain a fixed-size, text-free first-observed body-source failure in the terminal report.
+      Copy the existing category and optional provider detail; preserve observation-time body kind
+      through fallback. Missing detail is meaningful and later observations cannot replace it.
+- [x] Wire all four converters before post-ready deadline/cancellation arbitration, including
+      Axum's zero-length validation and final EOF lookahead and the existing Cloudflare/Spin
+      source-read races. Preserve polling, clocks, terminal precedence, bytes and resource ownership.
+- [x] Deliver the same snapshot to completion and observer; reject post-terminal recording.
+      Keep rendered application errors distinct from body-source errors and invent no provider
+      evidence for EOF, timer-only, conversion-only or transport-only failures.
+- [x] Add native converter regressions, core state/clock controls, real Cloudflare Node/WASM I/O
+      checks, and a Spin SDK async HTTP check in the existing local progress fixture.
+- [x] Finish independent quality review and broad current-tree Rust/WASM/docs verification before
+      committing this checkpoint.
+- [ ] Complete typed framing reasons, diagnostic capability publication, full F6a acceptance and
+      hosted qualification. This checkpoint does not complete F6a/EZ-16, P1, or the failed Fastly G2.
+
+Turing reviewed core state/report ownership and Axum; Heisenberg reviewed converter boundaries
+and the real SDK test paths. Their proposals favored one bounded observation on the existing
+attempt over wrapping streams, retaining source errors or changing delivery-error types.
+Implementation is centralized. The report field is a hard cut, not a compatibility wrapper.
+No production application renderer changes: its existing callback already receives the original
+error, and delivering that rendered response successfully remains a successful delivery.
+
+Native regressions first failed on missing source observations, then passed after wiring. Controls
+cover detail present/absent, first-None/later-Some, fallback attribution, no recording-time clock or
+callback activity, drop classification, terminal rejection and successful rendered-error delivery.
+Cloudflare's actual source race covers pre-expired/pre-aborted, EOF, ready error and ready
+error followed by deadline equality or cancellation. Its existing scoped Node timer shim is
+shared rather than duplicated. Spin's synchronous WASI test export cannot wait on SDK timers:
+both generic and SDK executor attempts are retained as failed harness diagnostics, not evidence.
+The check instead runs directly under the existing async HTTP export with eight cases on local
+Spin 4.1.0, without timer substitutions. Neither local runtime establishes hosted client delivery.
+
+The actual Cloudflare/Spin races failed when only their inner observation hooks were temporarily
+disabled, then passed after restoration; recording only in the outer pump loses those ready
+errors. Local Spin progress evidence is retained under `.runs/18e0bf43a59d4170-f275-0`, including
+the eight-case receipt, all four passing progress groups and no pre-shutdown worker panic.
+The mutation failure remains under `.runs/18e0bf38c867ad68-eb61-0` with its missing-observation
+diagnostic; neither failed run is rewritten as passing. These are local characterization runs,
+not the frozen acceptance inventory or hosted qualification.
+
+Independent spec and quality reviews passed after tightening exact provider assertions and adding
+terminal-without-observation and successful-rendered-error controls. All five Rust gates passed:
+27 workspace binaries, 2,116 tests, zero failures and one existing ignored test, including 804 core
+tests. All three actual-target WASM clippy checks passed. Node/WASM passed 41 Cloudflare tests;
+Viceroy passed 172 Fastly library tests and 25 contracts; pinned Wasmtime passed 35 Spin contracts
+and 12 SDK resource tests. The four native outbound contract suites passed 17/4/2/3 tests. Core
+doctests, the nonzero public-error sentinel, all seven eight-leg feature matrices, 48 demo-core
+tests, 56 fixture-harness tests, fixture clippy and docs format/lint/build passed. Dependency and
+legacy guards and all 18 evidence-checker tests passed. Inventory validation remains 255 criteria /
+511 planned legs, qualified false. SDK/decoder pins, frozen policies, the approved Interfaces digest
+and capability claims are unchanged. Typed framing reasons, full P1/F6a acceptance, browser/hosted
+evidence and the failed Fastly G2 remain open.
+
 - [ ] Add token-bearing URLs/provider messages to regression fixtures. Assert wire bytes and
       existing Display/status/reasons do not change; retained body failures preserve diagnostic detail
       internally. Add framing-reason cases independent of provider text and policy-panic/deadline cases.
