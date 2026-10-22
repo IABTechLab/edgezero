@@ -5,7 +5,7 @@ on:
     paths:
       - scripts/*axum_container*.sh
       - scripts/axum_container*.mjs
-      - scripts/tests/test_axum_container*.test.mjs
+      - scripts/tests/*axum_container*.mjs
       - examples/container-publishing/**
       - examples/axum-deployment/**
       - docs/guide/*axum-containers.md
@@ -35,7 +35,7 @@ on:
     paths:
       - scripts/*axum_container*.sh
       - scripts/axum_container*.mjs
-      - scripts/tests/test_axum_container*.test.mjs
+      - scripts/tests/*axum_container*.mjs
       - examples/container-publishing/**
       - examples/axum-deployment/**
       - docs/guide/*axum-containers.md

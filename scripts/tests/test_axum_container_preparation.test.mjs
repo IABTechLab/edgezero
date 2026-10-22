@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import test from 'node:test';
+import { paxRecord, tarEntry } from './axum_container_tar.mjs';
 import {
   appName, contextFiles, contextHash, isWithin, parseToml, recordInputs,
   rewriteManifest, stageSources, validateRuntimeTar,
@@ -224,35 +225,11 @@ test('record-inputs verifies confinement and retains context, lock, Dockerfile a
   assert.throws(() => recordInputs(app, metadata), /Out-of-context dependency: escaped/);
 });
 
-function tarEntry(name, data, type = '0', link = '') {
-  data = Buffer.from(data);
-  const header = Buffer.alloc(512);
-  header.write(name, 0, 100, 'utf8');
-  header.write('0000755\0', 100);
-  header.write('0000000\0', 108);
-  header.write('0000000\0', 116);
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124);
-  header.write('00000000000\0', 136);
-  header.fill(32, 148, 156);
-  header.write(type, 156);
-  header.write(link, 157, 100, 'utf8');
-  header.write('ustar\0', 257);
-  header.write('00', 263);
-  const checksum = header.reduce((sum, byte) => sum + byte, 0);
-  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
-  return Buffer.concat([header, data, Buffer.alloc((512 - data.length % 512) % 512)]);
-}
 function elf(machine = 62) {
   const data = Buffer.alloc(20);
   data.set([0x7f, 69, 76, 70, 2, 1]);
   data.writeUInt16LE(machine, 18);
   return data;
-}
-function paxRecord(key, value) {
-  const body = `${key}=${value}\n`;
-  let length = Buffer.byteLength(body) + 2;
-  while (length !== Buffer.byteLength(`${length} ${body}`)) length = Buffer.byteLength(`${length} ${body}`);
-  return `${length} ${body}`;
 }
 function runtimeTar(t, entries) {
   return put(temporary(t), 'runtime.tar', Buffer.concat([...entries, Buffer.alloc(1024)]));

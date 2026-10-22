@@ -14,7 +14,7 @@ on:
       - examples/axum-deployment/**
       - scripts/*axum_container*.sh
       - scripts/axum_container*.mjs
-      - scripts/tests/test_axum_container*.test.mjs
+      - scripts/tests/*axum_container*.mjs
       - docs/guide/*axum-containers.md
       - docs/guide/adapters/axum.md
   push:
@@ -30,7 +30,7 @@ on:
       - examples/axum-deployment/**
       - scripts/*axum_container*.sh
       - scripts/axum_container*.mjs
-      - scripts/tests/test_axum_container*.test.mjs
+      - scripts/tests/*axum_container*.mjs
       - docs/guide/*axum-containers.md
       - docs/guide/adapters/axum.md
 
