@@ -5,6 +5,7 @@ use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
     BadGatewayReason, BudgetSource, EdgeError, ResponseLimitReason, StoreExtractionReason,
 };
+use crate::geo::GeoOutcome;
 use crate::http::{Extensions, HeaderMap, Method, Request, RequestParts, Uri, Version};
 use crate::ingress::{AdmittedIngress, IngressGrant};
 use crate::outbound::HttpClient;
@@ -161,7 +162,9 @@ impl StoredError {
 /// Request context exposed to handlers and middleware.
 pub struct RequestContext {
     body: RefCell<BodyState>,
+    category_only_json_errors: bool,
     config_extraction_limits: ConfigExtractionLimits,
+    geo: GeoOutcome,
     ingress_grant: RefCell<Option<IngressGrant>>,
     monotonic_clock: MonotonicClock,
     parts: RequestParts,
@@ -349,6 +352,13 @@ impl RequestContext {
             .map_err(|err| EdgeError::bad_request(format!("invalid form payload: {err}")))
     }
 
+    /// Returns this request's immutable geographic outcome. Public extensions do not replace it.
+    #[must_use]
+    #[inline]
+    pub fn geo(&self) -> &GeoOutcome {
+        &self.geo
+    }
+
     #[must_use]
     #[inline]
     pub fn headers(&self) -> &HeaderMap {
@@ -396,8 +406,13 @@ impl RequestContext {
         T: DeserializeOwned,
     {
         let bytes = self.body_bytes(max).await?;
-        serde_json::from_slice(bytes.as_ref())
-            .map_err(|err| EdgeError::bad_request(format!("invalid JSON payload: {err}")))
+        serde_json::from_slice(bytes.as_ref()).map_err(|err| {
+            if self.category_only_json_errors {
+                EdgeError::bad_request("invalid JSON payload")
+            } else {
+                EdgeError::bad_request(format!("invalid JSON payload: {err}"))
+            }
+        })
     }
 
     /// Resolve the [`BoundKvStore`] for `id`. Strict lookup: when a
@@ -437,6 +452,8 @@ impl RequestContext {
     pub fn new(request: Request, params: PathParams) -> Self {
         let (parts, body) = request.into_parts();
         Self {
+            geo: GeoOutcome::NoSelection,
+            category_only_json_errors: false,
             body: RefCell::new(BodyState::Initial(body)),
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
@@ -453,12 +470,15 @@ impl RequestContext {
         request: Request,
         params: PathParams,
         route_metadata: RouteMetadata,
-        ingress: AdmittedIngress,
+        mut ingress: AdmittedIngress,
     ) -> Self {
+        let (geo, category_only_json_errors) = ingress.take_request_context();
         let (request_start, read_deadline, grant, config_extraction_limits, monotonic_clock) =
             ingress.into_parts();
         let (parts, body) = request.into_parts();
         Self {
+            geo,
+            category_only_json_errors,
             body: RefCell::new(BodyState::Initial(body)),
             config_extraction_limits,
             ingress_grant: RefCell::new(Some(grant)),

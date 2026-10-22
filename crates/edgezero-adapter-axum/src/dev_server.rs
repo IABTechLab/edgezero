@@ -16,7 +16,7 @@ use std::io::ErrorKind;
 #[cfg(test)]
 use std::iter;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
-use std::panic::AssertUnwindSafe;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process;
@@ -37,7 +37,7 @@ use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
 use futures_util::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
-use log::LevelFilter;
+use log::{Level, LevelFilter};
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -53,13 +53,16 @@ use tokio::time::{Instant as NativeInstant, sleep_until};
 use crate::config_store::AxumConfigStore;
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
+use crate::diagnostics::{NativeDiagnosticsHandle, NativeSession};
+use crate::geo::NativeGeo;
 use crate::ingress_config::AxumIngressConfig;
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
 use crate::outbound::AxumOutboundClient;
+use crate::proxy::TrustedProxyPolicy;
 use crate::response::EgressConnection;
 pub use crate::run_options::AxumRunOptions;
-use crate::run_options::{failure, shutdown_grace, strip_native_config_prefix};
+use crate::run_options::{failure, native_settings, shutdown_grace, strip_native_config_prefix};
 use crate::secret_store::EnvSecretStore;
 use crate::service::{
     AxumServiceState, legacy_config_registry, legacy_kv_registry, legacy_secret_registry,
@@ -141,6 +144,7 @@ struct Stores {
 /// Blocking dev server runner used by the `EdgeZero` CLI.
 pub struct AxumDevServer {
     config: AxumDevServerConfig,
+    native: NativeHosting,
     router: RouterService,
     stores: Stores,
 }
@@ -151,6 +155,7 @@ impl AxumDevServer {
     pub fn new(router: RouterService) -> Self {
         Self {
             config: AxumDevServerConfig::default(),
+            native: NativeHosting::default(),
             router,
             stores: Stores::default(),
         }
@@ -164,6 +169,7 @@ impl AxumDevServer {
             router,
             config,
             stores,
+            native,
         } = self;
         run_local(
             ListenerSource::Bind(config.addr),
@@ -171,8 +177,32 @@ impl AxumDevServer {
             Duration::from_secs(10),
             config.ingress,
             future::pending::<()>(),
-            async move { prepare_transport(App::new(router), stores.into()) },
+            async move { prepare_transport(App::new(router), stores.into(), native) },
         )
+    }
+
+    /// Installs explicit checked forwarding policy without ambient settings.
+    #[must_use]
+    #[inline]
+    pub fn with_trusted_proxy_policy(mut self, policy: TrustedProxyPolicy) -> Self {
+        self.native.policy = policy;
+        self
+    }
+
+    /// Controls default records, without disabling counters or observers.
+    #[must_use]
+    #[inline]
+    pub fn with_request_records(mut self, enabled: bool) -> Self {
+        self.native.request_records = enabled;
+        self
+    }
+
+    /// Shares the managed native observer and counters.
+    #[must_use]
+    #[inline]
+    pub fn with_diagnostics(mut self, diagnostics: NativeDiagnosticsHandle) -> Self {
+        self.native.diagnostics = diagnostics;
+        self
     }
 
     #[cfg(test)]
@@ -181,13 +211,15 @@ impl AxumDevServer {
             router,
             config,
             stores,
+            native,
         } = self;
-        serve_with_stores(
+        serve_with_native_stores(
             App::new(router),
             listener,
             config.enable_ctrl_c,
             config.ingress,
             stores,
+            native,
         )
         .await
     }
@@ -197,6 +229,7 @@ impl AxumDevServer {
     pub fn with_config(router: RouterService, config: AxumDevServerConfig) -> Self {
         Self {
             config,
+            native: NativeHosting::default(),
             router,
             stores: Stores::default(),
         }
@@ -357,6 +390,26 @@ async fn serve_with_stores(
     ingress: AxumIngressConfig,
     stores: Stores,
 ) -> anyhow::Result<()> {
+    serve_with_native_stores(
+        app,
+        listener,
+        enable_ctrl_c,
+        ingress,
+        stores,
+        NativeHosting::default(),
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn serve_with_native_stores(
+    app: App,
+    listener: TokioTcpListener,
+    enable_ctrl_c: bool,
+    ingress: AxumIngressConfig,
+    stores: Stores,
+    native: NativeHosting,
+) -> anyhow::Result<()> {
     struct ShutdownOnDrop(Option<ShutdownSender<()>>);
 
     impl Drop for ShutdownOnDrop {
@@ -379,6 +432,7 @@ async fn serve_with_stores(
             enable_ctrl_c,
             ingress,
             stores,
+            native,
             shutdown_receiver,
         )
     });
@@ -394,6 +448,7 @@ fn serve_local(
     enable_ctrl_c: bool,
     ingress: AxumIngressConfig,
     stores: Stores,
+    native: NativeHosting,
     shutdown_receiver: ShutdownReceiver<()>,
 ) -> anyhow::Result<()> {
     run_local(
@@ -404,11 +459,30 @@ fn serve_local(
         async move {
             let _closed = shutdown_receiver.await;
         },
-        async move { prepare_transport(app, stores.into()) },
+        async move { prepare_transport(app, stores.into(), native) },
     )
 }
 
-type PreparedApp = (App, PreparedStores, Arc<reqwest::Client>);
+#[derive(Clone)]
+struct NativeHosting {
+    diagnostics: NativeDiagnosticsHandle,
+    geo: NativeGeo,
+    policy: TrustedProxyPolicy,
+    request_records: bool,
+}
+
+impl Default for NativeHosting {
+    fn default() -> Self {
+        Self {
+            diagnostics: NativeDiagnosticsHandle::new(),
+            policy: TrustedProxyPolicy::no_trust(),
+            request_records: true,
+            geo: NativeGeo::default(),
+        }
+    }
+}
+
+type PreparedApp = (App, PreparedStores, Arc<reqwest::Client>, NativeHosting);
 type ConnectionResult = Result<Result<ConnectionExit, hyper::Error>, Box<dyn Any + Send>>;
 type Connections = FuturesUnordered<Pin<Box<dyn Future<Output = ConnectionResult>>>>;
 
@@ -439,10 +513,14 @@ fn adopt_listener(source: ListenerSource) -> anyhow::Result<TokioTcpListener> {
         .map_err(|_error| failure("bind", "listener", "runtime adoption failed"))
 }
 
-fn prepare_transport(app: App, stores: PreparedStores) -> anyhow::Result<PreparedApp> {
+fn prepare_transport(
+    app: App,
+    stores: PreparedStores,
+    native: NativeHosting,
+) -> anyhow::Result<PreparedApp> {
     let transport = AxumOutboundClient::try_transport()
         .map_err(|_error| failure("transport", "HTTP client", "initialization failed"))?;
-    Ok((app, stores, transport))
+    Ok((app, stores, transport, native))
 }
 
 struct Signals {
@@ -527,6 +605,7 @@ where
     runtime.block_on(local.run_until(async move {
         let mut signals = Signals::register(enable_signals)?;
         let (phase, reader) = watch::channel(LifecyclePhase::Starting);
+        log_native_lifecycle(LifecyclePhase::Starting, "starting", grace, false);
         let result = run_owned(
             listener,
             grace,
@@ -539,6 +618,16 @@ where
         )
         .await;
         phase.send_replace(LifecyclePhase::Stopped);
+        log_native_lifecycle(
+            LifecyclePhase::Stopped,
+            if result.is_ok() {
+                "stopped"
+            } else {
+                "runner_failed"
+            },
+            grace,
+            result.is_err(),
+        );
         result
     }))
 }
@@ -578,10 +667,13 @@ where
             phase.send_replace(LifecyclePhase::Draining);
             return Ok(());
         }
-        prepared = &mut prepare => prepared?,
+        prepared = &mut prepare => prepared.inspect_err(|_error| log_native_lifecycle(LifecyclePhase::Starting, "startup_failed", grace, true))?,
     };
-    let (app, stores, transport) = prepared;
-    let mut service = AxumServiceState::with_transport(app, transport).with_phase(reader.clone());
+    let (app, stores, transport, native) = prepared;
+    let session = NativeSession::new(native.diagnostics, native.request_records)?;
+    let mut service =
+        AxumServiceState::with_native_transport(app, transport, session, native.policy, native.geo)
+            .with_phase(reader.clone());
     if let Some(registry) = stores.config {
         service = service.with_config_registry(registry);
     }
@@ -600,6 +692,7 @@ where
     };
     phase.send_replace(LifecyclePhase::Ready);
     log::info!("[edgezero] native server ready");
+    log_native_lifecycle(LifecyclePhase::Ready, "ready", grace, false);
     let mut tasks = Connections::new();
     let mut outcome = Ok(());
     loop {
@@ -618,9 +711,11 @@ where
                             continue;
                         }
                         let responses = EgressConnection::default();
-                        let connection_service = service.for_connection(remote_addr, responses.clone());
+                        let (activity, connection_guard) = service.connection_activity();
+                        let connection_service = service.for_connection(remote_addr, responses.clone()).with_activity(activity);
                         let connection = serve_http1_with_shutdown(stream, connection_service, responses, Some(reader.clone()), ingress);
-                        tasks.push(Box::pin(AssertUnwindSafe(connection).catch_unwind()));
+                        let owned_connection = async move { let _guard = connection_guard; connection.await };
+                        tasks.push(Box::pin(AssertUnwindSafe(owned_connection).catch_unwind()));
                     }
                     Err(_error) => {
                         outcome = Err(failure("runner", "listener", "accept failed"));
@@ -631,6 +726,16 @@ where
         }
     }
     phase.send_replace(LifecyclePhase::Draining);
+    log_native_lifecycle(
+        LifecyclePhase::Draining,
+        if outcome.is_ok() {
+            "drain_requested"
+        } else {
+            "runner_failed"
+        },
+        grace,
+        outcome.is_err(),
+    );
     drop(listener);
     let result = drain_tasks(&mut tasks, grace, signals, outcome).await;
     // Service/registry clones are dropped only after every owned connection settles.
@@ -656,10 +761,12 @@ async fn drain_tasks(
         tokio::select! {
             biased;
             signal = next_signal(signals) => {
+                log_native_lifecycle(LifecyclePhase::Draining, "forced_stop", grace, true);
                 outcome = Err(signal.err().unwrap_or_else(|| failure("shutdown", "signal", "forced stop")));
                 break;
             }
             () = sleep_until(deadline) => {
+                log_native_lifecycle(LifecyclePhase::Draining, "grace_exhausted", grace, true);
                 outcome = Err(failure("shutdown", "budget", "grace exhausted"));
                 break;
             }
@@ -670,6 +777,19 @@ async fn drain_tasks(
     }
     tasks.clear();
     outcome
+}
+
+fn log_native_lifecycle(phase: LifecyclePhase, reason: &'static str, grace: Duration, fault: bool) {
+    let phase_name = match phase {
+        LifecyclePhase::Starting => "starting",
+        LifecyclePhase::Ready => "ready",
+        LifecyclePhase::Draining => "draining",
+        LifecyclePhase::Stopped => "stopped",
+    };
+    let level = if fault { Level::Error } else { Level::Info };
+    let _logged = catch_unwind(
+        || log::log!(target: "edgezero::native", level, "event=lifecycle phase={phase_name} reason={reason} grace_ms={}", grace.as_millis()),
+    );
 }
 
 fn report_connection_exit(result: &ConnectionResult) {
@@ -745,7 +865,13 @@ where
     A: Hooks,
     F: FnOnce() -> anyhow::Result<()>,
 {
-    let env = EnvConfig::from_env();
+    let env = capture_dev_environment()?;
+    let (policy, request_records) = native_settings(&env)?;
+    let native = NativeHosting {
+        policy,
+        request_records,
+        ..NativeHosting::default()
+    };
     if !A::owns_logging() {
         app_logger(&env)
             .init()
@@ -775,9 +901,39 @@ where
                 config: build_config_registry(metadata.config, &env, config_limits)?,
                 secrets: build_secret_registry(metadata.secrets, &env),
             };
-            prepare_transport(app, stores)
+            prepare_transport(app, stores, native)
         },
     )
+}
+
+fn capture_dev_environment() -> anyhow::Result<EnvConfig> {
+    let mut pairs = Vec::new();
+    for (os_key, os_value) in vars_os() {
+        let Some(key) = os_key.to_str() else {
+            continue;
+        };
+        let recognized = strip_native_config_prefix(key).is_some_and(|path| {
+            [
+                "ADAPTER__TRUSTED_PROXY_CIDRS",
+                "ADAPTER__FORWARDING_HEADER_FAMILY",
+                "LOGGING__REQUEST_RECORDS",
+            ]
+            .iter()
+            .any(|setting| path.eq_ignore_ascii_case(setting))
+        });
+        match (os_value.to_str(), recognized) {
+            (Some(value), _) => pairs.push((key.to_owned(), value.to_owned())),
+            (None, true) => {
+                return Err(failure(
+                    "settings",
+                    "native proxy/record policy",
+                    "non-Unicode value",
+                ));
+            }
+            (None, false) => {}
+        }
+    }
+    Ok(EnvConfig::from_vars(pairs))
 }
 
 fn init_logging<A: Hooks>(level: LevelFilter) -> anyhow::Result<()> {
@@ -920,6 +1076,13 @@ where
         &'startup PreparedStores,
     ) -> LocalStartupFuture<'startup>,
 {
+    let geo = options.native_geo()?;
+    let native = NativeHosting {
+        diagnostics: options.diagnostics(),
+        policy: options.trusted_proxy_policy(),
+        request_records: options.request_records(),
+        geo,
+    };
     run_local(
         ListenerSource::Bind(options.addr()),
         signals,
@@ -941,7 +1104,7 @@ where
                 );
                 failure("initializer", "application", &category)
             })?;
-            Ok((app, stores, transport))
+            Ok((app, stores, transport, native))
         },
     )
 }
@@ -3269,6 +3432,53 @@ mod native_store_tests {
             .await?
             .unwrap_or_default();
         Ok(format!("{}:{state}", value.as_str()))
+    }
+
+    #[cfg(not(feature = "geo-cloudfront"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn geo_unavailable_selection_fails_before_runner_resources() {
+        use crate::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
+        let root = tempfile::tempdir().unwrap();
+        let options = options()
+            .with_config_dir(root.path())
+            .unwrap()
+            .with_data_dir(root.path())
+            .unwrap()
+            .with_geo(NativeGeoSelection::CloudFront {
+                policy: ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture")
+                    .unwrap(),
+            });
+        let address = options.addr();
+        let prepared = Rc::new(Cell::new(false));
+        let initialized = Rc::new(Cell::new(false));
+        let prepare_observed = Rc::clone(&prepared);
+        let initialize_observed = Rc::clone(&initialized);
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .prepare_config("first", async move {
+                prepare_observed.set(true);
+                Err(NativeStorePreparationError::Unavailable)
+            })
+            .unwrap();
+        // Existing Tokio runtime would reject nested runner construction if validation were late.
+        let error = run_app_with_native_stores::<CustomApp, _, _>(
+            options,
+            overrides,
+            future::pending::<()>(),
+            move |_app, _stores| {
+                Box::pin(async move {
+                    initialize_observed.set(true);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unavailable"));
+        assert!(!prepared.get());
+        assert!(!initialized.get());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        let listener = StdTcpListener::bind(address).expect("runner never bound listener");
+        drop(listener);
     }
 
     #[test]

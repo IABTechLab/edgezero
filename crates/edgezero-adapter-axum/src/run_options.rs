@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::time::{Duration, Instant};
 
+use crate::diagnostics::NativeDiagnosticsHandle;
+use crate::geo::{NativeGeo, NativeGeoCapability, NativeGeoConfigError, NativeGeoSelection};
+use crate::proxy::TrustedProxyPolicy;
 use edgezero_core::addr;
 use edgezero_core::app::StoresMetadata;
 use edgezero_core::env_config::EnvConfig;
@@ -31,10 +34,14 @@ pub struct AxumRunOptions {
     celld_limits: Option<CelldPreparationLimits>,
     config_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    diagnostics: NativeDiagnosticsHandle,
     env: EnvConfig,
+    geo: NativeGeoSelection,
     grace: Duration,
     level: LevelFilter,
     non_unicode_overrides: Vec<Vec<String>>,
+    request_records: bool,
+    trusted_proxy_policy: TrustedProxyPolicy,
 }
 
 #[derive(Clone)]
@@ -104,6 +111,10 @@ impl AxumRunOptions {
 
     pub(crate) fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()
+    }
+
+    pub(crate) fn diagnostics(&self) -> NativeDiagnosticsHandle {
+        self.diagnostics.clone()
     }
 
     pub(crate) fn env_config(&self) -> &EnvConfig {
@@ -256,6 +267,7 @@ impl AxumRunOptions {
                 .map_err(|_error| failure("settings", "LOGGING__LEVEL", "invalid level"))?;
         }
         options.grace = shutdown_grace(&env)?;
+        (options.trusted_proxy_policy, options.request_records) = native_settings(&env)?;
         if let Some(root) = env.get(&["adapter", "config_dir"]) {
             options = options.with_config_dir(root)?;
         }
@@ -293,6 +305,10 @@ impl AxumRunOptions {
             return Err(failure("settings", "PORT", "invalid nonzero port"));
         }
         Ok(Self {
+            diagnostics: NativeDiagnosticsHandle::new(),
+            trusted_proxy_policy: TrustedProxyPolicy::no_trust(),
+            request_records: true,
+            geo: NativeGeoSelection::Off,
             bindings: NativeStoreBindingsInput::LocalDefaults,
             bindings_limits: NativeBindingsLimits::default(),
             aws_limits: None,
@@ -306,6 +322,42 @@ impl AxumRunOptions {
             level: LevelFilter::Info,
             non_unicode_overrides: Vec::new(),
         })
+    }
+
+    /// Select geographic resolution explicitly. Validation happens before runner resources.
+    #[must_use]
+    #[inline]
+    pub fn with_geo(mut self, selection: NativeGeoSelection) -> Self {
+        self.geo = selection;
+        self
+    }
+
+    /// Validate the finalized selection and capture its startup capability.
+    ///
+    /// # Errors
+    /// Rejects unavailable implementations and invalid protected-source policies.
+    #[inline]
+    pub fn geo_capability(&self) -> Result<NativeGeoCapability, NativeGeoConfigError> {
+        self.native_geo().map(|geo| geo.capability())
+    }
+
+    pub(crate) fn native_geo(&self) -> Result<NativeGeo, NativeGeoConfigError> {
+        NativeGeo::validate(&self.geo)
+    }
+
+    /// Shares native counters and the optional request observer.
+    #[must_use]
+    #[inline]
+    pub fn with_diagnostics(mut self, diagnostics: NativeDiagnosticsHandle) -> Self {
+        self.diagnostics = diagnostics;
+        self
+    }
+
+    pub(crate) fn request_records(&self) -> bool {
+        self.request_records
+    }
+    pub(crate) fn trusted_proxy_policy(&self) -> TrustedProxyPolicy {
+        self.trusted_proxy_policy.clone()
     }
 
     pub(crate) fn shutdown_grace(&self) -> Duration {
@@ -546,6 +598,14 @@ impl AxumRunOptions {
         self
     }
 
+    /// Enables only default native request logs; observers and accounting remain active.
+    #[inline]
+    #[must_use]
+    pub fn with_request_records(mut self, enabled: bool) -> Self {
+        self.request_records = enabled;
+        self
+    }
+
     /// Selects a positive, representable integer-second drain budget.
     ///
     /// # Errors
@@ -556,6 +616,40 @@ impl AxumRunOptions {
         self.grace = grace;
         Ok(self)
     }
+
+    /// Installs an explicit immutable incoming-proxy policy without reading the environment.
+    #[inline]
+    #[must_use]
+    pub fn with_trusted_proxy_policy(mut self, policy: TrustedProxyPolicy) -> Self {
+        self.trusted_proxy_policy = policy;
+        self
+    }
+}
+
+pub(crate) fn native_settings(env: &EnvConfig) -> anyhow::Result<(TrustedProxyPolicy, bool)> {
+    let policy = TrustedProxyPolicy::from_values(
+        env.get(&["adapter", "trusted_proxy_cidrs"]),
+        env.get(&["adapter", "forwarding_header_family"]),
+    )
+    .map_err(|_error| {
+        failure(
+            "settings",
+            "TRUSTED_PROXY_POLICY",
+            "invalid literal networks or forwarding family",
+        )
+    })?;
+    let records = match env.get(&["logging", "request_records"]) {
+        None | Some("true") => true,
+        Some("false") => false,
+        Some(_) => {
+            return Err(failure(
+                "settings",
+                "LOGGING__REQUEST_RECORDS",
+                "invalid boolean",
+            ));
+        }
+    };
+    Ok((policy, records))
 }
 
 pub(crate) fn failure(stage: &str, subject: &str, category: &str) -> anyhow::Error {
@@ -572,6 +666,9 @@ fn fixed_setting(path: &[String]) -> Option<&'static str> {
         ["adapter", "config_dir"] => Some("CONFIG_DIR"),
         ["adapter", "data_dir"] => Some("DATA_DIR"),
         ["adapter", "shutdown_grace_seconds"] => Some("SHUTDOWN_GRACE_SECONDS"),
+        ["adapter", "trusted_proxy_cidrs"] => Some("TRUSTED_PROXY_CIDRS"),
+        ["adapter", "forwarding_header_family"] => Some("FORWARDING_HEADER_FAMILY"),
+        ["logging", "request_records"] => Some("LOGGING__REQUEST_RECORDS"),
         ["logging", "level"] => Some("LOGGING__LEVEL"),
         ["store_bindings_file"] => Some("STORE_BINDINGS_FILE"),
         _ => None,
@@ -645,6 +742,79 @@ mod tests {
 
     const CELLD: &str = "version=1\n[config.remote]\nprovider='celld-config'\nendpoint='https://unreachable.invalid'\ndefault_key='settings'\n[config.remote.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n[config.remote.documents.settings]\nstore='config-fixture'\nkey='settings'\n[kv.state]\nprovider='celld-kv'\nendpoint='https://unreachable.invalid'\nstore='state-fixture'\n[kv.state.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n";
     const CELL_TOKEN: &str = "celld-bootstrap-value-01234567890123456789";
+
+    #[test]
+    fn geo_selection_defaults_and_whole_replacement_preserve_native_option_bounds() {
+        use crate::geo::ProtectedCloudFrontAlb;
+        let options = AxumRunOptions::new("127.0.0.1:8787".parse().unwrap()).unwrap();
+        let _thread_safe_clone: Box<dyn Send + Sync> = Box::new(options.clone());
+        assert!(matches!(
+            options.geo_capability(),
+            Ok(NativeGeoCapability::Off)
+        ));
+        let selected = options.with_geo(NativeGeoSelection::CloudFront {
+            policy: ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture")
+                .unwrap(),
+        });
+        let replaced = selected.with_geo(NativeGeoSelection::Off);
+        assert!(matches!(
+            replaced.geo_capability(),
+            Ok(NativeGeoCapability::Off)
+        ));
+    }
+
+    #[test]
+    fn native_settings_defaults_explicit_builders_and_strict_values() {
+        let defaults = AxumRunOptions::from_vars(Vec::<(String, String)>::new()).expect("defaults");
+        assert!(defaults.request_records());
+        assert_eq!(
+            defaults.trusted_proxy_policy(),
+            TrustedProxyPolicy::no_trust()
+        );
+        let configured = AxumRunOptions::from_vars([
+            ("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "127.0.0.2/32"),
+            ("EDGEZERO__ADAPTER__FORWARDING_HEADER_FAMILY", "forwarded"),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", "false"),
+        ])
+        .expect("configured");
+        assert!(!configured.request_records());
+        assert_ne!(
+            configured.trusted_proxy_policy(),
+            TrustedProxyPolicy::no_trust()
+        );
+        let explicit = AxumRunOptions::new(defaults.addr())
+            .expect("explicit")
+            .with_request_records(false)
+            .with_trusted_proxy_policy(configured.trusted_proxy_policy());
+        assert!(!explicit.request_records());
+        assert_eq!(
+            explicit.trusted_proxy_policy(),
+            configured.trusted_proxy_policy()
+        );
+        assert!(
+            explicit
+                .env_config()
+                .get(&["adapter", "trusted_proxy_cidrs"])
+                .is_none()
+        );
+        for (key, value) in [
+            ("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "127.0.0.2"),
+            ("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "sentinel-policy"),
+            (
+                "EDGEZERO__ADAPTER__FORWARDING_HEADER_FAMILY",
+                "sentinel-family",
+            ),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", "TRUE"),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", "false "),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", ""),
+        ] {
+            let error = AxumRunOptions::from_vars([(key, value)])
+                .err()
+                .expect("invalid supplied setting");
+            assert_eq!(error.chain().count(), 1);
+            assert!(!error.to_string().contains("sentinel"));
+        }
+    }
 
     fn explicit() -> AxumRunOptions {
         AxumRunOptions::new(SocketAddr::from(([127, 0, 0, 1], 1234))).expect("explicit options")

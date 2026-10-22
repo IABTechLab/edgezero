@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::fmt;
+use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,9 +9,10 @@ use bytes::Bytes;
 use crate::body::Body;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::EdgeError;
+use crate::geo::GeoOutcome;
 use crate::http::{
-    Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Response, StatusCode, Uri,
-    Version,
+    Authority, Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Response,
+    StatusCode, Uri, Version,
     header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
 };
 use crate::response_egress::{ResponseEgressCompletion, ResponseEgressEnvelope};
@@ -249,11 +251,13 @@ pub enum IngressDispatchOutcome {
 
 /// Proof that the application selected one request disposition with a finite read deadline.
 pub struct AdmittedIngress {
+    category_only_json_errors: bool,
     config_extraction_limits: ConfigExtractionLimits,
     dispatch_disposition: IngressDispatchDisposition,
     grant: IngressGrant,
     monotonic_clock: MonotonicClock,
     read_deadline: Deadline,
+    request_geo: GeoOutcome,
     request_start: MonotonicInstant,
 }
 
@@ -321,9 +325,92 @@ impl AdmittedIngress {
         self.request_start
     }
 
+    pub(crate) fn take_request_context(&mut self) -> (GeoOutcome, bool) {
+        (
+            mem::replace(&mut self.request_geo, GeoOutcome::NoSelection),
+            self.category_only_json_errors,
+        )
+    }
+
     pub(crate) fn with_config_extraction_limits(mut self, limits: ConfigExtractionLimits) -> Self {
         self.config_extraction_limits = limits;
         self
+    }
+
+    pub(crate) fn with_request_context(
+        mut self,
+        geo: GeoOutcome,
+        category_only_json_errors: bool,
+    ) -> Self {
+        self.request_geo = geo;
+        self.category_only_json_errors = category_only_json_errors;
+        self
+    }
+}
+
+/// Provenance of one independently checked effective proxy field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CheckedHostSource {
+    Direct,
+    TrustedForwarded,
+    TrustedXForwarded,
+    Unavailable,
+}
+
+/// Adapter-checked authority for portable host consumers.
+/// This witness does not itself authorize forwarding assertions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedEffectiveHost {
+    authority: Option<Authority>,
+    source: CheckedHostSource,
+}
+
+impl CheckedEffectiveHost {
+    #[must_use]
+    #[inline]
+    pub fn authority(&self) -> Option<&str> {
+        self.authority.as_ref().map(Authority::as_str)
+    }
+
+    /// Constructs a witness only after adapter-owned trust and syntax checks.
+    #[doc(hidden)]
+    #[must_use]
+    #[inline]
+    pub const fn from_ingress(authority: Option<Authority>, source: CheckedHostSource) -> Self {
+        Self { authority, source }
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn source(&self) -> CheckedHostSource {
+        self.source
+    }
+}
+
+/// Received normalized-head sizes; never proof of raw-wire accounting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NormalizedIngressHeadSummary {
+    header_bytes: u64,
+    header_count: u64,
+    target_bytes: u64,
+}
+
+impl NormalizedIngressHeadSummary {
+    #[must_use]
+    #[inline]
+    pub const fn header_bytes(self) -> u64 {
+        self.header_bytes
+    }
+    #[must_use]
+    #[inline]
+    pub const fn header_count(self) -> u64 {
+        self.header_count
+    }
+    #[must_use]
+    #[inline]
+    pub const fn target_bytes(self) -> u64 {
+        self.target_bytes
     }
 }
 
@@ -520,6 +607,7 @@ impl IngressHeadParts {
     #[inline]
     pub fn validate_normalized(&self, limits: IngressHeadLimits) -> Result<(), EdgeError> {
         validate_normalized_head(&self.target, self.version, &self.headers, limits)
+            .map(|_summary| ())
     }
 
     #[must_use]
@@ -803,6 +891,8 @@ pub(crate) fn apply_admission_policy(
     Ok(IngressAdmissionOutcome::Admitted {
         completion,
         ingress: AdmittedIngress {
+            request_geo: GeoOutcome::NoSelection,
+            category_only_json_errors: false,
             config_extraction_limits: ConfigExtractionLimits::default(),
             dispatch_disposition,
             grant,
@@ -834,6 +924,19 @@ pub fn validate_normalized_ingress_parts(
     parts: &RequestParts,
     limits: IngressHeadLimits,
 ) -> Result<(), EdgeError> {
+    validate_normalized_ingress_parts_with_summary(parts, limits).map(|_summary| ())
+}
+
+/// Validates and accounts for the received head in the same bounded pass.
+/// Call before stripping assertions; returned sizes remain normalized, not raw-wire.
+///
+/// # Errors
+/// Returns the same head/framing errors as [`validate_normalized_ingress_parts`].
+#[inline]
+pub fn validate_normalized_ingress_parts_with_summary(
+    parts: &RequestParts,
+    limits: IngressHeadLimits,
+) -> Result<NormalizedIngressHeadSummary, EdgeError> {
     validate_normalized_head(&parts.uri, parts.version, &parts.headers, limits)
 }
 
@@ -842,7 +945,7 @@ fn validate_normalized_head(
     version: Version,
     headers: &HeaderMap,
     limits: IngressHeadLimits,
-) -> Result<(), EdgeError> {
+) -> Result<NormalizedIngressHeadSummary, EdgeError> {
     let target_bytes = u64::try_from(target.to_string().len()).map_err(|_length_error| {
         EdgeError::uri_too_long("normalized request target is too large")
     })?;
@@ -886,7 +989,12 @@ fn validate_normalized_head(
         }
     }
 
-    validate_normalized_framing(version, headers)
+    validate_normalized_framing(version, headers)?;
+    Ok(NormalizedIngressHeadSummary {
+        header_bytes,
+        header_count,
+        target_bytes,
+    })
 }
 
 fn validate_normalized_framing(version: Version, headers: &HeaderMap) -> Result<(), EdgeError> {
