@@ -226,6 +226,64 @@ pub fn validate_negative_logging(replies: &[Value], starts: &[Value]) -> Result<
     }
     Ok(if reused { "pass" } else { "unverified" })
 }
+pub fn validate_fastly_delivery_report(
+    token: &str,
+    events: &[Value],
+    expected: &Value,
+) -> Result<()> {
+    let reports = events
+        .iter()
+        .filter(|event| event["event"] == "delivery_report" && event["token"] == token)
+        .collect::<Vec<_>>();
+    require(reports.len() == 1, "missing or duplicate delivery report")?;
+    let report = reports[0];
+    for key in [
+        "disposition",
+        "commitment",
+        "body_kind",
+        "outcome",
+        "fallback",
+        "may_send_native",
+    ] {
+        require(
+            expected.get(key).is_some(),
+            "incomplete delivery expectation",
+        )?;
+        require(
+            report.get(key) == expected.get(key),
+            format!("delivery report {key} mismatch"),
+        )?;
+    }
+    if expected["disposition"] == "no-attempt" {
+        require(
+            expected.get("no_attempt_reason").is_some()
+                && report.get("no_attempt_reason") == expected.get("no_attempt_reason"),
+            "delivery report no-attempt reason mismatch",
+        )?;
+    }
+    let attempted = matches!(
+        expected["disposition"].as_str(),
+        Some("routed" | "detached")
+    );
+    let terminals = events
+        .iter()
+        .filter(|event| event["event"] == "egress_terminal" && event["token"] == token)
+        .collect::<Vec<_>>();
+    require(
+        terminals.len() == usize::from(attempted),
+        "delivery completion count mismatch",
+    )?;
+    if attempted {
+        for key in ["outcome", "body_kind", "fallback", "bytes_written"] {
+            require(
+                report.get(key).is_some() && report.get(key) == terminals[0].get(key),
+                format!("delivery/completion {key} mismatch"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_post_send(token: &str, receipts: &[String], events: &[Value]) -> Result<()> {
     require(
         receipts.contains(&format!("/post-send?token={token}")),
@@ -763,6 +821,55 @@ mod tests {
             "pass"
         );
     }
+    #[test]
+    fn delivery_reports_require_exactly_one_matching_completion() {
+        let expected = json!({"disposition":"routed","commitment":"Committed", "body_kind":"Application",
+            "outcome":"SourceError","fallback":null,"may_send_native":false});
+        let mut delivery = expected.clone();
+        delivery["event"] = json!("delivery_report");
+        delivery["token"] = json!("x");
+        delivery["bytes_written"] = json!(7);
+        let terminal = json!({"event":"egress_terminal","token":"x","body_kind":"Application",
+            "outcome":"SourceError","fallback":null,"bytes_written":7});
+        assert!(
+            validate_fastly_delivery_report("x", &[delivery.clone(), terminal.clone()], &expected)
+                .is_ok()
+        );
+        assert!(validate_fastly_delivery_report("x", &[delivery.clone()], &expected).is_err());
+        assert!(
+            validate_fastly_delivery_report(
+                "x",
+                &[delivery.clone(), delivery.clone(), terminal.clone()],
+                &expected
+            )
+            .is_err()
+        );
+        for key in [
+            "commitment",
+            "body_kind",
+            "outcome",
+            "fallback",
+            "may_send_native",
+        ] {
+            let mut changed = delivery.clone();
+            changed[key] = json!("wrong");
+            assert!(
+                validate_fastly_delivery_report("x", &[changed, terminal.clone()], &expected)
+                    .is_err()
+            );
+        }
+        let expected = json!({"disposition":"no-attempt","commitment":null,"body_kind":null,
+            "outcome":null,"fallback":null,"may_send_native":true,"no_attempt_reason":"required-store"});
+        let mut no_attempt = expected.clone();
+        no_attempt["event"] = json!("delivery_report");
+        no_attempt["token"] = json!("x");
+        assert!(validate_fastly_delivery_report("x", &[no_attempt.clone()], &expected).is_ok());
+        let mut wrong_cause = no_attempt.clone();
+        wrong_cause["no_attempt_reason"] = json!("request-head-conversion");
+        assert!(validate_fastly_delivery_report("x", &[wrong_cause], &expected).is_err());
+        assert!(validate_fastly_delivery_report("x", &[no_attempt, terminal], &expected).is_err());
+    }
+
     #[test]
     fn post_send_requires_both_receipts() {
         assert!(validate_post_send("x", &[], &[]).is_err());

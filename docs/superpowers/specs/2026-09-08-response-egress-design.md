@@ -337,6 +337,28 @@ response requires `begin()`, which first transfers the completion into the attem
 unbegun envelope is permitted only as cancellation before transmission; it releases the resource
 without exposing the response or inventing a report.
 
+`ResponseEgressAttempt::into_terminal_report(self)` consumes the attempt and returns
+the exact stored report without another clock sample or notification when already
+terminal. A live attempt follows its existing Drop transition (conversion failure
+before writing, transport failure while writing, or the retained fallback cause
+with aborted fallback). The first transition installs terminal state before notifying
+completion and then the applicable observer; consuming or dropping it cannot notify
+again. This is terminal metadata extraction, not a response/transmission escape hatch.
+
+Fastly custom-send helpers return `FastlyRequestDelivery<State>` with NoAttempt,
+policy Aborted, Detached and Routed dispositions. Routed finalizer state survives
+delivery failure. Attempted results retain this exact terminal report plus the last
+selected body's commitment and last delivery error. Successful fallback transmission
+can have no delivery error while the report retains its original failure cause.
+NotCommitted means the head never reached host send, Unknown means host rejection
+cannot establish client visibility, and Committed means host acceptance only. Native
+replacement is allowed only for NoAttempt or confirmed NotCommitted; an attempted
+response's terminal callbacks already ran, and native replacement is outside their
+accounting. Policy abort never authorizes replacement. Pre-admission/refusal responses
+exclude the global observer; admitted source-error responses report Detached but retain it.
+Standard entrypoint serving
+policy and all BestEffort provider qualifications remain unchanged.
+
 `ResponseEgressAttempt::record_source_error(&EdgeError)` records only the first converter-observed
 body-source error as a fixed category, copied optional provider detail and observation-time body
 kind. It performs no clock read, allocation, source poll, state transition or callback. A first

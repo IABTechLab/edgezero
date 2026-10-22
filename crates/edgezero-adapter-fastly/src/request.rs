@@ -18,8 +18,9 @@ use edgezero_core::ingress::{
     IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
     IngressHeadParts, PreparedIngress,
 };
-use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::key_value_store::{KvError, KvHandle, KvStoreOpenFailure};
 use edgezero_core::outbound::HttpClient;
+#[cfg(any(test, feature = "test-utils"))]
 use edgezero_core::response_egress::ResponseEgressEnvelope;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
@@ -33,6 +34,12 @@ use std::collections::BTreeMap;
 
 use crate::config_store::FastlyConfigStore;
 use crate::context::FastlyRequestContext;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::delivery::FastlyResponseDelivery;
+use crate::delivery::{
+    DispatchOutcome, FastlyNoAttempt, FastlyNoAttemptReason, FastlyRequestDelivery,
+    FastlyRequestHeadFailure, finish_request,
+};
 use crate::init_fastly_abi;
 use crate::key_value_store::FastlyKvStore;
 use crate::outbound::FastlyOutboundClient;
@@ -121,15 +128,14 @@ struct KvSource {
     required: bool,
 }
 
+struct HeadConversionFailure {
+    cause: FastlyRequestHeadFailure,
+    error: EdgeError,
+}
+
 enum SecretSource {
     Off,
     On { required: bool },
-}
-
-enum DispatchOutcome {
-    Aborted,
-    Detached(ResponseEgressEnvelope),
-    Routed(ResponseEgressEnvelope),
 }
 
 impl DispatchOutcome {
@@ -152,6 +158,7 @@ impl<'app> FastlyService<'app> {
         req: FastlyRequest,
     ) -> Result<ResponseEgressEnvelope, FastlyError> {
         self.dispatch_with(req, |_req, _extensions| {})
+            .map_err(|reason| FastlyError::msg(reason.message()))
             .and_then(DispatchOutcome::into_envelope)
     }
 
@@ -159,7 +166,7 @@ impl<'app> FastlyService<'app> {
         self,
         req: FastlyRequest,
         prepare: Prepare,
-    ) -> Result<DispatchOutcome, FastlyError>
+    ) -> Result<DispatchOutcome, FastlyNoAttempt>
     where
         Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     {
@@ -238,14 +245,14 @@ impl<'app> FastlyService<'app> {
         prepare: Prepare,
         finalize: Finalize,
         deliver: Deliver,
-    ) -> Result<Option<State>, FastlyError>
+    ) -> FastlyRequestDelivery<State>
     where
         Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
         Finalize: FnOnce(&mut Response) -> State,
-        Deliver: FnOnce(ResponseEgressEnvelope) -> Result<(), FastlyError>,
+        Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
     {
-        let outcome = self.dispatch_with(req, prepare)?;
-        deliver_with_hooks(outcome, finalize, deliver)
+        let outcome = self.dispatch_with(req, prepare);
+        finish_request(outcome, finalize, deliver)
     }
 
     /// Resolve every wired store, receive the client request, and transmit its response.
@@ -258,6 +265,7 @@ impl<'app> FastlyService<'app> {
         init_fastly_abi();
         let req = FastlyRequest::from_client();
         self.send_request_with_hooks(req, |_req, _extensions| {}, |_response| ())
+            .into_standard_result()
             .map(|_state| ())
     }
 
@@ -265,26 +273,23 @@ impl<'app> FastlyService<'app> {
     ///
     /// `prepare` may mutate the borrowed raw request and add portable extensions before
     /// conversion. `finalize` may mutate only a routed response before egress policy/framing. The
-    /// adapter retains response ownership, sends exactly once, and returns routed hook state only
-    /// after delivery reaches its terminal boundary. Detached ingress responses return `None` and
-    /// skip `finalize`.
-    ///
-    /// # Errors
-    /// Returns an error when required stores, request conversion, or response delivery fails.
+    /// adapter retains response ownership and returns its disposition, last-body commitment and
+    /// exact terminal report. Routed hook state survives failed delivery and fallback. Detached
+    /// responses skip `finalize`. Inspect replacement permission before sending a native response.
     #[inline]
     pub fn send_request_with_hooks<State, Prepare, Finalize>(
         self,
         req: FastlyRequest,
         prepare: Prepare,
         finalize: Finalize,
-    ) -> Result<Option<State>, FastlyError>
+    ) -> FastlyRequestDelivery<State>
     where
         Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
         Finalize: FnOnce(&mut Response) -> State,
     {
         init_fastly_abi();
-        let outcome = self.dispatch_with(req, prepare)?;
-        deliver_with_hooks(outcome, finalize, send_egress_response)
+        let outcome = self.dispatch_with(req, prepare);
+        finish_request(outcome, finalize, send_egress_response)
     }
 
     /// Open the Fastly Config Store named `name` and inject its
@@ -370,29 +375,6 @@ fn detached_error_outcome(
     }
 }
 
-fn deliver_with_hooks<State, Finalize, Deliver>(
-    outcome: DispatchOutcome,
-    finalize: Finalize,
-    deliver: Deliver,
-) -> Result<Option<State>, FastlyError>
-where
-    Finalize: FnOnce(&mut Response) -> State,
-    Deliver: FnOnce(ResponseEgressEnvelope) -> Result<(), FastlyError>,
-{
-    match outcome {
-        DispatchOutcome::Aborted => Err(FastlyError::msg("ingress admission aborted")),
-        DispatchOutcome::Detached(envelope) => {
-            deliver(envelope)?;
-            Ok(None)
-        }
-        DispatchOutcome::Routed(mut envelope) => {
-            let state = finalize(envelope.response_mut());
-            deliver(envelope)?;
-            Ok(Some(state))
-        }
-    }
-}
-
 fn dispatch_core_request(
     app: &App,
     mut core_request: Request,
@@ -438,13 +420,18 @@ fn dispatch_with_handles<Prepare>(
     stores: Stores,
     request_start: MonotonicInstant,
     prepare: Prepare,
-) -> Result<DispatchOutcome, FastlyError>
+) -> Result<DispatchOutcome, FastlyNoAttempt>
 where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
     let scratch = apply_request_prepare(&mut req, prepare);
-    let mut head_request = into_core_request_head(&req, app.monotonic_clock())
-        .map_err(|error| map_edge_error(&error))?;
+    let mut head_request =
+        into_core_request_head(&req, app.monotonic_clock()).map_err(|failure| {
+            FastlyNoAttempt::new(
+                FastlyNoAttemptReason::RequestHeadConversion(failure.cause),
+                map_edge_error(&failure.error),
+            )
+        })?;
     head_request.extensions_mut().extend(scratch);
     Ok(dispatch_ingress_reader(
         app,
@@ -529,8 +516,7 @@ where
 /// fails before dispatch. Failed declared config bindings remain typed failing handles, and secret
 /// bindings open their logical alias when extraction requests the value.
 ///
-/// # Errors
-/// Returns admission-abort or terminal delivery errors; declared KV opening errors are
+/// Reports no-attempt, policy abort, detached or routed delivery. Declared KV opening errors are
 /// handled through the application's normal error response path when the store is used.
 #[inline]
 pub fn send_with_registries_and_hooks<State, Prepare, Finalize>(
@@ -538,7 +524,7 @@ pub fn send_with_registries_and_hooks<State, Prepare, Finalize>(
     stores: StoresMetadata,
     prepare: Prepare,
     finalize: Finalize,
-) -> Result<Option<State>, FastlyError>
+) -> FastlyRequestDelivery<State>
 where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
@@ -553,8 +539,8 @@ where
 /// Use this inside a retained serving loop; it never receives another client request.
 /// Request registries, preparation, finalization, and body handles remain request-local.
 ///
-/// # Errors
-/// Returns admission-abort or terminal delivery errors without sending a second response.
+/// Returns an owned disposition and delivery report without sending a second response.
+/// Routed finalization state is retained even when delivery fails or a fallback is delivered.
 #[inline]
 pub fn send_request_with_registries_and_hooks<State, Prepare, Finalize>(
     app: &App,
@@ -562,7 +548,7 @@ pub fn send_request_with_registries_and_hooks<State, Prepare, Finalize>(
     req: FastlyRequest,
     prepare: Prepare,
     finalize: Finalize,
-) -> Result<Option<State>, FastlyError>
+) -> FastlyRequestDelivery<State>
 where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
@@ -583,8 +569,8 @@ where
         },
         request_start,
         prepare,
-    )?;
-    deliver_with_hooks(outcome, finalize, send_egress_response)
+    );
+    finish_request(outcome, finalize, send_egress_response)
 }
 
 /// Pure synthesis: collapse a `Stores` (which may carry both a
@@ -693,23 +679,32 @@ fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretReg
 /// Returns [`EdgeError::Internal`] if the Fastly request cannot be reconstituted into a core request (e.g., method or URI conversion failure).
 #[inline]
 pub fn into_core_request(mut req: FastlyRequest) -> Result<Request, EdgeError> {
-    let request = into_core_request_head(&req, MonotonicClock::default())?;
+    let request =
+        into_core_request_head(&req, MonotonicClock::default()).map_err(|failure| failure.error)?;
     Ok(attach_core_body(&mut req, request, None))
 }
 
 fn into_core_request_head(
     req: &FastlyRequest,
     outbound_clock: MonotonicClock,
-) -> Result<Request, EdgeError> {
+) -> Result<Request, HeadConversionFailure> {
     let method = req.get_method().clone();
-    let uri = parse_uri(req.get_url_str())?;
+    let uri = parse_uri(req.get_url_str()).map_err(|error| HeadConversionFailure {
+        cause: FastlyRequestHeadFailure::InvalidUri,
+        error,
+    })?;
 
     let mut builder = request_builder().method(method).uri(uri);
     for (name, value) in req.get_headers() {
         builder = builder.header(name.as_str(), value.as_bytes());
     }
 
-    let mut request = builder.body(Body::empty()).map_err(EdgeError::internal)?;
+    let mut request = builder
+        .body(Body::empty())
+        .map_err(|error| HeadConversionFailure {
+            cause: FastlyRequestHeadFailure::RequestBuilder,
+            error: EdgeError::internal(error),
+        })?;
 
     let context = FastlyRequestContext {
         client_ip: req.get_client_ip_addr(),
@@ -859,7 +854,12 @@ where
         request_start,
         make_source,
     );
-    deliver_with_hooks(outcome, |_response| (), deliver).map(|_state| ())
+    match outcome {
+        DispatchOutcome::Aborted => Err(FastlyError::msg("ingress admission aborted")),
+        DispatchOutcome::Detached(envelope) | DispatchOutcome::Routed(envelope) => {
+            deliver(envelope)
+        }
+    }
 }
 
 /// Exercises a reader-construction failure after admission through the production seam.
@@ -901,12 +901,20 @@ fn map_edge_error(err: &EdgeError) -> FastlyError {
 fn resolve_kv_handle(
     kv_store_name: &str,
     kv_required: bool,
-) -> Result<Option<KvHandle>, FastlyError> {
+) -> Result<Option<KvHandle>, FastlyNoAttempt> {
     match FastlyKvStore::open(kv_store_name) {
         Ok(store) => Ok(Some(KvHandle::new(Arc::new(store)))),
         Err(err) => {
             if kv_required {
-                return Err(FastlyError::new(err));
+                let reason = if let KvError::OpenFailed { reason } = &err {
+                    *reason
+                } else {
+                    KvStoreOpenFailure::Unavailable
+                };
+                return Err(FastlyNoAttempt::new(
+                    FastlyNoAttemptReason::RequiredStore(reason),
+                    FastlyError::new(err),
+                ));
             }
             warn_missing_kv_store_once(kv_store_name, &err);
             Ok(None)
@@ -1092,11 +1100,17 @@ mod synthesis_tests {
                 |_| (),
                 |_| {
                     delivered.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    panic!("required store failure must not deliver")
                 },
             );
-        let error = result.expect_err("explicit required store fails before dispatch");
-        assert!(!error.to_string().contains("unlinked_f8_fixture"));
+        let FastlyRequestDelivery::NoAttempt(reason) = result else {
+            panic!("explicit required store must fail before dispatch");
+        };
+        assert!(matches!(
+            reason.reason(),
+            FastlyNoAttemptReason::RequiredStore(_)
+        ));
+        assert!(!reason.message().contains("unlinked_f8_fixture"));
         assert_eq!(prepared.load(Ordering::SeqCst), 0);
         assert_eq!(delivered.load(Ordering::SeqCst), 0);
     }

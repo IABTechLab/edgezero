@@ -29,6 +29,9 @@ mod tests {
     use bytes::Bytes;
     use edgezero_adapter_fastly::build_app_for_test;
     use edgezero_adapter_fastly::context::FastlyRequestContext;
+    use edgezero_adapter_fastly::delivery::{
+        FastlyRequestDelivery, FastlyResponseCommitState, testing::response_delivery,
+    };
     use edgezero_adapter_fastly::request::{FastlyService, into_core_request};
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::body::Body;
@@ -39,7 +42,7 @@ mod tests {
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{Method, Response, StatusCode, response_builder};
-    use edgezero_core::response_egress::ResponseEgressEnvelope;
+    use edgezero_core::response_egress::{ResponseEgressEnvelope, ResponseEgressReport};
     use edgezero_core::router::{RouteMetadata, RouterService};
     use edgezero_core::time::{Deadline, MonotonicClock};
     use fastly::Request as FastlyRequest;
@@ -47,12 +50,18 @@ mod tests {
     use futures::{executor::block_on, stream};
 
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
+        complete_envelope_with_report(envelope).0
+    }
+
+    fn complete_envelope_with_report(
+        envelope: ResponseEgressEnvelope,
+    ) -> (Response, ResponseEgressReport) {
         let Ok((prepared, _, mut attempt, clock)) = envelope.begin() else {
             panic!("begin response egress");
         };
         assert!(attempt.begin_writing());
         assert!(attempt.complete(clock.now()));
-        prepared.into_response()
+        (prepared.into_response(), attempt.into_terminal_report())
     }
 
     struct FixedConfigStore(&'static str);
@@ -278,41 +287,46 @@ mod tests {
         let finalize_events = Arc::clone(&events);
         let delivery_events = Arc::clone(&events);
 
-        let state = FastlyService::new(&app)
-            .run_request_with_hooks_for_test(
-                request,
-                move |raw, extensions| {
-                    prepare_events.lock().expect("events").push("prepare");
-                    raw.set_url("http://example.com/hook");
-                    extensions.insert(HookValue("visible"));
-                },
-                move |response| {
-                    finalize_events.lock().expect("events").push("finalize");
-                    *response.status_mut() = StatusCode::CREATED;
-                    response
-                        .headers_mut()
-                        .insert("x-finalized", "yes".parse().expect("header"));
-                    42_u8
-                },
-                move |envelope| {
-                    delivery_events.lock().expect("events").push("deliver");
-                    let response = complete_envelope(envelope);
-                    assert_eq!(response.status(), StatusCode::CREATED);
-                    assert_eq!(
-                        response.headers().get("x-finalized"),
-                        Some(&"yes".parse().expect("header"))
-                    );
-                    assert_eq!(
-                        block_on(response.into_body().into_bytes_bounded(64))
-                            .expect("response body"),
-                        Bytes::from_static(b"visible")
-                    );
-                    Ok(())
-                },
-            )
-            .expect("closed lifecycle");
+        let state = FastlyService::new(&app).run_request_with_hooks_for_test(
+            request,
+            move |raw, extensions| {
+                prepare_events.lock().expect("events").push("prepare");
+                raw.set_url("http://example.com/hook");
+                extensions.insert(HookValue("visible"));
+            },
+            move |response| {
+                finalize_events.lock().expect("events").push("finalize");
+                *response.status_mut() = StatusCode::CREATED;
+                response
+                    .headers_mut()
+                    .insert("x-finalized", "yes".parse().expect("header"));
+                42_u8
+            },
+            move |envelope| {
+                delivery_events.lock().expect("events").push("deliver");
+                let (response, report) = complete_envelope_with_report(envelope);
+                assert_eq!(response.status(), StatusCode::CREATED);
+                assert_eq!(
+                    response.headers().get("x-finalized"),
+                    Some(&"yes".parse().expect("header"))
+                );
+                assert_eq!(
+                    block_on(response.into_body().into_bytes_bounded(64)).expect("response body"),
+                    Bytes::from_static(b"visible")
+                );
+                response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+            },
+        );
 
-        assert_eq!(state, Some(42));
+        let FastlyRequestDelivery::Routed {
+            state: hook_state,
+            delivery,
+        } = state
+        else {
+            panic!("closed lifecycle lost routed state");
+        };
+        assert_eq!(hook_state, 42);
+        assert_eq!(delivery.error(), None);
         assert_eq!(
             *events.lock().expect("events"),
             ["prepare", "handler", "finalize", "deliver"]
@@ -337,22 +351,21 @@ mod tests {
         let delivered = Arc::new(AtomicUsize::new(0));
         let delivered_hook = Arc::clone(&delivered);
 
-        let state = FastlyService::new(&app)
-            .run_request_with_hooks_for_test(
-                fastly_request(FastlyMethod::GET, "/uri", None),
-                |_raw, _extensions| {},
-                move |_response| {
-                    finalized_hook.fetch_add(1, Ordering::SeqCst);
-                    7_u8
-                },
-                move |_envelope| {
-                    delivered_hook.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-            )
-            .expect("detached lifecycle");
+        let state = FastlyService::new(&app).run_request_with_hooks_for_test(
+            fastly_request(FastlyMethod::GET, "/uri", None),
+            |_raw, _extensions| {},
+            move |_response| {
+                finalized_hook.fetch_add(1, Ordering::SeqCst);
+                7_u8
+            },
+            move |envelope| {
+                delivered_hook.fetch_add(1, Ordering::SeqCst);
+                let (_response, report) = complete_envelope_with_report(envelope);
+                response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+            },
+        );
 
-        assert_eq!(state, None);
+        assert!(matches!(state, FastlyRequestDelivery::Detached(_)));
         assert_eq!(finalized.load(Ordering::SeqCst), 0);
         assert_eq!(delivered.load(Ordering::SeqCst), 1);
     }

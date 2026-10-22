@@ -805,7 +805,57 @@ fn custom_stream_checks(
             "missing correlated post-commit error",
         )
     })?;
-    records.push(json!({"event":"expected_stream_error","variant":variant,"repetition":repetition,"token":failure_token,"status_code":partial.status,"partial_body":String::from_utf8_lossy(&partial.body),"source":"controlled_backend_abort"}))
+    await_evidence(|| {
+        validate_post_send(
+            &failure_token,
+            &backend.receipts.lock().unwrap(),
+            &logs(log),
+        )
+    })?;
+    validate_fastly_delivery_report(
+        &failure_token,
+        &logs(log),
+        &json!({"disposition":"routed",
+        "commitment":"Committed","body_kind":"Application","outcome":"SourceError",
+        "fallback":null,"may_send_native":false}),
+    )?;
+    records.push(json!({"event":"expected_stream_error","variant":variant,"repetition":repetition,"token":failure_token,"status_code":partial.status,"partial_body":String::from_utf8_lossy(&partial.body),"source":"controlled_backend_abort"}))?;
+    let fallback_token = crate::token();
+    let fallback = net::request(
+        port,
+        "/probe/framing-fallback",
+        &fallback_token,
+        Some(&backend.url(&format!("/chunks?token={fallback_token}"))),
+        None,
+    )?;
+    require(
+        fallback["status"] == 500 && fallback["body"] == "internal server error",
+        "framing fallback wire mismatch",
+    )?;
+    await_evidence(|| {
+        require(
+            logs(log).iter().any(|event| {
+                event["event"] == "guest_completed" && event["token"] == fallback_token
+            }),
+            "missing fallback callback completion",
+        )
+    })?;
+    validate_fastly_delivery_report(
+        &fallback_token,
+        &logs(log),
+        &json!({"disposition":"routed",
+        "commitment":"Committed","body_kind":"Fallback","outcome":"ConversionError",
+        "fallback":"Completed","may_send_native":false}),
+    )?;
+    require(
+        !backend
+            .receipts
+            .lock()
+            .unwrap()
+            .contains(&format!("/post-send?token={fallback_token}")),
+        "fallback incorrectly scheduled post-send work",
+    )?;
+    records.push(annotate(fallback, json!({"variant":variant,"repetition":repetition,"token":fallback_token,"assertion":"reported_fallback_skips_post_send"})))
 }
 fn smoke_origin_checks(
     port: u16,
@@ -1378,6 +1428,8 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                     "constructor_panic"
                 } else if rendered_ingress {
                     "ingress_error_response"
+                } else if *path == "/collect-error" {
+                    "post_commit_error"
                 } else {
                     "adapter_error"
                 };
@@ -1389,6 +1441,13 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                 )
             })?;
             if *path == "/collect-error" {
+                validate_fastly_delivery_report(
+                    &failed_token,
+                    &logs(&log),
+                    &json!({"disposition":"routed",
+                    "commitment":"Committed","body_kind":"Application","outcome":"SourceError",
+                    "fallback":null,"may_send_native":false}),
+                )?;
                 let terminal = logs(&log)
                     .into_iter()
                     .filter(|event| {
@@ -1402,6 +1461,15 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                         && terminal[0]["bytes_written"] == 0
                         && terminal[0]["fallback"].is_null(),
                     "immediate source failure must terminate once without fallback delivery",
+                )?;
+            }
+            if matches!(*path, "/recoverable-store-error" | "/terminal-store-error") {
+                validate_fastly_delivery_report(
+                    &failed_token,
+                    &logs(&log),
+                    &json!({"disposition":"no-attempt",
+                    "commitment":null,"body_kind":null,"outcome":null,"fallback":null,"may_send_native":true,
+                    "no_attempt_reason":"required-store"}),
                 )?;
             }
             if recoverable || rendered_ingress {

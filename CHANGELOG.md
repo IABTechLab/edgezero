@@ -85,6 +85,23 @@ separately from the portable API and must be considered when declaring required 
   sanitized errors, warning deduplication, completion ownership and linked-store CRUD.
   These do not qualify hosted outage recovery, KV allocation, or stronger capabilities.
 
+### Fastly Custom Delivery Reports
+
+- Hard-cut `send_request_with_registries_and_hooks`, `send_with_registries_and_hooks`
+  and `FastlyService::send_request_with_hooks` from `Result<Option<State>, _>` to
+  owned `FastlyRequestDelivery<State>`. Distinguish no attempt, policy abort, detached
+  and routed delivery; preserve routed finalizer state after failure.
+- Retain exact terminal completion reports, last-body commitment and separate delivery
+  errors. Permit native replacement only for no attempt or confirmed non-commitment,
+  never unknown commitment, policy abort or committed failure. Public pre-attempt
+  diagnostics are typed and payload-free; standard serving preserves original errors.
+- Add consuming `ResponseEgressAttempt::into_terminal_report` with the existing live
+  Drop semantics and no second terminal clock sample or notification. Standard Fastly
+  run/serve/send policy is unchanged, including successful fallback handling.
+- Migrate fixture callers and publish synthetic `delivery::testing` utilities. Demo
+  and generated applications retain the unchanged standard entrypoints. Local runtime
+  characterization does not qualify hosted delivery or promote capabilities.
+
 ### Outbound HTTP And Batches
 
 - Add a separate bounded local overflow characterization suite through all four standard

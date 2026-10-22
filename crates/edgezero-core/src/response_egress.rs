@@ -929,6 +929,27 @@ impl ResponseEgressAttempt {
         self.transition(cause, observed_at)
     }
 
+    /// Returns the exact terminal snapshot after its completion and observer notifications.
+    ///
+    /// A live attempt is abandoned using the same failure classification as `Drop`, not completed
+    /// successfully. An already terminal attempt samples no clock and invokes no callback again.
+    #[must_use]
+    #[inline]
+    pub fn into_terminal_report(mut self) -> ResponseEgressReport {
+        let application_outcome = match &self.state {
+            AttemptState::Terminal(report) => return report.clone(),
+            AttemptState::Initial => ResponseEgressOutcome::ConversionError,
+            AttemptState::Writing => ResponseEgressOutcome::TransportError,
+        };
+        let outcome = if let Some(cause) = self.fallback_cause {
+            self.fallback_disposition = Some(ResponseEgressFallbackDisposition::Aborted);
+            cause
+        } else {
+            application_outcome
+        };
+        self.publish_report(outcome, self.clock.now())
+    }
+
     #[must_use]
     #[inline]
     pub fn new(
@@ -983,6 +1004,36 @@ impl ResponseEgressAttempt {
         })
     }
 
+    fn publish_report(
+        &mut self,
+        mut outcome: ResponseEgressOutcome,
+        observed_at: MonotonicInstant,
+    ) -> ResponseEgressReport {
+        let elapsed =
+            if let Some(elapsed) = observed_at.checked_duration_since(self.egress_started_at) {
+                elapsed
+            } else {
+                log::error!("response-egress monotonic clock moved backwards");
+                outcome = ResponseEgressOutcome::Unspecified;
+                Duration::ZERO
+            };
+        let report = ResponseEgressReport {
+            bytes_written: self.bytes_written,
+            body_kind: self.body_kind,
+            elapsed,
+            fallback_disposition: self.fallback_disposition,
+            framing_failures: self.framing_failures,
+            outcome,
+            request_start: self.request_start,
+            route: self.route.clone(),
+            source_failure: self.source_failure,
+        };
+        self.state = AttemptState::Terminal(report.clone());
+        self.completion.complete(&report);
+        self.observer.complete(&report);
+        report
+    }
+
     /// Retains the first body-source error without changing state, clocks or terminal outcome.
     ///
     /// Returns false after an observation or terminal transition. Missing provider detail is
@@ -1030,40 +1081,14 @@ impl ResponseEgressAttempt {
 
     fn transition(
         &mut self,
-        mut outcome: ResponseEgressOutcome,
+        outcome: ResponseEgressOutcome,
         observed_at: MonotonicInstant,
     ) -> bool {
         if matches!(self.state, AttemptState::Terminal(_)) {
             return false;
         }
-
-        let elapsed =
-            if let Some(elapsed) = observed_at.checked_duration_since(self.egress_started_at) {
-                elapsed
-            } else {
-                log::error!("response-egress monotonic clock moved backwards");
-                outcome = ResponseEgressOutcome::Unspecified;
-                Duration::ZERO
-            };
-        let report = ResponseEgressReport {
-            bytes_written: self.bytes_written,
-            body_kind: self.body_kind,
-            elapsed,
-            fallback_disposition: self.fallback_disposition,
-            framing_failures: self.framing_failures,
-            outcome,
-            request_start: self.request_start,
-            route: self.route.clone(),
-            source_failure: self.source_failure,
-        };
-        self.state = AttemptState::Terminal(report);
-        if let AttemptState::Terminal(terminal_report) = &self.state {
-            self.completion.complete(terminal_report);
-            self.observer.complete(terminal_report);
-            true
-        } else {
-            false
-        }
+        self.publish_report(outcome, observed_at);
+        true
     }
 }
 
@@ -1113,6 +1138,7 @@ mod tests {
     use std::error::Error;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::from_ref;
+    use std::slice::from_ref as slice_from_ref;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
@@ -1230,6 +1256,102 @@ mod tests {
             ResponseEgressObserverHandle::new(observer.clone()),
             MonotonicClock::default(),
         )
+    }
+
+    #[test]
+    fn terminal_report_extraction_preserves_callbacks_and_drop_semantics() {
+        for (fallback, writing, terminal) in [
+            (false, false, false),
+            (false, true, false),
+            (false, true, true),
+            (true, false, false),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let observed = RecordingObserver::default();
+            let completed = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&completed);
+            let reads = Arc::new(AtomicUsize::new(0));
+            let clock_reads = Arc::clone(&reads);
+            let now = MonotonicInstant::now();
+            let headers = HeaderMap::new();
+            let mut attempt = ResponseEgressAttempt::new(
+                &head(&headers, now, None),
+                now,
+                ResponseEgressCompletion::new(move |report| {
+                    captured.lock().unwrap().push(report.clone());
+                }),
+                ResponseEgressObserverHandle::new(observed.clone()),
+                MonotonicClock::new(move || {
+                    clock_reads.fetch_add(1, Ordering::SeqCst);
+                    now
+                }),
+            );
+            attempt.record_source_error(&EdgeError::bad_request("private source"));
+            prepare_extraction_state(&mut attempt, now, (fallback, writing, terminal));
+            let before_reads = reads.load(Ordering::SeqCst);
+            let report = attempt.into_terminal_report();
+            assert_eq!(
+                reads.load(Ordering::SeqCst) - before_reads,
+                usize::from(!terminal)
+            );
+            assert_eq!(
+                completed.lock().unwrap().as_slice(),
+                slice_from_ref(&report)
+            );
+            assert_eq!(
+                observed.reports.lock().unwrap().as_slice(),
+                slice_from_ref(&report)
+            );
+            assert!(report.source_failure.is_some());
+            assert_eq!(report.bytes_written, if writing { 3 } else { 0 });
+            if fallback {
+                assert_eq!(report.body_kind, ResponseEgressBodyKind::Fallback);
+                assert_eq!(report.outcome, ResponseEgressOutcome::ConversionError);
+                assert_eq!(
+                    report.fallback_disposition,
+                    Some(if terminal {
+                        ResponseEgressFallbackDisposition::Completed
+                    } else {
+                        ResponseEgressFallbackDisposition::Aborted
+                    })
+                );
+            } else {
+                assert_eq!(report.body_kind, ResponseEgressBodyKind::Application);
+                assert_eq!(
+                    report.outcome,
+                    if terminal {
+                        ResponseEgressOutcome::Completed
+                    } else if writing {
+                        ResponseEgressOutcome::TransportError
+                    } else {
+                        ResponseEgressOutcome::ConversionError
+                    }
+                );
+            }
+        }
+    }
+
+    fn prepare_extraction_state(
+        attempt: &mut ResponseEgressAttempt,
+        now: MonotonicInstant,
+        (fallback, writing, terminal): (bool, bool, bool),
+    ) {
+        if fallback {
+            assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
+        }
+        if writing {
+            assert!(attempt.begin_writing());
+            assert!(attempt.account_bytes(3, now));
+        }
+        if !terminal {
+            return;
+        }
+        if fallback {
+            assert!(attempt.finish_fallback(ResponseEgressFallbackDisposition::Completed, now));
+        } else {
+            assert!(attempt.complete(now));
+        }
     }
 
     #[test]

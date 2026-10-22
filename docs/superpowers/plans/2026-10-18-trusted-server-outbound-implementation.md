@@ -94,6 +94,15 @@ because provider visibility is incomplete. Published matrices are checked agains
 adapters. This does not recover host-hidden causes or close full EZ-16/P1, consumer/hosted
 qualification or failed Fastly G2. All transport, deadline and delivery guarantees remain unchanged.
 
+### F6b Delivery Report Checkpoint
+
+The [Fastly delivery-report checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f6b-delivery-report-checkpoint-2026-10-22)
+hard-migrates custom-send results while preserving standard serving policy. It retains finalizer
+state, exact terminal reports, last-body commitment and safe pre-attempt diagnostics. Native
+replacement is permitted only before any attempt or after confirmed non-commitment. Local
+Viceroy characterization is separate from hosted qualification; F9a assembly failure integration,
+consumer acceptance, full EZ-17 and failed Fastly G2 remain open.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

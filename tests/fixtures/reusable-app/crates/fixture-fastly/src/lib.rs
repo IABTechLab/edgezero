@@ -1,3 +1,6 @@
+use edgezero_adapter_fastly::delivery::{
+    FastlyNoAttemptReason, FastlyRequestDelivery, FastlyResponseCommitState,
+};
 use edgezero_adapter_fastly::lifecycle::{Sandbox, serve_custom};
 use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
 use edgezero_adapter_fastly::request::send_request_with_registries_and_hooks;
@@ -18,6 +21,45 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 static INITIALIZATIONS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 static PANIC_IN_CONSTRUCTOR: AtomicBool = AtomicBool::new(false);
+
+pub fn strict_delivery(result: FastlyRequestDelivery<()>) -> Result<(), Error> {
+    match result {
+        FastlyRequestDelivery::Routed { delivery, .. }
+        | FastlyRequestDelivery::Detached(delivery) => delivery
+            .error()
+            .map_or(Ok(()), |error| Err(Error::msg(error.message()))),
+        FastlyRequestDelivery::NoAttempt(reason) => Err(Error::msg(reason.message())),
+        FastlyRequestDelivery::Aborted => Err(Error::msg("ingress admission aborted")),
+        _ => Err(Error::msg("unsupported request delivery disposition")),
+    }
+}
+
+fn delivery_observed<State>(result: &FastlyRequestDelivery<State>, obs: &Observation, token: &str) {
+    let disposition = match result {
+        FastlyRequestDelivery::Routed { .. } => "routed",
+        FastlyRequestDelivery::Detached(_) => "detached",
+        FastlyRequestDelivery::NoAttempt(_) => "no-attempt",
+        FastlyRequestDelivery::Aborted => "aborted",
+        _ => "unknown",
+    };
+    let delivery = result.delivery();
+    println!(
+        "{}",
+        serde_json::json!({"event":"delivery_report", "instance":obs.instance,
+        "ordinal":obs.ordinal,"token":token,"disposition":disposition,
+        "commitment":delivery.map(|value|format!("{:?}",value.commitment())),
+        "body_kind":delivery.map(|value|format!("{:?}",value.report().body_kind)),
+        "outcome":delivery.map(|value|format!("{:?}",value.report().outcome)),
+        "bytes_written":delivery.map(|value|value.report().bytes_written),
+        "fallback":delivery.and_then(|value|value.report().fallback_disposition).map(|value|format!("{value:?}")),
+        "may_send_native":result.may_send_native_response(),
+        "no_attempt_reason":result.no_attempt_reason().map(|value|match value {
+            FastlyNoAttemptReason::RequiredStore(_) => "required-store",
+            FastlyNoAttemptReason::RequestHeadConversion(_) => "request-head-conversion",
+            _ => "unknown",
+        })})
+    );
+}
 
 fn lifecycle(event: &str, observation: &Observation, token: &str) {
     println!(
@@ -114,8 +156,13 @@ pub fn rebuilt() -> Result<(), Error> {
         let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
         setup.setup_once(|| install_logger(&logging))?;
         let app = App::build::<MeasuredApp>(FASTLY_PLATFORM)?;
-        send_request_with_registries_and_hooks(&app, stores, req, extend, |_response| ())
-            .map(|_state| ())
+        strict_delivery(send_request_with_registries_and_hooks(
+            &app,
+            stores,
+            req,
+            extend,
+            |_response| (),
+        ))
     }))
 }
 
@@ -135,7 +182,7 @@ pub fn logger_negative() -> Result<(), Error> {
             &obs,
             req.get_header_str("x-request-token").unwrap_or("missing"),
         );
-        send_request_with_registries_and_hooks(
+        strict_delivery(send_request_with_registries_and_hooks(
             &app,
             stores,
             req,
@@ -143,8 +190,7 @@ pub fn logger_negative() -> Result<(), Error> {
                 extensions.insert(obs);
             },
             |_response| (),
-        )
-        .map(|_state| ())
+        ))
     }))
 }
 
@@ -190,11 +236,13 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
         return Ok(());
     }
     log::info!("fixture request {}", obs.correlation);
-    // Only the streaming route schedules post-send work.
-    let post_send = req
-        .get_header_str("x-fixture-backend")
-        .filter(|uri| uri.contains("/chunks"))
-        .map(|uri| uri.replace("/chunks", "/post-send"));
+    let reject_framing = req.get_path() == "/probe/framing-fallback";
+    let post_send = req.get_header_str("x-fixture-backend").and_then(|value| {
+        let uri: Uri = value.parse().ok()?;
+        let authority = uri.authority()?;
+        matches!(uri.path(), "/chunks" | "/abort")
+            .then(|| format!("http://{authority}/post-send?token={token}"))
+    });
     // Per-request mode scopes application state to the current callback.
     let mut per_request = Sandbox::default();
     let state = if reuse_app { sandbox } else { &mut per_request };
@@ -219,6 +267,8 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
     initialized(&obs, &token);
     let app = state.state().unwrap();
     let attempts = state.initialization_attempts();
+    let client = HttpClient::with_client(FastlyOutboundClient::with_clock(app.monotonic_clock()));
+    let request_client = client.clone();
     let delivered = send_request_with_registries_and_hooks(
         app,
         stores,
@@ -226,29 +276,59 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
         |raw, extensions| {
             raw.set_header("x-fixture-mutated", "true");
             extensions.insert(obs.clone());
+            extensions.insert(request_client);
         },
-        |response| finalize_response(response, attempts),
+        |response| {
+            finalize_response(response, attempts);
+            if reject_framing {
+                response
+                    .headers_mut()
+                    .insert("trailer", "fixture-trailer".parse().unwrap());
+            }
+            client
+        },
     );
-    match delivered {
-        Err(error) => {
-            post_commit_error(&obs, &token, &error);
+    delivery_observed(&delivered, &obs, &token);
+    let client = match delivered {
+        FastlyRequestDelivery::NoAttempt(reason) => {
+            Response::from_status(500)
+                .with_body(reason.message())
+                .send_to_client();
             lifecycle("guest_completed", &obs, &token);
             return Ok(());
         }
-        Ok(None) => {
+        FastlyRequestDelivery::Aborted | FastlyRequestDelivery::Detached(_) => {
             lifecycle("guest_completed", &obs, &token);
             return Ok(());
         }
-        Ok(Some(())) => lifecycle("delivery_completed", &obs, &token),
-    }
+        FastlyRequestDelivery::Routed {
+            state: client,
+            delivery,
+        } => {
+            if let Some(error) = delivery.error() {
+                if delivery.commitment() == FastlyResponseCommitState::Committed {
+                    post_commit_error(&obs, &token, &Error::msg(error.message()));
+                } else {
+                    lifecycle("uncommitted_delivery_error", &obs, &token);
+                }
+            }
+            if delivery.commitment() != FastlyResponseCommitState::Committed
+                || delivery.report().body_kind != edgezero_core::ResponseEgressBodyKind::Application
+            {
+                lifecycle("guest_completed", &obs, &token);
+                return Ok(());
+            }
+            lifecycle("delivery_completed", &obs, &token);
+            client
+        }
+        _ => return Err(Error::msg("unsupported request delivery disposition")),
+    };
     if let Some(uri) = post_send {
         let outcome = block_on(async {
             let uri: Uri = uri.parse().map_err(EdgeError::internal)?;
             if !fixture_core::is_loopback_http(&uri) {
                 return Err(EdgeError::bad_request("backend must be loopback HTTP"));
             }
-            let client =
-                HttpClient::with_client(FastlyOutboundClient::with_clock(app.monotonic_clock()));
             client
                 .send(OutboundRequest::get(uri.to_string())?.stream_response())
                 .await?
@@ -412,16 +492,13 @@ pub fn faults() -> Result<(), Error> {
                     finalize,
                 )
             };
-            match result {
-                Ok(status) => {
-                    if path == "/inbound-error" {
-                        assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR));
-                        lifecycle("ingress_error_response", &obs, &token);
-                    }
-                    lifecycle("delivery_completed", &obs, &token);
-                    Ok(())
-                }
-                Err(error) => {
+            delivery_observed(&result, &obs, &token);
+            let (status, delivery) = match result {
+                FastlyRequestDelivery::Routed { state, delivery } => (Some(state), delivery),
+                FastlyRequestDelivery::Detached(delivery) => (None, delivery),
+                FastlyRequestDelivery::Aborted => return Ok(()),
+                FastlyRequestDelivery::NoAttempt(reason) => {
+                    let error = Error::msg(reason.message());
                     println!(
                         "{}",
                         serde_json::json!({"event":"adapter_error","instance":obs.instance,"ordinal":obs.ordinal,"token":token,"path":path,"error":error.to_string(),"source":"controlled_fixture_input"})
@@ -431,20 +508,31 @@ pub fn faults() -> Result<(), Error> {
                         Response::from_status(503)
                             .with_body("injected selector failed")
                             .send_to_client();
-                        Ok(())
+                        return Ok(());
                     } else {
-                        if path == "/terminal-store-error" {
-                            Response::from_status(500)
-                                .with_body("injected selector failed")
-                                .send_to_client();
-                        } else if path == "/collect-error" {
-                            post_commit_error(&obs, &token, &error);
-                        }
+                        Response::from_status(500)
+                            .with_body("injected selector failed")
+                            .send_to_client();
                         lifecycle("terminal_error", &obs, &token);
-                        Err(error)
+                        return Err(error);
                     }
                 }
+                _ => return Err(Error::msg("unsupported request delivery disposition")),
+            };
+            if let Some(error) = delivery.error() {
+                let error = Error::msg(error.message());
+                if delivery.commitment() == FastlyResponseCommitState::Committed {
+                    post_commit_error(&obs, &token, &error);
+                }
+                lifecycle("terminal_error", &obs, &token);
+                return Err(error);
             }
+            if path == "/inbound-error" {
+                assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+                lifecycle("ingress_error_response", &obs, &token);
+            }
+            lifecycle("delivery_completed", &obs, &token);
+            Ok(())
         },
     ))
 }

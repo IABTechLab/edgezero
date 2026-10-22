@@ -5998,7 +5998,7 @@ impl FastlyService {
         request: fastly::Request,
         prepare_request: RequestHook,
         finalize_response: ResponseHook,
-    ) -> Result<Option<PostSend>, fastly::Error>
+    ) -> FastlyRequestDelivery<PostSend>
     where
         RequestHook: FnOnce(&mut fastly::Request, &mut Extensions),
         ResponseHook: FnOnce(&mut Response) -> PostSend;
@@ -6016,12 +6016,29 @@ The exact order is normative:
 4. Revalidate response framing, begin the egress attempt with the application clock/deadline, and
    let the adapter alone commit headers, stream bytes, close or abandon the body, and record one
    terminal observation.
-5. Return the hook-produced `PostSend` value only after the adapter's strongest transport boundary
-   has completed. The caller may then perform post-send work.
+5. Return an owned `FastlyRequestDelivery<PostSend>` after the adapter's terminal boundary.
+   `Routed { state, delivery }` retains finalizer state on failure and fallback; `Detached`
+   skips finalization. `Aborted` means intentional policy abort, not `NoAttempt`. `NoAttempt`
+   carries payload-free typed required-store or request-head-conversion detail.
+
+Attempted results carry the exact `ResponseEgressReport` already sent to completion and the
+applicable observer, the last selected body's commitment, and its last delivery error separately
+from a fallback's original failure cause. `NotCommitted` means its head never reached the host
+send; `Unknown` means host rejection leaves client visibility unknown; `Committed` means host
+acceptance, not client delivery. `may_send_native_response()` authorizes native replacement only
+for NoAttempt or confirmed NotCommitted, never policy abort, Unknown or Committed. An attempted
+response is already terminally accounted; a native replacement is outside EdgeZero accounting.
+Pre-admission/refusal responses retain observer exclusion; an admitted source-error response
+also reports Detached but retains the application observer. Post-send application work must
+inspect body kind to avoid running after fallback; routed state remains available after a
+committed application-source failure. Complete pending work before returning from the callback.
 
 Hooks borrow the platform/core values. They cannot take the response, access the egress envelope,
 or invoke the platform sender. `run_app` remains the simple generated entrypoint and is built on
-this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper. The former
+this operation. `run_app_with_hooks` is the advanced auto-receiving wrapper; standard entrypoints
+retain their existing Result and stop-on-error serving policy, including successful fallback
+delivery. Custom callbacks select their own policy, including continuing after committed failure
+without a replacement send. The former
 `run_app_with_request_extensions` symbol is removed in the hard cut.
 
 ### 4.4 Spin — `crates/edgezero-adapter-spin`

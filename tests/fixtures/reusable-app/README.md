@@ -412,14 +412,27 @@ preservation and isolation rather than merely setting a constant header.
   own the serving boundary and successful-only initialization. Per-request mode uses a fresh
   state slot per callback; C uses the retained slot. Callbacks return `Result<(), E>`
   and own delivery by explicitly sending native replies or invoking
-  `send_request_with_registries_and_hooks(app, stores, req, &runtime.env, prepare, finalize)`.
+  `send_request_with_registries_and_hooks(app, stores, req, prepare, finalize)`.
   The preparation hook mutates the native request and extensions; the routed-response
   finalizer runs before egress policy and framing. The adapter owns appended headers,
   progressive body writes, and terminal close/abandon without whole-body collection.
-  Routed finalizer state is available as `Some` only after terminal delivery;
-  detached admission responses skip finalization and return `None`. Complete
+  Its owned `FastlyRequestDelivery<State>` distinguishes NoAttempt, policy Aborted,
+  Detached and Routed. Routed state survives delivery failure; detached responses
+  skip finalization. Attempted results carry the exact completion report and the
+  last selected body's NotCommitted/Unknown/Committed state. Only NoAttempt or
+  confirmed NotCommitted permit native replacement; completed attempt accounting
+  never includes that replacement. Complete
   post-send work before returning. Neither wrapper requests a synthetic SDK send;
   `run_custom` returns the callback result directly.
+
+The custom stream checks retain the finalizer's request-local client and complete
+post-send work after a committed application-source failure. A separate framing
+rejection delivers the canonical fallback and must not start application follow-up.
+Each attempted result must match exactly one correlated egress terminal event;
+required-store NoAttempt results must produce none. Host acceptance is not client
+delivery, and local Viceroy evidence is not hosted qualification. Synthetic
+`delivery::testing` fixtures exercise the shared finisher, not SDK head conversion
+or host transport.
 
 Callbacks that dispatch the app use baked `Hooks::logging_for("fastly")` settings
 for logger setup and reopen stores under their stable logical aliases per request.

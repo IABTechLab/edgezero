@@ -461,9 +461,40 @@ and finalization hook. It runs canonical admission, injects fresh `Kv`, `Config`
 `Secrets`, and `AppConfig` registries, then owns framing, streaming, deadlines, and
 terminal delivery. Preparation borrows a mutable native request and extension bag;
 finalization borrows a mutable routed core response. Neither hook returns a
-response for the callback to send separately. The result is `Result<Option<State>,
-fastly::Error>`: `Some` carries routed finalizer state only after terminal delivery,
-while a delivered detached admission response returns `None`.
+response for the callback to send separately. The hard-cut result is
+`delivery::FastlyRequestDelivery<State>`; inspect its disposition and commitment
+before deciding whether to send a native response or perform post-send work.
+The same result is returned by `send_with_registries_and_hooks` and
+`FastlyService::send_request_with_hooks`. Standard `run_app_with_hooks`,
+`serve_app_with_hooks`, and `FastlyService::send` keep their existing result and
+stop-on-error policy; successful fallback delivery remains successful there.
+
+- `NoAttempt(failure)`: no egress attempt, completion, observer or host send occurred.
+  `failure.reason()` distinguishes typed required-store failures from request-head
+  conversion (`InvalidUri` or `RequestBuilder`). Public messages and Debug output
+  contain no request, store or provider text. Standard serving privately retains
+  its original error and source.
+- `Aborted`: application policy intentionally selected no response. Never replace it.
+- `Detached(delivery)`: an attempted framework/admission response skipped finalization.
+- `Routed { state, delivery }`: retains finalizer state even when framing, fallback,
+  source or transport delivery fails. Terminal delivery is not necessarily successful.
+
+`FastlyResponseDelivery::report()` is the exact terminal `ResponseEgressReport`
+already supplied to completion and any applicable observer. Its body kind, source
+and framing observations, outcome, and fallback disposition describe the attempt.
+`error()` separately identifies the last delivery failure: a successful fallback
+can retain the original conversion/deadline cause in the report without a delivery
+error. `commitment()` describes the **last selected body**, not confirmed client
+delivery: `NotCommitted` means its head never reached the host send; `Unknown`
+means the host rejected the send; `Committed` means the host accepted the head.
+
+`may_send_native_response()` permits a replacement only for `NoAttempt` or confirmed
+`NotCommitted`, never policy abort, unknown commitment or committed failure. For an
+attempted response, its terminal notification has already happened; any native
+replacement is outside EdgeZero accounting. Pre-admission rejections and refusals
+exclude the global observer; an admitted source-error response also reports
+`Detached` but retains the application's observer. These reports do not strengthen
+provider capabilities.
 
 The manual response lifetime remains adapter-owned: append every header value,
 commit once through `stream_to_client`, account accepted body bytes, and finish or
@@ -512,9 +543,12 @@ Follow this order inside a callback:
    mutate a routed response before egress. Keep bodies, extensions, registries,
    and native handles request-local. Registered app state still overwrites
    extensions of the same type.
-5. Wait for the send helper's terminal result before using finalizer state or
-   starting post-send work. `None` means a detached response skipped finalization.
-   Never send the core response again; a returned delivery error may follow commitment.
+5. Inspect the owned terminal result before using finalizer state or starting post-send
+   work. Detached responses skip finalization; routed state survives delivery failure.
+   Schedule application follow-up only for an application-body result selected by your
+   policy, not a delivered fallback. A committed application failure can still carry
+   the request-local client needed for follow-up; complete that work before returning.
+   Never send the core response again. A delivery error alone does not authorize replacement.
 6. Complete pending backend and post-send work before returning. Constructors
    and callbacks that panic remain sandbox failures.
 
@@ -537,6 +571,7 @@ installs `FASTLY_PLATFORM` before application configuration:
 
 ```rust
 use edgezero_adapter_fastly::lifecycle::{self, Sandbox};
+use edgezero_adapter_fastly::delivery::{FastlyRequestDelivery, FastlyResponseCommitState};
 use edgezero_adapter_fastly::{
     FASTLY_PLATFORM, FastlyLogging, Serve, init_logger, request,
 };
@@ -566,21 +601,49 @@ fn handle(req: fastly::Request, sandbox: &mut Sandbox<App>) -> Result<(), fastly
     })?;
     sandbox.initialize(|| App::build::<MyApp>(FASTLY_PLATFORM).map_err(fastly::Error::from))?;
     let app = sandbox.state().expect("initialized above");
-    let _post_send_state = request::send_request_with_registries_and_hooks(
+    let result = request::send_request_with_registries_and_hooks(
         app,
         stores,
         req,
         |_raw, _extensions| {},
         |response| response.status(),
-    )?;
-    // Delivery is terminal here; complete any post-send work before returning.
-    Ok(())
+    );
+    // Custom reuse policy: keep serving after a committed failure, without replacement.
+    match result {
+        FastlyRequestDelivery::NoAttempt(failure) => {
+            // Permitted native replacement: no EdgeZero response was attempted.
+            fastly::Response::from_status(503).send_to_client();
+            Err(fastly::Error::msg(failure.message()))
+        }
+        FastlyRequestDelivery::Aborted => Err(fastly::Error::msg("admission aborted")),
+        FastlyRequestDelivery::Detached(delivery)
+        | FastlyRequestDelivery::Routed { delivery, .. } => {
+            if let Some(error) = delivery.error() {
+                log::error!("{}", error.message());
+                if delivery.commitment() == FastlyResponseCommitState::Committed {
+                    return Ok(());
+                }
+                // Never replace Unknown or Committed, including a failed body stream.
+                if delivery.commitment() == FastlyResponseCommitState::NotCommitted {
+                    fastly::Response::from_status(503).send_to_client();
+                }
+                return Err(fastly::Error::msg(error.message()));
+            }
+            Ok(())
+        }
+        _ => Err(fastly::Error::msg("unsupported delivery disposition")),
+    }
 }
 ```
 
 The fixture's [`custom_dispatch`](https://github.com/IABTechLab/edgezero/blob/main/tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs)
 is a fuller reference covering logger setup, handled initialization failure,
 response finalization, adapter-owned progressive streaming and post-send work.
+It verifies retained-client follow-up after a committed application-source failure
+and suppresses application follow-up when a framing rejection selects fallback.
+The `test-utils` module `delivery::testing` can supply synthetic dispatch/delivery
+outcomes to the shared hook finisher; it does not simulate SDK head conversion,
+host commitment or transport. Runtime fixtures establish those separate boundaries.
 
 `Sandbox::requests()` counts attempted callbacks, including early health responses
 and failed ones. `initialization_attempts()` counts only actual builder calls.

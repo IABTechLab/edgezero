@@ -586,6 +586,60 @@ publication; earlier diagnostic projection evidence retains its own revision and
       passes. Repeat canonical Viceroy composition, then the task lint card. Suggested commit:
       `feat: report Fastly delivery disposition without unsafe replacement`.
 
+#### F6b Delivery Report Checkpoint (2026-10-22)
+
+- [x] Hard-cut all three custom-send helpers to owned NoAttempt/Aborted/Detached/Routed
+      results. Preserve routed finalizer state on failure and exact terminal report identity,
+      last-body commitment and separate delivery errors. Keep standard serving policy unchanged.
+- [x] Consume the core attempt for terminal metadata using existing live Drop semantics.
+      Already-terminal extraction samples no clock and cannot notify twice. Shared transition
+      publication installs terminal state before completion and observer callbacks.
+- [x] Keep safe typed pre-attempt detail separate from privately retained standard errors.
+      Head conversion names URI/builder failures; required stores retain their typed open reason.
+      Public Debug/messages exclude original diagnostic text; standard errors retain their source.
+- [x] Migrate custom fixtures and test utilities without an old-signature wrapper. Standard
+      macro/demo/template entrypoints require no source migration. Local Viceroy smoke/progress
+      covers retained-client follow-up after committed source failure and no follow-up after
+      framing fallback; attempted reports match one terminal event and NoAttempt matches none.
+- [x] Finish final quality review and broad verification before committing this checkpoint.
+- [ ] Complete F9a assembly-failure integration, consumer acceptance and separately required
+      hosted qualification. This checkpoint does not close full F6b/EZ-17 or unblock Fastly G2.
+
+Schrodinger reviewed the custom-helper ownership contract and found two initial regressions:
+head-conversion detail was too coarse and standard pre-attempt errors lost their original source.
+Both now have typed-safe report projections plus exact standard-error preservation; the focused
+test failed before the fix and passes afterward. Herschel reviewed consuming core extraction and
+the final cross-crate changes. Synthetic fixtures share the production finisher but do not claim
+to execute SDK conversion or host commitment; separate normalizer/committer and Viceroy tests
+cover those boundaries. No submitted Interfaces, frozen policy, SDK/decoder pin, outbound
+algorithm or provider capability changes.
+
+Quality review also corrected two fixture weaknesses: the finalizer now retains the exact
+request-injected client handle, and required-store evidence checks the closed NoAttempt category.
+The wrong-category control failed before validator enforcement and passes afterward. Documentation
+distinguishes unobserved pre-admission/refusal responses from admitted source-error Detached
+responses, which retain the application observer. Revised spec and quality reviews passed.
+
+All five required Rust gates passed: 27 workspace binaries, 2,136 passing tests, zero failures and
+one existing ignored test, including 813 core tests. The separately executed generated-workspace
+gate passed its native/three-WASM builds and real fallback TCP checks. Demo-core's 48 tests and
+its actual Fastly-target build passed. All three actual-target WASM clippy checks, Fastly CLI-only
+clippy, both eight-leg Fastly feature matrices, strict public rustdoc, four core compile-fail
+doctests, the nonzero replacement and public-wire sentinels, 58 harness tests and 17 qualification
+core tests passed. The excluded Fastly fixture and harness clippy checks passed. Dependency,
+shared-pin, legacy and docs guards passed, as did docs format/lint/build and 18 evidence-checker
+tests. Inventory remains 255 criteria / 511 planned legs, qualified false.
+
+Viceroy 0.21.0 passed 178 Fastly library tests and 25 contracts. Final local smoke/progress
+evidence is retained in `.runs/18e0ea8c3a158010-a4bb-0`; it includes committed partial-source
+failure, retained-client post-send completion, framing fallback with no follow-up, and typed
+required-store NoAttempt with a native response. The earlier `.runs/18e0ea1e943e5d78-52b2-0`
+failure remains retained: its harness expected the retired generic adapter-error event instead
+of the committed-source event. A WASM-only test shadow-binding lint also failed before renaming.
+These are working-tree local characterization runs, not frozen consumer or hosted acceptance.
+F9a integration, consumer tests, hosted qualification, full EZ-17/P1 and failed Fastly G2 remain
+open; standard entrypoints, outbound transport algorithms and all pinned inputs are unchanged.
+
 ### Task F6c: Typed Response Framing Diagnostics
 
 **Files:** Core `src/error.rs`, `response_egress.rs`, `response_egress_framing.rs`;

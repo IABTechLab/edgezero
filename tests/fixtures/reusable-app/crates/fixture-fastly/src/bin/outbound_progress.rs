@@ -87,7 +87,11 @@ fn main() -> Result<(), fastly::Error> {
         None,
         edgezero_adapter_fastly::FASTLY_PLATFORM,
     );
-    edgezero_adapter_fastly::request::FastlyService::new(&app)
-        .send_request_with_hooks(request, |_, _| {}, |_| {})
-        .map(|_| ())
+    fixture_fastly::strict_delivery(
+        edgezero_adapter_fastly::request::FastlyService::new(&app).send_request_with_hooks(
+            request,
+            |_, _| {},
+            |_| {},
+        ),
+    )
 }

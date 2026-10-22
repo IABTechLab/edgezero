@@ -24,6 +24,7 @@ pub mod cli;
 #[cfg(feature = "fastly")]
 pub mod config_store;
 pub mod context;
+pub mod delivery;
 #[cfg(feature = "fastly")]
 pub mod key_value_store;
 pub mod lifecycle;
@@ -203,7 +204,7 @@ where
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
     }
     let app = build_app_for_dispatch::<A>()?;
-    request::send_with_registries_and_hooks(&app, stores, prepare, finalize)
+    request::send_with_registries_and_hooks(&app, stores, prepare, finalize).into_standard_result()
 }
 
 /// Retain a successfully built app while the SDK serves sequential requests.
@@ -263,6 +264,7 @@ where
             &mut prepare,
             &mut finalize,
         )
+        .into_standard_result()
         .map(|_state| ())
     })
 }

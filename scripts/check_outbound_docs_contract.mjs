@@ -1141,12 +1141,34 @@ if (
 ) {
   fail('Fastly guide must document the closed request/response lifecycle APIs')
 }
+for (const requiredFragment of [
+  'FastlyRequestDelivery<State>',
+  'FastlyResponseDelivery::report()',
+  'may_send_native_response()',
+  '`NotCommitted`',
+  '`Unknown`',
+  '`Committed`',
+  'outside EdgeZero accounting',
+]) {
+  if (!hardCutSurfaces[3][1].includes(requiredFragment)) {
+    fail(`Fastly guide is missing delivery-report contract: ${requiredFragment}`)
+  }
+}
+if (/Result<Option<State>,\s*fastly::Error>/.test(hardCutSurfaces[3][1])) {
+  fail('Fastly guide must not retain the retired custom-send return signature')
+}
 
 let outboundSpecSource
 try {
   outboundSpecSource = readFileSync(outboundSpecPath, 'utf8')
 } catch (error) {
   fail(`cannot read ${outboundSpecPath}: ${error.message}`)
+}
+if (
+  !outboundSpecSource.includes(') -> FastlyRequestDelivery<PostSend>') ||
+  outboundSpecSource.includes(') -> Result<Option<PostSend>, fastly::Error>')
+) {
+  fail('outbound specification must use the owned Fastly custom delivery report')
 }
 if (
   !outboundSpecSource.includes(

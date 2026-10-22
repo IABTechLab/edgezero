@@ -24,42 +24,10 @@ use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
 use futures::executor;
 use futures_util::StreamExt as _;
 
+use crate::delivery::{DeliveryError, FastlyResponseCommitState, FastlyResponseDelivery};
+
 const INTERNAL_FALLBACK_BODY: &[u8] = b"internal server error";
 const TIMEOUT_FALLBACK_BODY: &[u8] = b"response write deadline exceeded";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DeliveryError {
-    Conversion,
-    Deadline,
-    Source,
-    Transport,
-}
-
-impl DeliveryError {
-    const fn from_outcome(outcome: ResponseEgressOutcome) -> Self {
-        match outcome {
-            ResponseEgressOutcome::ConversionError => Self::Conversion,
-            ResponseEgressOutcome::DeadlineExceeded => Self::Deadline,
-            ResponseEgressOutcome::SourceError => Self::Source,
-            ResponseEgressOutcome::ClientDisconnected
-            | ResponseEgressOutcome::Completed
-            | ResponseEgressOutcome::HostHandoff
-            | ResponseEgressOutcome::RequestCancelled
-            | ResponseEgressOutcome::TransportError
-            | ResponseEgressOutcome::Unspecified
-            | _ => Self::Transport,
-        }
-    }
-
-    const fn outcome(self) -> ResponseEgressOutcome {
-        match self {
-            Self::Conversion => ResponseEgressOutcome::ConversionError,
-            Self::Deadline => ResponseEgressOutcome::DeadlineExceeded,
-            Self::Source => ResponseEgressOutcome::SourceError,
-            Self::Transport => ResponseEgressOutcome::TransportError,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransmitFailure {
@@ -68,6 +36,8 @@ enum TransmitFailure {
         cause: ResponseEgressOutcome,
         error: DeliveryError,
     },
+    Uncommitted(DeliveryError),
+    Unknown(DeliveryError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,8 +71,8 @@ trait EgressCommitter {
 #[cfg(feature = "fastly")]
 mod platform {
     use super::{
-        DeliveryError, EgressCommitter, EgressSink, HeaderMap, ResponseEgressEnvelope, StatusCode,
-        send_egress_with,
+        EgressCommitter, EgressSink, FastlyResponseDelivery, HeaderMap, ResponseEgressEnvelope,
+        StatusCode, send_egress_with,
     };
     use std::mem;
 
@@ -111,15 +81,6 @@ mod platform {
     use fastly_sys::{BodyHandle as FastlyBodyHandle, ResponseHandle as FastlyResponseHandle};
 
     use super::fastly_abi::{self, FastlyAbiError};
-
-    const fn public_message(error: DeliveryError) -> &'static str {
-        match error {
-            DeliveryError::Conversion => "response conversion failed",
-            DeliveryError::Deadline => "response write deadline exceeded",
-            DeliveryError::Source => "response body source failed",
-            DeliveryError::Transport => "response transport failed",
-        }
-    }
 
     pub(super) struct FastlyPrepared {
         body: FastlyBodyHandle,
@@ -245,15 +206,10 @@ mod platform {
 
     /// Sends one core response through Fastly's unbuffered downstream body handle.
     ///
-    /// # Errors
-    /// Returns a category-only Fastly error when the committed response cannot reach its terminal
-    /// body-handle boundary. Precommit conversion and deadline failures first attempt the bounded
-    /// adapter fallback on the same response-egress attempt.
-    pub(crate) fn send_egress_response(
-        egress: ResponseEgressEnvelope,
-    ) -> Result<(), fastly::Error> {
+    /// Returns its exact terminal report and last-body commitment. Precommit conversion and
+    /// deadline failures first attempt the bounded fallback on the same response-egress attempt.
+    pub(crate) fn send_egress_response(egress: ResponseEgressEnvelope) -> FastlyResponseDelivery {
         send_egress_with(egress, &mut FastlyCommitter)
-            .map_err(|error| fastly::Error::msg(public_message(error)))
     }
 }
 
@@ -263,14 +219,14 @@ pub(crate) use platform::send_egress_response;
 fn send_egress_with<Committer>(
     egress: ResponseEgressEnvelope,
     committer: &mut Committer,
-) -> Result<(), DeliveryError>
+) -> FastlyResponseDelivery
 where
     Committer: EgressCommitter,
 {
     let request_method = egress.request_method().clone();
-    match egress.begin() {
+    let (attempt, transmit_result) = match egress.begin() {
         Ok((prepared, policy, mut attempt, clock)) => {
-            match transmit_prepared(
+            let result = match transmit_prepared(
                 prepared,
                 policy,
                 &mut attempt,
@@ -278,34 +234,46 @@ where
                 TransmitKind::Application,
                 committer,
             ) {
-                Ok(()) => Ok(()),
                 Err(TransmitFailure::Precommit { cause, .. }) => {
-                    send_fallback(&request_method, cause, attempt, &clock, committer)
+                    send_fallback(&request_method, cause, &mut attempt, &clock, committer)
                 }
-                Err(TransmitFailure::Postcommit(error)) => Err(error),
-            }
+                result => result,
+            };
+            (attempt, result)
         }
         Err(failure) => {
-            let (attempt, clock, cause) = failure.into_parts();
-            send_fallback(&request_method, cause, attempt, &clock, committer)
+            let (mut attempt, clock, cause) = failure.into_parts();
+            let result = send_fallback(&request_method, cause, &mut attempt, &clock, committer);
+            (attempt, result)
         }
-    }
+    };
+    let (commitment, delivery_result) = match transmit_result {
+        Ok(()) => (FastlyResponseCommitState::Committed, Ok(())),
+        Err(TransmitFailure::Postcommit(error)) => {
+            (FastlyResponseCommitState::Committed, Err(error))
+        }
+        Err(TransmitFailure::Unknown(error)) => (FastlyResponseCommitState::Unknown, Err(error)),
+        Err(TransmitFailure::Uncommitted(error) | TransmitFailure::Precommit { error, .. }) => {
+            (FastlyResponseCommitState::NotCommitted, Err(error))
+        }
+    };
+    FastlyResponseDelivery::new(commitment, attempt.into_terminal_report(), delivery_result)
 }
 
 fn send_fallback<Committer>(
     request_method: &Method,
     original_cause: ResponseEgressOutcome,
-    mut attempt: ResponseEgressAttempt,
+    attempt: &mut ResponseEgressAttempt,
     clock: &MonotonicClock,
     committer: &mut Committer,
-) -> Result<(), DeliveryError>
+) -> Result<(), TransmitFailure>
 where
     Committer: EgressCommitter,
 {
     if !attempt.begin_fallback(original_cause) {
         log::error!("response-egress fallback state transition failed");
         attempt.terminate(ResponseEgressOutcome::ConversionError, clock.now());
-        return Err(DeliveryError::Conversion);
+        return Err(TransmitFailure::Uncommitted(DeliveryError::Conversion));
     }
 
     let fallback_started_at = clock.now();
@@ -317,25 +285,20 @@ where
         Ok(prepared) => prepared,
         Err(_error) => {
             attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
-            return Err(DeliveryError::Conversion);
+            return Err(TransmitFailure::Uncommitted(DeliveryError::Conversion));
         }
     };
     let policy = ResponseEgressPolicy {
         write_deadline: Deadline::at_instant(fallback_deadline),
     };
-    match transmit_prepared(
+    transmit_prepared(
         prepared,
         policy,
-        &mut attempt,
+        attempt,
         clock,
         TransmitKind::Fallback,
         committer,
-    ) {
-        Ok(()) => Ok(()),
-        Err(TransmitFailure::Postcommit(error) | TransmitFailure::Precommit { error, .. }) => {
-            Err(error)
-        }
-    }
+    )
 }
 
 fn fallback_response(cause: ResponseEgressOutcome) -> Response {
@@ -401,7 +364,7 @@ where
             ResponseEgressOutcome::TransportError,
             clock.now(),
         );
-        return Err(TransmitFailure::Postcommit(DeliveryError::Transport));
+        return Err(TransmitFailure::Uncommitted(DeliveryError::Transport));
     }
 
     let mut sink = match committer.commit(prepared_head) {
@@ -414,7 +377,7 @@ where
                 ResponseEgressOutcome::TransportError,
                 clock.now(),
             );
-            return Err(TransmitFailure::Postcommit(DeliveryError::Transport));
+            return Err(TransmitFailure::Unknown(DeliveryError::Transport));
         }
     };
 
@@ -899,7 +862,80 @@ mod tests {
     }
 
     #[test]
+    fn fastly_delivery_report_tracks_the_last_fallback_commitment() {
+        use crate::delivery::{DispatchOutcome, FastlyRequestDelivery, finish_request};
+        use edgezero_core::response_egress_framing::{
+            ResponseEgressFramingError, test_support::framing_fixture,
+        };
+        for (prepare, commit, expected) in [
+            (
+                Err(()),
+                MockCommit::Accept,
+                FastlyResponseCommitState::NotCommitted,
+            ),
+            (
+                Ok(()),
+                MockCommit::Error,
+                FastlyResponseCommitState::Unknown,
+            ),
+            (
+                Ok(()),
+                MockCommit::Accept,
+                FastlyResponseCommitState::Committed,
+            ),
+        ] {
+            let fixture = executor::block_on(framing_fixture(
+                ResponseEgressFramingError::UnsupportedTrailers,
+                false,
+            ))
+            .unwrap();
+            let state = Rc::new(RefCell::new(SinkState::default()));
+            let mut committer = MockCommitter {
+                prepare_plan: VecDeque::from([prepare]),
+                commit_plan: VecDeque::from([commit]),
+                state,
+            };
+            let result = finish_request(
+                Ok(DispatchOutcome::Routed(fixture.envelope)),
+                |_| 42_u8,
+                |envelope| send_egress_with(envelope, &mut committer),
+            );
+            assert_eq!(
+                result.may_send_native_response(),
+                expected == FastlyResponseCommitState::NotCommitted
+            );
+            let FastlyRequestDelivery::Routed {
+                state: hook_state,
+                delivery,
+            } = result
+            else {
+                panic!("routed result");
+            };
+            assert_eq!(hook_state, 42);
+            assert_eq!(delivery.commitment(), expected);
+            let completed = fixture.completed.lock().unwrap();
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(completed.len(), 1);
+            assert_eq!(completed.first(), Some(delivery.report()));
+            assert_eq!(*completed, *observed);
+            assert_eq!(
+                delivery.report().body_kind,
+                ResponseEgressBodyKind::Fallback
+            );
+            assert_eq!(
+                delivery.report().fallback_disposition,
+                Some(if expected == FastlyResponseCommitState::Committed {
+                    ResponseEgressFallbackDisposition::Completed
+                } else {
+                    ResponseEgressFallbackDisposition::Aborted
+                })
+            );
+        }
+    }
+
+    #[test]
     fn framing_observer_preserves_each_typed_reason() {
+        use crate::delivery::{DispatchOutcome, FastlyRequestDelivery, finish_request};
         use edgezero_core::response_egress_framing::test_support::{
             FRAMING_RULES, framing_fixture,
         };
@@ -909,13 +945,41 @@ mod tests {
                     executor::block_on(framing_fixture(reason, detached)).expect("fixture");
                 let state = Rc::new(RefCell::new(SinkState::default()));
                 let mut committer = MockCommitter::new(Rc::clone(&state));
-                assert_eq!(send_egress_with(fixture.envelope, &mut committer), Ok(()));
+                let dispatched = if detached {
+                    DispatchOutcome::Detached(fixture.envelope)
+                } else {
+                    DispatchOutcome::Routed(fixture.envelope)
+                };
+                let result = finish_request(
+                    Ok(dispatched),
+                    |_| {
+                        assert!(!detached);
+                        42_u8
+                    },
+                    |envelope| send_egress_with(envelope, &mut committer),
+                );
+                let delivery = match &result {
+                    FastlyRequestDelivery::Routed {
+                        state: hook_state,
+                        delivery,
+                    } => {
+                        assert_eq!(*hook_state, 42);
+                        delivery
+                    }
+                    FastlyRequestDelivery::Detached(delivery) => delivery,
+                    FastlyRequestDelivery::Aborted | FastlyRequestDelivery::NoAttempt(_) => {
+                        panic!("lost attempted delivery")
+                    }
+                };
+                assert_eq!(delivery.error(), None);
+                assert_eq!(delivery.commitment(), FastlyResponseCommitState::Committed);
                 let snapshot = state.borrow();
                 assert_eq!(snapshot.commits.len(), 1);
                 assert_eq!(snapshot.commits[0].0, StatusCode::INTERNAL_SERVER_ERROR);
                 assert_eq!(snapshot.accepted, INTERNAL_FALLBACK_BODY);
                 let completed = fixture.completed.lock().expect("completion");
                 assert_eq!(completed.len(), 1);
+                assert_eq!(delivery.report(), &completed[0]);
                 assert_eq!(completed[0].framing_failures.application(), Some(reason));
                 assert_eq!(completed[0].framing_failures.fallback(), None);
                 assert_eq!(completed[0].outcome, ResponseEgressOutcome::ConversionError);
@@ -1430,7 +1494,7 @@ mod tests {
         );
         let state = Rc::new(RefCell::new(SinkState::default()));
         let mut committer = MockCommitter::new(Rc::clone(&state));
-        assert_eq!(send_egress_with(egress, &mut committer), Ok(()));
+        assert_eq!(send_egress_with(egress, &mut committer).error(), None);
 
         let snapshot = state.borrow();
         assert_eq!(snapshot.commits.len(), 1);
@@ -1472,7 +1536,7 @@ mod tests {
         );
         let state = Rc::new(RefCell::new(SinkState::default()));
         let mut committer = MockCommitter::new(Rc::clone(&state));
-        assert_eq!(send_egress_with(egress, &mut committer), Ok(()));
+        assert_eq!(send_egress_with(egress, &mut committer).error(), None);
         assert_eq!(state.borrow().commits[0].0, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(state.borrow().accepted, TIMEOUT_FALLBACK_BODY);
         let reports = observer.reports();
@@ -1509,7 +1573,7 @@ mod tests {
         );
         let state = Rc::new(RefCell::new(SinkState::default()));
         let mut committer = MockCommitter::new(Rc::clone(&state));
-        assert_eq!(send_egress_with(egress, &mut committer), Ok(()));
+        assert_eq!(send_egress_with(egress, &mut committer).error(), None);
         assert!(state.borrow().accepted.is_empty());
         let reports = observer.reports();
         assert_eq!(reports.len(), 1);
@@ -1563,8 +1627,8 @@ mod tests {
         let state = Rc::new(RefCell::new(SinkState::default()));
         let mut committer = MockCommitter::new(Rc::clone(&state));
         assert_eq!(
-            send_egress_with(egress, &mut committer),
-            Err(DeliveryError::Deadline)
+            send_egress_with(egress, &mut committer).error(),
+            Some(DeliveryError::Deadline)
         );
         assert!(state.borrow().accepted.is_empty());
         assert_eq!(state.borrow().events.last(), Some(&"abandon"));
@@ -1617,7 +1681,7 @@ mod tests {
                 ..SinkState::default()
             }));
             let mut committer = MockCommitter::new(Rc::clone(&state));
-            assert!(send_egress_with(egress, &mut committer).is_err());
+            assert!(send_egress_with(egress, &mut committer).error().is_some());
             let reports = observer.reports();
             assert_eq!(reports.len(), 1);
             assert_eq!(reports[0].outcome, ResponseEgressOutcome::ConversionError);
@@ -1658,7 +1722,7 @@ mod tests {
             prepare_plan: VecDeque::from([Err(()), Ok(())]),
             state: Rc::clone(&state),
         };
-        assert_eq!(send_egress_with(egress, &mut committer), Ok(()));
+        assert_eq!(send_egress_with(egress, &mut committer).error(), None);
         assert_eq!(state.borrow().commits.len(), 1);
         assert_eq!(
             state.borrow().commits[0].0,
@@ -1677,7 +1741,7 @@ mod tests {
     }
 
     #[test]
-    fn downstream_commit_error_is_postcommit_and_does_not_send_fallback() {
+    fn downstream_commit_error_is_unknown_and_does_not_send_fallback() {
         let now = MonotonicInstant::now();
         let clock = stable_clock(now);
         let observer = RecordingObserver::default();
@@ -1700,7 +1764,7 @@ mod tests {
 
         assert_eq!(
             result,
-            Err(TransmitFailure::Postcommit(DeliveryError::Transport))
+            Err(TransmitFailure::Unknown(DeliveryError::Transport))
         );
         assert_eq!(state.borrow().commits.len(), 1);
         assert_eq!(observer.reports().len(), 1);
