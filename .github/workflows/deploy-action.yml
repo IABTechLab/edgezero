@@ -144,29 +144,50 @@ jobs:
           npm run lint
           npm run build
 
-  # Exercise actions/cache itself across jobs. The fixture key is stable and
-  # versioned; bump it only when this restore contract changes.
+  # Exercise source reuse and revision-isolated target caching across real jobs.
+  # Run-specific compiler inputs prevent accidental hits from older smoke runs.
+  # The tiny per-run target archive lets downstream jobs verify exact restores.
   cache-restore-seed:
     runs-on: ubuntu-latest
+    outputs:
+      fixture-id: ${{ steps.fixture.outputs.fixture-id }}
+      source-cache-key: ${{ steps.cache.outputs.source-cache-key }}
+      target-cache-key: ${{ steps.cache.outputs.target-cache-key }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Create cache restore fixture
-        run: |
-          mkdir -p cache-restore-fixture
-          printf '%s\n' '# edgezero target cache restore smoke v1' >cache-restore-fixture/Cargo.lock
+        id: fixture
+        run: bash .github/actions/setup-rust-build-cache/tests/make-fixture.sh seed
+
+      - name: Install native and WASM compiler targets
+        run: bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh
 
       - name: Seed the provider-neutral Rust target cache
+        id: cache
         uses: ./.github/actions/setup-rust-build-cache
         with:
-          app-name: cache-restore-smoke-v1
+          app-name: cache-restore-smoke-v2
           cache-target: true
+          save-target: true
+          target-cache-revision: ${{ steps.fixture.outputs.revision }}
           working-directory: cache-restore-fixture
 
       - name: Write restore marker
-        run: printf '%s\n' 'edgezero-cache-restore-smoke-v1' >"$CARGO_TARGET_DIR/restore-marker"
+        run: |
+          printf '%s\n' 'edgezero-cache-restore-smoke-v2' >"$CARGO_TARGET_DIR/restore-marker"
+          mkdir -p "$HOME/.cargo/git/db"
+          printf '%s\n' 'edgezero-source-cache-smoke-v2' >"$HOME/.cargo/git/db/edgezero-source-cache-smoke-v2"
+
+      - name: Seed native and WASM compiler outputs
+        working-directory: cache-restore-fixture
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          test -n "$host"
+          cargo build --locked --lib --target "$host"
+          cargo build --locked --lib --target wasm32-wasip1
 
   cache-restore-smoke:
     needs: cache-restore-seed
@@ -177,19 +198,69 @@ jobs:
           persist-credentials: false
 
       - name: Recreate cache restore fixture
-        run: |
-          mkdir -p cache-restore-fixture
-          printf '%s\n' '# edgezero target cache restore smoke v1' >cache-restore-fixture/Cargo.lock
+        id: fixture
+        env:
+          CACHE_FIXTURE_ID: ${{ needs.cache-restore-seed.outputs.fixture-id }}
+        run: bash .github/actions/setup-rust-build-cache/tests/make-fixture.sh seed
+
+      - name: Install native and WASM compiler targets
+        run: bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh
 
       - name: Restore the provider-neutral Rust target cache
+        id: cache
         uses: ./.github/actions/setup-rust-build-cache
         with:
-          app-name: cache-restore-smoke-v1
+          app-name: cache-restore-smoke-v2
           cache-target: true
+          target-cache-revision: ${{ steps.fixture.outputs.revision }}
           working-directory: cache-restore-fixture
 
       - name: Assert target cache restored across jobs
-        run: grep -Fxq 'edgezero-cache-restore-smoke-v1' "$CARGO_TARGET_DIR/restore-marker"
+        env:
+          TARGET_CACHE_HIT: ${{ steps.cache.outputs.target-cache-hit }}
+        run: |
+          test "$TARGET_CACHE_HIT" = true
+          grep -Fxq 'edgezero-cache-restore-smoke-v2' "$CARGO_TARGET_DIR/restore-marker"
+
+  cache-new-revision-smoke:
+    needs: cache-restore-seed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Create a different fixture source revision
+        id: fixture
+        env:
+          CACHE_FIXTURE_ID: ${{ needs.cache-restore-seed.outputs.fixture-id }}
+        run: bash .github/actions/setup-rust-build-cache/tests/make-fixture.sh next
+      - name: Install native and WASM compiler targets
+        run: bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh
+      - name: Set up revision-isolated target cache
+        id: cache
+        uses: ./.github/actions/setup-rust-build-cache
+        with:
+          app-name: cache-restore-smoke-v2
+          cache-target: true
+          target-cache-revision: ${{ steps.fixture.outputs.revision }}
+          working-directory: cache-restore-fixture
+      - name: Assert sources are reused but target artifacts are isolated
+        env:
+          SOURCE_CACHE_HIT: ${{ steps.cache.outputs.source-cache-hit }}
+          TARGET_CACHE_HIT: ${{ steps.cache.outputs.target-cache-hit }}
+          SOURCE_CACHE_KEY: ${{ steps.cache.outputs.source-cache-key }}
+          TARGET_CACHE_KEY: ${{ steps.cache.outputs.target-cache-key }}
+          SEED_SOURCE_KEY: ${{ needs.cache-restore-seed.outputs.source-cache-key }}
+          SEED_TARGET_KEY: ${{ needs.cache-restore-seed.outputs.target-cache-key }}
+        run: |
+          test "$SOURCE_CACHE_HIT" = true
+          test "$TARGET_CACHE_HIT" = false
+          test "$SOURCE_CACHE_KEY" = "$SEED_SOURCE_KEY"
+          test "$TARGET_CACHE_KEY" != "$SEED_TARGET_KEY"
+          test ! -e "$CARGO_TARGET_DIR/restore-marker"
+          grep -Fxq 'edgezero-source-cache-smoke-v2' "$HOME/.cargo/git/db/edgezero-source-cache-smoke-v2"
+      - name: Assert native and WASM compiler cache reuse
+        run: bash .github/actions/setup-rust-build-cache/tests/assert-compiler-reuse.sh
 
   # Build the store-aware application once. Its production/staging matrix and
   # lifecycle actions consume these exact CLI, package, and manifest bytes.
@@ -223,7 +294,7 @@ jobs:
         uses: ./.github/actions/setup-rust-build-cache
         with:
           app-name: store-aware-fixture
-          cache-target: true
+          cache-target: false
           working-directory: fixture-app
 
       - name: Build the application-owned CLI once
@@ -282,7 +353,7 @@ jobs:
         uses: ./.github/actions/setup-rust-build-cache
         with:
           app-name: store-free-fixture
-          cache-target: true
+          cache-target: false
           working-directory: fixture-app
 
       - name: Build the store-free application CLI once
