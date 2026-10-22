@@ -229,7 +229,7 @@ impl<'app> FastlyService<'app> {
     }
 
     /// Exercises the closed request/response lifecycle with an injected delivery boundary.
-    #[cfg(feature = "test-utils")]
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     #[inline]
     pub fn run_request_with_hooks_for_test<State, Prepare, Finalize, Deliver>(

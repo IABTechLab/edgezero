@@ -252,8 +252,13 @@ separately from the portable API and must be considered when declaring required 
   request-body replay. Existing internal sources and `From<anyhow::Error>` remain intact.
   Populate existing send/body SDK boundaries on all four adapters, Fastly backend/upload I/O,
   and Spin request completion. Preserve observed detail when existing deadline checks select a
-  timeout, including bounded response collection. Preparation enrichment, diagnostic capability
-  publication and hosted qualification remain follow-up work.
+  timeout, including bounded response collection. Record Cloudflare constructor/header/setup
+  failures and Spin's five header errors, typed timeout-option rejections and unit-returning
+  target rejections as `RequestPreparation`. Keep SDK-erased causes Unknown, advisory timeout
+  options successful, and shared response conversion unmodified. Observer/framing integration,
+  diagnostic capability publication and hosted qualification remain follow-up work.
+- Correct Fastly lifecycle test-helper gating so plain `fastly` WASM unit builds retain the
+  required-store failure regression without enabling `test-utils` or changing production behavior.
 - Hard-cut exact field construction/matching of `EdgeError::{BadGateway, BadRequest, GatewayTimeout, Internal}`
   to include `provider_detail: Option<ProviderFailureDetail>`; prefer semantic constructors and
   `..` in patterns. No wrapper variant or compatibility error type is introduced.

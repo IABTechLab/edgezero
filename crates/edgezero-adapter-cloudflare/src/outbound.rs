@@ -419,7 +419,8 @@ mod worker_impl {
         let mut worker_headers = Headers::new();
         super::copy_header_values(headers, &mut worker_headers, |name| {
             EdgeError::bad_request(format!("header value is not valid UTF-8: {name}"))
-        })?;
+        })
+        .map_err(diagnose_worker_preparation_error)?;
         Ok(worker_headers)
     }
 
@@ -440,7 +441,8 @@ mod worker_impl {
         if let Some(worker_body) = request_body {
             init.with_body(Some(worker_body));
         }
-        WorkerRequest::new_with_init(url, &init).map_err(EdgeError::internal)
+        WorkerRequest::new_with_init(url, &init)
+            .map_err(|error| diagnose_worker_preparation_error(EdgeError::internal(error)))
     }
 
     fn deadline_stream(
@@ -629,8 +631,8 @@ mod worker_impl {
         budget: DispatchBudget,
         clock: &MonotonicClock,
     ) -> Result<(WorkerResponse, AbortGuard), EdgeError> {
-        let controller = web_sys::AbortController::new().map_err(|_error| {
-            EdgeError::internal(anyhow::anyhow!("failed to construct abort controller"))
+        let controller = web_sys::AbortController::new().map_err(|error| {
+            js_preparation_error(&error, "failed to construct abort controller")
         })?;
         let signal = controller.signal();
         let abort_guard = AbortGuard::new(controller);
@@ -641,9 +643,7 @@ mod worker_impl {
             &JsValue::from_str("encodeResponseBody"),
             &JsValue::from_str("manual"),
         )
-        .map_err(|_error| {
-            EdgeError::internal(anyhow::anyhow!("failed to set manual response encoding"))
-        })?;
+        .map_err(|error| js_preparation_error(&error, "failed to set manual response encoding"))?;
         if !set {
             return Err(EdgeError::internal(anyhow::anyhow!(
                 "runtime refused manual response encoding"
@@ -818,6 +818,31 @@ mod worker_impl {
             };
         }
         CloudflareFailureCause::Unknown
+    }
+
+    fn diagnose_worker_preparation_error(mut error: EdgeError) -> EdgeError {
+        if let EdgeError::Internal {
+            source,
+            provider_detail,
+        } = &mut error
+            && let Some(worker_error) = source.downcast_ref::<worker::Error>()
+        {
+            *provider_detail = Some(ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::RequestPreparation,
+                cause: worker_failure_cause(worker_error),
+            });
+        }
+        error
+    }
+
+    fn js_preparation_error(source: &JsValue, message: &'static str) -> EdgeError {
+        EdgeError::internal_with_detail(
+            anyhow::anyhow!(message),
+            ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::RequestPreparation,
+                cause: js_failure_cause(source),
+            },
+        )
     }
 
     fn worker_body_failure(error: &worker::Error, message: &'static str) -> EdgeError {
@@ -1077,6 +1102,7 @@ mod worker_impl {
     #[cfg(test)]
     mod clock_tests {
         use std::collections::VecDeque;
+        use std::ptr;
         use std::sync::{Arc, Mutex};
         use std::task::Poll;
 
@@ -1090,6 +1116,195 @@ mod worker_impl {
         use wasm_bindgen_test::wasm_bindgen_test;
 
         use super::*;
+
+        struct RestoreGlobal(Function);
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
+        impl Drop for RestoreGlobal {
+            fn drop(&mut self) {
+                let _restored = self.0.call0(&JsValue::UNDEFINED);
+            }
+        }
+
+        fn assert_same_public_error(plain: EdgeError, diagnosed: EdgeError) {
+            assert_eq!(plain.to_string(), diagnosed.to_string());
+            assert_eq!(plain.message(), diagnosed.message());
+            assert_eq!(plain.kind(), diagnosed.kind());
+            assert_eq!(plain.status(), diagnosed.status());
+            assert!(
+                !format!("{:?}", diagnosed.provider_failure_detail())
+                    .contains("provider-secret-token")
+            );
+            let before = plain.into_response().expect("plain wire");
+            let after = diagnosed.into_response().expect("diagnosed wire");
+            assert_eq!(before.status(), after.status());
+            assert_eq!(before.headers(), after.headers());
+            assert_eq!(before.body().as_bytes(), after.body().as_bytes());
+        }
+
+        #[wasm_bindgen_test]
+        fn provider_diagnostics_preserve_preparation_errors_without_changing_sources() {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-test",
+                HeaderValue::from_bytes("\u{100}provider-secret-token".as_bytes())
+                    .expect("valid raw header"),
+            );
+            let header_error = build_headers(&headers).expect_err("Workers header rejection");
+            let detail = header_error
+                .provider_failure_detail()
+                .expect("header detail");
+            assert_eq!(
+                *detail,
+                ProviderFailureDetail::Cloudflare {
+                    phase: ProviderFailurePhase::RequestPreparation,
+                    cause: CloudflareFailureCause::TypeError,
+                }
+            );
+            assert!(header_error.inner().expect("source").is::<worker::Error>());
+            let header_source = header_error.inner().expect("source").to_string();
+            assert_same_public_error(
+                EdgeError::internal(anyhow::anyhow!(header_source)),
+                header_error,
+            );
+
+            let request_error = build_worker_request(
+                &Method::GET,
+                "https://example.com/?token=provider-secret-token",
+                &HeaderMap::new(),
+                Some(JsValue::from_str("body")),
+                OutboundCachePolicy::PlatformDefault,
+            )
+            .expect_err("GET body rejection");
+            assert_eq!(
+                request_error.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Cloudflare {
+                    phase: ProviderFailurePhase::RequestPreparation,
+                    cause: CloudflareFailureCause::Unknown,
+                })
+            );
+            assert!(request_error.inner().expect("source").is::<worker::Error>());
+            let request_source = request_error.inner().expect("source").to_string();
+            assert_same_public_error(
+                EdgeError::internal(anyhow::anyhow!(request_source)),
+                request_error,
+            );
+
+            headers.insert(
+                "x-test",
+                HeaderValue::from_bytes(b"\xff").expect("raw header"),
+            );
+            let invalid = build_headers(&headers).expect_err("non-UTF8 rejection");
+            assert!(invalid.provider_failure_detail().is_none());
+            assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+            let mut response_headers = Headers::new();
+            headers.insert(
+                "x-test",
+                HeaderValue::from_bytes("\u{100}".as_bytes()).expect("raw header"),
+            );
+            let response_error =
+                super::super::copy_header_values(&headers, &mut response_headers, |_name| {
+                    EdgeError::internal(anyhow::anyhow!("invalid response header"))
+                })
+                .expect_err("shared sink rejection");
+            assert!(response_error.provider_failure_detail().is_none());
+        }
+
+        #[wasm_bindgen_test]
+        fn provider_diagnostics_keep_original_worker_source_identity() {
+            let original =
+                EdgeError::internal(worker::Error::RustError("provider-secret-token".to_owned()));
+            let pointer = ptr::from_ref(
+                original
+                    .inner()
+                    .expect("source")
+                    .downcast_ref::<worker::Error>()
+                    .expect("worker source"),
+            );
+            let mapped = diagnose_worker_preparation_error(original);
+            let retained = mapped
+                .inner()
+                .expect("source")
+                .downcast_ref::<worker::Error>()
+                .expect("retained worker source");
+            assert!(ptr::eq(pointer, retained));
+            assert!(
+                matches!(retained, worker::Error::RustError(text) if text == "provider-secret-token")
+            );
+            assert_eq!(
+                mapped.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Cloudflare {
+                    phase: ProviderFailurePhase::RequestPreparation,
+                    cause: CloudflareFailureCause::Unknown,
+                })
+            );
+            assert_same_public_error(
+                EdgeError::internal(worker::Error::RustError("provider-secret-token".to_owned())),
+                mapped,
+            );
+        }
+
+        #[wasm_bindgen_test]
+        async fn provider_diagnostics_preserve_preparation_setup_exceptions() {
+            for (setup, message, expected) in [
+                (
+                    "const old = globalThis.AbortController; globalThis.AbortController = class { constructor() { throw new TypeError('provider-secret-token'); } }; return () => { globalThis.AbortController = old; };",
+                    "failed to construct abort controller",
+                    Some(CloudflareFailureCause::TypeError),
+                ),
+                (
+                    "const old = Reflect.set; Reflect.set = () => { throw new DOMException('provider-secret-token', 'AbortError'); }; return () => { Reflect.set = old; };",
+                    "failed to set manual response encoding",
+                    Some(CloudflareFailureCause::AbortError),
+                ),
+                (
+                    "const old = Reflect.set; Reflect.set = () => false; return () => { Reflect.set = old; };",
+                    "runtime refused manual response encoding",
+                    None,
+                ),
+            ] {
+                let request = build_worker_request(
+                    &Method::GET,
+                    "https://example.com/?token=provider-secret-token",
+                    &HeaderMap::new(),
+                    None,
+                    OutboundCachePolicy::PlatformDefault,
+                )
+                .expect("valid request");
+                let start = MonotonicInstant::now();
+                let budget = DispatchBudget {
+                    cause: BudgetSource::PerCallTimeout,
+                    deadline: Deadline::at_instant(
+                        start.checked_add(Duration::from_secs(1)).expect("deadline"),
+                    ),
+                    duration: Duration::from_secs(1),
+                };
+                let outcome = {
+                    let restore: Function = Function::new_no_args(setup)
+                        .call0(&JsValue::UNDEFINED)
+                        .expect("patch setup")
+                        .dyn_into()
+                        .expect("restore function");
+                    let _restore = RestoreGlobal(restore);
+                    raw_fetch(request, budget, &MonotonicClock::new(move || start)).await
+                };
+                let error = outcome.err().expect("setup refusal");
+                assert_eq!(
+                    error.provider_failure_detail(),
+                    expected
+                        .map(|cause| ProviderFailureDetail::Cloudflare {
+                            phase: ProviderFailurePhase::RequestPreparation,
+                            cause,
+                        })
+                        .as_ref()
+                );
+                assert_same_public_error(EdgeError::internal(anyhow::anyhow!(message)), error);
+            }
+        }
 
         #[wasm_bindgen_test]
         fn provider_diagnostics_fetch_settlement_keeps_only_observed_failures() {

@@ -71,7 +71,7 @@ pub use error::{
 pub use error_detail::{
     AxumFailureCause, AxumFailureKind, CloudflareFailureCause, FastlyFailureCause,
     ProviderFailureAdapter, ProviderFailureDetail, ProviderFailurePhase, SpinDnsRcode,
-    SpinFailureCause, SpinFieldSize,
+    SpinFailureCause, SpinFieldSize, SpinTimeoutOption,
 };
 pub use ingress::{
     AdmissionDecision, AdmittedIngress, BufferedIngressResponse, DEFAULT_INBOUND_READ_BUDGET,

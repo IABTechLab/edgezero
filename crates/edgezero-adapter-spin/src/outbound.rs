@@ -254,7 +254,9 @@ mod spin_impl {
     #[cfg(feature = "test-utils")]
     use edgezero_core::error::BudgetSource;
     use edgezero_core::error::{BadGatewayReason, EdgeError};
-    use edgezero_core::error_detail::ProviderFailurePhase;
+    use edgezero_core::error_detail::{
+        ProviderFailureDetail, ProviderFailurePhase, SpinFailureCause, SpinTimeoutOption,
+    };
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
@@ -273,8 +275,8 @@ mod spin_impl {
     use spin_sdk::time::sleep;
     use spin_sdk::wasip3::http::client;
     use spin_sdk::wasip3::http::types::{
-        ErrorCode, Fields, Method as WasiMethod, Request, RequestOptions, RequestOptionsError,
-        Response, Scheme,
+        ErrorCode, Fields, HeaderError, Method as WasiMethod, Request, RequestOptions,
+        RequestOptionsError, Response, Scheme,
     };
     use spin_sdk::wasip3::http_compat::BodyWriter;
     use spin_sdk::wasip3::wit_bindgen::{FutureWriter, StreamResult};
@@ -297,6 +299,14 @@ mod spin_impl {
     struct PreparedRequest {
         budget: DispatchBudget,
         parts: OutboundRequestParts,
+    }
+
+    #[derive(Clone, Copy)]
+    enum RequestTargetPart {
+        Authority,
+        Method,
+        Path,
+        Scheme,
     }
 
     impl SpinOutboundClient {
@@ -485,9 +495,7 @@ mod spin_impl {
         for (name, value) in headers {
             fields
                 .append(name.as_str(), value.as_bytes())
-                .map_err(|_error| {
-                    EdgeError::bad_request("Spin rejected an outbound request header")
-                })?;
+                .map_err(|error| map_spin_preparation_header(&error))?;
         }
         Ok(fields)
     }
@@ -500,43 +508,133 @@ mod spin_impl {
         let remaining = budget_remaining(budget, clock)?;
         let timeouts = super::request_timeouts(remaining);
         set_timeout_option(
-            "connect",
+            SpinTimeoutOption::Connect,
             &options.set_connect_timeout(Some(timeouts.connect())),
         )?;
         set_timeout_option(
-            "first-byte",
+            SpinTimeoutOption::FirstByte,
             &options.set_first_byte_timeout(Some(timeouts.first_byte())),
         )?;
         set_timeout_option(
-            "between-bytes",
+            SpinTimeoutOption::BetweenBytes,
             &options.set_between_bytes_timeout(Some(timeouts.between_bytes())),
         )?;
         Ok(options)
     }
 
     fn set_timeout_option(
-        name: &str,
+        option: SpinTimeoutOption,
         outcome: &Result<(), RequestOptionsError>,
     ) -> Result<(), EdgeError> {
+        let name = match option {
+            SpinTimeoutOption::BetweenBytes => "between-bytes",
+            SpinTimeoutOption::Connect => "connect",
+            SpinTimeoutOption::FirstByte => "first-byte",
+            _ => "unknown",
+        };
         match outcome {
             Ok(()) => Ok(()),
             Err(RequestOptionsError::NotSupported) => {
                 log::debug!("Spin host does not support the outbound {name} timeout option");
                 Ok(())
             }
-            Err(RequestOptionsError::Immutable) => Err(EdgeError::internal(anyhow::anyhow!(
-                "Spin outbound {name} timeout option is immutable"
-            ))),
-            Err(RequestOptionsError::Other(_)) => Err(EdgeError::internal(anyhow::anyhow!(
-                "Spin host rejected the outbound {name} timeout option"
-            ))),
+            Err(RequestOptionsError::Immutable) => Err(EdgeError::internal_with_detail(
+                anyhow::anyhow!("Spin outbound {name} timeout option is immutable"),
+                preparation_detail(SpinFailureCause::RequestOptionsImmutable(option)),
+            )),
+            Err(RequestOptionsError::Other(_)) => Err(EdgeError::internal_with_detail(
+                anyhow::anyhow!("Spin host rejected the outbound {name} timeout option"),
+                preparation_detail(SpinFailureCause::RequestOptionsOther(option)),
+            )),
         }
+    }
+
+    fn map_spin_preparation_header(error: &HeaderError) -> EdgeError {
+        let cause = match error {
+            HeaderError::Forbidden => SpinFailureCause::HeaderForbidden,
+            HeaderError::Immutable => SpinFailureCause::HeaderImmutable,
+            HeaderError::InvalidSyntax => SpinFailureCause::HeaderInvalidSyntax,
+            HeaderError::Other(_) => SpinFailureCause::HeaderOther,
+            HeaderError::SizeExceeded => SpinFailureCause::HeaderSizeExceeded,
+        };
+        EdgeError::bad_request_with_detail(
+            "Spin rejected an outbound request header",
+            preparation_detail(cause),
+        )
+    }
+
+    fn preparation_detail(cause: SpinFailureCause) -> ProviderFailureDetail {
+        ProviderFailureDetail::Spin {
+            phase: ProviderFailurePhase::RequestPreparation,
+            cause,
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[must_use]
+    #[inline]
+    pub fn map_spin_preparation_header_for_test(error: &HeaderError) -> EdgeError {
+        map_spin_preparation_header(error)
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub fn request_fields_for_test(headers: &HeaderMap) -> Result<(), EdgeError> {
+        request_fields(headers).map(|_fields| ())
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub fn set_timeout_option_for_test(
+        option: SpinTimeoutOption,
+        outcome: &Result<(), RequestOptionsError>,
+    ) -> Result<(), EdgeError> {
+        set_timeout_option(option, outcome)
+    }
+
+    fn request_target_error(part: RequestTargetPart) -> EdgeError {
+        let (message, cause) = match part {
+            RequestTargetPart::Authority => (
+                "Spin rejected the outbound request authority",
+                SpinFailureCause::RequestAuthorityRejected,
+            ),
+            RequestTargetPart::Method => (
+                "Spin rejected the outbound request method",
+                SpinFailureCause::RequestMethodRejected,
+            ),
+            RequestTargetPart::Path => (
+                "Spin rejected the outbound request path",
+                SpinFailureCause::RequestPathRejected,
+            ),
+            RequestTargetPart::Scheme => (
+                "Spin rejected the outbound request scheme",
+                SpinFailureCause::RequestSchemeRejected,
+            ),
+        };
+        EdgeError::bad_request_with_detail(message, preparation_detail(cause))
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[must_use]
+    #[inline]
+    pub fn request_target_errors_for_test() -> [EdgeError; 4] {
+        [
+            RequestTargetPart::Authority,
+            RequestTargetPart::Method,
+            RequestTargetPart::Path,
+            RequestTargetPart::Scheme,
+        ]
+        .map(request_target_error)
     }
 
     fn set_request_target(request: &Request, method: &Method, uri: &Uri) -> Result<(), EdgeError> {
         request
             .set_method(&wasi_method(method))
-            .map_err(|()| EdgeError::bad_request("Spin rejected the outbound request method"))?;
+            .map_err(|()| request_target_error(RequestTargetPart::Method))?;
         let scheme = match uri.scheme_str() {
             Some("http") => Scheme::Http,
             Some("https") => Scheme::Https,
@@ -545,19 +643,19 @@ mod spin_impl {
         };
         request
             .set_scheme(Some(&scheme))
-            .map_err(|()| EdgeError::bad_request("Spin rejected the outbound request scheme"))?;
+            .map_err(|()| request_target_error(RequestTargetPart::Scheme))?;
         let authority = uri
             .authority()
             .ok_or_else(|| EdgeError::bad_request("outbound request URI has no authority"))?;
         request
             .set_authority(Some(authority.as_str()))
-            .map_err(|()| EdgeError::bad_request("Spin rejected the outbound request authority"))?;
+            .map_err(|()| request_target_error(RequestTargetPart::Authority))?;
         request
             .set_path_with_query(Some(
                 uri.path_and_query()
                     .map_or("/", |path_and_query| path_and_query.as_str()),
             ))
-            .map_err(|()| EdgeError::bad_request("Spin rejected the outbound request path"))?;
+            .map_err(|()| request_target_error(RequestTargetPart::Path))?;
         Ok(())
     }
 
@@ -1456,7 +1554,8 @@ pub use spin_impl::SpinOutboundClient;
 pub use spin_impl::{
     converted_response_content_type_provenance_holds_for_test,
     converted_response_retains_injected_clock_for_test, deferred_clock_paths_hold_for_test,
-    provider_deadline_diagnostics_hold_for_test,
+    map_spin_preparation_header_for_test, provider_deadline_diagnostics_hold_for_test,
+    request_fields_for_test, request_target_errors_for_test, set_timeout_option_for_test,
 };
 
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]

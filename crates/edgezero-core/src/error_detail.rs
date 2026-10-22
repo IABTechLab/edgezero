@@ -165,12 +165,15 @@ impl ProviderFailureDetail {
     }
 }
 
-/// The provider boundary at which the original failure was observed.
+/// The provider API boundary at which the original failure was observed.
+/// This does not establish whether any request bytes reached the transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ProviderFailurePhase {
     BackendRegistration,
     RequestBodyUpload,
+    /// Request-resource construction or mutation before dispatch.
+    RequestPreparation,
     ResponseBodyRead,
     ResponseHeaders,
     Send,
@@ -207,7 +210,7 @@ impl SpinDnsRcode {
     }
 }
 
-/// Spin SDK 7 / WASI HTTP 0.3 causes, without coding strings, field names or error messages.
+/// Spin SDK 7 / WASI HTTP 0.3 causes, including resource setters, without provider text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SpinFailureCause {
@@ -227,6 +230,11 @@ pub enum SpinFailureCause {
         info_code: Option<u16>,
     },
     DnsTimeout,
+    HeaderForbidden,
+    HeaderImmutable,
+    HeaderInvalidSyntax,
+    HeaderOther,
+    HeaderSizeExceeded,
     HttpProtocolError,
     HttpRequestBodySize(Option<u64>),
     HttpRequestDenied,
@@ -250,6 +258,12 @@ pub enum SpinFailureCause {
     HttpUpgradeFailed,
     InternalError,
     LoopDetected,
+    RequestAuthorityRejected,
+    RequestMethodRejected,
+    RequestOptionsImmutable(SpinTimeoutOption),
+    RequestOptionsOther(SpinTimeoutOption),
+    RequestPathRejected,
+    RequestSchemeRejected,
     TlsAlertReceived {
         alert_id: Option<u8>,
     },
@@ -262,6 +276,15 @@ pub enum SpinFailureCause {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpinFieldSize {
     pub field_size: Option<u32>,
+}
+
+/// The outbound timeout setter rejected by the Spin host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SpinTimeoutOption {
+    BetweenBytes,
+    Connect,
+    FirstByte,
 }
 
 #[cfg(test)]

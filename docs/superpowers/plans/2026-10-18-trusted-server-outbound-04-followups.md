@@ -405,6 +405,56 @@ non-listening socket timed out on macOS, and port zero returned AddrNotAvailable
 proposed replacement can prove the required ConnectionRefused witness. This is a local harness
 limitation, not a transport behavior or hosted-qualification claim.
 
+#### F6a Preparation Checkpoint (2026-10-21)
+
+- [x] Record Cloudflare request-header and constructor errors without replacing the retained
+      worker error. Keep SDK-erased constructor types Unknown; project caught raw Fetch setup
+      exceptions while retaining their exact fixed internal source. Do not enrich local UTF-8
+      validation, nonthrowing runtime refusals or the shared response-header sink.
+- [x] Record all five pinned Spin HeaderError variants, timeout-option identity and rejection
+      category, and component-specific unit setter rejection. Preserve 400/500 classification,
+      fixed messages, advisory NotSupported success and existing preparation/dispatch order.
+- [x] Introduce RequestPreparation for these SDK resource boundaries. Do not infer transport
+      progress from phase names or relabel errors observed at existing SDK send/body boundaries.
+      Preserve the outbound contract, dependency pins, approved API digest and failed Fastly G2.
+- [x] Finish independent review and current-tree Rust/WASM/docs verification before committing.
+- [x] Repair the feature-matrix-discovered Fastly lifecycle helper gate: co-located tests can use
+      it without enabling test-utils. Keep the unit test active; production builds are unchanged.
+- [ ] Complete observer/framing integration, diagnostic capability publication and the remaining
+      provider/hosted acceptance legs. Preparation fixtures do not close F6a/EZ-16 by themselves.
+
+Dirac investigated Cloudflare source preservation and its shared request/response header sink;
+Banach verified the actual Spin SDK's five header variants and unit-returning setter provenance.
+Their proposals favored existing-boundary enrichment over a new request construction path or
+transport-error remapping. The selected design uses a distinct preparation phase, retains source
+objects where they already existed, and never reconstructs a missing cause from provider text.
+Implementation is centralized. No application-specific policy or compatibility alias is added.
+
+Cloudflare fixtures use actual SDK header/constructor failures and scoped, restored Node globals
+for setup exceptions and a nonthrowing refusal control. Spin exercises an actual forbidden field
+through the production field-construction helper; normal dispatch strips that field beforehand,
+so this is not an end-to-end public-client failure claim. Synthetic enum/unit outcomes cover
+otherwise unforced setter branches, including secret-bearing Other payloads. They are projection
+tests, not hosted cause or runtime-limit qualification. Tests assert exact existing public error
+behavior, typed detail and its text-free representation. Local validation and advisory success
+controls remain separate from provider failures.
+
+Spec review passed. Quality review tightened Cloudflare's setup fixtures so assertions run only
+after global restoration and added a direct retained-source identity/payload witness; the revised
+review passed. No panic-abort or trap cleanup guarantee is inferred from the test guard.
+
+Validation passed all five required Rust gates (801 core tests; 27 workspace binaries and 2,108
+tests), core doctests and the nonzero public-error diagnostic sentinel, all three actual-target
+WASM clippy checks, and the four native outbound contract suites (17/4/2/3 tests). Cloudflare's
+Node/WASM suite passed 40 tests; pinned Wasmtime passed 35 Spin contracts and 12 SDK resource tests;
+Viceroy passed 171 Fastly library tests and 25 contracts. The plain-fastly lifecycle sentinel also
+passed without test-utils after reproducing its missing-helper compile error. All seven adapter
+feature matrices passed eight legs each. Independent demo-core tests passed 48 cases. Docs
+format/lint/build, dependency/legacy guards and all 18 evidence-checker tests passed. Inventory
+validation remains 255 criteria / 511 planned legs, qualified false. No dependency pin, capability,
+frozen API file or approved Interfaces digest changed. Hosted/browser acceptance, full P1 and
+the failed Fastly G2 remain open.
+
 - [ ] Add token-bearing URLs/provider messages to regression fixtures. Assert wire bytes and
       existing Display/status/reasons do not change; retained body failures preserve diagnostic detail
       internally. Add framing-reason cases independent of provider text and policy-panic/deadline cases.

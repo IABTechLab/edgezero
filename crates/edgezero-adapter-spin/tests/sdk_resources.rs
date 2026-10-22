@@ -11,20 +11,22 @@ mod tests {
     use std::time::Duration;
 
     use edgezero_adapter_spin::outbound::{
-        SpinOutboundClient, map_spin_host_error_for_test,
-        provider_deadline_diagnostics_hold_for_test,
+        SpinOutboundClient, map_spin_host_error_for_test, map_spin_preparation_header_for_test,
+        provider_deadline_diagnostics_hold_for_test, request_fields_for_test,
+        request_target_errors_for_test, set_timeout_option_for_test,
     };
     use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
     use edgezero_core::error_detail::{
         ProviderFailureAdapter, ProviderFailureDetail, ProviderFailurePhase, SpinDnsRcode,
-        SpinFailureCause, SpinFieldSize,
+        SpinFailureCause, SpinFieldSize, SpinTimeoutOption,
     };
+    use edgezero_core::http::{HeaderMap, HeaderValue};
     use edgezero_core::outbound::{OutboundHttpClient, OutboundRequest};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::executor::block_on;
     use spin_sdk::wasip3::http::types::{
-        DnsErrorPayload, ErrorCode, FieldSizePayload, Fields, Request, RequestOptions, Response,
-        TlsAlertReceivedPayload,
+        DnsErrorPayload, ErrorCode, FieldSizePayload, Fields, HeaderError, Request, RequestOptions,
+        RequestOptionsError, Response, TlsAlertReceivedPayload,
     };
     use spin_sdk::wasip3::http_compat::BodyWriter;
 
@@ -103,6 +105,141 @@ mod tests {
     #[test]
     fn provider_diagnostics_survive_ready_deadlines() {
         assert!(block_on(provider_deadline_diagnostics_hold_for_test()));
+    }
+
+    #[test]
+    fn provider_diagnostics_preserve_actual_preparation_header_rejection() {
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", HeaderValue::from_static("close"));
+        let error = request_fields_for_test(&headers).expect_err("host forbids connection");
+        assert_eq!(
+            error.provider_failure_detail(),
+            Some(&ProviderFailureDetail::Spin {
+                phase: ProviderFailurePhase::RequestPreparation,
+                cause: SpinFailureCause::HeaderForbidden,
+            })
+        );
+        assert_preparation_wire_unchanged(
+            EdgeError::bad_request("Spin rejected an outbound request header"),
+            error,
+        );
+        headers.clear();
+        headers.insert("x-test", HeaderValue::from_static("valid"));
+        request_fields_for_test(&headers).expect("accepted field");
+    }
+
+    #[test]
+    fn provider_diagnostics_preserve_preparation_setter_causes_without_text() {
+        for (source, cause) in [
+            (HeaderError::Forbidden, SpinFailureCause::HeaderForbidden),
+            (HeaderError::Immutable, SpinFailureCause::HeaderImmutable),
+            (
+                HeaderError::InvalidSyntax,
+                SpinFailureCause::HeaderInvalidSyntax,
+            ),
+            (
+                HeaderError::SizeExceeded,
+                SpinFailureCause::HeaderSizeExceeded,
+            ),
+            (HeaderError::Other(None), SpinFailureCause::HeaderOther),
+            (
+                HeaderError::Other(Some("provider-secret-token".to_owned())),
+                SpinFailureCause::HeaderOther,
+            ),
+        ] {
+            let error = map_spin_preparation_header_for_test(&source);
+            assert_eq!(
+                error.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Spin {
+                    phase: ProviderFailurePhase::RequestPreparation,
+                    cause,
+                })
+            );
+            assert_preparation_wire_unchanged(
+                EdgeError::bad_request("Spin rejected an outbound request header"),
+                error,
+            );
+        }
+        for (option, name) in [
+            (SpinTimeoutOption::Connect, "connect"),
+            (SpinTimeoutOption::FirstByte, "first-byte"),
+            (SpinTimeoutOption::BetweenBytes, "between-bytes"),
+        ] {
+            set_timeout_option_for_test(option, &Ok(())).expect("accepted option");
+            set_timeout_option_for_test(option, &Err(RequestOptionsError::NotSupported))
+                .expect("unsupported option stays advisory");
+            for (source, cause, message) in [
+                (
+                    RequestOptionsError::Immutable,
+                    SpinFailureCause::RequestOptionsImmutable(option),
+                    format!("Spin outbound {name} timeout option is immutable"),
+                ),
+                (
+                    RequestOptionsError::Other(Some("provider-secret-token".to_owned())),
+                    SpinFailureCause::RequestOptionsOther(option),
+                    format!("Spin host rejected the outbound {name} timeout option"),
+                ),
+                (
+                    RequestOptionsError::Other(None),
+                    SpinFailureCause::RequestOptionsOther(option),
+                    format!("Spin host rejected the outbound {name} timeout option"),
+                ),
+            ] {
+                let error =
+                    set_timeout_option_for_test(option, &Err(source)).expect_err("rejection");
+                assert_eq!(
+                    error.provider_failure_detail(),
+                    Some(&ProviderFailureDetail::Spin {
+                        phase: ProviderFailurePhase::RequestPreparation,
+                        cause,
+                    })
+                );
+                assert_preparation_wire_unchanged(
+                    EdgeError::internal(anyhow::anyhow!(message)),
+                    error,
+                );
+            }
+        }
+    }
+
+    fn assert_preparation_wire_unchanged(plain: EdgeError, diagnosed: EdgeError) {
+        use edgezero_core::response::IntoResponse as _;
+
+        assert_eq!(plain.to_string(), diagnosed.to_string());
+        assert_eq!(plain.message(), diagnosed.message());
+        assert_eq!(plain.kind(), diagnosed.kind());
+        assert_eq!(plain.status(), diagnosed.status());
+        assert!(
+            !format!("{:?}", diagnosed.provider_failure_detail()).contains("provider-secret-token")
+        );
+        let before = plain.into_response().expect("plain response");
+        let after = diagnosed.into_response().expect("diagnosed response");
+        assert_eq!(before.status(), after.status());
+        assert_eq!(before.headers(), after.headers());
+        assert_eq!(before.body().as_bytes(), after.body().as_bytes());
+    }
+
+    #[test]
+    fn provider_diagnostics_preserve_unit_target_rejection_without_fabricating_error_codes() {
+        let expected = [
+            (SpinFailureCause::RequestAuthorityRejected, "authority"),
+            (SpinFailureCause::RequestMethodRejected, "method"),
+            (SpinFailureCause::RequestPathRejected, "path"),
+            (SpinFailureCause::RequestSchemeRejected, "scheme"),
+        ];
+        for (error, (cause, name)) in request_target_errors_for_test().into_iter().zip(expected) {
+            assert_eq!(
+                error.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Spin {
+                    phase: ProviderFailurePhase::RequestPreparation,
+                    cause,
+                })
+            );
+            assert_preparation_wire_unchanged(
+                EdgeError::bad_request(format!("Spin rejected the outbound request {name}")),
+                error,
+            );
+        }
     }
 
     #[test]

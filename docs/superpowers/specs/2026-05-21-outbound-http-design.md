@@ -3072,9 +3072,18 @@ the observed error's diagnostic field. Pure timer wins, successful operations ob
 clean EOF carry no invented cause. Core bounded collection follows the same rule without changing
 its cooperative deadline behavior. Raw Fetch failures use only an allowlisted exception name;
 opaque/text-only failures remain Unknown and never become timeouts solely because of that name.
-Preparation/header-option enrichment, diagnostic capability publication and hosted acceptance are
-tracked separately by F6a in the Trusted Server adoption plan; this checkpoint makes no capability
-promotion or hosted-qualification claim.
+The preparation checkpoint adds `RequestPreparation` for Cloudflare request headers/construction,
+raw Fetch setup exceptions, and Spin request-resource setters. The phase names the observed API
+boundary, not whether request bytes were sent; SDK send failures retain Send, including reqwest
+builder failures. Cloudflare constructor exception types erased by its SDK remain Unknown, while
+the original internal source is retained. A false manual-encoding setting result is not a thrown
+exception and gains no invented exception detail. Shared response-header conversion is unchanged.
+Spin records all five HeaderError categories, the rejected `SpinTimeoutOption`, and explicit
+component rejection from unit-returning target setters without fabricating an ErrorCode. Neither
+Other strings nor local validation failures become provider evidence, and NotSupported timeout
+options still succeed. Observer/framing integration, diagnostic capability publication and hosted
+acceptance remain tracked by F6a/F6c in the Trusted Server adoption plan; no capability promotion
+or hosted-qualification claim is made.
 
 | Condition | `EdgeError` | HTTP status |
 | --- | --- | --- |

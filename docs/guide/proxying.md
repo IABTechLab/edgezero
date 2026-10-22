@@ -79,8 +79,16 @@ completion. Axum retains reqwest predicates and searches up to 32 source entries
 and `TypeError` names and never infers a timeout from a name; text-only SDK errors remain Unknown.
 When an existing deadline check replaces an observed error, the selected timeout keeps its safe
 detail. Timer-only expiry, late successful results and EOF do not invent provider evidence.
-SDK preparation/header-option enrichment, diagnostic capability publication and hosted
-qualification remain open; this checkpoint does not strengthen transport guarantees.
+Cloudflare request construction and Spin header, timeout-option and target setters record
+`RequestPreparation`. This phase describes the observed API boundary, not transport progress;
+an error returned by an SDK send operation still has the Send phase, including a reqwest builder
+error. Cloudflare's SDK erases constructor exception types, so those causes remain Unknown.
+Spin preserves all five header-error categories and the rejected timeout option, discarding
+`Other` messages. Unit-returning target setters record component rejection without fabricating
+an HTTP transport error code. Unsupported timeout options remain advisory successes.
+Shared response-header conversion is not labeled as request preparation, and local validation
+does not invent provider evidence. Observer/framing integration, diagnostic capability publication
+and hosted qualification remain open; this checkpoint does not strengthen transport guarantees.
 
 `ResponseDecoding::Original` preserves encoded payload bytes and the representation headers
 that survive ordinary normalization. It does not restore hop-by-hop or invalid fields. Use it

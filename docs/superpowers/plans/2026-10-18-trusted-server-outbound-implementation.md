@@ -70,8 +70,10 @@ preserves public error behavior, and retains that detail through body policies, 
 handles and sticky body replay. Exact field patterns migrate without compatibility wrappers.
 The subsequent [SDK boundary checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f6a-sdk-boundary-checkpoint-2026-10-21)
 populates the existing send/body boundaries on all four adapters and retains detail through ready
-error/deadline arbitration. Preparation enrichment, observers, capability claims and hosted
-acceptance remain open. This does not change transport behavior, unblock Fastly G2 or complete P1/F6a.
+error/deadline arbitration. The [preparation checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f6a-preparation-checkpoint-2026-10-21)
+adds request-only Cloudflare and Spin resource-setter diagnostics. Observers, capability claims
+and hosted acceptance remain open. This does not change transport behavior, unblock Fastly G2 or
+complete P1/F6a.
 
 ### P1 Foundation Checkpoint
 
