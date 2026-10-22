@@ -73,7 +73,7 @@ pub(crate) enum FallbackDrainOutcome {
 
 enum StoredError {
     BadGateway(String, BadGatewayReason, Option<ProviderFailureDetail>),
-    BadRequest(String),
+    BadRequest(String, Option<ProviderFailureDetail>),
     ConfigOutOfDate(String, String),
     GatewayTimeout(String, BudgetSource, Option<ProviderFailureDetail>),
     Internal(String, Option<ProviderFailureDetail>),
@@ -102,7 +102,10 @@ impl StoredError {
                 reason,
                 provider_detail,
             } => Self::BadGateway(message, reason, provider_detail),
-            EdgeError::BadRequest { message } => Self::BadRequest(message),
+            EdgeError::BadRequest {
+                message,
+                provider_detail,
+            } => Self::BadRequest(message, provider_detail),
             EdgeError::ConfigOutOfDate {
                 message,
                 field_path,
@@ -148,7 +151,10 @@ impl StoredError {
                 }
                 None => EdgeError::bad_gateway_with_reason(message.clone(), *reason),
             },
-            Self::BadRequest(message) => EdgeError::bad_request(message.clone()),
+            Self::BadRequest(message, detail) => match detail {
+                Some(evidence) => EdgeError::bad_request_with_detail(message.clone(), *evidence),
+                None => EdgeError::bad_request(message.clone()),
+            },
             Self::ConfigOutOfDate(message, field_path) => {
                 EdgeError::config_out_of_date(message.clone(), field_path.clone())
             }
@@ -1097,6 +1103,7 @@ mod tests {
             cause: FastlyFailureCause::ConnectionRefused,
         };
         for source in [
+            EdgeError::bad_request_with_detail("fixed request rejection", detail),
             EdgeError::bad_gateway_with_detail(
                 "fixed transport category",
                 BadGatewayReason::Transport,

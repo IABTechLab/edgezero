@@ -188,6 +188,9 @@ mod fastly_impl {
     use bytes::Bytes;
     use edgezero_core::body::{Body, BodyStream};
     use edgezero_core::error::{BadGatewayReason, EdgeError};
+    use edgezero_core::error_detail::{
+        FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+    };
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
@@ -889,7 +892,7 @@ mod fastly_impl {
     }
 
     fn map_backend_creation_error(error: &BackendCreationError) -> EdgeError {
-        match error {
+        let classified = match error {
             BackendCreationError::Disallowed => EdgeError::bad_gateway_with_reason(
                 DYNAMIC_BACKENDS_DISABLED_MESSAGE,
                 BadGatewayReason::Unspecified,
@@ -909,6 +912,117 @@ mod fastly_impl {
                 "Fastly failed to register a dynamic backend",
                 BadGatewayReason::Unspecified,
             ),
+        };
+        with_fastly_detail(
+            classified,
+            ProviderFailurePhase::BackendRegistration,
+            backend_failure_cause(error),
+        )
+    }
+
+    fn with_fastly_detail(
+        mut error: EdgeError,
+        phase: ProviderFailurePhase,
+        cause: FastlyFailureCause,
+    ) -> EdgeError {
+        if let EdgeError::BadGateway {
+            provider_detail, ..
+        }
+        | EdgeError::GatewayTimeout {
+            provider_detail, ..
+        }
+        | EdgeError::Internal {
+            provider_detail, ..
+        } = &mut error
+        {
+            *provider_detail = Some(ProviderFailureDetail::Fastly { phase, cause });
+        }
+        error
+    }
+
+    fn backend_failure_cause(error: &BackendCreationError) -> FastlyFailureCause {
+        match error {
+            BackendCreationError::BetweenBytesTimeoutTooLarge(_) => {
+                FastlyFailureCause::BackendBetweenBytesTimeoutTooLarge
+            }
+            BackendCreationError::ConnectTimeoutTooLarge(_) => {
+                FastlyFailureCause::BackendConnectTimeoutTooLarge
+            }
+            BackendCreationError::FirstByteTimeoutTooLarge(_) => {
+                FastlyFailureCause::BackendFirstByteTimeoutTooLarge
+            }
+            BackendCreationError::Disallowed => FastlyFailureCause::BackendDisallowed,
+            BackendCreationError::EncodingError(_) => FastlyFailureCause::BackendEncodingError,
+            BackendCreationError::InvalidHealthcheckValue(_) => {
+                FastlyFailureCause::BackendInvalidHealthcheckValue
+            }
+            BackendCreationError::NameInUse => FastlyFailureCause::BackendNameInUse,
+            BackendCreationError::NameTooLong(_) => FastlyFailureCause::BackendNameTooLong,
+            BackendCreationError::HostError(status) => FastlyFailureCause::BackendHostError {
+                status: status.code,
+            },
+        }
+    }
+
+    fn send_failure_cause(error: &SendErrorCause) -> FastlyFailureCause {
+        match error {
+            SendErrorCause::DnsTimeout => FastlyFailureCause::DnsTimeout,
+            SendErrorCause::DnsError { rcode, info_code } => FastlyFailureCause::DnsError {
+                rcode: *rcode,
+                info_code: *info_code,
+            },
+            SendErrorCause::DestinationNotFound => FastlyFailureCause::DestinationNotFound,
+            SendErrorCause::DestinationUnavailable => FastlyFailureCause::DestinationUnavailable,
+            SendErrorCause::DestinationIpUnroutable => FastlyFailureCause::DestinationIpUnroutable,
+            SendErrorCause::ConnectionRefused => FastlyFailureCause::ConnectionRefused,
+            SendErrorCause::ConnectionTerminated => FastlyFailureCause::ConnectionTerminated,
+            SendErrorCause::ConnectionTimeout => FastlyFailureCause::ConnectionTimeout,
+            SendErrorCause::ConnectionLimitReached => FastlyFailureCause::ConnectionLimitReached,
+            SendErrorCause::TlsProtocolError => FastlyFailureCause::TlsProtocolError,
+            SendErrorCause::TlsCertificateError => FastlyFailureCause::TlsCertificateError,
+            SendErrorCause::TlsConfigurationError => FastlyFailureCause::TlsConfigurationError,
+            SendErrorCause::TlsAlertReceived { alert_id } => FastlyFailureCause::TlsAlertReceived {
+                alert_id: *alert_id,
+            },
+            SendErrorCause::HttpIncompleteResponse => FastlyFailureCause::HttpIncompleteResponse,
+            SendErrorCause::HttpProtocolError => FastlyFailureCause::HttpProtocolError,
+            SendErrorCause::HttpResponseHeaderSectionTooLarge => {
+                FastlyFailureCause::HttpResponseHeaderSectionTooLarge
+            }
+            SendErrorCause::HttpResponseBodyTooLarge => {
+                FastlyFailureCause::HttpResponseBodyTooLarge
+            }
+            SendErrorCause::HttpResponseTimeout => FastlyFailureCause::HttpResponseTimeout,
+            SendErrorCause::HttpResponseStatusInvalid => {
+                FastlyFailureCause::HttpResponseStatusInvalid
+            }
+            SendErrorCause::HttpUpgradeFailed => FastlyFailureCause::HttpUpgradeFailed,
+            SendErrorCause::HttpRequestCacheKeyInvalid => {
+                FastlyFailureCause::HttpRequestCacheKeyInvalid
+            }
+            SendErrorCause::HttpRequestUriInvalid => FastlyFailureCause::HttpRequestUriInvalid,
+            SendErrorCause::HttpCacheLimitExceeded => FastlyFailureCause::HttpCacheLimitExceeded,
+            SendErrorCause::HttpCacheApiUnsupported => FastlyFailureCause::HttpCacheApiUnsupported,
+            SendErrorCause::IoError(source) => FastlyFailureCause::IoError {
+                kind: source.kind(),
+            },
+            SendErrorCause::FanoutNotEnabled => FastlyFailureCause::FanoutNotEnabled,
+            SendErrorCause::ImageOptimizerUnsupported => {
+                FastlyFailureCause::ImageOptimizerUnsupported
+            }
+            SendErrorCause::InternalError(status) => FastlyFailureCause::InternalError {
+                status: status.as_ref().map(|value| value.code),
+            },
+            SendErrorCause::Http2StreamError {
+                frame_type,
+                error_code,
+            } => FastlyFailureCause::Http2StreamError {
+                frame_type: *frame_type,
+                error_code: *error_code,
+            },
+            SendErrorCause::RequestCollapse => FastlyFailureCause::RequestCollapse,
+            SendErrorCause::Custom(_) => FastlyFailureCause::Custom,
+            _ => FastlyFailureCause::Unknown,
         }
     }
 
@@ -932,7 +1046,11 @@ mod fastly_impl {
             }
             Err(error) => {
                 if budget.deadline.is_expired_at(clock.now()) {
-                    Err(timeout_error(budget.cause))
+                    Err(with_fastly_detail(
+                        timeout_error(budget.cause),
+                        ProviderFailurePhase::BackendRegistration,
+                        backend_failure_cause(&error),
+                    ))
                 } else {
                     Err(map_backend_creation_error(&error))
                 }
@@ -992,7 +1110,11 @@ mod fastly_impl {
         budget: DispatchBudget,
         clock: &MonotonicClock,
     ) -> EdgeError {
-        super::classify_send_failure(cause_to_failure(cause), budget, clock.now())
+        with_fastly_detail(
+            super::classify_send_failure(cause_to_failure(cause), budget, clock.now()),
+            ProviderFailurePhase::Send,
+            send_failure_cause(cause),
+        )
     }
 
     #[expect(
@@ -1212,10 +1334,27 @@ mod fastly_impl {
         failure_message: &'static str,
     ) -> Result<(), EdgeError> {
         if budget.deadline.is_expired_at(observed_at) {
-            return Err(timeout_error(budget.cause));
+            let selected = timeout_error(budget.cause);
+            return Err(match result {
+                Err(source) => with_fastly_detail(
+                    selected,
+                    ProviderFailurePhase::RequestBodyUpload,
+                    FastlyFailureCause::IoError {
+                        kind: source.kind(),
+                    },
+                ),
+                Ok(()) => selected,
+            });
         }
-        result.map_err(|_error| {
-            EdgeError::bad_gateway_with_reason(failure_message, BadGatewayReason::Transport)
+        result.map_err(|error| {
+            EdgeError::bad_gateway_with_detail(
+                failure_message,
+                BadGatewayReason::Transport,
+                ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::RequestBodyUpload,
+                    cause: FastlyFailureCause::IoError { kind: error.kind() },
+                },
+            )
         })
     }
 
@@ -1235,15 +1374,16 @@ mod fastly_impl {
                         budget_remaining(budget, &clock)?;
                         yield Ok(Bytes::from(chunk));
                     }
-                    Some(Err(_error)) => {
-                        if budget.deadline.is_expired_at(clock.now()) {
-                            yield Err(timeout_error(budget.cause));
+                    Some(Err(error)) => {
+                        let classified = if budget.deadline.is_expired_at(clock.now()) {
+                            timeout_error(budget.cause)
                         } else {
-                            yield Err(EdgeError::bad_gateway_with_reason(
+                            EdgeError::bad_gateway_with_reason(
                                 "Fastly upstream response body failed",
                                 BadGatewayReason::Transport,
-                            ));
-                        }
+                            )
+                        };
+                        yield Err(with_fastly_detail(classified, ProviderFailurePhase::ResponseBodyRead, FastlyFailureCause::IoError { kind: error.kind() }));
                         return;
                     }
                     None => {
@@ -1304,7 +1444,26 @@ mod fastly_impl {
         let outcome = pending
             .wait()
             .map_err(|error| map_send_error(&error, budget, clock));
-        budget_remaining(budget, clock)?;
+        finish_pending_outcome(outcome, budget_remaining(budget, clock))
+    }
+
+    fn finish_pending_outcome<Output>(
+        outcome: Result<Output, EdgeError>,
+        remaining: Result<Duration, EdgeError>,
+    ) -> Result<Output, EdgeError> {
+        if let Err(mut selected) = remaining {
+            if let EdgeError::GatewayTimeout {
+                provider_detail, ..
+            } = &mut selected
+            {
+                *provider_detail = outcome
+                    .as_ref()
+                    .err()
+                    .and_then(EdgeError::provider_failure_detail)
+                    .copied();
+            }
+            return Err(selected);
+        }
         outcome
     }
 
@@ -1379,7 +1538,7 @@ mod fastly_impl {
     mod tests {
         use std::cell::Cell;
         use std::collections::VecDeque;
-        use std::io::Error;
+        use std::io::{Error, ErrorKind};
         use std::mem::discriminant;
         use std::num::NonZeroU64;
         use std::sync::{Arc, Mutex};
@@ -2218,6 +2377,220 @@ mod fastly_impl {
         }
 
         #[test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "one exhaustive pinned SDK table checks all causes and unchanged wire behavior"
+        )]
+        fn provider_diagnostics_cover_send_causes_without_changing_public_errors() {
+            use edgezero_core::error_detail::{
+                FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+            };
+            use edgezero_core::response::IntoResponse as _;
+            use fastly_shared::FastlyStatus;
+
+            macro_rules! unit_causes {
+                ($($variant:ident),* $(,)?) => { vec![$((SendErrorCause::$variant, FastlyFailureCause::$variant)),*] };
+            }
+            let mut cases = unit_causes![
+                DnsTimeout,
+                DestinationNotFound,
+                DestinationUnavailable,
+                DestinationIpUnroutable,
+                ConnectionRefused,
+                ConnectionTerminated,
+                ConnectionTimeout,
+                ConnectionLimitReached,
+                TlsProtocolError,
+                TlsCertificateError,
+                TlsConfigurationError,
+                HttpIncompleteResponse,
+                HttpResponseHeaderSectionTooLarge,
+                HttpResponseBodyTooLarge,
+                HttpResponseTimeout,
+                HttpResponseStatusInvalid,
+                HttpUpgradeFailed,
+                HttpProtocolError,
+                HttpRequestCacheKeyInvalid,
+                HttpRequestUriInvalid,
+                HttpCacheLimitExceeded,
+                HttpCacheApiUnsupported,
+                FanoutNotEnabled,
+                ImageOptimizerUnsupported,
+                RequestCollapse,
+            ];
+            cases.extend([
+                (
+                    SendErrorCause::DnsError {
+                        rcode: Some(u16::MAX),
+                        info_code: Some(u16::MAX),
+                    },
+                    FastlyFailureCause::DnsError {
+                        rcode: Some(u16::MAX),
+                        info_code: Some(u16::MAX),
+                    },
+                ),
+                (
+                    SendErrorCause::DnsError {
+                        rcode: None,
+                        info_code: None,
+                    },
+                    FastlyFailureCause::DnsError {
+                        rcode: None,
+                        info_code: None,
+                    },
+                ),
+                (
+                    SendErrorCause::TlsAlertReceived {
+                        alert_id: Some(u8::MAX),
+                    },
+                    FastlyFailureCause::TlsAlertReceived {
+                        alert_id: Some(u8::MAX),
+                    },
+                ),
+                (
+                    SendErrorCause::TlsAlertReceived { alert_id: None },
+                    FastlyFailureCause::TlsAlertReceived { alert_id: None },
+                ),
+                (
+                    SendErrorCause::Http2StreamError {
+                        frame_type: u8::MAX,
+                        error_code: u32::MAX,
+                    },
+                    FastlyFailureCause::Http2StreamError {
+                        frame_type: u8::MAX,
+                        error_code: u32::MAX,
+                    },
+                ),
+                (
+                    SendErrorCause::InternalError(Some(FastlyStatus::ERROR)),
+                    FastlyFailureCause::InternalError {
+                        status: Some(FastlyStatus::ERROR.code),
+                    },
+                ),
+                (
+                    SendErrorCause::InternalError(None),
+                    FastlyFailureCause::InternalError { status: None },
+                ),
+                (
+                    SendErrorCause::IoError(Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "provider-secret-token",
+                    )),
+                    FastlyFailureCause::IoError {
+                        kind: ErrorKind::UnexpectedEof,
+                    },
+                ),
+                (
+                    SendErrorCause::Custom(anyhow::anyhow!(
+                        "https://example.com/?token=provider-secret-token"
+                    )),
+                    FastlyFailureCause::Custom,
+                ),
+            ]);
+            let now = MonotonicInstant::now();
+            let clock = constant_clock(now);
+            for (source, expected) in cases {
+                for expired in [false, true] {
+                    let mut budget = clock_budget(now, Duration::from_secs(1));
+                    if expired {
+                        budget.deadline = Deadline::at_instant(now);
+                    }
+                    let plain =
+                        super::super::classify_send_failure(cause_to_failure(&source), budget, now);
+                    let mapped = map_send_cause(&source, budget, &clock);
+                    assert_eq!(
+                        mapped.provider_failure_detail(),
+                        Some(&ProviderFailureDetail::Fastly {
+                            phase: ProviderFailurePhase::Send,
+                            cause: expected,
+                        })
+                    );
+                    assert_eq!(mapped.message(), plain.message());
+                    assert_eq!(mapped.to_string(), plain.to_string());
+                    assert_eq!(mapped.status(), plain.status());
+                    assert_eq!(mapped.kind(), plain.kind());
+                    assert!(
+                        !format!("{:?}", mapped.provider_failure_detail())
+                            .contains("provider-secret-token")
+                    );
+                    let before = plain.into_response().expect("plain wire");
+                    let after = mapped.into_response().expect("mapped wire");
+                    assert_eq!(before.status(), after.status());
+                    assert_eq!(before.headers(), after.headers());
+                    assert_eq!(before.body().as_bytes(), after.body().as_bytes());
+                }
+            }
+        }
+
+        #[test]
+        fn provider_diagnostics_keep_backend_registration_and_upload_io() {
+            use edgezero_core::error_detail::{
+                FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+            };
+            use fastly_shared::FastlyStatus;
+
+            let backend =
+                map_backend_creation_error(&BackendCreationError::HostError(FastlyStatus::ERROR));
+            assert_eq!(
+                backend.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::BackendRegistration,
+                    cause: FastlyFailureCause::BackendHostError {
+                        status: FastlyStatus::ERROR.code
+                    },
+                })
+            );
+            let now = MonotonicInstant::now();
+            let error = resolve_stream_io_result(
+                Err(Error::new(ErrorKind::BrokenPipe, "provider-secret-token")),
+                clock_budget(now, Duration::from_secs(1)),
+                now,
+                "Fastly outbound request body write failed",
+            )
+            .expect_err("upload failure");
+            assert_eq!(
+                error.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::RequestBodyUpload,
+                    cause: FastlyFailureCause::IoError {
+                        kind: ErrorKind::BrokenPipe
+                    },
+                })
+            );
+            assert_eq!(error.message(), "Fastly outbound request body write failed");
+        }
+
+        #[test]
+        fn provider_diagnostics_survive_post_wait_expiry() {
+            let detail = ProviderFailureDetail::Fastly {
+                phase: ProviderFailurePhase::Send,
+                cause: FastlyFailureCause::ConnectionRefused,
+            };
+            let selected = super::super::timeout_error(BudgetSource::RequestDeadline);
+            let source = EdgeError::bad_gateway_with_detail(
+                "outbound destination could not be reached",
+                BadGatewayReason::Unreachable,
+                detail,
+            );
+            let error = finish_pending_outcome::<u8>(Err(source), Err(selected))
+                .expect_err("deadline wins");
+            assert_eq!(error.provider_failure_detail(), Some(&detail));
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::RequestDeadline,
+                    ..
+                }
+            ));
+            let success = finish_pending_outcome(
+                Ok(7_u8),
+                Err(super::super::timeout_error(BudgetSource::RequestDeadline)),
+            )
+            .expect_err("late success");
+            assert!(success.provider_failure_detail().is_none());
+        }
+
+        #[test]
         fn backend_creation_failure_observed_at_deadline_is_a_timeout() {
             let started_at = MonotonicInstant::now();
             let budget = super::super::test_budget(started_at, BudgetSource::BatchCutoff);
@@ -2236,6 +2609,13 @@ mod fastly_impl {
             .expect_err("deadline must outrank backend failure");
 
             assert!(!retained.get());
+            assert_eq!(
+                error.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::BackendRegistration,
+                    cause: FastlyFailureCause::BackendDisallowed,
+                })
+            );
             assert!(matches!(
                 error,
                 EdgeError::GatewayTimeout {
@@ -2311,6 +2691,16 @@ mod fastly_impl {
                 "Fastly outbound request body write failed",
             )
             .expect_err("deadline must outrank transport failure");
+
+            assert_eq!(
+                error.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::RequestBodyUpload,
+                    cause: FastlyFailureCause::IoError {
+                        kind: ErrorKind::Other
+                    },
+                })
+            );
 
             assert!(matches!(
                 error,

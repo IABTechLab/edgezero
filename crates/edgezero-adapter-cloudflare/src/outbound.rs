@@ -103,6 +103,9 @@ mod worker_impl {
     #[cfg(feature = "test-utils")]
     use edgezero_core::error::BudgetSource;
     use edgezero_core::error::{BadGatewayReason, EdgeError};
+    use edgezero_core::error_detail::{
+        CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+    };
     use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use edgezero_core::outbound::{
@@ -467,7 +470,8 @@ mod worker_impl {
                     }
                 };
                 if budget_remaining(budget, &clock).is_err() {
-                    yield Err(timeout_error(budget.cause));
+                    let detail = stream_error_detail(next_item.as_ref());
+                    yield Err(preserve_timeout_detail(timeout_error(budget.cause), detail));
                     return;
                 }
                 match next_item {
@@ -564,8 +568,12 @@ mod worker_impl {
                         Either::Left((ready, _timer)) => ready,
                         Either::Right(((), _next)) => return Err(timeout_error(budget.cause)),
                     };
-                    budget_remaining(budget, &clock)?;
-                    yield_host_event(budget, &clock).await?;
+                    let detail = stream_error_detail(ready.0.as_ref());
+                    budget_remaining(budget, &clock)
+                        .map_err(|selected| preserve_timeout_detail(selected, detail))?;
+                    yield_host_event(budget, &clock)
+                        .await
+                        .map_err(|selected| preserve_timeout_detail(selected, detail))?;
                     match ready {
                         (Some(item), _rest) => {
                             item?;
@@ -653,8 +661,7 @@ mod worker_impl {
             Either::Left((result, _timer)) => result,
             Either::Right(((), _fetch)) => return Err(timeout_error(budget.cause)),
         };
-        budget_remaining(budget, clock)?;
-        let value = result.map_err(|_error| super::generic_fetch_failure())?;
+        let value = finish_fetch_result(result, budget_remaining(budget, clock))?;
         let web_response: web_sys::Response = value.dyn_into().map_err(|_non_response| {
             EdgeError::internal(anyhow::anyhow!("fetch returned a non-response value"))
         })?;
@@ -786,21 +793,105 @@ mod worker_impl {
         Ok(headers)
     }
 
+    fn js_failure_cause(value: &JsValue) -> CloudflareFailureCause {
+        let Ok(name) = Reflect::get(value, &JsValue::from_str("name")) else {
+            return CloudflareFailureCause::Unknown;
+        };
+        if name == JsValue::from_str("AbortError") {
+            CloudflareFailureCause::AbortError
+        } else if name == JsValue::from_str("TypeError") {
+            CloudflareFailureCause::TypeError
+        } else {
+            CloudflareFailureCause::Unknown
+        }
+    }
+
+    fn worker_failure_cause(error: &worker::Error) -> CloudflareFailureCause {
+        if let worker::Error::Internal(value) = error {
+            return js_failure_cause(value);
+        }
+        if let worker::Error::UnknownJsError { name, .. } = error {
+            return match name.as_deref() {
+                Some("AbortError") => CloudflareFailureCause::AbortError,
+                Some("TypeError") => CloudflareFailureCause::TypeError,
+                _ => CloudflareFailureCause::Unknown,
+            };
+        }
+        CloudflareFailureCause::Unknown
+    }
+
+    fn worker_body_failure(error: &worker::Error, message: &'static str) -> EdgeError {
+        EdgeError::bad_gateway_with_detail(
+            message,
+            BadGatewayReason::Transport,
+            ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::ResponseBodyRead,
+                cause: worker_failure_cause(error),
+            },
+        )
+    }
+
+    fn map_fetch_failure(error: &JsValue) -> EdgeError {
+        let mut mapped = super::generic_fetch_failure();
+        if let EdgeError::BadGateway {
+            provider_detail, ..
+        } = &mut mapped
+        {
+            *provider_detail = Some(ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::Send,
+                cause: js_failure_cause(error),
+            });
+        }
+        mapped
+    }
+
+    fn finish_fetch_result(
+        result: Result<JsValue, JsValue>,
+        remaining: Result<Duration, EdgeError>,
+    ) -> Result<JsValue, EdgeError> {
+        if let Err(selected) = remaining {
+            let detail = result
+                .as_ref()
+                .err()
+                .map(|source| ProviderFailureDetail::Cloudflare {
+                    phase: ProviderFailurePhase::Send,
+                    cause: js_failure_cause(source),
+                });
+            return Err(preserve_timeout_detail(selected, detail));
+        }
+        result.map_err(|error| map_fetch_failure(&error))
+    }
+
+    fn preserve_timeout_detail(
+        mut selected: EdgeError,
+        detail: Option<ProviderFailureDetail>,
+    ) -> EdgeError {
+        if let EdgeError::GatewayTimeout {
+            provider_detail, ..
+        } = &mut selected
+        {
+            *provider_detail = detail;
+        }
+        selected
+    }
+
+    fn stream_error_detail(
+        item: Option<&Result<Bytes, EdgeError>>,
+    ) -> Option<ProviderFailureDetail> {
+        item.and_then(|result| result.as_ref().err())
+            .and_then(EdgeError::provider_failure_detail)
+            .copied()
+    }
+
     fn response_stream(response: &mut WorkerResponse) -> Result<BodyStream, EdgeError> {
-        let source = response.stream().map_err(|_error| {
-            EdgeError::bad_gateway_with_reason(
-                "upstream response body is unavailable",
-                BadGatewayReason::Transport,
-            )
+        let source = response.stream().map_err(|error| {
+            worker_body_failure(&error, "upstream response body is unavailable")
         })?;
         Ok(source
             .map(|result| {
-                result.map(Bytes::from).map_err(|_error| {
-                    EdgeError::bad_gateway_with_reason(
-                        "upstream response body failed",
-                        BadGatewayReason::Transport,
-                    )
-                })
+                result
+                    .map(Bytes::from)
+                    .map_err(|error| worker_body_failure(&error, "upstream response body failed"))
             })
             .boxed_local())
     }
@@ -829,7 +920,11 @@ mod worker_impl {
         budget: DispatchBudget,
         clock: &MonotonicClock,
     ) -> EdgeError {
-        yield_host_event(budget, clock).await.err().unwrap_or(error)
+        let detail = error.provider_failure_detail().copied();
+        match yield_host_event(budget, clock).await {
+            Ok(()) => error,
+            Err(selected) => preserve_timeout_detail(selected, detail),
+        }
     }
 
     fn upload_stream(
@@ -860,7 +955,8 @@ mod worker_impl {
                     }
                 };
                 if budget_remaining(budget, &clock).is_err() {
-                    yield Err(timeout_error(budget.cause));
+                    let detail = stream_error_detail(next_item.as_ref());
+                    yield Err(preserve_timeout_detail(timeout_error(budget.cause), detail));
                     return;
                 }
                 let Some(item) = next_item else {
@@ -987,11 +1083,269 @@ mod worker_impl {
         use edgezero_core::error::BudgetSource;
         use edgezero_core::http::header::CONTENT_TYPE;
         use edgezero_core::outbound::ContentTypeProvenance;
+        use edgezero_core::response::IntoResponse as _;
         use edgezero_core::time::Deadline;
+        use edgezero_core::{CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase};
         use futures_util::stream;
         use wasm_bindgen_test::wasm_bindgen_test;
 
         use super::*;
+
+        #[wasm_bindgen_test]
+        fn provider_diagnostics_fetch_settlement_keeps_only_observed_failures() {
+            let value = Function::new_no_args("return new TypeError('provider-secret-token');")
+                .call0(&JsValue::UNDEFINED)
+                .expect("exception");
+            let failed = finish_fetch_result(
+                Err(value),
+                Err(timeout_error(BudgetSource::RequestDeadline)),
+            )
+            .expect_err("deadline wins");
+            assert_eq!(
+                failed.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Cloudflare {
+                    phase: ProviderFailurePhase::Send,
+                    cause: CloudflareFailureCause::TypeError,
+                })
+            );
+            assert!(matches!(
+                failed,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::RequestDeadline,
+                    ..
+                }
+            ));
+            let late_ok = finish_fetch_result(
+                Ok(JsValue::UNDEFINED),
+                Err(timeout_error(BudgetSource::RequestDeadline)),
+            )
+            .expect_err("late success");
+            assert!(late_ok.provider_failure_detail().is_none());
+        }
+
+        #[wasm_bindgen_test]
+        async fn provider_diagnostics_survive_reset_content_deadline_checks() {
+            let _timer_guard = NumericTimeoutGuard::install();
+            for during_yield in [false, true] {
+                let start = MonotonicInstant::now();
+                let budget = test_budget(start, Duration::from_secs(1));
+                let mut observations = vec![start, start];
+                if during_yield {
+                    observations.push(start);
+                }
+                observations.push(budget.deadline.instant());
+                let native = WorkerResponse::from_stream(stream::iter([Err::<Vec<u8>, _>(
+                    worker::Error::RustError("provider-secret-token".to_owned()),
+                )]))
+                .expect("stream response")
+                .with_status(205);
+                let result = process_response(
+                    native,
+                    AbortGuard::new(web_sys::AbortController::new().expect("controller")),
+                    Method::GET,
+                    OutboundProxyMarker::Inherit,
+                    ResponseDecoding::Decode,
+                    ResponseMode::Streamed,
+                    budget,
+                    32 * 1024 * 1024,
+                    24,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    scripted_clock(observations),
+                )
+                .await;
+                let error = result.expect_err("expiry overrides body failure");
+                assert!(matches!(
+                    error,
+                    EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    error.provider_failure_detail(),
+                    Some(&ProviderFailureDetail::Cloudflare {
+                        phase: ProviderFailurePhase::ResponseBodyRead,
+                        cause: CloudflareFailureCause::Unknown,
+                    })
+                );
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn provider_diagnostics_survive_post_ready_expiry_and_host_yield() {
+            let _timer_guard = NumericTimeoutGuard::install();
+            let detail = ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::ResponseBodyRead,
+                cause: CloudflareFailureCause::TypeError,
+            };
+            for upload in [false, true] {
+                let start = MonotonicInstant::now();
+                let budget = test_budget(start, Duration::from_secs(1));
+                let source = stream::iter([Err(EdgeError::bad_gateway_with_detail(
+                    "source failed",
+                    BadGatewayReason::Transport,
+                    detail,
+                ))])
+                .boxed_local();
+                let clock = scripted_clock(vec![start, budget.deadline.instant()]);
+                let mut wrapped = if upload {
+                    upload_stream(source, 32, budget, clock)
+                } else {
+                    deadline_stream(
+                        source,
+                        budget,
+                        clock,
+                        AbortGuard::new(web_sys::AbortController::new().expect("controller")),
+                    )
+                };
+                let error = wrapped.next().await.expect("terminal").expect_err("expiry");
+                assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+                assert_eq!(error.provider_failure_detail(), Some(&detail));
+            }
+            let start = MonotonicInstant::now();
+            let budget = test_budget(start, Duration::from_secs(1));
+            let clock = constant_clock(budget.deadline.instant());
+            let error = terminal_error_after_host_event(
+                EdgeError::bad_gateway_with_detail(
+                    "source failed",
+                    BadGatewayReason::Transport,
+                    detail,
+                ),
+                budget,
+                &clock,
+            )
+            .await;
+            assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+            assert_eq!(error.provider_failure_detail(), Some(&detail));
+        }
+
+        #[wasm_bindgen_test]
+        fn provider_diagnostics_fetch_names_are_closed_and_never_infer_timeouts() {
+            for (script, expected) in [
+                (
+                    "return new TypeError('provider-secret-token');",
+                    CloudflareFailureCause::TypeError,
+                ),
+                (
+                    "return Object.assign(new Error('provider-secret-token'), {name:'AbortError'});",
+                    CloudflareFailureCause::AbortError,
+                ),
+                (
+                    "return Object.assign(new Error('provider-secret-token'), {name:'secret-name'});",
+                    CloudflareFailureCause::Unknown,
+                ),
+                (
+                    "return Object.assign(new Error('provider-secret-token'), {name:17});",
+                    CloudflareFailureCause::Unknown,
+                ),
+                (
+                    "return Object.defineProperty({}, 'name', {get() {throw new Error('getter-secret')}});",
+                    CloudflareFailureCause::Unknown,
+                ),
+                (
+                    "return 'TypeError: provider-secret-token';",
+                    CloudflareFailureCause::Unknown,
+                ),
+            ] {
+                let value = Function::new_no_args(script)
+                    .call0(&JsValue::UNDEFINED)
+                    .expect("fixture value");
+                let mapped = map_fetch_failure(&value);
+                assert_eq!(
+                    mapped.provider_failure_detail(),
+                    Some(&ProviderFailureDetail::Cloudflare {
+                        phase: ProviderFailurePhase::Send,
+                        cause: expected,
+                    })
+                );
+                assert!(matches!(
+                    mapped,
+                    EdgeError::BadGateway {
+                        reason: BadGatewayReason::Unspecified,
+                        ..
+                    }
+                ));
+                assert_eq!(mapped.message(), "outbound fetch failed");
+                assert_eq!(mapped.to_string(), "outbound fetch failed");
+                assert!(!format!("{mapped:?}").contains("secret"));
+                assert_eq!(
+                    worker_failure_cause(&worker::Error::Internal(value)),
+                    expected
+                );
+            }
+            for (name, expected) in [
+                ("TypeError", CloudflareFailureCause::TypeError),
+                ("AbortError", CloudflareFailureCause::AbortError),
+            ] {
+                let value = Function::new_with_args(
+                    "name",
+                    "return Object.assign(new Error('provider-secret-token'), {name});",
+                )
+                .call1(&JsValue::UNDEFINED, &JsValue::from_str(name))
+                .expect("actual Error");
+                assert_eq!(worker_failure_cause(&worker::Error::from(value)), expected);
+            }
+            for error in [
+                worker::Error::JsError("TypeError: provider-secret-token".to_owned()),
+                worker::Error::RustError("AbortError: provider-secret-token".to_owned()),
+            ] {
+                assert_eq!(
+                    worker_failure_cause(&error),
+                    CloudflareFailureCause::Unknown
+                );
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn provider_diagnostics_preserve_response_stream_exception_without_text() {
+            for (name, expected) in [
+                ("TypeError", CloudflareFailureCause::TypeError),
+                ("AbortError", CloudflareFailureCause::AbortError),
+                ("secret-name", CloudflareFailureCause::Unknown),
+            ] {
+                let factory = Function::new_with_args(
+                    "name",
+                    "return new Response(new ReadableStream({ start(controller) { const error = new Error('provider-secret-token'); error.name = name; controller.error(error); } }));",
+                );
+                let native = factory
+                    .call1(&JsValue::UNDEFINED, &JsValue::from_str(name))
+                    .expect("raw response")
+                    .dyn_into::<web_sys::Response>()
+                    .expect("response type");
+                let mut response = WorkerResponse::from(native);
+                let mut source = response_stream(&mut response).expect("stream acquisition");
+                let mapped = source
+                    .next()
+                    .await
+                    .expect("terminal error")
+                    .expect_err("upstream failure");
+                assert_eq!(
+                    mapped.provider_failure_detail(),
+                    Some(&ProviderFailureDetail::Cloudflare {
+                        phase: ProviderFailurePhase::ResponseBodyRead,
+                        cause: expected,
+                    })
+                );
+                let plain = EdgeError::bad_gateway_with_reason(
+                    "upstream response body failed",
+                    BadGatewayReason::Transport,
+                );
+                assert_eq!(plain.to_string(), mapped.to_string());
+                assert_eq!(plain.message(), mapped.message());
+                assert_eq!(plain.status(), mapped.status());
+                assert_eq!(plain.kind(), mapped.kind());
+                assert!(!format!("{:?}", mapped.provider_failure_detail()).contains("secret"));
+                let before = plain.into_response().expect("plain wire");
+                let after = mapped.into_response().expect("diagnosed wire");
+                assert_eq!(before.status(), after.status());
+                assert_eq!(before.headers(), after.headers());
+                assert_eq!(before.body().as_bytes(), after.body().as_bytes());
+            }
+        }
 
         #[derive(Debug)]
         struct NumericTimeoutGuard {

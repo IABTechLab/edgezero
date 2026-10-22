@@ -147,7 +147,10 @@ pub enum EdgeError {
         provider_detail: Option<ProviderFailureDetail>,
     },
     #[error("{message}")]
-    BadRequest { message: String },
+    BadRequest {
+        message: String,
+        provider_detail: Option<ProviderFailureDetail>,
+    },
     /// The blob's `data` shape disagrees with the deployed `C`
     /// type. Re-running `<app-cli> config push` for the deployed
     /// code revision fixes it. HTTP 503, kind
@@ -261,6 +264,19 @@ impl EdgeError {
     {
         EdgeError::BadRequest {
             message: message.into(),
+            provider_detail: None,
+        }
+    }
+
+    /// Retains provider evidence for host rejections without changing their 400 contract.
+    #[inline]
+    pub fn bad_request_with_detail<S>(message: S, detail: ProviderFailureDetail) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::BadRequest {
+            message: message.into(),
+            provider_detail: Some(detail),
         }
     }
 
@@ -403,7 +419,7 @@ impl EdgeError {
     pub fn message(&self) -> String {
         match self {
             EdgeError::BadGateway { message, .. }
-            | EdgeError::BadRequest { message }
+            | EdgeError::BadRequest { message, .. }
             | EdgeError::ConfigOutOfDate { message, .. }
             | EdgeError::GatewayTimeout { message, .. }
             | EdgeError::RequestHeaderFieldsTooLarge { message }
@@ -471,14 +487,16 @@ impl EdgeError {
             Self::BadGateway {
                 provider_detail, ..
             }
+            | Self::BadRequest {
+                provider_detail, ..
+            }
             | Self::GatewayTimeout {
                 provider_detail, ..
             }
             | Self::Internal {
                 provider_detail, ..
             } => provider_detail.as_ref(),
-            Self::BadRequest { .. }
-            | Self::ConfigOutOfDate { .. }
+            Self::ConfigOutOfDate { .. }
             | Self::MethodNotAllowed { .. }
             | Self::NotFound { .. }
             | Self::NotImplemented { .. }
@@ -894,6 +912,10 @@ mod tests {
         };
         let pairs = [
             (
+                EdgeError::bad_request("outbound request rejected"),
+                EdgeError::bad_request_with_detail("outbound request rejected", detail),
+            ),
+            (
                 EdgeError::bad_gateway_with_reason(
                     "upstream unavailable",
                     BadGatewayReason::Unreachable,
@@ -931,6 +953,7 @@ mod tests {
             assert_eq!(plain.status(), diagnosed.status());
             assert_eq!(plain.kind(), diagnosed.kind());
             match (&plain, &diagnosed) {
+                (EdgeError::BadRequest { .. }, EdgeError::BadRequest { .. }) => {}
                 (
                     EdgeError::BadGateway { reason: left, .. },
                     EdgeError::BadGateway { reason: right, .. },

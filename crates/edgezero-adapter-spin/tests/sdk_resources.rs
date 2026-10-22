@@ -10,8 +10,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use edgezero_adapter_spin::outbound::{SpinOutboundClient, map_spin_send_error_for_test};
+    use edgezero_adapter_spin::outbound::{
+        SpinOutboundClient, map_spin_host_error_for_test,
+        provider_deadline_diagnostics_hold_for_test,
+    };
     use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
+    use edgezero_core::error_detail::{
+        ProviderFailureAdapter, ProviderFailureDetail, ProviderFailurePhase, SpinDnsRcode,
+        SpinFailureCause, SpinFieldSize,
+    };
     use edgezero_core::outbound::{OutboundHttpClient, OutboundRequest};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::executor::block_on;
@@ -91,6 +98,11 @@ mod tests {
         options
             .set_between_bytes_timeout(Some(3_000_000))
             .expect("between-bytes timeout is supported");
+    }
+
+    #[test]
+    fn provider_diagnostics_survive_ready_deadlines() {
+        assert!(block_on(provider_deadline_diagnostics_hold_for_test()));
     }
 
     #[test]
@@ -290,14 +302,26 @@ mod tests {
                 .expect("live deadline"),
         );
         for (code, expected) in known_error_codes() {
-            let mapped = map_spin_send_error_for_test(&code, live, BudgetSource::Default, now);
+            let mapped = map_spin_host_error_for_test(
+                &code,
+                live,
+                BudgetSource::Default,
+                now,
+                ProviderFailurePhase::Send,
+            );
             assert_expected_error(&mapped, expected);
+            let detail = mapped
+                .provider_failure_detail()
+                .expect("every SDK cause retains detail");
+            assert_eq!(detail.adapter(), ProviderFailureAdapter::Spin);
+            assert_eq!(detail.phase(), ProviderFailurePhase::Send);
 
-            let expired = map_spin_send_error_for_test(
+            let expired = map_spin_host_error_for_test(
                 &code,
                 Deadline::at_instant(now),
                 BudgetSource::RequestDeadline,
                 now,
+                ProviderFailurePhase::Send,
             );
             assert!(matches!(
                 expired,
@@ -310,17 +334,110 @@ mod tests {
     }
 
     #[test]
+    fn provider_diagnostics_preserve_spin_numbers_and_discard_provider_text() {
+        let now = MonotonicInstant::now();
+        let live = Deadline::at_instant(now.checked_add(Duration::from_secs(1)).expect("deadline"));
+        for (source, expected) in [
+            (
+                ErrorCode::TlsAlertReceived(TlsAlertReceivedPayload {
+                    alert_id: Some(u8::MAX),
+                    alert_message: Some("provider-secret-token".to_owned()),
+                }),
+                SpinFailureCause::TlsAlertReceived {
+                    alert_id: Some(u8::MAX),
+                },
+            ),
+            (
+                ErrorCode::DnsError(DnsErrorPayload {
+                    rcode: Some("provider-secret-token".to_owned()),
+                    info_code: Some(u16::MAX),
+                }),
+                SpinFailureCause::DnsError {
+                    rcode: Some(SpinDnsRcode::Unknown),
+                    info_code: Some(u16::MAX),
+                },
+            ),
+            (
+                ErrorCode::DnsError(DnsErrorPayload {
+                    rcode: Some("NXDOMAIN".to_owned()),
+                    info_code: None,
+                }),
+                SpinFailureCause::DnsError {
+                    rcode: Some(SpinDnsRcode::NameError),
+                    info_code: None,
+                },
+            ),
+            (
+                ErrorCode::DnsError(DnsErrorPayload {
+                    rcode: None,
+                    info_code: None,
+                }),
+                SpinFailureCause::DnsError {
+                    rcode: None,
+                    info_code: None,
+                },
+            ),
+            (
+                ErrorCode::HttpRequestHeaderSize(Some(FieldSizePayload {
+                    field_name: Some("provider-secret-token".to_owned()),
+                    field_size: Some(u32::MAX),
+                })),
+                SpinFailureCause::HttpRequestHeaderSize(Some(SpinFieldSize {
+                    field_size: Some(u32::MAX),
+                })),
+            ),
+            (
+                ErrorCode::HttpRequestBodySize(Some(u64::MAX)),
+                SpinFailureCause::HttpRequestBodySize(Some(u64::MAX)),
+            ),
+            (
+                ErrorCode::HttpResponseBodySize(Some(u64::MAX)),
+                SpinFailureCause::HttpResponseBodySize(Some(u64::MAX)),
+            ),
+            (
+                ErrorCode::HttpResponseContentCoding(Some("provider-secret-token".to_owned())),
+                SpinFailureCause::HttpResponseContentCoding,
+            ),
+            (
+                ErrorCode::HttpResponseTransferCoding(Some("provider-secret-token".to_owned())),
+                SpinFailureCause::HttpResponseTransferCoding,
+            ),
+            (
+                ErrorCode::InternalError(Some("provider-secret-token".to_owned())),
+                SpinFailureCause::InternalError,
+            ),
+        ] {
+            let mapped = map_spin_host_error_for_test(
+                &source,
+                live,
+                BudgetSource::Default,
+                now,
+                ProviderFailurePhase::Send,
+            );
+            assert_eq!(
+                mapped.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Spin {
+                    phase: ProviderFailurePhase::Send,
+                    cause: expected,
+                })
+            );
+            assert!(!format!("{mapped:?}").contains("provider-secret-token"));
+        }
+    }
+
+    #[test]
     fn spin_timeout_provenance_before_and_after_deadline() {
         let now = MonotonicInstant::now();
         let live = Deadline::at_instant(
             now.checked_add(Duration::from_secs(30))
                 .expect("live deadline"),
         );
-        let early = map_spin_send_error_for_test(
+        let early = map_spin_host_error_for_test(
             &ErrorCode::DnsTimeout,
             live,
             BudgetSource::PerCallTimeout,
             now,
+            ProviderFailurePhase::Send,
         );
         assert!(matches!(
             early,
@@ -330,11 +447,12 @@ mod tests {
             }
         ));
 
-        let unreachable = map_spin_send_error_for_test(
+        let unreachable = map_spin_host_error_for_test(
             &ErrorCode::ConnectionRefused,
             live,
             BudgetSource::Default,
             now,
+            ProviderFailurePhase::Send,
         );
         assert!(matches!(
             unreachable,

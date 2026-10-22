@@ -2957,7 +2957,8 @@ whatever buffered or streamed `Body` the core request supplies; it does not deli
 the inbound body state machine, extractor limits, or adapter ingress buffering.
 #### 3.4.3 New `EdgeError` variants & mapping
 
-`EdgeError` is `#[non_exhaustive]`, so this is additive.
+New variants extend the non-exhaustive enum. Exact field construction/matching of existing
+variants is a hard-cut API change, not a compatibility guarantee.
 
 ```rust
 // crates/edgezero-core/src/error.rs
@@ -2965,7 +2966,7 @@ the inbound body state machine, extractor limits, or adapter ingress buffering.
 // BadGateway carries a typed reason so consumers never classify retries or diagnostics by
 // parsing a provider-specific message. `Unspecified` preserves the ergonomic bare
 // constructor and is used when a platform exposes no narrower cause.
-EdgeError::BadGateway { message: String, reason: BadGatewayReason } // -> 502 (Phase 1a)
+EdgeError::BadGateway { message: String, reason: BadGatewayReason, provider_detail: Option<ProviderFailureDetail> } // -> 502
 // GatewayTimeout carries a TYPED `cause`, NOT just a message: consumers can observe
 // which configured budget input selected the effective deadline without parsing strings
 // (§3.3.2). This does not say which physical timer fired or prove that input elapsed.
@@ -2973,7 +2974,7 @@ EdgeError::BadGateway { message: String, reason: BadGatewayReason } // -> 502 (P
 // the field), even though its producer `dispatch_budget` is Phase 1b — freezing
 // `GatewayTimeout { message }` now would bake in a variant the master contract can't use,
 // forcing a breaking change later. `inner()` is still `None` (a `cause` is not a source error).
-EdgeError::GatewayTimeout { message: String, cause: BudgetSource }  // -> 504  (Phase 1a)
+EdgeError::GatewayTimeout { message: String, cause: BudgetSource, provider_detail: Option<ProviderFailureDetail> } // -> 504
 // The OUTBOUND response-handling phase adds a THIRD, so response-cap over-run is a
 // distinct machine-classifiable outcome, NOT collapsed into `bad_gateway` (§3.4.1):
 EdgeError::ResponseTooLarge { message: String, reason: ResponseLimitReason }
@@ -2984,7 +2985,7 @@ EdgeError::PayloadTooLarge { origin: RequestBodyOverflowOrigin }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum BadGatewayDecodeReason { Brotli, Gzip, Json }
+pub enum BadGatewayDecodeReason { Brotli, Deflate, Gzip, Json }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -3038,7 +3039,7 @@ DNS resolution, connection establishment/refusal, or TLS establishment. `Transpo
 an established exchange failing during request upload, response body/trailer reads, native
 completion, or a later connection termination. If a provider does not expose enough phase
 information, use `Unspecified`; never guess from message text. EdgeZero-owned decoders always
-use `Decode(BadGatewayDecodeReason::{Brotli,Gzip,Json})` as applicable. Provider-native decoding
+use `Decode(BadGatewayDecodeReason::{Brotli,Deflate,Gzip,Json})` as applicable. Provider-native decoding
 remains `BadGatewayReason::Unspecified` unless the adapter can establish the coding without
 parsing a diagnostic string.
 
@@ -3056,6 +3057,24 @@ response content into an outbound diagnostic. Tests use token-bearing fixtures t
 exhaustive-match discipline (every `match` arm + test matrix updated, alphabetical
 insertion); Phase 1a does the first two plus `BadGatewayReason`, and the outbound work does
 the third plus `ResponseLimitReason` in the same mechanical style.
+
+The SDK diagnostic checkpoint adds optional `ProviderFailureDetail` directly to `BadGateway`,
+`BadRequest`, `GatewayTimeout` and `Internal`. Semantic constructors default to no detail; the
+explicit `*_with_detail` constructors and `provider_failure_detail()` retain/read fixed-size,
+text-free adapter/phase/cause evidence. Exact field patterns must migrate; no wrapper variant or
+old-shape alias is provided. SDK send/body boundaries on all four adapters, Fastly backend/upload
+I/O, and Spin request completion project only closed causes, numeric codes and I/O kinds. Provider
+text is never copied into this field. Existing error text, status, kind, typed reason and wire
+envelopes remain unchanged, including host-rejected request errors that already mapped to 400.
+
+An existing deadline check can still replace a ready error with its selected timeout, but preserves
+the observed error's diagnostic field. Pure timer wins, successful operations observed late and
+clean EOF carry no invented cause. Core bounded collection follows the same rule without changing
+its cooperative deadline behavior. Raw Fetch failures use only an allowlisted exception name;
+opaque/text-only failures remain Unknown and never become timeouts solely because of that name.
+Preparation/header-option enrichment, diagnostic capability publication and hosted acceptance are
+tracked separately by F6a in the Trusted Server adoption plan; this checkpoint makes no capability
+promotion or hosted-qualification claim.
 
 | Condition | `EdgeError` | HTTP status |
 | --- | --- | --- |

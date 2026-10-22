@@ -5,6 +5,9 @@ use core::num::NonZeroU64;
 use core::time::Duration;
 use edgezero_core::body::{Body, BodyStream};
 use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
+use edgezero_core::error_detail::{
+    AxumFailureCause, AxumFailureKind, ProviderFailureDetail, ProviderFailurePhase,
+};
 use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use edgezero_core::outbound::{
@@ -20,6 +23,8 @@ use futures_util::StreamExt as _;
 use futures_util::future::{FutureExt as _, LocalBoxFuture};
 use reqwest::header::HeaderMap as ReqwestHeaderMap;
 use reqwest::redirect::Policy;
+use std::error::Error as _;
+use std::io::Error as IoError;
 use std::sync::Arc;
 use tokio::time::timeout;
 
@@ -248,7 +253,14 @@ async fn collect_request_body(
                 let next_item = timeout(remaining, source.next())
                     .await
                     .map_err(|_elapsed| timeout_error(budget.cause))?;
-                budget_remaining(budget, clock)?;
+                budget_remaining(budget, clock).map_err(|selected| {
+                    let detail = next_item
+                        .as_ref()
+                        .and_then(|item| item.as_ref().err())
+                        .and_then(EdgeError::provider_failure_detail)
+                        .copied();
+                    preserve_timeout_detail(selected, detail)
+                })?;
                 let Some(item) = next_item else {
                     return Ok(Bytes::from(collected));
                 };
@@ -293,7 +305,8 @@ fn deadline_stream(
                 }
             };
             if budget_remaining(budget, &clock).is_err() {
-                yield Err(timeout_error(budget.cause));
+                let detail = next_item.as_ref().and_then(|item| item.as_ref().err()).and_then(EdgeError::provider_failure_detail).copied();
+                yield Err(preserve_timeout_detail(timeout_error(budget.cause), detail));
                 return;
             }
             match next_item {
@@ -424,20 +437,80 @@ fn classify_send_error(
     budget: DispatchBudget,
     clock: &MonotonicClock,
 ) -> EdgeError {
-    if budget.deadline.is_expired_at(clock.now()) {
-        return timeout_error(budget.cause);
-    }
-    if error.is_timeout() {
-        return timeout_error(budget.cause);
-    }
-    let reason = if error.is_connect() {
-        BadGatewayReason::Unreachable
-    } else if error.is_builder() {
-        BadGatewayReason::Protocol
+    let classified = if budget.deadline.is_expired_at(clock.now()) || error.is_timeout() {
+        timeout_error(budget.cause)
     } else {
-        BadGatewayReason::Transport
+        let reason = if error.is_connect() {
+            BadGatewayReason::Unreachable
+        } else if error.is_builder() {
+            BadGatewayReason::Protocol
+        } else {
+            BadGatewayReason::Transport
+        };
+        EdgeError::bad_gateway_with_reason("upstream request failed", reason)
     };
-    EdgeError::bad_gateway_with_reason("upstream request failed", reason)
+    diagnose_reqwest_error(classified, error, ProviderFailurePhase::Send)
+}
+
+fn diagnose_reqwest_error(
+    mut classified: EdgeError,
+    source: &reqwest::Error,
+    phase: ProviderFailurePhase,
+) -> EdgeError {
+    if let EdgeError::BadGateway {
+        provider_detail, ..
+    }
+    | EdgeError::GatewayTimeout {
+        provider_detail, ..
+    } = &mut classified
+    {
+        *provider_detail = Some(reqwest_failure_detail(source, phase));
+    }
+    classified
+}
+
+fn reqwest_failure_detail(
+    error: &reqwest::Error,
+    phase: ProviderFailurePhase,
+) -> ProviderFailureDetail {
+    let kind = if error.is_builder() {
+        AxumFailureKind::Builder
+    } else if error.is_redirect() {
+        AxumFailureKind::Redirect
+    } else if error.is_status() {
+        AxumFailureKind::Status
+    } else if error.is_request() {
+        AxumFailureKind::Request
+    } else if error.is_body() {
+        AxumFailureKind::Body
+    } else if error.is_decode() {
+        AxumFailureKind::Decode
+    } else if error.is_upgrade() {
+        AxumFailureKind::Upgrade
+    } else {
+        AxumFailureKind::Unknown
+    };
+    let mut io_kind = None;
+    let mut source = error.source();
+    for _ in 0_u8..32 {
+        let Some(current) = source else {
+            break;
+        };
+        if let Some(io) = current.downcast_ref::<IoError>() {
+            io_kind = Some(io.kind());
+            break;
+        }
+        source = current.source();
+    }
+    ProviderFailureDetail::Axum {
+        phase,
+        cause: AxumFailureCause {
+            io_kind,
+            is_connect: error.is_connect(),
+            is_timeout: error.is_timeout(),
+            kind,
+        },
+    }
 }
 
 fn copy_headers(headers: &ReqwestHeaderMap) -> HeaderMap {
@@ -463,7 +536,7 @@ fn response_stream(
                 Ok(Some(bytes)) => yield Ok(bytes),
                 Ok(None) => return,
                 Err(error) => {
-                    let mapped = if budget.deadline.is_expired_at(clock.now()) || error.is_timeout() {
+                    let classified = if budget.deadline.is_expired_at(clock.now()) || error.is_timeout() {
                         timeout_error(budget.cause)
                     } else {
                         EdgeError::bad_gateway_with_reason(
@@ -471,7 +544,7 @@ fn response_stream(
                             BadGatewayReason::Transport,
                         )
                     };
-                    yield Err(mapped);
+                    yield Err(diagnose_reqwest_error(classified, &error, ProviderFailurePhase::ResponseBodyRead));
                     return;
                 }
             }
@@ -482,6 +555,19 @@ fn response_stream(
 
 fn timeout_error(cause: BudgetSource) -> EdgeError {
     EdgeError::gateway_timeout_caused("outbound request deadline expired", cause)
+}
+
+fn preserve_timeout_detail(
+    mut selected: EdgeError,
+    detail: Option<ProviderFailureDetail>,
+) -> EdgeError {
+    if let EdgeError::GatewayTimeout {
+        provider_detail, ..
+    } = &mut selected
+    {
+        *provider_detail = detail;
+    }
+    selected
 }
 
 fn apply_dispatch_timeout(
@@ -495,19 +581,43 @@ fn apply_dispatch_timeout(
 #[cfg(test)]
 mod clock_tests {
     use std::collections::VecDeque;
-    use std::io::Error as IoError;
+    use std::io::{Error as IoError, ErrorKind};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
+    use edgezero_core::http::response_builder;
+    use edgezero_core::response::IntoResponse as _;
     use edgezero_core::time::Deadline;
+    use edgezero_core::{
+        AxumFailureCause, AxumFailureKind, ProviderFailureDetail, ProviderFailurePhase,
+    };
     use futures_util::stream;
     use http_body::Frame;
+    use tokio::net::TcpListener;
 
     use super::*;
 
     struct NeverReadyBody(Arc<AtomicUsize>);
+
+    struct FailingBody(Option<IoError>);
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "default hints describe this failing test body"
+    )]
+    impl http_body::Body for FailingBody {
+        type Data = Bytes;
+        type Error = IoError;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            Poll::Ready(self.get_mut().0.take().map(Err))
+        }
+    }
 
     #[expect(
         clippy::missing_trait_methods,
@@ -543,6 +653,153 @@ mod clock_tests {
             deadline: Deadline::at_instant(start.checked_add(duration).expect("deadline")),
             duration,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_diagnostics_survive_post_ready_upload_and_response_expiry() {
+        let detail = ProviderFailureDetail::Axum {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: AxumFailureCause {
+                kind: AxumFailureKind::Decode,
+                is_connect: false,
+                is_timeout: false,
+                io_kind: Some(ErrorKind::UnexpectedEof),
+            },
+        };
+        for upload in [false, true] {
+            let start = MonotonicInstant::now();
+            let budget = test_budget(start, Duration::from_secs(1));
+            let source = stream::iter([Err(EdgeError::bad_gateway_with_detail(
+                "source failed",
+                BadGatewayReason::Transport,
+                detail,
+            ))])
+            .boxed_local();
+            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
+            let error = if upload {
+                collect_request_body(Body::from_stream(source), 32, budget, &clock)
+                    .await
+                    .expect_err("late upload error")
+            } else {
+                deadline_stream(source, budget, clock)
+                    .next()
+                    .await
+                    .expect("terminal")
+                    .expect_err("late response error")
+            };
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                }
+            ));
+            assert_eq!(error.provider_failure_detail(), Some(&detail));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_diagnostics_preserve_refused_connection_without_url_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client")
+            .get(format!("http://{address}/?token=provider-secret-token"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("closed local port");
+        assert!(error.to_string().contains("provider-secret-token"));
+        assert!(error.is_connect());
+        let start = MonotonicInstant::now();
+        for expired in [false, true] {
+            let clock = MonotonicClock::new(move || start);
+            let mut budget = test_budget(start, Duration::from_secs(1));
+            if expired {
+                budget.deadline = Deadline::at_instant(start);
+            }
+            let mapped = classify_send_error(&error, budget, &clock);
+            assert_eq!(
+                mapped.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Axum {
+                    phase: ProviderFailurePhase::Send,
+                    cause: AxumFailureCause {
+                        kind: AxumFailureKind::Request,
+                        is_connect: true,
+                        is_timeout: false,
+                        io_kind: Some(ErrorKind::ConnectionRefused),
+                    },
+                })
+            );
+            let plain = if expired {
+                timeout_error(budget.cause)
+            } else {
+                EdgeError::bad_gateway_with_reason(
+                    "upstream request failed",
+                    BadGatewayReason::Unreachable,
+                )
+            };
+            assert_same_public_error(plain, mapped);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_diagnostics_preserve_reqwest_body_source_kind() {
+        let source = FailingBody(Some(IoError::new(
+            ErrorKind::UnexpectedEof,
+            "provider-secret-token",
+        )));
+        let response = reqwest::Response::from(
+            response_builder()
+                .body(reqwest::Body::wrap(source))
+                .expect("response"),
+        );
+        let start = MonotonicInstant::now();
+        let budget = test_budget(start, Duration::from_secs(1));
+        let mut stream = response_stream(response, budget, MonotonicClock::new(move || start));
+        let mapped = stream
+            .next()
+            .await
+            .expect("source failure")
+            .expect_err("body failure");
+        assert_eq!(
+            mapped.provider_failure_detail(),
+            Some(&ProviderFailureDetail::Axum {
+                phase: ProviderFailurePhase::ResponseBodyRead,
+                cause: AxumFailureCause {
+                    kind: AxumFailureKind::Decode,
+                    is_connect: false,
+                    is_timeout: false,
+                    io_kind: Some(ErrorKind::UnexpectedEof),
+                },
+            })
+        );
+        assert!(stream.next().await.is_none());
+        assert_same_public_error(
+            EdgeError::bad_gateway_with_reason(
+                "upstream response body failed",
+                BadGatewayReason::Transport,
+            ),
+            mapped,
+        );
+    }
+
+    fn assert_same_public_error(plain: EdgeError, diagnosed: EdgeError) {
+        assert_eq!(plain.to_string(), diagnosed.to_string());
+        assert_eq!(plain.message(), diagnosed.message());
+        assert_eq!(plain.kind(), diagnosed.kind());
+        assert_eq!(plain.status(), diagnosed.status());
+        assert!(
+            !format!("{:?}", diagnosed.provider_failure_detail()).contains("provider-secret-token")
+        );
+        let before = plain.into_response().expect("plain wire");
+        let after = diagnosed.into_response().expect("diagnosed wire");
+        assert_eq!(before.status(), after.status());
+        assert_eq!(before.headers(), after.headers());
+        assert_eq!(before.body().as_bytes(), after.body().as_bytes());
     }
 
     #[tokio::test(flavor = "current_thread")]

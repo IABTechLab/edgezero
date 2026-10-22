@@ -68,8 +68,10 @@ The independent [F6a foundation](2026-10-18-trusted-server-outbound-04-followups
 adds fixed-size, text-free provider detail to existing gateway, timeout and internal errors,
 preserves public error behavior, and retains that detail through body policies, batches, pending
 handles and sticky body replay. Exact field patterns migrate without compatibility wrappers.
-Production SDK population, observers, capability claims and hosted diagnostic acceptance remain
-open. This does not change transport behavior, unblock Fastly G2 or complete P1/F6a.
+The subsequent [SDK boundary checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f6a-sdk-boundary-checkpoint-2026-10-21)
+populates the existing send/body boundaries on all four adapters and retains detail through ready
+error/deadline arbitration. Preparation enrichment, observers, capability claims and hosted
+acceptance remain open. This does not change transport behavior, unblock Fastly G2 or complete P1/F6a.
 
 ### P1 Foundation Checkpoint
 

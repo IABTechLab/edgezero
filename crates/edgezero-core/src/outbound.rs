@@ -1856,7 +1856,19 @@ async fn collect_response_stream_inner(
         }
         let next_item = source.next().await;
         if let Some((active_deadline, clock)) = optional_deadline {
-            ensure_deadline_live(active_deadline, clock)?;
+            ensure_deadline_live(active_deadline, clock).map_err(|mut selected| {
+                if let EdgeError::GatewayTimeout {
+                    provider_detail, ..
+                } = &mut selected
+                {
+                    *provider_detail = next_item
+                        .as_ref()
+                        .and_then(|item| item.as_ref().err())
+                        .and_then(EdgeError::provider_failure_detail)
+                        .copied();
+                }
+                selected
+            })?;
         }
         let Some(item) = next_item else {
             return Ok(Bytes::from(collected));
@@ -3175,6 +3187,7 @@ mod tests {
             for response_decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
                 for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
                     for error in [
+                        EdgeError::bad_request_with_detail("source rejected", detail),
                         EdgeError::bad_gateway_with_detail(
                             "source failed",
                             BadGatewayReason::Transport,
@@ -3231,6 +3244,74 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn provider_diagnostics_survive_bounded_collection_deadline() {
+        use crate::error_detail::{
+            FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::ConnectionTerminated,
+        };
+        for via_response in [false, true] {
+            for (item, expected) in [
+                (
+                    Some(Err(EdgeError::bad_gateway_with_detail(
+                        "source failed",
+                        BadGatewayReason::Transport,
+                        detail,
+                    ))),
+                    Some(&detail),
+                ),
+                (Some(Err(EdgeError::bad_gateway("source failed"))), None),
+                (Some(Ok(Bytes::from_static(b"ready"))), None),
+                (None, None),
+            ] {
+                let start = MonotonicInstant::now();
+                let end = start.checked_add(Duration::from_secs(1)).expect("deadline");
+                let deadline = Deadline::at_instant(end);
+                let samples = AtomicUsize::new(0);
+                let live_samples = if via_response { 2_usize } else { 1_usize };
+                let clock = MonotonicClock::new(move || {
+                    if samples.fetch_add(1, Ordering::SeqCst) < live_samples {
+                        start
+                    } else {
+                        end
+                    }
+                });
+                let source = stream::iter(item).boxed_local();
+                let result = if via_response {
+                    block_on(
+                        OutboundResponse::new(
+                            Method::GET,
+                            StatusCode::OK,
+                            HeaderMap::new(),
+                            Body::from_stream(source),
+                            clock,
+                            super::ContentTypeProvenance::Unknown,
+                        )
+                        .into_bytes_bounded_until(32, deadline),
+                    )
+                } else {
+                    block_on(super::collect_response_stream_until_with_clock(
+                        source, 32, deadline, &clock,
+                    ))
+                };
+                let error = result.expect_err("post-ready deadline wins");
+                assert_eq!(error.provider_failure_detail(), expected);
+                assert_eq!(error.message(), "response body deadline expired");
+                assert!(matches!(
+                    error,
+                    EdgeError::GatewayTimeout {
+                        cause: BudgetSource::Unspecified,
+                        ..
+                    }
+                ));
             }
         }
     }
@@ -3422,7 +3503,7 @@ mod tests {
     )]
     fn bad_request_message(error: EdgeError) -> String {
         match error {
-            EdgeError::BadRequest { message } => message,
+            EdgeError::BadRequest { message, .. } => message,
             other => panic!("expected bad request, got {other:?}"),
         }
     }

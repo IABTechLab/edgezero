@@ -246,12 +246,15 @@ separately from the portable API and must be considered when declaring required 
 - Use category-only public diagnostics for provider-backed failures so URLs, credentials, and
   provider error details cannot escape in framework HTTP error bodies.
 - Add fixed-size, text-free `ProviderFailureDetail` catalogs for the pinned adapters and
-  `EdgeError::provider_failure_detail()`. Explicit gateway/timeout/internal constructors attach
+  `EdgeError::provider_failure_detail()`. Explicit gateway/request/timeout/internal constructors attach
   detail without changing Display, messages, statuses, typed reasons or wire bytes. Retain it
   through response-body policies, buffered collection, pending handles, batch failures and sticky
   request-body replay. Existing internal sources and `From<anyhow::Error>` remain intact.
-  Adapter population and hosted diagnostic qualification remain follow-up work.
-- Hard-cut exact field construction/matching of `EdgeError::{BadGateway, GatewayTimeout, Internal}`
+  Populate existing send/body SDK boundaries on all four adapters, Fastly backend/upload I/O,
+  and Spin request completion. Preserve observed detail when existing deadline checks select a
+  timeout, including bounded response collection. Preparation enrichment, diagnostic capability
+  publication and hosted qualification remain follow-up work.
+- Hard-cut exact field construction/matching of `EdgeError::{BadGateway, BadRequest, GatewayTimeout, Internal}`
   to include `provider_detail: Option<ProviderFailureDetail>`; prefer semantic constructors and
   `..` in patterns. No wrapper variant or compatibility error type is introduced.
 

@@ -68,12 +68,19 @@ from that public classification. `ProviderFailureDetail` identifies the adapter 
 phase and holds only closed causes, numeric codes and I/O kinds, never provider text, URLs,
 headers or bodies. Spin DNS text recognizes only `NOERROR`, `FORMERR`, `SERVFAIL`, `NXDOMAIN`,
 `NOTIMP` and `REFUSED`; every other spelling is `Unknown`, while absent input remains absent.
-The `bad_gateway_with_detail`, `gateway_timeout_with_detail` and `internal_with_detail`
+The `bad_gateway_with_detail`, `bad_request_with_detail`, `gateway_timeout_with_detail` and `internal_with_detail`
 constructors leave Display, messages, statuses, existing reasons and framework wire bytes unchanged.
 Detail survives body policies, buffered collection, retained body errors, pending handles and
 batch failures. Framework code does not log it; application logging and correlation remain policy.
-This is the diagnostic **foundation**: production adapter mappers do not populate it yet, and no
-provider-diagnostic capability or hosted qualification is claimed.
+The existing send and response-body SDK boundaries now populate it on all four adapters. Fastly
+also records backend-registration and upload I/O failures; Spin distinguishes send from request
+completion. Axum retains reqwest predicates and searches up to 32 source entries for an I/O kind
+(reqwest's own predicate walks have their own behavior). Cloudflare recognizes only `AbortError`
+and `TypeError` names and never infers a timeout from a name; text-only SDK errors remain Unknown.
+When an existing deadline check replaces an observed error, the selected timeout keeps its safe
+detail. Timer-only expiry, late successful results and EOF do not invent provider evidence.
+SDK preparation/header-option enrichment, diagnostic capability publication and hosted
+qualification remain open; this checkpoint does not strengthen transport guarantees.
 
 `ResponseDecoding::Original` preserves encoded payload bytes and the representation headers
 that survive ordinary normalization. It does not restore hop-by-hop or invalid fields. Use it

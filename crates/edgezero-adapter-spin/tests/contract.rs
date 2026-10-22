@@ -772,7 +772,7 @@ mod tests {
                 .iter()
                 .map(
                     |slot| match &slot.as_ref().expect("resolved preflight slot").outcome {
-                        Err(EdgeError::BadRequest { message }) => message.as_str(),
+                        Err(EdgeError::BadRequest { message, .. }) => message.as_str(),
                         other => panic!("expected preflight rejection, got {other:?}"),
                     },
                 )

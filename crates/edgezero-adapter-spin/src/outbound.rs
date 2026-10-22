@@ -20,9 +20,13 @@ use edgezero_core::outbound::{OutboundRequest, validate_for_dispatch};
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
 use edgezero_core::error::{BadGatewayReason, BudgetSource};
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
+use edgezero_core::error_detail::{
+    ProviderFailureDetail, ProviderFailurePhase, SpinDnsRcode, SpinFailureCause, SpinFieldSize,
+};
+#[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
 use edgezero_core::time::Deadline;
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
-use spin_sdk::wasip3::http::types::ErrorCode;
+use spin_sdk::wasip3::http::types::{ErrorCode, FieldSizePayload};
 
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 mod exchange {
@@ -33,6 +37,7 @@ mod exchange {
     use async_stream::stream;
     use edgezero_core::body::BodyStream;
     use edgezero_core::error::EdgeError;
+    use edgezero_core::error_detail::ProviderFailurePhase;
     use futures_util::{StreamExt as _, future::poll_fn};
 
     pub(super) const READY_ITEM_YIELD_QUOTA: usize = 64;
@@ -144,7 +149,7 @@ mod exchange {
         Send: Future<Output = Result<Output, HostError>>,
         Pump: Future<Output = Result<UploadCompletion, EdgeError>>,
         RequestDone: IntoFuture<Output = Result<(), HostError>>,
-        MapError: Fn(&HostError) -> EdgeError,
+        MapError: Fn(&HostError, ProviderFailurePhase) -> EdgeError,
     {
         #[derive(Clone, Copy)]
         enum State {
@@ -215,7 +220,10 @@ mod exchange {
         drop(send);
         match outcome {
             Outcome::PumpError(error) => Err(error),
-            Outcome::RequestDoneError(error) | Outcome::Send(Err(error)) => Err(map_error(&error)),
+            Outcome::RequestDoneError(error) => {
+                Err(map_error(&error, ProviderFailurePhase::RequestBodyUpload))
+            }
+            Outcome::Send(Err(error)) => Err(map_error(&error, ProviderFailurePhase::Send)),
             Outcome::Send(Ok(output)) => Ok(output),
         }
     }
@@ -246,6 +254,7 @@ mod spin_impl {
     #[cfg(feature = "test-utils")]
     use edgezero_core::error::BudgetSource;
     use edgezero_core::error::{BadGatewayReason, EdgeError};
+    use edgezero_core::error_detail::ProviderFailurePhase;
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
@@ -273,7 +282,7 @@ mod spin_impl {
 
     use super::{
         UploadCompletion, cooperate_after_response_read, cooperative_yield_once,
-        map_spin_send_error, run_exchange, settle_reset_content, should_emit_response_chunk,
+        map_spin_host_error, run_exchange, settle_reset_content, should_emit_response_chunk,
         timeout_error,
     };
 
@@ -375,12 +384,25 @@ mod spin_impl {
                     self.clock.clone(),
                 );
                 let send = client::send(request);
-                run_exchange(send, upload, request_done, |error| {
-                    map_spin_send_error(error, budget.deadline, budget.cause, self.clock.now())
+                run_exchange(send, upload, request_done, |error, phase| {
+                    map_spin_host_error(
+                        error,
+                        budget.deadline,
+                        budget.cause,
+                        self.clock.now(),
+                        phase,
+                    )
                 })
                 .await
             };
-            let response = race_deadline(exchange, budget, &self.clock).await??;
+            let response = race_deadline(exchange, budget, &self.clock, |result| {
+                result
+                    .as_ref()
+                    .err()
+                    .and_then(EdgeError::provider_failure_detail)
+                    .copied()
+            })
+            .await??;
 
             process_response(
                 response,
@@ -770,7 +792,7 @@ mod spin_impl {
             let mut ready_reads = 0_usize;
             loop {
                 let read = body_reader.read(Vec::with_capacity(RESPONSE_READ_BYTES));
-                let (result, chunk) = match race_deadline(read, budget, &clock).await {
+                let (result, chunk) = match race_deadline(read, budget, &clock, |_result| None).await {
                     Ok(value) => value,
                     Err(error) => {
                         yield Err(error);
@@ -789,16 +811,20 @@ mod spin_impl {
                             async move { trailer_reader.await },
                             budget,
                             &clock,
+                            |trailers| trailers.as_ref().err().map(|source| super::ProviderFailureDetail::Spin {
+                                phase: ProviderFailurePhase::ResponseBodyRead, cause: super::spin_failure_cause(source),
+                            }),
                         )
                         .await;
                         match trailer_result {
                             Ok(Ok(_trailers)) => {}
                             Ok(Err(error)) => {
-                                yield Err(map_spin_send_error(
+                                yield Err(map_spin_host_error(
                                     &error,
                                     budget.deadline,
                                     budget.cause,
                                     clock.now(),
+                                    ProviderFailurePhase::ResponseBodyRead,
                                 ));
                                 return;
                             }
@@ -808,7 +834,7 @@ mod spin_impl {
                             }
                         }
                         let completion = completion_writer.write(Ok(()));
-                        match race_deadline(completion, budget, &clock).await {
+                        match race_deadline(completion, budget, &clock, |_result| None).await {
                             Ok(Ok(())) => return,
                             Ok(Err(_closed)) => {
                                 yield Err(EdgeError::bad_gateway_with_reason(
@@ -843,7 +869,9 @@ mod spin_impl {
     ) -> BodyStream {
         stream! {
             loop {
-                let next_item = match race_deadline(source.next(), budget, &clock).await {
+                let next_item = match race_deadline(source.next(), budget, &clock, |item| {
+                    item.as_ref().and_then(|result| result.as_ref().err()).and_then(EdgeError::provider_failure_detail).copied()
+                }).await {
                     Ok(item) => item,
                     Err(error) => {
                         yield Err(error);
@@ -867,6 +895,7 @@ mod spin_impl {
         future: impl Future<Output = Output>,
         budget: DispatchBudget,
         clock: &MonotonicClock,
+        failure_detail: impl FnOnce(&Output) -> Option<super::ProviderFailureDetail>,
     ) -> Result<Output, EdgeError> {
         let remaining = budget_remaining(budget, clock)?;
         let timer = sleep(remaining);
@@ -875,7 +904,15 @@ mod spin_impl {
             Either::Left((output, _timer)) => output,
             Either::Right(((), _future)) => return Err(timeout_error(budget.cause)),
         };
-        budget_remaining(budget, clock)?;
+        if let Err(mut selected) = budget_remaining(budget, clock) {
+            if let EdgeError::GatewayTimeout {
+                provider_detail, ..
+            } = &mut selected
+            {
+                *provider_detail = failure_detail(&output);
+            }
+            return Err(selected);
+        }
         Ok(output)
     }
 
@@ -944,6 +981,75 @@ mod spin_impl {
             body.next().await,
             Some(Err(EdgeError::GatewayTimeout { .. }))
         )
+    }
+
+    /// Checks ready-error diagnostic retention through actual SDK deadline races.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub async fn provider_deadline_diagnostics_hold_for_test() -> bool {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let detail = super::ProviderFailureDetail::Spin {
+            phase: ProviderFailurePhase::Send,
+            cause: super::SpinFailureCause::ConnectionRefused,
+        };
+        for body in [false, true] {
+            let start = MonotonicInstant::now();
+            let Some(end) = start.checked_add(Duration::from_secs(1)) else {
+                return false;
+            };
+            let budget = DispatchBudget {
+                deadline: Deadline::at_instant(end),
+                duration: Duration::from_secs(1),
+                cause: edgezero_core::BudgetSource::PerCallTimeout,
+            };
+            let observations = Arc::new(AtomicUsize::new(0));
+            let clock = MonotonicClock::new(move || {
+                if observations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    start
+                } else {
+                    end
+                }
+            });
+            let source_error = EdgeError::bad_gateway_with_detail(
+                "host failed",
+                BadGatewayReason::Unreachable,
+                detail,
+            );
+            let error = if body {
+                let source = once(async { Err(source_error) }).boxed_local();
+                let Some(Err(error)) = deadline_stream(source, budget, clock).next().await else {
+                    return false;
+                };
+                error
+            } else {
+                let Err(error) = race_deadline(
+                    async { Err::<(), _>(source_error) },
+                    budget,
+                    &clock,
+                    |result| {
+                        result
+                            .as_ref()
+                            .err()
+                            .and_then(EdgeError::provider_failure_detail)
+                            .copied()
+                    },
+                )
+                .await
+                else {
+                    return false;
+                };
+                error
+            };
+            if error.provider_failure_detail() != Some(&detail)
+                || !matches!(error, EdgeError::GatewayTimeout { .. })
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Exercises original Content-Type evidence through hosted response conversion.
@@ -1350,20 +1456,22 @@ pub use spin_impl::SpinOutboundClient;
 pub use spin_impl::{
     converted_response_content_type_provenance_holds_for_test,
     converted_response_retains_injected_clock_for_test, deferred_clock_paths_hold_for_test,
+    provider_deadline_diagnostics_hold_for_test,
 };
 
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
-fn map_spin_send_error(
+fn map_spin_host_error(
     error: &ErrorCode,
     deadline: Deadline,
     cause: BudgetSource,
     observed_at: edgezero_core::MonotonicInstant,
+    phase: ProviderFailurePhase,
 ) -> EdgeError {
     if deadline.is_expired_at(observed_at) {
-        return timeout_error(cause);
+        return with_spin_detail(timeout_error(cause), error, phase);
     }
 
-    match error {
+    let classified = match error {
         ErrorCode::DnsTimeout
         | ErrorCode::ConnectionTimeout
         | ErrorCode::ConnectionReadTimeout
@@ -1419,6 +1527,106 @@ fn map_spin_send_error(
             "Spin outbound HTTP host failed",
             BadGatewayReason::Unspecified,
         ),
+    };
+    with_spin_detail(classified, error, phase)
+}
+
+#[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
+fn with_spin_detail(
+    mut error: EdgeError,
+    source: &ErrorCode,
+    phase: ProviderFailurePhase,
+) -> EdgeError {
+    if let EdgeError::BadGateway {
+        provider_detail, ..
+    }
+    | EdgeError::BadRequest {
+        provider_detail, ..
+    }
+    | EdgeError::GatewayTimeout {
+        provider_detail, ..
+    }
+    | EdgeError::Internal {
+        provider_detail, ..
+    } = &mut error
+    {
+        *provider_detail = Some(ProviderFailureDetail::Spin {
+            phase,
+            cause: spin_failure_cause(source),
+        });
+    }
+    error
+}
+
+#[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
+fn spin_failure_cause(error: &ErrorCode) -> SpinFailureCause {
+    let field = |payload: &FieldSizePayload| SpinFieldSize {
+        field_size: payload.field_size,
+    };
+    match error {
+        ErrorCode::DnsTimeout => SpinFailureCause::DnsTimeout,
+        ErrorCode::DnsError(payload) => SpinFailureCause::DnsError {
+            rcode: payload
+                .rcode
+                .as_deref()
+                .map(SpinDnsRcode::from_provider_text),
+            info_code: payload.info_code,
+        },
+        ErrorCode::DestinationNotFound => SpinFailureCause::DestinationNotFound,
+        ErrorCode::DestinationUnavailable => SpinFailureCause::DestinationUnavailable,
+        ErrorCode::DestinationIpProhibited => SpinFailureCause::DestinationIpProhibited,
+        ErrorCode::DestinationIpUnroutable => SpinFailureCause::DestinationIpUnroutable,
+        ErrorCode::ConnectionRefused => SpinFailureCause::ConnectionRefused,
+        ErrorCode::ConnectionTerminated => SpinFailureCause::ConnectionTerminated,
+        ErrorCode::ConnectionTimeout => SpinFailureCause::ConnectionTimeout,
+        ErrorCode::ConnectionReadTimeout => SpinFailureCause::ConnectionReadTimeout,
+        ErrorCode::ConnectionWriteTimeout => SpinFailureCause::ConnectionWriteTimeout,
+        ErrorCode::ConnectionLimitReached => SpinFailureCause::ConnectionLimitReached,
+        ErrorCode::TlsProtocolError => SpinFailureCause::TlsProtocolError,
+        ErrorCode::TlsCertificateError => SpinFailureCause::TlsCertificateError,
+        ErrorCode::TlsAlertReceived(payload) => SpinFailureCause::TlsAlertReceived {
+            alert_id: payload.alert_id,
+        },
+        ErrorCode::HttpRequestDenied => SpinFailureCause::HttpRequestDenied,
+        ErrorCode::HttpRequestLengthRequired => SpinFailureCause::HttpRequestLengthRequired,
+        ErrorCode::HttpRequestBodySize(size) => SpinFailureCause::HttpRequestBodySize(*size),
+        ErrorCode::HttpRequestMethodInvalid => SpinFailureCause::HttpRequestMethodInvalid,
+        ErrorCode::HttpRequestUriInvalid => SpinFailureCause::HttpRequestUriInvalid,
+        ErrorCode::HttpRequestUriTooLong => SpinFailureCause::HttpRequestUriTooLong,
+        ErrorCode::HttpRequestHeaderSectionSize(size) => {
+            SpinFailureCause::HttpRequestHeaderSectionSize(*size)
+        }
+        ErrorCode::HttpRequestHeaderSize(payload) => {
+            SpinFailureCause::HttpRequestHeaderSize(payload.as_ref().map(field))
+        }
+        ErrorCode::HttpRequestTrailerSectionSize(size) => {
+            SpinFailureCause::HttpRequestTrailerSectionSize(*size)
+        }
+        ErrorCode::HttpRequestTrailerSize(payload) => {
+            SpinFailureCause::HttpRequestTrailerSize(field(payload))
+        }
+        ErrorCode::HttpResponseIncomplete => SpinFailureCause::HttpResponseIncomplete,
+        ErrorCode::HttpResponseHeaderSectionSize(size) => {
+            SpinFailureCause::HttpResponseHeaderSectionSize(*size)
+        }
+        ErrorCode::HttpResponseHeaderSize(payload) => {
+            SpinFailureCause::HttpResponseHeaderSize(field(payload))
+        }
+        ErrorCode::HttpResponseBodySize(size) => SpinFailureCause::HttpResponseBodySize(*size),
+        ErrorCode::HttpResponseTrailerSectionSize(size) => {
+            SpinFailureCause::HttpResponseTrailerSectionSize(*size)
+        }
+        ErrorCode::HttpResponseTrailerSize(payload) => {
+            SpinFailureCause::HttpResponseTrailerSize(field(payload))
+        }
+        ErrorCode::HttpResponseTransferCoding(_) => SpinFailureCause::HttpResponseTransferCoding,
+        ErrorCode::HttpResponseContentCoding(_) => SpinFailureCause::HttpResponseContentCoding,
+        ErrorCode::HttpResponseTimeout => SpinFailureCause::HttpResponseTimeout,
+        ErrorCode::HttpUpgradeFailed => SpinFailureCause::HttpUpgradeFailed,
+        ErrorCode::HttpProtocolError => SpinFailureCause::HttpProtocolError,
+        ErrorCode::LoopDetected => SpinFailureCause::LoopDetected,
+        ErrorCode::ConfigurationError => SpinFailureCause::ConfigurationError,
+        ErrorCode::InternalError(_) => SpinFailureCause::InternalError,
     }
 }
 
@@ -1478,13 +1686,14 @@ pub fn validate_request_for_test(request: &OutboundRequest) -> Result<(), EdgeEr
 #[cfg(all(feature = "spin", feature = "test-utils"))]
 #[must_use]
 #[inline]
-pub fn map_spin_send_error_for_test(
+pub fn map_spin_host_error_for_test(
     error: &ErrorCode,
     deadline: Deadline,
     cause: BudgetSource,
     observed_at: edgezero_core::MonotonicInstant,
+    phase: ProviderFailurePhase,
 ) -> EdgeError {
-    map_spin_send_error(error, deadline, cause, observed_at)
+    map_spin_host_error(error, deadline, cause, observed_at, phase)
 }
 
 #[cfg(test)]
@@ -1554,8 +1763,46 @@ mod exchange_tests {
         (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)))
     }
 
-    fn map_host_error(_error: &&'static str) -> EdgeError {
+    fn map_host_error(
+        _error: &&'static str,
+        _phase: edgezero_core::ProviderFailurePhase,
+    ) -> EdgeError {
         EdgeError::bad_gateway("scripted host failure")
+    }
+
+    #[test]
+    fn provider_diagnostics_distinguish_send_and_request_completion_phases() {
+        for send_fails in [false, true] {
+            let (send_polls, send_drops) = counters();
+            let (pump_polls, pump_drops) = counters();
+            let (done_polls, done_drops) = counters();
+            let send = ScriptedFuture::new(
+                [Poll::Ready(Err::<u8, _>("host failed"))],
+                send_polls,
+                send_drops,
+            );
+            let pump = ScriptedFuture::new(
+                [if send_fails {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(UploadCompletion::Complete))
+                }],
+                pump_polls,
+                pump_drops,
+            );
+            let done =
+                ScriptedFuture::new([Poll::Ready(Err("host failed"))], done_polls, done_drops);
+            let expected = if send_fails {
+                edgezero_core::ProviderFailurePhase::Send
+            } else {
+                edgezero_core::ProviderFailurePhase::RequestBodyUpload
+            };
+            let outcome = block_on(run_exchange(send, pump, done, |_error, phase| {
+                assert_eq!(phase, expected);
+                EdgeError::bad_gateway("host failed")
+            }));
+            assert_eq!(outcome.expect_err("host error").message(), "host failed");
+        }
     }
 
     #[test]
@@ -1842,7 +2089,11 @@ mod exchange_tests {
         let observed_send_drops = Rc::clone(&send_drops);
         let observed_pump_drops = Rc::clone(&pump_drops);
         let observed_done_drops = Rc::clone(&done_drops);
-        let outcome = block_on(run_exchange(send, pump, done, move |_error| {
+        let outcome = block_on(run_exchange(send, pump, done, move |_error, phase| {
+            assert_eq!(
+                phase,
+                edgezero_core::ProviderFailurePhase::RequestBodyUpload
+            );
             assert_eq!(observed_send_drops.get(), 1);
             assert_eq!(observed_pump_drops.get(), 1);
             assert_eq!(observed_done_drops.get(), 1);

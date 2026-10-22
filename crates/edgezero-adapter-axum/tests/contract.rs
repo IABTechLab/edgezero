@@ -268,7 +268,7 @@ async fn batch_preflight_precedence_and_indices() {
         .iter()
         .map(
             |slot| match &slot.as_ref().expect("preflight slot resolved").outcome {
-                Err(EdgeError::BadRequest { message }) => message.as_str(),
+                Err(EdgeError::BadRequest { message, .. }) => message.as_str(),
                 other => panic!("expected preflight rejection, got {other:?}"),
             },
         )

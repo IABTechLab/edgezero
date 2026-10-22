@@ -594,7 +594,7 @@ mod tests {
             .iter()
             .map(
                 |slot| match &slot.as_ref().expect("resolved preflight slot").outcome {
-                    Err(EdgeError::BadRequest { message }) => Some(message.as_str()),
+                    Err(EdgeError::BadRequest { message, .. }) => Some(message.as_str()),
                     _ => None,
                 },
             )
@@ -1520,7 +1520,7 @@ mod native_tests {
         use futures_util::stream;
 
         fn message(result: Result<(), EdgeError>) -> Option<String> {
-            if let Err(EdgeError::BadRequest { message }) = result {
+            if let Err(EdgeError::BadRequest { message, .. }) = result {
                 Some(message)
             } else {
                 None

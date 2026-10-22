@@ -361,6 +361,50 @@ original variants, not a wrapper or a reconstructed pipeline error. Spec/quality
 remaining foundation defect; their explicit getter assertions and outbound-collector coverage
 improvements were adopted. No SDK/dependency pins or capability claims changed.
 
+#### F6a SDK Boundary Checkpoint (2026-10-21)
+
+- [x] Project all 31 known pinned Fastly send causes and nine backend causes, including optional
+      numeric statuses/codes and I/O kinds, without changing the existing classification tables.
+      Dispatch initiation and pending-header completion are the same Send operation: no response
+      head is available on failure. Upload writes/flush/finish and body reads carry separate phases.
+- [x] Project all 39 Spin ErrorCode variants without retaining DNS text, TLS messages, field names,
+      coding strings or internal descriptions. Distinguish send and request-completion callback
+      phases without changing exchange arbitration, polling or drop order.
+- [x] Extend BadRequest with optional detail and sticky replay for the existing host-rejection
+      cases. Migrate exact patterns and the Spin test seam without compatibility wrappers.
+- [x] Populate Axum reqwest predicate/I/O-source evidence and Cloudflare closed exception-name
+      evidence at the existing send/body boundaries. Preserve original upload-source errors.
+- [x] Demonstrate and repair metadata loss during late backend/upload/pending results, adapter
+      post-ready checks, Cloudflare host-event/205 arbitration and shared bounded collection.
+      Keep selected timeout text/cause and every existing clock check; late Ok/EOF and timer-only
+      outcomes carry no invented detail. Spin uses an explicit private result projector in its
+      existing race helper, not a second transport or a new public client contract.
+- [ ] Finish preparation/header-option enrichment, observer/framing integration and diagnostic
+      capability publication with the remaining F6a/F6c acceptance and hosted evidence.
+
+Local SDK-value/Node/WASI fixtures are not hosted cause provenance. Standalone Spin library tests
+cannot link the Spin KV interface in plain Wasmtime; the executable SDK resource binary exercises
+the actual deadline helper through a test-only seam instead. Browser coverage remains unverified
+after the previous WebDriver failures; no new browser/hosted success or G2 waiver is claimed.
+
+Validation passed the five required Rust gates (801 core tests; 27 workspace binaries and 2,108
+tests), core doctests, all three actual-target WASM clippy checks, and all four native outbound
+contract suites. Local Viceroy passed 171 adapter library tests and 25 contracts; pinned Wasmtime
+passed 35 Spin contracts and nine SDK resource tests; Cloudflare Node/WASM passed 37 library tests.
+The final Axum ordering cleanup was followed by its full unit/contract suite and workspace clippy.
+Docs format/lint/build, dependency/legacy guards and the 18 evidence-checker tests passed; inventory
+validation still reports 255 criteria / 511 planned legs, `qualified: false`. No dependency pin or
+capability changed.
+
+Independent SDK and Axum/Cloudflare reviews found and closed the timeout-replacement losses,
+including the shared collector; classification now precedes additional Axum diagnostic inspection.
+Independent demo-core (48 tests) and qualification-enabled fixture-core (17 tests) checks passed.
+Remaining nonblocking test gaps include signed Fastly status extrema and explicit Spin timer-won/
+raw-trailer projection cases. The refused-port fixture retains a small port-reuse risk: a bound
+non-listening socket timed out on macOS, and port zero returned AddrNotAvailable, so neither
+proposed replacement can prove the required ConnectionRefused witness. This is a local harness
+limitation, not a transport behavior or hosted-qualification claim.
+
 - [ ] Add token-bearing URLs/provider messages to regression fixtures. Assert wire bytes and
       existing Display/status/reasons do not change; retained body failures preserve diagnostic detail
       internally. Add framing-reason cases independent of provider text and policy-panic/deadline cases.
