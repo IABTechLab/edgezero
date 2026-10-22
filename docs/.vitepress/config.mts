@@ -36,8 +36,9 @@ export default defineConfig({
           { text: 'Routing', link: '/guide/routing' },
           { text: 'Handlers & Extractors', link: '/guide/handlers' },
           { text: 'Middleware', link: '/guide/middleware' },
+          { text: 'Capabilities', link: '/guide/capabilities' },
           { text: 'Streaming', link: '/guide/streaming' },
-          { text: 'Proxying', link: '/guide/proxying' },
+          { text: 'Outbound HTTP', link: '/guide/proxying' },
           { text: 'KV Storage', link: '/guide/kv' },
         ],
       },
@@ -49,6 +50,25 @@ export default defineConfig({
           { text: 'Cloudflare Workers', link: '/guide/adapters/cloudflare' },
           { text: 'Fermyon Spin', link: '/guide/adapters/spin' },
           { text: 'Axum (Native)', link: '/guide/adapters/axum' },
+          {
+            text: 'Axum diagnostics and trusted proxies',
+            link: '/guide/axum-diagnostics',
+          },
+          { text: 'Native AWS stores', link: '/guide/native-aws-stores' },
+          { text: 'DynamoDB KV', link: '/guide/dynamodb-kv' },
+
+          {
+            text: 'Publishing Axum containers',
+            link: '/guide/publishing-axum-containers',
+          },
+          {
+            text: 'Deploying Axum containers',
+            link: '/guide/deploying-axum-containers',
+          },
+          {
+            text: 'Deploying Axum on Kubernetes',
+            link: '/guide/deploying-axum-kubernetes',
+          },
         ],
       },
       {

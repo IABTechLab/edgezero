@@ -1,22 +1,48 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use matchit::Router as PathRouter;
 use tower_service::Service;
 
-use crate::context::RequestContext;
+use crate::context::{FallbackDrainOutcome, RequestContext, drain_body_discard};
 use crate::error::EdgeError;
 use crate::handler::{BoxHandler, IntoHandler, IntrospectionNeeds};
 use crate::http::{Extensions, HandlerFuture, Method, Request, Response};
+use crate::ingress::AdmittedIngress;
 use crate::introspection::{ManifestJson, RouteTable};
 use crate::middleware::{BoxMiddleware, Middleware, Next};
 use crate::params::PathParams;
 use crate::response::IntoResponse as _;
+use crate::response_egress::{ResponseEgressFailureClassification, ResponseEgressFailureKind};
+
+pub(crate) enum RouteErrorKind {
+    MethodNotAllowed,
+    NotFound,
+}
+
+pub(crate) struct DispatchOutcome {
+    failure: Option<ResponseEgressFailureClassification>,
+    response: Result<Response, EdgeError>,
+    route_error: Option<RouteErrorKind>,
+}
+
+impl DispatchOutcome {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Result<Response, EdgeError>,
+        Option<RouteErrorKind>,
+        Option<ResponseEgressFailureClassification>,
+    ) {
+        (self.response, self.route_error, self.failure)
+    }
+}
 
 struct RouteEntry {
     handler: BoxHandler,
     introspection_needs: IntrospectionNeeds,
+    metadata: RouteMetadata,
 }
 
 impl Clone for RouteEntry {
@@ -24,49 +50,155 @@ impl Clone for RouteEntry {
         Self {
             handler: Arc::clone(&self.handler),
             introspection_needs: self.introspection_needs,
+            metadata: self.metadata.clone(),
         }
     }
 
     fn clone_from(&mut self, source: &Self) {
         self.handler = Arc::clone(&source.handler);
         self.introspection_needs = source.introspection_needs;
+        self.metadata.clone_from(&source.metadata);
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct RouteInfo {
+/// Stable identity for one registered route.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct RouteId {
     method: Method,
-    path: String,
+    pattern: String,
 }
 
-impl RouteInfo {
+impl RouteId {
     #[must_use]
     #[inline]
     pub fn method(&self) -> &Method {
         &self.method
     }
 
-    #[inline]
-    pub fn new<S>(method: Method, path: S) -> Self
+    fn new<S>(method: Method, pattern: S) -> Self
     where
         S: Into<String>,
     {
         Self {
             method,
-            path: path.into(),
+            pattern: pattern.into(),
         }
     }
 
     #[must_use]
     #[inline]
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+}
+
+/// Canonical metadata for one registered route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteMetadata {
+    class: Option<Arc<str>>,
+    id: RouteId,
+}
+
+impl RouteMetadata {
+    /// Opaque manifest-sourced route class used by admission policy.
+    #[must_use]
+    #[inline]
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn id(&self) -> &RouteId {
+        &self.id
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn method(&self) -> &Method {
+        self.id.method()
+    }
+
+    #[inline]
+    pub fn new<S>(method: Method, pattern: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self {
+            class: None,
+            id: RouteId::new(method, pattern),
+        }
+    }
+
+    fn new_with_class<S, C>(method: Method, pattern: S, class: C) -> Self
+    where
+        C: Into<Arc<str>>,
+        S: Into<String>,
+    {
+        Self {
+            class: Some(class.into()),
+            id: RouteId::new(method, pattern),
+        }
+    }
+
+    /// Registered route pattern. Preserved for existing route-introspection consumers.
+    #[must_use]
+    #[inline]
     pub fn path(&self) -> &str {
-        &self.path
+        self.pattern()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn pattern(&self) -> &str {
+        self.id.pattern()
+    }
+}
+
+/// Backward-compatible name for route-table entries; the value is canonical route metadata.
+pub type RouteInfo = RouteMetadata;
+
+/// Stable result exposed to ingress admission before route dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RouteResolution {
+    Matched(RouteMetadata),
+    MethodNotAllowed { allowed: Arc<[RouteMetadata]> },
+    NotFound,
+}
+
+enum ResolvedTarget {
+    Found(RouteEntry, PathParams),
+    MethodNotAllowed(Vec<RouteMetadata>),
+    NotFound,
+}
+
+/// Opaque route-match token bound to the router that created it.
+pub struct ResolvedDispatch {
+    method: Method,
+    owner: Arc<RouterInner>,
+    path: String,
+    resolution: RouteResolution,
+    target: ResolvedTarget,
+}
+
+impl ResolvedDispatch {
+    #[must_use]
+    #[inline]
+    pub(crate) fn method(&self) -> &Method {
+        &self.method
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn resolution(&self) -> &RouteResolution {
+        &self.resolution
     }
 }
 
 enum RouteMatch<'route> {
     Found(&'route RouteEntry, PathParams),
-    MethodNotAllowed(Vec<Method>),
+    MethodNotAllowed(Vec<RouteMetadata>),
     NotFound,
 }
 
@@ -86,11 +218,15 @@ impl RouterBuilder {
         clippy::panic,
         reason = "duplicate route is a build-time programmer error, not a runtime condition"
     )]
-    fn add_route<H>(&mut self, path: &str, method: Method, handler: H)
+    fn add_route<H>(&mut self, path: &str, method: Method, class: Option<Arc<str>>, handler: H)
     where
         H: IntoHandler,
     {
-        let router = self.routes.entry(method.clone()).or_default();
+        let metadata = class.map_or_else(
+            || RouteMetadata::new(method.clone(), path),
+            |route_class| RouteMetadata::new_with_class(method.clone(), path, route_class),
+        );
+        let router = self.routes.entry(method).or_default();
 
         // The handler reports which introspection payloads its route needs; the
         // flag is read once here and consulted per request in `dispatch`.
@@ -103,12 +239,12 @@ impl RouterBuilder {
                 RouteEntry {
                     handler: boxed,
                     introspection_needs,
+                    metadata: metadata.clone(),
                 },
             )
             .unwrap_or_else(|err| panic!("duplicate route definition for {path}: {err}"));
 
-        self.route_info
-            .push(RouteInfo::new(method, path.to_owned()));
+        self.route_info.push(metadata);
     }
 
     #[must_use]
@@ -190,7 +326,25 @@ impl RouterBuilder {
     where
         H: IntoHandler,
     {
-        self.add_route(path, method, handler);
+        self.add_route(path, method, None, handler);
+        self
+    }
+
+    /// Registers a route with opaque admission metadata from the manifest.
+    #[must_use]
+    #[inline]
+    pub fn route_with_class<H, C>(
+        mut self,
+        path: &str,
+        method: Method,
+        class: C,
+        handler: H,
+    ) -> Self
+    where
+        C: Into<Arc<str>>,
+        H: IntoHandler,
+    {
+        self.add_route(path, method, Some(class.into()), handler);
         self
     }
 
@@ -224,6 +378,7 @@ impl RouterBuilder {
     }
 }
 
+#[derive(Clone)]
 struct RouterInner {
     manifest_json: Option<Arc<str>>,
     middlewares: Vec<BoxMiddleware>,
@@ -233,43 +388,60 @@ struct RouterInner {
 }
 
 impl RouterInner {
-    async fn dispatch(&self, mut request: Request) -> Result<Response, EdgeError> {
+    async fn dispatch(&self, request: Request) -> Result<Response, EdgeError> {
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
 
         match self.find_route(&method, &path) {
             RouteMatch::Found(entry, params) => {
-                // Inject only the introspection payloads this route asked for —
-                // nothing for the vast majority of routes that need none.
-                let needs = entry.introspection_needs;
-                if needs.manifest
-                    && let Some(json) = &self.manifest_json
-                {
-                    request
-                        .extensions_mut()
-                        .insert(ManifestJson(Arc::clone(json)));
-                }
-                if needs.routes {
-                    request
-                        .extensions_mut()
-                        .insert(RouteTable(Arc::clone(&self.route_index)));
-                }
-                // App-owned state registered via RouterBuilder::with_state.
-                // Runs after introspection inserts; `extend` overwrites by
-                // TypeId, so app state wins last-write on any collision.
-                request
-                    .extensions_mut()
-                    .extend(self.state_extensions.clone());
-                let ctx = RequestContext::new(request, params);
-                let next = Next::new(&self.middlewares, entry.handler.as_ref());
-                next.run(ctx).await
+                self.dispatch_found(request, entry, params, None).await
             }
-            RouteMatch::MethodNotAllowed(mut allowed) => {
-                allowed.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-                Err(EdgeError::method_not_allowed(&method, &allowed))
+            RouteMatch::MethodNotAllowed(allowed) => {
+                let methods = allowed
+                    .iter()
+                    .map(|metadata| metadata.method().clone())
+                    .collect::<Vec<_>>();
+                Err(EdgeError::method_not_allowed(&method, &methods))
             }
             RouteMatch::NotFound => Err(EdgeError::not_found(path)),
         }
+    }
+
+    async fn dispatch_found(
+        &self,
+        mut request: Request,
+        entry: &RouteEntry,
+        params: PathParams,
+        ingress: Option<AdmittedIngress>,
+    ) -> Result<Response, EdgeError> {
+        // Inject only the introspection payloads this route asked for —
+        // nothing for the vast majority of routes that need none.
+        let needs = entry.introspection_needs;
+        if needs.manifest
+            && let Some(json) = &self.manifest_json
+        {
+            request
+                .extensions_mut()
+                .insert(ManifestJson(Arc::clone(json)));
+        }
+        if needs.routes {
+            request
+                .extensions_mut()
+                .insert(RouteTable(Arc::clone(&self.route_index)));
+        }
+        // App-owned state registered via RouterBuilder::with_state.
+        // Runs after introspection inserts; `extend` overwrites by TypeId, so app state wins.
+        request
+            .extensions_mut()
+            .extend(self.state_extensions.clone());
+        let ctx = match ingress {
+            Some(admitted) => {
+                RequestContext::new_routed(request, params, entry.metadata.clone(), admitted)
+            }
+            None => RequestContext::new(request, params),
+        };
+        let next = Next::new(&self.middlewares, entry.handler.as_ref());
+        next.run(ctx).await
     }
 
     fn find_route(&self, method: &Method, path: &str) -> RouteMatch<'_> {
@@ -286,17 +458,24 @@ impl RouterInner {
             return RouteMatch::Found(matched.value, params);
         }
 
-        let allowed: HashSet<Method> = self
+        let mut allowed: Vec<RouteMetadata> = self
             .routes
-            .iter()
-            .filter(|(_, router)| router.at(path).is_ok())
-            .map(|(candidate_method, _)| candidate_method.clone())
+            .values()
+            .filter_map(|router| router.at(path).ok())
+            .map(|matched| matched.value.metadata.clone())
             .collect();
+
+        allowed.sort_by(|left, right| {
+            left.method()
+                .as_str()
+                .cmp(right.method().as_str())
+                .then_with(|| left.pattern().cmp(right.pattern()))
+        });
 
         if allowed.is_empty() {
             RouteMatch::NotFound
         } else {
-            RouteMatch::MethodNotAllowed(allowed.into_iter().collect())
+            RouteMatch::MethodNotAllowed(allowed)
         }
     }
 }
@@ -330,6 +509,96 @@ impl RouterService {
         RouterBuilder::new()
     }
 
+    /// Dispatches the exact route selected before ingress admission without rematching.
+    ///
+    /// # Errors
+    /// Returns [`EdgeError::Internal`] if the token belongs to another router or the request
+    /// method/path changed after resolution. Normal handler and routing errors are preserved.
+    #[inline]
+    pub async fn dispatch_resolved(
+        &self,
+        resolved: ResolvedDispatch,
+        request: Request,
+        ingress: AdmittedIngress,
+    ) -> Result<Response, EdgeError> {
+        self.dispatch_resolved_outcome(resolved, request, ingress)
+            .await
+            .response
+    }
+
+    pub(crate) async fn dispatch_resolved_outcome(
+        &self,
+        resolved: ResolvedDispatch,
+        request: Request,
+        ingress: AdmittedIngress,
+    ) -> DispatchOutcome {
+        let mut route_error = None;
+        let mut failure = None;
+        let response = async {
+            if !Arc::ptr_eq(&self.inner, &resolved.owner) {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "resolved dispatch token belongs to another router"
+                )));
+            }
+            if request.method() != resolved.method || request.uri().path() != resolved.path {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "request method or path changed after ingress route resolution"
+                )));
+            }
+            match resolved.target {
+                ResolvedTarget::Found(entry, params) => {
+                    if ingress.is_fallback() {
+                        return Err(EdgeError::internal(anyhow::anyhow!(
+                            "fallback body policy cannot dispatch a matched route"
+                        )));
+                    }
+                    self.inner
+                        .dispatch_found(request, &entry, params, Some(ingress))
+                        .await
+                }
+                ResolvedTarget::MethodNotAllowed(allowed) => {
+                    if let Some((response, category)) =
+                        fallback_terminal_response(request, ingress).await?
+                    {
+                        failure = Some(category);
+                        return Ok(response);
+                    }
+                    let methods = allowed
+                        .iter()
+                        .map(|metadata| metadata.method().clone())
+                        .collect::<Vec<_>>();
+                    route_error = Some(RouteErrorKind::MethodNotAllowed);
+                    Err(EdgeError::method_not_allowed(&resolved.method, &methods))
+                }
+                ResolvedTarget::NotFound => {
+                    if let Some((response, category)) =
+                        fallback_terminal_response(request, ingress).await?
+                    {
+                        failure = Some(category);
+                        return Ok(response);
+                    }
+                    route_error = Some(RouteErrorKind::NotFound);
+                    Err(EdgeError::not_found(resolved.path))
+                }
+            }
+        }
+        .await;
+        DispatchOutcome {
+            failure,
+            response,
+            route_error,
+        }
+    }
+
+    pub(crate) fn insert_state<T>(&mut self, value: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        Arc::make_mut(&mut self.inner)
+            .state_extensions
+            .insert(value);
+    }
+
     fn new(
         routes: HashMap<Method, PathRouter<RouteEntry>>,
         middlewares: Vec<BoxMiddleware>,
@@ -360,10 +629,72 @@ impl RouterService {
         }
     }
 
+    /// Resolves a route without invoking middleware, handlers, or request-body code.
+    #[must_use]
+    #[inline]
+    pub fn resolve(&self, method: &Method, path: &str) -> ResolvedDispatch {
+        let (resolution, target) = match self.inner.find_route(method, path) {
+            RouteMatch::Found(entry, params) => (
+                RouteResolution::Matched(entry.metadata.clone()),
+                ResolvedTarget::Found(entry.clone(), params),
+            ),
+            RouteMatch::MethodNotAllowed(allowed) => (
+                RouteResolution::MethodNotAllowed {
+                    allowed: Arc::from(allowed.clone()),
+                },
+                ResolvedTarget::MethodNotAllowed(allowed),
+            ),
+            RouteMatch::NotFound => (RouteResolution::NotFound, ResolvedTarget::NotFound),
+        };
+
+        ResolvedDispatch {
+            method: method.clone(),
+            owner: Arc::clone(&self.inner),
+            path: path.to_owned(),
+            resolution,
+            target,
+        }
+    }
+
     #[must_use]
     #[inline]
     pub fn routes(&self) -> Vec<RouteInfo> {
         self.inner.route_index.to_vec()
+    }
+}
+
+async fn fallback_terminal_response(
+    request: Request,
+    ingress: AdmittedIngress,
+) -> Result<Option<(Response, ResponseEgressFailureClassification)>, EdgeError> {
+    let Some(fallback) = ingress.into_fallback() else {
+        return Ok(None);
+    };
+    let (grant, max_body_bytes, read_deadline, monotonic_clock, on_exceeded, on_timeout) =
+        fallback.into_parts();
+    let outcome = drain_body_discard(
+        request.into_body(),
+        max_body_bytes,
+        read_deadline,
+        &monotonic_clock,
+    )
+    .await;
+    drop(grant);
+
+    match outcome? {
+        FallbackDrainOutcome::Complete => Ok(None),
+        FallbackDrainOutcome::Exceeded => Ok(Some((
+            on_exceeded.into_response(),
+            ResponseEgressFailureClassification::fallback(
+                ResponseEgressFailureKind::FallbackBodyExceeded,
+            ),
+        ))),
+        FallbackDrainOutcome::TimedOut => Ok(Some((
+            on_timeout.into_response(),
+            ResponseEgressFailureClassification::fallback(
+                ResponseEgressFailureKind::FallbackReadTimedOut,
+            ),
+        ))),
     }
 }
 
@@ -402,7 +733,8 @@ mod tests {
         fn manifest_and_routes_route_injects_both() {
             // Combined `#[action(manifest, routes)]` → both payloads injected.
             let seen = run_probe(
-                RouterService::builder().with_manifest_json("{\"app\":{\"name\":\"t\"}}"),
+                RouterService::builder()
+                    .with_manifest_json(serde_json::json!({"app": {"name": "t"}}).to_string()),
                 IntrospectionNeeds {
                     manifest: true,
                     routes: true,
@@ -415,7 +747,8 @@ mod tests {
         fn manifest_route_injects_only_manifest() {
             // Manifest available AND requested → ManifestJson present, RouteTable absent.
             let seen = run_probe(
-                RouterService::builder().with_manifest_json("{\"app\":{\"name\":\"t\"}}"),
+                RouterService::builder()
+                    .with_manifest_json(serde_json::json!({"app": {"name": "t"}}).to_string()),
                 IntrospectionNeeds {
                     manifest: true,
                     routes: false,
@@ -443,7 +776,7 @@ mod tests {
 
             let saw: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
             let router = RouterService::builder()
-                .with_manifest_json("{\"app\":{\"name\":\"t\"}}")
+                .with_manifest_json(serde_json::json!({"app": {"name": "t"}}).to_string())
                 .middleware(Probe(Arc::clone(&saw)))
                 .get(
                     "/",
@@ -469,7 +802,8 @@ mod tests {
         fn plain_route_injects_neither() {
             // Manifest IS baked but the route requested nothing → neither injected.
             let seen = run_probe(
-                RouterService::builder().with_manifest_json("{\"app\":{\"name\":\"t\"}}"),
+                RouterService::builder()
+                    .with_manifest_json(serde_json::json!({"app": {"name": "t"}}).to_string()),
                 IntrospectionNeeds::default(),
             );
             assert_eq!(seen, (false, false));
@@ -512,17 +846,178 @@ mod tests {
     }
 
     use super::*;
+    use crate::app::App;
     use crate::body::Body;
     use crate::context::RequestContext;
     use crate::error::EdgeError;
     use crate::http::{Method, Request, Response, StatusCode, request_builder};
+    use crate::ingress::{
+        AdmissionDecision, IngressAdmissionOutcome, IngressFraming, IngressGrant, IngressHead,
+        IngressHeadAccounting,
+    };
     use crate::params::PathParams;
     use crate::response::response_with_body;
+    use crate::response_egress::ResponseEgressCompletion;
+    use crate::time::{Deadline, MonotonicInstant};
     use futures::executor::block_on;
     use futures::task::noop_waker_ref;
     use serde::Deserialize;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    #[test]
+    fn resolve_exposes_stable_route_identity_and_sorted_method_candidates() {
+        async fn handler(_ctx: RequestContext) -> Result<Response, EdgeError> {
+            response_with_body(StatusCode::OK, Body::empty())
+        }
+
+        let router = RouterService::builder()
+            .post("/users/{id}", handler)
+            .route_with_class("/users/{id}", Method::GET, "auction", handler)
+            .build();
+
+        let matched = router.resolve(&Method::GET, "/users/42");
+        let RouteResolution::Matched(metadata) = matched.resolution() else {
+            panic!("expected matched route");
+        };
+        assert_eq!(metadata.method(), Method::GET);
+        assert_eq!(metadata.pattern(), "/users/{id}");
+        assert_eq!(metadata.id().method(), Method::GET);
+        assert_eq!(metadata.id().pattern(), "/users/{id}");
+        assert_eq!(metadata.class(), Some("auction"));
+
+        let rejected = router.resolve(&Method::DELETE, "/users/99");
+        let RouteResolution::MethodNotAllowed { allowed } = rejected.resolution() else {
+            panic!("expected method-not-allowed route");
+        };
+        assert_eq!(allowed.len(), 2);
+        assert_eq!(allowed[0].method(), Method::GET);
+        assert_eq!(allowed[1].method(), Method::POST);
+        assert_eq!(allowed[0].class(), Some("auction"));
+        assert_eq!(allowed[1].class(), None);
+
+        assert!(matches!(
+            router.resolve(&Method::GET, "/missing").resolution(),
+            RouteResolution::NotFound
+        ));
+    }
+
+    fn admitted_for(resolved: &ResolvedDispatch, method: Method, path: &str) -> AdmittedIngress {
+        let app = App::new(RouterService::builder().build());
+        let request = request_builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .expect("request");
+        let head = IngressHead::from_request(
+            &request,
+            MonotonicInstant::now(),
+            resolved.resolution().clone(),
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let IngressAdmissionOutcome::Admitted {
+            completion,
+            ingress: admitted,
+        } = app.admit_ingress(&head).expect("admission")
+        else {
+            panic!("expected admission");
+        };
+        drop(completion);
+        admitted
+    }
+
+    #[test]
+    fn dispatch_resolved_preserves_metadata_and_grant() {
+        async fn handler(ctx: RequestContext) -> Result<String, EdgeError> {
+            let metadata = ctx.route_metadata().expect("route metadata");
+            let grant = ctx.take_ingress_grant().expect("ingress grant");
+            assert!(ctx.take_ingress_grant().is_none());
+            let lease = grant.downcast::<String>().expect("lease type");
+            Ok(format!(
+                "{}:{}:{lease}",
+                metadata.pattern(),
+                metadata.class().expect("route class")
+            ))
+        }
+
+        let router = RouterService::builder()
+            .route_with_class("/users/{id}", Method::GET, "auction", handler)
+            .build();
+        let resolved = router.resolve(&Method::GET, "/users/42");
+        let start = MonotonicInstant::now();
+        let request = request_builder()
+            .method(Method::GET)
+            .uri("/users/42")
+            .body(Body::empty())
+            .expect("request");
+        let head = IngressHead::from_request(
+            &request,
+            start,
+            resolved.resolution().clone(),
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let mut app = App::new(router.clone());
+        app.set_ingress_admission_policy(|_| AdmissionDecision::Admit {
+            completion: ResponseEgressCompletion::empty(),
+            grant: IngressGrant::new(String::from("lease")),
+            read_deadline: Deadline::after(Duration::from_secs(1)),
+        });
+        let IngressAdmissionOutcome::Admitted {
+            completion,
+            ingress: admitted,
+        } = app.admit_ingress(&head).expect("admission")
+        else {
+            panic!("expected admission");
+        };
+        drop(completion);
+        assert_eq!(admitted.request_start(), start);
+        let response = block_on(router.dispatch_resolved(resolved, request, admitted))
+            .expect("resolved response");
+        assert_eq!(
+            response.body().as_bytes().expect("buffered"),
+            b"/users/{id}:auction:lease"
+        );
+    }
+
+    #[test]
+    fn dispatch_resolved_rejects_foreign_router_token() {
+        let router = RouterService::builder()
+            .get("/users/{id}", ok_handler)
+            .build();
+        let resolved = router.resolve(&Method::GET, "/users/42");
+        let admitted = admitted_for(&resolved, Method::GET, "/users/42");
+        let request = request_builder()
+            .method(Method::GET)
+            .uri("/users/42")
+            .body(Body::empty())
+            .expect("request");
+        let foreign = RouterService::builder().build();
+        assert!(matches!(
+            block_on(foreign.dispatch_resolved(resolved, request, admitted)),
+            Err(EdgeError::Internal { .. })
+        ));
+    }
+
+    #[test]
+    fn dispatch_resolved_rejects_mutated_request_path() {
+        let router = RouterService::builder()
+            .get("/users/{id}", ok_handler)
+            .build();
+        let resolved = router.resolve(&Method::GET, "/users/42");
+        let admitted = admitted_for(&resolved, Method::GET, "/users/42");
+        let request = request_builder()
+            .method(Method::GET)
+            .uri("/users/43")
+            .body(Body::empty())
+            .expect("request");
+        assert!(matches!(
+            block_on(router.dispatch_resolved(resolved, request, admitted)),
+            Err(EdgeError::Internal { .. })
+        ));
+    }
 
     async fn ok_handler(_ctx: RequestContext) -> Result<Response, EdgeError> {
         response_with_body(StatusCode::OK, Body::empty())
@@ -725,6 +1220,7 @@ mod tests {
         let entry = RouteEntry {
             handler: ok_handler.into_handler(),
             introspection_needs: IntrospectionNeeds::default(),
+            metadata: RouteMetadata::new(Method::GET, "/test"),
         };
         let cloned = entry.clone();
 
@@ -894,16 +1390,16 @@ mod tests {
         }
         #[crate::action]
         async fn probe(ctx: RequestContext) -> Result<String, EdgeError> {
-            let request = ctx.request();
-            let counter = request.extensions().get::<Arc<AtomicUsize>>().unwrap();
+            let body = ctx.body_bytes(1024).await?;
+            let counter = ctx.extensions().get::<Arc<AtomicUsize>>().unwrap();
             counter.fetch_add(1, Ordering::SeqCst);
             Ok(format!(
                 "{}:{}:{}:{}:{}",
                 ctx.path_params().get("id").unwrap(),
-                request.headers()["x-request-token"].to_str().unwrap(),
-                from_utf8(ctx.body().as_bytes().unwrap()).unwrap(),
-                request.extensions().get::<RequestToken>().unwrap().0,
-                request.extensions().get::<Tag>().unwrap().0
+                ctx.headers()["x-request-token"].to_str().unwrap(),
+                from_utf8(&body).unwrap(),
+                ctx.extensions().get::<RequestToken>().unwrap().0,
+                ctx.extensions().get::<Tag>().unwrap().0
             ))
         }
         let (send1, recv1) = oneshot::channel();
@@ -962,12 +1458,7 @@ mod tests {
 
         #[crate::action]
         async fn probe(ctx: RequestContext) -> Result<String, EdgeError> {
-            assert!(
-                ctx.request()
-                    .extensions()
-                    .get::<RequestResource>()
-                    .is_none()
-            );
+            assert!(ctx.extensions().get::<RequestResource>().is_none());
             Ok(ctx.path_params().get("id").unwrap().to_owned())
         }
 

@@ -23,15 +23,16 @@ exists.
 Update these in your application's workspace `Cargo.toml` at the same
 time as the EdgeZero dependency:
 
-| Crate        | Old    | New    | Applies to                  |
-| ------------ | ------ | ------ | --------------------------- |
-| `fastly`     | `0.12` | `0.13` | Fastly adapter              |
-| `log-fastly` | `0.12` | `0.13` | Fastly adapter              |
-| `spin-sdk`   | `6`    | `7`    | Spin adapter                |
-| `validator`  | `0.20` | `0.21` | Any typed app config        |
-| `rusqlite`   | `0.32` | `0.40` | Only if you use it directly |
+| Crate        | Old    | New       | Applies to                  |
+| ------------ | ------ | --------- | --------------------------- |
+| `fastly`     | `0.12` | `=0.13.1` | Fastly adapter              |
+| `log-fastly` | `0.12` | `=0.13.1` | Fastly adapter              |
+| `spin-sdk`   | `6`    | `=7.0.0`  | Spin adapter                |
+| `validator`  | `0.20` | `0.21`    | Any typed app config        |
+| `rusqlite`   | `0.32` | `0.40`    | Only if you use it directly |
 
-Then refresh the lockfile:
+Keep the audited SDK requirements exact, including `worker = "=0.8.5"`
+for Cloudflare applications. Then refresh the lockfile:
 
 ```bash
 cargo update

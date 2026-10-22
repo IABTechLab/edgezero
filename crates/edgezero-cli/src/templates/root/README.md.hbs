@@ -13,15 +13,99 @@ This workspace demonstrates a multi-target EdgeZero app.
 - `GET /headers` - prints the incoming `user-agent`
 - `GET /stream` - emits a short streamed response body
 - `POST /echo` - echoes JSON payloads
-- `GET|POST /proxy/{*rest}` - forwards requests to `API_BASE_URL`, falling back to a 501 when the active adapter does not expose a proxy client
+- `GET /admission` - confirms route-aware admission and one-time grant consumption
+- `GET|POST /proxy/{*rest}` - sends the request to `API_BASE_URL`, falling back to a 501 when the active adapter does not inject an outbound HTTP client
+- `POST /fanout` - attempts up to eight relative paths before harvest and returns index-aligned status, error category, unresolved state, and per-slot elapsed milliseconds
+
+## Outbound HTTP
+
+The generated `edgezero.toml` declares `outbound-http` as optional and grants
+HTTPS destinations only. An optional capability accepts documented behavioral
+deviations and may fail at runtime when a deployment prerequisite has not been
+verified. If application behavior depends on successful outbound requests,
+promote `outbound-http` to `required` and choose an adapter and deployment whose
+capability check passes. See the
+[capability guide](https://iabtechlab.github.io/edgezero/guide/capabilities) for
+the current support matrix and deployment prerequisites.
+
+Both outbound examples bypass adapter-managed caches and set a 5-second timeout, a 1 MiB request-body cap,
+independent 2 MiB encoded / 1 MiB decoded / 2 MiB final-buffer response caps,
+64 KiB / 100-field response-header caps, and explicit Brotli window and decoder
+memory limits. `/fanout` also gives every slot one shared absolute deadline and
+returns the adapter-recorded elapsed time for each terminal slot. This elapsed value
+includes EdgeZero and provider processing rather than representing pure wire
+RTT. Cross-slot timing isolation is adapter-dependent; deployments that require
+it must declare `outbound-batch-slot-isolation` as a required capability. Applications
+that retain partial results after cancellation should also require the appropriate
+`outbound-batch-completion-order` and `outbound-batch-cancellation` support levels.
 
 ## Dev
 
 {{{readme_adapter_dev}}}
 
+## Logging
+
+Axum and Fastly entrypoints delegate logging to the reusable adapter runners;
+do not initialize a second CLI logger before a runtime runner. Ordinary levels
+come from `EDGEZERO__LOGGING__LEVEL` (Fastly reads its runtime Config Store), with
+`Info` as the absent/invalid fallback. Managed boot warnings use `edgezero::boot`
+at `Warn`, independently of ordinary `Error` or `Off`.
+
+Cloudflare and Spin logger initializers are no-ops, not Rust facade backends.
+To own logging on any target, set `owns_logging = true` in `app!`, install your
+backend before entering the runner, and configure both backend and facade filters.
+Reuse `edgezero_core::resolve_logging_level(&EnvConfig)`, `BOOT_LOG_TARGET`, and
+`BOOT_LOG_LEVEL`; raising only `log::set_max_level` cannot restore backend-filtered
+messages. No logging implementation is duplicated in the generated entrypoints.
+
+{{#if has_axum}}
+## Container build
+
+The root `Dockerfile` builds only `{{proj_axum}}`. Prepare the workspace first:
+
+1. Check `[workspace.dependencies]` in `Cargo.toml`. `edgezero new` may have
+   generated paths into the developer's EdgeZero checkout or unpinned Git
+   references. Replace every EdgeZero entry with the same approved release tag
+   or commit at `https://github.com/IABTechLab/edgezero.git`, preserving its
+   feature settings. Keep paths between this application's crates.
+2. Run `cargo generate-lockfile`, review the dependency sources with
+   `cargo metadata --locked --format-version 1`, and commit this application's
+   manifests and `Cargo.lock`. Do not copy EdgeZero's lockfile. These preparation
+   commands may fetch dependencies; scaffolding itself does not.
+3. Keep the Docker builder's Rust pin aligned with `.tool-versions`. If adding
+   `rust-toolchain.toml`, use a matching exact quoted `[toolchain].channel`.
+   Update both declarations and the reviewed builder image when changing Rust.
+4. Review `.dockerignore` and add your app-specific config, secrets and state
+   filenames. Keep required workspace manifests and build-time assets.
+
+```sh
+docker build -t app:local .
+docker run --rm --read-only --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  -p 127.0.0.1:8787:8787 app:local
+```
+
+The image runs as UID/GID 10001 and binds `0.0.0.0:8787` inside the container.
+Local development still defaults to localhost. This direct Cargo recipe does not read
+`[adapters.axum.build].features`. For an AWS-enabled application, explicitly add
+`--features aws-stores,aws-dynamodb` to its Dockerfile's Cargo build command, or
+select only the individual provider features needed. Keep the native bindings
+file external and mount it at runtime with `EDGEZERO__STORE_BINDINGS_FILE`.
+The default app has no stores
+and needs no writable mount. Apps using current embedded stores must provision
+an explicit `/app/.edgezero` mount with permissions for UID 10001. No config or
+keys are generated by the image. Embedded redb requires one writer.
+
+This recipe proves packaging, not production readiness or bounded SIGTERM
+shutdown. Application owners publish their own images. See the
+[Axum guide](https://iabtechlab.github.io/edgezero/guide/adapters/axum)
+for runtime limitations, optional asset builds and container checks.
+
+{{/if}}
+
 ## Configuration
 
-Environment variables are declared in `edgezero.toml`. Set `API_BASE_URL` to the upstream origin you want `/proxy/...` to target. Adapter-specific secrets are opt-in: uncomment the `#[secret]` field in `crates/{{proj_core}}/src/config.rs` and the matching `[stores.secrets]` block in `edgezero.toml`, then provide the secret value through the wired backend (Cloudflare Worker secret, Fastly Secret Store, Spin secret variable, ...). The Axum dev server reads secret key `demo_api_token` from the environment variable `EDGEZERO__SECRETS__DEMO_API_TOKEN`, which is the `EDGEZERO__SECRETS__` prefix plus the key in uppercase.
+Environment variables are declared in `edgezero.toml`. Set `API_BASE_URL` to the upstream origin you want `/proxy/...` to target; the handlers read it through `RequestContext::variable`, including from the declared Cloudflare Worker binding. Adapter-specific secrets are opt-in: uncomment the `#[secret]` field in `crates/{{proj_core}}/src/config.rs` and the matching `[stores.secrets]` block in `edgezero.toml`, then provide the secret value through the wired backend (Cloudflare Worker secret, Fastly Secret Store, Spin secret variable, ...). The Axum dev server reads secret key `demo_api_token` from the environment variable `EDGEZERO__SECRETS__DEMO_API_TOKEN`, which is the `EDGEZERO__SECRETS__` prefix plus the key in uppercase.
 
 ### Typed app config (`{{name}}.toml`)
 
@@ -50,6 +134,11 @@ cargo run -p {{proj_cli}} -- config diff --adapter <name> --format json --exit-c
 
 Uncomment `[stores.config]` in `edgezero.toml` (and the matching
 adapter binding in the per-adapter manifest) before running `config push`.
+For Axum, push before starting the server or restart after updating config: the
+runner loads bounded immutable snapshots before listener binding. Configure allocation
+budgets through `EDGEZERO__ADAPTER__CONFIG_STORE__*`; invalid budgets fail startup.
+Raw custom store implementations return shared `edgezero_core::ConfigValue`, while
+the typed config extractor and generated handlers require no manual store reads.
 
 Use `--key <name>` for per-environment overrides (staging / canary) on adapters
 that support custom runtime keys:

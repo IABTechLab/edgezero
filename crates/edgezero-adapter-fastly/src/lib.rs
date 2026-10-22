@@ -5,15 +5,21 @@
     feature = "fastly",
     expect(
         clippy::pub_use,
-        reason = "re-export the SDK serving builder rather than duplicate its API"
+        reason = "reuse the platform serving limits and summary"
     )
 )]
 
-// Only compiled where it is actually used by the CLI push/GC path. Gating it
-// keeps a `--no-default-features` build dead-code clean.
-#[cfg(any(feature = "cli", feature = "fastly", test))]
+#[cfg(feature = "fastly")]
+use anyhow::Context as _;
+
+// Compile storage helpers only for their runtime, CLI or colocated tests.
+#[cfg(any(
+    feature = "fastly",
+    test,
+    all(feature = "cli", not(target_arch = "wasm32"))
+))]
 pub(crate) mod chunked_config;
-#[cfg(feature = "cli")]
+#[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
 #[cfg(feature = "fastly")]
 pub mod config_store;
@@ -21,27 +27,54 @@ pub mod context;
 #[cfg(feature = "fastly")]
 pub mod key_value_store;
 pub mod lifecycle;
-#[cfg(feature = "fastly")]
+#[cfg(any(feature = "fastly", all(test, not(target_arch = "wasm32"))))]
 pub mod logger;
-#[cfg(feature = "fastly")]
-pub mod proxy;
+#[cfg(any(test, feature = "test-utils", feature = "fastly"))]
+pub mod outbound;
 #[cfg(feature = "fastly")]
 pub mod request;
-#[cfg(feature = "fastly")]
+#[cfg(any(test, feature = "fastly"))]
 pub mod response;
 #[cfg(feature = "fastly")]
 pub mod secret_store;
 
 #[cfg(any(feature = "fastly", test))]
-use edgezero_core::app::App;
+use edgezero_core::app::{App, Hooks};
+#[cfg(any(feature = "fastly", test))]
+use edgezero_core::error::EdgeError;
 #[cfg(feature = "fastly")]
-use edgezero_core::app::Hooks;
-#[cfg(feature = "fastly")]
-use edgezero_core::http::Extensions;
+use edgezero_core::http::{Extensions, Response};
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::manifest::ResolvedLoggingConfig;
 #[cfg(feature = "fastly")]
 pub use fastly::http::serve::{Serve, ServeSummary};
+use std::num::NonZeroU32;
+#[cfg(feature = "fastly")]
+use std::sync::Once;
+
+/// Fastly Compute's published per-execution heap and stack limits.
+pub const FASTLY_PLATFORM: edgezero_core::PlatformMetadata = edgezero_core::PlatformMetadata::new(
+    edgezero_core::PlatformFact::known(
+        edgezero_core::MemoryCeiling::new(
+            128_000_000,
+            edgezero_core::MemoryCeilingScope::PerExecution,
+            Some(1_000_000),
+        ),
+        edgezero_core::PlatformResourceSource::PlatformLimit {
+            provider: "Fastly Compute",
+        },
+    ),
+    edgezero_core::PlatformFact::known(
+        edgezero_core::InboundRequestPopulationBound::new(NonZeroU32::MIN),
+        edgezero_core::PlatformResourceSource::PlatformLimit {
+            provider: "Fastly Compute",
+        },
+    ),
+    edgezero_core::PlatformFact::unknown(edgezero_core::PlatformUnknownReason::ProviderUnpublished),
+);
+
+#[cfg(feature = "fastly")]
+static FASTLY_ABI_INIT: Once = Once::new();
 
 #[cfg(any(feature = "fastly", test))]
 #[derive(Debug, Clone)]
@@ -66,30 +99,36 @@ impl From<ResolvedLoggingConfig> for FastlyLogging {
     }
 }
 
-#[cfg(any(feature = "fastly", test))]
-#[derive(Default)]
-struct RetainedApp {
-    app: Option<App>,
+#[cfg(feature = "fastly")]
+fn build_app_for_dispatch<A>() -> Result<App, fastly::Error>
+where
+    A: Hooks,
+{
+    build_target_app::<A>().context("application configuration failed")
 }
 
 #[cfg(any(feature = "fastly", test))]
-impl RetainedApp {
-    fn get_or_init<E>(
-        &mut self,
-        logging: &FastlyLogging,
-        owns_logging: impl FnOnce() -> bool,
-        install_logger: impl FnOnce(&str, log::LevelFilter, bool) -> Result<(), E>,
-        build: impl FnOnce() -> App,
-    ) -> Result<&App, E> {
-        if self.app.is_none() && logging.use_fastly_logger && !owns_logging() {
-            install_logger(
-                logging.endpoint.as_deref().unwrap_or("stdout"),
-                logging.level,
-                logging.echo_stdout,
-            )?;
-        }
-        Ok(self.app.get_or_insert_with(build))
-    }
+fn build_target_app<A>() -> Result<App, EdgeError>
+where
+    A: Hooks,
+{
+    App::build::<A>(FASTLY_PLATFORM)
+}
+
+/// Test seam for the production application-assembly error mapping.
+#[cfg(all(feature = "test-utils", feature = "fastly"))]
+#[doc(hidden)]
+#[inline]
+pub fn build_app_for_test<A>() -> Result<App, fastly::Error>
+where
+    A: Hooks,
+{
+    build_app_for_dispatch::<A>()
+}
+
+#[cfg(feature = "fastly")]
+fn init_fastly_abi() {
+    FASTLY_ABI_INIT.call_once(fastly::init);
 }
 
 /// # Errors
@@ -129,45 +168,108 @@ pub fn init_logger(
 /// Logger setup failures and unavailable required stores return errors.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app<A>(req: fastly::Request) -> Result<fastly::Response, fastly::Error>
+pub fn run_app<A>() -> Result<(), fastly::Error>
 where
     A: Hooks,
 {
-    run_app_with_request_extensions::<A, _>(req, |_req, _extensions| {})
+    run_app_with_hooks::<A, _, _, ()>(|_req, _extensions| {}, |_response| ()).map(|_state| ())
 }
 
-/// Like [`run_app`], but runs `extend` against a scratch
-/// [`Extensions`] populated from the raw
-/// `fastly::Request` (TLS JA4, H2 fingerprint, client IP, …) before the request
-/// is converted; the scratch values are merged into the core request's
-/// extensions and are visible to middleware and the `State`/extractor layer.
+/// Runs the manifest-wired app through Fastly's closed request/response lifecycle.
+///
+/// `prepare` borrows the raw request and extension bag before conversion. `finalize` borrows only
+/// routed responses before response-egress policy and framing. `EdgeZero` retains transmission
+/// ownership; routed hook state is returned only after terminal delivery, while detached ingress
+/// responses skip `finalize` and return `None`.
 ///
 /// # Errors
 /// Logger setup failures and unavailable required stores return errors.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_app_with_request_extensions<A, F>(
-    req: fastly::Request,
-    extend: F,
-) -> Result<fastly::Response, fastly::Error>
+pub fn run_app_with_hooks<A, Prepare, Finalize, State>(
+    prepare: Prepare,
+    finalize: Finalize,
+) -> Result<Option<State>, fastly::Error>
 where
     A: Hooks,
-    F: FnOnce(&fastly::Request, &mut Extensions),
+    Prepare: FnOnce(&mut fastly::Request, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
 {
+    init_fastly_abi();
     let stores = A::stores();
     let logging = FastlyLogging::from(A::logging_for("fastly"));
     if logging.use_fastly_logger && !A::owns_logging() {
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
     }
-    let app = A::build_app();
-    request::dispatch_with_registries(&app, req, stores, extend)
+    let app = build_app_for_dispatch::<A>()?;
+    request::send_with_registries_and_hooks(&app, stores, prepare, finalize)
 }
 
-/// Dispatch with a config store wired explicitly. Its name and default key are
-/// provided by the caller rather than derived from manifest store metadata.
-/// KV is not auto-injected on this path; chain `.with_kv(name)` on a
-/// [`request::FastlyService`] builder if you need KV alongside the config store.
+/// Retain a successfully built app while the SDK serves sequential requests.
+///
+/// Each callback resolves fresh logical store registries. Logging uses baked
+/// settings, and the adapter owns response delivery without SDK resends.
+#[cfg(feature = "fastly")]
+#[must_use = "inspect the summary or handle its terminal error with into_result()"]
+#[inline]
+pub fn serve_app<A>(serve: Serve) -> ServeSummary<fastly::Error>
+where
+    A: Hooks,
+{
+    serve_app_with_hooks::<A, _, _, _>(serve, |_request, _extensions| {}, |_response| ())
+}
+
+/// Retained serving with request-local preparation and routed response finalization.
+///
+/// The hooks follow [`run_app_with_hooks`]. Preparation runs before admission;
+/// finalization runs only for routed responses, before adapter-owned delivery.
+/// Captures persist across callbacks and must not accidentally retain request resources.
+#[cfg(feature = "fastly")]
+#[must_use = "inspect the summary or handle its terminal error with into_result()"]
+#[inline]
+pub fn serve_app_with_hooks<A, Prepare, Finalize, State>(
+    serve: Serve,
+    mut prepare: Prepare,
+    mut finalize: Finalize,
+) -> ServeSummary<fastly::Error>
+where
+    A: Hooks,
+    Prepare: FnMut(&mut fastly::Request, &mut Extensions),
+    Finalize: FnMut(&mut Response) -> State,
+{
+    init_fastly_abi();
+    let stores = A::stores();
+    let logging = FastlyLogging::from(A::logging_for("fastly"));
+    lifecycle::serve_custom(serve, move |req, retained: &mut lifecycle::Sandbox<App>| {
+        retained.setup_once(|| {
+            if logging.use_fastly_logger && !A::owns_logging() {
+                init_logger(
+                    logging.endpoint.as_deref().unwrap_or("stdout"),
+                    logging.level,
+                    logging.echo_stdout,
+                )?;
+            }
+            Ok::<(), fastly::Error>(())
+        })?;
+        retained.initialize(build_app_for_dispatch::<A>)?;
+        let app = retained.state().ok_or_else(|| {
+            fastly::Error::msg("application initialization did not retain an app")
+        })?;
+        request::send_request_with_registries_and_hooks(
+            app,
+            stores,
+            req,
+            &mut prepare,
+            &mut finalize,
+        )
+        .map(|_state| ())
+    })
+}
+
+/// Dispatch with an explicitly wired config store. Its name comes from the caller,
+/// and its default key is `"default"`, not a manifest logical ID. KV is not
+/// automatically injected; use [`request::FastlyService`] for explicit bindings.
 ///
 /// # Errors
 /// Returns an error if logger setup fails or the underlying handler returns an error.
@@ -175,22 +277,22 @@ where
 #[inline]
 pub fn run_app_with_config<A>(
     logging: &FastlyLogging,
-    req: fastly::Request,
     config_store_name: Option<&str>,
-) -> Result<fastly::Response, fastly::Error>
+) -> Result<(), fastly::Error>
 where
     A: Hooks,
 {
+    init_fastly_abi();
     if logging.use_fastly_logger && !A::owns_logging() {
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
     }
-    let app = A::build_app();
+    let app = build_app_for_dispatch::<A>()?;
     let mut service = request::FastlyService::new(&app);
     if let Some(name) = config_store_name {
         service = service.with_config(name);
     }
-    service.dispatch(req)
+    service.send()
 }
 
 #[cfg(test)]
@@ -225,23 +327,24 @@ mod fastly_logging_tests {
 }
 
 #[cfg(test)]
-mod retained_app_tests {
-    use super::*;
+mod platform_tests {
     use edgezero_core::app::{App, Hooks};
+    use edgezero_core::error::EdgeError;
     use edgezero_core::router::RouterService;
-    use std::cell::{Cell, RefCell};
 
-    struct CountedApp;
-    thread_local! { static CONFIGURES: Cell<usize> = const { Cell::new(0) }; }
+    struct PlatformAwareConfiguration;
 
     #[expect(
         clippy::missing_trait_methods,
-        reason = "exercise default app construction"
+        reason = "test hook exercises only target metadata propagation"
     )]
-    impl Hooks for CountedApp {
-        fn configure(app: &mut App) {
-            CONFIGURES.with(|count| count.set(count.get().checked_add(1).unwrap()));
-            app.set_name("retained");
+    impl Hooks for PlatformAwareConfiguration {
+        fn configure(app: &mut App) -> Result<(), EdgeError> {
+            if app.platform() == crate::FASTLY_PLATFORM {
+                Ok(())
+            } else {
+                Err(EdgeError::service_unavailable("wrong application platform"))
+            }
         }
 
         fn routes() -> RouterService {
@@ -249,144 +352,11 @@ mod retained_app_tests {
         }
     }
 
-    fn configured_logging() -> FastlyLogging {
-        FastlyLogging {
-            echo_stdout: true,
-            endpoint: Some("fixture-logs".to_owned()),
-            level: log::LevelFilter::Debug,
-            use_fastly_logger: true,
-        }
-    }
-
     #[test]
-    fn retained_app_initializes_logging_before_build_once() {
-        let mut retained = RetainedApp::default();
-        let events = RefCell::new(Vec::new());
-        CONFIGURES.with(|count| count.set(0));
-        for _ in 0_usize..2 {
-            let app = retained
-                .get_or_init(
-                    &configured_logging(),
-                    || false,
-                    |endpoint, level, echo| {
-                        assert_eq!(endpoint, "fixture-logs");
-                        assert_eq!(level, log::LevelFilter::Debug);
-                        assert!(echo);
-                        events.borrow_mut().push("logger");
-                        Ok::<(), &'static str>(())
-                    },
-                    || {
-                        events.borrow_mut().push("build");
-                        CountedApp::build_app()
-                    },
-                )
-                .unwrap();
-            assert_eq!(app.name(), "retained");
-        }
-        assert_eq!(*events.borrow(), ["logger", "build"]);
-        CONFIGURES.with(|count| assert_eq!(count.get(), 1));
+    fn application_configuration_receives_fastly_platform_metadata() {
+        let app = super::build_target_app::<PlatformAwareConfiguration>()
+            .expect("configured application");
+
+        assert_eq!(app.platform(), crate::FASTLY_PLATFORM);
     }
-
-    #[test]
-    fn retained_app_skips_disabled_logging_and_builds_once() {
-        let mut retained = RetainedApp::default();
-        let builds = Cell::new(0_usize);
-        let logging = FastlyLogging::from(ResolvedLoggingConfig::default());
-        for _ in 0_usize..2 {
-            retained
-                .get_or_init(
-                    &logging,
-                    || false,
-                    |_, _, _| -> Result<(), &'static str> { panic!("logger is disabled") },
-                    || {
-                        builds.set(builds.get().checked_add(1).unwrap());
-                        CountedApp::build_app()
-                    },
-                )
-                .unwrap();
-        }
-        assert_eq!(builds.get(), 1);
-    }
-
-    #[test]
-    fn retained_app_respects_owned_logging_and_fresh_owners() {
-        let builds = Cell::new(0_usize);
-        for _ in 0_usize..2 {
-            let mut retained = RetainedApp::default();
-            retained
-                .get_or_init(
-                    &configured_logging(),
-                    || true,
-                    |_, _, _| -> Result<(), &'static str> { panic!("caller owns logging") },
-                    || {
-                        builds.set(builds.get().checked_add(1).unwrap());
-                        CountedApp::build_app()
-                    },
-                )
-                .unwrap();
-        }
-        assert_eq!(builds.get(), 2);
-    }
-
-    #[test]
-    fn retained_app_logger_error_prevents_construction() {
-        let mut retained = RetainedApp::default();
-        let result = retained.get_or_init(
-            &configured_logging(),
-            || false,
-            |_, _, _| Err("logger failed"),
-            || panic!("must not build"),
-        );
-        assert_eq!(result.err(), Some("logger failed"));
-        assert!(retained.app.is_none());
-    }
-}
-
-/// Serve requests with an app initialized once on the first callback.
-///
-/// Opt in using an ordinary `main` and an explicitly bounded [`Serve`]. The
-/// runtime may exit before any configured limit; every request must tolerate
-/// fresh initialization. The standard response conversion buffers core streams.
-/// Inspect the returned summary (whose request count includes failed attempts)
-/// or call its `into_result()` method to propagate terminal callback errors.
-#[cfg(feature = "fastly")]
-#[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
-#[inline]
-pub fn serve_app<A>(serve: Serve) -> ServeSummary<fastly::Error>
-where
-    A: Hooks,
-{
-    serve_app_with_request_extensions::<A, _>(serve, |_request, _extensions| {})
-}
-
-/// Serve a retained app with fresh request extensions and store registries.
-///
-/// Store aliases and logging settings are baked into `A`. The app and logging
-/// initialization are retained for the serving loop, while request extensions
-/// and store handles are recreated for every callback. Any returned error
-/// terminates the SDK loop; handler `EdgeError`s that render as responses do not.
-/// Construction panics remain sandbox failures.
-///
-/// The callback runs per request, but the closure and its captured state live
-/// for the entire serving loop. Create request-local mutable data inside the
-/// callback. For mutable native requests, manual streaming, response
-/// finalization, or custom initialization, use [`lifecycle::serve_custom`].
-#[cfg(feature = "fastly")]
-#[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
-#[inline]
-pub fn serve_app_with_request_extensions<A, F>(
-    serve: Serve,
-    mut extend: F,
-) -> ServeSummary<fastly::Error>
-where
-    A: Hooks,
-    F: FnMut(&fastly::Request, &mut Extensions),
-{
-    let stores = A::stores();
-    let logging = FastlyLogging::from(A::logging_for("fastly"));
-    let mut retained = RetainedApp::default();
-    serve.run(move |req| -> Result<fastly::Response, fastly::Error> {
-        let app = retained.get_or_init(&logging, A::owns_logging, init_logger, A::build_app)?;
-        request::dispatch_with_registries(app, req, stores, &mut extend)
-    })
 }

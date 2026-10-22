@@ -32,6 +32,8 @@ mod diff;
 #[cfg(feature = "cli")]
 mod generator;
 #[cfg(feature = "cli")]
+mod manifest_source;
+#[cfg(feature = "cli")]
 mod provision;
 #[cfg(feature = "cli")]
 mod scaffold;
@@ -59,7 +61,9 @@ use args::{
     ActiveVersionArgs, BuildArgs, DeployArgs, HealthcheckArgs, NewArgs, RollbackArgs, ServeArgs,
 };
 #[cfg(feature = "cli")]
-use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds};
+use edgezero_adapter::registry::{AdapterDeployContext, AdapterExecutionTarget, DeployStoreIds};
+#[cfg(any(test, feature = "demo-example"))]
+use edgezero_core::app::Hooks;
 #[cfg(feature = "cli")]
 use edgezero_core::manifest::{Manifest, ManifestLoader, StoreDeclaration};
 #[cfg(feature = "cli")]
@@ -124,7 +128,8 @@ impl log::Log for CliLogger {
 
 /// Initialize a CLI logger that prints messages without timestamps
 /// or level prefixes — the CLI's output IS the user-facing UX, not
-/// a debug log. See [`CliLogger`] for the routing rules.
+/// a debug log. Informational messages go to stdout, warnings and errors go to
+/// stderr, and debug and trace messages are filtered out.
 #[cfg(feature = "cli")]
 #[inline]
 pub fn init_cli_logger() {
@@ -142,17 +147,11 @@ pub fn init_cli_logger() {
 #[cfg(feature = "cli")]
 #[inline]
 pub fn run_build(args: &BuildArgs) -> Result<(), String> {
-    let manifest = load_manifest_optional()?;
-    ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
-    if let Some(loader) = &manifest {
-        log_store_bindings(&args.adapter, loader);
+    let runtime = manifest_source::resolve_runtime(&args.adapter, adapter::Action::Build)?;
+    if let Some(manifest) = runtime.manifest() {
+        log_store_bindings(runtime.adapter_name(), manifest);
     }
-    adapter::execute(
-        &args.adapter,
-        adapter::Action::Build,
-        manifest.as_ref(),
-        &args.adapter_args,
-    )
+    adapter::execute_runtime(&runtime, &args.adapter_args)
 }
 
 /// Deploy the project to a target edge adapter.
@@ -185,48 +184,69 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
         ));
     }
 
-    let manifest = load_manifest_optional()?;
-    ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
-    let manifest_stores = manifest.as_ref().map(|loader| &loader.manifest().stores);
+    let action = if args.staging {
+        adapter::Action::DeployStaging
+    } else {
+        adapter::Action::Deploy
+    };
+    let runtime = manifest_source::resolve_runtime(&args.adapter, action)?;
+    let manifest_stores = runtime.manifest().map(|manifest| &manifest.stores);
     let declared_ids = |declaration: Option<&StoreDeclaration>| {
         declaration
             .map(|store| store.ids.clone())
             .unwrap_or_default()
     };
-    let deploy_stores = DeployStoreIds {
+    let stores = DeployStoreIds {
         config: declared_ids(manifest_stores.and_then(|declared| declared.config.as_ref())),
         kv: declared_ids(manifest_stores.and_then(|declared| declared.kv.as_ref())),
         secrets: declared_ids(manifest_stores.and_then(|declared| declared.secrets.as_ref())),
     };
-    let variable_defaults = manifest
-        .as_ref()
-        .map(|loader| manifest_variable_defaults(loader.manifest(), &args.adapter))
+    let variable_defaults = runtime
+        .manifest()
+        .map(|manifest| manifest_variable_defaults(manifest, runtime.adapter_name()))
         .unwrap_or_default();
-    let (adapter_manifest_path, adapter_manifest_path_error) =
-        match resolve_adapter_manifest_path(manifest.as_ref(), &args.adapter) {
-            Ok(path) => (path.map(PathBuf::from), None),
-            Err(err) => (None, Some(err)),
-        };
-    let application_manifest_path = loaded_application_manifest_path(manifest.as_ref())?;
+    let (adapter_manifest_path, adapter_manifest_path_error) = match runtime.target() {
+        manifest_source::ResolvedAdapterTarget::Registered(target) => {
+            (target.platform_manifest().map(Path::to_path_buf), None)
+        }
+        manifest_source::ResolvedAdapterTarget::Shell(_) => {
+            match resolve_adapter_manifest_path(runtime.manifest_loader(), runtime.adapter_name()) {
+                Ok(path) => (path.map(PathBuf::from), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+    };
+    let application_manifest_path = runtime.manifest_path().map(Path::to_path_buf);
     let application_release_root = resolve_application_release_root(
         args.application_release.as_deref(),
         application_manifest_path.as_deref(),
     )?;
+    let target = match runtime.target() {
+        manifest_source::ResolvedAdapterTarget::Registered(target) => target.clone(),
+        manifest_source::ResolvedAdapterTarget::Shell(shell) => AdapterExecutionTarget::new(
+            shell.root().to_path_buf(),
+            shell.component().map(str::to_owned),
+            adapter_manifest_path.clone(),
+        ),
+    };
+    let defaults = runtime.manifest().map_or_else(Vec::new, |manifest| {
+        adapter::resolve_environment_defaults(&manifest.environment_for(runtime.adapter_name()))
+    });
     let context = AdapterDeployContext {
         adapter_manifest_path,
         application_manifest_path,
         application_release_root,
+        execution_target: Some(target.with_environment_defaults(defaults)),
         service_id: args.service_id.clone(),
-        stores: deploy_stores,
+        stores,
         staging: args.staging,
         variable_defaults,
     };
 
-    adapter::deploy(
-        &args.adapter,
+    adapter::deploy_runtime(
+        &runtime,
         &context,
         adapter_manifest_path_error.as_deref(),
-        manifest.as_ref(),
         &args.adapter_args,
     )
 }
@@ -239,30 +259,6 @@ fn manifest_variable_defaults(manifest: &Manifest, adapter: &str) -> BTreeMap<St
         .into_iter()
         .filter_map(|binding| binding.value.map(|value| (binding.env, value)))
         .collect()
-}
-
-#[cfg(feature = "cli")]
-fn loaded_application_manifest_path(
-    loader: Option<&ManifestLoader>,
-) -> Result<Option<PathBuf>, String> {
-    if loader.is_none() {
-        return Ok(None);
-    }
-    let path = env::var("EDGEZERO_MANIFEST")
-        .map_or_else(|_| PathBuf::from("edgezero.toml"), PathBuf::from);
-    let canonical = path.canonicalize().map_err(|error| {
-        format!(
-            "could not resolve loaded application manifest {}: {error}",
-            path.display()
-        )
-    })?;
-    if !canonical.is_file() {
-        return Err(format!(
-            "loaded application manifest {} is not a regular file",
-            canonical.display()
-        ));
-    }
-    Ok(Some(canonical))
 }
 
 #[cfg(feature = "cli")]
@@ -486,14 +482,8 @@ pub fn run_active_version(args: &ActiveVersionArgs) -> Result<(), String> {
 #[cfg(feature = "cli")]
 #[inline]
 pub fn run_serve(args: &ServeArgs) -> Result<(), String> {
-    let manifest = load_manifest_optional()?;
-    ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
-    adapter::execute(
-        &args.adapter,
-        adapter::Action::Serve,
-        manifest.as_ref(),
-        &[],
-    )
+    let runtime = manifest_source::resolve_runtime(&args.adapter, adapter::Action::Serve)?;
+    adapter::execute_runtime(&runtime, &[])
 }
 
 /// Create a new `EdgeZero` app skeleton.
@@ -521,10 +511,17 @@ pub fn run_demo() -> Result<(), String> {
     demo_server::run_demo()
 }
 
+#[cfg(any(test, feature = "demo-example"))]
+fn demo_capability_gate<Application>() -> Result<(), String>
+where
+    Application: Hooks,
+{
+    adapter::ensure_capabilities("axum", Application::manifest().as_contract())
+}
+
 #[cfg(feature = "cli")]
-fn store_bindings_message(adapter_name: &str, manifest: &ManifestLoader) -> Option<String> {
-    let manifest_data = manifest.manifest();
-    if !manifest_data.secret_store_enabled(adapter_name) {
+fn store_bindings_message(adapter_name: &str, manifest: &Manifest) -> Option<String> {
+    if !manifest.secret_store_enabled(adapter_name) {
         return None;
     }
 
@@ -549,7 +546,7 @@ fn store_bindings_message(adapter_name: &str, manifest: &ManifestLoader) -> Opti
 }
 
 #[cfg(feature = "cli")]
-fn log_store_bindings(adapter_name: &str, manifest: &ManifestLoader) {
+fn log_store_bindings(adapter_name: &str, manifest: &Manifest) {
     if let Some(message) = store_bindings_message(adapter_name, manifest) {
         log::info!("{message}");
     }
@@ -607,7 +604,9 @@ mod tests {
     use edgezero_adapter::registry::{
         self as adapter_registry, Adapter, AdapterAction, DeployOwnership,
     };
-    use edgezero_core::manifest::ManifestLoader;
+    use edgezero_core::app::Hooks;
+    use edgezero_core::manifest::{BakedManifest, Manifest, ManifestLoader};
+    use edgezero_core::router::RouterService;
     #[cfg(unix)]
     use edgezero_core::test_env::PathPrepend;
     use std::collections::BTreeMap;
@@ -632,7 +631,24 @@ mod tests {
         LazyLock::new(|| Mutex::new(None));
     static RECORDING_DEPLOY_ADAPTER: RecordingDeployAdapter = RecordingDeployAdapter;
 
+    struct CapabilityGateApp;
     struct RecordingDeployAdapter;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "test hook overrides only routes and the baked manifest under test"
+    )]
+    impl Hooks for CapabilityGateApp {
+        fn manifest() -> BakedManifest {
+            Manifest::from_baked_json(
+                r#"{"capabilities":{"required":["outbound-complete-resource-accounting"]}}"#,
+            )
+        }
+
+        fn routes() -> RouterService {
+            RouterService::builder().build()
+        }
+    }
 
     #[expect(
         clippy::missing_trait_methods,
@@ -694,6 +710,41 @@ mod tests {
         *DEPLOY_PREFLIGHT_CONTEXT
             .lock()
             .expect("deploy preflight context lock") = None;
+    }
+
+    #[test]
+    fn demo_capability_gate_runs_before_server_start() {
+        assert!(demo_capability_gate::<CapabilityGateApp>().is_err());
+    }
+
+    #[test]
+    fn deploy_capability_gate_precedes_managed_preflight() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        reset_recording_deploy_adapter(PREFLIGHT_ADAPTER_MANAGED);
+        let temp = TempDir::new().expect("temp dir");
+        let manifest = temp.path().join("edgezero.toml");
+        fs::write(&manifest, "[app]\nname = \"demo\"\n[capabilities]\nrequired = [\"outbound-complete-resource-accounting\"]\n[adapters.recording_deploy_test.commands]\ndeploy = \"exit 99\"\n").expect("write manifest");
+        let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+        let error = run_deploy(&DeployArgs {
+            adapter: "recording_deploy_test".to_owned(),
+            application_release: None,
+            adapter_args: Vec::new(),
+            service_id: None,
+            staging: false,
+        })
+        .expect_err("unsupported required capability must block deployment");
+        assert!(
+            error.contains("outbound-complete-resource-accounting"),
+            "{error}"
+        );
+        assert!(
+            DEPLOY_PREFLIGHT_CONTEXT
+                .lock()
+                .expect("preflight lock")
+                .is_none()
+        );
+        assert_eq!(DEPLOY_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(DEPLOY_FINALIZE_CALLS.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -834,7 +885,7 @@ mod tests {
         .expect_err("staging must resolve the explicitly selected fastly.toml");
 
         assert!(
-            err.contains("missing/fastly.toml") && err.contains("could not resolve"),
+            err.contains("missing/fastly.toml") && err.contains("failed to resolve"),
             "staging reports the selected missing manifest before discovery: {err}"
         );
     }
@@ -1476,19 +1527,20 @@ ids = ["MY_SECRETS"]
 "#,
         );
 
-        let axum = store_bindings_message("axum", &loader).expect("axum message");
+        let axum = store_bindings_message("axum", loader.manifest()).expect("axum message");
         assert!(axum.contains("environment variables"));
 
-        let cloudflare = store_bindings_message("cloudflare", &loader).expect("cloudflare message");
+        let cloudflare =
+            store_bindings_message("cloudflare", loader.manifest()).expect("cloudflare message");
         assert!(cloudflare.contains("wrangler"));
 
-        let fastly = store_bindings_message("fastly", &loader).expect("fastly message");
+        let fastly = store_bindings_message("fastly", loader.manifest()).expect("fastly message");
         assert!(fastly.contains("secrets enabled"));
     }
 
     #[test]
     fn store_bindings_message_is_absent_without_secret_store() {
         let loader = ManifestLoader::load_from_str("[app]\nname = \"x\"\n");
-        assert!(store_bindings_message("fastly", &loader).is_none());
+        assert!(store_bindings_message("fastly", loader.manifest()).is_none());
     }
 }

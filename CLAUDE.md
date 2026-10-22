@@ -12,7 +12,7 @@ CI workflows under `.github/workflows/`.
 
 ```
 crates/
-  edgezero-core/              # Core: routing, extractors, middleware, proxy, body, errors
+  edgezero-core/              # Core: routing, extractors, middleware, outbound HTTP, body, errors
   edgezero-macros/            # Proc macros: #[action], #[app]
   edgezero-adapter/           # Adapter registry and traits
   edgezero-adapter-fastly/    # Fastly Compute bridge (wasm32-wasip1)
@@ -39,6 +39,9 @@ scripts/                      # Build/deploy/test helper scripts
 ```sh
 # Full workspace test (primary CI command)
 cargo test --workspace --all-targets
+
+# Core doctests (not included by --all-targets)
+cargo test -p edgezero-core --doc
 
 # Test a specific crate
 cargo test -p edgezero-core
@@ -134,11 +137,13 @@ impl Middleware for MyMiddleware {
 }
 ```
 
-### Proxy
+### Outbound HTTP
 
-Use `ProxyService` with adapter-specific clients (`FastlyProxyClient`,
-`CloudflareProxyClient`, `SpinProxyClient`). Keep proxy logic provider-agnostic
-in core.
+Handlers obtain `HttpClient` from `RequestContext::http_client()`, construct
+`OutboundRequest` values, and consume `OutboundResponse` or per-slot
+`OutboundSlotResult` outcomes. Keep provider transport logic in adapter-specific
+`*OutboundClient` implementations and use the capability matrix for behavioral
+differences.
 
 ### Logging
 
@@ -157,6 +162,9 @@ in core.
 - **Async tests** use `futures::executor::block_on` (not Tokio) for WASM compat.
 - **Minimal changes**: every change should impact as little code as possible.
   Avoid unnecessary refactoring, docstrings on untouched code, or premature abstractions.
+- **JSON construction**: use `serde_json::json!` for ordinary JSON values and fixtures;
+  serialize typed structs directly. Keep raw JSON for syntax or exact-byte tests,
+  static-input APIs, and last-resort fallbacks that must avoid serialization.
 - **Feature gates**: platform-specific code goes behind `fastly`, `cloudflare`,
   `spin`, or `axum` features. Core stays `default-features = false` for WASM targets.
 - **No direct `http` crate imports** in application code — use `edgezero_core` re-exports.
@@ -168,7 +176,7 @@ Each adapter follows the same structure:
 - `context.rs` — platform-specific request context
 - `request.rs` — platform request → core request conversion
 - `response.rs` — core response → platform response conversion
-- `proxy.rs` — platform-specific proxy client
+- `outbound.rs` — platform-specific outbound HTTP client
 - `logger.rs` — platform-specific logging init
 - `cli.rs` — adapter dispatch behind the `cli` feature: `build` / `deploy` / `serve` (legacy) plus `Adapter::execute` for `auth` (login/logout/status) and dedicated trait methods `provision` (Stage 6 — platform-resource creation) and `push_config_entries` (Stage 7 — `config push` writeback). Self-registers via `#[ctor]` into the `edgezero-adapter` registry.
 
@@ -186,8 +194,9 @@ Every PR must pass:
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 3. `cargo test --workspace --all-targets`
-4. `cargo check --workspace --all-targets --features "fastly cloudflare spin"`
-5. `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`
+4. `cargo test -p edgezero-core --doc`
+5. `cargo check --workspace --all-targets --features "fastly cloudflare spin"`
+6. `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`
 
 Docs CI additionally runs ESLint + Prettier on the `docs/` directory.
 
@@ -283,7 +292,7 @@ Custom commands live in `.claude/commands/`:
 
 | Command           | Purpose                                            |
 | ----------------- | -------------------------------------------------- |
-| `/check-ci`       | Run all 4 CI gate checks locally                   |
+| `/check-ci`       | Run all 5 CI gate checks locally                   |
 | `/test-all`       | Run full workspace test suite                      |
 | `/test-crate`     | Run tests for a specific crate                     |
 | `/review-changes` | Staff-engineer-level review of uncommitted changes |
