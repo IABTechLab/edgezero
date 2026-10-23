@@ -578,9 +578,13 @@ validates the final response head before commit, and applies this precedence ord
    the body and always removes `Content-Length`. A `205` response drops the body and rejects a
    nonzero declared length; explicit zero is permitted. A `304` response drops the body and may
    preserve an explicitly supplied representation length.
-4. For every other status, a `HEAD` response drops the body without polling it and may preserve
+4. For every other status, a `HEAD` response suppresses the body without polling it and may preserve
    an explicitly supplied representation `Content-Length`; that value is not compared with the
-   unsent body.
+   unsent body. Suppressed buffers and streams are dropped immediately and are never restored.
+   Local Fastly SDK controls expose forbidden 205 payload delivery and HTTP/2 failures when a HEAD
+   body is restored for size inference. The requester approved preserving suppression and leaving
+   exact HEAD/205 SDK parity unqualified pending hosted evidence, rather than reproducing invalid
+   protocol behavior. This does not waive that parity gate or claim full EZ-18 acceptance.
 5. Only responses whose payload will be transmitted enter body-length validation.
 
 After suppression is resolved, every adapter applies these common field rules:
@@ -590,6 +594,11 @@ After suppression is resolved, every adapter applies these common field rules:
 - For a response whose payload will be transmitted, `Content-Length` on `Body::Once` must equal
   the exact body length before commit. A mismatch is `ConversionError` and produces the bounded
   pre-commit fallback.
+- `begin(framing)` and both preparation APIs require an explicit
+  `ResponseEgressFramingMode`. Axum, Cloudflare and Spin select `ExplicitBufferedLength`, deriving
+  the exact length of an eligible transmitted buffer (including empty) after hop-by-hop removal.
+  Fastly selects `HostAutomatic`: source lengths are still validated, but core adds no length that
+  could incorrectly constrain host-transformed wire bytes. The same mode applies to fallbacks.
 - A streamed body with `Content-Length` is checked incrementally. Exceeding the declared length
   aborts immediately; early EOF aborts instead of presenting a clean truncated response.
 - A streamed body without `Content-Length` uses the provider's native streaming framing.
@@ -706,10 +715,28 @@ fn main() -> Result<(), fastly::Error> {
 ```
 
 All public dispatch variants become send-owning terminal operations. No public
-response-returning converter remains. The adapter constructs a low-level `ResponseHandle` and
-commits with `ResponseHandle::stream_to_client(BodyHandle::new())`, obtaining an unbuffered
-`StreamingBodyHandle`. It does not use the high-level `StreamingBody`, whose `BufWriter` may
-flush buffered data while attempting to finish or abandon.
+response-returning converter remains. The adapter constructs owned low-level response/body
+handles. For a transmitted buffered response it stages the complete native body while the attempt remains
+precommit, checking the injected deadline before and after every short write. Preparation failure
+releases that body and may select the bounded fallback. One non-streaming Automatic send hands
+head and body to the host together, matching the pinned SDK's `send_to_client` ABI. Transmitted
+source bytes are counted once at successful handoff; suppressed HEAD bytes count zero. Expiry
+during a successful bulk send may produce a late terminal report but cannot truncate or abandon
+the already-consumed body. Handoff is not evidence of peer receipt.
+
+Suppressed HEAD/204/205/304 responses instead use an empty streaming handoff. Their original
+buffer or stream is already dropped without polling; no representation bytes are restored or
+staged. This prevents the local HTTP/2 host from mistaking a known zero-byte suppressed payload
+for a representation `Content-Length: 0`. Explicit representation lengths still reach the host,
+whose Automatic framing may omit them. Exact bodyless SDK parity remains unqualified.
+
+Actual streams use `stream_to_client`, obtaining an unbuffered `StreamingBodyHandle`. Manual
+framing is restricted to a transmitted declared-length stream without any `x-compress-hint` field.
+Any hint delegates wire framing to Automatic, even `off` or ambiguous values: pinned SDK sources
+do not establish the host's hint parser semantics. Source-length enforcement remains unchanged.
+Hosted compression and SDK parity over HTTP/1.1 and HTTP/2 remain explicit qualification gates.
+The adapter does not use the high-level `StreamingBody`, whose `BufWriter` may flush buffered data
+while attempting to finish or abandon.
 
 Each chunk is fully written before the next source poll. Native short writes account their
 accepted prefix and retain only the unwritten suffix. Zero-length progress is a
@@ -805,6 +832,7 @@ The implemented declarations are conservative:
 
 | Capability                           | Axum       | Cloudflare | Fastly     | Spin       |
 | ------------------------------------ | ---------- | ---------- | ---------- | ---------- |
+| `buffered-response-content-length`   | Native     | BestEffort | BestEffort | BestEffort |
 | `response-egress-abort`              | BestEffort | BestEffort | BestEffort | BestEffort |
 | `response-egress-backpressure`       | BestEffort | BestEffort | BestEffort | BestEffort |
 | `response-egress-completion`         | BestEffort | BestEffort | BestEffort | BestEffort |

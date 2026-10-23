@@ -168,6 +168,7 @@ edgezero_core::app!("../../edgezero.toml", configure = crate::configure_app);
 
 #[cfg(test)]
 mod lifecycle_tests {
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use std::num::NonZeroU32;
     use std::time::Duration;
 
@@ -411,7 +412,9 @@ mod lifecycle_tests {
     }
 
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
-        let Ok((prepared, _, mut attempt, clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("response egress begin");
         };
         assert!(attempt.begin_writing());

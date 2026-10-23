@@ -727,6 +727,7 @@ fn render_default_error_response(error: EdgeError) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use crate::response_egress_framing::ResponseEgressFramingMode;
     use crate::response_egress_framing::prepare_response_egress;
     use std::num::NonZeroU32;
     use std::sync::Arc;
@@ -1027,7 +1028,9 @@ mod tests {
     }
 
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
-        let Ok((prepared, _, mut attempt, clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("response egress begin");
         };
         assert!(attempt.begin_writing());
@@ -1097,7 +1100,9 @@ mod tests {
             let clock_now = Arc::clone(&now);
             let clock = MonotonicClock::new(move || *clock_now.lock().expect("clock lock"));
             let envelope = App::assembly_error_egress(error, Method::GET, request_start, clock);
-            let Ok((prepared, policy, mut attempt, egress_clock)) = envelope.begin() else {
+            let Ok((prepared, policy, mut attempt, egress_clock)) =
+                envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            else {
                 panic!("assembly error must enter canonical egress");
             };
             let response = prepared.into_response();
@@ -1138,7 +1143,9 @@ mod tests {
             clock.now(),
             clock,
         );
-        let Ok((prepared, _, mut attempt, egress_clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, egress_clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("assembly error must enter canonical egress");
         };
         let response = prepared.into_response();
@@ -1331,7 +1338,9 @@ mod tests {
         )) else {
             panic!("state route must produce a response");
         };
-        let Ok((prepared, _, mut attempt, clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("state response must be valid");
         };
         let response = prepared.into_response();
@@ -1963,7 +1972,9 @@ mod tests {
         else {
             panic!("expected refusal");
         };
-        let Ok((prepared, _, mut attempt, egress_clock)) = egress.begin() else {
+        let Ok((prepared, _, mut attempt, egress_clock)) =
+            egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("begin egress");
         };
         let response = prepared.into_response();
@@ -2027,7 +2038,9 @@ mod tests {
                 "uri_too_long",
             )]
         );
-        let Ok((prepared, policy, mut attempt, clock)) = egress.begin() else {
+        let Ok((prepared, policy, mut attempt, clock)) =
+            egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("begin detached egress");
         };
         assert_eq!(
@@ -2064,7 +2077,9 @@ mod tests {
         ) else {
             panic!("expected detached response");
         };
-        let Ok((_prepared, policy, _attempt, _clock)) = egress.begin() else {
+        let Ok((_prepared, policy, _attempt, _clock)) =
+            egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("begin detached egress");
         };
 
@@ -2098,7 +2113,9 @@ mod tests {
         ) else {
             panic!("expected detached response");
         };
-        let Ok((_prepared, policy, _attempt, _clock)) = egress.begin() else {
+        let Ok((_prepared, policy, _attempt, _clock)) =
+            egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("begin detached egress");
         };
 
@@ -2181,7 +2198,9 @@ mod tests {
         ) else {
             panic!("default detached decision must send a response");
         };
-        let Ok((prepared, policy, mut attempt, clock)) = egress.begin() else {
+        let Ok((prepared, policy, mut attempt, clock)) =
+            egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("begin detached egress");
         };
 
@@ -2236,7 +2255,9 @@ mod tests {
             EdgeError::internal(anyhow::anyhow!("post-admission failure")),
         );
         assert_eq!(grant_drops.load(Ordering::SeqCst), 1);
-        let Ok((prepared_egress, _, mut attempt, clock)) = egress.begin() else {
+        let Ok((prepared_egress, _, mut attempt, clock)) =
+            egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("begin egress");
         };
         let response = prepared_egress.into_response();
@@ -2281,7 +2302,9 @@ mod tests {
         else {
             panic!("expected refusal");
         };
-        let Ok((prepared, _, mut attempt, clock)) = egress.begin() else {
+        let Ok((prepared, _, mut attempt, clock)) =
+            egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("owned response egress failed");
         };
         assert!(!prepared.transmits_body());
@@ -2539,9 +2562,13 @@ mod tests {
                     .expect("required retry"),
                 "60"
             );
-            let prepared = prepare_response_egress(&Method::POST, response)
-                .expect("prepared")
-                .into_response();
+            let prepared = prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::POST,
+                response,
+            )
+            .expect("prepared")
+            .into_response();
             assert_eq!(
                 prepared
                     .headers()

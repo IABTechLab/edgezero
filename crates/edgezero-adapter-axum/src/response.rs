@@ -18,7 +18,8 @@ use edgezero_core::response_egress::{
     ResponseEgressFallbackDisposition, ResponseEgressOutcome,
 };
 use edgezero_core::response_egress_framing::{
-    PreparedResponseEgress, ResponseEgressBodyLengthError, response_egress_source_error_category,
+    PreparedResponseEgress, ResponseEgressBodyLengthError, ResponseEgressFramingMode,
+    response_egress_source_error_category,
 };
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::StreamExt as _;
@@ -537,7 +538,7 @@ pub(crate) async fn prepare_egress_response(
     connection: &EgressConnection,
 ) -> Response<AxumEgressBody> {
     let request_method = egress.request_method().clone();
-    match egress.begin() {
+    match egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength) {
         Ok((prepared, policy, mut attempt, clock)) => {
             if policy.write_deadline.is_expired_at(clock.now()) {
                 return prepare_fallback(
@@ -640,7 +641,11 @@ async fn validate_empty_stream(
             .map_err(|_elapsed| ResponseEgressOutcome::DeadlineExceeded)??;
     }
     attempt
-        .prepare_response(request_method, response)
+        .prepare_response(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            request_method,
+            response,
+        )
         .map_err(|_error| ResponseEgressOutcome::ConversionError)
 }
 
@@ -688,7 +693,11 @@ fn prepare_fallback(
         return detached_fallback(request_method, cause);
     };
     let fallback = fallback_response(cause);
-    let Ok(prepared) = attempt.prepare_response(request_method, fallback) else {
+    let Ok(prepared) = attempt.prepare_response(
+        ResponseEgressFramingMode::ExplicitBufferedLength,
+        request_method,
+        fallback,
+    ) else {
         attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
         return detached_fallback(request_method, cause);
     };
@@ -766,7 +775,9 @@ mod tests {
         ResponseEgressHead, ResponseEgressObserver, ResponseEgressObserverHandle,
         ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressReport,
     };
-    use edgezero_core::response_egress_framing::prepare_response_egress;
+    use edgezero_core::response_egress_framing::{
+        ResponseEgressFramingMode, prepare_response_egress,
+    };
     use edgezero_core::router::{RouteMetadata, RouterService};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures_util::future::poll_fn as poll_future;
@@ -1393,7 +1404,12 @@ mod tests {
             .header("content-length", "3")
             .body(Body::from_stream(source))
             .expect("response");
-        let prepared = prepare_response_egress(&Method::GET, response).expect("prepared response");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            response,
+        )
+        .expect("prepared response");
         let started_at = MonotonicInstant::now();
         let clock = MonotonicClock::new(move || started_at);
         let connection = EgressConnection::default();

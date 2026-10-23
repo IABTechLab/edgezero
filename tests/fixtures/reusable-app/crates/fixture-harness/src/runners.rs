@@ -1,6 +1,7 @@
 use crate::{evidence::*, net::Backend, *};
 use std::collections::HashMap;
 mod assembly;
+mod framing;
 mod overflow;
 mod progress;
 fn cargo_build() -> Command {
@@ -258,6 +259,9 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if version.split_whitespace().nth(1) != Some(pin) {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
+    }
+    if args.suite == "response-framing" {
+        return framing::run("fastly", run, records);
     }
     if args.suite == "outbound-overflow" {
         return overflow::run("fastly", run, records);
@@ -1022,6 +1026,9 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "response-framing" {
+        return framing::run(name, run, records);
+    }
     if args.suite == "assembly" {
         return assembly::provider(name, run, records);
     }

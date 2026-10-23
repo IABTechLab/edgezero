@@ -137,7 +137,8 @@ struct CloudflareCliAdapter;
 impl Adapter for CloudflareCliAdapter {
     fn capability(&self, capability: Capability) -> CapabilitySupport {
         match capability {
-            Capability::ConfigReadDeadlines
+            Capability::BufferedResponseContentLength
+            | Capability::ConfigReadDeadlines
             | Capability::InboundReadDeadlines
             | Capability::IngressAdmissionAbort
             | Capability::OutboundAuthorityOverride
@@ -1308,6 +1309,10 @@ mod tests {
             ),
             (
                 Capability::ResponseWriteDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::BufferedResponseContentLength,
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundHttp, CapabilitySupport::Native),

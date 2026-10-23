@@ -9,8 +9,8 @@ use crate::error::EdgeError;
 use crate::error_detail::ProviderFailureDetail;
 use crate::http::{HeaderMap, Method, Response, StatusCode, Version};
 use crate::response_egress_framing::{
-    PreparedResponseEgress, ResponseEgressFramingError, prepare_response_egress,
-    response_egress_source_error_category,
+    PreparedResponseEgress, ResponseEgressFramingError, ResponseEgressFramingMode,
+    prepare_response_egress, response_egress_source_error_category,
 };
 use crate::router::RouteMetadata;
 use crate::time::{DEADLINE_FAR_FUTURE, Deadline, MonotonicClock, MonotonicInstant};
@@ -649,6 +649,7 @@ impl ResponseEgressEnvelope {
     #[inline]
     pub fn begin(
         mut self,
+        framing: ResponseEgressFramingMode,
     ) -> Result<
         (
             PreparedResponseEgress,
@@ -709,7 +710,8 @@ impl ResponseEgressEnvelope {
                 },
             )),
         };
-        let Ok(prepared) = attempt.prepare_response(&self.request_method, self.response) else {
+        let Ok(prepared) = attempt.prepare_response(framing, &self.request_method, self.response)
+        else {
             return Err(Box::new(ResponseEgressBeginFailure {
                 attempt,
                 cause: ResponseEgressOutcome::ConversionError,
@@ -985,10 +987,11 @@ impl ResponseEgressAttempt {
     #[inline]
     pub fn prepare_response(
         &mut self,
+        framing: ResponseEgressFramingMode,
         request_method: &Method,
         response: Response,
     ) -> Result<PreparedResponseEgress, ResponseEgressFramingError> {
-        prepare_response_egress(request_method, response).inspect_err(|reason| {
+        prepare_response_egress(framing, request_method, response).inspect_err(|reason| {
             if !matches!(self.state, AttemptState::Initial) {
                 return;
             }
@@ -1526,7 +1529,10 @@ mod tests {
         for reason in FRAMING_RULES {
             for detached in [false, true] {
                 let fixture = block_on(framing_fixture(reason, detached)).expect("fixture");
-                let Err(failure) = fixture.envelope.begin() else {
+                let Err(failure) = fixture
+                    .envelope
+                    .begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+                else {
                     panic!("framing must reject the response")
                 };
                 let (mut attempt, clock, cause) = failure.into_parts();
@@ -1580,7 +1586,13 @@ mod tests {
         ] {
             let (method, response) = framing_response(reason);
             assert_eq!(
-                attempt.prepare_response(&method, response).err(),
+                attempt
+                    .prepare_response(
+                        ResponseEgressFramingMode::ExplicitBufferedLength,
+                        &method,
+                        response
+                    )
+                    .err(),
                 Some(reason)
             );
         }
@@ -1588,14 +1600,24 @@ mod tests {
         let reason = ResponseEgressFramingError::UnsupportedTrailers;
         let (method, response) = framing_response(reason);
         assert_eq!(
-            attempt.prepare_response(&method, response).err(),
+            attempt
+                .prepare_response(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    &method,
+                    response
+                )
+                .err(),
             Some(reason)
         );
         let (later_method, later_response) =
             framing_response(ResponseEgressFramingError::UnsupportedStatus);
         assert_eq!(
             attempt
-                .prepare_response(&later_method, later_response)
+                .prepare_response(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    &later_method,
+                    later_response
+                )
                 .err(),
             Some(ResponseEgressFramingError::UnsupportedStatus)
         );
@@ -1607,7 +1629,11 @@ mod tests {
             framing_response(ResponseEgressFramingError::UnsupportedTunnel);
         assert_eq!(
             attempt
-                .prepare_response(&terminal_method, terminal_response)
+                .prepare_response(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    &terminal_method,
+                    terminal_response
+                )
                 .err(),
             Some(ResponseEgressFramingError::UnsupportedTunnel)
         );
@@ -1639,7 +1665,13 @@ mod tests {
             assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
             let (method, response) = framing_response(reason);
             assert_eq!(
-                attempt.prepare_response(&method, response).err(),
+                attempt
+                    .prepare_response(
+                        ResponseEgressFramingMode::ExplicitBufferedLength,
+                        &method,
+                        response
+                    )
+                    .err(),
                 Some(reason)
             );
             assert!(attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, now));
@@ -1668,7 +1700,9 @@ mod tests {
             ResponseEgressObserverHandle::new(observer.clone()),
             MonotonicClock::new(move || now),
         );
-        let Ok((_prepared, policy, mut attempt, clock)) = envelope.begin() else {
+        let Ok((_prepared, policy, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("valid expired policy remains valid")
         };
         assert!(policy.write_deadline.is_expired_at(clock.now()));
@@ -1689,7 +1723,13 @@ mod tests {
         assert!(attempt.complete(now));
         let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers);
         assert_eq!(
-            attempt.prepare_response(&method, response).err(),
+            attempt
+                .prepare_response(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    &method,
+                    response
+                )
+                .err(),
             Some(ResponseEgressFramingError::UnsupportedTrailers)
         );
         assert_eq!(
@@ -1726,7 +1766,13 @@ mod tests {
         assert!(attempt.begin_writing());
         let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers);
         assert_eq!(
-            attempt.prepare_response(&method, response).err(),
+            attempt
+                .prepare_response(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    &method,
+                    response
+                )
+                .err(),
             Some(ResponseEgressFramingError::UnsupportedTrailers)
         );
         assert!(observer.reports().is_empty());
@@ -2599,7 +2645,7 @@ mod tests {
         );
         assert_eq!(envelope.request_method(), &Method::GET);
 
-        let Err(failure) = envelope.begin() else {
+        let Err(failure) = envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength) else {
             panic!("policy panic must select fallback");
         };
         assert!(observer.reports().is_empty());
@@ -2666,7 +2712,7 @@ mod tests {
             clock,
         );
 
-        let Err(failure) = envelope.begin() else {
+        let Err(failure) = envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength) else {
             panic!("framing failure must retain the attempt");
         };
         assert_eq!(polls.get(), 0);
@@ -2724,7 +2770,9 @@ mod tests {
             MonotonicClock::new(move || egress_started_at),
         );
 
-        let Ok((prepared, policy, _attempt, _clock)) = envelope.begin() else {
+        let Ok((prepared, policy, _attempt, _clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("egress preparation failed");
         };
 
@@ -2781,7 +2829,9 @@ mod tests {
             MonotonicClock::new(move || egress_started_at),
         );
 
-        let Ok((prepared, policy, _attempt, _clock)) = envelope.begin() else {
+        let Ok((prepared, policy, _attempt, _clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("egress preparation failed");
         };
 
@@ -2856,7 +2906,9 @@ mod tests {
         );
 
         *envelope.response_mut().status_mut() = StatusCode::CREATED;
-        let Ok((prepared, _policy, _attempt, _clock)) = envelope.begin() else {
+        let Ok((prepared, _policy, _attempt, _clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("egress preparation failed");
         };
         let prepared_response = prepared.into_response();

@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use std::sync::{Mutex, PoisonError};
 
     use edgezero_core::app::App;
@@ -40,7 +41,9 @@ mod tests {
             clock.now(),
             clock,
         );
-        let Ok((prepared, _, mut attempt, egress_clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, egress_clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("assembly failure response must prepare");
         };
         let bytes = block_on(

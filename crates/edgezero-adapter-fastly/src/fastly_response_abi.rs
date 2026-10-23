@@ -61,6 +61,14 @@ fn result(status: FastlyStatus) -> Result<(), FastlyAbiError> {
     status.result().map_err(|_status| FastlyAbiError)
 }
 
+pub(super) fn send_buffered(
+    response: ResponseHandle,
+    body: BodyHandle,
+) -> Result<(), FastlyAbiError> {
+    // SAFETY: both handles are exclusively owned and consumed by this non-streaming send.
+    result(unsafe { fastly_http_resp::send_downstream(response, body, 0) })
+}
+
 pub(super) fn send_streaming(
     response: ResponseHandle,
     body: BodyHandle,

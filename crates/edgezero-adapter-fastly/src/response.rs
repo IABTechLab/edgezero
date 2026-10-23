@@ -17,6 +17,7 @@ use edgezero_core::response_egress::{
     RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET, ResponseEgressAttempt, ResponseEgressEnvelope,
     ResponseEgressFallbackDisposition, ResponseEgressOutcome, ResponseEgressPolicy,
 };
+use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
 use edgezero_core::response_egress_framing::{
     PreparedResponseEgress, response_egress_source_error_category,
 };
@@ -28,6 +29,32 @@ use crate::delivery::{DeliveryError, FastlyResponseCommitState, FastlyResponseDe
 
 const INTERNAL_FALLBACK_BODY: &[u8] = b"internal server error";
 const TIMEOUT_FALLBACK_BODY: &[u8] = b"response write deadline exceeded";
+
+struct BufferedBody<'body> {
+    bytes: &'body [u8],
+    clock: &'body MonotonicClock,
+    deadline: Deadline,
+}
+
+impl BufferedBody<'_> {
+    fn stage<Error>(
+        &self,
+        mut write: impl FnMut(&[u8]) -> Result<usize, Error>,
+    ) -> Result<(), DeliveryError> {
+        let mut remaining = self.bytes;
+        while !remaining.is_empty() {
+            ensure_deadline(self.deadline, self.clock)?;
+            let result = write(remaining);
+            ensure_deadline(self.deadline, self.clock)?;
+            let written = result.map_err(|_error| DeliveryError::Transport)?;
+            if written == 0 || written > remaining.len() {
+                return Err(DeliveryError::Transport);
+            }
+            remaining = remaining.get(written..).ok_or(DeliveryError::Transport)?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransmitFailure {
@@ -65,18 +92,18 @@ trait EgressCommitter {
         status: StatusCode,
         headers: &HeaderMap,
         transmits_body: bool,
-    ) -> Result<Self::Prepared, Self::Error>;
+        buffered_body: Option<BufferedBody<'_>>,
+    ) -> Result<Self::Prepared, DeliveryError>;
 }
 
 #[cfg(feature = "fastly")]
 mod platform {
     use super::{
-        EgressCommitter, EgressSink, FastlyResponseDelivery, HeaderMap, ResponseEgressEnvelope,
-        StatusCode, send_egress_with,
+        BufferedBody, DeliveryError, EgressCommitter, EgressSink, FastlyResponseDelivery,
+        HeaderMap, ResponseEgressEnvelope, StatusCode, manual_stream_framing, send_egress_with,
     };
     use std::mem;
 
-    use edgezero_core::http::header::CONTENT_LENGTH;
     use fastly_shared::{INVALID_BODY_HANDLE, INVALID_RESPONSE_HANDLE};
     use fastly_sys::{BodyHandle as FastlyBodyHandle, ResponseHandle as FastlyResponseHandle};
 
@@ -85,40 +112,55 @@ mod platform {
     pub(super) struct FastlyPrepared {
         body: FastlyBodyHandle,
         response: FastlyResponseHandle,
+        streaming: bool,
     }
 
     impl FastlyPrepared {
         fn commit(mut self) -> Result<FastlyBodySink, FastlyAbiError> {
             let response = mem::replace(&mut self.response, INVALID_RESPONSE_HANDLE);
             let body = mem::replace(&mut self.body, INVALID_BODY_HANDLE);
-            if fastly_abi::send_streaming(response, body).is_err() {
-                let _result = fastly_abi::abandon_body(body);
-                return Err(FastlyAbiError);
+            if self.streaming {
+                if fastly_abi::send_streaming(response, body).is_err() {
+                    let _result = fastly_abi::abandon_body(body);
+                    return Err(FastlyAbiError);
+                }
+                Ok(FastlyBodySink(body))
+            } else {
+                fastly_abi::send_buffered(response, body)?;
+                Ok(FastlyBodySink(INVALID_BODY_HANDLE))
             }
-            Ok(FastlyBodySink(body))
         }
 
         fn new(
             status: StatusCode,
             headers: &HeaderMap,
             transmits_body: bool,
-        ) -> Result<Self, FastlyAbiError> {
-            let response = fastly_abi::new_response()?;
+            buffered_body: Option<BufferedBody<'_>>,
+        ) -> Result<Self, DeliveryError> {
+            let response =
+                fastly_abi::new_response().map_err(|_error| DeliveryError::Conversion)?;
             let mut prepared = Self {
                 body: INVALID_BODY_HANDLE,
                 response,
+                streaming: buffered_body.is_none(),
             };
-            prepared.body = fastly_abi::new_body()?;
-            fastly_abi::set_status(prepared.response, status.as_u16())?;
+            prepared.body = fastly_abi::new_body().map_err(|_error| DeliveryError::Conversion)?;
+            fastly_abi::set_status(prepared.response, status.as_u16())
+                .map_err(|_error| DeliveryError::Conversion)?;
             for (name, value) in headers {
                 fastly_abi::append_header(
                     prepared.response,
                     name.as_str().as_bytes(),
                     value.as_bytes(),
-                )?;
+                )
+                .map_err(|_error| DeliveryError::Conversion)?;
             }
-            if transmits_body && headers.contains_key(CONTENT_LENGTH) {
-                fastly_abi::set_manual_framing(prepared.response)?;
+            if manual_stream_framing(headers, transmits_body, prepared.streaming) {
+                fastly_abi::set_manual_framing(prepared.response)
+                    .map_err(|_error| DeliveryError::Conversion)?;
+            }
+            if let Some(buffered) = buffered_body {
+                buffered.stage(|remaining| fastly_abi::write_body(prepared.body, remaining))?;
             }
             Ok(prepared)
         }
@@ -199,12 +241,13 @@ mod platform {
             status: StatusCode,
             headers: &HeaderMap,
             transmits_body: bool,
-        ) -> Result<Self::Prepared, Self::Error> {
-            FastlyPrepared::new(status, headers, transmits_body)
+            buffered_body: Option<BufferedBody<'_>>,
+        ) -> Result<Self::Prepared, DeliveryError> {
+            FastlyPrepared::new(status, headers, transmits_body, buffered_body)
         }
     }
 
-    /// Sends one core response through Fastly's unbuffered downstream body handle.
+    /// Sends buffers atomically and streams through an owned downstream body handle.
     ///
     /// Returns its exact terminal report and last-body commitment. Precommit conversion and
     /// deadline failures first attempt the bounded fallback on the same response-egress attempt.
@@ -224,7 +267,7 @@ where
     Committer: EgressCommitter,
 {
     let request_method = egress.request_method().clone();
-    let (attempt, transmit_result) = match egress.begin() {
+    let (attempt, transmit_result) = match egress.begin(ResponseEgressFramingMode::HostAutomatic) {
         Ok((prepared, policy, mut attempt, clock)) => {
             let result = match transmit_prepared(
                 prepared,
@@ -281,7 +324,11 @@ where
         .checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
         .unwrap_or(fallback_started_at);
     let fallback_response = fallback_response(original_cause);
-    let prepared = match attempt.prepare_response(request_method, fallback_response) {
+    let prepared = match attempt.prepare_response(
+        ResponseEgressFramingMode::HostAutomatic,
+        request_method,
+        fallback_response,
+    ) {
         Ok(prepared) => prepared,
         Err(_error) => {
             attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
@@ -334,18 +381,34 @@ where
 
     let transmits_body = prepared.transmits_body();
     let (parts, body) = prepared.into_response().into_parts();
-    let prepared_head = match committer.prepare(parts.status, &parts.headers, transmits_body) {
-        Ok(prepared_head) => prepared_head,
-        Err(_error) => {
-            log::error!("response-egress Fastly head preparation failed");
-            let cause = if policy.write_deadline.is_expired_at(clock.now()) {
-                ResponseEgressOutcome::DeadlineExceeded
-            } else {
-                ResponseEgressOutcome::ConversionError
-            };
-            return precommit_failure(kind, attempt, clock, cause);
-        }
+    // Suppressed payload size is not representation size. An empty bulk body would
+    // let HTTP/2 synthesize a false Content-Length: 0 on HEAD/304.
+    let buffered_bytes = if transmits_body {
+        body.as_bytes()
+    } else {
+        None
     };
+    let buffered_length = buffered_bytes.map(<[u8]>::len);
+    let buffered_body = buffered_bytes.map(|bytes| BufferedBody {
+        bytes,
+        clock,
+        deadline: policy.write_deadline,
+    });
+    let prepared_head =
+        match committer.prepare(parts.status, &parts.headers, transmits_body, buffered_body) {
+            Ok(prepared_head) => prepared_head,
+            Err(error) => {
+                log::error!("response-egress Fastly head preparation failed");
+                let cause = if error == DeliveryError::Deadline
+                    || policy.write_deadline.is_expired_at(clock.now())
+                {
+                    ResponseEgressOutcome::DeadlineExceeded
+                } else {
+                    ResponseEgressOutcome::ConversionError
+                };
+                return precommit_failure(kind, attempt, clock, cause);
+            }
+        };
 
     let commit_started_at = clock.now();
     if policy.write_deadline.is_expired_at(commit_started_at) {
@@ -367,7 +430,7 @@ where
         return Err(TransmitFailure::Uncommitted(DeliveryError::Transport));
     }
 
-    let mut sink = match committer.commit(prepared_head) {
+    let sink = match committer.commit(prepared_head) {
         Ok(sink) => sink,
         Err(_error) => {
             log::error!("response-egress Fastly downstream commit failed");
@@ -382,6 +445,40 @@ where
     };
 
     let committed_at = clock.now();
+    if let Some(length) = buffered_length {
+        // A successful bulk send consumes the complete native body. Never truncate it by
+        // entering streaming cleanup, even if the clock expires during that hostcall.
+        let accepted =
+            u64::try_from(length).is_ok_and(|bytes| attempt.account_bytes(bytes, committed_at));
+        let terminal_error = if policy.write_deadline.is_expired_at(committed_at) {
+            Some(DeliveryError::Deadline)
+        } else if !accepted {
+            Some(DeliveryError::Transport)
+        } else {
+            None
+        };
+        if let Some(error) = terminal_error {
+            settle_failure(kind, attempt, error.outcome(), committed_at);
+            return Err(TransmitFailure::Postcommit(error));
+        }
+        settle_success(kind, attempt, committed_at);
+        return Ok(());
+    }
+    transmit_stream(body, sink, policy, attempt, clock, kind, committed_at)
+}
+
+fn transmit_stream<Sink>(
+    body: Body,
+    mut sink: Sink,
+    policy: ResponseEgressPolicy,
+    attempt: &mut ResponseEgressAttempt,
+    clock: &MonotonicClock,
+    kind: TransmitKind,
+    committed_at: MonotonicInstant,
+) -> Result<(), TransmitFailure>
+where
+    Sink: EgressSink,
+{
     if policy.write_deadline.is_expired_at(committed_at) {
         abandon(&mut sink);
         settle_failure(
@@ -576,6 +673,13 @@ fn settle_success(
     }
 }
 
+fn manual_stream_framing(headers: &HeaderMap, transmits_body: bool, streaming: bool) -> bool {
+    streaming
+        && transmits_body
+        && headers.contains_key("content-length")
+        && !headers.contains_key("x-compress-hint")
+}
+
 pub(crate) fn parse_uri(uri: &str) -> Result<Uri, EdgeError> {
     uri.parse::<Uri>()
         .map_err(|err| EdgeError::bad_request(format!("invalid request URI: {err}")))
@@ -629,6 +733,7 @@ mod tests {
         commits: Vec<(StatusCode, HeaderMap, bool)>,
         events: Vec<&'static str>,
         finish: MockTerminal,
+        staged: Vec<Vec<u8>>,
         write_plan: VecDeque<Result<usize, ()>>,
     }
 
@@ -686,6 +791,11 @@ mod tests {
         Error,
     }
 
+    struct MockPrepared {
+        buffered_body: Option<Vec<u8>>,
+        head: (StatusCode, HeaderMap, bool),
+    }
+
     impl MockCommitter {
         fn new(state: Rc<RefCell<SinkState>>) -> Self {
             Self {
@@ -698,13 +808,19 @@ mod tests {
 
     impl EgressCommitter for MockCommitter {
         type Error = ();
-        type Prepared = (StatusCode, HeaderMap, bool);
+        type Prepared = MockPrepared;
         type Sink = MockSink;
 
         fn commit(&mut self, prepared: Self::Prepared) -> Result<Self::Sink, Self::Error> {
-            self.state.borrow_mut().commits.push(prepared);
+            let transmits_body = prepared.head.2;
+            self.state.borrow_mut().commits.push(prepared.head);
             match self.commit_plan.pop_front().unwrap_or(MockCommit::Accept) {
-                MockCommit::Accept => Ok(MockSink(Rc::clone(&self.state))),
+                MockCommit::Accept => {
+                    if transmits_body && let Some(bytes) = prepared.buffered_body {
+                        self.state.borrow_mut().accepted.extend(bytes);
+                    }
+                    Ok(MockSink(Rc::clone(&self.state)))
+                }
                 MockCommit::Error => Err(()),
             }
         }
@@ -714,9 +830,35 @@ mod tests {
             status: StatusCode,
             headers: &HeaderMap,
             transmits_body: bool,
-        ) -> Result<Self::Prepared, Self::Error> {
-            self.prepare_plan.pop_front().unwrap_or(Ok(()))?;
-            Ok((status, headers.clone(), transmits_body))
+            buffered_body: Option<BufferedBody<'_>>,
+        ) -> Result<Self::Prepared, DeliveryError> {
+            self.prepare_plan
+                .pop_front()
+                .unwrap_or(Ok(()))
+                .map_err(|_error| DeliveryError::Conversion)?;
+            let staged_body = if let Some(buffered) = buffered_body {
+                let mut staged = Vec::new();
+                buffered.stage(|remaining| {
+                    let accepted = self
+                        .state
+                        .borrow_mut()
+                        .write_plan
+                        .pop_front()
+                        .unwrap_or(Ok(remaining.len()))?;
+                    if accepted <= remaining.len() {
+                        staged.extend_from_slice(&remaining[..accepted]);
+                    }
+                    Ok::<usize, ()>(accepted)
+                })?;
+                self.state.borrow_mut().staged.push(staged.clone());
+                Some(staged)
+            } else {
+                None
+            };
+            Ok(MockPrepared {
+                buffered_body: staged_body,
+                head: (status, headers.clone(), transmits_body),
+            })
         }
     }
 
@@ -754,6 +896,7 @@ mod tests {
 
     fn prepared(body: Body) -> PreparedResponseEgress {
         prepare_response_egress(
+            ResponseEgressFramingMode::HostAutomatic,
             &Method::GET,
             response_builder()
                 .status(StatusCode::OK)
@@ -782,6 +925,192 @@ mod tests {
         );
         drop(attempt);
         (result, observer.reports())
+    }
+
+    #[test]
+    fn buffered_handoff_does_not_reenter_the_stream_writer() {
+        for bytes in ["abcdef", ""] {
+            let state = Rc::new(RefCell::new(SinkState::default()));
+            let (result, reports) = transmit(Body::from(bytes), Rc::clone(&state));
+            assert_eq!(result, Ok(()));
+            assert_eq!(state.borrow().accepted, bytes.as_bytes());
+            assert!(
+                state.borrow().events.is_empty(),
+                "buffered handoff must not write or finish a consumed streaming handle"
+            );
+            assert_eq!(reports.len(), 1);
+            assert_eq!(
+                reports[0].bytes_written,
+                u64::try_from(bytes.len()).expect("length")
+            );
+        }
+    }
+
+    #[test]
+    fn manual_framing_is_only_for_transmitted_unhinted_declared_streams() {
+        let mut headers = HeaderMap::new();
+        assert!(!manual_stream_framing(&headers, true, true));
+        headers.insert("content-length", "6".parse().expect("length"));
+        assert!(manual_stream_framing(&headers, true, true));
+        assert!(!manual_stream_framing(&headers, false, true));
+        assert!(!manual_stream_framing(&headers, true, false));
+        for hint in ["on", "gzip", "br", "off", "ON", " on ", "", "unrecognized"] {
+            headers.insert("x-compress-hint", hint.parse().expect("hint"));
+            assert!(!manual_stream_framing(&headers, true, true));
+        }
+        headers.append("x-compress-hint", "on".parse().expect("repeated hint"));
+        assert!(!manual_stream_framing(&headers, true, true));
+    }
+
+    #[test]
+    fn buffered_staging_stops_at_deadline_before_another_write() {
+        use std::sync::atomic::AtomicBool;
+
+        let start = MonotonicInstant::now();
+        let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
+        let expired = Arc::new(AtomicBool::new(false));
+        let clock_expired = Arc::clone(&expired);
+        let clock = MonotonicClock::new(move || {
+            if clock_expired.load(Ordering::SeqCst) {
+                deadline
+            } else {
+                start
+            }
+        });
+        let staged = BufferedBody {
+            bytes: b"abcdef",
+            clock: &clock,
+            deadline: Deadline::at_instant(deadline),
+        };
+        let mut writes = 0_usize;
+        assert_eq!(
+            staged.stage(|_| {
+                writes += 1;
+                expired.store(true, Ordering::SeqCst);
+                Ok::<usize, ()>(2)
+            }),
+            Err(DeliveryError::Deadline)
+        );
+        assert_eq!(writes, 1);
+    }
+
+    #[test]
+    fn observed_staging_deadline_survives_a_later_backwards_clock_sample() {
+        struct DeadlinePreparer;
+        impl EgressCommitter for DeadlinePreparer {
+            type Error = DeliveryError;
+            type Prepared = ();
+            type Sink = MockSink;
+
+            fn commit(&mut self, _prepared: ()) -> Result<MockSink, DeliveryError> {
+                Err(DeliveryError::Transport)
+            }
+
+            fn prepare(
+                &mut self,
+                _status: StatusCode,
+                _headers: &HeaderMap,
+                _transmits_body: bool,
+                _buffered_body: Option<BufferedBody<'_>>,
+            ) -> Result<(), DeliveryError> {
+                Err(DeliveryError::Deadline)
+            }
+        }
+        let now = MonotonicInstant::now();
+        let observer = RecordingObserver::default();
+        let mut attempt = attempt(&observer, now);
+        assert_eq!(
+            transmit_prepared(
+                prepared(Body::from("abcdef")),
+                future_policy(now),
+                &mut attempt,
+                &stable_clock(now),
+                TransmitKind::Application,
+                &mut DeadlinePreparer
+            ),
+            Err(TransmitFailure::Precommit {
+                cause: ResponseEgressOutcome::DeadlineExceeded,
+                error: DeliveryError::Deadline
+            })
+        );
+        assert!(observer.reports().is_empty());
+    }
+
+    #[test]
+    fn bulk_commit_expiry_preserves_the_complete_handed_off_buffer() {
+        let start = MonotonicInstant::now();
+        let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
+        let reads = Arc::new(AtomicUsize::new(0));
+        let clock_reads = Arc::clone(&reads);
+        let clock = MonotonicClock::new(move || {
+            if clock_reads.fetch_add(1, Ordering::SeqCst) < 4 {
+                start
+            } else {
+                deadline
+            }
+        });
+        let observer = RecordingObserver::default();
+        let mut attempt = attempt(&observer, start);
+        let state = Rc::new(RefCell::new(SinkState::default()));
+        let mut committer = MockCommitter::new(Rc::clone(&state));
+        let result = transmit_prepared(
+            prepared(Body::from("abcdef")),
+            ResponseEgressPolicy {
+                write_deadline: Deadline::at_instant(deadline),
+            },
+            &mut attempt,
+            &clock,
+            TransmitKind::Application,
+            &mut committer,
+        );
+        assert_eq!(
+            result,
+            Err(TransmitFailure::Postcommit(DeliveryError::Deadline))
+        );
+        assert_eq!(state.borrow().accepted, b"abcdef");
+        assert_eq!(state.borrow().commits.len(), 1);
+        assert!(state.borrow().events.is_empty());
+        assert_eq!(observer.reports().len(), 1);
+        assert_eq!(observer.reports()[0].bytes_written, 6);
+    }
+
+    #[test]
+    fn buffered_head_never_restores_suppressed_payload() {
+        for status in [
+            StatusCode::OK,
+            StatusCode::NO_CONTENT,
+            StatusCode::RESET_CONTENT,
+            StatusCode::NOT_MODIFIED,
+        ] {
+            let response = response_builder()
+                .status(status)
+                .body(Body::from("abcdef"))
+                .expect("response");
+            let prepared = prepare_response_egress(
+                ResponseEgressFramingMode::HostAutomatic,
+                &Method::HEAD,
+                response,
+            )
+            .expect("prepared");
+            let now = MonotonicInstant::now();
+            let observer = RecordingObserver::default();
+            let mut attempt = attempt(&observer, now);
+            let state = Rc::new(RefCell::new(SinkState::default()));
+            assert_eq!(
+                transmit_prepared(
+                    prepared,
+                    future_policy(now),
+                    &mut attempt,
+                    &stable_clock(now),
+                    TransmitKind::Application,
+                    &mut MockCommitter::new(Rc::clone(&state))
+                ),
+                Ok(())
+            );
+            assert!(state.borrow().staged.is_empty());
+            assert!(state.borrow().accepted.is_empty());
+            assert_eq!(observer.reports()[0].bytes_written, 0);
+        }
     }
 
     async fn invalid_length_response(_context: RequestContext) -> Result<Response, EdgeError> {
@@ -819,7 +1148,7 @@ mod tests {
         headers.append("set-cookie", "b=2".parse().expect("header"));
         let mut committer = platform::FastlyCommitter;
         let prepared = committer
-            .prepare(StatusCode::OK, &headers, true)
+            .prepare(StatusCode::OK, &headers, true, None)
             .expect("prepare raw response");
         let mut sink = committer.commit(prepared).expect("commit raw response");
         assert_eq!(sink.write(b"raw-egress"), Ok(10));
@@ -829,9 +1158,13 @@ mod tests {
     #[test]
     fn streams_empty_once_and_multiple_chunks_with_short_writes() {
         for (body, plan, expected) in [
-            (Body::empty(), VecDeque::new(), b"".as_slice()),
             (
-                Body::from("hello"),
+                Body::stream(stream::empty()),
+                VecDeque::new(),
+                b"".as_slice(),
+            ),
+            (
+                Body::stream(stream::iter([Bytes::from_static(b"hello")])),
                 VecDeque::from([Ok(2), Ok(3)]),
                 b"hello".as_slice(),
             ),
@@ -1088,13 +1421,13 @@ mod tests {
     fn zero_write_write_error_source_error_and_finish_error_abort_once() {
         let cases = [
             (
-                Body::from("x"),
+                Body::stream(stream::iter([Bytes::from_static(b"x")])),
                 VecDeque::from([Ok(0)]),
                 false,
                 ResponseEgressOutcome::TransportError,
             ),
             (
-                Body::from("x"),
+                Body::stream(stream::iter([Bytes::from_static(b"x")])),
                 VecDeque::from([Err(())]),
                 false,
                 ResponseEgressOutcome::TransportError,
@@ -1108,7 +1441,7 @@ mod tests {
                 ResponseEgressOutcome::SourceError,
             ),
             (
-                Body::empty(),
+                Body::stream(stream::empty()),
                 VecDeque::new(),
                 true,
                 ResponseEgressOutcome::TransportError,
@@ -1145,7 +1478,7 @@ mod tests {
         let reads = Arc::new(AtomicUsize::new(0));
         let clock_reads = Arc::clone(&reads);
         let clock = MonotonicClock::new(move || {
-            if clock_reads.fetch_add(1, Ordering::SeqCst) < 4 {
+            if clock_reads.fetch_add(1, Ordering::SeqCst) < 6 {
                 start
             } else {
                 deadline
@@ -1156,7 +1489,7 @@ mod tests {
         let state = Rc::new(RefCell::new(SinkState::default()));
         let mut committer = MockCommitter::new(Rc::clone(&state));
         let result = transmit_prepared(
-            prepared(Body::from("abc")),
+            prepared(Body::stream(stream::iter([Bytes::from_static(b"abc")]))),
             ResponseEgressPolicy {
                 write_deadline: Deadline::at_instant(deadline),
             },
@@ -1317,7 +1650,7 @@ mod tests {
         let reads = Arc::new(AtomicUsize::new(0));
         let clock_reads = Arc::clone(&reads);
         let clock = MonotonicClock::new(move || {
-            if clock_reads.fetch_add(1, Ordering::SeqCst) < 4 {
+            if clock_reads.fetch_add(1, Ordering::SeqCst) < 6 {
                 start
             } else {
                 deadline
@@ -1329,7 +1662,7 @@ mod tests {
         let mut committer = MockCommitter::new(Rc::clone(&state));
 
         let result = transmit_prepared(
-            prepared(Body::empty()),
+            prepared(Body::stream(stream::empty())),
             ResponseEgressPolicy {
                 write_deadline: Deadline::at_instant(deadline),
             },
@@ -1376,7 +1709,12 @@ mod tests {
             .header("content-length", "99")
             .body(body)
             .expect("response");
-        let prepared = prepare_response_egress(&Method::HEAD, response).expect("prepared");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::HostAutomatic,
+            &Method::HEAD,
+            response,
+        )
+        .expect("prepared");
         let start = MonotonicInstant::now();
         let clock = stable_clock(start);
         let observer = RecordingObserver::default();
@@ -1409,7 +1747,12 @@ mod tests {
                 .header("content-length", "99")
                 .body(Body::from("suppressed"))
                 .expect("response");
-            let prepared = prepare_response_egress(&method, response).expect("prepared");
+            let prepared = prepare_response_egress(
+                ResponseEgressFramingMode::HostAutomatic,
+                &method,
+                response,
+            )
+            .expect("prepared");
             let now = MonotonicInstant::now();
             let clock = stable_clock(now);
             let observer = RecordingObserver::default();
@@ -1443,7 +1786,12 @@ mod tests {
             .header("content-length", "3")
             .body(Body::from("abc"))
             .expect("response");
-        let prepared = prepare_response_egress(&Method::GET, response).expect("prepared");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::HostAutomatic,
+            &Method::GET,
+            response,
+        )
+        .expect("prepared");
         let now = MonotonicInstant::now();
         let clock = stable_clock(now);
         let observer = RecordingObserver::default();
@@ -1602,7 +1950,7 @@ mod tests {
         let reads = Arc::new(AtomicUsize::new(0));
         let clock_reads = Arc::clone(&reads);
         app.set_monotonic_clock(MonotonicClock::new(move || {
-            if clock_reads.fetch_add(1, Ordering::SeqCst) < 4 {
+            if clock_reads.fetch_add(1, Ordering::SeqCst) < 3 {
                 start
             } else {
                 safety_deadline
@@ -1631,7 +1979,8 @@ mod tests {
             Some(DeliveryError::Deadline)
         );
         assert!(state.borrow().accepted.is_empty());
-        assert_eq!(state.borrow().events.last(), Some(&"abandon"));
+        assert!(state.borrow().commits.is_empty());
+        assert!(state.borrow().events.is_empty());
         let reports = observer.reports();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].outcome, ResponseEgressOutcome::ConversionError);
@@ -1643,8 +1992,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_partial_write_and_finish_failure_preserve_conversion_cause() {
-        for finish_error in [false, true] {
+    fn fallback_staging_and_bulk_commit_failure_preserve_conversion_cause() {
+        for commit_error in [false, true] {
             let mut app = App::new(
                 RouterService::builder()
                     .get("/", invalid_length_response)
@@ -1668,12 +2017,7 @@ mod tests {
                 .expect("egress"),
             );
             let state = Rc::new(RefCell::new(SinkState {
-                finish: if finish_error {
-                    MockTerminal::Error
-                } else {
-                    MockTerminal::Success
-                },
-                write_plan: if finish_error {
+                write_plan: if commit_error {
                     VecDeque::new()
                 } else {
                     VecDeque::from([Ok(3), Err(())])
@@ -1681,6 +2025,9 @@ mod tests {
                 ..SinkState::default()
             }));
             let mut committer = MockCommitter::new(Rc::clone(&state));
+            if commit_error {
+                committer.commit_plan = VecDeque::from([MockCommit::Error]);
+            }
             assert!(send_egress_with(egress, &mut committer).error().is_some());
             let reports = observer.reports();
             assert_eq!(reports.len(), 1);
@@ -1690,9 +2037,9 @@ mod tests {
                 reports[0].fallback_disposition,
                 Some(ResponseEgressFallbackDisposition::Aborted)
             );
-            if !finish_error {
-                assert_eq!(reports[0].bytes_written, 3);
-            }
+            assert_eq!(reports[0].bytes_written, 0);
+            assert!(state.borrow().accepted.is_empty());
+            assert_eq!(state.borrow().commits.len(), usize::from(commit_error));
         }
     }
 

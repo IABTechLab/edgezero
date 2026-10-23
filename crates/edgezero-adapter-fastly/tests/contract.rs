@@ -22,6 +22,7 @@ mod secret_store_compile_check {
     reason = "ingress contracts are grouped after the provider fixture tests"
 )]
 mod tests {
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -55,7 +56,9 @@ mod tests {
     fn complete_envelope_with_report(
         envelope: ResponseEgressEnvelope,
     ) -> (Response, ResponseEgressReport) {
-        let Ok((prepared, _, mut attempt, clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+        else {
             panic!("begin response egress");
         };
         assert!(attempt.begin_writing());
@@ -672,7 +675,9 @@ mod tests {
         }
 
         fn complete_response(envelope: ResponseEgressEnvelope) -> Response {
-            let Ok((prepared, _policy, mut attempt, clock)) = envelope.begin() else {
+            let Ok((prepared, _policy, mut attempt, clock)) =
+                envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+            else {
                 panic!("test egress envelope must prepare");
             };
             assert!(attempt.begin_writing());

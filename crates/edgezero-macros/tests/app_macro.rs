@@ -51,6 +51,7 @@ mod configured_app {
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, Uri, Version};
     use edgezero_core::ingress::{AdmissionDecision, IngressBeginOutcome, IngressHeadParts};
     use edgezero_core::response_egress::ResponseEgressCompletion;
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use edgezero_core::time::MonotonicInstant;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,7 +109,9 @@ mod configured_app {
         let IngressBeginOutcome::Refused(response) = outcome else {
             panic!("configured policy must refuse ingress");
         };
-        let Ok((prepared, _, mut attempt, clock)) = response.begin() else {
+        let Ok((prepared, _, mut attempt, clock)) =
+            response.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("begin response egress");
         };
         assert!(attempt.begin_writing());

@@ -169,6 +169,13 @@ const expectedOutboundRows = [
 ]
 const expectedResponseEgressRows = [
   [
+    'buffered-response-content-length',
+    'Native',
+    'BestEffort',
+    'BestEffort',
+    'BestEffort',
+  ],
+  [
     'response-egress-abort',
     'BestEffort',
     'BestEffort',
@@ -1693,7 +1700,8 @@ const responseEgressProviderCaveats = new Map([
   [
     'Fastly',
     [
-      'accounts synchronous body-handle writes through `stream_to_client` close',
+      'hands buffered heads and complete bodies to the host together',
+      'account synchronous body-handle writes through `stream_to_client` close',
       'cannot preempt a blocked source poll or hostcall',
       'loses the body handle if `finish` itself fails',
     ],

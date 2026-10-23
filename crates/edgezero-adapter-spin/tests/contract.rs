@@ -555,6 +555,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     mod ingress_contract {
+        use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
         use std::collections::VecDeque;
         use std::future::{Future, poll_fn as poll_future, ready};
         use std::io;
@@ -1097,7 +1098,9 @@ mod tests {
         }
 
         fn capture_response(envelope: ResponseEgressEnvelope) -> Response {
-            let Ok((prepared, _policy, mut attempt, clock)) = envelope.begin() else {
+            let Ok((prepared, _policy, mut attempt, clock)) =
+                envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            else {
                 panic!("test egress envelope must prepare");
             };
             assert!(attempt.begin_writing());

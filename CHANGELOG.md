@@ -46,6 +46,24 @@ separately from the portable API and must be considered when declaring required 
 - Add TCP policy, upload, streaming, HEAD, raw-head, local-work, store/state and cleanup controls.
   These do not promote capabilities or replace consumer/hosted qualification.
 
+### Buffered Response Framing
+
+- Derive exact buffered response lengths, including empty and framework fallback bodies, on
+  Axum, Cloudflare and Spin. Preserve explicit source-length validation and lazy stream framing;
+  suppressed HEAD/204/205/304 bodies gain no core-derived length.
+- Stage Fastly buffers before a single SDK-equivalent Automatic handoff. Check deadlines around
+  each staging write; never pump, finish or abandon a body consumed by a successful bulk send.
+  Preserve strict body suppression and zero payload accounting. Do not restore HEAD bytes for
+  size inference: pinned local SDK controls expose HTTP/2 failures and forbidden 205 payloads;
+  exact HEAD/205 SDK parity remains unqualified pending hosted evidence. Host compression owns
+  final wire lengths; hint-bearing declared streams use
+  Automatic framing while retaining source-length enforcement.
+- Hard-cut framework egress preparation and `ResponseEgressEnvelope::begin` to require an explicit
+  `ResponseEgressFramingMode`; migrate demos, scaffolds and fixtures without compatibility aliases.
+- Add `buffered-response-content-length`: Native on Axum, BestEffort on serverless adapters pending
+  qualifying runtime/hosted evidence. Local probes do not complete hosted compression or consumer
+  parity gates, and do not alter the failed Fastly outbound body-read readiness gate.
+
 ### Bounded Local Config Snapshots
 
 - Hard-cut `ConfigStore::{get, get_bounded}` and matching handle APIs from owned `String`

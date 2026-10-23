@@ -63,6 +63,21 @@ fn main() -> Result<(), fastly::Error> {
     fastly::init();
     fixture_core::init_fixture_logging(telemetry)?;
     let mut request = fastly::Request::from_client();
+    if let Some(case) = request.get_path().strip_prefix("/progress/reference/") {
+        let source = fixture_core::qualification::framing::source(case)?;
+        let (parts, body) = source.into_parts();
+        let edgezero_core::Body::Once(bytes) = body else {
+            return Err(progress::probe_failure().into());
+        };
+        let mut response = fastly::Response::from_status(parts.status.as_u16())
+            .with_framing_headers_mode(fastly::http::FramingHeadersMode::Automatic);
+        for (name, value) in &parts.headers {
+            response.append_header(name.as_str(), value.as_bytes());
+        }
+        response.set_body(bytes.as_ref());
+        response.send_to_client();
+        return Ok(());
+    }
     let signal = json!({"source":"fastly-sdk-before-conversion", "has_body":request.has_body(),
         "known_length":request.try_get_body_mut().and_then(fastly::Body::known_length)});
     if let Some(target) = request.get_header_str("x-fixture-backend") {

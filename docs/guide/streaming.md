@@ -166,9 +166,25 @@ async fn dynamic_content() -> Response {
 }
 ```
 
-The provider owns the final wire framing. EdgeZero does not guarantee a particular HTTP/1 transfer
-coding; it normalizes framing and enforces the application's declared payload length before the
-adapter writes body bytes.
+Untransformed transmitted buffered bodies carry an exact `Content-Length`, including zero for an
+empty body. This includes framework errors and bounded fallbacks. A supplied buffered length must
+match the source or conversion fails before commitment. HEAD/204/205/304 do not gain a core-derived
+length. Fastly still delegates framing to Automatic, but does not restore suppressed HEAD bytes:
+doing so causes HTTP/2 protocol failures in the pinned local runtime. Exact known-buffer HEAD/205
+SDK parity remains an open gate; strict body suppression takes precedence.
+
+Streams remain progressive: without a declared length the provider chooses transfer framing;
+with a declared length EdgeZero enforces the source byte count and aborts a short or long stream.
+No stream is buffered or polled merely to guess its length. Fastly preloads actual buffered bodies
+before its non-streaming Automatic handoff, so an expired precommit deadline can produce the 504
+fallback instead of truncating an already-committed buffered response.
+
+Host transformations take precedence over source length. For Fastly host compression requested
+with `x-compress-hint`, Automatic framing may recompute or omit client-visible `Content-Length`.
+Any such hint also disables manual framing for declared streams; EdgeZero still validates their
+untransformed source length. It deliberately does not interpret ambiguous hint values in the guest.
+Hosted compression and HTTP/1.1/HTTP/2 SDK parity remain qualification gates, not claims inferred
+from Viceroy. See the [response egress capability matrix](/guide/capabilities#response-egress-matrix).
 
 ## Next Steps
 

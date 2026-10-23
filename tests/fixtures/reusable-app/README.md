@@ -107,6 +107,34 @@ scripts/smoke_test_reusable_app.sh --adapter all --suite outbound-progress
 scripts/smoke_test_reusable_app.sh --adapter all --suite smoke
 ```
 
+### Buffered Response Framing
+
+```sh
+scripts/smoke_test_reusable_app.sh --adapter all --suite response-framing
+```
+
+This separate suite reuses the progress artifacts and production entrypoints without changing
+the outbound scheduling/coding case counts. It requires curl; Fastly additionally requires an
+HTTP/2-enabled build for prior-knowledge h2c. Bounded captures record protocol, headers and body
+artifacts for literal buffered, empty, explicit-length, stream, suppressed and fallback sources.
+Fastly compares framing against a direct pinned-SDK Automatic reference for the same buffered
+sources over HTTP/1.1 and HTTP/2. The expired case uses a response-owned absolute deadline.
+Each case is attempted independently; a failed case does not hide later observations.
+HEAD captures are header-only and report payload observation as unavailable, not a measured empty
+body. Failed curl requests retain bounded diagnostics and partial capture artifacts. Short sources
+require a terminal HTTP/1 partial-transfer/empty-reply or HTTP/2 stream-error witness; a client
+timeout is not a passing abort. Both transfers must succeed before an SDK parity case can pass.
+
+The pinned local SDK's bodyless controls currently fail: restoring a known HEAD body breaks
+HTTP/2, forbidden-status SDK payloads are not consistently suppressed, and representation framing
+differs from strict suppression. Fastly and `--adapter all` therefore remain nonzero. These failed
+controls are retained as open parity gates, not normalized away or inferred to be hosted behavior.
+
+These are working-tree local characterization runs. They do not qualify hosted Fastly compression,
+deployed Workers header delivery, consumer response parity, or Fastly outbound G2/P1. Hosted
+compression still needs encoded wire counts, coding and decompressed source hashes for buffered
+and declared-stream sources on both HTTP versions; Viceroy does not supply that transformation.
+
 The default-off `progress` feature selects fixture-only SDK probes, independent of the hosted
 `qualification` application. Smoke also builds and runs these probes after its existing cases;
 their artifacts are staged separately. Eager single/batch SDK starts are compared with the

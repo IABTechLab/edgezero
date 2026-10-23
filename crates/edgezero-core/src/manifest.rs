@@ -84,6 +84,7 @@ impl BakedManifest {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Capability {
+    BufferedResponseContentLength,
     ConfigReadAllocationBounds,
     ConfigReadDeadlines,
     InboundReadDeadlines,
@@ -125,6 +126,7 @@ impl Capability {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::BufferedResponseContentLength => "buffered-response-content-length",
             Self::ConfigReadAllocationBounds => "config-read-allocation-bounds",
             Self::ConfigReadDeadlines => "config-read-deadlines",
             Self::InboundReadDeadlines => "inbound-read-deadlines",
@@ -1670,6 +1672,18 @@ env = "APP_TOKEN"
 "#;
 
     #[test]
+    fn buffered_response_content_length_capability_round_trip() {
+        let name = "buffered-response-content-length";
+        let capability: Capability =
+            serde_json::from_value(serde_json::json!(name)).expect("buffered framing capability");
+        assert_eq!(capability.as_str(), name);
+        assert_eq!(
+            serde_json::to_value(capability).expect("serialize capability"),
+            serde_json::json!(name)
+        );
+    }
+
+    #[test]
     fn provider_failure_diagnostics_capability_round_trip() {
         let name = "outbound-failure-diagnostics";
         let capability: Capability =
@@ -1705,6 +1719,7 @@ env = "APP_TOKEN"
         let source = r#"
 [capabilities]
 required = [
+    "buffered-response-content-length",
     "config-read-allocation-bounds",
     "config-read-deadlines",
     "inbound-read-deadlines",
@@ -1737,6 +1752,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
 "#;
         let loader = ManifestLoader::try_load_from_str(source).expect("capability manifest");
         let expected = [
+            Capability::BufferedResponseContentLength,
             Capability::ConfigReadAllocationBounds,
             Capability::ConfigReadDeadlines,
             Capability::InboundReadDeadlines,
@@ -1773,6 +1789,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             )
         );
         for (capability, expected_name) in expected.iter().zip([
+            "buffered-response-content-length",
             "config-read-allocation-bounds",
             "config-read-deadlines",
             "inbound-read-deadlines",

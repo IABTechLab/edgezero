@@ -144,7 +144,8 @@ impl Adapter for AxumCliAdapter {
             | Capability::ResponseEgressBackpressure
             | Capability::ResponseEgressCompletion
             | Capability::ResponseWriteDeadlines => CapabilitySupport::BestEffort,
-            Capability::InboundReadDeadlines
+            Capability::BufferedResponseContentLength
+            | Capability::InboundReadDeadlines
             | Capability::IngressAdmission
             | Capability::IngressAdmissionAbort
             | Capability::OutboundAuthorityOverride
@@ -888,6 +889,10 @@ mod tests {
             (
                 Capability::ResponseWriteDeadlines,
                 CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::BufferedResponseContentLength,
+                CapabilitySupport::Native,
             ),
             (Capability::OutboundHttp, CapabilitySupport::Native),
             (

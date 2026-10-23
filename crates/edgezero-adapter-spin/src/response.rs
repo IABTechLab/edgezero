@@ -21,6 +21,7 @@ use edgezero_core::response_egress::{
     RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET, ResponseEgressAttempt,
     ResponseEgressFallbackDisposition, ResponseEgressOutcome, ResponseEgressPolicy,
 };
+use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
 use edgezero_core::response_egress_framing::{
     PreparedResponseEgress, response_egress_source_error_category,
 };
@@ -372,9 +373,9 @@ mod platform {
 
     use super::{
         BodyStream, Bytes, Deadline, DeliveryError, EdgeError, EgressKind, EgressRace, HeaderMap,
-        IoFailure, IoFailureKind, LocalBoxFuture, MonotonicClock, SpinEgressCommitter,
-        SpinEgressIo, StartOutcome, StatusCode, WriteProgress, ensure_deadline,
-        poll_egress_operation, start_fallback, start_prepared,
+        IoFailure, IoFailureKind, LocalBoxFuture, MonotonicClock, ResponseEgressFramingMode,
+        SpinEgressCommitter, SpinEgressIo, StartOutcome, StatusCode, WriteProgress,
+        ensure_deadline, poll_egress_operation, start_fallback, start_prepared,
     };
     use std::future::{Future, IntoFuture as _};
     use std::pin::Pin;
@@ -880,7 +881,7 @@ mod platform {
     ) -> Result<SpinResponse, EdgeError> {
         let request_method = egress.request_method().clone();
         let mut committer = WasiCommitter;
-        let result = match egress.begin() {
+        let result = match egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength) {
             Ok((prepared, policy, attempt, clock)) => {
                 match start_prepared(
                     prepared,
@@ -1000,7 +1001,11 @@ where
         .checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
         .unwrap_or(started_at);
     let prepared = attempt
-        .prepare_response(request_method, fallback_response(original_cause))
+        .prepare_response(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            request_method,
+            fallback_response(original_cause),
+        )
         .map_err(|_error| {
             attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
             DeliveryError::from_outcome(original_cause)
@@ -1473,7 +1478,10 @@ mod tests {
             for detached in [false, true] {
                 let fixture = block_on(framing_fixture(reason, detached)).expect("fixture");
                 let method = fixture.envelope.request_method().clone();
-                let Err(failure) = fixture.envelope.begin() else {
+                let Err(failure) = fixture
+                    .envelope
+                    .begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+                else {
                     panic!("framing rejection")
                 };
                 let (attempt, clock, cause) = failure.into_parts();
@@ -1819,7 +1827,12 @@ mod tests {
             .header("content-length", "99")
             .body(body)
             .expect("response");
-        let prepared = prepare_response_egress(&Method::HEAD, core_response).expect("prepared");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::HEAD,
+            core_response,
+        )
+        .expect("prepared");
         let now = MonotonicInstant::now();
         let observer = RecordingObserver::default();
         let state = Rc::new(RefCell::new(MockState::default()));

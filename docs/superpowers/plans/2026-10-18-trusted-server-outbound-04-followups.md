@@ -761,6 +761,62 @@ Independent of F7b and D1b-D1d.
       adapter response contracts and required Fastly SDK/host-compression legs, then the task lint
       card. Suggested commit: `fix: align buffered response framing across adapters`.
 
+### F7a Implementation Checkpoint (2026-10-23)
+
+This is an implementation checkpoint, not full EZ-18 acceptance. The original task checklist stays
+open because hosted compression, frozen SDK parity and consumer response-diff evidence are still
+required. The approved outbound Interfaces and frozen policies are unchanged.
+
+- [x] Derive exact transmitted buffered lengths, including empty and framework fallback bodies,
+      after common header normalization on Axum, Cloudflare and Spin. Continue rejecting explicit
+      buffered mismatches and incrementally enforcing declared streamed source lengths.
+- [x] Hard-cut `ResponseEgressEnvelope::begin` and both preparation APIs to require an explicit
+      `ResponseEgressFramingMode`; migrate all adapters, demo tests and generated scaffolds without
+      compatibility wrappers.
+- [x] Preload transmitted Fastly buffers before one non-streaming Automatic handoff. Check the
+      injected deadline before/after each staging write, retain an observed timeout through a later
+      backwards clock sample, and count source bytes once only after successful bulk handoff.
+      Never pump, finish or abandon a body consumed by that handoff.
+- [x] Preserve strict HEAD/204/205/304 suppression. Original buffers and streams are dropped
+      without polling. Suppressed Fastly responses use an empty streaming handoff, preventing the
+      local HTTP/2 host from deriving a false zero-length representation. No unused HEAD restoration
+      field or accessor remains. Hint-bearing declared streams delegate wire framing to Automatic
+      while retaining source-length enforcement.
+- [x] Add the capability row, deterministic red/green controls, separate `response-framing`
+      suite, bounded failure captures, actual SDK reference controls and HTTP/2 client observations.
+      Preserve the existing scheduling/coding suite counts and failed Fastly G2 gate.
+- [ ] Freeze and qualify hosted Fastly HTTP/1.1/HTTP/2 compression and SDK parity, including encoded
+      wire counts and decompressed source hashes. Deployed Workers, frozen Spin evidence and the
+      consumer response-diff acceptance remain separate required legs.
+
+Nash investigated ownership, native preload/send and clock ordering. Russell investigated fixture
+reuse, wire evidence and false-positive assertions. The selected implementation separates explicit
+buffered framing from host-owned Automatic framing and keeps actual streaming progressive. Review
+found and fixed avoidable staging writes after deadline, loss of typed timeout provenance, and
+fixture predicates that could mistake a timeout or failed transfer for passing evidence.
+
+The first real Viceroy run invalidated the proposed HEAD-buffer restoration: HTTP/2 SDK controls
+with nonempty HEAD/204/304 bodies fail, and the SDK's 205 control transmits forbidden payload. The
+requester explicitly chose strict suppression and unqualified parity rather than reproducing that
+behavior. Those controls remain failed; this decision does not waive EZ-18.4 or infer hosted behavior.
+
+Local characterization records 80/80 production cases: 32 on Viceroy 0.21.0 across HTTP/1.1 and
+HTTP/2, plus 16 each on local Workers, Spin 4.1.0 and Axum. Nine of 18 Fastly SDK reference controls
+fail; `--adapter fastly` and `--adapter all` intentionally return nonzero. HEAD captures report
+payload observation as unavailable. Short-source cases require concrete terminal transfer failures,
+not client timeouts. The capability remains Native on Axum and BestEffort on all serverless targets.
+See [working-tree evidence](../../audits/evidence/2026-10-23-buffered-response-framing.json).
+
+Verification passes all five required Rust gates, 2,181 tests across 28 workspace binaries
+(823 core; one existing ignored test exercised separately by the generated-project gate), all
+56 native/WASM feature-compilation combinations, the target clippy variants, native adapter
+contracts, the demo and generated application checks, and documentation formatting/lint/build.
+The independent build-validator also passes the default native build and all three actual WASM
+builds. Its additional native all-features link check fails on Fastly SDK hostcalls. A clean
+detached build of pushed baseline `fe0fd4c9` fails with the identical 83 undefined symbols, so this
+is recorded as a pre-existing target-link limitation, not converted into a passing check or
+"fixed" with native ABI stubs. The temporary baseline worktree was removed without changing it.
+
 ### Task F7b: Bounded Synthesized Response Headers
 
 **Files:** Core `src/app.rs`, `response_egress.rs`; four adapter `src/response.rs` and contracts;

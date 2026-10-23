@@ -1001,6 +1001,7 @@ mod synthesis_tests {
     };
     use edgezero_core::context::RequestContext;
     use edgezero_core::key_value_store::{KvStore, NoopKvStore};
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use edgezero_core::router::RouterService;
     use edgezero_core::secret_store::{NoopSecretStore, SecretHandle};
     use std::collections::BTreeMap;
@@ -1200,7 +1201,9 @@ mod synthesis_tests {
             .expect("dispatch")
             .into_envelope()
             .expect("response envelope");
-        let Ok((prepared, _, mut attempt, egress_clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, egress_clock)) =
+            envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+        else {
             panic!("begin response egress");
         };
         assert!(attempt.begin_writing());

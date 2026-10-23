@@ -123,6 +123,17 @@ streaming and cleanup controls pass the root gates, all seven feature matrices, 
 demo/generated checks and local TCP smoke. Independent spec/quality reviews passed. Consumer
 parity, the conditional begun-request leg and exact-candidate qualification remain open.
 
+### F7a Buffered Framing Checkpoint
+
+The independent [F7a checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f7a-implementation-checkpoint-2026-10-23)
+derives eligible buffered lengths and hands transmitted Fastly buffers to the host before any
+stream writer can truncate them. Core preparation requires an explicit framing mode; demos and
+scaffolds migrate directly. Strict body suppression takes precedence over the pinned local SDK's
+failing bodyless reference controls. All 80 local production cases pass, while nine SDK parity
+controls remain failed and keep the full framing suite nonzero. Hosted compression, frozen
+candidate qualification and consumer comparisons remain open. No serverless capability is
+promoted, Fastly G2 remains failed, and neither full F7a nor P1 is complete.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

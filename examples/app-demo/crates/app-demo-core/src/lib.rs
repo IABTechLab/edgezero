@@ -306,6 +306,7 @@ edgezero_core::app!(
 
 #[cfg(test)]
 mod lifecycle_tests {
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -637,7 +638,9 @@ mod lifecycle_tests {
 
         assert_eq!(static_effects.load(Ordering::SeqCst), 0);
         assert_eq!(late_bound_effects.load(Ordering::SeqCst), 0);
-        let Ok((prepared_response, _, mut attempt, clock)) = envelope.begin() else {
+        let Ok((prepared_response, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("response egress begin");
         };
         assert_eq!(static_effects.load(Ordering::SeqCst), 0);
@@ -773,7 +776,9 @@ mod lifecycle_tests {
     }
 
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
-        let Ok((prepared, _, mut attempt, clock)) = envelope.begin() else {
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
             panic!("response egress begin");
         };
         assert!(attempt.begin_writing());

@@ -2043,7 +2043,8 @@ impl Adapter for FastlyCliAdapter {
             | Capability::OutboundCacheBypass
             | Capability::OutboundFailureDiagnostics
             | Capability::OutboundHeaderFidelity => CapabilitySupport::Native,
-            Capability::ConfigReadDeadlines
+            Capability::BufferedResponseContentLength
+            | Capability::ConfigReadDeadlines
             | Capability::InboundReadDeadlines
             | Capability::IngressAdmissionAbort
             | Capability::LazyStreamedResponsePassthrough
@@ -6903,6 +6904,10 @@ mod tests {
             ),
             (
                 Capability::ResponseWriteDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::BufferedResponseContentLength,
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundHttp, CapabilitySupport::BestEffort),

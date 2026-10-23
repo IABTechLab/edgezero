@@ -44,6 +44,16 @@ pub enum ResponseEgressFramingError {
     UnsupportedTunnel,
 }
 
+/// Selects whether buffered wire framing is explicit or owned by the platform sender.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum ResponseEgressFramingMode {
+    /// Derive an exact length for transmitted buffered bodies after normalization.
+    ExplicitBufferedLength,
+    /// Preserve source framing and let a known-buffer platform send choose wire framing.
+    HostAutomatic,
+}
+
 /// Canonical response head and body ready for one adapter-owned writer.
 #[doc(hidden)]
 pub struct PreparedResponseEgress {
@@ -80,6 +90,7 @@ impl PreparedResponseEgress {
 #[doc(hidden)]
 #[inline]
 pub fn prepare_response_egress(
+    framing: ResponseEgressFramingMode,
     request_method: &Method,
     mut response: Response,
 ) -> Result<PreparedResponseEgress, ResponseEgressFramingError> {
@@ -117,6 +128,17 @@ pub fn prepare_response_egress(
     response.headers_mut().remove(TRANSFER_ENCODING);
     if content_length_was_nominated {
         declared_length = None;
+    }
+
+    if framing == ResponseEgressFramingMode::ExplicitBufferedLength
+        && !suppress_body
+        && declared_length.is_none()
+        && let Body::Once(bytes) = response.body()
+    {
+        declared_length = Some(
+            u64::try_from(bytes.len())
+                .map_err(|_error| ResponseEgressFramingError::ContentLengthMismatch)?,
+        );
     }
 
     if let Some(length) = declared_length {
@@ -332,12 +354,14 @@ mod tests {
 
     use crate::body::Body;
     use crate::error::{BadGatewayDecodeReason, BadGatewayReason, EdgeError};
+    use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
     use crate::http::{HeaderValue, Method, Response, StatusCode, response_builder};
     use crate::response::IntoResponse as _;
 
     use super::{
-        ResponseEgressBodyLengthError, ResponseEgressFramingError, prepare_response_egress,
-        response_egress_body_length_error, response_egress_source_error_category,
+        ResponseEgressBodyLengthError, ResponseEgressFramingError, ResponseEgressFramingMode,
+        prepare_response_egress, response_egress_body_length_error,
+        response_egress_source_error_category,
     };
 
     struct DropSignal(Rc<Cell<usize>>);
@@ -350,6 +374,94 @@ mod tests {
         fn drop(&mut self) {
             self.0.set(self.0.get().saturating_add(1));
         }
+    }
+
+    #[test]
+    fn buffered_framing_respects_suppression_and_host_transform() {
+        for bytes in [Bytes::from_static(b"abcdef"), Bytes::new()] {
+            let length = bytes.len().to_string();
+            let response = response_builder()
+                .body(Body::from_bytes(bytes))
+                .expect("response");
+            let prepared = prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::GET,
+                response,
+            )
+            .expect("buffered response");
+            assert!(prepared.transmits_body());
+            assert_eq!(
+                prepared.declared_length().map(|value| value.to_string()),
+                Some(length.clone())
+            );
+            let converted = prepared.into_response();
+            assert_eq!(
+                converted
+                    .headers()
+                    .get(CONTENT_LENGTH)
+                    .expect("derived length"),
+                length.as_str()
+            );
+            assert!(!converted.headers().contains_key(TRANSFER_ENCODING));
+        }
+
+        for (method, status) in [
+            (Method::HEAD, StatusCode::OK),
+            (Method::GET, StatusCode::NO_CONTENT),
+            (Method::GET, StatusCode::RESET_CONTENT),
+            (Method::GET, StatusCode::NOT_MODIFIED),
+        ] {
+            let response = response_builder()
+                .status(status)
+                .body(Body::from("abcdef"))
+                .expect("bodyless response");
+            let prepared = prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &method,
+                response,
+            )
+            .expect("suppressed body");
+            assert!(!prepared.transmits_body());
+            assert!(
+                !prepared
+                    .into_response()
+                    .headers()
+                    .contains_key(CONTENT_LENGTH)
+            );
+        }
+
+        let stream = poll_fn(|_| Poll::Pending::<Option<Result<Bytes, EdgeError>>>);
+        let streamed_response = response_builder()
+            .body(Body::from_stream(stream))
+            .expect("stream response");
+        let prepared_stream = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            streamed_response,
+        )
+        .expect("stream remains lazy");
+        assert_eq!(prepared_stream.declared_length(), None);
+
+        let transformed_response = response_builder()
+            .header("x-compress-hint", "on")
+            .header(CONTENT_LENGTH, "6")
+            .body(Body::from("abcdef"))
+            .expect("host-transform source");
+        let prepared_transform = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            transformed_response,
+        )
+        .expect("validated source length");
+        assert_eq!(prepared_transform.declared_length(), Some(6));
+        assert_eq!(
+            prepared_transform
+                .into_response()
+                .headers()
+                .get(CONTENT_LENGTH)
+                .expect("source length"),
+            "6"
+        );
     }
 
     #[test]
@@ -367,9 +479,13 @@ mod tests {
             response
                 .headers_mut()
                 .append("retry-after", HeaderValue::from_static("240"));
-            let prepared = prepare_response_egress(&Method::POST, response)
-                .expect("prepared")
-                .into_response();
+            let prepared = prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::POST,
+                response,
+            )
+            .expect("prepared")
+            .into_response();
             assert_eq!(prepared.status(), StatusCode::PAYLOAD_TOO_LARGE);
             assert!(!prepared.headers().contains_key("retry-after"));
         }
@@ -378,9 +494,13 @@ mod tests {
             .header("retry-after", "120")
             .body(Body::empty())
             .expect("upstream response");
-        let prepared_upstream = prepare_response_egress(&Method::POST, upstream)
-            .expect("prepared")
-            .into_response();
+        let prepared_upstream = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::POST,
+            upstream,
+        )
+        .expect("prepared")
+        .into_response();
         assert_eq!(
             prepared_upstream
                 .headers()
@@ -391,9 +511,13 @@ mod tests {
         let config = EdgeError::config_out_of_date("stale", "field")
             .into_response()
             .expect("config response");
-        let prepared_config = prepare_response_egress(&Method::POST, config)
-            .expect("prepared")
-            .into_response();
+        let prepared_config = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::POST,
+            config,
+        )
+        .expect("prepared")
+        .into_response();
         assert_eq!(
             prepared_config
                 .headers()
@@ -417,7 +541,11 @@ mod tests {
         response: Response,
         failure_message: &str,
     ) -> ResponseEgressFramingError {
-        let Err(error) = prepare_response_egress(method, response) else {
+        let Err(error) = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            method,
+            response,
+        ) else {
             panic!("{failure_message}");
         };
         error
@@ -435,8 +563,12 @@ mod tests {
             .body(Body::from("hello"))
             .expect("response");
 
-        let prepared =
-            prepare_response_egress(&Method::GET, source_response).expect("prepared response");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            source_response,
+        )
+        .expect("prepared response");
         assert!(prepared.transmits_body());
         assert_eq!(prepared.declared_length(), Some(5));
         let converted_response = prepared.into_response();
@@ -453,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_nominated_content_length_stays_removed() {
+    fn connection_nominated_content_length_is_not_reused_for_framing() {
         let source_response = response_builder()
             .status(StatusCode::OK)
             .header("connection", "content-length")
@@ -461,14 +593,58 @@ mod tests {
             .body(Body::from("hello"))
             .expect("response");
 
-        let prepared =
-            prepare_response_egress(&Method::GET, source_response).expect("prepared response");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            source_response,
+        )
+        .expect("prepared response");
+        assert_eq!(prepared.declared_length(), Some(5));
+        assert_eq!(prepared.into_response().headers()[CONTENT_LENGTH], "5");
+    }
+
+    #[test]
+    fn host_automatic_preserves_suppression_and_does_not_derive_wire_length() {
+        for status in [
+            StatusCode::OK,
+            StatusCode::NO_CONTENT,
+            StatusCode::RESET_CONTENT,
+            StatusCode::NOT_MODIFIED,
+        ] {
+            let response = response_builder()
+                .status(status)
+                .body(Body::from("abcdef"))
+                .expect("response");
+            let prepared = prepare_response_egress(
+                ResponseEgressFramingMode::HostAutomatic,
+                &Method::HEAD,
+                response,
+            )
+            .expect("prepared");
+            assert!(!prepared.transmits_body());
+            assert_eq!(prepared.declared_length(), None);
+            assert_eq!(
+                prepared.into_response().body().as_bytes(),
+                Some(b"".as_slice())
+            );
+        }
+        let response = response_builder()
+            .header("x-compress-hint", "on")
+            .body(Body::from("abcdef"))
+            .expect("response");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::HostAutomatic,
+            &Method::GET,
+            response,
+        )
+        .expect("host-owned framing");
+        assert!(prepared.transmits_body());
         assert_eq!(prepared.declared_length(), None);
         assert!(
             !prepared
                 .into_response()
                 .headers()
-                .contains_key("content-length")
+                .contains_key(CONTENT_LENGTH)
         );
     }
 
@@ -490,9 +666,13 @@ mod tests {
             .body(Body::from("body"))
             .expect("response");
 
-        let converted_response = prepare_response_egress(&Method::GET, source_response)
-            .expect("prepared response")
-            .into_response();
+        let converted_response = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            source_response,
+        )
+        .expect("prepared response")
+        .into_response();
         for name in [
             "connection",
             "x-first",
@@ -520,9 +700,13 @@ mod tests {
             .body(Body::from("hello"))
             .expect("response");
         assert_eq!(
-            prepare_response_egress(&Method::GET, spaced)
-                .expect("whitespace is valid")
-                .declared_length(),
+            prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::GET,
+                spaced
+            )
+            .expect("whitespace is valid")
+            .declared_length(),
             Some(5)
         );
 
@@ -549,12 +733,16 @@ mod tests {
                 Ok(Bytes::from_static(b"cd")),
             ])))
             .expect("response");
-        let mut body = prepare_response_egress(&Method::GET, response)
-            .expect("prepared response")
-            .into_response()
-            .into_body()
-            .into_stream()
-            .expect("stream");
+        let mut body = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            response,
+        )
+        .expect("prepared response")
+        .into_response()
+        .into_body()
+        .into_stream()
+        .expect("stream");
 
         block_on(async {
             assert_eq!(body.next().await.expect("first").expect("chunk"), "ab");
@@ -592,7 +780,12 @@ mod tests {
             .body(body)
             .expect("response");
 
-        let prepared = prepare_response_egress(&Method::HEAD, response).expect("prepared response");
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::HEAD,
+            response,
+        )
+        .expect("prepared response");
 
         assert!(!prepared.transmits_body());
         assert_eq!(prepared.declared_length(), Some(99));
@@ -618,12 +811,16 @@ mod tests {
                 Ok(Bytes::from_static(b"cd")),
             ])))
             .expect("response");
-        let mut overrun_stream = prepare_response_egress(&Method::GET, overrun)
-            .expect("prepared response")
-            .into_response()
-            .into_body()
-            .into_stream()
-            .expect("stream body");
+        let mut overrun_stream = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            overrun,
+        )
+        .expect("prepared response")
+        .into_response()
+        .into_body()
+        .into_stream()
+        .expect("stream body");
         block_on(async {
             assert_eq!(
                 overrun_stream
@@ -652,12 +849,16 @@ mod tests {
                 b"ab",
             ))])))
             .expect("response");
-        let mut early_eof_stream = prepare_response_egress(&Method::GET, early_eof)
-            .expect("prepared response")
-            .into_response()
-            .into_body()
-            .into_stream()
-            .expect("stream body");
+        let mut early_eof_stream = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            early_eof,
+        )
+        .expect("prepared response")
+        .into_response()
+        .into_body()
+        .into_stream()
+        .expect("stream body");
         block_on(async {
             assert_eq!(
                 early_eof_stream
@@ -691,12 +892,16 @@ mod tests {
                 &overrun_drops,
             ))
             .expect("response");
-        let mut overrun_stream = prepare_response_egress(&Method::GET, overrun)
-            .expect("prepared response")
-            .into_response()
-            .into_body()
-            .into_stream()
-            .expect("stream body");
+        let mut overrun_stream = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            overrun,
+        )
+        .expect("prepared response")
+        .into_response()
+        .into_body()
+        .into_stream()
+        .expect("stream body");
         block_on(overrun_stream.next())
             .expect("overrun result")
             .expect_err("overrun error");
@@ -711,12 +916,16 @@ mod tests {
                 &source_drops,
             ))
             .expect("response");
-        let mut source_stream = prepare_response_egress(&Method::GET, source_error)
-            .expect("prepared response")
-            .into_response()
-            .into_body()
-            .into_stream()
-            .expect("stream body");
+        let mut source_stream = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            source_error,
+        )
+        .expect("prepared response")
+        .into_response()
+        .into_body()
+        .into_stream()
+        .expect("stream body");
         block_on(source_stream.next())
             .expect("source result")
             .expect_err("source error");
@@ -728,12 +937,16 @@ mod tests {
             .header("content-length", "1")
             .body(tracked_body(Vec::new(), &eof_drops))
             .expect("response");
-        let mut eof_stream = prepare_response_egress(&Method::GET, early_eof)
-            .expect("prepared response")
-            .into_response()
-            .into_body()
-            .into_stream()
-            .expect("stream body");
+        let mut eof_stream = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            early_eof,
+        )
+        .expect("prepared response")
+        .into_response()
+        .into_body()
+        .into_stream()
+        .expect("stream body");
         block_on(eof_stream.next())
             .expect("early EOF result")
             .expect_err("early EOF error");
@@ -779,8 +992,12 @@ mod tests {
             .header("content-length", "9")
             .body(Body::from("ignored"))
             .expect("response");
-        let no_content_prepared =
-            prepare_response_egress(&Method::HEAD, no_content).expect("204 response");
+        let no_content_prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::HEAD,
+            no_content,
+        )
+        .expect("204 response");
         assert!(!no_content_prepared.transmits_body());
         assert_eq!(no_content_prepared.declared_length(), None);
         assert!(
@@ -810,8 +1027,12 @@ mod tests {
             .header("content-length", "9")
             .body(Body::from("ignored"))
             .expect("response");
-        let not_modified_prepared =
-            prepare_response_egress(&Method::GET, not_modified).expect("304 response");
+        let not_modified_prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            not_modified,
+        )
+        .expect("304 response");
         assert!(!not_modified_prepared.transmits_body());
         assert_eq!(not_modified_prepared.declared_length(), Some(9));
 
@@ -820,8 +1041,12 @@ mod tests {
             .header("content-length", "0")
             .body(Body::empty())
             .expect("response");
-        let zero_reset_prepared =
-            prepare_response_egress(&Method::GET, zero_reset_content).expect("zero-length 205");
+        let zero_reset_prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            zero_reset_content,
+        )
+        .expect("zero-length 205");
         assert!(!zero_reset_prepared.transmits_body());
         assert_eq!(zero_reset_prepared.declared_length(), Some(0));
 
@@ -872,9 +1097,13 @@ mod tests {
             .header("transfer-encoding", "chunked")
             .body(Body::from("body"))
             .expect("response");
-        let transfer_response = prepare_response_egress(&Method::GET, transfer_encoded)
-            .expect("response")
-            .into_response();
+        let transfer_response = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            transfer_encoded,
+        )
+        .expect("response")
+        .into_response();
         assert!(
             !transfer_response
                 .headers()

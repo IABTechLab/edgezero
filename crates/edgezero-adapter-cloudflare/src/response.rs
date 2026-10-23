@@ -18,6 +18,7 @@ use edgezero_core::response_egress::{
     RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET, ResponseEgressAttempt,
     ResponseEgressFallbackDisposition, ResponseEgressOutcome, ResponseEgressPolicy,
 };
+use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
 use edgezero_core::response_egress_framing::{
     PreparedResponseEgress, response_egress_source_error_category,
 };
@@ -392,7 +393,11 @@ where
         .checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
         .unwrap_or(started_at);
     let prepared = attempt
-        .prepare_response(request_method, fallback_response(original_cause))
+        .prepare_response(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            request_method,
+            fallback_response(original_cause),
+        )
         .map_err(|_error| {
             attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
             DeliveryError::from_outcome(original_cause)
@@ -438,8 +443,8 @@ mod platform {
     use super::{
         BodyStream, Bytes, CloudflareEgressCommitter, CloudflareEgressIo, Deadline, DeliveryError,
         Duration, EdgeError, EgressKind, HeaderMap, IoFailure, IoFailureKind, LocalBoxFuture,
-        MonotonicClock, StartOutcome, StatusCode, ensure_deadline, manual_response_encoding,
-        start_fallback, start_prepared,
+        MonotonicClock, ResponseEgressFramingMode, StartOutcome, StatusCode, ensure_deadline,
+        manual_response_encoding, start_fallback, start_prepared,
     };
     use std::future::Future;
     use std::sync::Arc;
@@ -782,7 +787,7 @@ mod platform {
             context: runtime.context,
             signal: runtime.signal,
         };
-        let result = match egress.begin() {
+        let result = match egress.begin(ResponseEgressFramingMode::ExplicitBufferedLength) {
             Ok((prepared, policy, attempt, clock)) => {
                 match start_prepared(
                     prepared,
@@ -1219,6 +1224,7 @@ mod tests {
 
     fn prepared(method: &Method, body: Body) -> PreparedResponseEgress {
         prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
             method,
             response_builder()
                 .status(StatusCode::OK)
@@ -1244,7 +1250,10 @@ mod tests {
             for detached in [false, true] {
                 let fixture = block_on(framing_fixture(reason, detached)).expect("fixture");
                 let method = fixture.envelope.request_method().clone();
-                let Err(failure) = fixture.envelope.begin() else {
+                let Err(failure) = fixture
+                    .envelope
+                    .begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+                else {
                     panic!("framing rejection")
                 };
                 let (attempt, clock, cause) = failure.into_parts();
@@ -1357,14 +1366,15 @@ mod tests {
 
     #[test]
     fn once_and_multi_chunk_bodies_account_only_accepted_writes() {
-        for (body, has_declared_length) in [
-            (Body::from(Bytes::from_static(b"once")), false),
+        for (body, declared_length) in [
+            (Body::from(Bytes::from_static(b"once")), Some(4)),
+            (Body::empty(), Some(0)),
             (
                 Body::stream(stream::iter([
                     Bytes::from_static(b"one"),
                     Bytes::from_static(b"two"),
                 ])),
-                false,
+                None,
             ),
         ] {
             let now = MonotonicInstant::now();
@@ -1384,7 +1394,7 @@ mod tests {
                 panic!("response must start");
             };
             assert!(response.transmits_body);
-            assert_eq!(response.declared_length.is_some(), has_declared_length);
+            assert_eq!(response.declared_length, declared_length);
             assert_eq!(state.borrow().closes, 1);
             let expected = state.borrow().writes.iter().map(Vec::len).sum::<usize>();
             let reports = observer.reports();

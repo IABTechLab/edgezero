@@ -81,6 +81,12 @@ pub fn router(
             dispatch_returned,
         }))
         .get("/progress/framing-trailers", framing_trailers)
+        .get("/progress/framing/{case}", super::framing::probe)
+        .route(
+            "/progress/framing/{case}",
+            Method::HEAD,
+            super::framing::probe,
+        )
         .get("/progress/{case}", progress)
         .post("/progress/{case}", progress)
         .post("/progress/overflow/{case}", super::overflow::probe)

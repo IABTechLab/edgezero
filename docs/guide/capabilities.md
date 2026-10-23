@@ -217,14 +217,27 @@ rather than silently restoring them. Axum also completes assembly before binding
 
 ## Response Egress Matrix
 
-| Capability                     | Axum       | Cloudflare | Fastly     | Spin       |
-| ------------------------------ | ---------- | ---------- | ---------- | ---------- |
-| `response-egress-abort`        | BestEffort | BestEffort | BestEffort | BestEffort |
-| `response-egress-backpressure` | BestEffort | BestEffort | BestEffort | BestEffort |
-| `response-egress-completion`   | BestEffort | BestEffort | BestEffort | BestEffort |
-| `response-write-deadlines`     | BestEffort | BestEffort | BestEffort | BestEffort |
+| Capability                         | Axum       | Cloudflare | Fastly     | Spin       |
+| ---------------------------------- | ---------- | ---------- | ---------- | ---------- |
+| `buffered-response-content-length` | Native     | BestEffort | BestEffort | BestEffort |
+| `response-egress-abort`            | BestEffort | BestEffort | BestEffort | BestEffort |
+| `response-egress-backpressure`     | BestEffort | BestEffort | BestEffort | BestEffort |
+| `response-egress-completion`       | BestEffort | BestEffort | BestEffort | BestEffort |
+| `response-write-deadlines`         | BestEffort | BestEffort | BestEffort | BestEffort |
 
-These cells describe transport-observable client-response delivery, not response conversion.
+`buffered-response-content-length` covers untransformed transmitted buffered payloads, including
+empty and framework-generated bodies. Core derives their exact length on Axum, Cloudflare and
+Spin; Fastly stages the complete native buffer before its SDK-equivalent Automatic handoff.
+HEAD/204/205/304 do not gain a core-derived length. Suppressed buffers are dropped and streams
+are never polled. Exact Fastly known-buffer HEAD/205 SDK parity remains unqualified: local SDK
+controls expose forbidden payload delivery and HTTP/2 protocol failures. The requester approved
+preserving strict suppression rather than restoring a HEAD body merely to reproduce SDK framing.
+Host transformations may recompute or omit the wire length. Serverless cells remain `BestEffort`
+pending frozen qualifying evidence: hosted Fastly HTTP/1.1 and HTTP/2 compression/parity, deployed
+Workers header delivery, and the pinned Spin runtime check. Local characterization alone is not
+hosted qualification.
+
+The remaining cells describe transport-observable client-response delivery, not response conversion.
 Every adapter now owns a response coordinator through its strongest available host boundary,
 uses the application's monotonic clock, applies one absolute write deadline, and emits one
 terminal report. The boundaries remain `BestEffort` because none proves end-client receipt:
@@ -233,7 +246,9 @@ terminal report. The boundaries remain `BestEffort` because none proves end-clie
   closes the owned HTTP/1 connection on deadline, and reports clean source EOF as `HostHandoff`.
 - Cloudflare awaits JavaScript writer promises, races request abort/deadline signals, and keeps the
   coordinator alive with `waitUntil`; deployed disconnect and completion timing remain unproved.
-- Fastly accounts synchronous body-handle writes through `stream_to_client` close, but cannot
+- Fastly hands buffered heads and complete bodies to the host together, accounting transmitted
+  source bytes once at successful handoff; this is not proof of client receipt. Actual streams
+  account synchronous body-handle writes through `stream_to_client` close, but Fastly cannot
   preempt a blocked source poll or hostcall and loses the body handle if `finish` itself fails.
 - Spin owns the WASI response/body/result writers through handoff and races pending operations
   against its timer. An early successful host response-result observation is retired once without

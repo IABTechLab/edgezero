@@ -1146,7 +1146,12 @@ mod tests {
         body: &[u8],
     ) {
         assert_eq!(response.status(), status);
-        assert_eq!(response.headers(), &terminal_response_headers(marker));
+        let mut expected_headers = terminal_response_headers(marker);
+        expected_headers.insert(
+            "content-length",
+            body.len().to_string().parse().expect("body length"),
+        );
+        assert_eq!(response.headers(), &expected_headers);
         assert_eq!(
             to_bytes(response.into_body(), usize::MAX)
                 .await
