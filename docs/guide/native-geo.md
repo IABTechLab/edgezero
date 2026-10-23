@@ -204,6 +204,13 @@ The unmanaged request converter, legacy dispatch, Fastly, Cloudflare, and Spin e
 `NoSelection`. Returning a context to an ordinary request and constructing a new unmanaged
 context does not preserve its private Geo result.
 
+For application-owned response headers, use middleware on `Ok(Response)` and install
+`App::set_admitted_error_response_finalizer` for admitted dispatch errors. This optional
+synchronous callback receives `&GeoOutcome` and `&mut Response` after the existing error
+renderer, without resolving the provider again. EdgeZero preserves failure classification,
+rendered status, and required protocol headers. Detached and pre-admission errors have no
+resolved outcome and bypass the callback.
+
 ## CloudFront assertion rules
 
 CloudFront must generate both `CloudFront-Viewer-Country` and

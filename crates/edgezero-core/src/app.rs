@@ -33,6 +33,9 @@ const DEFAULT_APP_NAME: &str = "EdgeZero App";
 pub const FASTLY_ADAPTER: &str = "fastly";
 /// Canonical adapter name for the Spin adapter.
 pub const SPIN_ADAPTER: &str = "spin";
+type AdmittedErrorResponseFinalizer =
+    Arc<dyn Fn(&GeoOutcome, &mut Response) + Send + Sync + 'static>;
+
 enum ErrorResponseRenderer {
     Custom(Arc<dyn Fn(EdgeError) -> Response + Send + Sync + 'static>),
     Default,
@@ -48,6 +51,7 @@ pub enum FrameworkErrorDetail {
 
 /// Lightweight container around a `RouterService` that can be extended via hook implementations.
 pub struct App {
+    admitted_error_response_finalizer: Option<AdmittedErrorResponseFinalizer>,
     config_extraction_limits: ConfigExtractionLimits,
     detached_response_egress_decision_factory: DetachedResponseEgressDecisionFactory,
     error_response_renderer: ErrorResponseRenderer,
@@ -291,6 +295,7 @@ impl App {
         let request_start = prepared.request_start();
         let route = prepared.route_metadata().cloned();
         let (resolved, admitted, completion) = prepared.into_parts();
+        let error_geo = geo.clone();
         let (result, route_error, mut failure) = self
             .router
             .dispatch_resolved_outcome(
@@ -317,7 +322,20 @@ impl App {
                 } else {
                     None
                 };
-                self.render_error_response_with_message(error, fixed)
+                let required_headers = self
+                    .admitted_error_response_finalizer
+                    .as_ref()
+                    .and_then(|_| error.required_response_headers().ok());
+                let mut response = self.render_error_response_with_message(error, fixed);
+                if let Some(finalizer) = &self.admitted_error_response_finalizer {
+                    let status = response.status();
+                    finalizer(&error_geo, &mut response);
+                    *response.status_mut() = status;
+                    if let Some(headers) = required_headers {
+                        response.headers_mut().extend(headers);
+                    }
+                }
+                response
             }
         };
         self.response_egress_envelope(response, request_method, request_start, route, completion)
@@ -479,6 +497,24 @@ impl App {
         &self.router
     }
 
+    /// Installs a synchronous finalizer for rendered admitted dispatch errors only.
+    ///
+    /// The callback runs exactly once after the configured error renderer, with the same
+    /// immutable geographic outcome supplied to the admitted request context. It does not
+    /// resolve geography again. Use middleware to finalize successful dispatch responses,
+    /// including application-returned error statuses. Detached errors, pre-admission errors,
+    /// and admitted body-conversion errors without a resolved outcome bypass this hook.
+    ///
+    /// `EdgeZero` preserves failure classification and reapplies the rendered status and
+    /// mandatory protocol headers after the callback. With no finalizer, behavior is unchanged.
+    #[inline]
+    pub fn set_admitted_error_response_finalizer<Finalizer>(&mut self, finalizer: Finalizer)
+    where
+        Finalizer: Fn(&GeoOutcome, &mut Response) + Send + Sync + 'static,
+    {
+        self.admitted_error_response_finalizer = Some(Arc::new(finalizer));
+    }
+
     /// Installs validated typed-config extraction limits.
     ///
     /// # Errors
@@ -591,6 +627,7 @@ impl App {
         S: Into<String>,
     {
         Self {
+            admitted_error_response_finalizer: None,
             config_extraction_limits: ConfigExtractionLimits::default(),
             detached_response_egress_decision_factory: Arc::new(|head| {
                 DetachedResponseEgressDecision::Send {
@@ -760,6 +797,7 @@ mod tests {
     use crate::config_store::ConfigExtractionLimits;
     use crate::context::RequestContext;
     use crate::error::{EdgeError, StoreExtractionReason};
+    use crate::geo::{GeoInput, GeoProvider, GeoResolution};
     use crate::http::{
         HeaderMap, HeaderValue, Method, StatusCode, Version, request_builder, response_builder,
     };
@@ -806,6 +844,15 @@ mod tests {
     struct CountingMiddleware(Arc<AtomicUsize>);
 
     struct GrantDropProbe(Arc<AtomicUsize>);
+
+    struct CountingGeoProvider(GeoResolution, Arc<AtomicUsize>);
+
+    impl GeoProvider for CountingGeoProvider {
+        fn resolve(&self, _input: &GeoInput) -> GeoResolution {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            self.0.clone()
+        }
+    }
 
     #[derive(Clone)]
     struct AppEgressObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
@@ -2183,6 +2230,245 @@ mod tests {
             response.body().as_bytes().unwrap(),
             b"private parse failure"
         );
+    }
+
+    #[test]
+    fn admitted_error_finalizer_retains_geo_without_resolving_again() {
+        use crate::geo::{
+            CountryCode, GeoAssertion, GeoLocation, GeoProviderId, GeoSource, GeoStatus,
+            GeoTrustBasis, GeoUnavailableReason,
+        };
+
+        for resolution in [
+            GeoResolution::Located(GeoLocation::new(CountryCode::new("US").unwrap(), None)),
+            GeoResolution::MissingMetadata,
+        ] {
+            let provider_calls = Arc::new(AtomicUsize::new(0));
+            let provider = CountingGeoProvider(resolution, Arc::clone(&provider_calls));
+            let status = match provider.resolve(&GeoInput {
+                country: GeoAssertion::absent(),
+                subdivision: GeoAssertion::absent(),
+            }) {
+                GeoResolution::Located(location) => GeoStatus::Located {
+                    location,
+                    source: GeoSource::CloudFront,
+                    trust_basis: GeoTrustBasis::DeclaredProtectedAlb,
+                },
+                GeoResolution::MissingMetadata => {
+                    GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata)
+                }
+                GeoResolution::Error(_) => panic!("unexpected provider error"),
+            };
+            let geo = GeoOutcome::Selected {
+                provider: GeoProviderId::new("counted").unwrap(),
+                status,
+            };
+            let handler_geo = geo.clone();
+            let router = RouterService::builder()
+                .get("/fails", move |mut ctx: RequestContext| {
+                    let expected = handler_geo.clone();
+                    async move {
+                        assert_eq!(ctx.geo(), &expected);
+                        ctx.headers_mut()
+                            .insert("cloudfront-viewer-country", HeaderValue::from_static("DE"));
+                        ctx.extensions_mut().insert(GeoOutcome::NoSelection);
+                        assert_eq!(ctx.geo(), &expected);
+                        Err::<&str, _>(EdgeError::config_out_of_date("private-sentinel", "field"))
+                    }
+                })
+                .build();
+            let mut app = App::new(router);
+            let renderer_calls = Arc::new(AtomicUsize::new(0));
+            let rendered = Arc::clone(&renderer_calls);
+            app.set_error_response_renderer(move |error| {
+                rendered.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(error.message(), "private-sentinel");
+                Response::new(Body::from("application-owned"))
+            });
+            let finalizer_calls = Arc::new(AtomicUsize::new(0));
+            let finalized = Arc::clone(&finalizer_calls);
+            let finalizer_geo = geo.clone();
+            app.set_admitted_error_response_finalizer(move |outcome, response| {
+                finalized.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(outcome, &finalizer_geo);
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.headers()["retry-after"], "60");
+                assert_eq!(response.body().as_bytes().unwrap(), b"application-owned");
+                response
+                    .headers_mut()
+                    .insert("x-geo-finalized", HeaderValue::from_static("yes"));
+                response.headers_mut().remove("retry-after");
+                *response.status_mut() = StatusCode::OK;
+            });
+            let request = request_builder().uri("/fails").body(Body::empty()).unwrap();
+            let head = IngressHeadParts::from_request(
+                &request,
+                IngressHeadAccounting::HostManaged,
+                IngressFraming::HostManaged,
+            );
+            let IngressBeginOutcome::Admitted(prepared) =
+                app.begin_ingress(head, app.monotonic_now()).unwrap()
+            else {
+                panic!("admission");
+            };
+            let envelope = block_on(app.dispatch_admitted_with_geo(
+                prepared,
+                request,
+                FrameworkErrorDetail::CategoryOnly,
+                geo,
+            ));
+            assert_eq!(
+                envelope.failure_classification(),
+                Some(ResponseEgressFailureClassification::error(
+                    "config_out_of_date"
+                ))
+            );
+            let response = complete_envelope(envelope);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["retry-after"], "60");
+            assert_eq!(response.headers()["x-geo-finalized"], "yes");
+            assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(renderer_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(finalizer_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn admitted_error_finalizer_preserves_category_only_routing_errors() {
+        let mut app = App::new(
+            RouterService::builder()
+                .get("/known", |_ctx: RequestContext| async {
+                    Ok::<_, EdgeError>("ok")
+                })
+                .build(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        app.set_admitted_error_response_finalizer(move |geo, response| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(geo, &GeoOutcome::NoSelection);
+            assert!(
+                !str::from_utf8(response.body().as_bytes().unwrap())
+                    .unwrap()
+                    .contains("sentinel")
+            );
+            response
+                .headers_mut()
+                .insert("x-robots-tag", HeaderValue::from_static("noindex"));
+            response.headers_mut().remove("allow");
+            *response.status_mut() = StatusCode::OK;
+        });
+        for (method, path, status, message) in [
+            (
+                Method::GET,
+                "/private-sentinel",
+                StatusCode::NOT_FOUND,
+                "route not found",
+            ),
+            (
+                Method::from_bytes(b"PRIVATE-SENTINEL").unwrap(),
+                "/known",
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method not allowed",
+            ),
+        ] {
+            let envelope = managed_dispatch(&app, method, path, FrameworkErrorDetail::CategoryOnly);
+            assert_eq!(
+                envelope.failure_classification(),
+                Some(ResponseEgressFailureClassification::routing(
+                    if status == StatusCode::NOT_FOUND {
+                        "not_found"
+                    } else {
+                        "method_not_allowed"
+                    }
+                ))
+            );
+            let response = complete_envelope(envelope);
+            assert_eq!(response.status(), status);
+            if status == StatusCode::METHOD_NOT_ALLOWED {
+                assert_eq!(response.headers()["allow"], "GET");
+            }
+            assert_eq!(response.headers()["x-robots-tag"], "noindex");
+            let payload: serde_json::Value =
+                serde_json::from_slice(response.body().as_bytes().unwrap()).unwrap();
+            assert_eq!(payload["error"]["message"], message);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn admitted_error_finalizer_bypasses_ok_and_errors_without_geo_outcomes() {
+        let mut app = App::new(
+            RouterService::builder()
+                .get("/{status}", |ctx: RequestContext| async move {
+                    let status = match ctx.uri().path() {
+                        "/401" => StatusCode::UNAUTHORIZED,
+                        "/404" => StatusCode::NOT_FOUND,
+                        _ => StatusCode::OK,
+                    };
+                    Ok::<_, EdgeError>(
+                        response_builder()
+                            .status(status)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                })
+                .build(),
+        );
+        app.set_admitted_error_response_finalizer(|_, _| panic!("must not finalize"));
+        for (path, status) in [
+            ("/200", StatusCode::OK),
+            ("/401", StatusCode::UNAUTHORIZED),
+            ("/404", StatusCode::NOT_FOUND),
+        ] {
+            let envelope =
+                managed_dispatch(&app, Method::GET, path, FrameworkErrorDetail::CategoryOnly);
+            assert!(envelope.failure_classification().is_none());
+            assert_eq!(complete_envelope(envelope).status(), status);
+        }
+        let detached = app.detached_ingress_error_egress(
+            EdgeError::uri_too_long("private"),
+            Method::GET,
+            app.monotonic_now(),
+        );
+        assert_eq!(
+            complete_dispatch(detached).status(),
+            StatusCode::URI_TOO_LONG
+        );
+        let head = IngressHeadParts::new(
+            Method::GET,
+            "/200".parse().unwrap(),
+            Version::HTTP_11,
+            HeaderMap::new(),
+        );
+        let IngressBeginOutcome::Admitted(prepared) =
+            app.begin_ingress(head, app.monotonic_now()).unwrap()
+        else {
+            panic!("admission");
+        };
+        assert_eq!(
+            complete_envelope(
+                app.admitted_error_egress(prepared, EdgeError::bad_request("conversion"))
+            )
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        app.set_ingress_admission_policy(|_| AdmissionDecision::Refuse {
+            completion: ResponseEgressCompletion::empty(),
+            response: response_builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::empty())
+                .unwrap(),
+        });
+        let request = request_builder().uri("/200").body(Body::empty()).unwrap();
+        let refused = block_on(app.dispatch_ingress(
+            request,
+            app.monotonic_now(),
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        ))
+        .unwrap();
+        assert_eq!(complete_dispatch(refused).status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
