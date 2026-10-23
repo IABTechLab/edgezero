@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
+use std::panic::catch_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(test)]
@@ -8,13 +9,15 @@ use std::task::{Context, Poll};
 use axum::body::Body as AxumBody;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, Response};
-use edgezero_core::app::App;
+use edgezero_core::app::{App, FrameworkErrorDetail};
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::Method;
+use edgezero_core::geo::GeoOutcome;
+use edgezero_core::http::{Method, RequestParts};
 use edgezero_core::ingress::{
     IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
-    IngressHeadParts, validate_normalized_ingress_parts,
+    IngressHeadParts, NormalizedIngressHeadSummary, PreparedIngress,
+    validate_normalized_ingress_parts_with_summary,
 };
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::probe::{LifecyclePhase, LifecycleReader};
@@ -33,10 +36,19 @@ use tower::Service as TowerService;
 
 #[cfg(test)]
 use crate::connection::{ConnectionExit, serve_http1};
+use crate::context::AxumRequestContext;
+#[cfg(test)]
+use crate::diagnostics::NativeDiagnosticsHandle;
+use crate::diagnostics::{
+    ConnectionActivity, ConnectionGuard, IngressDisposition, NativeIngressMetadata, NativeSession,
+    RequestGuard,
+};
+use crate::geo::NativeGeo;
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
 #[cfg(test)]
 use crate::outbound::AxumOutboundClient;
+use crate::proxy::{TrustedProxyPolicy, normalize, strip_forwarding_headers};
 use crate::request::into_core_request_parts;
 use crate::response::{AxumEgressBody, EgressConnection, prepare_egress_response};
 
@@ -48,15 +60,19 @@ pub(crate) struct AxumIngressAbort;
 /// Shared application state used to construct one private Hyper service per HTTP/1 connection.
 #[derive(Clone)]
 pub(crate) struct AxumServiceState {
+    activity: Option<ConnectionActivity>,
     app: Arc<App>,
     config_registry: Option<ConfigRegistry>,
     config_store_handle: Option<ConfigStoreHandle>,
+    geo: NativeGeo,
     kv_handle: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
+    native: NativeSession,
     outbound_transport: Option<Arc<reqwest::Client>>,
     phase: Option<watch::Receiver<LifecyclePhase>>,
     secret_handle: Option<SecretHandle>,
     secret_registry: Option<SecretRegistry>,
+    trusted_proxy_policy: TrustedProxyPolicy,
 }
 
 #[expect(
@@ -75,8 +91,29 @@ impl AxumServiceState {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_transport(app: App, transport: Arc<reqwest::Client>) -> Self {
+        Self::with_native_transport(
+            app,
+            transport,
+            NativeSession::new(NativeDiagnosticsHandle::new(), true).expect("test native identity"),
+            TrustedProxyPolicy::no_trust(),
+            NativeGeo::default(),
+        )
+    }
+
+    pub(crate) fn with_native_transport(
+        app: App,
+        transport: Arc<reqwest::Client>,
+        native: NativeSession,
+        policy: TrustedProxyPolicy,
+        geo: NativeGeo,
+    ) -> Self {
         Self {
+            activity: None,
+            geo,
+            native,
+            trusted_proxy_policy: policy,
             app: Arc::new(app),
             config_registry: None,
             config_store_handle: None,
@@ -87,6 +124,19 @@ impl AxumServiceState {
             secret_handle: None,
             secret_registry: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_native(
+        mut self,
+        native: NativeSession,
+        policy: TrustedProxyPolicy,
+        geo: NativeGeo,
+    ) -> Self {
+        self.native = native;
+        self.trusted_proxy_policy = policy;
+        self.geo = geo;
+        self
     }
 
     #[must_use]
@@ -180,6 +230,10 @@ impl AxumServiceState {
         self
     }
 
+    pub(crate) fn connection_activity(&self) -> (ConnectionActivity, ConnectionGuard) {
+        self.native.connection()
+    }
+
     pub(crate) fn for_connection(
         &self,
         remote_addr: SocketAddr,
@@ -222,78 +276,37 @@ impl AxumServiceState {
             .is_none_or(|phase| *phase.borrow() == LifecyclePhase::Ready)
     }
 
-    async fn dispatch_request(
+    fn sanitize_received_head(
         &self,
-        mut request: Request<AxumBody>,
+        parts: &mut RequestParts,
+    ) -> Result<NormalizedIngressHeadSummary, EdgeError> {
+        // Original accounting precedes credential removal, including rejected ingress.
+        let received =
+            validate_normalized_ingress_parts_with_summary(parts, self.app.ingress_head_limits());
+        self.geo.strip_credential(&mut parts.headers);
+        received
+    }
+
+    async fn dispatch_prepared(
+        &self,
+        prepared: PreparedIngress,
+        parts: RequestParts,
+        native_body: AxumBody,
         connection: &EgressConnection,
-        remote_addr: Option<SocketAddr>,
-    ) -> Result<Response<AxumEgressBody>, AxumIngressAbort> {
-        // This private gate defines dispatched work. Public extensions and app
-        // admission policy cannot admit new work after the owner starts draining.
-        if !self.admission_open() {
-            return Err(AxumIngressAbort);
-        }
-        if let Some(peer_addr) = remote_addr {
-            request.extensions_mut().insert(ConnectInfo(peer_addr));
-        }
-        let request_start = self.app.monotonic_now();
-        let app = Arc::clone(&self.app);
-        let outbound_transport_handle = self.outbound_transport.clone();
-        let (config_registry, kv_registry, secret_registry) = self.resolved_store_registries();
-        let (parts, native_body) = request.into_parts();
-        let request_method = parts.method.clone();
-        if let Err(error) = validate_normalized_ingress_parts(&parts, app.ingress_head_limits()) {
-            return prepare_detached_ingress_error(
-                &app,
-                error,
-                request_method.clone(),
-                request_start,
-                connection,
-            )
-            .await;
-        }
-        let head_parts = IngressHeadParts::from_parts(
-            &parts,
-            IngressHeadAccounting::HostManaged,
-            IngressFraming::HostManaged,
-        );
-        let prepared = match app.begin_ingress(head_parts, request_start) {
-            Ok(IngressBeginOutcome::Admitted(prepared)) => prepared,
-            Ok(IngressBeginOutcome::Refused(response)) => {
-                return Ok(prepare_egress_response(response, connection).await);
-            }
-            Ok(IngressBeginOutcome::Aborted) => return Err(AxumIngressAbort),
-            Ok(_) => {
-                return prepare_detached_ingress_error(
-                    &app,
-                    EdgeError::internal(anyhow::anyhow!("unsupported ingress admission outcome")),
-                    request_method,
-                    request_start,
-                    connection,
-                )
-                .await;
-            }
-            Err(error) => {
-                return prepare_detached_ingress_error(
-                    &app,
-                    error,
-                    request_method.clone(),
-                    request_start,
-                    connection,
-                )
-                .await;
-            }
-        };
+        guard: RequestGuard,
+        geo: GeoOutcome,
+    ) -> Response<AxumEgressBody> {
+        let app = &self.app;
         let read_deadline = prepared.read_deadline();
         let monotonic_clock = prepared.monotonic_clock();
-        let Some(outbound_transport) = outbound_transport_handle else {
+        let Some(outbound_transport) = self.outbound_transport.clone() else {
             let egress = app.admitted_error_egress(
                 prepared,
                 EdgeError::internal(anyhow::anyhow!(
                     "failed to initialize outbound HTTP transport"
                 )),
             );
-            return Ok(prepare_egress_response(egress, connection).await);
+            return prepare_native_egress(egress, connection, guard).await;
         };
         let mut core_request = match into_core_request_parts(
             parts,
@@ -309,15 +322,15 @@ impl AxumServiceState {
                         "failed to convert inbound request: {error}"
                     )),
                 );
-                return Ok(prepare_egress_response(egress, connection).await);
+                return prepare_native_egress(egress, connection, guard).await;
             }
         };
-
         if let Some(phase) = self.phase.clone() {
             core_request
                 .extensions_mut()
                 .insert(LifecycleReader::new(move || Some(*phase.borrow())));
         }
+        let (config_registry, kv_registry, secret_registry) = self.resolved_store_registries();
         if let Some(registry) = config_registry {
             core_request.extensions_mut().insert(registry);
         }
@@ -327,9 +340,111 @@ impl AxumServiceState {
         if let Some(registry) = secret_registry {
             core_request.extensions_mut().insert(registry);
         }
+        let egress = app
+            .dispatch_admitted_with_geo(
+                prepared,
+                core_request,
+                FrameworkErrorDetail::CategoryOnly,
+                geo,
+            )
+            .await;
+        prepare_native_egress(egress, connection, guard).await
+    }
 
-        let egress = app.dispatch_admitted(prepared, core_request).await;
-        Ok(prepare_egress_response(egress, connection).await)
+    async fn dispatch_request(
+        &self,
+        mut request: Request<AxumBody>,
+        connection: &EgressConnection,
+        remote_addr: Option<SocketAddr>,
+    ) -> Result<Response<AxumEgressBody>, AxumIngressAbort> {
+        let request_start = self.app.monotonic_now();
+        let mut guard = self.native.request(request.method(), request_start, self.app.monotonic_clock(), self.activity.clone())
+            .map_err(|_error| {
+                let _logged = catch_unwind(|| log::error!(target: "edgezero::native", "event=lifecycle reason=request_identity_exhausted"));
+                AxumIngressAbort
+            })?;
+        // Identity and lifetime start before the gate, without admitting/body polling.
+        if !self.admission_open() {
+            guard.finish_ingress(IngressDisposition::Draining);
+            return Err(AxumIngressAbort);
+        }
+        // Only the owning socket supplies native peer facts, including an absent peer.
+        request.extensions_mut().remove::<AxumRequestContext>();
+        if let Some(peer_addr) = remote_addr {
+            request.extensions_mut().insert(ConnectInfo(peer_addr));
+        } else {
+            request.extensions_mut().remove::<ConnectInfo<SocketAddr>>();
+        }
+        let app = Arc::clone(&self.app);
+        let (mut parts, native_body) = request.into_parts();
+        let request_method = parts.method.clone();
+        // Account for the original received head, but remove credentials before any error
+        // renderer or admission callback. Sanitization must also cover rejected ingress.
+        let received = match self.sanitize_received_head(&mut parts) {
+            Ok(summary) => summary,
+            Err(error) => {
+                return prepare_detached_ingress_error(
+                    &app,
+                    error,
+                    request_method.clone(),
+                    request_start,
+                    connection,
+                    guard,
+                )
+                .await;
+            }
+        };
+        let checked = normalize(&self.trusted_proxy_policy, remote_addr, &parts);
+        guard.set_forwarding_result(checked.forwarding_result());
+        strip_forwarding_headers(&mut parts.headers);
+        parts.extensions.insert(checked.effective_host().clone());
+        parts.extensions.insert(NativeIngressMetadata::new(
+            guard.request_id(),
+            checked,
+            received,
+        ));
+        let head_parts = IngressHeadParts::from_parts(
+            &parts,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let prepared = match app.begin_ingress(head_parts, request_start) {
+            Ok(IngressBeginOutcome::Admitted(prepared)) => prepared,
+            Ok(IngressBeginOutcome::Refused(response)) => {
+                guard.refused();
+                return Ok(prepare_native_egress(response, connection, guard).await);
+            }
+            Ok(IngressBeginOutcome::Aborted) => {
+                guard.finish_ingress(IngressDisposition::Aborted);
+                return Err(AxumIngressAbort);
+            }
+            Ok(_) => {
+                return prepare_detached_ingress_error(
+                    &app,
+                    EdgeError::internal(anyhow::anyhow!("unsupported ingress admission outcome")),
+                    request_method,
+                    request_start,
+                    connection,
+                    guard,
+                )
+                .await;
+            }
+            Err(error) => {
+                return prepare_detached_ingress_error(
+                    &app,
+                    error,
+                    request_method.clone(),
+                    request_start,
+                    connection,
+                    guard,
+                )
+                .await;
+            }
+        };
+        let geo = self.geo.resolve(remote_addr, &parts.headers);
+        Ok(self
+            .dispatch_prepared(prepared, parts, native_body, connection, guard, geo)
+            .await)
     }
 }
 
@@ -338,6 +453,13 @@ pub(crate) struct AxumConnectionService {
     connection: EgressConnection,
     remote_addr: SocketAddr,
     state: AxumServiceState,
+}
+
+impl AxumConnectionService {
+    pub(crate) fn with_activity(mut self, activity: ConnectionActivity) -> Self {
+        self.state.activity = Some(activity);
+        self
+    }
 }
 
 impl HyperService<Request<Incoming>> for AxumConnectionService {
@@ -406,13 +528,34 @@ async fn prepare_detached_ingress_error(
     request_method: Method,
     request_start: MonotonicInstant,
     connection: &EgressConnection,
+    mut guard: RequestGuard,
 ) -> Result<Response<AxumEgressBody>, AxumIngressAbort> {
-    match app.detached_ingress_error_egress(error, request_method, request_start) {
-        IngressDispatchOutcome::Response(envelope) => {
-            Ok(prepare_egress_response(*envelope, connection).await)
-        }
-        IngressDispatchOutcome::Aborted | _ => Err(AxumIngressAbort),
+    guard.set_ingress_error_kind(error.kind());
+    if let IngressDispatchOutcome::Response(envelope) =
+        app.detached_ingress_error_egress(error, request_method, request_start)
+    {
+        Ok(prepare_native_egress(*envelope, connection, guard).await)
+    } else {
+        guard.finish_ingress(IngressDisposition::Aborted);
+        Err(AxumIngressAbort)
     }
+}
+
+async fn prepare_native_egress(
+    envelope: edgezero_core::ResponseEgressEnvelope,
+    connection: &EgressConnection,
+    mut guard: RequestGuard,
+) -> Response<AxumEgressBody> {
+    if let Some(failure) = envelope.failure_classification() {
+        guard.set_failure(Some(failure));
+    }
+    let (completion, selected) = guard.completion();
+    prepare_egress_response(
+        envelope.with_completion(completion),
+        connection,
+        Some(&selected),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -423,7 +566,11 @@ mod tests {
     )]
 
     use super::*;
+    use crate::diagnostics::{
+        NativeRequestFailure, NativeRequestObserver, NativeRequestOutcome, NativeRequestRecord,
+    };
     use bytes::{Bytes, BytesMut};
+    use edgezero_core::action;
     use edgezero_core::body::Body;
     use edgezero_core::config_store::{
         BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
@@ -459,6 +606,287 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::{sleep, timeout};
     use tower::ServiceExt as _;
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one counted-provider scenario verifies admission and terminal boundaries without resetting shared evidence"
+    )]
+    #[tokio::test(flavor = "current_thread")]
+    async fn geo_managed_resolution_runs_once_from_owned_ingress() {
+        use crate::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
+        use edgezero_core::geo::{
+            GeoError, GeoInput, GeoOutcome, GeoProvider, GeoProviderId, GeoResolution, GeoStatus,
+            GeoUnavailableReason,
+        };
+        use futures_util::FutureExt as _;
+        use futures_util::stream::iter as result_stream;
+        use std::future::pending;
+        struct Counted(Arc<Mutex<Vec<GeoInput>>>);
+        impl GeoProvider for Counted {
+            fn resolve(&self, input: &GeoInput) -> GeoResolution {
+                self.0.lock().unwrap().push(input.clone());
+                if input.country.as_bytes().is_err() {
+                    GeoResolution::Error(GeoError::InvalidAssertion)
+                } else {
+                    GeoResolution::MissingMetadata
+                }
+            }
+        }
+        struct ObserveAndMutate;
+        #[async_trait::async_trait(?Send)]
+        impl Middleware for ObserveAndMutate {
+            async fn handle(
+                &self,
+                mut ctx: RequestContext,
+                next: Next<'_>,
+            ) -> Result<CoreResponse, EdgeError> {
+                assert!(!ctx.headers().contains_key("x-origin-verify-fixture"));
+                let owned = ctx.geo().clone();
+                ctx.extensions_mut().insert(GeoOutcome::NoSelection);
+                ctx.headers_mut()
+                    .insert("cloudfront-viewer-country", HeaderValue::from_static("DE"));
+                assert_eq!(ctx.geo(), &owned);
+                next.run(ctx).await
+            }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let selection = NativeGeoSelection::Supplied {
+            policy: ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture")
+                .unwrap(),
+            id: GeoProviderId::new("counted").unwrap(),
+            provider: Arc::new(Counted(Arc::clone(&calls))),
+        };
+        let geo = NativeGeo::validate(&selection).unwrap();
+        let admission_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let observed_handler = Arc::clone(&handler_calls);
+        let router = RouterService::builder()
+            .middleware(ObserveAndMutate)
+            .get("/{mode}", move |mut ctx: RequestContext| {
+                let handler = Arc::clone(&observed_handler);
+                async move {
+                    handler.fetch_add(1, Ordering::SeqCst);
+                    assert!(!ctx.headers().contains_key("x-origin-verify-fixture"));
+                    let owned = ctx.geo().clone();
+                    assert!(matches!(owned, GeoOutcome::Selected { .. }));
+                    ctx.extensions_mut().remove::<GeoOutcome>();
+                    assert_eq!(ctx.geo(), &owned);
+                    if ctx.uri().path() == "/handler-cancel" {
+                        pending::<()>().await;
+                    }
+                    let label = match ctx.geo() {
+                        GeoOutcome::Selected {
+                            status: GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+                            ..
+                        } => "admitted",
+                        GeoOutcome::Selected {
+                            status: GeoStatus::Error(_),
+                            ..
+                        } => "error",
+                        GeoOutcome::NoSelection | GeoOutcome::Selected { .. } => "untrusted",
+                    };
+                    let body = if ctx.uri().path() == "/egress-fail" {
+                        Body::from_stream(result_stream([Err(EdgeError::bad_request(
+                            "fixture egress failure",
+                        ))]))
+                    } else {
+                        Body::from(label)
+                    };
+                    response_builder()
+                        .body(body)
+                        .map_err(|error| EdgeError::internal(anyhow::Error::new(error)))
+                }
+            })
+            .build();
+        let mut app = App::new(router);
+        app.set_ingress_head_limits(
+            IngressHeadLimits::default()
+                .with_max_request_header_bytes(128)
+                .unwrap(),
+        );
+        let observed_admission = Arc::clone(&admission_calls);
+        app.set_ingress_admission_policy(move |head| {
+            observed_admission.fetch_add(1, Ordering::SeqCst);
+            assert!(!head.headers().contains_key("x-origin-verify-fixture"));
+            match head.target().path() {
+                "/refuse" => AdmissionDecision::Refuse {
+                    completion: ResponseEgressCompletion::empty(),
+                    response: response_builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Body::empty())
+                        .unwrap(),
+                },
+                "/abort" => AdmissionDecision::Abort,
+                _ => AdmissionDecision::Admit {
+                    completion: ResponseEgressCompletion::empty(),
+                    grant: IngressGrant::empty(),
+                    read_deadline: head.read_deadline_after(Duration::from_secs(1)),
+                },
+            }
+        });
+        let mut service = AxumServiceState::from_app(app);
+        service.geo = geo;
+        let trusted: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        for (peer, country, path, expected) in [
+            (Some(trusted), Some("US"), "/good", "admitted"),
+            (None, Some("US"), "/forged", "untrusted"),
+            (
+                Some("127.0.0.2:1234".parse().unwrap()),
+                Some("US"),
+                "/forged",
+                "untrusted",
+            ),
+            (Some(trusted), None, "/missing", "admitted"),
+        ] {
+            let mut request = Request::builder()
+                .uri(path)
+                .body(AxumBody::empty())
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(trusted));
+            request.extensions_mut().insert(AxumRequestContext {
+                remote_addr: Some(trusted),
+            });
+            request.extensions_mut().insert(GeoOutcome::NoSelection);
+            request.headers_mut().append(
+                "x-origin-verify-fixture",
+                HeaderValue::from_static("secret-one"),
+            );
+            request.headers_mut().append(
+                "x-origin-verify-fixture",
+                HeaderValue::from_static("secret-two"),
+            );
+            if let Some(assertion) = country {
+                request.headers_mut().insert(
+                    "cloudfront-viewer-country",
+                    HeaderValue::from_static(assertion),
+                );
+            }
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), peer)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(to_bytes(response.into_body(), 128).await.unwrap(), expected);
+        }
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            calls.lock().unwrap()[0].country.as_bytes().unwrap(),
+            Some(b"US".as_slice())
+        );
+        assert_eq!(calls.lock().unwrap()[1].country.as_bytes().unwrap(), None);
+        for path in ["/invalid", "/egress-drop", "/egress-fail"] {
+            let expected_calls = calls.lock().unwrap().len().checked_add(1).unwrap();
+            let mut request = Request::builder()
+                .uri(path)
+                .body(AxumBody::empty())
+                .unwrap();
+            if path == "/invalid" {
+                request
+                    .headers_mut()
+                    .append("cloudfront-viewer-country", HeaderValue::from_static("US"));
+                request
+                    .headers_mut()
+                    .append("cloudfront-viewer-country", HeaderValue::from_static("US"));
+            }
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), Some(trusted))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "Geo errors remain outcomes, not HTTP errors"
+            );
+            assert_eq!(calls.lock().unwrap().len(), expected_calls);
+            match path {
+                "/invalid" => {
+                    assert_eq!(to_bytes(response.into_body(), 128).await.unwrap(), "error");
+                }
+                "/egress-drop" => drop(response),
+                _ => {
+                    to_bytes(response.into_body(), 128).await.unwrap_err();
+                }
+            }
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                expected_calls,
+                "terminal work does not resolve Geo again"
+            );
+        }
+        calls.lock().unwrap()[2].country.as_bytes().unwrap_err();
+        for path in ["/refuse", "/abort"] {
+            let request = Request::builder()
+                .uri(path)
+                .body(AxumBody::empty())
+                .unwrap();
+            let outcome = service
+                .dispatch_request(request, &EgressConnection::default(), Some(trusted))
+                .await;
+            if path == "/refuse" {
+                assert_eq!(outcome.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+            } else {
+                assert!(outcome.is_err());
+            }
+        }
+        let before = admission_calls.load(Ordering::SeqCst);
+        let invalid = Request::builder()
+            .uri("/oversized")
+            .header("x-origin-verify-fixture", "x".repeat(256))
+            .body(AxumBody::empty())
+            .unwrap();
+        let (mut parts, _) = invalid.into_parts();
+        parts.headers.append(
+            "x-origin-verify-fixture",
+            HeaderValue::from_static("duplicate-secret"),
+        );
+        service.sanitize_received_head(&mut parts).unwrap_err();
+        assert!(!parts.headers.contains_key("x-origin-verify-fixture"));
+        let request = Request::builder()
+            .uri("/oversized")
+            .header("x-origin-verify-fixture", "x".repeat(256))
+            .body(AxumBody::empty())
+            .unwrap();
+        let response = service
+            .dispatch_request(request, &EgressConnection::default(), Some(trusted))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+        assert_eq!(admission_calls.load(Ordering::SeqCst), before);
+        drop(response);
+        let cancelled = Request::builder()
+            .uri("/handler-cancel")
+            .body(AxumBody::empty())
+            .unwrap();
+        assert!(
+            service
+                .dispatch_request(cancelled, &EgressConnection::default(), Some(trusted))
+                .now_or_never()
+                .is_none()
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            6,
+            "cancellation does not resolve again"
+        );
+        let (phase_owner, reader) = watch::channel(LifecyclePhase::Draining);
+        service.phase = Some(reader);
+        let draining = Request::builder()
+            .uri("/draining")
+            .body(AxumBody::empty())
+            .unwrap();
+        assert!(
+            service
+                .dispatch_request(draining, &EgressConnection::default(), Some(trusted))
+                .await
+                .is_err()
+        );
+        drop(phase_owner);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 8);
+        assert_eq!(calls.lock().unwrap().len(), 6);
+    }
 
     async fn to_bytes(mut body: AxumEgressBody, limit: usize) -> Result<Bytes, anyhow::Error> {
         let mut buffered = BytesMut::new();
@@ -811,6 +1239,17 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalized_ingress_error_decision_abort_closes_without_response() {
+        #[derive(Clone)]
+        struct NativeRecords(Arc<Mutex<Vec<NativeRequestRecord>>>);
+        impl NativeRequestObserver for NativeRecords {
+            #[inline]
+            fn observe(&self, record: &NativeRequestRecord) {
+                self.0.lock().expect("native records").push(record.clone());
+            }
+        }
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let diagnostics = NativeDiagnosticsHandle::new()
+            .with_request_observer(NativeRecords(Arc::clone(&records)));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -827,7 +1266,8 @@ mod tests {
             observed_factory_calls.fetch_add(1, Ordering::SeqCst);
             DetachedResponseEgressDecision::Abort
         });
-        let state = AxumServiceState::from_app(app);
+        let mut state = AxumServiceState::from_app(app);
+        state.native = NativeSession::new(diagnostics.clone(), false).expect("test native session");
 
         let server = async move {
             let (stream, remote_addr) = listener.accept().await.expect("accept client");
@@ -862,6 +1302,23 @@ mod tests {
         }
         assert!(response.is_empty());
         assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        let captured = records.lock().expect("native records");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].event, "request_ingress");
+        assert_eq!(
+            captured[0].outcome,
+            NativeRequestOutcome::Ingress(IngressDisposition::Aborted)
+        );
+        assert_eq!(
+            captured[0].failure,
+            Some(NativeRequestFailure::PropagatedError {
+                kind: "uri_too_long"
+            })
+        );
+        assert!(captured[0].status.is_none());
+        assert!(captured[0].bytes_written.is_none());
+        assert!(captured[0].body_kind.is_none());
+        assert_eq!(diagnostics.snapshot().active_requests, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1994,6 +2451,1463 @@ mod tests {
 
         assert_eq!(body_at(&service, "/lookup/only").await, "present=true");
         assert_eq!(body_at(&service, "/lookup/missing").await, "present=false");
+    }
+
+    mod managed_native {
+        use std::future::pending;
+        use std::net::{IpAddr, SocketAddr};
+
+        use http_body::Body as _;
+        use serde_json::{Value, json};
+
+        use crate::context::AxumRequestContext;
+        use crate::diagnostics::{
+            NativeDiagnosticsSnapshot, NativeRequestFailure, NativeRequestObserver,
+            NativeRequestOutcome, NativeRequestRecord,
+        };
+        use crate::proxy::{ForwardingHeaderFamily, ForwardingResult, Scheme};
+        use edgezero_core::extractor::ForwardedHost;
+        use edgezero_core::http::{Authority, Uri};
+        use edgezero_core::ingress::{CheckedEffectiveHost, CheckedHostSource, IngressHead};
+
+        use super::*;
+
+        #[derive(Clone, Default)]
+        struct NativeProbe {
+            handle: NativeDiagnosticsHandle,
+            records: Arc<Mutex<Vec<NativeRequestRecord>>>,
+            snapshots: Arc<Mutex<Vec<NativeDiagnosticsSnapshot>>>,
+            events: Arc<Mutex<Vec<&'static str>>>,
+            panics: bool,
+        }
+
+        impl NativeRequestObserver for NativeProbe {
+            fn observe(&self, record: &NativeRequestRecord) {
+                self.records
+                    .lock()
+                    .expect("native records")
+                    .push(record.clone());
+                self.snapshots
+                    .lock()
+                    .expect("native snapshots")
+                    .push(self.handle.snapshot());
+                self.events.lock().expect("hook events").push("native");
+                assert!(!self.panics, "native observer fixture panic");
+            }
+        }
+
+        struct OrderedAppObserver {
+            events: Arc<Mutex<Vec<&'static str>>>,
+            reports: Arc<Mutex<Vec<ResponseEgressReport>>>,
+        }
+
+        impl ResponseEgressObserver for OrderedAppObserver {
+            fn complete(&self, report: &ResponseEgressReport) {
+                self.events.lock().expect("hook events").push("observer");
+                self.reports
+                    .lock()
+                    .expect("app reports")
+                    .push(report.clone());
+            }
+        }
+
+        #[derive(Clone)]
+        struct PendingCalls(Arc<AtomicUsize>);
+
+        struct MetadataMiddleware(Arc<Mutex<Option<Value>>>);
+
+        #[async_trait::async_trait(?Send)]
+        impl Middleware for MetadataMiddleware {
+            async fn handle(
+                &self,
+                ctx: RequestContext,
+                next: Next<'_>,
+            ) -> Result<CoreResponse, EdgeError> {
+                *self.0.lock().expect("middleware facts") = Some(context_facts(&ctx));
+                next.run(ctx).await
+            }
+        }
+
+        fn observed_service(
+            app: App,
+            policy: TrustedProxyPolicy,
+            probe: &NativeProbe,
+        ) -> AxumServiceState {
+            let handle = probe.handle.clone().with_request_observer(probe.clone());
+            AxumServiceState::with_transport(
+                app,
+                AxumOutboundClient::try_transport().expect("fixture transport"),
+            )
+            .with_native(
+                NativeSession::new(handle, false).expect("fixture identity"),
+                policy,
+                NativeGeo::default(),
+            )
+        }
+
+        fn tracked_connection(service: &mut AxumServiceState) -> ConnectionGuard {
+            let (activity, guard) = service.connection_activity();
+            service.activity = Some(activity);
+            guard
+        }
+
+        fn source_name(source: CheckedHostSource) -> &'static str {
+            match source {
+                CheckedHostSource::Direct => "direct",
+                CheckedHostSource::TrustedForwarded => "trusted_forwarded",
+                CheckedHostSource::TrustedXForwarded => "trusted_x_forwarded",
+                CheckedHostSource::Unavailable => "unavailable",
+                _ => "unknown",
+            }
+        }
+
+        fn metadata_facts(
+            metadata: &NativeIngressMetadata,
+            headers: &HeaderMap,
+            uri: &Uri,
+        ) -> Value {
+            let summary = metadata.received_normalized_head();
+            json!({
+                "request_id": metadata.request_id().to_string(),
+                "peer": metadata.direct_peer().map(|peer| peer.to_string()),
+                "client": metadata.effective_client().map(|client| client.to_string()),
+                "host": metadata.effective_host().authority(),
+                "scheme": metadata.effective_scheme().as_str(),
+                "client_source": source_name(metadata.client_source()),
+                "host_source": source_name(metadata.host_source()),
+                "scheme_source": source_name(metadata.scheme_source()),
+                "forwarding_result": metadata.forwarding_result().as_str(),
+                "host_header": headers.get("host").and_then(|host| host.to_str().ok()),
+                "uri": uri.to_string(),
+                "raw_forwarding_absent": headers.keys().all(|name| name.as_str() != "forwarded" && !name.as_str().starts_with("x-forwarded-")),
+                "normalized": {"target_bytes": summary.target_bytes(), "header_bytes": summary.header_bytes(), "header_count": summary.header_count()},
+            })
+        }
+
+        fn context_facts(ctx: &RequestContext) -> Value {
+            metadata_facts(
+                ctx.extensions()
+                    .get::<NativeIngressMetadata>()
+                    .expect("managed metadata"),
+                ctx.headers(),
+                ctx.uri(),
+            )
+        }
+
+        #[action]
+        async fn metadata_handler(
+            ctx: RequestContext,
+            ForwardedHost(host): ForwardedHost,
+        ) -> Result<CoreResponse, EdgeError> {
+            let peer = ctx
+                .extensions()
+                .get::<AxumRequestContext>()
+                .and_then(|native| native.remote_addr);
+            Ok(CoreResponse::new(Body::from(
+                json!({
+                    "facts": context_facts(&ctx), "forwarded_host": host,
+                    "direct_context_peer": peer.map(|address| address.to_string()),
+                })
+                .to_string(),
+            )))
+        }
+
+        #[action]
+        async fn mutate_metadata_handler(mut ctx: RequestContext) -> Result<String, EdgeError> {
+            let original = ctx
+                .extensions_mut()
+                .remove::<NativeIngressMetadata>()
+                .expect("original metadata");
+            ctx.extensions_mut()
+                .insert(CheckedEffectiveHost::from_ingress(
+                    Some(
+                        "application-mutated.example"
+                            .parse::<Authority>()
+                            .expect("authority"),
+                    ),
+                    CheckedHostSource::Direct,
+                ));
+            Ok(original.request_id().to_string())
+        }
+
+        #[action]
+        async fn ordinary_status_handler(ctx: RequestContext) -> Result<CoreResponse, EdgeError> {
+            let status = if ctx.uri().path().ends_with("/413") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            Ok(response_builder()
+                .status(status)
+                .body(Body::from("application status"))
+                .expect("status response"))
+        }
+
+        #[action]
+        async fn success_handler() -> Result<&'static str, EdgeError> {
+            Ok("ok")
+        }
+
+        #[action]
+        async fn internal_error_handler() -> Result<&'static str, EdgeError> {
+            Err(EdgeError::internal(anyhow::anyhow!(
+                "PRIVATE_SERVICE_ERROR_SENTINEL"
+            )))
+        }
+
+        #[action]
+        async fn upstream_error_handler() -> Result<&'static str, EdgeError> {
+            Err(EdgeError::bad_gateway("PRIVATE_UPSTREAM_SENTINEL"))
+        }
+
+        #[action]
+        async fn terminal_stream_handler(ctx: RequestContext) -> Result<CoreResponse, EdgeError> {
+            let source_failure = ctx.uri().path().ends_with("/source");
+            let mut sent_prefix = false;
+            let stream = poll_fn(move |_context| {
+                if !sent_prefix {
+                    sent_prefix = true;
+                    return Poll::Ready(Some(Ok::<_, io::Error>(Bytes::from_static(
+                        b"terminal-prefix",
+                    ))));
+                }
+                if source_failure {
+                    Poll::Ready(Some(Err(io::Error::other("PRIVATE_SOURCE_SENTINEL"))))
+                } else {
+                    Poll::Pending
+                }
+            });
+            Ok(CoreResponse::new(Body::from_external_stream(stream)))
+        }
+
+        #[action]
+        async fn bad_framing_handler() -> Result<CoreResponse, EdgeError> {
+            Ok(response_builder()
+                .header("content-length", "1")
+                .body(Body::from("mismatched"))
+                .expect("framing response"))
+        }
+
+        #[action]
+        async fn handler_not_found() -> Result<&'static str, EdgeError> {
+            Err(EdgeError::not_found("APPLICATION_CHOSEN_SENTINEL"))
+        }
+
+        #[action]
+        async fn read_body_handler(ctx: RequestContext) -> Result<String, EdgeError> {
+            ctx.extensions()
+                .get::<PendingCalls>()
+                .expect("handler calls")
+                .0
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(ctx.body_bytes(1024).await?.len().to_string())
+        }
+
+        #[action]
+        async fn pending_handler(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            ctx.extensions()
+                .get::<PendingCalls>()
+                .expect("handler calls")
+                .0
+                .fetch_add(1, Ordering::SeqCst);
+            pending().await
+        }
+
+        fn assert_one_released(probe: &NativeProbe) -> NativeRequestRecord {
+            let records = probe.records.lock().expect("native records");
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                probe.snapshots.lock().expect("native snapshots")[0].active_requests,
+                0
+            );
+            assert_eq!(probe.handle.snapshot().active_requests, 0);
+            records[0].clone()
+        }
+
+        #[tokio::test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "The seven-case trust matrix keeps forged inputs, one managed dispatch, and all consumer-witness assertions together so each boundary proof is visible"
+        )]
+        async fn owned_peer_checked_metadata_precedes_all_managed_consumers() {
+            let trusted: SocketAddr = "192.0.2.2:4000".parse().expect("trusted peer");
+            let untrusted: SocketAddr = "192.0.2.250:5000".parse().expect("untrusted peer");
+            for (
+                family,
+                peer,
+                enabled,
+                forwarded,
+                expected_host,
+                expected_scheme,
+                expected_client,
+                expected_result,
+                expected_source,
+            ) in [
+                (
+                    ForwardingHeaderFamily::Forwarded,
+                    Some(trusted),
+                    false,
+                    "for=203.0.113.7;host=public.example;proto=https",
+                    "direct.example",
+                    Scheme::Http,
+                    Some(trusted.ip()),
+                    ForwardingResult::UntrustedPeer,
+                    CheckedHostSource::Direct,
+                ),
+                (
+                    ForwardingHeaderFamily::Forwarded,
+                    Some(trusted),
+                    true,
+                    "for=203.0.113.7;host=public.example;proto=https",
+                    "public.example",
+                    Scheme::Https,
+                    Some("203.0.113.7".parse::<IpAddr>().expect("client")),
+                    ForwardingResult::Accepted,
+                    CheckedHostSource::TrustedForwarded,
+                ),
+                (
+                    ForwardingHeaderFamily::Forwarded,
+                    None,
+                    true,
+                    "for=203.0.113.7;host=public.example;proto=https",
+                    "direct.example",
+                    Scheme::Http,
+                    None,
+                    ForwardingResult::UntrustedPeer,
+                    CheckedHostSource::Direct,
+                ),
+                (
+                    ForwardingHeaderFamily::Forwarded,
+                    Some(untrusted),
+                    true,
+                    "for=203.0.113.7;host=public.example;proto=https",
+                    "direct.example",
+                    Scheme::Http,
+                    Some(untrusted.ip()),
+                    ForwardingResult::UntrustedPeer,
+                    CheckedHostSource::Direct,
+                ),
+                (
+                    ForwardingHeaderFamily::XForwarded,
+                    Some(trusted),
+                    true,
+                    "for=203.0.113.7;host=public.example;proto=https",
+                    "x-public.example",
+                    Scheme::Https,
+                    Some("203.0.113.9".parse::<IpAddr>().expect("client")),
+                    ForwardingResult::Accepted,
+                    CheckedHostSource::TrustedXForwarded,
+                ),
+                (
+                    ForwardingHeaderFamily::Forwarded,
+                    Some(trusted),
+                    true,
+                    "for=bad-address;host=public.example;proto=https",
+                    "direct.example",
+                    Scheme::Http,
+                    Some(trusted.ip()),
+                    ForwardingResult::Malformed,
+                    CheckedHostSource::Direct,
+                ),
+                (
+                    ForwardingHeaderFamily::Forwarded,
+                    Some(trusted),
+                    true,
+                    "for=unknown;host=public.example;proto=https",
+                    "public.example",
+                    Scheme::Https,
+                    Some(trusted.ip()),
+                    ForwardingResult::UnresolvedChain,
+                    CheckedHostSource::TrustedForwarded,
+                ),
+            ] {
+                let probe = NativeProbe::default();
+                let admission = Arc::new(Mutex::new(None));
+                let middleware = Arc::new(Mutex::new(None));
+                let captured_admission = Arc::clone(&admission);
+                let admission_handle = probe.handle.clone();
+                let router = RouterService::builder()
+                    .get("/native/{id}", metadata_handler)
+                    .middleware(MetadataMiddleware(Arc::clone(&middleware)))
+                    .build();
+                let mut app = App::new(router);
+                app.set_ingress_admission_policy(move |head| {
+                    assert!(matches!(
+                        head.head_accounting(),
+                        IngressHeadAccounting::HostManaged
+                    ));
+                    assert!(matches!(head.framing(), IngressFraming::HostManaged));
+                    assert_eq!(admission_handle.snapshot().active_requests, 1);
+                    let metadata = head
+                        .extension::<NativeIngressMetadata>()
+                        .expect("admission metadata");
+                    assert_eq!(
+                        head.extension::<CheckedEffectiveHost>()
+                            .expect("checked host"),
+                        metadata.effective_host()
+                    );
+                    *captured_admission.lock().expect("admission facts") =
+                        Some(metadata_facts(metadata, head.headers(), head.target()));
+                    AdmissionDecision::Admit {
+                        completion: ResponseEgressCompletion::empty(),
+                        grant: IngressGrant::empty(),
+                        read_deadline: head.read_deadline_after(Duration::from_secs(30)),
+                    }
+                });
+                let policy = if enabled {
+                    TrustedProxyPolicy::new(family, ["192.0.2.2"]).expect("policy")
+                } else {
+                    TrustedProxyPolicy::no_trust()
+                };
+                let mut service = observed_service(app, policy, &probe);
+                let owned_connection = tracked_connection(&mut service);
+                let incoming = Request::builder()
+                    .uri("https://direct.example/native/SECRET-PATH?token=SECRET-QUERY")
+                    .header("host", "direct.example")
+                    .header("forwarded", forwarded)
+                    .header("x-forwarded-for", "203.0.113.9")
+                    .header("x-forwarded-host", "x-public.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("X-FoRwArDeD-Private-Secret", "SECRET-HEADER")
+                    .header("x-request-id", "SECRET-VISITOR-ID")
+                    .body(AxumBody::empty())
+                    .expect("request");
+                let (mut parts, body) = incoming.into_parts();
+                let received = validate_normalized_ingress_parts_with_summary(
+                    &parts,
+                    IngressHeadLimits::default(),
+                )
+                .expect("original summary");
+                let foreign = NativeSession::new(NativeDiagnosticsHandle::new(), false)
+                    .expect("foreign session");
+                let foreign_guard = foreign
+                    .request(
+                        &Method::GET,
+                        MonotonicInstant::now(),
+                        MonotonicClock::default(),
+                        None,
+                    )
+                    .expect("foreign request");
+                let foreign_id = foreign_guard.request_id();
+                let claimed = normalize(
+                    &TrustedProxyPolicy::new(ForwardingHeaderFamily::Forwarded, ["192.0.2.2"])
+                        .expect("forged policy"),
+                    Some(trusted),
+                    &parts,
+                );
+                parts
+                    .extensions
+                    .insert(NativeIngressMetadata::new(foreign_id, claimed, received));
+                parts.extensions.insert(CheckedEffectiveHost::from_ingress(
+                    Some("FORGED-HOST.example".parse().expect("forged authority")),
+                    CheckedHostSource::TrustedForwarded,
+                ));
+                parts
+                    .extensions
+                    .insert(ConnectInfo(if peer == Some(trusted) {
+                        untrusted
+                    } else {
+                        trusted
+                    }));
+                parts.extensions.insert(AxumRequestContext {
+                    remote_addr: Some(if peer == Some(trusted) {
+                        untrusted
+                    } else {
+                        trusted
+                    }),
+                });
+                drop(foreign_guard);
+                let response = service
+                    .dispatch_request(
+                        Request::from_parts(parts, body),
+                        &EgressConnection::default(),
+                        peer,
+                    )
+                    .await
+                    .expect("managed response");
+                assert!(!response.headers().contains_key("x-request-id"));
+                assert!(!response.headers().contains_key("request-id"));
+                assert_eq!(probe.handle.snapshot().active_requests, 1);
+                let result: Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), 8192)
+                        .await
+                        .expect("metadata body"),
+                )
+                .expect("metadata JSON");
+                let facts = &result["facts"];
+                assert_eq!(
+                    facts,
+                    admission
+                        .lock()
+                        .expect("admission facts")
+                        .as_ref()
+                        .expect("observed admission")
+                );
+                assert_eq!(
+                    facts,
+                    middleware
+                        .lock()
+                        .expect("middleware facts")
+                        .as_ref()
+                        .expect("observed middleware")
+                );
+                assert_eq!(
+                    facts["peer"],
+                    json!(peer.map(|address| address.to_string()))
+                );
+                assert_eq!(
+                    facts["client"],
+                    json!(expected_client.map(|address| address.to_string()))
+                );
+                assert_eq!(facts["host"], expected_host);
+                assert_eq!(facts["scheme"], expected_scheme.as_str());
+                assert_eq!(facts["host_source"], source_name(expected_source));
+                assert_eq!(facts["scheme_source"], source_name(expected_source));
+                let client_source = if peer.is_none() {
+                    CheckedHostSource::Unavailable
+                } else if expected_result == ForwardingResult::Accepted {
+                    expected_source
+                } else {
+                    CheckedHostSource::Direct
+                };
+                assert_eq!(facts["client_source"], source_name(client_source));
+                assert_eq!(facts["forwarding_result"], expected_result.as_str());
+                assert_eq!(facts["host_header"], "direct.example");
+                assert_eq!(
+                    facts["uri"],
+                    "https://direct.example/native/SECRET-PATH?token=SECRET-QUERY"
+                );
+                assert_eq!(facts["raw_forwarding_absent"], true);
+                assert_eq!(
+                    facts["normalized"],
+                    json!({"target_bytes":received.target_bytes(), "header_bytes":received.header_bytes(), "header_count":received.header_count()})
+                );
+                assert_eq!(result["forwarded_host"], expected_host);
+                assert_eq!(
+                    result["direct_context_peer"],
+                    json!(peer.map(|address| address.to_string()))
+                );
+                assert_ne!(facts["request_id"], foreign_id.to_string());
+                assert_ne!(facts["request_id"], "SECRET-VISITOR-ID");
+                let record = assert_one_released(&probe);
+                assert_eq!(facts["request_id"], record.request_id.to_string());
+                assert_eq!(record.route, "/native/{id}");
+                assert_eq!(record.forwarding_result, expected_result);
+                assert_eq!(record.status, Some(StatusCode::OK));
+                assert_eq!(
+                    record.level(),
+                    if expected_result == ForwardingResult::Malformed {
+                        log::Level::Warn
+                    } else {
+                        log::Level::Info
+                    }
+                );
+                assert_eq!(probe.handle.snapshot().idle_connections, 1);
+                drop(owned_connection);
+                assert_eq!(
+                    probe.handle.snapshot(),
+                    NativeDiagnosticsSnapshot::default()
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn original_forwarding_head_overages_reject_before_stripping_or_body_poll() {
+            for limits in [
+                IngressHeadLimits::default()
+                    .with_max_request_header_count(1)
+                    .expect("field limit"),
+                IngressHeadLimits::default()
+                    .with_max_request_header_bytes(32)
+                    .expect("byte limit"),
+            ] {
+                let probe = NativeProbe::default();
+                let body_polls = Arc::new(AtomicUsize::new(0));
+                let source_drops = Arc::new(AtomicUsize::new(0));
+                let source_guard = DropSignal(Arc::clone(&source_drops));
+                let counted_polls = Arc::clone(&body_polls);
+                let body = AxumBody::from_stream(poll_fn(move |_context| {
+                    let _retained = &source_guard;
+                    counted_polls.fetch_add(1, Ordering::SeqCst);
+                    Poll::<Option<Result<Bytes, io::Error>>>::Pending
+                }));
+                let admission_calls = Arc::new(AtomicUsize::new(0));
+                let counted_admission = Arc::clone(&admission_calls);
+                let app_reports = Arc::new(Mutex::new(Vec::new()));
+                let mut app = App::new(
+                    RouterService::builder()
+                        .post("/head", success_handler)
+                        .build(),
+                );
+                app.set_ingress_head_limits(limits);
+                app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&app_reports)));
+                app.set_ingress_admission_policy(move |_head| {
+                    counted_admission.fetch_add(1, Ordering::SeqCst);
+                    AdmissionDecision::Abort
+                });
+                let service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+                let incoming = Request::builder()
+                    .method("POST")
+                    .uri("/head")
+                    .header("host", "d.test")
+                    .header(
+                        "forwarded",
+                        "for=203.0.113.8;host=PUBLIC-SECRET.example;proto=https",
+                    )
+                    .header("x-forwarded-private", "SECRET-HEADER")
+                    .body(body)
+                    .expect("head request");
+                let (mut parts, native_body) = incoming.into_parts();
+                let saved = parts.headers.clone();
+                strip_forwarding_headers(&mut parts.headers);
+                validate_normalized_ingress_parts_with_summary(&parts, limits)
+                    .expect("stripped head alone would fit");
+                parts.headers = saved;
+                let response = service
+                    .dispatch_request(
+                        Request::from_parts(parts, native_body),
+                        &EgressConnection::default(),
+                        None,
+                    )
+                    .await
+                    .expect("detached head response");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                );
+                assert_eq!(body_polls.load(Ordering::SeqCst), 0);
+                assert_eq!(admission_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(source_drops.load(Ordering::SeqCst), 1);
+                let rendered = to_bytes(response.into_body(), 1024)
+                    .await
+                    .expect("head error body");
+                assert!(!String::from_utf8_lossy(&rendered).contains("SECRET"));
+                let record = assert_one_released(&probe);
+                assert_eq!(
+                    record.failure,
+                    Some(NativeRequestFailure::PropagatedError {
+                        kind: "request_header_fields_too_large"
+                    })
+                );
+                assert_eq!(
+                    record.status,
+                    Some(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE)
+                );
+                assert_eq!(record.forwarding_result, ForwardingResult::Absent);
+                assert!(app_reports.lock().expect("detached app reports").is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn public_metadata_mutation_cannot_change_private_record_identity_or_add_response_id()
+        {
+            let probe = NativeProbe::default();
+            let router = RouterService::builder()
+                .get("/mutate", mutate_metadata_handler)
+                .build();
+            let service =
+                observed_service(App::new(router), TrustedProxyPolicy::no_trust(), &probe);
+            let request = Request::builder()
+                .uri("/mutate")
+                .header("x-request-id", "VISITOR-SENTINEL")
+                .body(AxumBody::empty())
+                .expect("request");
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), None)
+                .await
+                .expect("response");
+            assert!(!response.headers().contains_key("x-request-id"));
+            assert!(!response.headers().contains_key("request-id"));
+            let identity = to_bytes(response.into_body(), 1024)
+                .await
+                .expect("identity body");
+            let record = assert_one_released(&probe);
+            assert_eq!(identity.as_ref(), record.request_id.to_string().as_bytes());
+            assert_eq!(identity.len(), 64);
+            assert_ne!(identity, "VISITOR-SENTINEL");
+        }
+
+        #[tokio::test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "The abort, drain and refusal matrix shares lifetime fixtures while checking their distinct no-response versus detached-completion contracts"
+        )]
+        async fn native_abort_drain_and_refusal_release_once_without_inventing_egress() {
+            for mode in ["abort", "drain", "refuse"] {
+                let probe = NativeProbe::default();
+                let body_polls = Arc::new(AtomicUsize::new(0));
+                let observed_polls = Arc::clone(&body_polls);
+                let source_drops = Arc::new(AtomicUsize::new(0));
+                let source_guard = DropSignal(Arc::clone(&source_drops));
+                let body = AxumBody::from_stream(poll_fn(move |_context| {
+                    let _retained = &source_guard;
+                    observed_polls.fetch_add(1, Ordering::SeqCst);
+                    Poll::<Option<Result<Bytes, io::Error>>>::Pending
+                }));
+                let app_reports = Arc::new(Mutex::new(Vec::new()));
+                let completion_calls = Arc::new(AtomicUsize::new(0));
+                let counted_completion = Arc::clone(&completion_calls);
+                let admission_calls = Arc::new(AtomicUsize::new(0));
+                let counted_admission = Arc::clone(&admission_calls);
+                let admission_handle = probe.handle.clone();
+                let mut app = App::new(
+                    RouterService::builder()
+                        .post("/gate", success_handler)
+                        .build(),
+                );
+                app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&app_reports)));
+                app.set_ingress_admission_policy(move |_head| {
+                    counted_admission.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(admission_handle.snapshot().active_requests, 1);
+                    if mode == "refuse" {
+                        let completed = Arc::clone(&counted_completion);
+                        AdmissionDecision::Refuse {
+                            completion: ResponseEgressCompletion::new(move |_report| {
+                                completed.fetch_add(1, Ordering::SeqCst);
+                            }),
+                            response: response_builder()
+                                .status(StatusCode::SERVICE_UNAVAILABLE)
+                                .body(Body::from("admission refusal"))
+                                .expect("refusal"),
+                        }
+                    } else {
+                        AdmissionDecision::Abort
+                    }
+                });
+                let mut service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+                let (_phase_sender, phase) = watch::channel(if mode == "drain" {
+                    LifecyclePhase::Draining
+                } else {
+                    LifecyclePhase::Ready
+                });
+                service.phase = Some(phase);
+                let owned_connection = tracked_connection(&mut service);
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/gate")
+                    .body(body)
+                    .expect("request");
+                let outcome = service
+                    .dispatch_request(request, &EgressConnection::default(), None)
+                    .await;
+                if mode == "refuse" {
+                    let response = outcome.expect("refusal response");
+                    assert_eq!(probe.handle.snapshot().active_requests, 1);
+                    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                    assert_eq!(
+                        to_bytes(response.into_body(), 1024)
+                            .await
+                            .expect("refusal body"),
+                        "admission refusal"
+                    );
+                    let record = assert_one_released(&probe);
+                    assert_eq!(record.status, Some(StatusCode::SERVICE_UNAVAILABLE));
+                    assert_eq!(record.failure, Some(NativeRequestFailure::AdmissionRefused));
+                    assert_eq!(
+                        record.outcome,
+                        NativeRequestOutcome::Egress(ResponseEgressOutcome::HostHandoff)
+                    );
+                    assert_eq!(completion_calls.load(Ordering::SeqCst), 1);
+                    // Refusal retains its completion, not the admitted-request observer.
+                    assert!(app_reports.lock().expect("app reports").is_empty());
+                } else {
+                    let Err(_aborted) = outcome else {
+                        panic!("no response expected on abort or drain");
+                    };
+                    let record = assert_one_released(&probe);
+                    assert_eq!(record.event, "request_ingress");
+                    assert_eq!(record.status, None);
+                    assert_eq!(record.bytes_written, None);
+                    assert_eq!(record.body_kind, None);
+                    assert_eq!(
+                        record.outcome,
+                        NativeRequestOutcome::Ingress(if mode == "drain" {
+                            IngressDisposition::Draining
+                        } else {
+                            IngressDisposition::Aborted
+                        })
+                    );
+                    assert_eq!(completion_calls.load(Ordering::SeqCst), 0);
+                    assert!(app_reports.lock().expect("app reports").is_empty());
+                }
+                assert_eq!(
+                    admission_calls.load(Ordering::SeqCst),
+                    usize::from(mode != "drain")
+                );
+                assert_eq!(body_polls.load(Ordering::SeqCst), 0);
+                assert_eq!(source_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.handle.snapshot().idle_connections, 1);
+                drop(owned_connection);
+                assert_eq!(
+                    probe.handle.snapshot(),
+                    NativeDiagnosticsSnapshot::default()
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "Three cancellation stages retain one fixture and its before-drop and after-drop assertions for native, body, grant and completion ownership"
+        )]
+        async fn cancelled_body_handler_and_fallback_futures_release_native_and_app_resources() {
+            for stage in ["body", "handler", "fallback"] {
+                let probe = NativeProbe::default();
+                let body_polls = Arc::new(AtomicUsize::new(0));
+                let observed_polls = Arc::clone(&body_polls);
+                let source_drops = Arc::new(AtomicUsize::new(0));
+                let source_guard = DropSignal(Arc::clone(&source_drops));
+                let body_handle = probe.handle.clone();
+                let body = AxumBody::from_stream(poll_fn(move |_context| {
+                    let _retained = &source_guard;
+                    assert_eq!(body_handle.snapshot().active_requests, 1);
+                    observed_polls.fetch_add(1, Ordering::SeqCst);
+                    Poll::<Option<Result<Bytes, io::Error>>>::Pending
+                }));
+                let handler_calls = Arc::new(AtomicUsize::new(0));
+                let router = match stage {
+                    "body" => RouterService::builder()
+                        .post("/pending", read_body_handler)
+                        .build(),
+                    "handler" => RouterService::builder()
+                        .post("/pending", pending_handler)
+                        .build(),
+                    _ => RouterService::builder().build(),
+                };
+                let app_reports = Arc::new(Mutex::new(Vec::new()));
+                let completion_calls = Arc::new(AtomicUsize::new(0));
+                let retained_drops = Arc::new(AtomicUsize::new(0));
+                let grant_drops = Arc::new(AtomicUsize::new(0));
+                let captured_completions = Arc::clone(&completion_calls);
+                let captured_retained = Arc::clone(&retained_drops);
+                let captured_grants = Arc::clone(&grant_drops);
+                let mut app = App::new(router);
+                app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&app_reports)));
+                app.set_ingress_admission_policy(move |head| {
+                    let calls = Arc::clone(&captured_completions);
+                    let retained = DropSignal(Arc::clone(&captured_retained));
+                    let completion = ResponseEgressCompletion::new(move |_report| {
+                        let _resource = retained;
+                        calls.fetch_add(1, Ordering::SeqCst);
+                    });
+                    let grant = IngressGrant::new(DropSignal(Arc::clone(&captured_grants)));
+                    if stage == "fallback" {
+                        AdmissionDecision::ReadBodyBeforeFallback {
+                            completion,
+                            grant,
+                            max_body_bytes: 1024,
+                            read_deadline: head.read_deadline_after(Duration::from_secs(30)),
+                            on_exceeded: BufferedIngressResponse::text(StatusCode::OK, "overflow"),
+                            on_timeout: BufferedIngressResponse::text(StatusCode::OK, "timeout"),
+                        }
+                    } else {
+                        AdmissionDecision::Admit {
+                            completion,
+                            grant,
+                            read_deadline: head.read_deadline_after(Duration::from_secs(30)),
+                        }
+                    }
+                });
+                let mut service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+                let owned_connection = tracked_connection(&mut service);
+                let mut request = Request::builder()
+                    .method("POST")
+                    .uri("/pending")
+                    .body(body)
+                    .expect("request");
+                request
+                    .extensions_mut()
+                    .insert(PendingCalls(Arc::clone(&handler_calls)));
+                let connection = EgressConnection::default();
+                let mut response = Box::pin(service.dispatch_request(request, &connection, None));
+                assert!(matches!(
+                    futures_util::poll!(response.as_mut()),
+                    Poll::Pending
+                ));
+                assert_eq!(
+                    probe.handle.snapshot(),
+                    NativeDiagnosticsSnapshot {
+                        active_requests: 1,
+                        active_connections: 1,
+                        idle_connections: 0
+                    }
+                );
+                assert_eq!(source_drops.load(Ordering::SeqCst), 0);
+                assert_eq!(retained_drops.load(Ordering::SeqCst), 0);
+                assert_eq!(grant_drops.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    handler_calls.load(Ordering::SeqCst),
+                    usize::from(stage != "fallback")
+                );
+                assert_eq!(body_polls.load(Ordering::SeqCst) > 0, stage != "handler");
+                drop(response);
+                assert_eq!(source_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(retained_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(grant_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(completion_calls.load(Ordering::SeqCst), 0);
+                assert!(app_reports.lock().expect("app reports").is_empty());
+                let record = assert_one_released(&probe);
+                assert_eq!(
+                    record.outcome,
+                    NativeRequestOutcome::Ingress(IngressDisposition::Abandoned)
+                );
+                assert_eq!(record.status, None);
+                assert_eq!(record.bytes_written, None);
+                assert_eq!(probe.handle.snapshot().idle_connections, 1);
+                drop(owned_connection);
+                assert_eq!(
+                    probe.handle.snapshot(),
+                    NativeDiagnosticsSnapshot::default()
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn prepared_response_drop_is_one_failing_egress_record_with_original_status() {
+            let probe = NativeProbe::default();
+            let app_reports = Arc::new(Mutex::new(Vec::new()));
+            let mut app = App::new(
+                RouterService::builder()
+                    .get("/drop", success_handler)
+                    .build(),
+            );
+            app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&app_reports)));
+            let mut service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+            let owned_connection = tracked_connection(&mut service);
+            let response = service
+                .dispatch_request(
+                    Request::builder()
+                        .uri("/drop")
+                        .body(AxumBody::empty())
+                        .expect("request"),
+                    &EgressConnection::default(),
+                    None,
+                )
+                .await
+                .expect("response");
+            assert_eq!(probe.handle.snapshot().active_requests, 1);
+            drop(response);
+            let record = assert_one_released(&probe);
+            assert_eq!(record.event, "request_terminal");
+            assert_eq!(record.status, Some(StatusCode::OK));
+            assert_eq!(
+                record.outcome,
+                NativeRequestOutcome::Egress(ResponseEgressOutcome::TransportError)
+            );
+            assert_eq!(record.level(), log::Level::Warn);
+            assert_eq!(app_reports.lock().expect("app reports").len(), 1);
+            drop(owned_connection);
+            assert_eq!(
+                probe.handle.snapshot(),
+                NativeDiagnosticsSnapshot::default()
+            );
+        }
+
+        #[tokio::test]
+        async fn managed_native_observer_panic_preserves_release_and_application_observer() {
+            for abort in [false, true] {
+                let probe = NativeProbe {
+                    panics: true,
+                    ..NativeProbe::default()
+                };
+                let app_reports = Arc::new(Mutex::new(Vec::new()));
+                let mut app = App::new(
+                    RouterService::builder()
+                        .get("/observer", success_handler)
+                        .build(),
+                );
+                app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&app_reports)));
+                if abort {
+                    app.set_ingress_admission_policy(|_head| AdmissionDecision::Abort);
+                }
+                let service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+                let request = Request::builder()
+                    .uri("/observer")
+                    .body(AxumBody::empty())
+                    .expect("request");
+                let outcome = service
+                    .dispatch_request(request, &EgressConnection::default(), None)
+                    .await;
+                if abort {
+                    let Err(_aborted) = outcome else {
+                        panic!("abort produced a response");
+                    };
+                    assert_eq!(assert_one_released(&probe).status, None);
+                    assert!(app_reports.lock().expect("app reports").is_empty());
+                } else {
+                    let response = outcome.expect("response despite observer panic");
+                    assert_eq!(
+                        to_bytes(response.into_body(), 1024)
+                            .await
+                            .expect("body despite observer panic"),
+                        "ok"
+                    );
+                    assert_eq!(assert_one_released(&probe).status, Some(StatusCode::OK));
+                    assert_eq!(app_reports.lock().expect("app reports").len(), 1);
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn configured_fallback_200_has_owner_failure_but_deliberate_413_and_503_do_not() {
+            for timed_out in [false, true] {
+                let probe = NativeProbe::default();
+                let mut app = App::new(RouterService::builder().build());
+                app.set_ingress_admission_policy(move |head| {
+                    AdmissionDecision::ReadBodyBeforeFallback {
+                        completion: ResponseEgressCompletion::empty(),
+                        grant: IngressGrant::empty(),
+                        max_body_bytes: 1,
+                        read_deadline: if timed_out {
+                            Deadline::at_instant(head.request_start())
+                        } else {
+                            head.read_deadline_after(Duration::from_secs(30))
+                        },
+                        on_exceeded: BufferedIngressResponse::text(
+                            StatusCode::OK,
+                            "configured overflow",
+                        ),
+                        on_timeout: BufferedIngressResponse::text(
+                            StatusCode::OK,
+                            "configured timeout",
+                        ),
+                    }
+                });
+                let service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/missing")
+                    .body(AxumBody::from("ab"))
+                    .expect("fallback request");
+                let response = service
+                    .dispatch_request(request, &EgressConnection::default(), None)
+                    .await
+                    .expect("configured response");
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    to_bytes(response.into_body(), 1024)
+                        .await
+                        .expect("configured body"),
+                    if timed_out {
+                        "configured timeout"
+                    } else {
+                        "configured overflow"
+                    }
+                );
+                let record = assert_one_released(&probe);
+                assert_eq!(
+                    record.failure,
+                    Some(if timed_out {
+                        NativeRequestFailure::FallbackReadTimedOut
+                    } else {
+                        NativeRequestFailure::FallbackBodyExceeded
+                    })
+                );
+                assert_eq!(record.status, Some(StatusCode::OK));
+                assert_eq!(record.level(), log::Level::Warn);
+            }
+            for (path, status) in [
+                ("/ordinary/413", StatusCode::PAYLOAD_TOO_LARGE),
+                ("/ordinary/503", StatusCode::SERVICE_UNAVAILABLE),
+            ] {
+                let probe = NativeProbe::default();
+                let service = observed_service(
+                    App::new(
+                        RouterService::builder()
+                            .get("/ordinary/{status}", ordinary_status_handler)
+                            .build(),
+                    ),
+                    TrustedProxyPolicy::no_trust(),
+                    &probe,
+                );
+                let request = Request::builder()
+                    .uri(path)
+                    .body(AxumBody::empty())
+                    .expect("ordinary request");
+                let response = service
+                    .dispatch_request(request, &EgressConnection::default(), None)
+                    .await
+                    .expect("ordinary response");
+                assert_eq!(response.status(), status);
+                to_bytes(response.into_body(), 1024)
+                    .await
+                    .expect("ordinary body");
+                let record = assert_one_released(&probe);
+                assert_eq!(record.failure, None);
+                assert_eq!(record.status, Some(status));
+                assert_eq!(record.level(), log::Level::Info);
+            }
+        }
+
+        // #407 JSON-ceiling coverage is excluded from this narrower ingress reconciliation.
+
+        #[tokio::test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "Framework routing, handler errors and custom rendering are paired negative controls that keep privacy and provenance assertions in one matrix"
+        )]
+        async fn native_routing_privacy_preserves_router_provenance_allow_and_application_control()
+        {
+            for (path, method, status, framework, kind, public_sentinel) in [
+                (
+                    "/missing/FRAMEWORK_PATH_SENTINEL",
+                    "GET",
+                    StatusCode::NOT_FOUND,
+                    true,
+                    "not_found",
+                    false,
+                ),
+                (
+                    "/known",
+                    "PRIVATE-METHOD-SENTINEL",
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    true,
+                    "method_not_allowed",
+                    false,
+                ),
+                (
+                    "/handler404",
+                    "GET",
+                    StatusCode::NOT_FOUND,
+                    false,
+                    "not_found",
+                    true,
+                ),
+                (
+                    "/internal",
+                    "GET",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    false,
+                    "internal",
+                    false,
+                ),
+                (
+                    "/upstream",
+                    "GET",
+                    StatusCode::BAD_GATEWAY,
+                    false,
+                    "bad_gateway",
+                    false,
+                ),
+            ] {
+                let probe = NativeProbe::default();
+                let router = RouterService::builder()
+                    .get("/known", success_handler)
+                    .get("/handler404", handler_not_found)
+                    .get("/internal", internal_error_handler)
+                    .get("/upstream", upstream_error_handler)
+                    .build();
+                let service =
+                    observed_service(App::new(router), TrustedProxyPolicy::no_trust(), &probe);
+                let request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(AxumBody::empty())
+                    .expect("error request");
+                let response = service
+                    .dispatch_request(request, &EgressConnection::default(), None)
+                    .await
+                    .expect("error response");
+                assert_eq!(response.status(), status);
+                if status == StatusCode::METHOD_NOT_ALLOWED {
+                    assert_eq!(response.headers().get("allow").expect("Allow"), "GET");
+                }
+                let body = to_bytes(response.into_body(), 2048)
+                    .await
+                    .expect("error body");
+                assert_eq!(
+                    String::from_utf8_lossy(&body).contains("SENTINEL"),
+                    public_sentinel
+                );
+                let record = assert_one_released(&probe);
+                assert_eq!(
+                    record.failure,
+                    Some(if framework {
+                        NativeRequestFailure::FrameworkRouting { kind }
+                    } else {
+                        NativeRequestFailure::PropagatedError { kind }
+                    })
+                );
+                assert_eq!(
+                    record.level(),
+                    if framework {
+                        log::Level::Info
+                    } else {
+                        log::Level::Warn
+                    }
+                );
+                assert_eq!(record.method, if method == "GET" { "GET" } else { "other" });
+            }
+            let probe = NativeProbe::default();
+            let mut app = App::new(RouterService::builder().build());
+            app.set_error_response_renderer(|error| {
+                let chosen_body = error.to_string();
+                assert!(chosen_body.contains("CUSTOM_ROUTE_SENTINEL"));
+                CoreResponse::new(Body::from(chosen_body))
+            });
+            let service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+            let request = Request::builder()
+                .uri("/CUSTOM_ROUTE_SENTINEL")
+                .body(AxumBody::empty())
+                .expect("custom request");
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), None)
+                .await
+                .expect("custom response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert!(
+                String::from_utf8_lossy(
+                    &to_bytes(response.into_body(), 1024)
+                        .await
+                        .expect("custom body")
+                )
+                .contains("CUSTOM_ROUTE_SENTINEL")
+            );
+            assert_eq!(
+                assert_one_released(&probe).failure,
+                Some(NativeRequestFailure::FrameworkRouting { kind: "not_found" })
+            );
+        }
+
+        #[tokio::test]
+        async fn managed_source_and_deadline_failures_keep_selected_200_prefix_accounting_and_one_record()
+         {
+            for failure in [
+                ResponseEgressOutcome::SourceError,
+                ResponseEgressOutcome::DeadlineExceeded,
+            ] {
+                let probe = NativeProbe::default();
+                let app_reports = Arc::new(Mutex::new(Vec::new()));
+                let start = MonotonicInstant::now();
+                let now = Arc::new(Mutex::new(start));
+                let captured_clock = Arc::clone(&now);
+                let mut app = App::new(
+                    RouterService::builder()
+                        .get("/stream/{failure}", terminal_stream_handler)
+                        .build(),
+                );
+                app.set_monotonic_clock(MonotonicClock::new(move || {
+                    *captured_clock.lock().expect("clock")
+                }));
+                app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&app_reports)));
+                app.set_response_egress_policy(|_head, egress_started_at| ResponseEgressPolicy {
+                    write_deadline: Deadline::at_instant(
+                        egress_started_at
+                            .checked_add(Duration::from_secs(1))
+                            .expect("write deadline"),
+                    ),
+                });
+                let mut service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+                let owned_connection = tracked_connection(&mut service);
+                let path = if failure == ResponseEgressOutcome::SourceError {
+                    "/stream/source"
+                } else {
+                    "/stream/deadline"
+                };
+                let request = Request::builder()
+                    .uri(path)
+                    .body(AxumBody::empty())
+                    .expect("stream request");
+                let response = service
+                    .dispatch_request(request, &EgressConnection::default(), None)
+                    .await
+                    .expect("stream response");
+                assert_eq!(response.status(), StatusCode::OK);
+                let mut body = response.into_body();
+                let prefix = poll_future(|context| Pin::new(&mut body).poll_frame(context))
+                    .await
+                    .expect("prefix frame")
+                    .expect("prefix data")
+                    .into_data()
+                    .expect("data frame");
+                assert_eq!(prefix, "terminal-prefix");
+                assert_eq!(probe.handle.snapshot().active_requests, 1);
+                assert!(probe.records.lock().expect("native records").is_empty());
+                if failure == ResponseEgressOutcome::DeadlineExceeded {
+                    *now.lock().expect("clock") = start
+                        .checked_add(Duration::from_secs(1))
+                        .expect("expired instant");
+                }
+                let terminal_error = poll_future(|context| Pin::new(&mut body).poll_frame(context))
+                    .await
+                    .expect("terminal frame")
+                    .expect_err("terminal failure");
+                assert!(!terminal_error.to_string().contains("SENTINEL"));
+                // Hyper stops after a body error; an ended body need not be repolled.
+                assert!(body.is_end_stream());
+                drop(body);
+                let record = assert_one_released(&probe);
+                assert_eq!(record.status, Some(StatusCode::OK));
+                assert_eq!(record.outcome, NativeRequestOutcome::Egress(failure));
+                assert_eq!(record.bytes_written, Some(15));
+                assert_eq!(record.fallback_disposition, None);
+                assert_eq!(record.route, "/stream/{failure}");
+                assert_eq!(record.level(), log::Level::Warn);
+                assert_eq!(app_reports.lock().expect("app reports").len(), 1);
+                assert_eq!(app_reports.lock().expect("app reports")[0].outcome, failure);
+                drop(owned_connection);
+                assert_eq!(
+                    probe.handle.snapshot(),
+                    NativeDiagnosticsSnapshot::default()
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn managed_precommit_framing_fallback_records_selected_500_and_original_cause() {
+            let probe = NativeProbe::default();
+            let service = observed_service(
+                App::new(
+                    RouterService::builder()
+                        .get("/framing", bad_framing_handler)
+                        .build(),
+                ),
+                TrustedProxyPolicy::no_trust(),
+                &probe,
+            );
+            let request = Request::builder()
+                .uri("/framing")
+                .body(AxumBody::empty())
+                .expect("request");
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), None)
+                .await
+                .expect("fallback response");
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = to_bytes(response.into_body(), 1024)
+                .await
+                .expect("fallback body");
+            assert!(!String::from_utf8_lossy(&body).contains("mismatched"));
+            let record = assert_one_released(&probe);
+            assert_eq!(record.status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+            assert_eq!(
+                record.outcome,
+                NativeRequestOutcome::Egress(ResponseEgressOutcome::ConversionError)
+            );
+            assert_eq!(
+                record.body_kind,
+                Some(edgezero_core::ResponseEgressBodyKind::Fallback)
+            );
+            assert_eq!(
+                record.fallback_disposition,
+                Some(ResponseEgressFallbackDisposition::Completed)
+            );
+        }
+
+        #[tokio::test]
+        async fn managed_hooks_keep_app_native_observer_order_and_authoritative_total_duration() {
+            let probe = NativeProbe::default();
+            let start = MonotonicInstant::now();
+            let now = Arc::new(Mutex::new(start));
+            let source = Arc::clone(&now);
+            let admission_now = Arc::clone(&now);
+            let completion_now = Arc::clone(&now);
+            let completion_events = Arc::clone(&probe.events);
+            let reports = Arc::new(Mutex::new(Vec::new()));
+            let mut app = App::new(
+                RouterService::builder()
+                    .get("/timed", success_handler)
+                    .build(),
+            );
+            app.set_monotonic_clock(MonotonicClock::new(move || *source.lock().expect("clock")));
+            app.set_ingress_admission_policy(move |head: &IngressHead| {
+                assert_eq!(head.request_start(), start);
+                *admission_now.lock().expect("clock") = start
+                    .checked_add(Duration::from_secs(3))
+                    .expect("pre-egress instant");
+                let events = Arc::clone(&completion_events);
+                let observed_clock = Arc::clone(&completion_now);
+                AdmissionDecision::Admit {
+                    completion: ResponseEgressCompletion::new(move |_report| {
+                        events.lock().expect("hook events").push("app");
+                        *observed_clock.lock().expect("clock") = start
+                            .checked_add(Duration::from_secs(80))
+                            .expect("callback instant");
+                    }),
+                    grant: IngressGrant::empty(),
+                    read_deadline: head.read_deadline_after(Duration::from_secs(30)),
+                }
+            });
+            app.set_response_egress_observer(OrderedAppObserver {
+                events: Arc::clone(&probe.events),
+                reports: Arc::clone(&reports),
+            });
+            let mut service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+            let owned_connection = tracked_connection(&mut service);
+            let response = service
+                .dispatch_request(
+                    Request::builder()
+                        .uri("/timed")
+                        .body(AxumBody::empty())
+                        .expect("request"),
+                    &EgressConnection::default(),
+                    None,
+                )
+                .await
+                .expect("response");
+            assert_eq!(probe.handle.snapshot().active_requests, 1);
+            *now.lock().expect("clock") = start
+                .checked_add(Duration::from_secs(8))
+                .expect("terminal instant");
+            to_bytes(response.into_body(), 1024)
+                .await
+                .expect("response body");
+            let record = assert_one_released(&probe);
+            assert_eq!(record.duration, Some(Duration::from_secs(8)));
+            assert_eq!(
+                reports.lock().expect("app reports")[0].elapsed,
+                Duration::from_secs(5)
+            );
+            assert_eq!(
+                probe.events.lock().expect("hook events").as_slice(),
+                ["app", "native", "observer"]
+            );
+            assert_eq!(probe.handle.snapshot().idle_connections, 1);
+            drop(owned_connection);
+            assert_eq!(
+                probe.handle.snapshot(),
+                NativeDiagnosticsSnapshot::default()
+            );
+        }
+
+        #[tokio::test]
+        async fn managed_backwards_request_clock_is_safe_native_fault_without_fake_duration() {
+            let probe = NativeProbe::default();
+            let now = MonotonicInstant::now();
+            let request_start = now
+                .checked_add(Duration::from_secs(1))
+                .expect("request start");
+            let samples = Arc::new(AtomicUsize::new(0));
+            let captured_samples = Arc::clone(&samples);
+            let mut app = App::new(
+                RouterService::builder()
+                    .get("/backwards", success_handler)
+                    .build(),
+            );
+            app.set_monotonic_clock(MonotonicClock::new(move || {
+                if captured_samples.fetch_add(1, Ordering::SeqCst) == 0 {
+                    request_start
+                } else {
+                    now
+                }
+            }));
+            let service = observed_service(app, TrustedProxyPolicy::no_trust(), &probe);
+            let request = Request::builder()
+                .uri("/backwards")
+                .body(AxumBody::empty())
+                .expect("request");
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), None)
+                .await
+                .expect("response");
+            to_bytes(response.into_body(), 1024)
+                .await
+                .expect("response body");
+            let record = assert_one_released(&probe);
+            assert_eq!(record.status, Some(StatusCode::OK));
+            assert_eq!(record.duration, None);
+            assert_eq!(record.level(), log::Level::Error);
+        }
     }
 
     /// Send a GET request through `service` and return the response body as a UTF-8 string.

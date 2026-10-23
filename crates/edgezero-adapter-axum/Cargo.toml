@@ -19,6 +19,8 @@ axum = [
     "dep:tokio",
     "dep:tower",
     "dep:futures-util",
+    "dep:getrandom",
+    "dep:ipnet",
     "dep:http-body",
     "dep:hyper",
     "dep:hyper-util",
@@ -32,6 +34,7 @@ aws-stores = ["aws-appconfig-agent", "aws-secrets-manager"]
 aws-dynamodb = ["axum", "edgezero-store-aws/dynamodb-kv"]
 celld-config = ["axum", "edgezero-store-celld/config"]
 celld-kv = ["axum", "edgezero-store-celld/kv"]
+geo-cloudfront = ["axum"]
 cli = [
     "native-bindings",
     "dep:edgezero-adapter",
@@ -54,6 +57,8 @@ bytes = { workspace = true }
 ctor = { workspace = true, optional = true }
 futures = { workspace = true }
 futures-util = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+ipnet = { workspace = true, optional = true }
 http = { workspace = true }
 http-body = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
@@ -115,6 +120,8 @@ flate2 = { workspace = true }
 http-body = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+rustls = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "test-util"] }
+tokio-rustls = { workspace = true }

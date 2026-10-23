@@ -209,6 +209,29 @@ field-section accounting or raw framing-rejection policy. Admission still receiv
 `IngressHeadAccounting::HostManaged` and `IngressFraming::HostManaged`; both raw-ingress
 capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
 
+## Checked ingress and diagnostics
+
+Managed hosting validates the original normalized request head, removes raw forwarding fields,
+and exposes checked metadata from the actual socket peer. Proxy trust is off by default.
+Configure a bounded `TrustedProxyPolicy` only for deployment-owned peers. Native request records
+omit raw headers, addresses, paths/queries, and source error strings; application-owned loggers
+and observers remain responsible for their own output. See
+[Axum diagnostics and trusted proxies](../axum-diagnostics.md) for configuration, metadata,
+request identity, counters, and deployment examples.
+
+## Native Geo providers
+
+Geo is off by default and selected only through `AxumRunOptions::with_geo`. The opt-in
+`geo-cloudfront` feature adds a bounded local CloudFront parser, not AWS SDKs or store setup.
+Both built-in and supplied providers require a separate `ProtectedCloudFrontAlb` policy using
+the actual socket peer. Ordinary trusted-proxy configuration does not admit geographic assertions.
+
+Read the immutable outcome through `RequestContext::geo()`. Missing metadata, untrusted ingress,
+invalid assertions, and provider failures remain distinct; none grants permission or chooses an
+HTTP status. The [native Geo guide](../native-geo.md) covers the Rust API, mandatory HTTPS origin
+credential gate and network isolation, header generation, disabled shared caching, rotation,
+and the separate cloud/downstream acceptance checks.
+
 ## Outbound HTTP
 
 The Axum adapter injects `AxumOutboundClient`, backed by `reqwest`. Application handlers use the

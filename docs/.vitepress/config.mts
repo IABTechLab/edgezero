@@ -50,6 +50,8 @@ export default defineConfig({
           { text: 'Cloudflare Workers', link: '/guide/adapters/cloudflare' },
           { text: 'Fermyon Spin', link: '/guide/adapters/spin' },
           { text: 'Axum (Native)', link: '/guide/adapters/axum' },
+          { text: 'Axum diagnostics', link: '/guide/axum-diagnostics' },
+          { text: 'Native Geo providers', link: '/guide/native-geo' },
           { text: 'Native AWS stores', link: '/guide/native-aws-stores' },
           { text: 'Native celld stores', link: '/guide/native-celld-stores' },
           { text: 'DynamoDB KV', link: '/guide/dynamodb-kv' },

@@ -1,8 +1,10 @@
+use std::panic::catch_unwind;
 use std::sync::Arc;
 
 use crate::body::Body;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::EdgeError;
+use crate::geo::GeoOutcome;
 use crate::http::header::CONTENT_TYPE;
 use crate::http::{HeaderValue, Method, Request, Response, StatusCode};
 use crate::ingress::{
@@ -12,15 +14,14 @@ use crate::ingress::{
 };
 use crate::manifest::BakedManifest;
 use crate::platform::PlatformMetadata;
-use crate::response::IntoResponse as _;
 use crate::response_egress::{
     DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
     DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead, ResponseEgressCompletion,
-    ResponseEgressDeadline, ResponseEgressEnvelope, ResponseEgressHead, ResponseEgressObserver,
-    ResponseEgressObserverHandle, ResponseEgressPolicy, ResponseEgressPolicyCallback,
-    ResponseEgressRequestMetadata, default_response_egress_policy,
+    ResponseEgressDeadline, ResponseEgressEnvelope, ResponseEgressFailureClassification,
+    ResponseEgressHead, ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressPolicy,
+    ResponseEgressPolicyCallback, ResponseEgressRequestMetadata, default_response_egress_policy,
 };
-use crate::router::{RouteMetadata, RouterService};
+use crate::router::{RouteErrorKind, RouteMetadata, RouterService};
 use crate::time::{MonotonicClock, MonotonicInstant};
 
 /// Canonical adapter name for the Axum adapter.
@@ -32,7 +33,18 @@ const DEFAULT_APP_NAME: &str = "EdgeZero App";
 pub const FASTLY_ADAPTER: &str = "fastly";
 /// Canonical adapter name for the Spin adapter.
 pub const SPIN_ADAPTER: &str = "spin";
-type ErrorResponseRenderer = Arc<dyn Fn(EdgeError) -> Response + Send + Sync + 'static>;
+enum ErrorResponseRenderer {
+    Custom(Arc<dyn Fn(EdgeError) -> Response + Send + Sync + 'static>),
+    Default,
+}
+
+/// Presentation of framework-generated routing errors on a managed adapter path.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameworkErrorDetail {
+    CategoryOnly,
+    Default,
+}
 
 /// Lightweight container around a `RouterService` that can be extended via hook implementations.
 pub struct App {
@@ -92,6 +104,7 @@ impl App {
         let request_start = prepared.request_start();
         let route = prepared.route_metadata().cloned();
         let (_resolved, _admitted, completion) = prepared.into_parts();
+        let failure = ResponseEgressFailureClassification::error(error.kind());
         self.response_egress_envelope(
             self.render_error_response(error),
             request_method,
@@ -99,6 +112,7 @@ impl App {
             route,
             completion,
         )
+        .with_failure(Some(failure))
     }
 
     /// Resolves and admits a normalized request head before an adapter transfers native body
@@ -188,6 +202,7 @@ impl App {
         request_method: Method,
         request_start: MonotonicInstant,
     ) -> IngressDispatchOutcome {
+        let failure = ResponseEgressFailureClassification::error(error.kind());
         let head = DetachedResponseEgressHead::new(
             &request_method,
             request_start,
@@ -204,12 +219,15 @@ impl App {
                 response
                     .extensions_mut()
                     .insert(ResponseEgressDeadline::at(deadline));
-                IngressDispatchOutcome::Response(Box::new(self.detached_response_egress(
-                    response,
-                    request_method,
-                    request_start,
-                    completion,
-                )))
+                IngressDispatchOutcome::Response(Box::new(
+                    self.detached_response_egress(
+                        response,
+                        request_method,
+                        request_start,
+                        completion,
+                    )
+                    .with_failure(Some(failure)),
+                ))
             }
         }
     }
@@ -238,19 +256,72 @@ impl App {
         prepared: PreparedIngress,
         request: Request,
     ) -> ResponseEgressEnvelope {
+        self.dispatch_admitted_with_framework_error_detail(
+            prepared,
+            request,
+            FrameworkErrorDetail::Default,
+        )
+        .await
+    }
+
+    /// Dispatches with native default routing-error presentation, preserving custom renderers.
+    #[doc(hidden)]
+    #[inline]
+    pub async fn dispatch_admitted_with_framework_error_detail(
+        &self,
+        prepared: PreparedIngress,
+        request: Request,
+        detail: FrameworkErrorDetail,
+    ) -> ResponseEgressEnvelope {
+        self.dispatch_admitted_with_geo(prepared, request, detail, GeoOutcome::NoSelection)
+            .await
+    }
+
+    /// Dispatches with an adapter-owned outcome, independent of public request extensions.
+    #[doc(hidden)]
+    #[inline]
+    pub async fn dispatch_admitted_with_geo(
+        &self,
+        prepared: PreparedIngress,
+        request: Request,
+        detail: FrameworkErrorDetail,
+        geo: GeoOutcome,
+    ) -> ResponseEgressEnvelope {
         let request_method = request.method().clone();
         let request_start = prepared.request_start();
         let route = prepared.route_metadata().cloned();
         let (resolved, admitted, completion) = prepared.into_parts();
-        let response = match self
+        let (result, route_error, mut failure) = self
             .router
-            .dispatch_resolved(resolved, request, admitted)
+            .dispatch_resolved_outcome(
+                resolved,
+                request,
+                admitted.with_request_context(geo, detail == FrameworkErrorDetail::CategoryOnly),
+            )
             .await
-        {
+            .into_parts();
+        let response = match result {
             Ok(response) => response,
-            Err(error) => self.render_error_response(error),
+            Err(error) => {
+                failure = Some(if route_error.is_some() {
+                    ResponseEgressFailureClassification::routing(error.kind())
+                } else {
+                    ResponseEgressFailureClassification::error(error.kind())
+                });
+                let fixed = if detail == FrameworkErrorDetail::CategoryOnly {
+                    match route_error {
+                        Some(RouteErrorKind::NotFound) => Some("route not found"),
+                        Some(RouteErrorKind::MethodNotAllowed) => Some("method not allowed"),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                self.render_error_response_with_message(error, fixed)
+            }
         };
         self.response_egress_envelope(response, request_method, request_start, route, completion)
+            .with_failure(failure)
     }
 
     /// Resolves, admits, and dispatches one normalized inbound request into owned egress.
@@ -345,12 +416,25 @@ impl App {
     }
 
     fn render_error_response(&self, error: EdgeError) -> Response {
+        self.render_error_response_with_message(error, None)
+    }
+
+    fn render_error_response_with_message(
+        &self,
+        error: EdgeError,
+        fixed: Option<&'static str>,
+    ) -> Response {
         let status = error.status();
         let required_headers = match error.required_response_headers() {
             Ok(headers) => headers,
             Err(header_error) => return render_default_error_response(header_error),
         };
-        let mut response = (self.error_response_renderer)(error);
+        let mut response = match &self.error_response_renderer {
+            ErrorResponseRenderer::Default => {
+                render_default_error_response_with_message(error, fixed)
+            }
+            ErrorResponseRenderer::Custom(renderer) => renderer(error),
+        };
         *response.status_mut() = status;
         response.headers_mut().extend(required_headers);
         response
@@ -432,7 +516,7 @@ impl App {
     where
         Renderer: Fn(EdgeError) -> Response + Send + Sync + 'static,
     {
-        self.error_response_renderer = Arc::new(renderer);
+        self.error_response_renderer = ErrorResponseRenderer::Custom(Arc::new(renderer));
     }
 
     /// Installs the synchronous body-blind ingress admission callback.
@@ -514,7 +598,7 @@ impl App {
                     deadline: head.write_deadline_after(DEFAULT_RESPONSE_WRITE_BUDGET),
                 }
             }),
-            error_response_renderer: Arc::new(render_default_error_response),
+            error_response_renderer: ErrorResponseRenderer::Default,
             ingress_head_limits: IngressHeadLimits::default(),
             ingress_policy: default_admission_policy(),
             monotonic_clock: MonotonicClock::default(),
@@ -625,10 +709,18 @@ pub trait Hooks {
 }
 
 fn render_default_error_response(error: EdgeError) -> Response {
-    match error.into_response() {
+    render_default_error_response_with_message(error, None)
+}
+
+fn render_default_error_response_with_message(
+    error: EdgeError,
+    fixed: Option<&'static str>,
+) -> Response {
+    match error.into_response_with_message(fixed) {
         Ok(response) => response,
-        Err(render_error) => {
-            log::error!("failed to render typed ingress error response: {render_error}");
+        Err(_render_error) => {
+            let _logged =
+                catch_unwind(|| log::error!("failed to render typed ingress error response"));
             // Keep the last-resort response independent of JSON serialization.
             let mut response = Response::new(Body::from(
                 r#"{"error":{"kind":"internal","message":"internal server error","status":500}}"#,
@@ -1992,6 +2084,264 @@ mod tests {
             response.headers().get("allow").expect("Allow header"),
             "GET"
         );
+    }
+
+    #[test]
+    fn geo_owned_outcome_survives_public_request_mutation() {
+        use crate::geo::{GeoOutcome, GeoProviderId, GeoStatus, GeoUnavailableReason};
+        use crate::params::PathParams;
+        fn selected() -> GeoOutcome {
+            GeoOutcome::Selected {
+                provider: GeoProviderId::new("owned").unwrap(),
+                status: GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+            }
+        }
+        struct MutatePublic;
+        #[async_trait(?Send)]
+        impl Middleware for MutatePublic {
+            async fn handle(
+                &self,
+                mut ctx: RequestContext,
+                next: Next<'_>,
+            ) -> Result<Response, EdgeError> {
+                assert_eq!(ctx.geo(), &selected());
+                ctx.extensions_mut().insert(GeoOutcome::NoSelection);
+                ctx.headers_mut()
+                    .insert("cloudfront-viewer-country", HeaderValue::from_static("DE"));
+                assert_eq!(ctx.geo(), &selected());
+                next.run(ctx).await
+            }
+        }
+        let router = RouterService::builder()
+            .middleware(MutatePublic)
+            .post("/geo", |mut ctx: RequestContext| async move {
+                assert_eq!(ctx.geo(), &selected());
+                ctx.extensions_mut().remove::<GeoOutcome>();
+                ctx.parts_mut().extensions.insert(GeoOutcome::NoSelection);
+                assert_eq!(ctx.geo(), &selected());
+                let error = ctx
+                    .json_within::<u64>(64)
+                    .await
+                    .expect_err("wrong JSON type");
+                assert_eq!(error.message(), "invalid JSON payload");
+                ctx.extensions_mut().insert(selected());
+                let reconstructed =
+                    RequestContext::new(ctx.into_request().unwrap(), PathParams::default());
+                assert_eq!(reconstructed.geo(), &GeoOutcome::NoSelection);
+                Err::<&str, _>(error)
+            })
+            .build();
+        let mut app = App::new(router);
+        app.set_error_response_renderer(|error| {
+            assert_eq!(error.message(), "invalid JSON payload");
+            Response::new(Body::from("private parse failure"))
+        });
+        let mut request = request_builder()
+            .method(Method::POST)
+            .uri("/geo")
+            .header("content-type", "application/json")
+            .body(Body::from("\"PAYLOAD_SENTINEL\""))
+            .unwrap();
+        request.extensions_mut().insert(GeoOutcome::NoSelection);
+        let head = IngressHeadParts::from_request(
+            &request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let IngressBeginOutcome::Admitted(prepared) =
+            app.begin_ingress(head, app.monotonic_now()).unwrap()
+        else {
+            panic!("admission")
+        };
+        let response = complete_envelope(block_on(app.dispatch_admitted_with_geo(
+            prepared,
+            request,
+            FrameworkErrorDetail::CategoryOnly,
+            selected(),
+        )));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.body().as_bytes().unwrap(),
+            b"private parse failure"
+        );
+    }
+
+    #[test]
+    fn geo_legacy_dispatch_ignores_forged_extensions() {
+        use crate::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+        use crate::params::PathParams;
+        let forged = GeoOutcome::Selected {
+            provider: GeoProviderId::new("forged").unwrap(),
+            status: GeoStatus::Error(GeoError::ProviderFailure),
+        };
+        let mut unmanaged = request_builder().body(Body::empty()).unwrap();
+        unmanaged.extensions_mut().insert(forged.clone());
+        assert_eq!(
+            RequestContext::new(unmanaged, PathParams::default()).geo(),
+            &GeoOutcome::NoSelection
+        );
+        let legacy = App::new(
+            RouterService::builder()
+                .get("/legacy", |ctx: RequestContext| async move {
+                    assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
+                    Ok::<_, EdgeError>("legacy")
+                })
+                .build(),
+        );
+        let mut legacy_request = request_builder()
+            .uri("/legacy")
+            .body(Body::empty())
+            .unwrap();
+        legacy_request.extensions_mut().insert(forged.clone());
+        let legacy_head = IngressHeadParts::from_request(
+            &legacy_request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let IngressBeginOutcome::Admitted(legacy_prepared) = legacy
+            .begin_ingress(legacy_head, legacy.monotonic_now())
+            .unwrap()
+        else {
+            panic!("admission")
+        };
+        let legacy_response = complete_envelope(block_on(
+            legacy.dispatch_admitted(legacy_prepared, legacy_request),
+        ));
+        assert_eq!(legacy_response.status(), StatusCode::OK);
+    }
+
+    fn managed_dispatch(
+        app: &App,
+        method: Method,
+        path: &str,
+        detail: FrameworkErrorDetail,
+    ) -> ResponseEgressEnvelope {
+        let request = request_builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .expect("request");
+        let head = IngressHeadParts::from_request(
+            &request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let IngressBeginOutcome::Admitted(prepared) = app
+            .begin_ingress(head, app.monotonic_now())
+            .expect("admission")
+        else {
+            panic!("admission");
+        };
+        block_on(app.dispatch_admitted_with_framework_error_detail(prepared, request, detail))
+    }
+
+    #[test]
+    fn native_default_routing_errors_do_not_reflect_path_or_custom_method() {
+        let app = App::new(
+            RouterService::builder()
+                .get("/known", |_ctx: RequestContext| async {
+                    Ok::<_, EdgeError>("ok")
+                })
+                .build(),
+        );
+        for (method, path, status, fixed) in [
+            (
+                Method::GET,
+                "/private-sentinel",
+                StatusCode::NOT_FOUND,
+                "route not found",
+            ),
+            (
+                Method::from_bytes(b"PRIVATE-SENTINEL").expect("method"),
+                "/known",
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method not allowed",
+            ),
+        ] {
+            let envelope = managed_dispatch(&app, method, path, FrameworkErrorDetail::CategoryOnly);
+            let failure = envelope.failure_classification().expect("routing category");
+            assert!(failure.is_framework_route_error());
+            let response = complete_dispatch(IngressDispatchOutcome::Response(Box::new(envelope)));
+            assert_eq!(response.status(), status);
+            if status == StatusCode::METHOD_NOT_ALLOWED {
+                assert_eq!(response.headers()["allow"], "GET");
+            }
+            let payload: serde_json::Value =
+                serde_json::from_slice(response.body().as_bytes().expect("body")).expect("json");
+            assert_eq!(payload["error"]["message"], fixed);
+            assert!(
+                !str::from_utf8(response.body().as_bytes().expect("body"))
+                    .expect("utf8")
+                    .contains("sentinel")
+            );
+        }
+        let legacy = managed_dispatch(
+            &app,
+            Method::GET,
+            "/private-sentinel",
+            FrameworkErrorDetail::Default,
+        );
+        let response = complete_dispatch(IngressDispatchOutcome::Response(Box::new(legacy)));
+        assert!(
+            str::from_utf8(response.body().as_bytes().expect("body"))
+                .expect("utf8")
+                .contains("private-sentinel")
+        );
+    }
+
+    #[test]
+    fn native_routing_detail_preserves_custom_renderer_input_and_handler_errors() {
+        let mut app = App::new(
+            RouterService::builder()
+                .get("/handler", |_ctx: RequestContext| async {
+                    Err::<&'static str, _>(EdgeError::not_found("handler-sentinel"))
+                })
+                .build(),
+        );
+        let handler = managed_dispatch(
+            &app,
+            Method::GET,
+            "/handler",
+            FrameworkErrorDetail::CategoryOnly,
+        );
+        assert!(
+            !handler
+                .failure_classification()
+                .expect("handler error")
+                .is_framework_route_error()
+        );
+        let handler_response =
+            complete_dispatch(IngressDispatchOutcome::Response(Box::new(handler)));
+        assert!(
+            str::from_utf8(handler_response.body().as_bytes().expect("body"))
+                .expect("utf8")
+                .contains("handler-sentinel")
+        );
+        let seen = Arc::new(Mutex::new(String::new()));
+        let renderer_seen = Arc::clone(&seen);
+        app.set_error_response_renderer(move |error| {
+            *renderer_seen.lock().expect("seen") = error.to_string();
+            Response::new(Body::from("application-owned"))
+        });
+        let envelope = managed_dispatch(
+            &app,
+            Method::GET,
+            "/route-sentinel",
+            FrameworkErrorDetail::CategoryOnly,
+        );
+        assert!(
+            envelope
+                .failure_classification()
+                .expect("routing error")
+                .is_framework_route_error()
+        );
+        let response = complete_dispatch(IngressDispatchOutcome::Response(Box::new(envelope)));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.body().as_bytes().expect("body"),
+            b"application-owned"
+        );
+        assert!(seen.lock().expect("seen").contains("route-sentinel"));
     }
 
     #[test]
