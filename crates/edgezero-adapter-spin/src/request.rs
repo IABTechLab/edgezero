@@ -117,6 +117,30 @@ pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
     Ok(request)
 }
 
+/// Begins canonical detached delivery of an assembly error without a configured app.
+///
+/// Releases the unread request. The supplied start and clock must share a domain; the finite
+/// default write deadline starts before assembly. No configured app callbacks or headers apply.
+///
+/// # Errors
+/// Returns a category-safe delivery error if conversion and its bounded fallback both fail.
+#[inline]
+pub fn send_assembly_error(
+    req: SpinRequest,
+    error: EdgeError,
+    request_start: MonotonicInstant,
+    clock: MonotonicClock,
+) -> Result<SpinResponse, EdgeError> {
+    let method = req.method().clone();
+    drop(req);
+    from_egress_response(App::assembly_error_egress(
+        error,
+        method,
+        request_start,
+        clock,
+    ))
+}
+
 fn into_core_request_head(parts: RequestParts, outbound_clock: MonotonicClock) -> Request {
     let client_addr = parts
         .headers

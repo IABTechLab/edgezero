@@ -3,7 +3,9 @@ use edgezero_adapter_fastly::delivery::{
 };
 use edgezero_adapter_fastly::lifecycle::{Sandbox, serve_custom};
 use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
-use edgezero_adapter_fastly::request::send_request_with_registries_and_hooks;
+use edgezero_adapter_fastly::request::{
+    send_assembly_error, send_request_with_registries_and_hooks,
+};
 use edgezero_adapter_fastly::{FASTLY_PLATFORM, FastlyLogging, Serve, ServeSummary, init_logger};
 use edgezero_core::app::{App, Hooks};
 use edgezero_core::body::Body;
@@ -11,7 +13,8 @@ use edgezero_core::error::EdgeError;
 use edgezero_core::http::{Extensions, Response as CoreResponse, StatusCode, Uri};
 use edgezero_core::outbound::{HttpClient, OutboundRequest};
 use edgezero_core::{
-    AdmissionDecision, DEFAULT_INBOUND_READ_BUDGET, IngressGrant, ResponseEgressCompletion,
+    AdmissionDecision, DEFAULT_INBOUND_READ_BUDGET, IngressGrant, MonotonicClock,
+    ResponseEgressCompletion,
 };
 use fastly::{Error, Request, Response};
 use fixture_core::{FixtureApp, Observation, observe};
@@ -246,23 +249,26 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
     // Per-request mode scopes application state to the current callback.
     let mut per_request = Sandbox::default();
     let state = if reuse_app { sandbox } else { &mut per_request };
+    let clock = MonotonicClock::default();
+    let start = clock.now();
     let result = state.initialize(|| {
         if req.get_path() == "/initialization-error" {
-            Err(Error::msg("injected initialization failure"))
+            Err(EdgeError::service_unavailable("state unavailable"))
         } else {
-            App::build::<MeasuredApp>(FASTLY_PLATFORM).map_err(Error::from)
+            App::build::<MeasuredApp>(FASTLY_PLATFORM)
         }
     });
-    if result.is_err() {
-        Response::from_status(503)
-            .with_header(
-                "x-fixture-attempts",
-                state.initialization_attempts().to_string(),
-            )
-            .with_body_json(&serde_json::json!({"instance":obs.instance,
-                        "ordinal":obs.ordinal,"retained":state.state().is_some()}))?
-            .send_to_client();
-        return Ok(());
+    if let Err(error) = result {
+        println!(
+            "{}",
+            serde_json::json!({"event":"assembly-rejected", "token":token,
+            "instance":obs.instance,"ordinal":obs.ordinal,"retained":state.state().is_some(),
+            "attempts":state.initialization_attempts()})
+        );
+        let delivered = send_assembly_error(req, error, start, clock);
+        delivery_observed(&delivered, &obs, &token);
+        lifecycle("guest_completed", &obs, &token);
+        return strict_delivery(delivered);
     }
     initialized(&obs, &token);
     let app = state.state().unwrap();

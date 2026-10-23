@@ -695,12 +695,12 @@ The macro:
 
 Arguments:
 
-| Argument       | Form                    | Meaning                                                                                                           |
-| -------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| manifest path  | positional (required)   | Path to `edgezero.toml`, resolved against the invoking crate's `CARGO_MANIFEST_DIR`                               |
-| App identifier | positional (optional)   | Name for the generated struct instead of `App`; must come immediately after the path, before any keyword argument |
-| `owns_logging` | `owns_logging = <bool>` | Sets `Hooks::owns_logging()`. Defaults to `false`                                                                 |
-| `state`        | `state = <expr>`        | Emits `builder.with_state(expr)` so handlers can extract shared state                                             |
+| Argument       | Form                    | Meaning                                                                                                               |
+| -------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| manifest path  | positional (required)   | Path to `edgezero.toml`, resolved against the invoking crate's `CARGO_MANIFEST_DIR`                                   |
+| App identifier | positional (optional)   | Name for the generated struct instead of `App`; must come immediately after the path, before any keyword argument     |
+| `owns_logging` | `owns_logging = <bool>` | Sets `Hooks::owns_logging()`. Defaults to `false`                                                                     |
+| `state`        | `state = <expr>`        | Registers the expression's state value. Use `state = load_state()?` to propagate a typed failure before configuration |
 
 ```rust
 edgezero_core::app!(

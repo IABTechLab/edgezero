@@ -573,6 +573,26 @@ where
     finish_request(outcome, finalize, send_egress_response)
 }
 
+/// Delivers an assembly failure for an already-received request without an application.
+///
+/// Drops the unread request and uses the default redacted renderer and finite write deadline.
+/// No preparation, finalization, store opening or app observer runs. The returned detached
+/// delivery owns the terminal report. Inspect commitment before an explicit native replacement;
+/// this helper never resends, and unknown or committed delivery never permits replacement.
+#[inline]
+pub fn send_assembly_error(
+    req: FastlyRequest,
+    error: EdgeError,
+    request_start: MonotonicInstant,
+    clock: MonotonicClock,
+) -> FastlyRequestDelivery<()> {
+    init_fastly_abi();
+    let method = req.get_method().clone();
+    drop(req);
+    let envelope = App::assembly_error_egress(error, method, request_start, clock);
+    FastlyRequestDelivery::Detached(send_egress_response(envelope))
+}
+
 /// Pure synthesis: collapse a `Stores` (which may carry both a
 /// wired multi-id registry AND a legacy bare handle) into the
 /// three registries that go into request extensions. Precedence

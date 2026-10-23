@@ -102,7 +102,7 @@ separately from the portable API and must be considered when declaring required 
   and generated applications retain the unchanged standard entrypoints. Local runtime
   characterization does not qualify hosted delivery or promote capabilities.
 
-### Fallible Application Assembly Foundation
+### Fallible Application Assembly
 
 - Hard-cut `Hooks::routes` and macro-generated `build_router` to
   `Result<RouterService, EdgeError>`. Route/state assembly failures return unchanged,
@@ -114,7 +114,21 @@ separately from the portable API and must be considered when declaring required 
   registry. Configuration, entrypoints and request extractors share registered interiors.
 - Migrate adapter contracts, demo, generator and reusable fixtures. Verify real
   successful-only `Sandbox<App>` retention after route and configuration failures.
-  Entrypoint assembly-error delivery and hosted qualification remain separate follow-ups.
+- Adopt one assembly-failure delivery contract across all serverless entrypoints and
+  fallible macro state expressions (`state = load_state()?`). Add app-free
+  `App::assembly_error_egress` and adapter `request::send_assembly_error` helpers;
+  use the existing default renderer and owned converters, preserving typed status,
+  internal-error redaction, HEAD suppression and one full boot diagnostic per attempt.
+- Hard-remove host-generic assembly-error mappings and their test-only wrappers.
+  Failed apps supply no configured callbacks or headers. The default finite write
+  deadline uses the captured pre-assembly start and supplied clock; it does not
+  interrupt synchronous construction. Axum logs the original failure on the boot target
+  and still fails before listener binding, without constructing an HTTP response.
+- Standard retained Fastly serving answers assembly failures and retries on the next
+  request after successful delivery; custom callbacks receive the detached terminal
+  report without building a temporary app. Preserve commitment-safe no-resend rules.
+  Demo and generated entrypoints inherit this behavior without extra application plumbing.
+  Local runtime characterization remains separate from consumer and hosted qualification.
 
 ### Outbound HTTP And Batches
 

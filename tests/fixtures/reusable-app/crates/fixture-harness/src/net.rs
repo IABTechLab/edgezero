@@ -382,6 +382,11 @@ pub fn request(
 enum Capture {
     Text,
     Binary,
+    Head,
+}
+
+pub fn head_request(port: u16, path: &str) -> Result<Value> {
+    request_with_framing(port, path, &crate::token(), None, None, None, Capture::Head)
 }
 
 pub fn binary_request(port: u16, path: &str, token: &str, backend: Option<&str>) -> Result<Value> {
@@ -444,7 +449,13 @@ fn request_with_framing(
     write!(
         stream,
         "{} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-request-token: {token}\r\n{framing_header}Connection: close\r\n",
-        if probe { "POST" } else { "GET" },
+        if matches!(capture, Capture::Head) {
+            "HEAD"
+        } else if probe {
+            "POST"
+        } else {
+            "GET"
+        },
     )?;
     if let Some(url) = backend {
         write!(stream, "x-fixture-backend: {url}\r\n")?;
@@ -481,7 +492,7 @@ fn request_with_framing(
     let mut bytes = Vec::new();
     let capture_limit = match capture {
         Capture::Text => usize::MAX,
-        Capture::Binary => 256,
+        Capture::Binary | Capture::Head => 256,
     };
     let outcome = (|| -> Result<()> {
         let mut read_part = |reader: &mut BufReader<TcpStream>, count: usize| -> Result<()> {
@@ -512,7 +523,13 @@ fn request_with_framing(
             }
             Ok(())
         };
-        if chunked {
+        if matches!(capture, Capture::Head) {
+            let mut byte = [0];
+            require(
+                reader.read(&mut byte)? == 0,
+                "HEAD response transmitted body bytes",
+            )?;
+        } else if chunked {
             loop {
                 line.clear();
                 require(reader.read_line(&mut line)? > 0, "truncated chunk header")?;
@@ -571,7 +588,7 @@ fn request_with_framing(
     }
     let mut event = json!({"event":"client_completed","token":token,"status":status,"headers":headers,"header_ns":header_ns,"first_byte_ns":first_byte_ns.unwrap_or(header_ns),"complete_ns":start.elapsed().as_nanos() as u64});
     match capture {
-        Capture::Text => event["body"] = json!(String::from_utf8(bytes)?),
+        Capture::Text | Capture::Head => event["body"] = json!(String::from_utf8(bytes)?),
         Capture::Binary => event["body_bytes"] = json!(bytes),
     }
     CLIENT_EVENTS.lock().unwrap().push(event.clone());
@@ -580,6 +597,29 @@ fn request_with_framing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_capture_accepts_representation_length_but_rejects_transmitted_bytes() {
+        for body in ["", "body"] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("HEAD "));
+                while line != "\r\n" {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                }
+                write!(stream, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\n{body}").unwrap();
+            });
+            let response = head_request(port, "/assembly/configuration");
+            server.join().unwrap();
+            assert_eq!(response.is_ok(), body.is_empty());
+        }
+    }
 
     fn binary_reply(wire: Vec<u8>) -> Result<Value> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();

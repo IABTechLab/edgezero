@@ -361,8 +361,12 @@ mod lifecycle_tests {
 
     #[test]
     fn configured_admission_uses_finite_class_aware_deadlines() {
-        let app = EdgeZeroApp::build::<super::App>(edgezero_core::PlatformMetadata::default())
-            .expect("configured app");
+        let router = crate::build_router().expect("generated routes");
+        let app = EdgeZeroApp::from_router::<super::App>(
+            router,
+            edgezero_core::PlatformMetadata::default(),
+        )
+        .expect("configured app");
         let start = MonotonicInstant::now();
 
         let outbound = begin_ingress(&app, "/proxy/status/200", start);

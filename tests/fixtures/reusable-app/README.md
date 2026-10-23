@@ -17,6 +17,29 @@ applications. The shell script only launches it through Cargo.
 
 ## Outbound Cutover Gates
 
+### Focused Assembly Checks
+
+```sh
+scripts/smoke_test_reusable_app.sh --adapter fastly --suite assembly
+scripts/smoke_test_reusable_app.sh --adapter cloudflare --suite assembly
+scripts/smoke_test_reusable_app.sh --adapter spin --suite assembly
+```
+
+This local-only suite exercises the standard entrypoints and the same app-free canonical
+error delivery used by custom retention recipes. It checks typed JSON/status/retry headers,
+HEAD suppression, internal redaction and one full boot log per failed attempt. Retained
+503-to-200-to-200 cases require two builds, shared instance identity and persistent successful
+state. Fastly additionally checks configure-failure state release and detached commitment
+reports. Instance turnover never counts as a retry pass. Axum's distinct
+fail-before-bind behavior and boot diagnostics are covered by its native startup tests.
+
+Use the explicit Cloudflare tool overrides documented below. Runtime processes, compiled
+artifacts and JSONL evidence are scoped to the run directory. Results are working-tree
+characterization, not hosted qualification; this suite neither changes capability levels
+nor closes the separate Fastly readiness/scheduling gate.
+
+### Qualification Inventory
+
 The acceptance inventory is `outbound-cutover-cases.json`. It records acceptance criteria,
 including the unnumbered lists and consumer end-to-end prose checks, expanded into individual
 environment legs. Source and criterion SHA-256 digests require explicit review when the

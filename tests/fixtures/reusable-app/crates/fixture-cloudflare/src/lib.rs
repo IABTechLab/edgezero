@@ -3,9 +3,11 @@
 #[cfg(feature = "progress")]
 mod progress;
 
+use edgezero_core::MonotonicClock;
 use edgezero_core::app::{App, Hooks};
 #[cfg(not(feature = "qualification"))]
 use fixture_core::DeclaredKvApp as FixtureApp;
+use fixture_core::assembly::{ConfigurationFailureApp, InternalFailureApp, RetryApp};
 #[cfg(feature = "qualification")]
 use fixture_core::qualification::QualificationApp as FixtureApp;
 use fixture_core::{OtherApp, retained_app};
@@ -13,14 +15,31 @@ use std::sync::OnceLock;
 use worker::{Context, Env, Request, Response, event};
 static APP: OnceLock<App> = OnceLock::new();
 static OTHER_APP: OnceLock<App> = OnceLock::new();
+static ASSEMBLY_APP: OnceLock<App> = OnceLock::new();
 
 fn telemetry(line: &str) {
     worker::console_log!("{line}");
 }
 
-fn retained_app_for_dispatch<A: Hooks>(cell: &OnceLock<App>) -> worker::Result<&App> {
-    retained_app::<A>(cell, edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
-        .map_err(|_error| worker::Error::RustError("application configuration failed".to_owned()))
+async fn dispatch_selected<A: Hooks>(
+    req: Request,
+    env: Env,
+    ctx: Context,
+    retained: bool,
+    cell: &OnceLock<App>,
+) -> worker::Result<Response> {
+    if !retained {
+        return edgezero_adapter_cloudflare::run_app::<A>(req, env, ctx).await;
+    }
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    match retained_app::<A>(cell, edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM) {
+        Ok(app) => edgezero_adapter_cloudflare::dispatch_app::<A>(app, req, env, ctx).await,
+        Err(error) => {
+            drop(env);
+            edgezero_adapter_cloudflare::request::send_assembly_error(req, error, ctx, start, clock)
+        }
+    }
 }
 
 #[event(fetch)]
@@ -39,8 +58,34 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response>
         .var("FIXTURE_MODE")
         .map(|v| v.to_string() == "retained")
         .unwrap_or(false);
+    match req.path().as_str() {
+        "/assembly/configuration" => {
+            return edgezero_adapter_cloudflare::run_app::<ConfigurationFailureApp>(req, env, ctx)
+                .await;
+        }
+        "/assembly/internal" => {
+            return edgezero_adapter_cloudflare::run_app::<InternalFailureApp>(req, env, ctx).await;
+        }
+        "/assembly/retry" => {
+            return dispatch_selected::<RetryApp<false>>(req, env, ctx, retained, &ASSEMBLY_APP)
+                .await;
+        }
+        _ => {}
+    }
     if retained && req.path() == "/binding-failure" {
-        let app = retained_app_for_dispatch::<FixtureApp>(&APP)?;
+        let clock = MonotonicClock::default();
+        let start = clock.now();
+        let app = match retained_app::<FixtureApp>(
+            &APP,
+            edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM,
+        ) {
+            Ok(app) => app,
+            Err(error) => {
+                return edgezero_adapter_cloudflare::request::send_assembly_error(
+                    req, error, ctx, start, clock,
+                );
+            }
+        };
         let result = edgezero_adapter_cloudflare::request::CloudflareService::new(app)
             .with_kv("missing_fixture_kv")
             .require_kv()
@@ -52,26 +97,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response>
         };
     }
     if req.path() == "/other" {
-        if !retained {
-            return edgezero_adapter_cloudflare::run_app::<OtherApp>(req, env, ctx).await;
-        }
-        return edgezero_adapter_cloudflare::dispatch_app::<OtherApp>(
-            retained_app_for_dispatch::<OtherApp>(&OTHER_APP)?,
-            req,
-            env,
-            ctx,
-        )
-        .await;
+        return dispatch_selected::<OtherApp>(req, env, ctx, retained, &OTHER_APP).await;
     }
-    if retained {
-        edgezero_adapter_cloudflare::dispatch_app::<FixtureApp>(
-            retained_app_for_dispatch::<FixtureApp>(&APP)?,
-            req,
-            env,
-            ctx,
-        )
-        .await
-    } else {
-        edgezero_adapter_cloudflare::run_app::<FixtureApp>(req, env, ctx).await
-    }
+    dispatch_selected::<FixtureApp>(req, env, ctx, retained, &APP).await
 }

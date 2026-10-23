@@ -36,8 +36,6 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    #[cfg(feature = "test-utils")]
-    use edgezero_adapter_cloudflare::build_app_for_test;
     use edgezero_adapter_cloudflare::context::CloudflareRequestContext;
     use edgezero_adapter_cloudflare::outbound::CloudflareOutboundClient;
     #[cfg(feature = "test-utils")]
@@ -93,13 +91,11 @@ mod tests {
     #[cfg(feature = "test-utils")]
     #[wasm_bindgen_test]
     fn failing_configuration() {
-        let result = build_app_for_test::<FailingConfiguration>();
-        assert!(result.is_err());
-        let error = result.err().expect("configuration must fail");
-        assert!(matches!(
-            error,
-            worker::Error::RustError(message) if message == "application configuration failed"
-        ));
+        let result =
+            App::build::<FailingConfiguration>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM);
+        let error = result.err().expect("configuration must not produce an app");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "private configuration detail");
     }
 
     #[async_trait::async_trait(?Send)]

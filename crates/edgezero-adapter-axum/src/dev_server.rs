@@ -441,7 +441,11 @@ fn build_app_for_dispatch<A>() -> anyhow::Result<App>
 where
     A: Hooks,
 {
-    App::build::<A>(crate::AXUM_PLATFORM).context("application configuration failed")
+    App::build::<A>(crate::AXUM_PLATFORM)
+        .inspect_err(|error| {
+            log::error!(target: BOOT_LOG_TARGET, "application assembly failed: {error:?}");
+        })
+        .context("application configuration failed")
 }
 
 fn app_logger(env: &EnvConfig) -> SimpleLogger {
@@ -870,6 +874,12 @@ mod tests {
     fn logging_is_ready_before_configure_with_separate_boot_filter() {
         for level in ["off", "error", "trace"] {
             let output = logging_probe("managed", level);
+            assert_eq!(
+                output.matches("application assembly failed:").count(),
+                1,
+                "{output}"
+            );
+            assert!(output.contains("stop before listening"), "{output}");
             assert!(output.contains("boot-warning-probe"), "{output}");
             assert!(!output.contains("boot-info-probe"), "{output}");
             assert_eq!(

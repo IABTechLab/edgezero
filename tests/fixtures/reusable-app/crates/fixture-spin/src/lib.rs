@@ -4,12 +4,13 @@
     reason = "spin's #[http_service] macro generates the unsafe wasm export"
 )]
 
-use anyhow::Context as _;
 #[cfg(feature = "progress")]
 mod progress;
+use edgezero_core::MonotonicClock;
 use edgezero_core::app::{App, Hooks};
 #[cfg(not(feature = "qualification"))]
 use fixture_core::DeclaredKvApp as FixtureApp;
+use fixture_core::assembly::{ConfigurationFailureApp, InternalFailureApp, RetryApp};
 #[cfg(feature = "qualification")]
 use fixture_core::qualification::QualificationApp as FixtureApp;
 use fixture_core::{OtherApp, retained_app};
@@ -20,14 +21,28 @@ use spin_sdk::{
 use std::sync::OnceLock;
 static APP: OnceLock<App> = OnceLock::new();
 static OTHER_APP: OnceLock<App> = OnceLock::new();
+static ASSEMBLY_APP: OnceLock<App> = OnceLock::new();
 
 fn telemetry(line: &str) {
     eprintln!("{line}");
 }
 
-fn retained_app_for_dispatch<A: Hooks>(cell: &OnceLock<App>) -> anyhow::Result<&App> {
-    retained_app::<A>(cell, edgezero_adapter_spin::SPIN_PLATFORM)
-        .context("application configuration failed")
+async fn dispatch_selected<A: Hooks>(
+    req: Request,
+    retained: bool,
+    cell: &OnceLock<App>,
+) -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
+    if !retained {
+        return edgezero_adapter_spin::run_app::<A>(req).await;
+    }
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    match retained_app::<A>(cell, edgezero_adapter_spin::SPIN_PLATFORM) {
+        Ok(app) => edgezero_adapter_spin::dispatch_app::<A>(app, req).await,
+        Err(error) => Ok(edgezero_adapter_spin::request::send_assembly_error(
+            req, error, start, clock,
+        )?),
+    }
 }
 
 #[http_service]
@@ -42,6 +57,18 @@ async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinRespo
         fixture_core::init_fixture_logging(telemetry)?;
     }
     let retained = std::env::var("FIXTURE_MODE").as_deref() == Ok("retained");
+    match req.uri().path() {
+        "/assembly/configuration" => {
+            return edgezero_adapter_spin::run_app::<ConfigurationFailureApp>(req).await;
+        }
+        "/assembly/internal" => {
+            return edgezero_adapter_spin::run_app::<InternalFailureApp>(req).await;
+        }
+        "/assembly/retry" => {
+            return dispatch_selected::<RetryApp<false>>(req, retained, &ASSEMBLY_APP).await;
+        }
+        _ => {}
+    }
     if retained && req.uri().path() == "/binding-failure" {
         let result =
             edgezero_adapter_spin::key_value_store::SpinKvStore::open("missing_fixture_kv").await;
@@ -67,22 +94,7 @@ async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinRespo
         store.set("marker", b"local-fixture").await?;
     }
     if req.uri().path() == "/other" {
-        if !retained {
-            return edgezero_adapter_spin::run_app::<OtherApp>(req).await;
-        }
-        return edgezero_adapter_spin::dispatch_app::<OtherApp>(
-            retained_app_for_dispatch::<OtherApp>(&OTHER_APP)?,
-            req,
-        )
-        .await;
+        return dispatch_selected::<OtherApp>(req, retained, &OTHER_APP).await;
     }
-    if retained {
-        edgezero_adapter_spin::dispatch_app::<FixtureApp>(
-            retained_app_for_dispatch::<FixtureApp>(&APP)?,
-            req,
-        )
-        .await
-    } else {
-        edgezero_adapter_spin::run_app::<FixtureApp>(req).await
-    }
+    dispatch_selected::<FixtureApp>(req, retained, &APP).await
 }

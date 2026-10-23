@@ -63,9 +63,11 @@ derived from the baked store ids and queried individually). Per-id
 `KV` / `Config` / `Secret` registries are built and injected into
 request extensions automatically. No `edgezero.toml` is loaded by
 the runtime — see [the migration guide](../manifest-store-migration.md).
-If `Hooks::configure` fails, `run_app` logs only the stable EdgeZero error category and returns the
-fixed `application configuration failed` worker error before request conversion. Application or
-provider diagnostics are not exposed on the wire.
+If route/state assembly or `Hooks::configure` fails, `run_app` delivers the typed error's
+status and standard JSON body through canonical detached egress, without reading the request
+body or opening registries. Internal details stay off the wire and the full failure is logged
+once on `edgezero::boot`. No failed app's renderer, headers or callbacks apply. The finite default
+write deadline starts before assembly; see [application assembly](/guide/handlers#configuring-the-application-lifecycle).
 
 For fully manual wiring, `CloudflareService::new(&app)` builds a dispatcher one
 store at a time: `.with_config(binding)` (a KV binding name),
@@ -77,13 +79,20 @@ to open bindings:
 ```rust
 use edgezero_adapter_cloudflare::{CLOUDFLARE_PLATFORM, request::CloudflareService};
 use edgezero_core::app::App as EdgeZeroApp;
+use edgezero_core::MonotonicClock;
 use my_app_core::App;
 use worker::*;
 
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
-    let app = EdgeZeroApp::build::<App>(CLOUDFLARE_PLATFORM)
-        .map_err(|_| Error::RustError("application configuration failed".to_owned()))?;
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    let app = match EdgeZeroApp::build::<App>(CLOUDFLARE_PLATFORM) {
+        Ok(app) => app,
+        Err(error) => return edgezero_adapter_cloudflare::request::send_assembly_error(
+            req, error, ctx, start, clock,
+        ),
+    };
     CloudflareService::new(&app)
         .with_config("app_config")
         .with_kv("sessions")
@@ -346,7 +355,7 @@ select its `Hooks` type with `dispatch_app::<MyApp>` on every fetch:
 
 ```rust
 use edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM;
-use edgezero_core::{app::App, EdgeError};
+use edgezero_core::{app::App, EdgeError, MonotonicClock};
 use my_app_core::App as MyApp;
 use std::sync::OnceLock;
 
@@ -364,9 +373,15 @@ fn retained_app() -> Result<&'static App, EdgeError> {
 async fn fetch(req: worker::Request, env: worker::Env, ctx: worker::Context)
     -> worker::Result<worker::Response>
 {
-    let app = retained_app().map_err(|_| {
-        worker::Error::RustError("application configuration failed".to_owned())
-    })?;
+    // Install application-owned logging before attempting assembly.
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    let app = match retained_app() {
+        Ok(app) => app,
+        Err(error) => return edgezero_adapter_cloudflare::request::send_assembly_error(
+            req, error, ctx, start, clock,
+        ),
+    };
     edgezero_adapter_cloudflare::dispatch_app::<MyApp>(app, req, env, ctx).await
 }
 ```

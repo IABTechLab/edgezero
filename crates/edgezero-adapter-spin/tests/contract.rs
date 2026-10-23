@@ -35,8 +35,6 @@ mod store_trait_compile_checks {
 )]
 mod tests {
     use bytes::Bytes;
-    #[cfg(feature = "test-utils")]
-    use edgezero_adapter_spin::build_app_for_test;
     use edgezero_adapter_spin::context::SpinRequestContext;
     #[cfg(feature = "test-utils")]
     use edgezero_adapter_spin::request::deadline_body_releases_source_for_test;
@@ -87,11 +85,12 @@ mod tests {
     #[cfg(feature = "test-utils")]
     #[test]
     fn failing_configuration() {
-        let result = build_app_for_test::<FailingConfiguration>();
-        assert!(result.is_err());
-        let error = result.err().expect("configuration must fail");
-        assert_eq!(error.to_string(), "application configuration failed");
-        assert!(format!("{error:#}").contains("configuration unavailable"));
+        let Err(error) = App::build::<FailingConfiguration>(edgezero_adapter_spin::SPIN_PLATFORM)
+        else {
+            panic!("configuration must not produce an app");
+        };
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "configuration unavailable");
     }
 
     /// Config store that returns a value only for the expected key.

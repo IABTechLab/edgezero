@@ -324,6 +324,12 @@ edgezero_core::app!("edgezero.toml", state = crate::app_state());
 allowed per `app!` — to share more than one value, wrap them in an aggregate
 app-state struct and register that.
 
+For fallible state, use `state = crate::load_state()?`, where the call returns
+`Result<T, EdgeError>`. The generated `build_router()` returns `Result`; `?`
+propagates the original error before configuration and registers `T`, not `Result<T, EdgeError>`.
+Never turn a transient initialization error into a successful error-response router or cache it
+in `OnceLock<Result<_, _>>`. Retain only successfully assembled state or applications.
+
 > **Make `app_state()` cheap.** The macro emits the `state` expression inside the
 > generated `build_router()`, which each adapter's `run_app` calls through
 > `App::build::<A>(platform)` — **once at startup** for Axum, but **once per
@@ -400,9 +406,29 @@ does not retain request admission grants, registries, bodies, or response-egress
 resources; those are fresh for every dispatch. See
 [application retention](/guide/adapters/overview#opt-in-application-retention).
 
-This assembly foundation does not change entrypoint failure responses. Fastly's
-canonical assembly-failure delivery/retry integration remains a separate step;
-Axum still fails startup before binding a listener.
+All standard Fastly, Cloudflare and Spin entrypoints deliver route/state or configuration
+failures through the same default error renderer and canonical adapter response converter.
+The error's status is preserved; internal details remain off the wire. Full failure details
+are logged once per failed attempt on `edgezero::boot`, so install the application's logging
+backend before assembly when the adapter does not provide one. Axum logs its failed assembly
+once on the same boot target and fails startup before binding, without constructing a response.
+
+No successful app configuration exists on failure, even if `configure` installed some policies
+before returning an error. The failure response therefore uses no configured renderer,
+application headers, completion factory, egress policy or observer. It uses the default finite
+write budget anchored to the request start captured before assembly. This deadline does not
+interrupt synchronous initialization itself. Fastly retained serving keeps its app slot empty
+and retries on the next request when failure-response delivery succeeds; transport failures
+retain their existing terminal behavior.
+
+Custom entrypoints can construct the same envelope without an app using
+`App::assembly_error_egress(error, method, request_start, clock)`. Use the adapter's
+`request::send_assembly_error` helper to release the unread native request and enter its
+existing converter once. Fastly returns `FastlyRequestDelivery::Detached` with the exact
+terminal report; Cloudflare and Spin return their adapter-owned response. The supplied
+start and clock must share one monotonic domain. Never send a second native response after
+unknown or committed delivery. Fastly's confirmed `NotCommitted` replacement permission
+remains an explicit caller decision outside EdgeZero accounting, never an automatic resend.
 
 Use the synchronous error renderer when framework and handler errors must use an application-owned,
 fixed-size wire body:

@@ -1,5 +1,6 @@
 use crate::{evidence::*, net::Backend, *};
 use std::collections::HashMap;
+mod assembly;
 mod overflow;
 mod progress;
 fn cargo_build() -> Command {
@@ -155,7 +156,36 @@ fn custom_initialization_contract(
                 reply["status"] == status,
                 "custom initialization status mismatch",
             )?;
-            let value: Value = serde_json::from_str(reply["body"].as_str().ok_or("missing body")?)?;
+            let parsed: Value =
+                serde_json::from_str(reply["body"].as_str().ok_or("missing body")?)?;
+            let value = if status == 503 {
+                require(
+                    parsed
+                        == json!({"error":{"kind":"service_unavailable","message":"state unavailable","status":503}}),
+                    "initialization did not use the canonical error body",
+                )?;
+                await_evidence(|| {
+                    require(
+                        logs(&log)
+                            .iter()
+                            .filter(|event| {
+                                event["event"] == "assembly-rejected"
+                                    && event["token"] == reply["token"]
+                            })
+                            .count()
+                            == 1,
+                        "missing correlated assembly failure",
+                    )
+                })?;
+                logs(&log)
+                    .into_iter()
+                    .find(|event| {
+                        event["event"] == "assembly-rejected" && event["token"] == reply["token"]
+                    })
+                    .ok_or("missing assembly failure metadata")?
+            } else {
+                parsed
+            };
             instances.push(value["instance"].clone());
             let same_instance = instances.iter().all(|id| id == &instances[0]);
             if same_instance {
@@ -171,14 +201,29 @@ fn custom_initialization_contract(
                         "health or failure retained an app",
                     )?;
                 }
-                require(
-                    reply["headers"].as_array().unwrap().iter().any(|h| {
-                        h[0].as_str()
-                            .is_some_and(|name| name.eq_ignore_ascii_case("x-fixture-attempts"))
-                            && h[1].as_str().and_then(|v| v.parse::<u64>().ok()) == Some(attempts)
-                    }),
-                    "lazy build attempt count mismatch",
-                )?;
+                if status == 503 {
+                    require(
+                        value["attempts"] == attempts,
+                        "failed assembly attempt count mismatch",
+                    )?;
+                    require(
+                        !reply["headers"].as_array().unwrap().iter().any(|h| {
+                            h[0].as_str()
+                                .is_some_and(|name| name.eq_ignore_ascii_case("x-fixture-attempts"))
+                        }),
+                        "failed assembly used application headers",
+                    )?;
+                } else {
+                    require(
+                        reply["headers"].as_array().unwrap().iter().any(|h| {
+                            h[0].as_str()
+                                .is_some_and(|name| name.eq_ignore_ascii_case("x-fixture-attempts"))
+                                && h[1].as_str().and_then(|v| v.parse::<u64>().ok())
+                                    == Some(attempts)
+                        }),
+                        "lazy build attempt count mismatch",
+                    )?;
+                }
             }
             records.push(annotate(
                 reply,
@@ -216,6 +261,9 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     }
     if args.suite == "outbound-overflow" {
         return overflow::run("fastly", run, records);
+    }
+    if args.suite == "assembly" {
+        return assembly::fastly(&exe, run, records);
     }
     if args.suite == "outbound-progress" {
         return progress::run("fastly", run, records);
@@ -974,6 +1022,9 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "assembly" {
+        return assembly::provider(name, run, records);
+    }
     if args.suite == "outbound-overflow" {
         return overflow::run(name, run, records);
     }

@@ -286,6 +286,7 @@ fn response_lifecycle(
 /// So `app_state()` must be **cheap**: build the heavy state once and hand out
 /// clones. Here a `OnceLock<Arc<DemoState>>` builds it lazily and every call just
 /// bumps the `Arc` refcount — do NOT `Arc::new(..)` a heavy object on each call.
+/// Fallible state loaders can instead use `state = load_state()?`; cache only success.
 #[must_use]
 #[inline]
 pub fn app_state() -> Arc<DemoState> {
@@ -324,6 +325,21 @@ mod lifecycle_tests {
     use edgezero_core::time::MonotonicInstant;
     use futures::executor::block_on;
     use futures::stream::iter;
+
+    #[test]
+    fn manual_assembly_and_entrypoint_share_the_registered_demo_state() {
+        let router = crate::build_router().expect("demo routes");
+        let app = EdgeZeroApp::from_router::<crate::App>(
+            router,
+            edgezero_core::PlatformMetadata::default(),
+        )
+        .expect("configured demo app");
+        let registered = app
+            .state::<Arc<crate::DemoState>>()
+            .expect("registered demo state");
+        assert!(Arc::ptr_eq(registered, &crate::app_state()));
+        assert_eq!(registered.greeting, "hello from app state");
+    }
 
     #[test]
     fn manifest_route_classes_reach_route_resolution() {

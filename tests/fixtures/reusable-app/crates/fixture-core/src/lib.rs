@@ -1,3 +1,4 @@
+pub mod assembly;
 #[cfg(feature = "qualification")]
 pub mod qualification;
 

@@ -74,8 +74,11 @@ in at the same time. Managed deployments resolve `EDGEZERO__*` store selectors
 and link each physical resource under its logical ID; neither `edgezero.toml`
 nor the deployment environment is read by the runtime. See
 [the migration guide](../manifest-store-migration.md).
-If `Hooks::configure` fails, `run_app` returns the source-preserving
-`application configuration failed` error before receiving the client request.
+If route/state assembly or `Hooks::configure` fails, `run_app`, `run_app_with_hooks` and
+`run_app_with_config` deliver the error's status and standard JSON body through canonical
+detached egress. They release the unread request, skip preparation/finalization and registries,
+and log the full failure once on `edgezero::boot`. Internal details stay off the wire. No failed
+app's renderer, headers or callbacks apply; the finite default write deadline starts before assembly.
 
 For fully manual wiring, build `FastlyService`, attach stores as needed, and call its send-owning
 `send()` method. Prefer `run_app` for manifest-driven store resolution.
@@ -404,7 +407,7 @@ Detached admission responses skip finalization. The retained helper discards the
 finalizer's state after delivery; use the request-level send helper in a custom
 callback when post-send work needs that state.
 
-The first request initializes logging and builds the app through
+The first request initializes logging and attempts to build the app through
 `App::build::<MyApp>(FASTLY_PLATFORM) -> Result<App, EdgeError>`. Each request constructs
 fresh store registries using deployed logical aliases. Successful app construction
 and `configure` execute once per sandbox; explicit work elsewhere still executes
@@ -412,6 +415,16 @@ whenever the application calls it. Both hooks and their captures are retained fo
 the whole serving loop; the supplied native request, extensions, and response are
 request-local. Create request-specific mutable data inside the preparation hook
 or store it in those extensions.
+
+Failed route/state or configuration attempts leave the retained slot empty. `serve_app` and
+`serve_app_with_hooks` deliver the same detached error response as the single-request helpers;
+successful failure-response delivery keeps serving, and the next request retries assembly.
+They never retain an error-response router. A custom `serve_custom` callback can use
+`request::send_assembly_error(req, error, request_start, clock)` without an App and inspect its
+owned `FastlyRequestDelivery::Detached` report. Capture the start with that clock before assembly.
+The helper never invokes preparation/finalization, configured rendering, headers, policy or an
+app observer. A terminal delivery failure retains the ordinary stop/error behavior; it does
+not authorize an automatic native resend.
 
 Logging uses the immutable baked settings, unless the app owns logging. Setup
 completes once per sandbox and does not reconfigure filters on later callbacks.

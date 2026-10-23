@@ -42,7 +42,7 @@ impl Args {
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|outbound-readiness|outbound-progress|outbound-overflow] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
+                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-progress|outbound-overflow] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
                 );
                 std::process::exit(0);
             }
@@ -67,6 +67,7 @@ impl Args {
             [
                 "smoke",
                 "benchmark",
+                "assembly",
                 "outbound-readiness",
                 "outbound-progress",
                 "outbound-overflow",

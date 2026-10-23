@@ -865,21 +865,23 @@ entrypoint/lifecycle modules; fixture apps and affected demo/template callers.
 affected lifecycle integration. F8 applies to declared-KV assembly-failure integration only.
 No F9b or D1b-D1d prerequisite. These scheduling scopes do not change the release blocking set.
 
-- [ ] Add failures-before-configure, registered-state identity/access, configure-from-state,
+- [x] Add failures-before-configure, registered-state identity/access, configure-from-state,
       manually-built-router policy/platform parity, success-only retention, and retry-after-failed-build
       tests. Hard-migrate route assembly to Result; no expect-based configuration wrapper.
-- [ ] Expose typed assembled-app state access and one manual-router assembly path that applies
+- [x] Expose typed assembled-app state access and one manual-router assembly path that applies
       name/configure/platform checks exactly once. Retain only complete successful apps, safe under
       overlapping requests. Standard Fastly serving answers/retries assembly failures through canonical
       detached delivery; custom callbacks can do so without an assembled app. Log once on boot target.
-- [ ] Implement separately adopted macro fallible-state and standard CF/Spin failure-response
-      SHOULDs only after applicability is recorded. Preserve Axum fail-before-bind behavior; do not
+- [x] Implement the adopted macro fallible-state and standard serverless failure-response
+      SHOULDs. Preserve Axum fail-before-bind behavior; do not
       retain the temporary failure router or require async route-building inside EdgeZero.
-- [ ] Add `failed_app_assembly_retries_without_retaining_partial_state`; run it before/after the
-      hard cut with `scripts/run_test_nonzero.sh failed_app_assembly_retries_without_retaining_partial_state cargo test -p edgezero-core --features test-utils`.
+- [x] Add `failed_app_assembly_retries_without_retaining_partial_state`; run it before/after the
+      hard cut with `scripts/run_test_nonzero.sh failed_app_assembly_retries_without_retaining_partial_state cargo test -p edgezero-adapter-fastly --no-default-features --features test-utils --lib`.
       Expected red for missing fallible/retained-state contract, then retry and successful-state
       identity pass. Run macros and four adapter assembly contracts plus applicable retained-instance
       fixtures and the task lint card. Suggested commit: `feat: assemble and retain only complete applications`.
+- [ ] Close the remaining consumer acceptance and exact-candidate qualification record.
+      The implementation and local runtime checks below do not substitute for those external legs.
 
 #### F9a Assembly Foundation Checkpoint (2026-10-22)
 
@@ -896,11 +898,30 @@ No F9b or D1b-D1d prerequisite. These scheduling scopes do not change the releas
       subsequent success and retained state identity. Keep the existing success-only mechanism.
 - [x] Finish scoped spec/quality reviews and all root, actual-target, demo/generator/fixture,
       documentation and dependency verification before committing the foundation.
-- [ ] Implement app-free canonical Fastly assembly-error delivery and standard retained retry
-      integration, then execute the required runtime/consumer cases. No entrypoint error-serving
-      change or full F9a/EZ-22 acceptance is claimed by this foundation.
-- [ ] Record explicit applicability before claiming the optional macro fallible-state and
-      single-request Fastly/Cloudflare/Spin failure-response SHOULD acceptance cases.
+- [x] Implement app-free canonical Fastly assembly-error delivery and standard retained retry
+      integration in the subsequent unified checkpoint below. The original foundation alone
+      did not change entrypoint responses; full F9a/EZ-22 consumer acceptance remains separate.
+- [x] The requester adopted EZ-22.8 and EZ-22.10 on 2026-10-22: one fallible assembly and
+      error-delivery contract, including macro state expressions and all single-request Fastly,
+      Cloudflare and Spin entrypoints. These are part of this hard cut, not compatibility modes.
+
+#### F9a Unified Failure Delivery Work
+
+- [x] Construct assembly-error egress without an App or temporary error router. Share the
+      existing default renderer, preserve typed status and redaction, log the failure once on
+      the boot target, and carry the caller's clock and captured request start into egress.
+      No successfully configured policies, completion factory, observer or application headers
+      exist on this path; use the finite default response-write policy.
+- [x] Reuse that envelope through the existing adapter converters on Fastly, Cloudflare and
+      Spin. Remove superseded host-generic assembly-error mappings and their test-only wrappers.
+      Keep Axum startup failure before binding; keep transport failures distinct from assembly.
+- [x] Let Fastly custom callbacks deliver the error without an App. Standard retained serving
+      delivers the same detached response and retries assembly on the next request, retaining
+      only complete success. Preserve commitment-safe delivery and no automatic native resend.
+- [x] Exercise fallible macro state, typed/redacted wire failures, HEAD suppression, supplied
+      clocks, partial-state release, and standard/custom runtime failure-to-success recovery.
+      Align the demo, generator, active guides and changelog; record local evidence separately
+      from consumer integration and hosted qualification. Fastly G2 remains a separate gate.
 
 Rawls mapped macro emission and callers; Herschel mapped retained assembly and provider delivery.
 Both proposed one shared configured core path and state access through existing Extensions.
@@ -967,6 +988,66 @@ node scripts/check_outbound_docs_contract.mjs
 bash scripts/check_outbound_legacy_api.sh
 node scripts/check_serde_json_map_contract.mjs
 ```
+
+#### F9a Unified Failure Delivery Checkpoint (2026-10-22)
+
+The requester adopted both SHOULDs as one hard-cut contract. One app-free core factory now
+shares the default renderer and detached envelope; all three serverless adapters release the
+unread native request and use their existing converter once. Failed configuration contributes
+no callbacks, headers, observer or retained App. The 30-second default write deadline is
+anchored before assembly in the supplied clock domain; synchronous initialization itself is
+not preempted. Fastly standard retained serving answers/retries, and custom callbacks receive
+the detached owned report without native resend. Axum logs the original failure once but
+still returns its source-preserving startup error before binding, without an HTTP response.
+
+Ramanujan proposed/reviewed Fastly ownership and the focused fixture; Linnaeus mapped the
+Cloudflare/Spin converters and reviewed quality. Both approved the shared factory and deletion
+of superseded host-generic wrappers; both reviewed the final Axum diagnostic delta. Central
+implementation kept transport code, dependency pins, lockfiles, the approved Interfaces and
+frozen policies unchanged. Demo state identity and generated manual-router policy tests use
+the same assembler; normal generated entrypoints need no extra assembly plumbing.
+
+Relative to `e07a30d23d37e0f640bdbe6a181a619cc70530bf`, 25 changed Rust/template files have
+aggregate SHA-256 `872ddd60aff29ac208dfbbac7570a3326e9cc480b5fad4833124230bee075ef3`, using
+the sorted source-file hashing recipe above. This is local working-tree characterization,
+not an exact-commit release qualification or approval of unresolved gates.
+
+Local Rust 1.98.1 verification completed with exit 0: all five root gates; 2,151 workspace
+tests across 28 binaries, zero failures and one separately executed ignored generator gate;
+820 core tests and the once-only full-log/redacted-wire regression; seven macro integration
+tests; all three actual-target WASM clippy checks; 180 Fastly WASI library tests and 25 contracts;
+49 demo-core tests, demo clippy/three WASM checks, fresh generated native/three-WASM builds,
+22 generated-core tests and fallback TCP checks; 18 fixture-core tests and 61 harness tests;
+fixture host/three-WASM clippy and Axum compilation; strict public rustdoc; docs format/lint/build;
+decoder/shared-pin/map/legacy/docs guards and 18 evidence-checker tests. The inventory still
+contains 255 criteria / 511 planned legs and reports qualified false.
+
+The new focused `--suite assembly` completed with exit 0 on Viceroy 0.21.0, local workerd
+2026-09-10 through Wrangler 4.131.0, and Spin 4.1.0. Seven Fastly cases cover standard/custom
+503-to-200-to-200 recovery, successful-state retention, partial-state release, all standard
+single-request helpers, exact configuration retry metadata, HEAD suppression and internal-error
+redaction. Cloudflare and Spin each pass per-request and retained cases, including actual
+same-instance recovery. Boot logs are checked once per failed request, including HEAD. The
+existing full Fastly smoke suite also passes after replacing its native initialization response.
+
+Local events (each with zero failed/unverified/unsupported records):
+
+| Adapter | Events Path | Events SHA-256 |
+| --- | --- | --- |
+| Fastly | `/private/tmp/edgezero-f9a-unified-fastly-final/events.jsonl` | `f6a9611381ca4269eb4d5d1139bc511b25977d021403c5ebf267e8241216e7aa` |
+| Cloudflare | `/private/tmp/edgezero-f9a-unified-cloudflare-b/events.jsonl` | `04fa354bd903b9aa9579df7879a6b8bac9720677eda0d2d81eb67d660af68a99` |
+| Spin | `/private/tmp/edgezero-f9a-unified-spin-final/events.jsonl` | `22e8b2f6d195765314fbdbc1fa5e551cde89be7ae807c098d8299bf1942756a2` |
+
+Earlier fixture/validator failures are retained locally, not counted as passing evidence:
+the HEAD capture test incorrectly assumed one TCP read contained the method, the boot validator
+counted two separate GET/HEAD failures as one, and fixture-only `std::time::SystemTime` failed
+on Workers. The fixes use complete request-line reads, per-failure counts and EdgeZero's portable
+clock. Fresh successful reruns supersede those failures. Template formatting and strict target
+lint failures were likewise fixed and rerun, without suppressions or weakened assertions.
+
+Consumer integration (including acceptance criteria 9 and 10), durable exact-candidate/hosted
+qualification, full EZ-17/EZ-22 acceptance, P1 cutover and failed Fastly G2 remain open. No
+provider capability is promoted, no waiver is inferred, and no temporary failure app is retained.
 
 ### Task F9b: Policy-Aware Axum Servers and Test Helpers
 

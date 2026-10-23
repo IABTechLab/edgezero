@@ -42,6 +42,8 @@ use edgezero_core::manifest::BakedManifest;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::manifest::ResolvedEnvironmentBinding;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+use edgezero_core::time::MonotonicClock;
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use worker::{Context, Env, Error as WorkerError, Request, Response};
 
 /// Cloudflare Workers' published per-isolate memory limit.
@@ -65,34 +67,12 @@ pub const CLOUDFLARE_PLATFORM: edgezero_core::PlatformMetadata =
         ),
     );
 
-#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-fn build_app_for_dispatch<A>() -> Result<App, WorkerError>
-where
-    A: Hooks,
-{
-    build_target_app::<A>().map_err(|error| {
-        log::error!(target: edgezero_core::BOOT_LOG_TARGET, "application configuration failed: {}", error.kind());
-        WorkerError::RustError("application configuration failed".to_owned())
-    })
-}
-
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 fn build_target_app<A>() -> Result<App, EdgeError>
 where
     A: Hooks,
 {
     App::build::<A>(CLOUDFLARE_PLATFORM)
-}
-
-/// Test seam for the production application-assembly error mapping.
-#[cfg(all(feature = "test-utils", feature = "cloudflare", target_arch = "wasm32"))]
-#[doc(hidden)]
-#[inline]
-pub fn build_app_for_test<A>() -> Result<App, WorkerError>
-where
-    A: Hooks,
-{
-    build_app_for_dispatch::<A>()
 }
 
 /// # Errors
@@ -170,8 +150,8 @@ fn collect_worker_variables(
 /// variables on the worker `Env`. No `edgezero.toml` is required.
 ///
 /// # Errors
-/// Returns [`worker::Error`] if the inner dispatch fails or any required
-/// store binding cannot be opened.
+/// Returns a category-safe [`worker::Error`] for request conversion, admission abort or failed
+/// delivery. Assembly failures use their typed HTTP status and the default error response.
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[inline]
 pub async fn run_app<A>(req: Request, env: Env, ctx: Context) -> Result<Response, WorkerError>
@@ -181,7 +161,15 @@ where
     if !A::owns_logging() {
         drop(init_logger());
     }
-    let app = build_app_for_dispatch::<A>()?;
+    let clock = MonotonicClock::default();
+    let request_start = clock.now();
+    let app = match build_target_app::<A>() {
+        Ok(app) => app,
+        Err(error) => {
+            drop(env);
+            return request::send_assembly_error(req, error, ctx, request_start, clock);
+        }
+    };
     dispatch_app::<A>(&app, req, env, ctx).await
 }
 

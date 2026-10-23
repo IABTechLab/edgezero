@@ -121,6 +121,61 @@ mod configured_app {
 }
 
 #[cfg(test)]
+mod fallible_state_app {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use edgezero_core::app::App;
+    use edgezero_core::http::StatusCode;
+    use edgezero_core::{EdgeError, PlatformMetadata};
+
+    static CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
+    static STATE_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn app_state() -> Result<Arc<AtomicUsize>, EdgeError> {
+        if STATE_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(EdgeError::service_unavailable("state unavailable"));
+        }
+        Ok(Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn configure_app(app: &mut App) -> Result<(), EdgeError> {
+        let state = app
+            .state::<Arc<AtomicUsize>>()
+            .ok_or_else(|| EdgeError::service_unavailable("missing state"))?;
+        state.fetch_add(1, Ordering::SeqCst);
+        CONFIGURATIONS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    edgezero_core::app!(
+        "tests/fixtures/owns_logging.toml",
+        FallibleStateApp,
+        configure = configure_app,
+        state = app_state()?
+    );
+
+    #[test]
+    fn fallible_macro_state_skips_configuration_and_retries_without_caching_failure() {
+        let Err(error) = App::build::<FallibleStateApp>(PlatformMetadata::default()) else {
+            panic!("failed state must prevent app assembly");
+        };
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "state unavailable");
+        assert_eq!(CONFIGURATIONS.load(Ordering::SeqCst), 0);
+        let app = App::build::<FallibleStateApp>(PlatformMetadata::default()).unwrap();
+        assert_eq!(
+            app.state::<Arc<AtomicUsize>>()
+                .unwrap()
+                .load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(STATE_ATTEMPTS.load(Ordering::SeqCst), 2);
+        assert_eq!(CONFIGURATIONS.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
 mod failing_configured_app {
     use edgezero_core::app::App;
     use edgezero_core::error::EdgeError;

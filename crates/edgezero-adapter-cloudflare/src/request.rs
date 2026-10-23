@@ -845,6 +845,31 @@ fn into_core_method(method: &Method) -> CoreMethod {
     })
 }
 
+/// Begins canonical detached delivery of an assembly error without a configured app.
+///
+/// Releases the unread request after capturing its method and abort signal. The caller supplies
+/// the pre-assembly start and clock; no app callbacks, stores or configured headers are used.
+///
+/// # Errors
+/// Returns a category-safe delivery error if conversion and its bounded fallback both fail.
+#[inline]
+pub fn send_assembly_error(
+    req: CfRequest,
+    error: EdgeError,
+    ctx: Context,
+    request_start: MonotonicInstant,
+    clock: MonotonicClock,
+) -> Result<CfResponse, WorkerError> {
+    let method = into_core_method(&req.method());
+    let runtime = CloudflareEgressRuntime::new(req.inner().signal(), Arc::new(ctx));
+    drop(req);
+    from_egress_response(
+        App::assembly_error_egress(error, method, request_start, clock),
+        runtime,
+    )
+    .map_err(|delivery_error| edge_error_to_worker(&delivery_error))
+}
+
 fn open_config_handle(env: &Env, binding_name: &str) -> ConfigStoreHandle {
     match CloudflareConfigStore::from_env(env, binding_name) {
         Ok(store) => ConfigStoreHandle::new(Arc::new(store)),

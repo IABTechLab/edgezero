@@ -46,8 +46,11 @@ async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinRespo
 `run_app` reads the portable store metadata baked into `App` by the `app!`
 macro plus `EDGEZERO__*` environment variables; it does not require an
 `edgezero.toml` to be present at runtime.
-If `Hooks::configure` fails, `run_app` returns the source-preserving
-`application configuration failed` error before converting or dispatching the request.
+If route/state assembly or `Hooks::configure` fails, `run_app` and `run_app_with_platform`
+deliver the typed error's status and standard JSON body through canonical detached egress.
+They release the unread request, use no failed app's policies or headers, and log the full failure
+once on `edgezero::boot`. Internal details stay off the wire. The finite default write deadline
+starts before assembly; see [application assembly](/guide/handlers#configuring-the-application-lifecycle).
 
 ## Building
 
@@ -347,7 +350,7 @@ generic unkeyed static or hold a lock across an await.
 
 ```rust
 use edgezero_adapter_spin::{SPIN_PLATFORM, SpinResponse};
-use edgezero_core::{app::App, EdgeError};
+use edgezero_core::{app::App, EdgeError, MonotonicClock};
 use my_app_core::App as MyApp;
 use spin_sdk::{http::Request, http_service};
 use std::sync::OnceLock;
@@ -364,7 +367,15 @@ fn retained_app() -> Result<&'static App, EdgeError> {
 
 #[http_service]
 async fn handle(req: Request) -> anyhow::Result<SpinResponse> {
-    let app = retained_app()?;
+    // Install application-owned logging before attempting assembly.
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    let app = match retained_app() {
+        Ok(app) => app,
+        Err(error) => return Ok(edgezero_adapter_spin::request::send_assembly_error(
+            req, error, start, clock,
+        )?),
+    };
     edgezero_adapter_spin::dispatch_app::<MyApp>(app, req).await
 }
 ```

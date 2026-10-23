@@ -24,6 +24,10 @@ name = "fixture-fastly-single-request"
 path = "src/bin/single_request.rs"
 
 [[bin]]
+name = "fixture-fastly-assembly"
+path = "src/bin/assembly.rs"
+
+[[bin]]
 name = "fixture-fastly-outbound-progress"
 path = "src/bin/outbound_progress.rs"
 required-features = ["progress"]

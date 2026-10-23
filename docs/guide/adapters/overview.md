@@ -217,6 +217,11 @@ successful configuration that changes that metadata. `App::state::<T>()` borrows
 router's registered state, also available during configuration; retrieve an `Arc<S>`
 registration as that exact type. Retain only a successfully
 configured app; never cache an initialization error or publish a partial app.
+Macro state expressions can use `state = load_state()?` under the same fallible assembly contract.
+Serverless standard entrypoints and custom `request::send_assembly_error` helpers use canonical
+detached delivery for failed assembly, preserving typed status without using any partially
+configured app callbacks. Fastly retained serving retries after successful error delivery;
+Axum instead fails startup before binding. See [assembly failures](/guide/handlers#configuring-the-application-lifecycle).
 Cloudflare uses `dispatch_app::<A>(&app, req, env, ctx)`; Spin uses
 `dispatch_app::<A>(&app, req)` and returns a raw `SpinResponse`. Neither builds an
 app nor initializes logging. The caller must pair the app with its construction

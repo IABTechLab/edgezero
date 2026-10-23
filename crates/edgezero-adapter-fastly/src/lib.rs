@@ -9,9 +9,6 @@
     )
 )]
 
-#[cfg(feature = "fastly")]
-use anyhow::Context as _;
-
 // Compile storage helpers only for their runtime, CLI or colocated tests.
 #[cfg(any(
     feature = "fastly",
@@ -47,6 +44,8 @@ use edgezero_core::error::EdgeError;
 use edgezero_core::http::{Extensions, Response};
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::manifest::ResolvedLoggingConfig;
+#[cfg(feature = "fastly")]
+use edgezero_core::time::MonotonicClock;
 #[cfg(feature = "fastly")]
 pub use fastly::http::serve::{Serve, ServeSummary};
 use std::num::NonZeroU32;
@@ -100,31 +99,12 @@ impl From<ResolvedLoggingConfig> for FastlyLogging {
     }
 }
 
-#[cfg(feature = "fastly")]
-fn build_app_for_dispatch<A>() -> Result<App, fastly::Error>
-where
-    A: Hooks,
-{
-    build_target_app::<A>().context("application configuration failed")
-}
-
 #[cfg(any(feature = "fastly", test))]
 fn build_target_app<A>() -> Result<App, EdgeError>
 where
     A: Hooks,
 {
     App::build::<A>(FASTLY_PLATFORM)
-}
-
-/// Test seam for the production application-assembly error mapping.
-#[cfg(all(feature = "test-utils", feature = "fastly"))]
-#[doc(hidden)]
-#[inline]
-pub fn build_app_for_test<A>() -> Result<App, fastly::Error>
-where
-    A: Hooks,
-{
-    build_app_for_dispatch::<A>()
 }
 
 #[cfg(feature = "fastly")]
@@ -166,7 +146,8 @@ pub fn init_logger(
 /// IDs through Fastly resource links.
 ///
 /// # Errors
-/// Logger setup failures and unavailable required stores return errors.
+/// Returns logger setup, admission-abort or terminal-delivery errors. Assembly failures are
+/// delivered as typed HTTP error responses rather than returned as host-generic errors.
 #[cfg(feature = "fastly")]
 #[inline]
 pub fn run_app<A>() -> Result<(), fastly::Error>
@@ -184,7 +165,8 @@ where
 /// responses skip `finalize` and return `None`.
 ///
 /// # Errors
-/// Logger setup failures and unavailable required stores return errors.
+/// Returns logger setup, admission-abort or terminal-delivery errors. Assembly failures are
+/// delivered as detached HTTP responses and return `None` after successful delivery.
 #[cfg(feature = "fastly")]
 #[inline]
 pub fn run_app_with_hooks<A, Prepare, Finalize, State>(
@@ -203,8 +185,19 @@ where
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
     }
-    let app = build_app_for_dispatch::<A>()?;
-    request::send_with_registries_and_hooks(&app, stores, prepare, finalize).into_standard_result()
+    let req = fastly::Request::from_client();
+    let clock = MonotonicClock::default();
+    let request_start = clock.now();
+    let app = match build_target_app::<A>() {
+        Ok(app) => app,
+        Err(error) => {
+            return request::send_assembly_error(req, error, request_start, clock)
+                .into_standard_result()
+                .map(|_state| None);
+        }
+    };
+    request::send_request_with_registries_and_hooks(&app, stores, req, prepare, finalize)
+        .into_standard_result()
 }
 
 /// Retain a successfully built app while the SDK serves sequential requests.
@@ -253,7 +246,13 @@ where
             }
             Ok::<(), fastly::Error>(())
         })?;
-        retained.initialize(build_app_for_dispatch::<A>)?;
+        let clock = MonotonicClock::default();
+        let request_start = clock.now();
+        if let Err(error) = retained.initialize(build_target_app::<A>) {
+            return request::send_assembly_error(req, error, request_start, clock)
+                .into_standard_result()
+                .map(|_state| ());
+        }
         let app = retained.state().ok_or_else(|| {
             fastly::Error::msg("application initialization did not retain an app")
         })?;
@@ -274,7 +273,8 @@ where
 /// automatically injected; use [`request::FastlyService`] for explicit bindings.
 ///
 /// # Errors
-/// Returns an error if logger setup fails or the underlying handler returns an error.
+/// Returns logger setup, required-store, admission-abort or terminal-delivery errors.
+/// Assembly failures are delivered as typed HTTP error responses.
 #[cfg(feature = "fastly")]
 #[inline]
 pub fn run_app_with_config<A>(
@@ -289,12 +289,25 @@ where
         let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
         init_logger(endpoint, logging.level, logging.echo_stdout)?;
     }
-    let app = build_app_for_dispatch::<A>()?;
+    let req = fastly::Request::from_client();
+    let clock = MonotonicClock::default();
+    let request_start = clock.now();
+    let app = match build_target_app::<A>() {
+        Ok(app) => app,
+        Err(error) => {
+            return request::send_assembly_error(req, error, request_start, clock)
+                .into_standard_result()
+                .map(|_state| ());
+        }
+    };
     let mut service = request::FastlyService::new(&app);
     if let Some(name) = config_store_name {
         service = service.with_config(name);
     }
-    service.send()
+    service
+        .send_request_with_hooks(req, |_request, _extensions| {}, |_response| ())
+        .into_standard_result()
+        .map(|_state| ())
 }
 
 #[cfg(test)]

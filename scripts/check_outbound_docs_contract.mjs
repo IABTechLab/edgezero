@@ -1069,6 +1069,19 @@ for (const requiredFragment of [
   }
 }
 const cloudflareGuideSource = readFileSync(cloudflareGuidePath, 'utf8')
+for (const path of [
+  fastlyGuidePath,
+  cloudflareGuidePath,
+  'docs/guide/adapters/spin.md',
+]) {
+  const guide = readFileSync(path, 'utf8')
+  if (
+    guide.includes('`application configuration failed`') ||
+    !guide.includes('request::send_assembly_error')
+  ) {
+    fail(`${path} must use canonical typed assembly-error delivery`)
+  }
+}
 if (
   !cloudflareGuideSource.includes(
     'EdgeZeroApp::build::<App>(CLOUDFLARE_PLATFORM)'
@@ -1096,6 +1109,10 @@ for (const requiredFragment of [
   'App::from_router::<A>(router, PLATFORM)',
   'App::state::<T>() -> Option<&T>',
   "router's existing state registry",
+  'state = crate::load_state()?',
+  'App::assembly_error_egress(error, method, request_start, clock)',
+  'request::send_assembly_error',
+  'No successful app configuration exists on failure',
 ]) {
   if (!handlersGuideSource.includes(requiredFragment)) {
     fail(`handlers guide is missing application assembly contract: ${requiredFragment}`)

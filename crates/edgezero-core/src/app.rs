@@ -13,6 +13,7 @@ use crate::ingress::{
     IngressDispatchOutcome, IngressFraming, IngressHead, IngressHeadAccounting, IngressHeadLimits,
     IngressHeadParts, PreparedIngress, apply_admission_policy, default_admission_policy,
 };
+use crate::logging::BOOT_LOG_TARGET;
 use crate::manifest::{BakedManifest, ResolvedLoggingConfig};
 use crate::platform::PlatformMetadata;
 use crate::response::IntoResponse as _;
@@ -101,6 +102,40 @@ impl App {
             request_start,
             route,
             completion,
+        )
+    }
+
+    /// Prepares canonical assembly-error egress without constructing or retaining an application.
+    ///
+    /// Logs the original error once on the boot target and uses the default redacted renderer.
+    /// No configured application callbacks or headers apply. The finite default write budget
+    /// starts at `request_start`; both that instant and the supplied clock must share a domain.
+    #[must_use]
+    #[inline]
+    pub fn assembly_error_egress(
+        error: EdgeError,
+        request_method: Method,
+        request_start: MonotonicInstant,
+        clock: MonotonicClock,
+    ) -> ResponseEgressEnvelope {
+        log::error!(target: BOOT_LOG_TARGET, "application assembly failed: {error:?}");
+        let deadline = DetachedResponseEgressHead::new(
+            &request_method,
+            request_start,
+            error.status(),
+            error.kind(),
+        )
+        .write_deadline_after(DEFAULT_RESPONSE_WRITE_BUDGET);
+        let mut response = render_default_error_response(error);
+        response
+            .extensions_mut()
+            .insert(ResponseEgressDeadline::at(deadline));
+        ResponseEgressEnvelope::detached(
+            response,
+            request_start,
+            request_method,
+            ResponseEgressCompletion::empty(),
+            clock,
         )
     }
 
@@ -1033,6 +1068,88 @@ mod tests {
             .middleware(CountingMiddleware(Arc::clone(&middleware_calls)))
             .build();
         (App::new(router), handler_calls, middleware_calls)
+    }
+
+    #[test]
+    fn assembly_error_egress_preserves_status_redaction_and_clock() {
+        let request_start = MonotonicInstant::now();
+        let started_at = request_start
+            .checked_add(Duration::from_secs(1))
+            .expect("egress start");
+        let completed_at = started_at
+            .checked_add(Duration::from_millis(5))
+            .expect("egress end");
+        for (error, expected_status, expected_kind, expected_message) in [
+            (
+                EdgeError::service_unavailable("configuration unavailable"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "configuration unavailable",
+            ),
+            (
+                EdgeError::internal(anyhow::anyhow!("private-token=secret")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "internal server error",
+            ),
+        ] {
+            let now = Arc::new(Mutex::new(started_at));
+            let clock_now = Arc::clone(&now);
+            let clock = MonotonicClock::new(move || *clock_now.lock().expect("clock lock"));
+            let envelope = App::assembly_error_egress(error, Method::GET, request_start, clock);
+            let Ok((prepared, policy, mut attempt, egress_clock)) = envelope.begin() else {
+                panic!("assembly error must enter canonical egress");
+            };
+            let response = prepared.into_response();
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(response.headers()["content-type"], "application/json");
+            assert_eq!(
+                policy.write_deadline.instant(),
+                request_start
+                    .checked_add(DEFAULT_RESPONSE_WRITE_BUDGET)
+                    .unwrap()
+            );
+            let bytes = block_on(response.into_body().into_bytes_bounded(2048)).unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"error": {
+                    "kind": expected_kind, "message": expected_message,
+                    "status": expected_status.as_u16(),
+                }})
+            );
+            assert!(attempt.begin_writing());
+            *now.lock().expect("clock lock") = completed_at;
+            assert!(attempt.complete(egress_clock.now()));
+            let report = attempt.into_terminal_report();
+            assert_eq!(report.request_start, request_start);
+            assert_eq!(report.elapsed, Duration::from_millis(5));
+            assert_eq!(report.outcome, ResponseEgressOutcome::Completed);
+            assert!(report.route.is_none());
+        }
+    }
+
+    #[test]
+    fn assembly_error_egress_suppresses_head_body_without_an_app() {
+        let clock = MonotonicClock::default();
+        let envelope = App::assembly_error_egress(
+            EdgeError::service_unavailable("configuration unavailable"),
+            Method::HEAD,
+            clock.now(),
+            clock,
+        );
+        let Ok((prepared, _, mut attempt, egress_clock)) = envelope.begin() else {
+            panic!("assembly error must enter canonical egress");
+        };
+        let response = prepared.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            block_on(response.into_body().into_bytes_bounded(0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(egress_clock.now()));
     }
 
     #[test]

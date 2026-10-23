@@ -27,7 +27,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
-    use edgezero_adapter_fastly::build_app_for_test;
     use edgezero_adapter_fastly::context::FastlyRequestContext;
     use edgezero_adapter_fastly::delivery::{
         FastlyRequestDelivery, FastlyResponseCommitState, testing::response_delivery,
@@ -84,11 +83,22 @@ mod tests {
 
     #[test]
     fn failing_configuration() {
-        let Err(error) = build_app_for_test::<FailingConfiguration>() else {
-            panic!("configuration must fail before request receive");
+        let Err(error) =
+            App::build::<FailingConfiguration>(edgezero_adapter_fastly::FASTLY_PLATFORM)
+        else {
+            panic!("configuration must not produce an app");
         };
-        assert_eq!(error.to_string(), "application configuration failed");
-        assert!(format!("{error:#}").contains("configuration unavailable"));
+        let clock = MonotonicClock::default();
+        let response = complete_envelope(App::assembly_error_egress(
+            error,
+            Method::GET,
+            clock.now(),
+            clock,
+        ));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = block_on(response.into_body().into_bytes_bounded(2048)).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["message"], "configuration unavailable");
     }
 
     #[async_trait::async_trait(?Send)]

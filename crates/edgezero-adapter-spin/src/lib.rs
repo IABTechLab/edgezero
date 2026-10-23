@@ -1,8 +1,5 @@
 //! Adapter helpers for Spin (Fermyon).
 
-#[cfg(all(feature = "spin", target_arch = "wasm32"))]
-use anyhow::Context as _;
-
 #[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
 
@@ -38,6 +35,8 @@ use edgezero_core::app::{App, Hooks};
 use edgezero_core::env_config::EnvConfig;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 use edgezero_core::error::EdgeError;
+#[cfg(all(feature = "spin", target_arch = "wasm32"))]
+use edgezero_core::time::MonotonicClock;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 use spin_sdk::http::Request as SpinRequest;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
@@ -99,31 +98,12 @@ impl AppExt for App {
     }
 }
 
-#[cfg(all(feature = "spin", target_arch = "wasm32"))]
-fn build_app_for_dispatch<A>(platform: edgezero_core::PlatformMetadata) -> anyhow::Result<App>
-where
-    A: Hooks,
-{
-    build_target_app::<A>(platform).context("application configuration failed")
-}
-
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 fn build_target_app<A>(platform: edgezero_core::PlatformMetadata) -> Result<App, EdgeError>
 where
     A: Hooks,
 {
     App::build::<A>(platform)
-}
-
-/// Test seam for the production application-assembly error mapping.
-#[cfg(all(feature = "test-utils", feature = "spin", target_arch = "wasm32"))]
-#[doc(hidden)]
-#[inline]
-pub fn build_app_for_test<A>() -> anyhow::Result<App>
-where
-    A: Hooks,
-{
-    build_app_for_dispatch::<A>(SPIN_PLATFORM)
 }
 
 /// Initialize the logger for Spin.
@@ -165,8 +145,8 @@ pub fn init_logger() -> Result<(), log::SetLoggerError> {
 /// remain owned by the adapter's spawned response-egress coordinator.
 ///
 /// # Errors
-/// Returns [`anyhow::Error`] when the inner dispatch fails — transport,
-/// router, store binding, or response translation errors propagate here.
+/// Returns [`anyhow::Error`] for request conversion, admission abort or failed delivery.
+/// Assembly failures use their typed HTTP status and the default error response.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[inline]
 pub async fn run_app<A>(req: SpinRequest) -> anyhow::Result<SpinResponse>
@@ -182,8 +162,8 @@ where
 /// deployments can construct metadata from their configured `max_instance_memory`.
 ///
 /// # Errors
-/// Returns [`anyhow::Error`] when application configuration, request conversion,
-/// routing, store binding, or response translation fails.
+/// Returns [`anyhow::Error`] for request conversion, admission abort or failed delivery.
+/// Assembly failures use their typed HTTP status and the default error response.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[inline]
 pub async fn run_app_with_platform<A>(
@@ -196,7 +176,19 @@ where
     if !A::owns_logging() {
         drop(init_logger());
     }
-    let app = build_app_for_dispatch::<A>(platform)?;
+    let clock = MonotonicClock::default();
+    let request_start = clock.now();
+    let app = match build_target_app::<A>(platform) {
+        Ok(app) => app,
+        Err(error) => {
+            return Ok(request::send_assembly_error(
+                req,
+                error,
+                request_start,
+                clock,
+            )?);
+        }
+    };
     dispatch_app::<A>(&app, req).await
 }
 
