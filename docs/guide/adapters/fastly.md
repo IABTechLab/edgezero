@@ -444,7 +444,7 @@ handler or backend time. If your service is billed by memory × wall-clock time,
 idle waiting is billed too. Limits do not guarantee reuse; any request may start a
 fresh sandbox. The fixtures pin standalone Viceroy 0.21.0. Local request ceilings depend on
 the runtime version and must be checked when pins change. `edgezero serve` runs
-`fastly compute serve`, whose bundled Viceroy can differ. Neither local ceiling
+`fastly compute serve`, whose bundled Viceroy can differ. Neither local runtime
 establishes deployed behavior.
 Lifetime and memory checks occur between callbacks and cannot interrupt
 blocked application work. Before using a local memory limit, verify that the

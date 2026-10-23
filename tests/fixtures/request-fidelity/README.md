@@ -11,9 +11,10 @@ Run from the repository root with the Rust and Node versions in `.tool-versions`
 prove source freshness. Use the default locked build for review evidence.
 
 The isolated Cargo workspace and npm lock pin fixture dependencies. Install
-Viceroy 0.21.0, Spin 4.1.0, worker-build 0.8.5 and wasm-bindgen CLI 0.2.128.
-The fixture manifest's `[package.metadata.request-fidelity]` is authoritative for
-Spin CLI and worker-build versions; the runner and CI read those pins.
+Viceroy at the version in `.tool-versions`, Spin CLI and worker-build at the
+versions in the fixture manifest's `[package.metadata.request-fidelity]`, and
+wasm-bindgen CLI at the `wasm-bindgen` version in the fixture `Cargo.lock`.
+The runner and CI read these authoritative pins.
 The runner uses `WASM_BINDGEN_BIN` when set, otherwise resolves `wasm-bindgen`
 from `PATH`, checks it against the fixture Cargo lock, and passes its absolute
 path to worker-build. An invalid override fails instead of falling back to a
@@ -69,7 +70,7 @@ Known gates:
   Absolute-form and duplicate Content-Length requests return local 500 errors.
 - Spin 4.1.0 rejects non-UTF-8 header values before component invocation.
   It consumes chunked framing and removes Transfer-Encoding before the hook in
-  `chunked` and `te-cl`; these observations differ from the old Spin 4.0 baseline.
+  `chunked` and `te-cl` cases.
 - Global original field order is unavailable on Axum, Cloudflare and Spin.
   Fastly reports Unknown: original-name/count APIs provide partial evidence,
   without associating original fields with converted values. Local evidence

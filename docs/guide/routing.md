@@ -247,17 +247,29 @@ If the hook consumes the body and returns `Ok(None)`, the handler receives only
 what remains unless the hook replaces the body. Generated `app!` applications
 cannot install a hook through the macro or modify the built router. A
 hand-written `Hooks` implementation does not inherit the generated metadata.
-Keep `app!` in a separate module and delegate stores, logging, name and
-application configuration:
+Move your existing `app!` invocation **unchanged, including all arguments**
+(`owns_logging = …`, `state = …`), into a separate module. Delegate stores,
+logging, name and application configuration. For example, an application whose
+existing invocation uses `owns_logging = true, state = 42_u32` would keep them:
 
 ```rust
 use edgezero_core::app::{App, Hooks, StoresMetadata};
 use edgezero_core::manifest::{ManifestLoader, ResolvedLoggingConfig};
+use edgezero_core::router::RouterService;
+use std::sync::{Arc, LazyLock};
 
 mod manifest_app {
-    edgezero_core::app!("edgezero.toml", ManifestApp);
+    edgezero_core::app!(
+        "edgezero.toml", ManifestApp,
+        owns_logging = true, state = 42_u32
+    );
 }
 use manifest_app::ManifestApp;
+
+static MANIFEST_JSON: LazyLock<Arc<str>> = LazyLock::new(|| {
+    let manifest = ManifestLoader::load_from_str(include_str!("../edgezero.toml"));
+    serde_json::to_string(manifest.manifest()).expect("valid manifest").into()
+});
 
 pub struct HookedApp;
 
@@ -269,14 +281,11 @@ impl Hooks for HookedApp {
     }
 
     fn routes() -> RouterService {
-        let manifest = ManifestLoader::load_from_str(include_str!("../edgezero.toml"));
         RouterService::builder()
             .pre_dispatch_hook(ExampleHook)
-            .with_manifest_json(
-                serde_json::to_string(manifest.manifest()).expect("valid manifest"),
-            )
+            .with_manifest_json(Arc::clone(&MANIFEST_JSON))
+            .with_state(42_u32)
             // Re-register every manifest route and middleware here, in order.
-            // Repeat any app!(..., state = ...) registration with .with_state(...).
             .build()
     }
 
@@ -290,14 +299,29 @@ impl Hooks for HookedApp {
 }
 ```
 
-This outline assumes `src/lib.rs` beside a root `edgezero.toml` and a direct
-`serde_json` dependency. Adjust the `include_str!` path to the source file.
+This outline uses `ExampleHook` from above, with code in `src/lib.rs` and
+`edgezero.toml` at the crate root. Add direct `async-trait` and `serde_json`
+dependencies: core does not re-export those crates. The `app!` path is relative
+to the crate root; the `include_str!` path is relative to the source file.
+Import any names used by the original arguments into the nested module (for
+example, `use super::app_state;` for `state = app_state()`).
 Use `HookedApp` as the adapter entry point. Its `routes()` must explicitly
 re-register **all routes, manifest middleware and configured state**; delegating
 metadata alone does not preserve them. `with_manifest_json` above preserves
-manifest introspection and parses/serializes the manifest when constructing the
-router. This manual duplication must stay synchronized with `app!` and the
-manifest. The complete executable example and regression tests are in
+manifest introspection. The lazy static parses and serializes the manifest once
+per runtime instance. Standard Fastly, Cloudflare and Spin runners construct the
+application on every request. Persistent instances (Cloudflare isolates, Axum,
+or Fastly `serve_app`) reuse this cached JSON. Classic Fastly Compute starts a
+fresh instance per request, so it still pays the initialization cost on each
+request. Spin's [instance reuse depends on the component and runtime](https://spinframework.dev/v4/http-trigger#controlling-instance-reuse):
+WASI P3 HTTP components can reuse the cache, while fresh instances always pay
+the initialization cost. Do not assume any minimum degree of reuse.
+The macro embeds its JSON at compile time; exposing that literal
+or registering hooks directly through `app!` is tracked in
+[issue #434](https://github.com/IABTechLab/edgezero/issues/434).
+This manual duplication must stay synchronized with `app!` and the manifest,
+including matching `.with_state(...)` to the original macro's state argument.
+The complete executable example and regression tests are in
 `crates/edgezero-macros/tests/hooked_app.rs`. The store-free ingress fixture is
 not a metadata-preserving example for manifest applications.
 

@@ -24,8 +24,16 @@ mod tests {
     use edgezero_core::middleware::{Middleware, Next};
     use edgezero_core::router::{PreDispatchHook, RouterService};
     use futures::executor::block_on;
+    use std::sync::{Arc, LazyLock};
 
     use manifest_app::ManifestApp;
+
+    static MANIFEST_JSON: LazyLock<Arc<str>> = LazyLock::new(|| {
+        let manifest = ManifestLoader::load_from_str(include_str!("fixtures/hooked_app.toml"));
+        serde_json::to_string(manifest.manifest())
+            .expect("valid manifest")
+            .into()
+    });
 
     struct HookedApp;
     impl Hooks for HookedApp {
@@ -47,12 +55,9 @@ mod tests {
             ManifestApp::owns_logging()
         }
         fn routes() -> RouterService {
-            let manifest = ManifestLoader::load_from_str(include_str!("fixtures/hooked_app.toml"));
             RouterService::builder()
                 .pre_dispatch_hook(ReservedGate)
-                .with_manifest_json(
-                    serde_json::to_string(manifest.manifest()).expect("valid manifest"),
-                )
+                .with_manifest_json(Arc::clone(&MANIFEST_JSON))
                 .with_state(42_u32)
                 .middleware(MarkMiddleware)
                 .get("/ordinary", ordinary)
@@ -100,10 +105,9 @@ mod tests {
     }
 
     #[action(manifest)]
-    async fn ordinary(State(value): State<u32>, ManifestJson(json): ManifestJson) -> &'static str {
+    async fn ordinary(State(value): State<u32>, ManifestJson(json): ManifestJson) -> String {
         assert_eq!(value, 42);
-        assert!(json.contains("hooked-manifest-app"), "manifest retained");
-        "continued"
+        json.to_string()
     }
 
     #[test]
@@ -130,7 +134,9 @@ mod tests {
     #[test]
     fn manual_router_preserves_continuation_and_terminal_hook_boundaries() {
         block_on(async {
-            let router = HookedApp::routes();
+            let app = HookedApp::build_app();
+            assert_eq!(app.name(), "hooked-manifest-app");
+            let router = app.router();
             let continued = router
                 .oneshot(
                     request_builder()
@@ -142,6 +148,23 @@ mod tests {
                 .expect("response");
             assert_eq!(continued.status(), 200);
             assert_eq!(continued.headers()["x-middleware"], "present");
+            let generated = ManifestApp::build_app()
+                .into_router()
+                .oneshot(
+                    request_builder()
+                        .uri("/ordinary")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("macro response");
+            assert_eq!(generated.status(), 200);
+            assert_eq!(generated.headers()["x-middleware"], "present");
+            assert_eq!(
+                continued.body().as_bytes().expect("buffered manifest"),
+                generated.body().as_bytes().expect("macro manifest"),
+                "manifest retained byte for byte"
+            );
             let terminal = router
                 .oneshot(
                     request_builder()

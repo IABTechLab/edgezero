@@ -73,6 +73,7 @@ jobs:
       # deploy fixture). A mismatch only surfaces as a confusing
       # "trait bound not satisfied" in a deploy smoke job, so gate it here.
       - name: Shared dependency pins agree
+        if: matrix.suite == 'workspace'
         run: |
           ./scripts/check_shared_dep_pins.sh
           bash scripts/test_shared_dep_pins.sh
@@ -344,7 +345,7 @@ jobs:
         id: worker-build-pin
         shell: bash
         run: |
-          version="$(awk '/^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") } in_pins && $1 == "worker-build" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.toml)"
+          version="$(awk '{ sub(/[[:space:]]*#.*/, "") } /^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") } in_pins && $1 == "worker-build" && $2 == "=" { gsub(/"/, "", $3); count++; found=$3 } END { if (count == 1) print found }' tests/fixtures/request-fidelity/Cargo.toml)"
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -374,7 +375,7 @@ jobs:
         if: matrix.adapter == 'spin'
         shell: bash
         run: |
-          version="$(awk '$1 == "spin-cli" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.toml)"
+          version="$(awk '{ sub(/[[:space:]]*#.*/, "") } /^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") } in_pins && $1 == "spin-cli" && $2 == "=" { gsub(/"/, "", $3); count++; found=$3 } END { if (count == 1) print found }' tests/fixtures/request-fidelity/Cargo.toml)"
           test "$version" = "4.1.0"
           install_dir="$RUNNER_TEMP/spin"
           mkdir -p "$install_dir"
@@ -401,8 +402,8 @@ jobs:
           if [ "${{ matrix.adapter }}" = "cloudflare" ]; then
             version="$(awk '$1 == "name" && $3 == "\"wasm-bindgen\"" { in_pkg=1; next } in_pkg && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.lock)"
             test -n "$version"
-            WASM_BINDGEN_BIN="$(command -v wasm-bindgen)"
-            if [[ "$("$WASM_BINDGEN_BIN" --version)" != "wasm-bindgen $version" ]]; then
+            WASM_BINDGEN_BIN="$(command -v wasm-bindgen || true)"
+            if [[ -z "$WASM_BINDGEN_BIN" ]] || [[ "$("$WASM_BINDGEN_BIN" --version 2>/dev/null || true)" != "wasm-bindgen $version" ]]; then
               cargo install wasm-bindgen-cli --version "$version" --locked --root "$RUNNER_TEMP/fixture-wasm-bindgen"
               WASM_BINDGEN_BIN="$RUNNER_TEMP/fixture-wasm-bindgen/bin/wasm-bindgen"
             fi

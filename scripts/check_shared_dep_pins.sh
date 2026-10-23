@@ -154,6 +154,7 @@ done
 # worker-build's release must match the fixture's Worker SDK, but its pin is
 # declared once in metadata and consumed by CI and the native runner.
 worker_build="$(awk '
+  { sub(/[[:space:]]*#.*/, "") }
   /^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") }
   in_pins && $1 == "worker-build" && $2 == "=" {
     value=$3; gsub(/"/, "", value); count++; found=value

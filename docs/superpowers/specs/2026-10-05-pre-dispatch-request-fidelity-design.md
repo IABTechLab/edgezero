@@ -3,7 +3,6 @@
 **Status:** Implemented API contract; current verification requirements and dependency pins are recorded in the matching plan.
 **Date:** 2026-10-05.
 **Baseline:** EdgeZero main `98930917d96cb665c7255f36ca8bbd61fc7539e1`.
-**Branch:** `spec/pre-dispatch-request-fidelity`.
 **Implementation plan:** [Matching plan](../plans/2026-10-05-pre-dispatch-request-fidelity.md).
 
 ## 1. Problem and outcome
@@ -101,7 +100,10 @@ Only after continuation may the router clone the method/path, call `find_route`,
 
 The hook has no implicit router-state access because it precedes injection. Consumers capture their own `Arc<AppState>` when building the hook. They own authentication, method validation, complete local response headers and any diagnostic policy. Outer adapter/consumer finalizers still exist; a terminal core response is not a promise to bypass arbitrary external finalization.
 
-Manual builder registration is sufficient; no new `Hooks` method or `app!` argument is required.
+Manual builder registration provides the hook without changing `Hooks` or the
+`app!` grammar. Applications using `app!` need the
+[routing guide's manual `Hooks` delegation](../../guide/routing.md#intercepting-before-dispatch);
+direct macro registration is tracked in [#434](https://github.com/IABTechLab/edgezero/issues/434).
 
 ## 6. Ingress metadata contract
 
@@ -115,8 +117,8 @@ Use private fields, Clone, and borrowed accessors. Do not derive value-bearing D
 - `TargetSource`: `TransportRequestTarget`, `RuntimeUrl`, `RuntimePathAndQuery`. Source and fidelity are independent: a runtime URL is not automatically the original request target.
 - `Preservation`: `Preserved`, `Transformed`, `Unknown`, `Unavailable`.
 - `TargetUnavailable`: `NotExposed`, `TooLarge`, `ReadFailed`.
-- `OriginSource`: `RuntimeUri` or `TransportBinding`; provenance is explicit. RuntimeUri records the runtime URI source, normally derived from client Host or :authority; TransportBinding records a trusted transport scheme combined with a single validated inbound request authority. Request authority is not operator approval or host ownership. Invalid, multiple or contradictory authority stays unavailable.
-- `InboundOrigin`: validated HTTP(S) scheme and authority, bounded to 1 KiB authority bytes, captured from trusted inbound/runtime request information with `OriginSource`. Getters borrow those values. No user-info/path/query/fragment; reject invalid authority or expose unavailable origin. An Origin request header or arbitrary forwarded header cannot populate it.
+- `OriginSource`: `RuntimeUri` or `TransportBinding`; provenance is explicit. RuntimeUri records the runtime URI source, normally derived from client Host or :authority; TransportBinding records a scheme established by the adapter's listener combined with a single validated inbound request authority. Request authority is not operator approval or host ownership. Invalid, multiple or contradictory authority stays unavailable.
+- `InboundOrigin`: validated HTTP(S) scheme and authority, bounded to 1 KiB authority bytes, captured from adapter-established transport binding or runtime URI information with `OriginSource`. Getters borrow those values. No user-info/path/query/fragment; reject invalid authority or expose unavailable origin. An Origin request header or arbitrary forwarded header cannot populate it.
 - `HeaderFidelity`: independent `Preservation` values for octets, field multiplicity, same-name value order and global field order.
 - `RequestIngress`: captured target, optional inbound origin, common header fidelity and small per-header fidelity overrides. `header_fidelity(&HeaderName)` returns an override or the common default; this handles Content-Length folding without implying identical behavior for Cookie.
 
@@ -217,8 +219,8 @@ Use fictional/example.com fixtures only. Never log actual headers, cookies, cred
 
 ## 10. Decision log and consumer boundary
 
-- Worker header conversion copies UTF-8 runtime strings. The earlier ByteString
-  assumption corrupted C3 A9 and rejected C4 80; the fixture asserts both exact
+- Worker header conversion copies UTF-8 runtime strings. A ByteString/Latin-1
+  conversion would corrupt C3 A9 and reject C4 80; the fixture asserts both exact
   byte sequences. Invalid UTF-8 replacement remains a runtime limitation.
 - Fidelity is per observation. Runtime normalization or folding capability does
   not establish that a particular request changed; use Unknown when unproved.

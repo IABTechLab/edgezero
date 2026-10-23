@@ -278,7 +278,8 @@ pub enum OriginSource {
     /// It identifies the requested origin; it does not establish that an operator
     /// approves or owns that host.
     RuntimeUri,
-    /// A trusted transport scheme combined with one validated inbound request authority.
+    /// A transport scheme established by the adapter's listener, combined with
+    /// one validated inbound request authority.
     ///
     /// The authority identifies the requested origin; it does not establish
     /// that an operator approves or owns that host.

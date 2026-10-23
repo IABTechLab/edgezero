@@ -285,35 +285,65 @@ fn run_command(
     cancelled: &Cancelled,
     capture: bool,
 ) -> io::Result<String> {
-    check_cancelled(cancelled)?;
     let mut command = command(fixture, program, arguments);
-    if program == "worker-build" && arguments != ["--version"] {
-        let bindgen = if let Some(path) = env::var_os("WASM_BINDGEN_BIN") {
-            PathBuf::from(path)
-        } else {
-            env::split_paths(&env::var_os("PATH").unwrap_or_default())
-                .map(|directory| directory.join("wasm-bindgen"))
-                .find(|path| path.is_file())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
-                    "wasm-bindgen not found on PATH; install the fixture-locked CLI or set WASM_BINDGEN_BIN"))?
-        };
-        configure_worker_build(&mut command, fixture, &bindgen, cancelled)?;
-    }
+    run_prepared_command(&mut command, cancelled, capture)
+}
+
+fn run_prepared_command(
+    command: &mut Command,
+    cancelled: &Cancelled,
+    capture: bool,
+) -> io::Result<String> {
+    let description = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|value| value.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let describe =
+        |error: io::Error| io::Error::new(error.kind(), format!("{description}: {error}"));
+    check_cancelled(cancelled).map_err(describe)?;
     // A file avoids pipe backpressure while waiting interruptibly for build tools.
-    let mut output = tempfile::tempfile()?;
-    command.stdout(output.try_clone()?);
-    command.stderr(Stdio::inherit());
-    let result = OwnedProcess::spawn(&mut command)?.wait(cancelled);
-    output.rewind()?;
-    if !capture {
-        io::copy(&mut output, &mut io::stderr())?;
-    }
-    result?;
-    if capture {
-        let mut value = String::new();
-        output.read_to_string(&mut value)?;
-        Ok(value)
+    let mut output = tempfile::tempfile().map_err(describe)?;
+    let mut stderr = tempfile::tempfile().map_err(describe)?;
+    command.stdout(output.try_clone().map_err(describe)?);
+    command.stderr(if capture {
+        Stdio::from(stderr.try_clone().map_err(describe)?)
     } else {
+        Stdio::inherit()
+    });
+    let result = OwnedProcess::spawn(command)
+        .map_err(describe)?
+        .wait(cancelled);
+    output.rewind().map_err(describe)?;
+    if capture {
+        let mut bytes = Vec::new();
+        output.read_to_end(&mut bytes).map_err(describe)?;
+        stderr.rewind().map_err(describe)?;
+        let mut diagnostics = Vec::new();
+        stderr.read_to_end(&mut diagnostics).map_err(describe)?;
+        result.map_err(|error| {
+            describe(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; stdout: {}; stderr: {}",
+                    String::from_utf8_lossy(&bytes),
+                    String::from_utf8_lossy(&diagnostics)
+                ),
+            ))
+        })?;
+        io::stderr().write_all(&diagnostics).map_err(describe)?;
+        String::from_utf8(bytes).map_err(|error| {
+            describe(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{error}; output: {}",
+                    String::from_utf8_lossy(error.as_bytes())
+                ),
+            ))
+        })
+    } else {
+        io::copy(&mut output, &mut io::stderr()).map_err(describe)?;
+        result.map_err(describe)?;
         Ok(String::new())
     }
 }
@@ -352,13 +382,46 @@ fn fixture_tool_pin(fixture: &Path, tool: &str) -> io::Result<String> {
         .ok_or_else(|| io::Error::other(format!("missing fixture tool pin: {tool}")))
 }
 
+fn resolve_wasm_bindgen(
+    override_path: Option<std::ffi::OsString>,
+    path: &std::ffi::OsStr,
+) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let executable =
+        |metadata: &fs::Metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0;
+    if let Some(path) = override_path {
+        let path = PathBuf::from(path);
+        let metadata = path.metadata().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("WASM_BINDGEN_BIN {}: {error}", path.display()),
+            )
+        })?;
+        if !executable(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "WASM_BINDGEN_BIN {} must be an executable file",
+                    path.display()
+                ),
+            ));
+        }
+        return Ok(path);
+    }
+    env::split_paths(path)
+        .map(|directory| directory.join("wasm-bindgen"))
+        .find(|path| path.metadata().is_ok_and(|metadata| executable(&metadata)))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
+            "wasm-bindgen not found on PATH; install the fixture-locked CLI or set WASM_BINDGEN_BIN"))
+}
+
 fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()> {
     if platform == "cloudflare" {
         let pin = fixture_tool_pin(fixture, "worker-build")?;
         verify_version(fixture, "worker-build", &pin, cancelled)?;
         run_command(fixture, "npm", &["ci"], cancelled, false)?;
         let lock = fs::read(fixture.join("Cargo.lock"))?;
-        run_command(
+        let mut command = command(
             fixture,
             "worker-build",
             &[
@@ -374,9 +437,13 @@ fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()
                 "--target-dir",
                 "target/cloudflare",
             ],
-            cancelled,
-            false,
+        );
+        let bindgen = resolve_wasm_bindgen(
+            env::var_os("WASM_BINDGEN_BIN"),
+            &env::var_os("PATH").unwrap_or_default(),
         )?;
+        configure_worker_build(&mut command, fixture, &bindgen, cancelled)?;
+        run_prepared_command(&mut command, cancelled, false)?;
         if fs::read(fixture.join("Cargo.lock"))? != lock {
             return Err(io::Error::other(
                 "worker-build changes the locked fixture dependencies",
@@ -1211,6 +1278,88 @@ mod tests {
     }
 
     #[test]
+    fn command_failures_include_arguments_and_captured_diagnostics() {
+        let directory = tempfile::tempdir().expect("command directory");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for (script, kind, diagnostics) in [
+            (
+                "printf 'probe stdout'; printf 'probe stderr' >&2; exit 3",
+                io::ErrorKind::Other,
+                "probe stdout",
+            ),
+            ("printf '\\377'", io::ErrorKind::InvalidData, "�"),
+        ] {
+            let error = super::run_command(
+                directory.path(),
+                "/bin/sh",
+                &["-c", script],
+                &cancelled,
+                true,
+            )
+            .expect_err("command must fail");
+            assert_eq!(error.kind(), kind);
+            let message = error.to_string();
+            assert!(message.contains("/bin/sh -c"), "{message}");
+            assert!(message.contains(diagnostics), "{message}");
+            if kind == io::ErrorKind::Other {
+                assert!(message.contains("probe stderr"), "{message}");
+                assert!(message.contains('3'), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn captured_success_keeps_stdout_separate_from_stderr() {
+        let directory = tempfile::tempdir().expect("command directory");
+        let output = super::run_command(
+            directory.path(),
+            "/bin/sh",
+            &["-c", "printf 'tool 1.2.3'; printf 'tool warning' >&2"],
+            &Arc::new(AtomicBool::new(false)),
+            true,
+        )
+        .expect("successful command");
+        assert_eq!(output, "tool 1.2.3");
+    }
+
+    #[test]
+    fn bindgen_resolution_skips_nonexecutables_and_honors_overrides() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("tool directories");
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir_all(&first).expect("first directory");
+        std::fs::create_dir_all(&second).expect("second directory");
+        let shadow = first.join("wasm-bindgen");
+        let executable = second.join("wasm-bindgen");
+        for (file, mode) in [(&shadow, 0o644), (&executable, 0o755)] {
+            std::fs::write(file, "#!/bin/sh\nexit 0\n").expect("tool");
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode))
+                .expect("permissions");
+        }
+        let path = std::env::join_paths([&first, &second]).expect("PATH");
+        assert_eq!(
+            super::resolve_wasm_bindgen(None, &path).expect("executable lookup"),
+            executable
+        );
+        let override_tool = directory.path().join("override-wasm-bindgen");
+        std::fs::copy(&executable, &override_tool).expect("distinct override outside PATH");
+        assert_eq!(
+            super::resolve_wasm_bindgen(Some(override_tool.clone().into_os_string()), &path)
+                .expect("override"),
+            override_tool
+        );
+        for invalid in [shadow, directory.path().join("missing"), first] {
+            let error = super::resolve_wasm_bindgen(Some(invalid.into_os_string()), &path)
+                .expect_err("invalid override must not fall back to PATH");
+            assert!(error.to_string().contains("WASM_BINDGEN_BIN"), "{error}");
+        }
+        std::fs::remove_file(&executable).expect("remove executable");
+        let error = super::resolve_wasm_bindgen(None, &path).expect_err("no executable");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
     fn version_diagnostic_includes_expected_and_actual() {
         use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("tool directory");
@@ -1323,7 +1472,7 @@ mod tests {
         assert!(error.to_string().contains("0.2.127"));
         std::fs::remove_file(&bindgen).expect("remove tool");
         let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
-            .expect_err("missing override must fail instead of downloading");
+            .expect_err("missing configured tool must fail instead of downloading");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains("wasm-bindgen"));
     }

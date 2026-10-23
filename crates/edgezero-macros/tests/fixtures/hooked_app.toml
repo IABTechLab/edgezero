@@ -4,7 +4,7 @@ middleware = ["crate::tests::MarkMiddleware"]
 
 [[triggers.http]]
 path = "/ordinary"
-method = "GET"
+methods = ["GET"]
 handler = "crate::tests::ordinary"
 
 [stores.kv]

@@ -3,12 +3,10 @@
 **Goal:** Method-independent interception before router dispatch, with bounded,
 confidential metadata that accurately describes runtime-visible request facts.
 
-**Status:** Core feature implemented. This document supersedes earlier execution
-notes, signatures, case counts and runtime flags; it is a maintenance and
-verification checklist, not a chronological session log.
+**Status:** Core feature implemented. This document records the implemented
+surfaces, maintenance requirements and verification procedure.
 
 **Contract:** [Design](../specs/2026-10-05-pre-dispatch-request-fidelity-design.md).
-**Branch:** `spec/pre-dispatch-request-fidelity`.
 
 ## Implemented surfaces
 
@@ -30,7 +28,7 @@ ingress, extend)`. Capture reports target NotExposed before reading the SDK
   read; parse the captured copy with `worker::Url`; preserve runtime UTF-8
   header bytes. Bounded conversion errors become Worker errors through standard
   runners and the fetch wrapper returns 500.
-- Axum `src/request.rs`: preserve incoming URI/headers, trusted plain-HTTP
+- Axum `src/request.rs`: preserve incoming URI/headers, listener-established plain-HTTP
   transport binding and one consistent Host. Existing JSON buffering and
   non-JSON streaming remain in place.
 - Spin `src/ingress.rs`: pure metadata helper shared by WASM conversion and host
@@ -70,19 +68,19 @@ versioned cache keys; debug lint and release probe builds keep their profiles.
 
 ## Verification checklist
 
-- [x] Run core, affected adapter and native runner tests after code changes.
-- [x] Run workspace fmt, strict all-feature clippy and full workspace tests.
-- [x] Check workspace `fastly cloudflare spin` features and Spin wasm32-wasip2.
-- [x] Format/lint both isolated fixture workspaces; lint WASM fixture on each of
-      wasm32-wasip1/Fastly, wasm32-unknown-unknown/Cloudflare and
-      wasm32-wasip2/Spin with `--locked`.
-- [x] Execute browser Cloudflare, Viceroy Fastly and Wasmtime Spin contracts.
-      Spin uses plain `wasmtime run`; full Spin lib-test artifacts additionally
-      need Spin-specific host interfaces and are not plain-Wasmtime contracts.
-- [x] Run `./scripts/test-request-fidelity.sh all --record-observations` into a
-      temporary file, inspect per-case differences, then replace the baseline.
-      Run the ordinary comparison afterward. See the fixture README commands.
-- [x] Run docs lint, format and build; review the final diff independently.
+- Run core, affected adapter and native runner tests after code changes.
+- Run workspace fmt, strict all-feature clippy and full workspace tests.
+- Check workspace `fastly cloudflare spin` features and Spin wasm32-wasip2.
+- Format/lint both isolated fixture workspaces; lint WASM fixture on each of
+  wasm32-wasip1/Fastly, wasm32-unknown-unknown/Cloudflare and
+  wasm32-wasip2/Spin with `--locked`.
+- Execute browser Cloudflare, Viceroy Fastly and Wasmtime Spin contracts.
+  Spin uses plain `wasmtime run`; full Spin lib-test artifacts additionally
+  need Spin-specific host interfaces and are not plain-Wasmtime contracts.
+- Run `./scripts/test-request-fidelity.sh all --record-observations` into a
+  temporary file, inspect per-case differences, then replace the baseline.
+  Run the ordinary comparison afterward. See the fixture README commands.
+- Run docs lint, format and build; review the final diff independently.
 
 ## Baseline maintenance
 
@@ -96,7 +94,7 @@ the PR description.
 
 - Worker runtime UTF-8 strings must be copied as UTF-8; browser ByteString
   construction is not evidence of Worker wire bytes. Exact C3 A9/C4 80 assertions
-  prevent the earlier encoding defect.
+  guard against corruption from a ByteString/Latin-1 conversion.
 - Origin availability and hook dispatch prerequisites must pass before the
   UTF-8 regression can prove anything; assert the specific encoding error and
   include a passing valid verdict.
