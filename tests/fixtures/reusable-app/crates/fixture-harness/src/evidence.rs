@@ -9,6 +9,155 @@ pub fn require(condition: bool, message: impl Into<String>) -> Result<()> {
         Err(message.into().into())
     }
 }
+pub fn validate_outbound_progress(probe: &Value, receipts: &[Value]) -> Result<()> {
+    require(
+        probe["pause_ns"]
+            .as_u64()
+            .is_some_and(|ns| ns >= 100_000_000),
+        "unrelated pause shorter than 100ms or unmeasured",
+    )?;
+    require(
+        matches!(
+            probe["adapter"].as_str(),
+            Some("axum" | "cloudflare" | "fastly" | "spin")
+        ),
+        "unknown or missing progress adapter",
+    )?;
+    require(
+        probe["protocol"] == "http1",
+        "unsupported or unobserved protocol",
+    )?;
+    require(
+        probe["consumer_polls_before_window_end"] == 0,
+        "consumer polled during window",
+    )?;
+    let case = probe["case"].as_str().ok_or("missing progress case")?;
+    let slots = match case {
+        "eager-single" | "lazy-single" => 1,
+        "eager-batch" | "response-owned" | "baseline-batch" => 2,
+        _ => return Err("unknown progress case".into()),
+    };
+    require(probe["slots"] == slots, "wrong slot count")?;
+    let token = probe["token"].as_str().ok_or("missing probe token")?;
+    require(
+        !token.is_empty()
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "invalid probe token",
+    )?;
+    let prefix = format!("/g3/{token}/");
+    require(
+        receipts.len() == slots + 2,
+        "missing or extra origin receipts",
+    )?;
+    let one = |suffix: &str| -> Result<u64> {
+        let path = format!("{prefix}{suffix}");
+        let matching = receipts
+            .iter()
+            .filter(|r| r["path"] == path)
+            .collect::<Vec<_>>();
+        require(
+            matching.len() == 1,
+            "missing, duplicate or foreign origin receipt",
+        )?;
+        matching[0]["received_ns"]
+            .as_u64()
+            .ok_or_else(|| "missing origin timestamp".into())
+    };
+    let start = one("start")?;
+    let end = one("end")?;
+    require(
+        end.saturating_sub(start) >= 100_000_000,
+        "unrelated wait shorter than 100ms",
+    )?;
+    let eager = case != "lazy-single" && (case != "baseline-batch" || probe["adapter"] == "fastly");
+    for slot in 0..slots {
+        let received = one(&format!("slot-{slot}"))?;
+        require(
+            if eager {
+                received >= start && received - start < 100_000_000
+            } else {
+                received >= end
+            },
+            "origin receipt did not match eager/lazy dispatch window",
+        )?;
+    }
+    Ok(())
+}
+pub fn validate_outbound_readiness(probes: &[Value]) -> Result<()> {
+    require(!probes.is_empty(), "no readiness probes executed")?;
+    for probe in probes {
+        require(
+            probe["revision"]
+                .as_str()
+                .is_some_and(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                && probe["read_limit"] == 1
+                && probe["deadline_us"].as_u64() == Some(500_000),
+            "readiness identity or bounded-read policy missing",
+        )?;
+        let samples = probe["samples"].as_array().ok_or("missing read samples")?;
+        require(!samples.is_empty(), "empty read samples")?;
+        require(
+            samples.last().is_some_and(|s| {
+                s["operation"] == "read"
+                    && (s["bytes"] == 0 || s["error"].as_str().is_some_and(|e| !e.is_empty()))
+            }),
+            "no terminal body read; readiness timeout/error is not evidence of source-error loss",
+        )?;
+        require(
+            samples.iter().any(|s| s["operation"] == "head-select")
+                && samples.iter().any(|s| s["operation"] == "read"),
+            "missing head wait or body read sample",
+        )?;
+        for sample in samples {
+            let start = sample["start_us"].as_u64().ok_or("missing start")?;
+            let end = sample["end_us"].as_u64().ok_or("missing end")?;
+            require(
+                start <= end && end <= 505_000,
+                "unbounded or late operation",
+            )?;
+            if matches!(
+                sample["operation"].as_str(),
+                Some("head-select" | "body-select")
+            ) {
+                require(
+                    sample["timeout_ms"]
+                        .as_u64()
+                        .is_some_and(|ms| (1..=500).contains(&ms)),
+                    "zero/unbounded readiness timeout",
+                )?;
+            } else {
+                require(
+                    sample["operation"] == "read"
+                        && (sample["bytes"].as_u64().is_some_and(|n| n <= 1)
+                            || sample["error"].as_str().is_some_and(|s| !s.is_empty())),
+                    "missing bounded read outcome",
+                )?;
+            }
+        }
+        if probe["mode"] == "selected" {
+            for (index, _) in samples
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s["operation"] == "read")
+            {
+                require(
+                    index
+                        .checked_sub(1)
+                        .and_then(|i| samples.get(i))
+                        .is_some_and(|s| {
+                            s["operation"] == "body-select"
+                                && s["status"] == "FastlyStatus::OK"
+                                && s["selected"] == 0
+                        }),
+                    "body read lacks successful immediately preceding readiness",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
 pub fn validate_shared_state(guest: &Value, retained: bool) -> Result<()> {
     let expected = if retained {
         guest["ordinal"].as_u64()
@@ -77,6 +226,64 @@ pub fn validate_negative_logging(replies: &[Value], starts: &[Value]) -> Result<
     }
     Ok(if reused { "pass" } else { "unverified" })
 }
+pub fn validate_fastly_delivery_report(
+    token: &str,
+    events: &[Value],
+    expected: &Value,
+) -> Result<()> {
+    let reports = events
+        .iter()
+        .filter(|event| event["event"] == "delivery_report" && event["token"] == token)
+        .collect::<Vec<_>>();
+    require(reports.len() == 1, "missing or duplicate delivery report")?;
+    let report = reports[0];
+    for key in [
+        "disposition",
+        "commitment",
+        "body_kind",
+        "outcome",
+        "fallback",
+        "may_send_native",
+    ] {
+        require(
+            expected.get(key).is_some(),
+            "incomplete delivery expectation",
+        )?;
+        require(
+            report.get(key) == expected.get(key),
+            format!("delivery report {key} mismatch"),
+        )?;
+    }
+    if expected["disposition"] == "no-attempt" {
+        require(
+            expected.get("no_attempt_reason").is_some()
+                && report.get("no_attempt_reason") == expected.get("no_attempt_reason"),
+            "delivery report no-attempt reason mismatch",
+        )?;
+    }
+    let attempted = matches!(
+        expected["disposition"].as_str(),
+        Some("routed" | "detached")
+    );
+    let terminals = events
+        .iter()
+        .filter(|event| event["event"] == "egress_terminal" && event["token"] == token)
+        .collect::<Vec<_>>();
+    require(
+        terminals.len() == usize::from(attempted),
+        "delivery completion count mismatch",
+    )?;
+    if attempted {
+        for key in ["outcome", "body_kind", "fallback", "bytes_written"] {
+            require(
+                report.get(key).is_some() && report.get(key) == terminals[0].get(key),
+                format!("delivery/completion {key} mismatch"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_post_send(token: &str, receipts: &[String], events: &[Value]) -> Result<()> {
     require(
         receipts.contains(&format!("/post-send?token={token}")),
@@ -615,6 +822,55 @@ mod tests {
         );
     }
     #[test]
+    fn delivery_reports_require_exactly_one_matching_completion() {
+        let expected = json!({"disposition":"routed","commitment":"Committed", "body_kind":"Application",
+            "outcome":"SourceError","fallback":null,"may_send_native":false});
+        let mut delivery = expected.clone();
+        delivery["event"] = json!("delivery_report");
+        delivery["token"] = json!("x");
+        delivery["bytes_written"] = json!(7);
+        let terminal = json!({"event":"egress_terminal","token":"x","body_kind":"Application",
+            "outcome":"SourceError","fallback":null,"bytes_written":7});
+        assert!(
+            validate_fastly_delivery_report("x", &[delivery.clone(), terminal.clone()], &expected)
+                .is_ok()
+        );
+        assert!(validate_fastly_delivery_report("x", &[delivery.clone()], &expected).is_err());
+        assert!(
+            validate_fastly_delivery_report(
+                "x",
+                &[delivery.clone(), delivery.clone(), terminal.clone()],
+                &expected
+            )
+            .is_err()
+        );
+        for key in [
+            "commitment",
+            "body_kind",
+            "outcome",
+            "fallback",
+            "may_send_native",
+        ] {
+            let mut changed = delivery.clone();
+            changed[key] = json!("wrong");
+            assert!(
+                validate_fastly_delivery_report("x", &[changed, terminal.clone()], &expected)
+                    .is_err()
+            );
+        }
+        let expected = json!({"disposition":"no-attempt","commitment":null,"body_kind":null,
+            "outcome":null,"fallback":null,"may_send_native":true,"no_attempt_reason":"required-store"});
+        let mut no_attempt = expected.clone();
+        no_attempt["event"] = json!("delivery_report");
+        no_attempt["token"] = json!("x");
+        assert!(validate_fastly_delivery_report("x", &[no_attempt.clone()], &expected).is_ok());
+        let mut wrong_cause = no_attempt.clone();
+        wrong_cause["no_attempt_reason"] = json!("request-head-conversion");
+        assert!(validate_fastly_delivery_report("x", &[wrong_cause], &expected).is_err());
+        assert!(validate_fastly_delivery_report("x", &[no_attempt, terminal], &expected).is_err());
+    }
+
+    #[test]
     fn post_send_requires_both_receipts() {
         assert!(validate_post_send("x", &[], &[]).is_err());
         let receipts = vec!["/post-send?token=x".into()];
@@ -644,5 +900,97 @@ mod tests {
         assert!(validate_limit_summaries(&events).is_err());
         events.push(json!({"event":"request_start","instance":"two"}));
         assert!(validate_limit_summaries(&events).is_err());
+    }
+}
+#[cfg(test)]
+mod readiness_tests {
+    use serde_json::json;
+
+    #[test]
+    fn outbound_readiness_rejects_empty_or_unbounded_measurements() {
+        assert!(super::validate_outbound_readiness(&[]).is_err());
+        let valid = json!({"case":"truncated", "mode":"direct", "revision":"a".repeat(40),
+        "read_limit":1, "deadline_us":500_000, "samples":[
+            {"operation":"head-select", "start_us":0, "end_us":10, "timeout_ms":500, "status":"ready"},
+            {"operation":"read", "start_us":10, "end_us":11, "bytes":0, "error":"UnexpectedEof"}
+        ]});
+        assert!(super::validate_outbound_readiness(std::slice::from_ref(&valid)).is_ok());
+        for field in ["samples", "revision", "deadline_us", "read_limit"] {
+            let mut broken = valid.clone();
+            broken.as_object_mut().unwrap().remove(field);
+            assert!(super::validate_outbound_readiness(&[broken]).is_err());
+        }
+        let mut broken = valid.clone();
+        broken["mode"] = json!("selected");
+        broken["samples"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("error");
+        broken["samples"][1]["bytes"] = json!(1);
+        assert!(super::validate_outbound_readiness(&[broken]).is_err());
+        let mut broken = valid.clone();
+        broken["samples"][0]["timeout_ms"] = json!(0);
+        assert!(super::validate_outbound_readiness(&[broken]).is_err());
+        broken = valid;
+        broken["samples"][1]["end_us"] = json!(505_001);
+        assert!(super::validate_outbound_readiness(&[broken]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn outbound_progress_probe_requires_origin_receipts() {
+        let probe = json!({"adapter":"axum", "case":"eager-batch", "token":"one", "protocol":"http1",
+            "slots":2, "consumer_polls_before_window_end":0,"pause_ns":100_000_000});
+        assert!(validate_outbound_progress(&probe, &[]).is_err());
+        let events = vec![
+            json!({"path":"/g3/one/start", "received_ns":0}),
+            json!({"path":"/g3/one/slot-0", "received_ns":10_000_000}),
+            json!({"path":"/g3/one/slot-1", "received_ns":20_000_000}),
+            json!({"path":"/g3/one/end", "received_ns":110_000_000}),
+        ];
+        validate_outbound_progress(&probe, &events).unwrap();
+        for mutation in [
+            "missing",
+            "duplicate",
+            "late",
+            "foreign",
+            "protocol",
+            "polled",
+            "adapter",
+            "pause",
+        ] {
+            let mut events = events.clone();
+            let mut probe = probe.clone();
+            match mutation {
+                "missing" => {
+                    events.remove(1);
+                }
+                "duplicate" => events.push(events[1].clone()),
+                "late" => events[1]["received_ns"] = json!(105_000_000),
+                "foreign" => events[1]["path"] = json!("/g3/another/slot-0"),
+                "protocol" => probe["protocol"] = json!("unsupported"),
+                "polled" => probe["consumer_polls_before_window_end"] = json!(1),
+                "adapter" => probe["adapter"] = json!("unknown"),
+                "pause" => probe["pause_ns"] = json!(0),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_outbound_progress(&probe, &events).is_err(),
+                "{mutation}"
+            );
+        }
+        let mut lazy = probe;
+        lazy["case"] = json!("lazy-single");
+        lazy["slots"] = json!(1);
+        let events = vec![
+            events[0].clone(),
+            events[3].clone(),
+            json!({"path":"/g3/one/slot-0", "received_ns":120_000_000}),
+        ];
+        validate_outbound_progress(&lazy, &events).unwrap();
     }
 }

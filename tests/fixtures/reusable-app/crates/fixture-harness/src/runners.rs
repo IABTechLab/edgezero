@@ -1,5 +1,8 @@
 use crate::{evidence::*, net::Backend, *};
 use std::collections::HashMap;
+mod assembly;
+mod overflow;
+mod progress;
 fn cargo_build() -> Command {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -153,7 +156,36 @@ fn custom_initialization_contract(
                 reply["status"] == status,
                 "custom initialization status mismatch",
             )?;
-            let value: Value = serde_json::from_str(reply["body"].as_str().ok_or("missing body")?)?;
+            let parsed: Value =
+                serde_json::from_str(reply["body"].as_str().ok_or("missing body")?)?;
+            let value = if status == 503 {
+                require(
+                    parsed
+                        == json!({"error":{"kind":"service_unavailable","message":"state unavailable","status":503}}),
+                    "initialization did not use the canonical error body",
+                )?;
+                await_evidence(|| {
+                    require(
+                        logs(&log)
+                            .iter()
+                            .filter(|event| {
+                                event["event"] == "assembly-rejected"
+                                    && event["token"] == reply["token"]
+                            })
+                            .count()
+                            == 1,
+                        "missing correlated assembly failure",
+                    )
+                })?;
+                logs(&log)
+                    .into_iter()
+                    .find(|event| {
+                        event["event"] == "assembly-rejected" && event["token"] == reply["token"]
+                    })
+                    .ok_or("missing assembly failure metadata")?
+            } else {
+                parsed
+            };
             instances.push(value["instance"].clone());
             let same_instance = instances.iter().all(|id| id == &instances[0]);
             if same_instance {
@@ -169,14 +201,29 @@ fn custom_initialization_contract(
                         "health or failure retained an app",
                     )?;
                 }
-                require(
-                    reply["headers"].as_array().unwrap().iter().any(|h| {
-                        h[0].as_str()
-                            .is_some_and(|name| name.eq_ignore_ascii_case("x-fixture-attempts"))
-                            && h[1].as_str().and_then(|v| v.parse::<u64>().ok()) == Some(attempts)
-                    }),
-                    "lazy build attempt count mismatch",
-                )?;
+                if status == 503 {
+                    require(
+                        value["attempts"] == attempts,
+                        "failed assembly attempt count mismatch",
+                    )?;
+                    require(
+                        !reply["headers"].as_array().unwrap().iter().any(|h| {
+                            h[0].as_str()
+                                .is_some_and(|name| name.eq_ignore_ascii_case("x-fixture-attempts"))
+                        }),
+                        "failed assembly used application headers",
+                    )?;
+                } else {
+                    require(
+                        reply["headers"].as_array().unwrap().iter().any(|h| {
+                            h[0].as_str()
+                                .is_some_and(|name| name.eq_ignore_ascii_case("x-fixture-attempts"))
+                                && h[1].as_str().and_then(|v| v.parse::<u64>().ok())
+                                    == Some(attempts)
+                        }),
+                        "lazy build attempt count mismatch",
+                    )?;
+                }
             }
             records.push(annotate(
                 reply,
@@ -211,6 +258,22 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if version.split_whitespace().nth(1) != Some(pin) {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
+    }
+    if args.suite == "outbound-overflow" {
+        return overflow::run("fastly", run, records);
+    }
+    if args.suite == "assembly" {
+        return assembly::fastly(&exe, run, records);
+    }
+    if args.suite == "outbound-progress" {
+        return progress::run("fastly", run, records);
+    }
+    if args.suite == "outbound-readiness" {
+        require(
+            version.split_whitespace().nth(1) == Some(pin),
+            "readiness proof requires the pinned runtime",
+        )?;
+        return outbound_readiness(&exe, run, records);
     }
     checked(
         cargo_build()
@@ -270,6 +333,7 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if args.suite == "smoke" {
         logging(&exe, run, records)?;
         faults(&exe, run, records)?;
+        progress::run("fastly", run, records)?;
     }
     if records
         .values
@@ -279,6 +343,96 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
         records.push(json!({"status":"unsupported","reason":"heap snapshot unavailable; memory limit unverified"}))?;
     }
     Ok(())
+}
+
+fn outbound_readiness(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
+    let revision = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root())
+        .output()?;
+    require(revision.status.success(), "cannot record source revision")?;
+    let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
+    checked(
+        cargo_build()
+            .args([
+                "build",
+                "--offline",
+                "--locked",
+                "--release",
+                "-p",
+                "fixture-fastly",
+                "--features",
+                "readiness",
+                "--bin",
+                "fixture-fastly-outbound-readiness",
+                "--target",
+                "wasm32-wasip1",
+            ])
+            .env("EDGEZERO_QUALIFICATION_REVISION", &revision),
+    )?;
+    let binary = stage(
+        &root().join("target/wasm32-wasip1/release/fixture-fastly-outbound-readiness.wasm"),
+        run,
+    )?;
+    records.push(json!({"event":"readiness-build", "revision":revision,
+        "source_state":"working-tree-characterization", "sdk":"0.13.1", "artifact":artifact(&binary)?}))?;
+    let config = run.join("fastly.toml");
+    fs::copy(root().join("crates/fixture-fastly/fastly.toml"), &config)?;
+    let port = net::port()?;
+    let log = run.join("readiness.log");
+    let _process = Process::start(
+        &mut fastly_command(exe, &config, run, "outbound-readiness", port),
+        &log,
+        port,
+    )?;
+    let backend = Backend::start()?;
+    let mut probes = Vec::new();
+    for repetition in 0..3 {
+        for mode in ["direct", "selected"] {
+            let reply = net::request(
+                port,
+                &format!("/{mode}"),
+                &token(),
+                Some(&backend.url("/readiness/truncated")),
+                None,
+            )?;
+            let mut probe = guest(&reply)?;
+            probe["repetition"] = json!(repetition);
+            records.push(probe.clone())?;
+            probes.push(probe);
+        }
+    }
+    validate_outbound_readiness(&probes)?;
+    require(
+        probes.len() == 6 && backend.receipts.lock().unwrap().len() == 6,
+        "readiness controls must execute six real origin requests",
+    )?;
+    let mut lost = false;
+    for pair in probes.as_chunks::<2>().0 {
+        let error = |probe: &Value| {
+            probe["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|s| s["error"].as_str().map(str::to_owned))
+        };
+        let direct = error(&pair[0]);
+        let selected = error(&pair[1]);
+        require(
+            direct.as_deref() == Some("UnexpectedEof"),
+            "truncated direct-read control did not observe UnexpectedEof",
+        )?;
+        lost |= direct != selected;
+        records.push(
+            json!({"event":"readiness-error-preservation", "direct":direct, "selected":selected,
+            "status":if direct == selected {"pass"} else {"fail"}, "qualification":false}),
+        )?;
+    }
+    require(
+        !lost,
+        "pinned Viceroy body readiness consumed the source error; Fastly G2 fails",
+    )?;
+    records.push(json!({"status":"unverified", "reason":"paired error control passed; remaining G2 timed-read scenarios are still pending", "qualification":false}))
 }
 fn fastly_variant(
     args: &Args,
@@ -316,6 +470,9 @@ fn fastly_variant(
                 json!({"variant":variant,"repetition":repetition,"assertion":"idle_fresh_initialization"}),
             ))?;
         }
+        if args.suite == "smoke" && variant == "c" {
+            declared_kv_checks("fastly", port, &log, records)?;
+        }
         let bindings = req(port, "/bindings")?;
         require(
             guest(&bindings)? == json!({"config":true,"kv":true,"secrets":true,"unknown":false}),
@@ -349,6 +506,14 @@ fn fastly_variant(
         }
         records.push(json!({"status":"pass","variant":variant,"repetition":repetition,"assertions":["initialization","isolation","cookies","rendered_error"]}))
     })();
+    let outcome = outcome.and_then(|()| {
+        if args.suite == "smoke" && variant == "c" {
+            let count = declared_kv_warning_count(&fs::read_to_string(&log)?);
+            records.push(json!({"event":"declared-kv-after-shutdown","adapter":"fastly","warnings":count,"qualification":false}))?;
+            require(count == 1, "declared KV warning repeated during teardown")?;
+        }
+        Ok(())
+    });
     settle(
         records,
         &log,
@@ -356,6 +521,183 @@ fn fastly_variant(
         json!({"adapter":"fastly"}),
         outcome,
     )
+}
+
+fn declared_kv_warning_count(text: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            line.starts_with("fixture-logs :: ")
+                && line.contains(
+                    "declared Fastly KV store 'missing_fixture_kv' failed to open: missing binding",
+                )
+        })
+        .count()
+}
+
+fn validate_declared_kv_lifecycle(
+    events: &[Value],
+    token: &str,
+    expected_instance: Option<&str>,
+    expected_outcome: &str,
+) -> Result<String> {
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "request_start" && event["token"] == token)
+        .collect();
+    let ends: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "egress_terminal" && event["token"] == token)
+        .collect();
+    require(
+        starts.len() == 1 && ends.len() == 1,
+        "declared KV request lost exactly-once lifecycle evidence",
+    )?;
+    let current = starts[0]["instance"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or("missing declared KV instance")?;
+    require(
+        expected_instance.is_none_or(|expected| expected == current),
+        "declared KV sandbox turnover: deduplication unverified",
+    )?;
+    require(
+        ends[0]["instance"] == starts[0]["instance"]
+            && ends[0]["outcome"] == expected_outcome
+            && ends[0]["body_kind"] == "Application"
+            && ends[0].get("fallback") == Some(&Value::Null),
+        "declared KV terminal disposition mismatch",
+    )?;
+    Ok(current.to_owned())
+}
+
+fn provider_kv_warning_count(text: &str, adapter: &str, instance: &str) -> usize {
+    let (platform, reason) = if adapter == "spin" {
+        ("Spin", "invalid binding configuration")
+    } else {
+        ("Cloudflare", "missing binding")
+    };
+    let message =
+        format!("declared {platform} KV store 'missing_fixture_kv' failed to open: {reason}");
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["event"] == "fixture_log"
+                && event["instance"] == instance
+                && event["level"] == "WARN"
+                && event["target"] == "edgezero::boot"
+                && event["message"] == message
+        })
+        .count()
+}
+
+fn declared_kv_checks(
+    adapter: &str,
+    port: u16,
+    log: &Path,
+    records: &mut Records,
+) -> Result<String> {
+    let mut instance = None;
+    for (path, status, warnings) in [
+        ("/declared-kv/free", 200, 0),
+        ("/declared-kv/missing/read", 500, 1),
+        ("/declared-kv/missing/read", 500, 1),
+        ("/declared-kv/free", 200, 1),
+    ] {
+        let token = token();
+        let response = net::request(port, path, &token, None, None)?;
+        require(response["status"] == status, "declared KV status mismatch")?;
+        if status == 200 {
+            let value = guest(&response)?;
+            require(
+                value["declared_kv"] == true
+                    && value["default_kv"] == true
+                    && value["unknown_kv"] == false
+                    && value["builds"] == 1,
+                "declared KV registry or retained application mismatch",
+            )?;
+        } else {
+            let body = response["body"]
+                .as_str()
+                .ok_or("missing declared KV error body")?;
+            let public: Value = serde_json::from_str(body)?;
+            require(
+                public
+                    == json!({"error":{"kind":"internal","message":"internal server error","status":500}}),
+                "declared KV error gained provider diagnostics",
+            )?;
+        }
+        let mut current = None;
+        await_evidence(|| {
+            current = Some(validate_declared_kv_lifecycle(
+                &logs(log),
+                &token,
+                instance.as_deref(),
+                if adapter == "fastly" {
+                    "Completed"
+                } else {
+                    "HostHandoff"
+                },
+            )?);
+            Ok(())
+        })?;
+        instance = current;
+        let text = fs::read_to_string(log)?;
+        let count = if adapter == "fastly" {
+            declared_kv_warning_count(&text)
+        } else {
+            provider_kv_warning_count(
+                &fs::read_to_string(log)?,
+                adapter,
+                instance.as_deref().ok_or("missing declared KV instance")?,
+            )
+        };
+        require(count == warnings, "declared KV warning count mismatch")?;
+        records.push(json!({"event":"declared-kv-case","adapter":adapter,"path":path,"token":token,"instance":instance,
+            "client":response,"warnings":count,"status":"pass","qualification":false}))?;
+    }
+    for (operation, expected) in [
+        ("write", json!("written")),
+        ("read", json!("f8-value")),
+        ("list", json!(["f8-key"])),
+        ("delete", json!("deleted")),
+    ] {
+        let response = req(port, &format!("/declared-kv/linked/{operation}"))?;
+        require(
+            guest(&response)?["kv_outcome"] == expected,
+            "linked KV operation failed after declared failure",
+        )?;
+        let token = response["token"]
+            .as_str()
+            .ok_or("missing linked KV token")?;
+        let mut linked_instance = None;
+        await_evidence(|| {
+            linked_instance = Some(validate_declared_kv_lifecycle(
+                &logs(log),
+                token,
+                None,
+                if adapter == "fastly" {
+                    "Completed"
+                } else {
+                    "HostHandoff"
+                },
+            )?);
+            Ok(())
+        })?;
+        records.push(json!({"event":"declared-kv-linked","adapter":adapter,"operation":operation,"instance":linked_instance,"client":response,"status":"pass","qualification":false}))?;
+    }
+    require(
+        if adapter == "fastly" {
+            declared_kv_warning_count(&fs::read_to_string(log)?)
+        } else {
+            provider_kv_warning_count(
+                &fs::read_to_string(log)?,
+                adapter,
+                instance.as_deref().ok_or("missing declared KV instance")?,
+            )
+        } == 1,
+        "declared KV warning repeated after successful linked operations",
+    )?;
+    instance.ok_or_else(|| "missing declared KV instance".into())
 }
 fn fastly_probes(
     args: &Args,
@@ -480,13 +822,15 @@ fn custom_stream_checks(
         large,
         json!({"variant":variant,"repetition":repetition,"assertion":"large_progressive_stream"}),
     ))?;
+    // Trigger truncation only after the downstream client has observed the partial body.
+    *backend.release.0.lock().unwrap() = false;
     let failure_token = crate::token();
     let failure = net::request(
         port,
         "/stream-error",
         &failure_token,
-        Some(&backend.url(&format!("/abort?token={failure_token}"))),
-        None,
+        Some(&backend.url(&format!("/abort?gated=1&token={failure_token}"))),
+        Some(&backend.release),
     );
     let failure = match failure {
         Ok(reply) => {
@@ -509,7 +853,57 @@ fn custom_stream_checks(
             "missing correlated post-commit error",
         )
     })?;
-    records.push(json!({"event":"expected_stream_error","variant":variant,"repetition":repetition,"token":failure_token,"status_code":partial.status,"partial_body":String::from_utf8_lossy(&partial.body),"source":"controlled_backend_abort"}))
+    await_evidence(|| {
+        validate_post_send(
+            &failure_token,
+            &backend.receipts.lock().unwrap(),
+            &logs(log),
+        )
+    })?;
+    validate_fastly_delivery_report(
+        &failure_token,
+        &logs(log),
+        &json!({"disposition":"routed",
+        "commitment":"Committed","body_kind":"Application","outcome":"SourceError",
+        "fallback":null,"may_send_native":false}),
+    )?;
+    records.push(json!({"event":"expected_stream_error","variant":variant,"repetition":repetition,"token":failure_token,"status_code":partial.status,"partial_body":String::from_utf8_lossy(&partial.body),"source":"controlled_backend_abort"}))?;
+    let fallback_token = crate::token();
+    let fallback = net::request(
+        port,
+        "/probe/framing-fallback",
+        &fallback_token,
+        Some(&backend.url(&format!("/chunks?token={fallback_token}"))),
+        None,
+    )?;
+    require(
+        fallback["status"] == 500 && fallback["body"] == "internal server error",
+        "framing fallback wire mismatch",
+    )?;
+    await_evidence(|| {
+        require(
+            logs(log).iter().any(|event| {
+                event["event"] == "guest_completed" && event["token"] == fallback_token
+            }),
+            "missing fallback callback completion",
+        )
+    })?;
+    validate_fastly_delivery_report(
+        &fallback_token,
+        &logs(log),
+        &json!({"disposition":"routed",
+        "commitment":"Committed","body_kind":"Fallback","outcome":"ConversionError",
+        "fallback":"Completed","may_send_native":false}),
+    )?;
+    require(
+        !backend
+            .receipts
+            .lock()
+            .unwrap()
+            .contains(&format!("/post-send?token={fallback_token}")),
+        "fallback incorrectly scheduled post-send work",
+    )?;
+    records.push(annotate(fallback, json!({"variant":variant,"repetition":repetition,"token":fallback_token,"assertion":"reported_fallback_skips_post_send"})))
 }
 fn smoke_origin_checks(
     port: u16,
@@ -628,6 +1022,15 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "assembly" {
+        return assembly::provider(name, run, records);
+    }
+    if args.suite == "outbound-overflow" {
+        return overflow::run(name, run, records);
+    }
+    if args.suite == "outbound-progress" {
+        return progress::run(name, run, records);
+    }
     let package = root().join("crates").join(format!("fixture-{name}"));
     let Some((exe, staged)) = provider_build(name, &package, run, records)? else {
         return Ok(());
@@ -642,8 +1045,24 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
         let mut command = provider_command(name, mode, &exe, &staged, &package, run, port)?;
         let log = run.join(format!("{name}-{mode}.log"));
         let mut failure = json!({"phase":"startup"});
-        let outcome = Process::start(&mut command, &log, port)
-            .and_then(|_process| provider_checks(name, mode, port, args, records, &mut failure));
+        let mut declared_instance = None;
+        let outcome = Process::start(&mut command, &log, port).and_then(|_process| {
+            // Establish single-instance dedup before overlap creates additional instances.
+            if args.suite == "smoke" && mode == "retained" && name != "axum" {
+                failure = json!({"phase":"declared_kv"});
+                declared_instance = Some(declared_kv_checks(name, port, &log, records)?);
+            }
+            provider_checks(name, mode, port, args, records, &mut failure)?;
+            Ok(())
+        });
+        let outcome = outcome.and_then(|()| {
+            if let Some(instance) = declared_instance {
+                let count = provider_kv_warning_count(&fs::read_to_string(&log)?, name, &instance);
+                require(count == 1, "declared KV warning repeated during shutdown")?;
+                records.push(json!({"event":"declared-kv-after-shutdown","adapter":name,"instance":instance,"warnings":count,"status":"pass","qualification":false}))?;
+            }
+            Ok(())
+        });
         settle(
             records,
             &log,
@@ -651,6 +1070,9 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
             failure,
             outcome,
         )?;
+    }
+    if args.suite == "smoke" {
+        progress::run(name, run, records)?;
     }
     Ok(())
 }
@@ -714,6 +1136,9 @@ fn provider_build(
             records.push(json!({"status":"unsupported","reason":"worker-build unavailable"}))?;
             return Ok(None);
         };
+        if !progress::check_bindgen(records)? {
+            return Ok(None);
+        }
         checked(
             Command::new(builder)
                 .args(["--release", ".", "--", "--locked"])
@@ -756,7 +1181,7 @@ fn provider_command(
         )?;
         command
             .current_dir(state)
-            .env("fixture_marker", "fixture-only-value");
+            .env("EDGEZERO__SECRETS__FIXTURE_MARKER", "fixture-only-value");
     } else if name == "cloudflare" {
         let state = run.join(mode).join("worker-state");
         checked(
@@ -879,10 +1304,10 @@ fn provider_checks(
         )?;
         let failed_guest: Value = serde_json::from_str(failed["body"].as_str().unwrap())?;
         require(
-            failed_guest["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("missing_fixture_kv")),
-            "binding failure did not identify the injected missing KV binding",
+            failed_guest["error"].as_str().is_some_and(|error| {
+                error.starts_with("kv store open failed:") && !error.contains("missing_fixture_kv")
+            }),
+            "binding failure lost its sanitized open category",
         )?;
         let recovered = guest(&req(port, "/probe/after-binding-failure")?)?;
         require(
@@ -1005,10 +1430,39 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
             )?;
             records.push(json!({"status":"pass","assertion":"malformed_rejected_before_dispatch","token":malformed_token,"status_line":rejected}))?;
             let failed_token = token();
-            let reply = net::request(port, path, &failed_token, None, None)?;
+            let reply = if *path == "/collect-error" {
+                let failure = net::request(port, path, &failed_token, None, None)
+                    .err()
+                    .ok_or("owned egress must abandon the failed response stream")?;
+                if let Some(partial) = failure.downcast_ref::<net::InterruptedResponse>() {
+                    require(
+                        partial.status == 200 && partial.body.is_empty(),
+                        "egress source failure sent a replacement response",
+                    )?;
+                    json!({"status":partial.status,"body":"","interrupted":true})
+                } else {
+                    // An immediate source error can reset delivery before the head is observed.
+                    require(
+                        failure.downcast_ref::<net::ResponseHeadAborted>().is_some(),
+                        format!("unexpected response-head failure: {failure}"),
+                    )?;
+                    json!({"no_response_head":true,"interrupted":true,"error":failure.to_string()})
+                }
+            } else {
+                net::request(port, path, &failed_token, None, None)?
+            };
             let recoverable = *path == "/recoverable-store-error";
+            let rendered_ingress = *path == "/inbound-error";
             require(
-                reply["status"] == if recoverable { 503 } else { 500 },
+                (*path == "/collect-error" && reply["no_response_head"] == true)
+                    || reply["status"]
+                        == if *path == "/collect-error" {
+                            200
+                        } else if recoverable {
+                            503
+                        } else {
+                            500
+                        },
                 format!("fault not observed: {path}: {reply}"),
             )?;
             let following = req(port, "/probe/recovered")?;
@@ -1023,6 +1477,10 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                     .ok_or("missing fault attempt")?;
                 let event = if *path == "/constructor-panic" {
                     "constructor_panic"
+                } else if rendered_ingress {
+                    "ingress_error_response"
+                } else if *path == "/collect-error" {
+                    "post_commit_error"
                 } else {
                     "adapter_error"
                 };
@@ -1033,7 +1491,39 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                     "missing actual failure boundary",
                 )
             })?;
-            if recoverable {
+            if *path == "/collect-error" {
+                validate_fastly_delivery_report(
+                    &failed_token,
+                    &logs(&log),
+                    &json!({"disposition":"routed",
+                    "commitment":"Committed","body_kind":"Application","outcome":"SourceError",
+                    "fallback":null,"may_send_native":false}),
+                )?;
+                let terminal = logs(&log)
+                    .into_iter()
+                    .filter(|event| {
+                        event["event"] == "egress_terminal" && event["token"] == failed_token
+                    })
+                    .collect::<Vec<_>>();
+                require(
+                    terminal.len() == 1
+                        && terminal[0]["outcome"] == "SourceError"
+                        && terminal[0]["body_kind"] == "Application"
+                        && terminal[0]["bytes_written"] == 0
+                        && terminal[0]["fallback"].is_null(),
+                    "immediate source failure must terminate once without fallback delivery",
+                )?;
+            }
+            if matches!(*path, "/recoverable-store-error" | "/terminal-store-error") {
+                validate_fastly_delivery_report(
+                    &failed_token,
+                    &logs(&log),
+                    &json!({"disposition":"no-attempt",
+                    "commitment":null,"body_kind":null,"outcome":null,"fallback":null,"may_send_native":true,
+                    "no_attempt_reason":"required-store"}),
+                )?;
+            }
+            if recoverable || rendered_ingress {
                 let status = if value["instance"] == failed_guest {
                     "pass"
                 } else {
@@ -1041,14 +1531,18 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                 };
                 require(
                     value["builds"] == 1,
-                    "retained app rebuilt after handled store failure",
+                    "retained app rebuilt after handled failure",
                 )?;
                 require(
                     guest(&req(port, "/bindings")?)?
                         == json!({"config":true,"kv":true,"secrets":true,"unknown":false}),
                     "bindings failed to recover",
                 )?;
-                records.push(json!({"status":status,"assertion":"injected_selector_failure_recovery","instance":failed_guest,"source":"custom_callback_handles_real_registry_error"}))?;
+                if rendered_ingress {
+                    records.push(json!({"status":status,"assertion":"admitted_body_failure_rendered","instance":failed_guest,"source":"canonical_admitted_request_dispatch"}))?;
+                } else {
+                    records.push(json!({"status":status,"assertion":"injected_selector_failure_recovery","instance":failed_guest,"source":"custom_callback_handles_real_registry_error"}))?;
+                }
             } else {
                 require(
                     value["instance"] != failed_guest,
@@ -1088,6 +1582,99 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_kv_lifecycle_rejects_missing_duplicate_failed_and_cross_instance() {
+        let start = json!({"event":"request_start","token":"case","instance":"one"});
+        let end = json!({"event":"egress_terminal","token":"case","instance":"one","outcome":"Completed","body_kind":"Application","fallback":null});
+        let valid = vec![start.clone(), end.clone()];
+        assert_eq!(
+            validate_declared_kv_lifecycle(&valid, "case", Some("one"), "Completed").unwrap(),
+            "one"
+        );
+        assert!(
+            validate_declared_kv_lifecycle(&valid, "case", Some("other"), "Completed").is_err()
+        );
+        for invalid in [
+            vec![],
+            vec![start.clone()],
+            vec![end.clone()],
+            vec![start.clone(), start.clone(), end.clone()],
+            vec![start.clone(), end.clone(), end.clone()],
+        ] {
+            assert!(validate_declared_kv_lifecycle(&invalid, "case", None, "Completed").is_err());
+        }
+        for (field, value) in [
+            ("instance", json!("other")),
+            ("token", json!("other")),
+            ("outcome", json!("TransportError")),
+            ("outcome", json!("HostHandoff")),
+            ("body_kind", json!("Fallback")),
+            ("fallback", json!("Completed")),
+        ] {
+            let mut changed = end.clone();
+            changed[field] = value;
+            assert!(
+                validate_declared_kv_lifecycle(
+                    &[start.clone(), changed],
+                    "case",
+                    None,
+                    "Completed"
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn declared_kv_warning_counter_ignores_echoes_but_not_duplicates() {
+        let warning =
+            "declared Fastly KV store 'missing_fixture_kv' failed to open: missing binding";
+        assert_eq!(
+            declared_kv_warning_count(&format!("fixture-logs :: WARN {warning}\nWARN {warning}\n")),
+            1
+        );
+        assert_eq!(
+            declared_kv_warning_count(&format!(
+                "fixture-logs :: WARN {warning}\nfixture-logs :: WARN {warning}\n"
+            )),
+            2
+        );
+        assert_eq!(
+            declared_kv_warning_count("fixture-logs :: ordinary warning\n"),
+            0
+        );
+    }
+    #[test]
+    fn provider_warning_receipts_require_instance_target_and_exact_category() {
+        let valid = json!({"event":"fixture_log","instance":"one","level":"WARN","target":"edgezero::boot",
+            "message":"declared Spin KV store 'missing_fixture_kv' failed to open: invalid binding configuration"});
+        assert_eq!(
+            provider_kv_warning_count(&valid.to_string(), "spin", "one"),
+            1
+        );
+        assert_eq!(
+            provider_kv_warning_count(&valid.to_string(), "spin", "other"),
+            0
+        );
+        assert_eq!(
+            provider_kv_warning_count(&format!("{valid}\n{valid}\n"), "spin", "one"),
+            2
+        );
+        for (field, value) in [
+            ("target", "other"),
+            ("event", "other"),
+            ("level", "INFO"),
+            ("message", "provider-token"),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = json!(value);
+            assert_eq!(
+                provider_kv_warning_count(&invalid.to_string(), "spin", "one"),
+                0
+            );
+        }
+    }
     #[test]
     fn cargo_artifacts_select_the_fresh_executable_in_a_configured_target() {
         let output = concat!(

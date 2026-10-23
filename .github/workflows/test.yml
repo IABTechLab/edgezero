@@ -48,14 +48,18 @@ jobs:
       - name: Set up Rust tool chain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          components: "clippy, rustfmt"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
 
       - name: Install wasm targets for generated-project checks
-        if: matrix.suite == 'cli'
+        if: matrix.suite == 'cli' || matrix.suite == 'workspace' || matrix.suite == 'app-demo'
         run: rustup target add wasm32-wasip1 wasm32-wasip2 wasm32-unknown-unknown
 
       - name: Fetch dependencies (locked)
-        run: cargo fetch --locked
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path examples/app-demo/Cargo.toml
+          cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
 
       - name: No placeholder pins
         if: matrix.suite == 'workspace'
@@ -64,6 +68,28 @@ jobs:
       - name: No legacy typed reads
         if: matrix.suite == 'workspace'
         run: ./scripts/check_no_legacy_typed_reads.sh
+
+      # These roots are the active API surface. Historical design and plan
+      # documents under docs/superpowers intentionally remain immutable.
+      - name: No legacy outbound API
+        run: bash scripts/check_outbound_legacy_api.sh
+
+      - name: Outbound documentation contract
+        run: node scripts/check_outbound_docs_contract.mjs
+
+      - name: Build strict public API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --offline --locked --workspace --all-features --no-deps
+
+      - name: Brotli dependency contract
+        run: node scripts/check_brotli_dependency_contract.mjs
+
+      - name: Flate dependency contract
+        run: node scripts/check_flate_dependency_contract.mjs
+
+      - name: Serde JSON map contract
+        run: node scripts/check_serde_json_map_contract.mjs
 
       # `validator` is pinned in four places cargo cannot reconcile (this
       # workspace, the excluded demo workspace, the scaffold seeds, and the
@@ -82,11 +108,9 @@ jobs:
 
       - name: Lifecycle fixture host tests
         if: matrix.suite == 'workspace'
-        run: >-
-          cargo test --locked
-          --manifest-path tests/fixtures/reusable-app/Cargo.toml
-          -p fixture-harness
-          -p fixture-core
+        run: |
+          cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core --features fixture-core/qualification
+          node --test scripts/qualify_response_egress.test.mjs
 
       - name: Check Axum lifecycle fixture
         if: matrix.suite == 'axum'
@@ -95,10 +119,40 @@ jobs:
           --manifest-path tests/fixtures/reusable-app/Cargo.toml
           -p fixture-axum
 
+      - name: Check opt-in lifecycle qualification fixtures
+        if: matrix.suite == 'workspace'
+        # These are compile-only identities, never deployed qualification evidence.
+        env:
+          EDGEZERO_QUALIFICATION_REVISION: "0000000000000000000000000000000000000000"
+          EDGEZERO_QUALIFICATION_ARTIFACT: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: |
+          cargo check --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-axum --features qualification
+          cargo check --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-fastly --features qualification --bin fixture-fastly-qualification --target wasm32-wasip1
+          cargo check --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-cloudflare --features qualification --target wasm32-unknown-unknown
+          cargo check --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-spin --features qualification --target wasm32-wasip2
+
       - name: Run workspace tests
         if: matrix.suite == 'workspace'
         run: cargo test --workspace --all-targets
 
+      - name: Bundled demo logging and fallback TCP contracts
+        if: matrix.suite == 'cli'
+        run: |
+          node --test scripts/run_test_nonzero.test.mjs
+          scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
+
+      - name: Run native outbound adapter contracts
+        if: matrix.suite == 'workspace'
+        run: |
+          scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --test contract
+          scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils --test contract
+          scripts/run_test_nonzero.sh batch_preflight_rejects_streamed_slots_without_poisoning_siblings cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --test contract
+          scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils --test contract
+
+      # The adapter CLI dispatch (build/deploy/stage/healthcheck/rollback) and
+      # its tests live behind the `cli` feature, which the unfeatured
+      # `cargo test --workspace` step above does not enable — so none of those
+      # tests compile or run there. Exercise them explicitly.
       - name: Run EdgeZero CLI tests
         if: matrix.suite == 'cli'
         run: cargo test -p edgezero-cli --all-targets
@@ -115,13 +169,28 @@ jobs:
           --no-default-features
           --features cli
 
+      - name: Verify exact outbound capability matrices
+        if: matrix.suite == 'workspace'
+        run: |
+          scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+          scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+          scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+          scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+
       - name: Check feature compilation
         if: matrix.suite == 'workspace'
         run: cargo check --workspace --all-targets --features "fastly cloudflare spin"
 
-      - name: Verify a generated project compiles
+      - name: Check native adapter feature matrices
+        if: matrix.suite == 'workspace'
+        run: |
+          for adapter in axum cloudflare fastly spin; do
+            bash scripts/check_adapter_feature_matrix.sh "${adapter}" native
+          done
+
+      - name: Verify generated project builds and fallback TCP policy
         if: matrix.suite == 'cli'
-        run: cargo test -p edgezero-cli --test generated_project_builds -- --ignored
+        run: scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds
 
       - name: Run Axum host tests
         if: matrix.suite == 'axum'
@@ -132,6 +201,13 @@ jobs:
         working-directory: examples/app-demo
         run: cargo test --locked --workspace --all-targets
 
+      - name: Check app-demo wasm targets
+        if: matrix.suite == 'app-demo'
+        working-directory: examples/app-demo
+        run: |
+          cargo check --locked -p app-demo-adapter-cloudflare --target wasm32-unknown-unknown --no-default-features --features cloudflare
+          cargo check --locked -p app-demo-adapter-fastly --target wasm32-wasip1 --no-default-features --features fastly
+          cargo check --locked -p app-demo-adapter-spin --target wasm32-wasip2 --no-default-features --features spin
   cargo-test:
     name: cargo test
     needs: host-tests
@@ -154,14 +230,17 @@ jobs:
             target: wasm32-unknown-unknown
             runner_env: CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER
             runner_value: wasm-bindgen-test-runner
+            sentinel: dispatch_runs_router_and_returns_response
           - adapter: fastly
             target: wasm32-wasip1
             runner_env: CARGO_TARGET_WASM32_WASIP1_RUNNER
             runner_value: viceroy run
+            sentinel: dispatch_runs_router_and_returns_response
           - adapter: spin
             target: wasm32-wasip2
             runner_env: CARGO_TARGET_WASM32_WASIP2_RUNNER
-            runner_value: wasmtime run
+            runner_value: wasmtime run -W component-model-async=y -S p3=y -S http=y
+            sentinel: router_dispatches_get_and_returns_response
     steps:
       - uses: actions/checkout@v6
         with:
@@ -264,8 +343,8 @@ jobs:
           echo "$install_dir" >> "$GITHUB_PATH"
           export PATH="$install_dir:$PATH"
           version="$WASMTIME_VERSION"
-          # Compare exact versions so a pin like `44.0.1` does not silently
-          # accept `wasmtime 44.0.10` from a stale cache or runner-provided
+          # Compare exact versions so a pin like `48.0.2` does not silently
+          # accept `wasmtime 48.0.20` from a stale cache or runner-provided
           # binary.
           actual="$(wasmtime --version 2>/dev/null | awk '{print $2}' || true)"
           if [ "$actual" != "$version" ]; then
@@ -286,7 +365,25 @@ jobs:
       - name: Run ${{ matrix.adapter }} wasm tests
         env:
           ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
-        run: cargo test -p edgezero-adapter-${{ matrix.adapter }} --features ${{ matrix.adapter }} --target ${{ matrix.target }} --test contract
+        run: scripts/run_test_nonzero.sh ${{ matrix.sentinel }} cargo test --offline --locked -p edgezero-adapter-${{ matrix.adapter }} --no-default-features --features ${{ matrix.adapter }},test-utils --target ${{ matrix.target }} --test contract
+
+      - name: Run Fastly closed lifecycle wasm sentinel
+        if: matrix.adapter == 'fastly'
+        env:
+          ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
+        run: scripts/run_test_nonzero.sh closed_lifecycle_orders_hooks_and_returns_state_after_delivery cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --test contract
+
+      - name: Run Spin WASI HTTP SDK resource tests
+        if: matrix.adapter == 'spin'
+        env:
+          ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
+        run: scripts/run_test_nonzero.sh spin_error_code_table_is_exhaustive cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --test sdk_resources
+
+      - name: Run Cloudflare outbound runtime unit tests
+        if: matrix.adapter == 'cloudflare'
+        env:
+          ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
+        run: scripts/run_test_nonzero.sh streamed_upload_eof_yields_before_final_precedence cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib
 
       # The colocated runtime unit tests (config-store resolver, chunk
       # remediation) need the `fastly` feature and only RUN under Viceroy — the
@@ -296,8 +393,11 @@ jobs:
         if: matrix.adapter == 'fastly'
         env:
           ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
-        run: cargo test -p edgezero-adapter-fastly --features fastly --target wasm32-wasip1 --lib
+        working-directory: crates/edgezero-adapter-fastly
+        run: ../../scripts/run_test_nonzero.sh backend_creation_error_table_is_exhaustive cargo test --offline --locked --no-default-features --features fastly,test-utils --lib
 
+      - name: Check ${{ matrix.adapter }} wasm feature matrix
+        run: bash scripts/check_adapter_feature_matrix.sh ${{ matrix.adapter }} ${{ matrix.target }}
       - name: Fastly reusable HTTP smoke
         if: matrix.adapter == 'fastly'
         run: ./scripts/smoke_test_reusable_app.sh --adapter fastly --suite smoke
@@ -311,9 +411,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
-
-      - name: Check ${{ matrix.adapter }} wasm target
-        run: cargo check -p edgezero-adapter-${{ matrix.adapter }} --features ${{ matrix.adapter }} --target ${{ matrix.target }}
 
       - name: Check ${{ matrix.adapter }} lifecycle fixture
         run: >-

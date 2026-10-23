@@ -42,7 +42,7 @@ impl Args {
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
+                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-progress|outbound-overflow] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
                 );
                 std::process::exit(0);
             }
@@ -64,8 +64,20 @@ impl Args {
             "unknown adapter",
         )?;
         require(
-            ["smoke", "benchmark"].contains(&a.suite.as_str()),
+            [
+                "smoke",
+                "benchmark",
+                "assembly",
+                "outbound-readiness",
+                "outbound-progress",
+                "outbound-overflow",
+            ]
+            .contains(&a.suite.as_str()),
             "unknown suite",
+        )?;
+        require(
+            a.suite != "outbound-readiness" || a.adapter == "fastly",
+            "outbound-readiness requires --adapter fastly",
         )?;
         require(
             a.requests > 0 && a.repetitions > 0,

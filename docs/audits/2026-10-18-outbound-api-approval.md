@@ -1,0 +1,309 @@
+# Outbound API Review and Approval Record
+
+## Decision Status
+
+Prepared on 2026-10-19 for [task G4](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-01-gates.md#task-g4-maintainer-api-and-feasibility-approval).
+**API-only approval: AG, 2026-10-19.** The requester replied `continue` to the conversation
+question naming the exact Interfaces digest below, then supplied `AG` as the approving maintainer.
+That scoped response authorizes API implementation, not Fastly policy, capability promotion,
+requirement changes, dependency repinning or production adoption. The other decisions remain
+pending. Preparing this record or passing tests does not supply their approval.
+
+The inspected checkout is PR 275 at `7cccaf10734914161803317aec6c55c22c2bccc9` plus the uncommitted
+G1-G3 work and Spin response-egress repair. Its local characterization does not qualify that commit.
+The [implementation index](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md)
+continues to require a buildable hard migration preserving the implemented outbound baseline.
+There is no compatibility branch, alternate transport or lazy default proposed here.
+
+| Decision ID          | Decision                                | Approver                                   | Decision Date | Approved Subject Digest                                            |
+| -------------------- | --------------------------------------- | ------------------------------------------ | ------------- | ------------------------------------------------------------------ |
+| G4-API               | Approved, API only                      | AG; scoped exact-digest conversation reply | 2026-10-19    | `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a` |
+| G4-FASTLY-POLICY     | Pending; local primitive failed         | Unset                                      | Unset         | Unset                                                              |
+| G4-OPTIMIZER-HORIZON | Pending; finite rule unproved           | Unset                                      | Unset         | Unset                                                              |
+| G4-APPLICABILITY     | Pending; G1 scope lock open             | Unset                                      | Unset         | Unset                                                              |
+| G4-MEASUREMENTS      | Pending; replay definitions unconfirmed | Unset                                      | Unset         | Unset                                                              |
+
+The scoped API response and its exact digest are attributed to the maintainer name supplied in
+the conversation, not inferred from Git. This does not close G4 as a whole. A completed
+decision must retain its maintainer, date, exact subject digest and scope. Proposal hashes do not
+approve the other subjects; missing, rejected or stale approval blocks their dependent work.
+
+## Exact API Subject
+
+Review the complete [Interfaces: Proposed Hard-Cut Contract](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md#interfaces-proposed-hard-cut-contract),
+not just its opening trait declaration or the summaries in this packet. The subject includes every
+signature, supporting type, ownership/default rule, migration table and acceptance sentinel in
+that section, ending immediately before `## Task P1:`. It is referenced once rather than copied
+into a second potentially conflicting contract.
+These source links use the immutable base revision because internal plans are excluded from the
+published documentation site; verify the local submitted bytes with the command below.
+
+| Property                       | Submitted Value                                                            |
+| ------------------------------ | -------------------------------------------------------------------------- |
+| Source                         | `docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md` |
+| Section                        | Lines 18-696 inclusive, 679 LF-terminated lines, 42,166 UTF-8 bytes        |
+| Section SHA-256                | `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a`         |
+| Complete source-file SHA-256   | `c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80`         |
+| Normative requirements SHA-256 | `5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec`         |
+
+Run from the repository/worktree root before approval and again before P1. The extraction includes
+the trailing blank lines before the next task; it does not normalize whitespace or line endings.
+Any changed Interfaces byte needs a new digest and review. Changes elsewhere in the plan or in
+the requirements also require reviewing their effect, not silently refreshing these identities.
+
+```sh
+node --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+
+const path = 'docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md';
+const source = readFileSync(path, 'utf8');
+const start = source.indexOf('## Interfaces: Proposed Hard-Cut Contract\n');
+assert.notEqual(start, -1);
+const end = source.indexOf('## Task P1:', start);
+assert.ok(end > start);
+const section = source.slice(start, end);
+const digest = value => createHash('sha256').update(value).digest('hex');
+assert.equal(Buffer.byteLength(section), 42166);
+assert.equal(section.split('\n').length - 1, 679);
+assert.equal(digest(section), 'c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a');
+assert.equal(digest(source), 'c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80');
+const requirements = readFileSync('docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md');
+assert.equal(digest(requirements), '5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec');
+console.log('Submitted API and requirement identities match; approval is still a separate decision.');
+JS
+```
+
+### Included Contract Decisions
+
+- One required `dispatch_head` network primitive, synchronous support validation and paired
+  `time()`, plus mandatory eager `begin`/batch scheduling. Supplied implementations use the same
+  protocol. `OutboundHttpClient` stays object-safe and `Send + Sync`; owned futures, heads and
+  cleanup owners may be local and capture `Rc`. No unsafe `Send` wrapper or core runtime is added.
+- Facade invocation captures the original entry time. Unsupported options reject before budget
+  rejection, timer registration, inbound settlement or network activity. `OutboundTime` pairs the
+  application clock with the adapter's real wakeup factory; clock-only constructors hard-migrate.
+  Early/frozen-clock wakeups recheck time and yield/rearm without extending the captured deadline.
+- Request builders and readbacks cover connect timeout, decode/original response delivery,
+  marker override and the complete typed Image Optimizer subset. Marker default remains **on**;
+  client off and per-request Inherit/On/Off resolve into one effective policy. Decode stays default;
+  original identity responses still enforce their decoded limit. Existing independent caps,
+  pre-normalization header accounting, Content-Type provenance and typed errors remain intact.
+- Heads own encoded bodies and one SDK cleanup owner. Header limits and immutable Location
+  evidence precede filtering; body disposition precedes length checks, decoding and collection.
+  Discard never polls payloads. Collected streams retain ownership instead of being cancelled
+  when their pending handle completes. No SDK resource receives two independent release callbacks.
+- Prepared batches and their contexts retain original indices, start, paired time, cutoff,
+  selected budgets and exact preflight outcomes. External producers receive these through the
+  facade, not unchecked public constructors. Drivers emit raw timestamped observations; only core
+  creates immutable consumer receipts and derives elapsed/cutoff eligibility.
+- Mixed collection uses `AlreadyDelivered`, `Resolved` and `Unresolved`, not ambiguous `Option`
+  slots. Receipts and collections have read-only access and consuming decomposition. A batch-bound
+  accumulator preserves ownership on rejected insert/merge, including the distinct original
+  driver error. EOF/trailing validation, poisoning, exact-once release and the extra poll for
+  `Finished(Completed)` remain. Cancel returns all never-delivered indices, including recorded
+  but unconsumed results; consumers check first to retain those results.
+- Explicit follow uses the same client's head pipeline. The complete redirect limit/context,
+  prepared-request transfer, actions, generic non-Clone/non-Send policy error, stop reasons and
+  success/error readbacks are part of this submission. The initial absolute chain deadline survives
+  replacements; each hop captures its own entry and uses its selected request's timeout. Followed
+  heads are discarded without payload reads.
+- `BudgetSource::ConnectTimeout` and `IdleTimeout` extend the existing non-exhaustive enum;
+  aggregate budget selection and public wire text do not gain a second cause field. Governing
+  expiry wins connect ties; expired application/chain absolute deadlines win idle ties and late
+  observation, as the requirements specify.
+- Fastly's request-scoped observation handle, immutable snapshot/getters, extension access and
+  `current()` scope are included in the API subject. Failed/late registration attempts count;
+  retained snapshots do not retain work or attach to the next request. This is not approval of
+  an unproved Fastly scheduling/backend implementation.
+
+Arrival recording is subject to EZ-6.11's actual scheduling opportunities: Fastly observes during
+EdgeZero operations; the other adapters also observe when the application yields to their
+executor. CPU-only work or synchronously ready awaits do not promise background observation or
+allow backdating a terminal instant. No summary here expands that normative contract.
+
+The optimizer mode matrix is also fixed: Fastly Send/Follow only, subject to entitlement and
+horizon gates; Fastly Begin/Batch and all modes on other adapters reject it synchronously.
+
+## Hard-Migration Inventory
+
+This is the submission-time worktree inventory, including untracked G3 callers, not a claim that the
+migration is implemented. Repeat the discovery commands before editing; new callers must join
+the same cut. A separately approved portable API does not authorize a broken Fastly build,
+stubbed transport, compatibility trait or removed baseline regression test.
+
+| Existing Surface                                                  | Submitted Replacement                                                                                                                 |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Implementer `async send(OutboundRequest)`                         | Required `dispatch_head(OutboundDispatchRequest)`, `time()` and synchronous support validation                                        |
+| Implementer raw request-vector batch                              | `start_batch_until(OutboundPreparedBatch)` and required eager `begin(OutboundDispatchRequest)`                                        |
+| Borrowing facade send/collection futures                          | Owned local `'static` futures with invocation-time capture; `new`/`with_client` keep their signatures                                 |
+| Axum `try_with_clock` / internal `with_transport_and_clock`       | `try_with_time` / `with_transport_and_time`; `try_new` stays fallible                                                                 |
+| Fastly/Cloudflare/Spin `with_clock`                               | `with_time(OutboundTime)`; default constructors pair real clocks and timers                                                           |
+| Raw-count batch construction, `from_futures`, `finish_batch_item` | Context-consuming `cutoff`/`from_driver`, raw driver observations and a group cancellation owner; remove superseded paths             |
+| Public item/result/failure fields and receipt constructor         | Private identity with inspection/decomposition and lossless accumulator recovery; no reconstruction or mutable compatibility accessor |
+| Direct adapter behavioral calls in tests                          | Facade calls through `HttpClient::with_client`; generic implementer assertions remain trait assertions                                |
+
+### Eight Implementations
+
+| Current File                                                     | Implementation / Migration Surface                                                              |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `crates/edgezero-adapter-axum/src/outbound.rs:174`               | `AxumOutboundClient`; constructors 161/165, future factory 212, clock tests 521/544             |
+| `crates/edgezero-adapter-fastly/src/outbound.rs:562`             | `FastlyOutboundClient`; constructors 300/307, completion helper 170, raw driver 653             |
+| `crates/edgezero-adapter-cloudflare/src/outbound.rs:363`         | `CloudflareOutboundClient`; constructors 331/338, future factory 401, clock tests 1097/1126     |
+| `crates/edgezero-adapter-spin/src/outbound.rs:408`               | `SpinOutboundClient`; constructors 296/303, future factory 446, clock tests 1049/1079           |
+| `crates/edgezero-core/src/outbound.rs:1982`                      | `MockClient`; trait 419, facade 567, batch fields 124, factories 254/278 and helper 1307        |
+| `crates/edgezero-core/src/context.rs:768`                        | `DummyOutboundClient`; raw driver 786 and context-client injection 1165; accessor 372 stays     |
+| `examples/app-demo/crates/app-demo-core/src/handlers.rs:648`     | `TestOutboundClient`; application fields 196-199, item 683, driver 691 and injections 1300/1425 |
+| `crates/edgezero-cli/src/templates/core/src/handlers.rs.hbs:338` | Template client; application fields 156-159, item 368, driver 376 and injections 595/643        |
+
+### Callers, Injectors and Guards
+
+| Files                                                                                                                                                                                                         | Migration Responsibility                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/edgezero-adapter-axum/src/request.rs:69`                                                                                                                                                              | Clock-only constructor branches 69/70 and injection 75; preserve supplied-client precedence                                                                                                         |
+| `crates/edgezero-adapter-fastly/src/request.rs:732`                                                                                                                                                           | Clock-only constructor/injector 732/733, helper paths 727/826/861/889 and batch test 1068                                                                                                           |
+| `crates/edgezero-adapter-cloudflare/src/request.rs:351`                                                                                                                                                       | Clock-only constructor/injector 351/352, paths 347/498 and batch test 982                                                                                                                           |
+| `crates/edgezero-adapter-spin/src/request.rs:152`                                                                                                                                                             | Clock-only constructor/injector 152/153, paths 143/535 and batch test 907                                                                                                                           |
+| `crates/edgezero-adapter-axum/src/service.rs`, `dev_server.rs`, `response.rs`                                                                                                                                 | Preserve shared transport and installed LocalSet; integrate independent callback/body owners under D2                                                                                               |
+| Cloudflare and Spin `src/response.rs`; Fastly `src/context.rs` and serving scope                                                                                                                              | Adapter-specific lifecycle/scope integration under D1/D3/D4; retain the current Spin repair                                                                                                         |
+| `crates/edgezero-adapter-axum/tests/contract.rs:67`                                                                                                                                                           | Direct sends/batches at 67/98/256 and collection/item fields; runtime evidence remains D2/D5 work                                                                                                   |
+| `crates/edgezero-adapter-fastly/tests/contract.rs:1303`                                                                                                                                                       | Direct batches 1303/1332 and clock constructor 1327; runtime evidence remains D1/D5 work                                                                                                            |
+| `crates/edgezero-adapter-cloudflare/tests/contract.rs:482`                                                                                                                                                    | Clock constructors 482/517/547/566, direct batches 492/522/551/578 and collection 632                                                                                                               |
+| `crates/edgezero-adapter-spin/tests/contract.rs:662`                                                                                                                                                          | Clock constructors 662/695/723/743, direct batches 673/701/728/756 and collection 822                                                                                                               |
+| `crates/edgezero-adapter-spin/tests/sdk_resources.rs:24`                                                                                                                                                      | Retain trait assertion 24; migrate clock constructor 43, batch 56 and slot access 61                                                                                                                |
+| `crates/edgezero-cli/src/generator.rs:1783`                                                                                                                                                                   | Literal assertions 1783/1786-1791 for `failure.error`, elapsed, clocks/imports and driver construction change with the template, not later                                                          |
+| `tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs:251`                                                                                                                                            | Migrate manually constructed clock-only client 251; facade send 253 remains                                                                                                                         |
+| `tests/fixtures/reusable-app/crates/fixture-core/src/lib.rs:208`                                                                                                                                              | Preserve context-client send behavior and validate changed preparation                                                                                                                              |
+| `tests/fixtures/reusable-app/crates/fixture-core/src/qualification/progress.rs:157`                                                                                                                           | Untracked G3 caller: facade send 176, batch 181 and Option-slot consumption 184-188; do not rewrite historical evidence                                                                             |
+| `crates/edgezero-core/src/lib.rs`, `src/error.rs`, `src/time.rs`                                                                                                                                              | Export reviewed supporting types/causes; preserve aggregate budget selection and original clock domain                                                                                              |
+| New `crates/edgezero-core/src/outbound/exchange.rs`, `image_optimizer.rs`, `progress.rs`, `redirect.rs`                                                                                                       | P1-P5 implementation modules, not alternative transports                                                                                                                                            |
+| New `crates/edgezero-core/tests/outbound_public_api.rs`                                                                                                                                                       | External object-safety/local ownership, option/follow, and context-backed producer compile contracts                                                                                                |
+| `docs/guide/proxying.md`, `streaming.md`, `capabilities.md`, `handlers.md`, `architecture.md`, `adapters/overview.md`, `adapters/axum.md`, `adapters/cloudflare.md`, `adapters/spin.md`, `adapters/fastly.md` | All paths use the `docs/guide/` prefix. Update affected contracts/examples; Fastly's current backend section at line 194 also needs the reviewed observation/getter/counting/frozen-handle contract |
+| `scripts/check_outbound_docs_contract.mjs`, `check_outbound_legacy_api.sh`, `CHANGELOG.md`                                                                                                                    | Replace superseded active-signature assertions with equally strong reviewed contracts; retain retired-API guards and record the hard cut                                                            |
+
+The historical `docs/superpowers/specs/2026-05-21-outbound-http-design.md` describes the implemented
+baseline. It must not be rewritten to make a failed cutover pass. Explain supersession in active
+guides and CHANGELOG as directed by Q1; the new requirements and approved Interfaces govern the cut.
+Demo, generated projects and the excluded fixture workspace must build in the same series.
+Source locations above are submission-time review anchors, not stable line-number APIs. Axum's
+`src/service.rs:73/282` owns shared transport setup and `:607/614` its injection assertions.
+Active guide consumers include `docs/guide/proxying.md:120/144/158` and
+`docs/guide/adapters/overview.md:69`; active-source signature guards include
+`scripts/check_outbound_docs_contract.mjs:744/1735`. Its `:1216` producer-signature check reads
+the historical spec, not active source; review those assertions independently when implementing
+the cut.
+
+```sh
+rg -n 'impl OutboundHttpClient|OutboundHttpClient|start_batch_until' crates examples tests
+rg -n 'OutboundBatch(Item|Results|Failure)|finish_batch_item|OutboundBatch::(cutoff|from_driver|from_futures)' crates examples tests
+rg -n 'with_clock|try_with_clock|with_transport_and_clock|OutboundResponse::new' crates examples tests
+rg -n 'failure\.error|slot\.elapsed|handlers\.contains' crates/edgezero-cli/src/generator.rs
+```
+
+## Evidence Inputs and Outstanding Decisions
+
+The [feasibility report](2026-10-18-outbound-feasibility.md) separates local results, provider
+unknowns and cancelled/deferred work. These hashes identify submitted inputs, not passing gates:
+
+| Input                                                                               | SHA-256                                                            | Disposition                                                               |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| [G1 draft inventory](../../tests/fixtures/reusable-app/outbound-cutover-cases.json) | `232798a4a7e12a727e937d4ef5064c2c46c7420ded02cbbe6ce3534259f59819` | 255 acceptance criteria, 511 planned legs; scope/owner approval pending   |
+| [G2 readiness evidence](evidence/2026-10-19-fastly-readiness.json)                  | `bf0911474b9f2dd50a5c0b1d1927edb1eafc865d7ff816e39bc686c379a88ac3` | Failed error preservation; hosted PendingExternal                         |
+| [Initial G3 evidence](evidence/2026-10-19-outbound-progress.json)                   | `46effcfd323756d861efef16f46d4652741692db44df595dfcdc5cf8e93a9a9c` | Historical Spin failure, Cloudflare unavailable                           |
+| [Repaired Spin/G3 evidence](evidence/2026-10-19-spin-response-egress.json)          | `59006383b01abbde4ad5a97a04841ccfe2cc4cb4627d14b5e13ad80febcc20f6` | Native/Viceroy/Spin exercised cases pass; smoke exit 2, not qualification |
+
+G3 does not yet prove Cloudflare execution, every protocol, missing active scheduler detection,
+callback/export-return lifetime, all cancellation interleavings or the future public begin API.
+Fastly's empty-response progress controls do not repair G2's body-readiness error loss. Spin's
+header-derived zero-length hints are not raw framing evidence; no known-empty fast path is approved.
+
+### Independent Decision Requirements
+
+| Decision             | Required Attributed Review                                                                                                                                                                                                                                            | Task Effect                                                                                                                                                          |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G4-API               | EdgeZero maintainer reviews the entire submitted Interfaces digest, migration/readback/recovery rules, defaults, causes, timer pairing and external producer contract                                                                                                 | Required before P1; does not approve Fastly feasibility, runtime promotion or production adoption                                                                    |
+| G4-FASTLY-POLICY     | EdgeZero and TS maintainers review a new preserving primitive/report plus literal positive B, fixed origin/authority/TLS/connect-settings scope, complete budget domain, rounding/cardinality proof and boundary evidence                                             | D1 needs passing local G2 plus this approval; the currently tested primitive remains failed, not waived                                                              |
+| G4-OPTIMIZER-HORIZON | Both maintainers separately approve original t0/D/source, actual backend-policy digest, finite numerical H(K) rule, literal finite maximum/domain and proposed 5 ms observation tolerance, accounting for every phase/retry/provider step                             | Blocks optimizer integration until approved and production qualification until hosted proof; never widens ordinary body/head deadlines                               |
+| G4-APPLICABILITY     | EdgeZero maintainer approves exact part/target/leg adoption decisions; changes to TS's blocking/applicability set also require TS approval. Record basis, implementation/execution/CI owners and evidence; confirmed-present parts need CHANGELOG and TS confirmation | Locks G1 scope; EZ-24 remains Follow-up unless explicitly promoted; missing Image Optimizer entitlement does not demote blocking EZ-8                                |
+| G4-MEASUREMENTS      | Before replay, confirm M1/M2/M5/M7 samples, warm-up, settings, thresholds, zero-baseline and negative/inconclusive-control rules against identified builds                                                                                                            | Enables those comparison runs, not an automatic passing result; M3's count invariant remains pass/fail, its timing distribution report-only; M4 reuse stays deferred |
+
+The submitted product thresholds are unchanged from EZ-2/EZ-3 and still require confirmation
+before replay. Sample counts, runner/build identities and zero-baseline/control rules are not
+approved by listing these proposed values:
+
+| Measurement | Submitted Bound                                                                                                                                                                     |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1          | After five-minute warm-up, new handshakes per request to the origin and provider are at most 10 percent above baseline                                                              |
+| M2          | Each bidder's p95 slot and response-head latency is at most 10 ms above baseline                                                                                                    |
+| M3          | Registrations per inbound request do not exceed its distinct origin configurations; duration distribution is report-only                                                            |
+| M5          | Gateway-failure share is at most 10 percent above baseline share or 0.1 percentage points above it, whichever is larger; apply the connection-limit subcategory if EZ-16 is present |
+| M7          | Zero pre-send internal-error slots/sends, reported per 1000 auctions by bidder count; per-slot 504 rate at most one percentage point above baseline, both for a 12-bidder profile   |
+
+M4 reuse-mode capacity characterization remains deferred. Fixed deadline acceptance windows and
+required negative/inconclusive-control handling do not become optional product thresholds.
+
+Applicability decisions must name EZ-5.9 and EZ-5.10 separately; EZ-24 host/WASI promotion,
+EZ-24.11 abandonment, EZ-24.12 demo/template replacement and the JavaScript target separately;
+and EZ-25.42/.43 separately. Preserve all other individually scoped pending decisions in the G1
+inventory. Approving one sibling does not adopt a range. Scoped approval of portable work does
+not cancel the blocking Fastly requirements or permit an incomplete adapter migration.
+
+For each completed decision, record the exact requirement/target/leg scope; approved subject
+digest; actual approver(s)/date; implementation, execution and CI owners; source/SDK/runtime/settings
+identities and evidence hashes; unresolved conditions; and explicitly blocked/unblocked tasks.
+Keep unknown B, H(K), owner assignments and pending approvals unset rather than manufacturing values.
+
+## Review Exit
+
+- [x] AG approves the exact full Interfaces digest for API implementation only, on 2026-10-19.
+- [ ] G1's required applicability/owner decisions and G3's remaining prerequisites are resolved
+      for the work selected to proceed; portable progress is not mistaken for production readiness.
+- [ ] Fastly primitive/B and optimizer horizon decisions have their own attributed dispositions;
+      a negative or unavailable result remains a visible block for dependent work.
+
+No checkbox is satisfied merely by creating this packet, passing a unit test or receiving an
+unscoped instruction to continue. The scoped exact-digest reply and supplied maintainer name close
+the API approval entry only; the remaining decisions still need their own approvals.
+
+**Downstream P1 obligation, not a G4 review exit:** after approval, P1 rereads the decisions,
+verifies their digests and hard-migrates every affected implementation and caller with nonzero
+red/green sentinels and the index's test/fmt/clippy card. Closing API review does not complete P1.
+
+## P1 Foundation Checkpoint
+
+The scoped reply starts the approved clock/timer foundation only: `OutboundFuture` and
+`OutboundTime` are declared in core outbound, re-exported at the crate root, and implemented in
+private `outbound/exchange.rs`. Named generic syntax for the factory uses the same approved
+`Fn(Deadline, MonotonicClock) -> OutboundFuture<()> + Send + Sync + 'static` bounds.
+No new executor, default/inert timer, adapter scheduling fallback or transport was added.
+
+Eleven co-located deterministic tests cover the foundation. Initial compilation failed on the
+missing public types/exports; a later ready-error-at-expiry regression failed before its fix.
+They cover paired-clock wakeups and waker replacement, retaining pending registrations,
+early/frozen-ready rearming with the original deadline, typed original errors, equality/expiry,
+clock regression, clone/local-future contracts, and exact release on cancellation and terminal
+polls. A terminal wait releases captured factory state even if its completed boxed future remains
+allocated. Ready factories under frozen time yield once per poll; real pending wakeups remain the
+provider factory's obligation, not a core scheduling guarantee.
+
+A retained timer is polled once even when a later outer poll arrives at/past expiry, preserving
+its original ready error instead of discarding it. A still-pending timer is cancelled when the
+paired clock expires; no new timer is constructed for an already-expired wait. Error-path probes
+remain fields of the timer after `Ready`, proving actual timer destruction rather than an
+explicit test-local cleanup. Fake time is seeded ahead of process time so it is representable
+on the JavaScript target as well as native/WASI.
+
+This does not establish settlement's timer-before-body ordering or 408/504 precedence, eager
+public begin/batches, nor any adapter/runtime qualification. Existing client traits/constructors,
+request options, demo and generator still use the current implemented contract. They must migrate
+together in the later atomic dispatch cut; no compatibility alias was introduced to defer it.
+Historical G2/G3 source/artifact records have not been relabeled as evidence for this later work.
+
+Verification for this foundation passed all five workspace Rust CI commands, 761 core unit
+tests (including the eleven time tests), the nonzero timer sentinel, core compilation for
+`wasm32-unknown-unknown` and `wasm32-wasip1`, and the Spin `wasm32-wasip2` check. The full workspace
+suite had no failures and one existing ignored generated-project test. Strict clippy, decoder/map
+dependency audits, outbound docs/legacy guards, the 18 evidence-checker tests and docs format,
+lint and build passed. These are local checks, not hosted qualification or acceptance of G1's
+511 still-planned legs.

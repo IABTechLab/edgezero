@@ -6,42 +6,258 @@ use thiserror::Error;
 
 use crate::body::Body;
 use crate::config_store::ConfigStoreError;
+use crate::error_detail::ProviderFailureDetail;
 use crate::http::{
-    HeaderValue, Method, Response, StatusCode,
-    header::{CONTENT_TYPE, RETRY_AFTER},
+    HeaderMap, HeaderValue, Method, Response, StatusCode,
+    header::{ALLOW, CONTENT_TYPE, RETRY_AFTER},
 };
 use crate::response::{IntoResponse, response_with_body};
+use crate::response_egress_framing::ResponseEgressFramingError;
+
+/// Stable identity for an EdgeZero-owned upstream decode failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BadGatewayDecodeReason {
+    Brotli,
+    Deflate,
+    Gzip,
+    Json,
+}
+
+/// Stable classification for upstream failures that map to HTTP 502.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BadGatewayReason {
+    Decode(BadGatewayDecodeReason),
+    Protocol,
+    Transport,
+    Unreachable,
+    Unspecified,
+}
+
+/// Configured budget input that selected an effective deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BudgetSource {
+    BatchCutoff,
+    Default,
+    PerCallTimeout,
+    RequestDeadline,
+    Unspecified,
+}
+
+/// Where an EdgeZero-owned request-byte limit was exceeded; never serialized on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RequestBodyOverflowOrigin {
+    Inbound,
+    OutboundUpload,
+}
+
+/// Stable identity for a response resource limit enforced by `EdgeZero`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResponseLimitReason {
+    BrotliWindow,
+    BufferedBody,
+    DecodedBody,
+    DecoderMemory,
+    EncodedBody,
+    HeaderBytes,
+    HeaderCount,
+    Unspecified,
+}
+
+/// Stable classification for typed configuration extraction failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StoreExtractionReason {
+    BackendFailure,
+    BackendUnavailable,
+    DeadlineExceeded,
+    Deserialization,
+    IntegrityMismatch,
+    InvalidKey,
+    InvalidSecretValue,
+    MalformedEnvelope,
+    MissingBlob,
+    MissingRegistry,
+    MissingSecret,
+    SecretBackendUnavailable,
+    StructuralLimit,
+    UnknownStore,
+    UnsupportedVersion,
+    Validation,
+    ValueTooLarge,
+}
+
+impl StoreExtractionReason {
+    fn wire_kind(self) -> &'static str {
+        match self {
+            Self::BackendFailure
+            | Self::IntegrityMismatch
+            | Self::InvalidSecretValue
+            | Self::MalformedEnvelope
+            | Self::MissingRegistry
+            | Self::StructuralLimit
+            | Self::UnsupportedVersion
+            | Self::UnknownStore
+            | Self::ValueTooLarge => "internal",
+            Self::BackendUnavailable | Self::DeadlineExceeded | Self::SecretBackendUnavailable => {
+                "service_unavailable"
+            }
+            Self::InvalidKey => "bad_request",
+            Self::Deserialization | Self::MissingBlob | Self::MissingSecret | Self::Validation => {
+                "config_out_of_date"
+            }
+        }
+    }
+
+    fn wire_status(self) -> StatusCode {
+        match self {
+            Self::BackendFailure
+            | Self::IntegrityMismatch
+            | Self::InvalidSecretValue
+            | Self::MalformedEnvelope
+            | Self::MissingRegistry
+            | Self::StructuralLimit
+            | Self::UnsupportedVersion
+            | Self::UnknownStore
+            | Self::ValueTooLarge => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BackendUnavailable
+            | Self::DeadlineExceeded
+            | Self::Deserialization
+            | Self::MissingBlob
+            | Self::MissingSecret
+            | Self::SecretBackendUnavailable
+            | Self::Validation => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InvalidKey => StatusCode::BAD_REQUEST,
+        }
+    }
+}
 
 /// Application-level error that carries an HTTP status code.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum EdgeError {
+    /// Upstream or transport failure. HTTP 502.
     #[error("{message}")]
-    BadRequest { message: String },
+    BadGateway {
+        message: String,
+        reason: BadGatewayReason,
+        provider_detail: Option<ProviderFailureDetail>,
+    },
+    #[error("{message}")]
+    BadRequest {
+        message: String,
+        provider_detail: Option<ProviderFailureDetail>,
+    },
     /// The blob's `data` shape disagrees with the deployed `C`
     /// type. Re-running `<app-cli> config push` for the deployed
     /// code revision fixes it. HTTP 503, kind
     /// `"config_out_of_date"`, carries `Retry-After: 60`.
     #[error("config out of date: {message}")]
     ConfigOutOfDate { message: String, field_path: String },
+    /// A wall-clock deadline or per-request timeout fired. HTTP 504.
+    #[error("{message}")]
+    GatewayTimeout {
+        message: String,
+        cause: BudgetSource,
+        provider_detail: Option<ProviderFailureDetail>,
+    },
     #[error("internal error: {source}")]
     Internal {
-        #[from]
+        #[source]
         source: AnyError,
+        provider_detail: Option<ProviderFailureDetail>,
     },
-    #[error("method {method} not allowed; allowed: {allowed}")]
-    MethodNotAllowed { method: Method, allowed: String },
+    #[error(
+        "method {method} not allowed; allowed: {}",
+        allowed_method_names(.allowed)
+    )]
+    #[non_exhaustive]
+    MethodNotAllowed {
+        method: Method,
+        allowed: Vec<Method>,
+    },
     #[error("no route matched path: {path}")]
     NotFound { path: String },
     #[error("not implemented: {message}")]
     NotImplemented { message: String },
+    /// An EdgeZero-owned inbound or upload byte cap was exceeded. HTTP 413.
+    #[error("request body too large")]
+    PayloadTooLarge { origin: RequestBodyOverflowOrigin },
+    #[error("{message}")]
+    RequestHeaderFieldsTooLarge { message: String },
+    #[error("{message}")]
+    RequestTimeout { message: String },
+    /// An upstream response exceeded an EdgeZero-owned resource policy. HTTP 502.
+    #[error("{message}")]
+    ResponseTooLarge {
+        message: String,
+        reason: ResponseLimitReason,
+    },
     #[error("service unavailable: {message}")]
     ServiceUnavailable { message: String },
+    #[error("{message}")]
+    StoreExtraction {
+        reason: StoreExtractionReason,
+        message: String,
+        field_path: Option<String>,
+    },
+    #[error("{message}")]
+    UriTooLong { message: String },
     #[error("validation error: {message}")]
     Validation { message: String },
 }
 
+#[derive(Clone)]
+pub(crate) struct RequestBodyOverflowResponse {
+    _origin: RequestBodyOverflowOrigin,
+}
+
 impl EdgeError {
+    #[inline]
+    pub fn bad_gateway<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
+        EdgeError::BadGateway {
+            message: message.into(),
+            reason: BadGatewayReason::Unspecified,
+            provider_detail: None,
+        }
+    }
+
+    /// Adds text-free provider detail without changing the gateway's public classification.
+    #[inline]
+    pub fn bad_gateway_with_detail<S>(
+        message: S,
+        reason: BadGatewayReason,
+        detail: ProviderFailureDetail,
+    ) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::BadGateway {
+            message: message.into(),
+            reason,
+            provider_detail: Some(detail),
+        }
+    }
+
+    #[inline]
+    pub fn bad_gateway_with_reason<S>(message: S, reason: BadGatewayReason) -> Self
+    where
+        S: Into<String>,
+    {
+        EdgeError::BadGateway {
+            message: message.into(),
+            reason,
+            provider_detail: None,
+        }
+    }
+
     #[inline]
     pub fn bad_request<S>(message: S) -> Self
     where
@@ -49,6 +265,19 @@ impl EdgeError {
     {
         EdgeError::BadRequest {
             message: message.into(),
+            provider_detail: None,
+        }
+    }
+
+    /// Retains provider evidence for host rejections without changing their 400 contract.
+    #[inline]
+    pub fn bad_request_with_detail<S>(message: S, detail: ProviderFailureDetail) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::BadRequest {
+            message: message.into(),
+            provider_detail: Some(detail),
         }
     }
 
@@ -69,34 +298,44 @@ impl EdgeError {
         }
     }
 
-    /// Construct from a `serde_path_to_error` error returned by
-    /// the deserialise wrapper around the blob's `data` field.
-    #[must_use]
     #[inline]
-    pub fn config_out_of_date_from_serde(serde_err: &SerdePathError<serde_json::Error>) -> Self {
-        // The serde message embeds the offending stored VALUE (e.g. `invalid
-        // type: string "hunter2", expected u32`), and this message is serialised
-        // into the HTTP error body. The config blob may hold secrets, so the
-        // VALUE must not escape — report only the category.
-        //
-        // The `field_path` STRING segments are redacted (structure kept): a map
-        // key is indistinguishable from a struct field here and may be a secret,
-        // and the redaction invariant forbids a stored string on any path. The
-        // exact path is available from a local `config validate`. See
-        // `redact_serde_path`.
-        use serde_json::error::Category;
-        let category = match serde_err.inner().classify() {
-            Category::Data => "wrong type or invalid value",
-            Category::Syntax => "malformed JSON",
-            Category::Eof => "unexpected end of input",
-            Category::Io => "i/o error while reading",
-        };
-        Self::ConfigOutOfDate {
-            message: format!(
-                "typed app-config is out of date ({category}; value redacted) — \
-                 run `<app-cli> config push` for this deploy"
-            ),
-            field_path: redact_serde_path(serde_err.path()),
+    pub fn gateway_timeout<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
+        EdgeError::GatewayTimeout {
+            message: message.into(),
+            cause: BudgetSource::Unspecified,
+            provider_detail: None,
+        }
+    }
+
+    #[inline]
+    pub fn gateway_timeout_caused<S>(message: S, cause: BudgetSource) -> Self
+    where
+        S: Into<String>,
+    {
+        EdgeError::GatewayTimeout {
+            message: message.into(),
+            cause,
+            provider_detail: None,
+        }
+    }
+
+    /// Adds text-free provider detail without replacing the selected timeout cause.
+    #[inline]
+    pub fn gateway_timeout_with_detail<S>(
+        message: S,
+        cause: BudgetSource,
+        detail: ProviderFailureDetail,
+    ) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::GatewayTimeout {
+            message: message.into(),
+            cause,
+            provider_detail: Some(detail),
         }
     }
 
@@ -110,12 +349,20 @@ impl EdgeError {
     #[inline]
     pub fn inner(&self) -> Option<&AnyError> {
         match self {
-            EdgeError::Internal { source } => Some(source),
-            EdgeError::BadRequest { .. }
+            EdgeError::Internal { source, .. } => Some(source),
+            EdgeError::BadGateway { .. }
+            | EdgeError::BadRequest { .. }
             | EdgeError::ConfigOutOfDate { .. }
+            | EdgeError::GatewayTimeout { .. }
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
+            | EdgeError::PayloadTooLarge { .. }
+            | EdgeError::RequestHeaderFieldsTooLarge { .. }
+            | EdgeError::RequestTimeout { .. }
+            | EdgeError::ResponseTooLarge { .. }
             | EdgeError::MethodNotAllowed { .. }
+            | EdgeError::StoreExtraction { .. }
+            | EdgeError::UriTooLong { .. }
             | EdgeError::Validation { .. }
             | EdgeError::ServiceUnavailable { .. } => None,
         }
@@ -128,18 +375,42 @@ impl EdgeError {
     {
         EdgeError::Internal {
             source: error.into(),
+            provider_detail: None,
         }
     }
 
-    fn kind_str(&self) -> &'static str {
+    /// Retains the original internal source and its existing Display and wire behavior.
+    #[inline]
+    pub fn internal_with_detail<E>(error: E, detail: ProviderFailureDetail) -> Self
+    where
+        E: Into<AnyError>,
+    {
+        Self::Internal {
+            source: error.into(),
+            provider_detail: Some(detail),
+        }
+    }
+
+    /// Returns the stable public category without provider or application diagnostics.
+    #[must_use]
+    #[inline]
+    pub fn kind(&self) -> &'static str {
         match self {
+            EdgeError::BadGateway { .. } => "bad_gateway",
             EdgeError::BadRequest { .. } => "bad_request",
             EdgeError::ConfigOutOfDate { .. } => "config_out_of_date",
+            EdgeError::GatewayTimeout { .. } => "gateway_timeout",
             EdgeError::Internal { .. } => "internal",
             EdgeError::MethodNotAllowed { .. } => "method_not_allowed",
             EdgeError::NotFound { .. } => "not_found",
             EdgeError::NotImplemented { .. } => "not_implemented",
+            EdgeError::PayloadTooLarge { .. } => "payload_too_large",
+            EdgeError::RequestHeaderFieldsTooLarge { .. } => "request_header_fields_too_large",
+            EdgeError::RequestTimeout { .. } => "request_timeout",
+            EdgeError::ResponseTooLarge { .. } => "response_too_large",
             EdgeError::ServiceUnavailable { .. } => "service_unavailable",
+            EdgeError::StoreExtraction { reason, .. } => reason.wire_kind(),
+            EdgeError::UriTooLong { .. } => "uri_too_long",
             EdgeError::Validation { .. } => "validation",
         }
     }
@@ -148,35 +419,39 @@ impl EdgeError {
     #[inline]
     pub fn message(&self) -> String {
         match self {
-            EdgeError::BadRequest { message }
+            EdgeError::BadGateway { message, .. }
+            | EdgeError::BadRequest { message, .. }
             | EdgeError::ConfigOutOfDate { message, .. }
+            | EdgeError::GatewayTimeout { message, .. }
+            | EdgeError::RequestHeaderFieldsTooLarge { message }
+            | EdgeError::RequestTimeout { message }
+            | EdgeError::ResponseTooLarge { message, .. }
+            | EdgeError::StoreExtraction { message, .. }
+            | EdgeError::UriTooLong { message }
             | EdgeError::Validation { message }
             | EdgeError::NotImplemented { message }
             | EdgeError::ServiceUnavailable { message } => message.clone(),
             EdgeError::NotFound { path } => format!("no route matched path: {path}"),
             EdgeError::MethodNotAllowed { method, allowed } => {
-                format!("method {method} not allowed; allowed: {allowed}")
+                format!(
+                    "method {method} not allowed; allowed: {}",
+                    allowed_method_names(allowed)
+                )
             }
-            EdgeError::Internal { source } => format!("internal error: {source}"),
+            EdgeError::Internal { source, .. } => format!("internal error: {source}"),
+            EdgeError::PayloadTooLarge { .. } => "request body too large".to_owned(),
         }
     }
 
     #[must_use]
     #[inline]
     pub fn method_not_allowed(method: &Method, allowed: &[Method]) -> Self {
-        let mut names = allowed
-            .iter()
-            .map(|name| name.as_str().to_owned())
-            .collect::<Vec<_>>();
-        names.sort();
-        let allowed_list = if names.is_empty() {
-            "(none)".to_owned()
-        } else {
-            names.join(", ")
-        };
+        let mut sorted_allowed = allowed.to_vec();
+        sorted_allowed.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        sorted_allowed.dedup();
         EdgeError::MethodNotAllowed {
             method: method.clone(),
-            allowed: allowed_list,
+            allowed: sorted_allowed,
         }
     }
 
@@ -198,6 +473,121 @@ impl EdgeError {
         }
     }
 
+    /// Constructs a request-byte overflow without cap-specific or provider diagnostics.
+    #[must_use]
+    #[inline]
+    pub const fn payload_too_large(origin: RequestBodyOverflowOrigin) -> Self {
+        Self::PayloadTooLarge { origin }
+    }
+
+    /// Borrows safe provider evidence. Rendering never serializes or formats this detail.
+    #[must_use]
+    #[inline]
+    pub const fn provider_failure_detail(&self) -> Option<&ProviderFailureDetail> {
+        match self {
+            Self::BadGateway {
+                provider_detail, ..
+            }
+            | Self::BadRequest {
+                provider_detail, ..
+            }
+            | Self::GatewayTimeout {
+                provider_detail, ..
+            }
+            | Self::Internal {
+                provider_detail, ..
+            } => provider_detail.as_ref(),
+            Self::ConfigOutOfDate { .. }
+            | Self::MethodNotAllowed { .. }
+            | Self::NotFound { .. }
+            | Self::NotImplemented { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::RequestHeaderFieldsTooLarge { .. }
+            | Self::RequestTimeout { .. }
+            | Self::ResponseTooLarge { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::StoreExtraction { .. }
+            | Self::UriTooLong { .. }
+            | Self::Validation { .. } => None,
+        }
+    }
+
+    /// Returns whether a request-byte cap fired while reading ingress or uploading outbound.
+    #[must_use]
+    #[inline]
+    pub const fn request_body_overflow_origin(&self) -> Option<RequestBodyOverflowOrigin> {
+        if let Self::PayloadTooLarge { origin } = self {
+            Some(*origin)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn request_header_fields_too_large<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::RequestHeaderFieldsTooLarge {
+            message: message.into(),
+        }
+    }
+
+    #[inline]
+    pub fn request_timeout<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::RequestTimeout {
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn required_response_headers(&self) -> Result<HeaderMap, EdgeError> {
+        let mut headers = HeaderMap::new();
+        if let EdgeError::MethodNotAllowed { allowed, .. } = self {
+            let value = HeaderValue::from_str(&allowed_header_value(allowed))
+                .map_err(EdgeError::internal)?;
+            headers.insert(ALLOW, value);
+        }
+        if self.kind() == "config_out_of_date" {
+            headers.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        }
+        Ok(headers)
+    }
+
+    /// Reads an owned precommit framing reason without formatting its source or changing wire errors.
+    #[must_use]
+    #[inline]
+    pub fn response_framing_error(&self) -> Option<ResponseEgressFramingError> {
+        let Self::Internal { source, .. } = self else {
+            return None;
+        };
+        source.downcast_ref::<ResponseEgressFramingError>().copied()
+    }
+
+    #[inline]
+    pub fn response_too_large<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
+        EdgeError::ResponseTooLarge {
+            message: message.into(),
+            reason: ResponseLimitReason::Unspecified,
+        }
+    }
+
+    #[inline]
+    pub fn response_too_large_with_reason<S>(message: S, reason: ResponseLimitReason) -> Self
+    where
+        S: Into<String>,
+    {
+        EdgeError::ResponseTooLarge {
+            message: message.into(),
+            reason,
+        }
+    }
+
     #[inline]
     pub fn service_unavailable<S>(message: S) -> Self
     where
@@ -212,15 +602,96 @@ impl EdgeError {
     #[inline]
     pub fn status(&self) -> StatusCode {
         match self {
+            EdgeError::BadGateway { .. } | EdgeError::ResponseTooLarge { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
             EdgeError::BadRequest { .. } => StatusCode::BAD_REQUEST,
             EdgeError::ConfigOutOfDate { .. } | EdgeError::ServiceUnavailable { .. } => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            EdgeError::GatewayTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+            EdgeError::RequestHeaderFieldsTooLarge { .. } => {
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+            }
+            EdgeError::RequestTimeout { .. } => StatusCode::REQUEST_TIMEOUT,
             EdgeError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             EdgeError::NotFound { .. } => StatusCode::NOT_FOUND,
             EdgeError::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
             EdgeError::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
+            EdgeError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            EdgeError::StoreExtraction { reason, .. } => reason.wire_status(),
+            EdgeError::UriTooLong { .. } => StatusCode::URI_TOO_LONG,
             EdgeError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Constructs a redacted deserialization failure from a serde path error.
+    #[must_use]
+    #[inline]
+    pub fn store_deserialization_from_serde(serde_err: &SerdePathError<serde_json::Error>) -> Self {
+        use serde_json::error::Category;
+
+        let category = match serde_err.inner().classify() {
+            Category::Data => "wrong type or invalid value",
+            Category::Syntax => "malformed JSON",
+            Category::Eof => "unexpected end of input",
+            Category::Io => "i/o error while reading",
+        };
+        let path = redact_serde_path(serde_err.path());
+        Self::store_extraction(
+            StoreExtractionReason::Deserialization,
+            format!("typed app-config is out of date ({category}; value redacted)"),
+            Some(path),
+        )
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn store_extraction<Msg>(
+        reason: StoreExtractionReason,
+        message: Msg,
+        field_path: Option<String>,
+    ) -> Self
+    where
+        Msg: Into<String>,
+    {
+        Self::StoreExtraction {
+            reason,
+            message: message.into(),
+            field_path: field_path.filter(|path| !path.is_empty()),
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn store_extraction_reason(&self) -> Option<StoreExtractionReason> {
+        match self {
+            Self::StoreExtraction { reason, .. } => Some(*reason),
+            Self::BadGateway { .. }
+            | Self::BadRequest { .. }
+            | Self::ConfigOutOfDate { .. }
+            | Self::GatewayTimeout { .. }
+            | Self::Internal { .. }
+            | Self::MethodNotAllowed { .. }
+            | Self::NotFound { .. }
+            | Self::NotImplemented { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::RequestHeaderFieldsTooLarge { .. }
+            | Self::RequestTimeout { .. }
+            | Self::ResponseTooLarge { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::UriTooLong { .. }
+            | Self::Validation { .. } => None,
+        }
+    }
+
+    #[inline]
+    pub fn uri_too_long<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::UriTooLong {
+            message: message.into(),
         }
     }
 
@@ -233,14 +704,54 @@ impl EdgeError {
             message: message.into(),
         }
     }
+
+    fn wire_message(&self) -> String {
+        match self {
+            EdgeError::BadGateway { .. } => "bad gateway".to_owned(),
+            EdgeError::GatewayTimeout { .. } => "gateway timeout".to_owned(),
+            EdgeError::Internal { .. } => "internal server error".to_owned(),
+            EdgeError::ResponseTooLarge { .. } => {
+                "upstream response exceeded configured limits".to_owned()
+            }
+            EdgeError::BadRequest { .. }
+            | EdgeError::ConfigOutOfDate { .. }
+            | EdgeError::MethodNotAllowed { .. }
+            | EdgeError::NotFound { .. }
+            | EdgeError::NotImplemented { .. }
+            | EdgeError::PayloadTooLarge { .. }
+            | EdgeError::RequestHeaderFieldsTooLarge { .. }
+            | EdgeError::RequestTimeout { .. }
+            | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::StoreExtraction { .. }
+            | EdgeError::UriTooLong { .. }
+            | EdgeError::Validation { .. } => self.message(),
+        }
+    }
+}
+
+impl From<AnyError> for EdgeError {
+    #[inline]
+    fn from(source: AnyError) -> Self {
+        Self::internal(source)
+    }
 }
 
 impl From<ConfigStoreError> for EdgeError {
     #[inline]
     fn from(err: ConfigStoreError) -> Self {
         match err {
-            ConfigStoreError::InvalidKey { message } => EdgeError::bad_request(message),
-            ConfigStoreError::Unavailable { message } => EdgeError::service_unavailable(message),
+            ConfigStoreError::DeadlineExceeded => {
+                EdgeError::service_unavailable("config store read deadline exceeded")
+            }
+            ConfigStoreError::InvalidKey { .. } => {
+                EdgeError::bad_request("config store rejected the requested key")
+            }
+            ConfigStoreError::Unavailable { .. } => {
+                EdgeError::service_unavailable("config store is unavailable")
+            }
+            ConfigStoreError::ValueTooLarge => {
+                EdgeError::internal(anyhow::anyhow!("config store value too large"))
+            }
             ConfigStoreError::Internal { source } => EdgeError::internal(source),
         }
     }
@@ -249,8 +760,8 @@ impl From<ConfigStoreError> for EdgeError {
 impl IntoResponse for EdgeError {
     #[inline]
     fn into_response(self) -> Result<Response, EdgeError> {
-        let kind = self.kind_str();
-        let is_config_out_of_date = matches!(self, EdgeError::ConfigOutOfDate { .. });
+        let required_headers = self.required_response_headers()?;
+        let kind = self.kind();
         // `ConfigOutOfDate { field_path: String::new(), .. }` (the missing-blob
         // path) must OMIT the `field_path` JSON key entirely, not emit
         // `"field_path": ""`. Per spec 6.3.1.
@@ -258,38 +769,90 @@ impl IntoResponse for EdgeError {
             EdgeError::ConfigOutOfDate { field_path, .. } if !field_path.is_empty() => {
                 Some(field_path.as_str())
             }
-            EdgeError::BadRequest { .. }
+            EdgeError::StoreExtraction {
+                field_path: Some(field_path),
+                ..
+            } => Some(field_path.as_str()),
+            EdgeError::BadGateway { .. }
+            | EdgeError::BadRequest { .. }
             | EdgeError::ConfigOutOfDate { .. }
+            | EdgeError::GatewayTimeout { .. }
             | EdgeError::Internal { .. }
             | EdgeError::MethodNotAllowed { .. }
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
+            | EdgeError::PayloadTooLarge { .. }
+            | EdgeError::RequestHeaderFieldsTooLarge { .. }
+            | EdgeError::RequestTimeout { .. }
+            | EdgeError::ResponseTooLarge { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::StoreExtraction { .. }
+            | EdgeError::UriTooLong { .. }
             | EdgeError::Validation { .. } => None,
         };
         let status = self.status();
-        let message = self.message();
+        let message = self.wire_message();
 
-        let mut error_obj = serde_json::Map::new();
-        error_obj.insert("status".into(), serde_json::Value::from(status.as_u16()));
-        error_obj.insert("kind".into(), serde_json::Value::from(kind));
-        error_obj.insert("message".into(), serde_json::Value::from(message));
-        if let Some(field_path) = field_path_opt {
-            error_obj.insert("field_path".into(), serde_json::Value::from(field_path));
+        let mut payload = json!({
+            "error": {
+                "status": status.as_u16(),
+                "kind": kind,
+                "message": message,
+            },
+        });
+        if let Some(field_path) = field_path_opt
+            && let Some(error_obj) = payload
+                .get_mut("error")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            error_obj.insert("field_path".into(), json!(field_path));
         }
-        let payload = json!({ "error": serde_json::Value::Object(error_obj) });
 
         let body = json_or_text(&payload);
         let mut response = response_with_body(status, body)?;
         response
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if is_config_out_of_date {
-            response
-                .headers_mut()
-                .insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        response.headers_mut().extend(required_headers);
+        if let Some(origin) = self.request_body_overflow_origin() {
+            mark_body_overflow_response(&mut response, origin);
         }
         Ok(response)
+    }
+}
+
+pub(crate) fn mark_body_overflow_response(
+    response: &mut Response,
+    origin: RequestBodyOverflowOrigin,
+) {
+    response
+        .extensions_mut()
+        .insert(RequestBodyOverflowResponse { _origin: origin });
+}
+
+pub(crate) fn suppress_overflow_retry_after(response: &mut Response) {
+    if response
+        .extensions()
+        .get::<RequestBodyOverflowResponse>()
+        .is_some()
+    {
+        response.headers_mut().remove(RETRY_AFTER);
+    }
+}
+
+fn allowed_header_value(allowed: &[Method]) -> String {
+    allowed
+        .iter()
+        .map(Method::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn allowed_method_names(allowed: &[Method]) -> String {
+    if allowed.is_empty() {
+        "(none)".to_owned()
+    } else {
+        allowed_header_value(allowed)
     }
 }
 
@@ -346,15 +909,416 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_detail::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
     use crate::http::Method;
     use serde::ser;
+    use std::io::Error as IoError;
     use std::str;
+
+    #[test]
+    fn framing_detail_preserves_each_existing_display_and_wire_error() {
+        use crate::response_egress_framing::{
+            ResponseEgressBodyLengthError, response_egress_body_length_error,
+            test_support::FRAMING_RULES,
+        };
+        for reason in FRAMING_RULES {
+            let error = EdgeError::internal(reason);
+            assert_eq!(error.response_framing_error(), Some(reason));
+            assert_eq!(error.to_string(), format!("internal error: {reason}"));
+            assert_eq!(error.kind(), "internal");
+            let response = error.into_response().expect("response");
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let ordinary = EdgeError::internal(anyhow::anyhow!("private token=secret"))
+                .into_response()
+                .expect("ordinary response");
+            assert_eq!(response.status(), ordinary.status());
+            assert_eq!(response.headers(), ordinary.headers());
+            let (Body::Once(actual), Body::Once(expected)) =
+                (response.into_body(), ordinary.into_body())
+            else {
+                panic!("buffered wire error")
+            };
+            assert_eq!(actual, expected);
+        }
+        assert!(
+            EdgeError::internal(anyhow::anyhow!("private token=secret"))
+                .response_framing_error()
+                .is_none()
+        );
+        for length_error in [
+            ResponseEgressBodyLengthError::Exceeded,
+            ResponseEgressBodyLengthError::Incomplete,
+        ] {
+            let error = EdgeError::internal(length_error);
+            assert_eq!(error.response_framing_error(), None);
+            assert_eq!(
+                response_egress_body_length_error(&error),
+                Some(length_error)
+            );
+        }
+    }
+
+    #[test]
+    fn provider_diagnostics_never_change_public_errors() {
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::Send,
+            cause: FastlyFailureCause::ConnectionRefused,
+        };
+        let pairs = [
+            (
+                EdgeError::bad_request("outbound request rejected"),
+                EdgeError::bad_request_with_detail("outbound request rejected", detail),
+            ),
+            (
+                EdgeError::bad_gateway_with_reason(
+                    "upstream unavailable",
+                    BadGatewayReason::Unreachable,
+                ),
+                EdgeError::bad_gateway_with_detail(
+                    "upstream unavailable",
+                    BadGatewayReason::Unreachable,
+                    detail,
+                ),
+            ),
+            (
+                EdgeError::gateway_timeout_caused(
+                    "upstream timed out",
+                    BudgetSource::PerCallTimeout,
+                ),
+                EdgeError::gateway_timeout_with_detail(
+                    "upstream timed out",
+                    BudgetSource::PerCallTimeout,
+                    detail,
+                ),
+            ),
+            (
+                EdgeError::internal(anyhow::anyhow!("https://example.com/?token=secret")),
+                EdgeError::internal_with_detail(
+                    anyhow::anyhow!("https://example.com/?token=secret"),
+                    detail,
+                ),
+            ),
+        ];
+        for (plain, diagnosed) in pairs {
+            assert!(plain.provider_failure_detail().is_none());
+            assert_eq!(diagnosed.provider_failure_detail(), Some(&detail));
+            assert_eq!(plain.to_string(), diagnosed.to_string());
+            assert_eq!(plain.message(), diagnosed.message());
+            assert_eq!(plain.status(), diagnosed.status());
+            assert_eq!(plain.kind(), diagnosed.kind());
+            match (&plain, &diagnosed) {
+                (EdgeError::BadRequest { .. }, EdgeError::BadRequest { .. }) => {}
+                (
+                    EdgeError::BadGateway { reason: left, .. },
+                    EdgeError::BadGateway { reason: right, .. },
+                ) => assert_eq!(left, right),
+                (
+                    EdgeError::GatewayTimeout { cause: left, .. },
+                    EdgeError::GatewayTimeout { cause: right, .. },
+                ) => assert_eq!(left, right),
+                (EdgeError::Internal { .. }, EdgeError::Internal { .. }) => assert_eq!(
+                    plain.inner().unwrap().to_string(),
+                    diagnosed.inner().unwrap().to_string()
+                ),
+                _ => panic!("diagnostic attachment must preserve the error variant"),
+            }
+            let before = plain.into_response().expect("plain response");
+            let after = diagnosed.into_response().expect("diagnosed response");
+            assert_eq!(before.status(), after.status());
+            assert_eq!(before.headers(), after.headers());
+            assert_eq!(before.body().as_bytes(), after.body().as_bytes());
+            assert!(
+                !str::from_utf8(after.body().as_bytes().expect("buffered wire"))
+                    .expect("wire text")
+                    .contains("secret")
+            );
+        }
+    }
+
+    #[test]
+    fn internal_from_anyhow_keeps_the_original_source_without_detail() {
+        let source = IoError::from_raw_os_error(42);
+        let error = EdgeError::from(anyhow::Error::new(source));
+        assert!(error.provider_failure_detail().is_none());
+        assert_eq!(
+            error
+                .inner()
+                .expect("source")
+                .downcast_ref::<IoError>()
+                .expect("original concrete source")
+                .raw_os_error(),
+            Some(42_i32)
+        );
+    }
+
+    #[test]
+    fn request_overflow_origins_share_one_fixed_wire_contract() {
+        for origin in [
+            RequestBodyOverflowOrigin::Inbound,
+            RequestBodyOverflowOrigin::OutboundUpload,
+        ] {
+            let error = EdgeError::payload_too_large(origin);
+            assert_eq!(error.request_body_overflow_origin(), Some(origin));
+            assert_eq!(error.to_string(), "request body too large");
+            assert_eq!(error.message(), "request body too large");
+            assert!(error.inner().is_none());
+            assert!(error.store_extraction_reason().is_none());
+            let response = error.into_response().expect("response");
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(!response.headers().contains_key(RETRY_AFTER));
+            assert_eq!(
+                response
+                    .body()
+                    .to_json::<serde_json::Value>()
+                    .expect("JSON"),
+                json!({"error": {
+                    "status": 413_u16, "kind": "payload_too_large", "message": "request body too large"
+                }})
+            );
+        }
+        assert!(
+            EdgeError::bad_request("malformed payload")
+                .request_body_overflow_origin()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bad_gateway_and_gateway_timeout_surface() {
+        for (err, code, msg) in [
+            (
+                EdgeError::bad_gateway("upstream refused"),
+                StatusCode::BAD_GATEWAY,
+                "upstream refused",
+            ),
+            (
+                EdgeError::gateway_timeout("deadline expired"),
+                StatusCode::GATEWAY_TIMEOUT,
+                "deadline expired",
+            ),
+        ] {
+            assert_eq!(err.status(), code);
+            assert_eq!(err.message(), msg);
+            assert!(err.inner().is_none());
+            assert!(err.to_string().contains(msg));
+        }
+    }
+
+    #[test]
+    fn bad_gateway_and_gateway_timeout_json_shape() {
+        for (err, code, kind, msg) in [
+            (
+                EdgeError::bad_gateway("nope"),
+                502_u16,
+                "bad_gateway",
+                "bad gateway",
+            ),
+            (
+                EdgeError::bad_gateway_with_reason("nope", BadGatewayReason::Protocol),
+                502_u16,
+                "bad_gateway",
+                "bad gateway",
+            ),
+            (
+                EdgeError::bad_gateway_with_reason("nope", BadGatewayReason::Unreachable),
+                502_u16,
+                "bad_gateway",
+                "bad gateway",
+            ),
+            (
+                EdgeError::bad_gateway_with_reason("nope", BadGatewayReason::Transport),
+                502_u16,
+                "bad_gateway",
+                "bad gateway",
+            ),
+            (
+                EdgeError::gateway_timeout("late"),
+                504_u16,
+                "gateway_timeout",
+                "gateway timeout",
+            ),
+            (
+                EdgeError::gateway_timeout_caused("late", BudgetSource::PerCallTimeout),
+                504_u16,
+                "gateway_timeout",
+                "gateway timeout",
+            ),
+            (
+                EdgeError::gateway_timeout_caused("late", BudgetSource::RequestDeadline),
+                504_u16,
+                "gateway_timeout",
+                "gateway timeout",
+            ),
+            (
+                EdgeError::gateway_timeout_caused("late", BudgetSource::Default),
+                504_u16,
+                "gateway_timeout",
+                "gateway timeout",
+            ),
+        ] {
+            let response = err.into_response().expect("response");
+            assert_eq!(response.status().as_u16(), code);
+            let body_json = parse_body(response);
+            assert_eq!(body_json["error"]["status"], code);
+            assert_eq!(body_json["error"]["kind"], serde_json::Value::from(kind));
+            assert_eq!(body_json["error"]["message"], serde_json::Value::from(msg));
+            assert!(
+                body_json["error"].get("field_path").is_none(),
+                "502/504 carry no field_path"
+            );
+            assert!(
+                body_json["error"].get("reason").is_none(),
+                "reason is not part of the wire shape"
+            );
+            assert!(
+                body_json["error"].get("cause").is_none(),
+                "cause is not part of the wire shape"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_gateway_decode_reason_is_not_serialized() {
+        for reason in [
+            BadGatewayDecodeReason::Brotli,
+            BadGatewayDecodeReason::Deflate,
+            BadGatewayDecodeReason::Gzip,
+            BadGatewayDecodeReason::Json,
+        ] {
+            let err = EdgeError::bad_gateway_with_reason("nope", BadGatewayReason::Decode(reason));
+            let response = err.into_response().expect("response");
+            assert_eq!(response.status().as_u16(), 502);
+            let body_json = parse_body(response);
+            assert_eq!(body_json["error"]["status"], 502_u16);
+            assert_eq!(body_json["error"]["kind"], "bad_gateway");
+            assert_eq!(body_json["error"]["message"], "bad gateway");
+            assert!(body_json["error"].get("reason").is_none());
+        }
+    }
+
+    #[test]
+    fn server_error_wire_messages_do_not_expose_internal_diagnostics() {
+        const TOKEN: &str = "super-secret-token";
+        let diagnostic = format!(
+            "provider failed for https://example.com/bid?access_token={TOKEN}: connection refused"
+        );
+        let cases = [
+            (
+                EdgeError::bad_gateway_with_reason(
+                    diagnostic.clone(),
+                    BadGatewayReason::Unreachable,
+                ),
+                "bad gateway",
+            ),
+            (
+                EdgeError::gateway_timeout_caused(diagnostic.clone(), BudgetSource::PerCallTimeout),
+                "gateway timeout",
+            ),
+            (
+                EdgeError::internal(anyhow::anyhow!(diagnostic.clone())),
+                "internal server error",
+            ),
+            (
+                EdgeError::response_too_large_with_reason(
+                    diagnostic,
+                    ResponseLimitReason::EncodedBody,
+                ),
+                "upstream response exceeded configured limits",
+            ),
+        ];
+
+        for (error, public_message) in cases {
+            assert!(
+                error.message().contains(TOKEN),
+                "the diagnostic remains available before wire conversion"
+            );
+            let response = error.into_response().expect("response");
+            let body = parse_body(response);
+            assert_eq!(body["error"]["message"], public_message);
+            let encoded = body.to_string();
+            assert!(!encoded.contains(TOKEN), "token escaped in {encoded}");
+            assert!(
+                !encoded.contains("access_token"),
+                "query escaped in {encoded}"
+            );
+            assert!(
+                !encoded.contains("connection refused"),
+                "provider diagnostic escaped in {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_store_provider_diagnostics_do_not_reach_wire() {
+        const TOKEN: &str = "provider-secret-token";
+        let cases = [
+            (
+                ConfigStoreError::InvalidKey {
+                    message: format!("invalid key includes {TOKEN}"),
+                },
+                "config store rejected the requested key",
+            ),
+            (
+                ConfigStoreError::Unavailable {
+                    message: format!("provider unavailable at https://user:{TOKEN}@config.invalid"),
+                },
+                "config store is unavailable",
+            ),
+        ];
+
+        for (provider_error, public_message) in cases {
+            let response = EdgeError::from(provider_error)
+                .into_response()
+                .expect("response");
+            let body = parse_body(response);
+            assert_eq!(body["error"]["message"], public_message);
+            assert!(!body.to_string().contains(TOKEN));
+        }
+    }
+
+    #[test]
+    fn bad_gateway_reason_is_typed() {
+        let EdgeError::BadGateway {
+            reason: default_reason,
+            ..
+        } = EdgeError::bad_gateway("x")
+        else {
+            panic!("expected BadGateway");
+        };
+        assert_eq!(default_reason, BadGatewayReason::Unspecified);
+
+        for expected in [
+            BadGatewayReason::Decode(BadGatewayDecodeReason::Brotli),
+            BadGatewayReason::Decode(BadGatewayDecodeReason::Deflate),
+            BadGatewayReason::Decode(BadGatewayDecodeReason::Gzip),
+            BadGatewayReason::Decode(BadGatewayDecodeReason::Json),
+            BadGatewayReason::Protocol,
+            BadGatewayReason::Transport,
+            BadGatewayReason::Unreachable,
+            BadGatewayReason::Unspecified,
+        ] {
+            let EdgeError::BadGateway { reason, .. } =
+                EdgeError::bad_gateway_with_reason("x", expected)
+            else {
+                panic!("expected BadGateway");
+            };
+            assert_eq!(reason, expected);
+        }
+    }
 
     #[test]
     fn bad_request_sets_status_and_message() {
         let err = EdgeError::bad_request("oops");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "oops");
+    }
+
+    #[test]
+    fn bare_gateway_timeout_is_unspecified() {
+        let EdgeError::GatewayTimeout { cause, .. } = EdgeError::gateway_timeout("x") else {
+            panic!("expected GatewayTimeout");
+        };
+        assert_eq!(cause, BudgetSource::Unspecified);
     }
 
     #[test]
@@ -368,12 +1332,20 @@ mod tests {
                 assert_eq!(message, "missing field");
                 assert_eq!(field_path, "feature.new_checkout");
             }
-            EdgeError::BadRequest { .. }
+            EdgeError::BadGateway { .. }
+            | EdgeError::BadRequest { .. }
+            | EdgeError::GatewayTimeout { .. }
             | EdgeError::Internal { .. }
             | EdgeError::MethodNotAllowed { .. }
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
+            | EdgeError::RequestHeaderFieldsTooLarge { .. }
+            | EdgeError::RequestTimeout { .. }
+            | EdgeError::ResponseTooLarge { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::StoreExtraction { .. }
+            | EdgeError::UriTooLong { .. }
+            | EdgeError::PayloadTooLarge { .. }
             | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
         }
     }
@@ -387,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn config_out_of_date_from_serde_extracts_path_and_message() {
+    fn store_deserialization_from_serde_extracts_path_and_message() {
         use serde::Deserialize;
 
         #[derive(Debug, Deserialize)]
@@ -404,32 +1376,29 @@ mod tests {
 
         // Feed JSON that puts a string where u32 is expected to force a
         // type-mismatch error at path `service.timeout_ms`.
-        let json = r#"{"service": {"timeout_ms": "not-a-number"}}"#;
-        let de = &mut serde_json::Deserializer::from_str(json);
+        let json = json!({"service": {"timeout_ms": "not-a-number"}}).to_string();
+        let de = &mut serde_json::Deserializer::from_str(&json);
         let result: Result<Outer, _> = serde_path_to_error::deserialize(de);
         let serde_err = result.expect_err("expected deserialization error");
 
-        let err = EdgeError::config_out_of_date_from_serde(&serde_err);
+        let err = EdgeError::store_deserialization_from_serde(&serde_err);
 
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!err.message().is_empty());
-        match err {
-            EdgeError::ConfigOutOfDate { field_path, .. } => {
-                // String segments redacted, structure preserved.
-                assert_eq!(field_path, "<redacted>.<redacted>");
-            }
-            EdgeError::BadRequest { .. }
-            | EdgeError::Internal { .. }
-            | EdgeError::MethodNotAllowed { .. }
-            | EdgeError::NotFound { .. }
-            | EdgeError::NotImplemented { .. }
-            | EdgeError::ServiceUnavailable { .. }
-            | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
-        }
+        let EdgeError::StoreExtraction {
+            field_path: Some(field_path),
+            reason: StoreExtractionReason::Deserialization,
+            ..
+        } = err
+        else {
+            panic!("expected deserialization store extraction");
+        };
+        // String segments redacted, structure preserved.
+        assert_eq!(field_path, "<redacted>.<redacted>");
     }
 
     #[test]
-    fn config_out_of_date_from_serde_redacts_map_key_from_path_and_message() {
+    fn store_deserialization_from_serde_redacts_map_key_from_path_and_message() {
         use serde::Deserialize;
         use std::collections::BTreeMap;
 
@@ -450,40 +1419,34 @@ mod tests {
         // field in the serde path, so every string segment is redacted (structure
         // kept).
         const SENTINEL: &str = "SUPER_SECRET_MAP_KEY";
-        let json = format!(r#"{{"items": {{"{SENTINEL}": {{"port": "nope"}}}}}}"#);
+        let json = json!({"items": {(SENTINEL): {"port": "nope"}}}).to_string();
         let de = &mut serde_json::Deserializer::from_str(&json);
         let result: Result<Outer, _> = serde_path_to_error::deserialize(de);
         let serde_err = result.expect_err("expected deserialization error");
 
-        let err = EdgeError::config_out_of_date_from_serde(&serde_err);
-        match err {
-            EdgeError::ConfigOutOfDate {
-                field_path,
-                message,
-            } => {
-                assert!(
-                    !message.contains(SENTINEL),
-                    "a stored map key must never reach the message: {message}"
-                );
-                assert!(
-                    !field_path.contains(SENTINEL),
-                    "a stored map key must never reach the field_path: {field_path}"
-                );
-                // Structure is preserved (items.<key>.port -> redacted, dotted).
-                assert_eq!(field_path, "<redacted>.<redacted>.<redacted>");
-            }
-            EdgeError::BadRequest { .. }
-            | EdgeError::Internal { .. }
-            | EdgeError::MethodNotAllowed { .. }
-            | EdgeError::NotFound { .. }
-            | EdgeError::NotImplemented { .. }
-            | EdgeError::ServiceUnavailable { .. }
-            | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
-        }
+        let err = EdgeError::store_deserialization_from_serde(&serde_err);
+        let EdgeError::StoreExtraction {
+            field_path: Some(field_path),
+            message,
+            reason: StoreExtractionReason::Deserialization,
+        } = err
+        else {
+            panic!("expected deserialization store extraction");
+        };
+        assert!(
+            !message.contains(SENTINEL),
+            "a stored map key must never reach the message: {message}"
+        );
+        assert!(
+            !field_path.contains(SENTINEL),
+            "a stored map key must never reach the field_path: {field_path}"
+        );
+        // Structure is preserved (items.<key>.port -> redacted, dotted).
+        assert_eq!(field_path, "<redacted>.<redacted>.<redacted>");
     }
 
     #[test]
-    fn config_out_of_date_from_serde_root_error_passes_through_sentinel() {
+    fn store_deserialization_from_serde_root_error_passes_through_sentinel() {
         use serde::Deserialize;
 
         #[derive(Debug, Deserialize)]
@@ -492,33 +1455,30 @@ mod tests {
             value: u32,
         }
 
-        // A completely invalid JSON causes a root-level error. serde_path_to_error
+        // A valid JSON string instead of an object causes a root-level error. serde_path_to_error
         // returns "." as the path sentinel in this case.
-        let json = r#""not-an-object""#;
-        let de = &mut serde_json::Deserializer::from_str(json);
+        let json = json!("not-an-object").to_string();
+        let de = &mut serde_json::Deserializer::from_str(&json);
         let result: Result<Root, _> = serde_path_to_error::deserialize(de);
         let serde_err = result.expect_err("expected deserialization error");
 
         let expected_path = serde_err.path().to_string();
-        let err = EdgeError::config_out_of_date_from_serde(&serde_err);
+        let err = EdgeError::store_deserialization_from_serde(&serde_err);
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
-        match err {
-            EdgeError::ConfigOutOfDate { field_path, .. } => {
-                // The from_serde constructor passes the library's path through
-                // verbatim; for root-level errors that is ".".
-                assert_eq!(
-                    field_path, expected_path,
-                    "field_path should match serde_path_to_error sentinel"
-                );
-            }
-            EdgeError::BadRequest { .. }
-            | EdgeError::Internal { .. }
-            | EdgeError::MethodNotAllowed { .. }
-            | EdgeError::NotFound { .. }
-            | EdgeError::NotImplemented { .. }
-            | EdgeError::ServiceUnavailable { .. }
-            | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
-        }
+        let EdgeError::StoreExtraction {
+            field_path: Some(field_path),
+            reason: StoreExtractionReason::Deserialization,
+            ..
+        } = err
+        else {
+            panic!("expected deserialization store extraction");
+        };
+        // The serde constructor passes the library's path through verbatim;
+        // for root-level errors that is ".".
+        assert_eq!(
+            field_path, expected_path,
+            "field_path should match serde_path_to_error sentinel"
+        );
     }
 
     #[test]
@@ -532,14 +1492,32 @@ mod tests {
     fn config_store_error_invalid_key_maps_to_bad_request() {
         let err = EdgeError::from(ConfigStoreError::invalid_key("invalid config key"));
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(err.message(), "invalid config key");
+        assert_eq!(err.message(), "config store rejected the requested key");
     }
 
     #[test]
     fn config_store_error_unavailable_maps_to_service_unavailable() {
         let err = EdgeError::from(ConfigStoreError::unavailable("backend offline"));
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(err.message(), "backend offline");
+        assert_eq!(err.message(), "config store is unavailable");
+    }
+
+    #[test]
+    fn gateway_timeout_caused_preserves_cause() {
+        for expected in [
+            BudgetSource::BatchCutoff,
+            BudgetSource::Default,
+            BudgetSource::PerCallTimeout,
+            BudgetSource::RequestDeadline,
+            BudgetSource::Unspecified,
+        ] {
+            let EdgeError::GatewayTimeout { cause, .. } =
+                EdgeError::gateway_timeout_caused("x", expected)
+            else {
+                panic!("expected GatewayTimeout");
+            };
+            assert_eq!(cause, expected);
+        }
     }
 
     #[test]
@@ -601,9 +1579,36 @@ mod tests {
 
     #[test]
     fn method_not_allowed_lists_methods_sorted() {
-        let err = EdgeError::method_not_allowed(&Method::POST, &[Method::GET, Method::DELETE]);
+        let err = EdgeError::method_not_allowed(
+            &Method::POST,
+            &[Method::GET, Method::DELETE, Method::GET],
+        );
         assert_eq!(err.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert!(err.message().contains("allowed: DELETE, GET"));
+        assert_eq!(
+            err.to_string(),
+            "method POST not allowed; allowed: DELETE, GET"
+        );
+        let EdgeError::MethodNotAllowed { allowed, .. } = err else {
+            panic!("expected MethodNotAllowed");
+        };
+        assert_eq!(allowed, vec![Method::DELETE, Method::GET]);
+    }
+
+    #[test]
+    fn method_not_allowed_response_emits_sorted_deduplicated_allow_header() {
+        let response = EdgeError::method_not_allowed(
+            &Method::POST,
+            &[Method::GET, Method::DELETE, Method::GET],
+        )
+        .into_response()
+        .expect("response");
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response.headers().get(ALLOW).expect("Allow header"),
+            "DELETE, GET"
+        );
     }
 
     #[test]
@@ -655,6 +1660,7 @@ mod tests {
             }};
         }
 
+        assert_kind!(EdgeError::bad_gateway("x"), "bad_gateway", 502_u16);
         assert_kind!(EdgeError::bad_request("x"), "bad_request", 400_u16);
         assert_kind!(
             EdgeError::config_out_of_date("x", "f"),
@@ -673,6 +1679,12 @@ mod tests {
         );
         assert_kind!(EdgeError::not_found("/x"), "not_found", 404_u16);
         assert_kind!(EdgeError::not_implemented("x"), "not_implemented", 501_u16);
+        assert_kind!(
+            EdgeError::response_too_large("x"),
+            "response_too_large",
+            502_u16
+        );
+        assert_kind!(EdgeError::gateway_timeout("x"), "gateway_timeout", 504_u16);
         assert_kind!(
             EdgeError::service_unavailable("x"),
             "service_unavailable",
@@ -695,15 +1707,239 @@ mod tests {
             }};
         }
 
+        assert_retry_after!(EdgeError::bad_gateway("x"), false);
         assert_retry_after!(EdgeError::bad_request("x"), false);
+        assert_retry_after!(EdgeError::gateway_timeout("x"), false);
         assert_retry_after!(EdgeError::internal(anyhow::anyhow!("x")), false);
+        assert_retry_after!(EdgeError::response_too_large("x"), false);
         // ServiceUnavailable is also 503 but must NOT carry Retry-After
         assert_retry_after!(EdgeError::service_unavailable("x"), false);
         assert_retry_after!(EdgeError::config_out_of_date("x", "f"), true);
     }
 
     #[test]
+    fn response_too_large_constructors_preserve_unspecified_and_specific_reason() {
+        let EdgeError::ResponseTooLarge { reason, .. } = EdgeError::response_too_large("large")
+        else {
+            panic!("expected ResponseTooLarge");
+        };
+        assert_eq!(reason, ResponseLimitReason::Unspecified);
+
+        let EdgeError::ResponseTooLarge {
+            reason: specific_reason,
+            ..
+        } = EdgeError::response_too_large_with_reason("large", ResponseLimitReason::EncodedBody)
+        else {
+            panic!("expected ResponseTooLarge");
+        };
+        assert_eq!(specific_reason, ResponseLimitReason::EncodedBody);
+    }
+
+    #[test]
+    fn response_too_large_preserves_every_reason_without_serializing_it() {
+        for reason in [
+            ResponseLimitReason::BrotliWindow,
+            ResponseLimitReason::BufferedBody,
+            ResponseLimitReason::DecodedBody,
+            ResponseLimitReason::DecoderMemory,
+            ResponseLimitReason::EncodedBody,
+            ResponseLimitReason::HeaderBytes,
+            ResponseLimitReason::HeaderCount,
+            ResponseLimitReason::Unspecified,
+        ] {
+            let error = EdgeError::response_too_large_with_reason("response limit", reason);
+            assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+            let EdgeError::ResponseTooLarge {
+                reason: stored_reason,
+                ..
+            } = &error
+            else {
+                panic!("expected ResponseTooLarge");
+            };
+            assert_eq!(*stored_reason, reason);
+
+            let response = error.into_response().expect("response");
+            assert!(response.headers().get(RETRY_AFTER).is_none());
+            let body = parse_body(response);
+            assert_eq!(body["error"]["status"], 502_u16);
+            assert_eq!(body["error"]["kind"], "response_too_large");
+            assert_eq!(
+                body["error"]["message"],
+                "upstream response exceeded configured limits"
+            );
+            assert!(body["error"].get("reason").is_none());
+            assert!(body["error"].get("field_path").is_none());
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive extraction-reason wire-policy table is clearer in one test"
+    )]
+    fn store_extraction_reason_wire_policy_table() {
+        let cases = [
+            (
+                StoreExtractionReason::BackendFailure,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::BackendUnavailable,
+                503_u16,
+                "service_unavailable",
+                false,
+            ),
+            (
+                StoreExtractionReason::DeadlineExceeded,
+                503_u16,
+                "service_unavailable",
+                false,
+            ),
+            (
+                StoreExtractionReason::IntegrityMismatch,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::MalformedEnvelope,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::InvalidKey,
+                400_u16,
+                "bad_request",
+                false,
+            ),
+            (
+                StoreExtractionReason::InvalidSecretValue,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::MissingBlob,
+                503_u16,
+                "config_out_of_date",
+                true,
+            ),
+            (
+                StoreExtractionReason::MissingRegistry,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::MissingSecret,
+                503_u16,
+                "config_out_of_date",
+                true,
+            ),
+            (
+                StoreExtractionReason::Deserialization,
+                503_u16,
+                "config_out_of_date",
+                true,
+            ),
+            (
+                StoreExtractionReason::SecretBackendUnavailable,
+                503_u16,
+                "service_unavailable",
+                false,
+            ),
+            (
+                StoreExtractionReason::StructuralLimit,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::UnsupportedVersion,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::UnknownStore,
+                500_u16,
+                "internal",
+                false,
+            ),
+            (
+                StoreExtractionReason::Validation,
+                503_u16,
+                "config_out_of_date",
+                true,
+            ),
+            (
+                StoreExtractionReason::ValueTooLarge,
+                500_u16,
+                "internal",
+                false,
+            ),
+        ];
+
+        for (reason, status, kind, retry_after) in cases {
+            let error = EdgeError::store_extraction(
+                reason,
+                "safe extraction diagnostic",
+                Some(String::from("field")),
+            );
+            assert_eq!(error.store_extraction_reason(), Some(reason));
+            let response = error.into_response().expect("response");
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(response.headers().contains_key(RETRY_AFTER), retry_after);
+            let body = parse_body(response);
+            assert_eq!(body["error"]["kind"], kind);
+            assert_eq!(body["error"]["field_path"], "field");
+            assert!(body["error"].get("reason").is_none());
+        }
+
+        let error = EdgeError::store_extraction(
+            StoreExtractionReason::MissingBlob,
+            "missing",
+            Some(String::new()),
+        );
+        let body = parse_body(error.into_response().expect("response"));
+        assert!(body["error"].get("field_path").is_none());
+    }
+
+    #[test]
+    fn inbound_boundary_errors_have_distinct_status_and_kind() {
+        for (error, status, kind) in [
+            (
+                EdgeError::request_header_fields_too_large("headers"),
+                431_u16,
+                "request_header_fields_too_large",
+            ),
+            (
+                EdgeError::request_timeout("request body deadline exceeded"),
+                408_u16,
+                "request_timeout",
+            ),
+            (EdgeError::uri_too_long("target"), 414_u16, "uri_too_long"),
+        ] {
+            assert_eq!(error.status().as_u16(), status);
+            let body = parse_body(error.into_response().expect("response"));
+            assert_eq!(body["error"]["kind"], kind);
+            assert!(body["error"].get("field_path").is_none());
+        }
+    }
+
+    #[test]
     fn field_path_only_on_config_out_of_date() {
+        for err in [EdgeError::bad_gateway("x"), EdgeError::gateway_timeout("x")] {
+            let body = parse_body(err.into_response().expect("response"));
+            assert!(
+                body["error"].get("field_path").is_none(),
+                "field_path should be absent for gateway errors"
+            );
+        }
+
         let bad_req_err = EdgeError::bad_request("x");
         let bad_req_body = parse_body(bad_req_err.into_response().expect("response"));
         assert!(

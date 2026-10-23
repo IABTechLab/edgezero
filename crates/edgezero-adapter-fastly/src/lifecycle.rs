@@ -17,6 +17,18 @@ pub struct Sandbox<T> {
     state: Option<T>,
 }
 
+#[cfg(any(feature = "fastly", test))]
+struct DeliveryResult<E>(Result<(), E>);
+
+#[cfg(feature = "fastly")]
+impl<E> HandlerResult for DeliveryResult<E> {
+    type Error = E;
+
+    fn send(self) -> Result<(), E> {
+        self.0
+    }
+}
+
 impl<T> Default for Sandbox<T> {
     #[inline]
     fn default() -> Self {
@@ -105,53 +117,69 @@ impl<T> Sandbox<T> {
 /// Serve custom callbacks with lazy retained state and the supplied SDK limits.
 ///
 /// The callback controls initialization, dispatch, finalization and streaming.
-/// Its result goes directly to the SDK's sending boundary. A callback that sends
-/// its own response should return `()` or `Ok(())`; after commitment, handle
-/// failures locally rather than return an error that would send another response.
+/// The callback owns sending and returns only a terminal `Result<(), E>`. The
+/// SDK records that result without sending a synthetic error response. Errors
+/// terminate serving, including failures after commitment, without a second send.
 ///
 /// SDK limits are upper bounds, not a guarantee of reuse. This function does not
 /// read configuration or enable reuse in existing entry points.
 #[cfg(feature = "fastly")]
 #[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
 #[inline]
-pub fn serve_custom<T, F, R>(serve: Serve, mut handler: F) -> ServeSummary<R::Error>
+pub fn serve_custom<T, F, E>(serve: Serve, mut handler: F) -> ServeSummary<E>
 where
-    F: FnMut(fastly::Request, &mut Sandbox<T>) -> R,
-    R: HandlerResult,
+    F: FnMut(fastly::Request, &mut Sandbox<T>) -> Result<(), E>,
 {
+    crate::init_fastly_abi();
     let mut sandbox = Sandbox::default();
     serve.run_with_context(
-        |request, context: &mut Sandbox<T>| context.handle(request, &mut handler),
+        |request, context: &mut Sandbox<T>| DeliveryResult(context.handle(request, &mut handler)),
         &mut sandbox,
     )
 }
 
 /// Handle one request with fresh state, without entering the SDK serving loop.
 ///
-/// Takes a request already received by the caller and completes the callback's
-/// `HandlerResult` exactly once. Use from an ordinary `fn main`: propagating a
-/// returned error through `#[fastly::main]` could attempt a second error response.
-/// Explicitly sending callbacks follow the same rules as [`serve_custom`].
+/// Takes a request already received by the caller. Sending remains owned by the
+/// callback; this function never asks the SDK to render an error. Use an ordinary `main`.
 ///
 /// # Errors
-/// Returns the error from completing the callback's SDK result.
+/// Returns the callback error unchanged without another response attempt.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_custom<T, R, F>(request: fastly::Request, handler: F) -> Result<(), R::Error>
+pub fn run_custom<T, E, F>(request: fastly::Request, handler: F) -> Result<(), E>
 where
-    R: HandlerResult,
-    F: FnOnce(fastly::Request, &mut Sandbox<T>) -> R,
+    F: FnOnce(fastly::Request, &mut Sandbox<T>) -> Result<(), E>,
 {
-    Sandbox::default().handle(request, handler).send()
+    crate::init_fastly_abi();
+    Sandbox::default().handle(request, handler)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Sandbox;
+    use super::{DeliveryResult, Sandbox};
 
     // Neither the retained value nor an error payload needs framework traits.
     struct App(u64);
     struct Fallback(&'static str);
+
+    #[test]
+    fn owned_delivery_retains_terminal_error_without_synthetic_send() {
+        let result = DeliveryResult(Err::<(), _>("post-commit error"));
+        assert_eq!(result.0, Err("post-commit error"));
+    }
+
+    #[cfg(feature = "fastly")]
+    #[test]
+    fn sdk_delivery_result_returns_terminal_error_without_synthetic_send() {
+        use fastly::http::serve::HandlerResult as _;
+
+        assert_eq!(
+            DeliveryResult(Err::<(), _>("post-commit error")).send(),
+            Err("post-commit error")
+        );
+        assert_eq!(DeliveryResult(Ok::<(), &str>(())).send(), Ok(()));
+    }
 
     #[test]
     fn early_return_counts_request_without_setup_or_build() {
@@ -199,6 +227,81 @@ mod tests {
         assert!(fresh.state().is_none());
         assert_eq!(fresh.requests(), 0);
         assert_eq!(fresh.initialization_attempts(), 0);
+    }
+
+    #[test]
+    fn failed_app_assembly_retries_without_retaining_partial_state() {
+        use edgezero_core::EdgeError;
+        use edgezero_core::app::{App as AssembledApp, Hooks};
+        use edgezero_core::router::RouterService;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static BUILDS: AtomicUsize = AtomicUsize::new(0);
+        static CONFIGURES: AtomicUsize = AtomicUsize::new(0);
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct StateProbe;
+        struct RetryHooks;
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for StateProbe {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests route and configure failure retention"
+        )]
+        impl Hooks for RetryHooks {
+            fn configure(app: &mut AssembledApp) -> Result<(), EdgeError> {
+                if app.state::<Arc<StateProbe>>().is_none() {
+                    return Err(EdgeError::service_unavailable("registered state missing"));
+                }
+                if CONFIGURES.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(EdgeError::service_unavailable("configuration unavailable"));
+                }
+                Ok(())
+            }
+
+            fn routes() -> Result<RouterService, EdgeError> {
+                if BUILDS.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(EdgeError::service_unavailable("routes unavailable"));
+                }
+                Ok(RouterService::builder()
+                    .with_state(Arc::new(StateProbe))
+                    .build())
+            }
+        }
+
+        let mut sandbox = Sandbox::<AssembledApp>::default();
+        for (attempt, message) in [(1, "routes unavailable"), (2, "configuration unavailable")] {
+            let error = sandbox
+                .initialize(|| AssembledApp::build::<RetryHooks>(crate::FASTLY_PLATFORM))
+                .unwrap_err();
+            assert_eq!(error.message(), message);
+            assert!(sandbox.state().is_none());
+            assert_eq!(sandbox.initialization_attempts(), attempt);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        sandbox
+            .initialize(|| AssembledApp::build::<RetryHooks>(crate::FASTLY_PLATFORM))
+            .unwrap();
+        let retained = Arc::clone(sandbox.state().unwrap().state::<Arc<StateProbe>>().unwrap());
+        sandbox
+            .initialize::<EdgeError, _>(|| panic!("successful app must not be rebuilt"))
+            .unwrap();
+        assert_eq!(sandbox.initialization_attempts(), 3);
+        assert_eq!(BUILDS.load(Ordering::SeqCst), 3);
+        assert_eq!(CONFIGURES.load(Ordering::SeqCst), 2);
+        assert!(Arc::ptr_eq(
+            &retained,
+            sandbox.state().unwrap().state::<Arc<StateProbe>>().unwrap()
+        ));
+        drop(retained);
+        drop(sandbox);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2);
     }
 
     #[test]

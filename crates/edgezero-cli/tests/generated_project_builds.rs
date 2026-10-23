@@ -15,10 +15,46 @@
 //! ```
 
 #[cfg(test)]
+#[path = "support/fallback_tcp.rs"]
+mod fallback_tcp;
+
+#[cfg(test)]
 mod tests {
     use std::env;
-    use std::path::Path;
-    use std::process::{Command, ExitStatus};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, ExitStatus, Stdio};
+
+    fn require_listed_test(output: &str, sentinel: &str) -> Result<(), String> {
+        let tests: Vec<_> = output
+            .lines()
+            .filter_map(|line| line.trim().strip_suffix(": test"))
+            .collect();
+        if tests.is_empty() {
+            return Err("generated core test listing contained zero tests".to_owned());
+        }
+        let matches = tests
+            .iter()
+            .filter(|name| {
+                **name == sentinel
+                    || name
+                        .strip_suffix(sentinel)
+                        .is_some_and(|prefix| prefix.ends_with("::"))
+            })
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "expected exactly one generated `{sentinel}` test, found {matches}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generated_core_test_gate_rejects_zero_tests() {
+        let error = require_listed_test("0 tests, 0 benchmarks\n", "generated_outbound_http_smoke")
+            .expect_err("a zero-test listing must fail closed");
+        assert!(error.contains("zero tests"));
+    }
 
     /// Targets installed for the toolchain that builds `project`. A wasm
     /// check is skipped when its target is absent (e.g. a local run where
@@ -41,6 +77,100 @@ mod tests {
             .current_dir(project)
             .status()
             .unwrap_or_else(|err| panic!("run generated CLI with {args:?}: {err}"))
+    }
+
+    fn assert_cargo_success(project: &Path, args: &[&str], expectation: &str) {
+        let status = Command::new(env!("CARGO"))
+            .args(args)
+            .current_dir(project)
+            .status()
+            .unwrap_or_else(|err| panic!("run cargo with {args:?}: {err}"));
+        assert!(status.success(), "{expectation}");
+    }
+
+    fn assert_edgezero_success(project: &Path, args: &[&str], expectation: &str) {
+        let status = Command::new(env!("CARGO_BIN_EXE_edgezero"))
+            .args(args)
+            .current_dir(project)
+            .status()
+            .unwrap_or_else(|err| panic!("run edgezero with {args:?}: {err}"));
+        assert!(status.success(), "{expectation}");
+    }
+
+    fn generated_axum_binary(project: &Path) -> PathBuf {
+        let version_output = Command::new("rustc")
+            .arg("-vV")
+            .current_dir(project)
+            .output()
+            .expect("native Rust target");
+        assert!(
+            version_output.status.success(),
+            "rustc native target must be available"
+        );
+        let version = String::from_utf8(version_output.stdout).expect("rustc version");
+        let host = version
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .expect("rustc host triple");
+        let output = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--offline",
+                "--locked",
+                "-p",
+                "scaffold-probe-adapter-axum",
+                "--target",
+                host,
+                "--message-format=json-render-diagnostics",
+            ])
+            .current_dir(project)
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("build generated Axum entrypoint");
+        assert!(
+            output.status.success(),
+            "generated Axum entrypoint must build"
+        );
+        let manifest = project
+            .join("crates/scaffold-probe-adapter-axum/Cargo.toml")
+            .canonicalize()
+            .expect("generated Axum manifest");
+        let manifests: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_slice::<serde_json::Value>(line).expect("Cargo JSON record")
+            })
+            .filter(|record| {
+                record["reason"] == "compiler-artifact"
+                    && record["target"]["name"] == "scaffold-probe-adapter-axum"
+                    && record["target"]["kind"] == serde_json::json!(["bin"])
+                    && record["profile"]["test"] == false
+                    && record["manifest_path"].as_str().is_some_and(|path| {
+                        Path::new(path)
+                            .canonicalize()
+                            .is_ok_and(|candidate| candidate == manifest)
+                    })
+            })
+            .map(|record| {
+                PathBuf::from(
+                    record["executable"]
+                        .as_str()
+                        .expect("native binary executable"),
+                )
+            })
+            .collect();
+        assert_eq!(manifests.len(), 1, "one generated Axum executable");
+        manifests.into_iter().next().expect("generated Axum binary")
+    }
+
+    fn assert_generated_fallback_tcp(project: &Path) {
+        let binary = generated_axum_binary(project);
+        let state = tempfile::tempdir().expect("isolated generated runtime state");
+        let mut command = Command::new(binary);
+        command.current_dir(state.path());
+        super::fallback_tcp::assert_fallbacks(command, "generated", b"scaffold-probe app");
     }
 
     #[test]
@@ -70,13 +200,9 @@ mod tests {
         // `cargo check` so a manifest/config drift surfaces as a
         // fast, clear error -- not as a compilation cascade from
         // a downstream macro tripping over the bad config.
-        let validate = Command::new(env!("CARGO_BIN_EXE_edgezero"))
-            .args(["config", "validate"])
-            .current_dir(&project)
-            .status()
-            .expect("run `edgezero config validate` on the generated workspace");
-        assert!(
-            validate.success(),
+        assert_edgezero_success(
+            &project,
+            &["config", "validate"],
             "generated workspace should pass `edgezero config validate`",
         );
 
@@ -87,26 +213,57 @@ mod tests {
         // with a malformed handler or a manifest that violates the
         // adapter capability matrix would silently pass plain
         // validate but fail under strict.
-        let validate_strict = Command::new(env!("CARGO_BIN_EXE_edgezero"))
-            .args(["config", "validate", "--strict"])
-            .current_dir(&project)
-            .status()
-            .expect("run `edgezero config validate --strict` on the generated workspace");
-        assert!(
-            validate_strict.success(),
+        assert_edgezero_success(
+            &project,
+            &["config", "validate", "--strict"],
             "generated workspace should pass `edgezero config validate --strict`",
+        );
+
+        assert_cargo_success(
+            &project,
+            &["fmt", "--all", "--", "--check"],
+            "generated workspace should be rustfmt-clean",
         );
 
         // Host target: the whole workspace, including the generated CLI
         // crate that imports `edgezero_cli`.
-        let host = Command::new(env!("CARGO"))
-            .args(["check", "--workspace"])
-            .current_dir(&project)
-            .status()
-            .expect("run `cargo check` on the generated workspace");
-        assert!(
-            host.success(),
+        assert_cargo_success(
+            &project,
+            &["check", "--workspace"],
             "generated workspace should compile for the host target",
+        );
+
+        assert_cargo_success(
+            &project,
+            &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            "generated workspace should pass strict clippy",
+        );
+
+        let listed = Command::new(env!("CARGO"))
+            .args(["test", "-p", "scaffold-probe-core", "--lib", "--", "--list"])
+            .current_dir(&project)
+            .output()
+            .expect("list generated core tests");
+        assert!(
+            listed.status.success(),
+            "generated core test list should succeed"
+        );
+        let listed_stdout = String::from_utf8_lossy(&listed.stdout);
+        require_listed_test(&listed_stdout, "generated_outbound_http_smoke")
+            .expect("generated outbound smoke test must be listed exactly once");
+
+        assert_cargo_success(
+            &project,
+            &["test", "-p", "scaffold-probe-core", "--lib"],
+            "generated core tests should pass",
         );
 
         // Typed config validation via the generated `<name>-cli` binary.
@@ -146,8 +303,9 @@ mod tests {
                 continue;
             }
             let crate_name = format!("scaffold-probe-adapter-{adapter}");
-            let wasm = Command::new(env!("CARGO"))
-                .args([
+            assert_cargo_success(
+                &project,
+                &[
                     "check",
                     "-p",
                     &crate_name,
@@ -155,14 +313,10 @@ mod tests {
                     target,
                     "--features",
                     adapter,
-                ])
-                .current_dir(&project)
-                .status()
-                .expect("run `cargo check` for a wasm adapter target");
-            assert!(
-                wasm.success(),
-                "generated {adapter} adapter should compile for {target}",
+                ],
+                &format!("generated {adapter} adapter should compile for {target}"),
             );
         }
+        assert_generated_fallback_tcp(&project);
     }
 }
