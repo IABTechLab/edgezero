@@ -99,6 +99,10 @@ jobs:
         if: matrix.suite == 'workspace'
         run: cargo test --workspace --all-targets
 
+      - name: Core doctests
+        if: matrix.suite == 'workspace'
+        run: cargo test -p edgezero-core --doc
+
       - name: Run EdgeZero CLI tests
         if: matrix.suite == 'cli'
         run: cargo test -p edgezero-cli --all-targets
