@@ -1087,6 +1087,34 @@ where
     )
 }
 
+/// Runs strict startup with explicit options, one application-owned local
+/// initializer, SIGINT and Unix SIGTERM. No ambient hosting/store settings are merged.
+/// Pass an inline `|app, stores| Box::pin(async move { ... })` or a boxed function
+/// so Rust can infer the higher-ranked borrow lifetime. Futures need not be Send.
+///
+/// # Errors
+/// Returns classified startup/runner errors or non-success for forced shutdown.
+#[inline]
+pub fn run_production_app_with_options_and_initializer<A, Initialize>(
+    options: AxumRunOptions,
+    initialize: Initialize,
+) -> anyhow::Result<()>
+where
+    A: Hooks,
+    Initialize: for<'startup> FnOnce(
+        &'startup mut App,
+        &'startup PreparedStores,
+    ) -> LocalStartupFuture<'startup>,
+{
+    run_production_selected::<A, _, _>(
+        options,
+        NativeStoreOverrides::default(),
+        true,
+        future::pending::<()>(),
+        initialize,
+    )
+}
+
 /// Runs production with explicit options and caller-owned stop, installing no
 /// process-wide signal handlers and merging no ambient hosting/store settings.
 ///

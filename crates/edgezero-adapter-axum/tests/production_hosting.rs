@@ -1905,12 +1905,7 @@ mod tests {
     }
 
     fn finish_geo(server: &mut Server, cwd: &TempDir) {
-        assert!(
-            server
-                .request("/stop")
-                .expect("Geo caller stop")
-                .ends_with("stopping")
-        );
+        server.signal("TERM");
         assert!(server.wait().success(), "{}", server.log());
         let log = server.log();
         assert_eq!(log.matches("INITIALIZED").count(), 1);
@@ -1921,6 +1916,25 @@ mod tests {
             0,
             "Geo-only startup must not create store roots or local databases"
         );
+    }
+
+    #[test]
+    fn geo_hosting_production_options_ignore_ambient_settings() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut launch = geo_command("geo-supplied", &cwd, addr);
+        launch
+            .env("EDGEZERO__ADAPTER__HOST", "INVALID_HOST_SENTINEL")
+            .env("EDGEZERO__ADAPTER__PORT", "INVALID_PORT_SENTINEL")
+            .env("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES", "0");
+        let mut server = Server::spawn(launch, addr);
+        server.ready();
+        let value = geo_response(&server, "");
+        assert_eq!(value["geo"]["provider"], "fixture-local");
+        assert_eq!(value["geo"]["status"], "located");
+        assert_upload_status(&upload(&server, "/json", None, exact_json(64), true), 200);
+        assert_upload_status(&upload(&server, "/json", None, exact_json(65), false), 413);
+        finish_geo(&mut server, &cwd);
     }
 
     #[test]
@@ -2088,13 +2102,15 @@ mod tests {
 
     #[test]
     fn both_signals_stop_idle_processes() {
-        for signal in ["INT", "TERM"] {
-            let roots = Roots::new();
-            let addr = address();
-            let mut server = Server::spawn(command("bare", &roots, addr), addr);
-            server.ready();
-            server.signal(signal);
-            assert!(server.wait().success(), "{}", server.log());
+        for mode in ["bare", "geo-supplied"] {
+            for signal in ["INT", "TERM"] {
+                let roots = Roots::new();
+                let addr = address();
+                let mut server = Server::spawn(command(mode, &roots, addr), addr);
+                server.ready();
+                server.signal(signal);
+                assert!(server.wait().success(), "{}", server.log());
+            }
         }
     }
 
@@ -2102,7 +2118,7 @@ mod tests {
     fn sigterm_drains_dispatched_response_closes_idle_and_gates_pipeline() {
         let roots = Roots::new();
         let addr = address();
-        let mut server = Server::spawn(command("bare", &roots, addr), addr);
+        let mut server = Server::spawn(command("geo-supplied", &roots, addr), addr);
         server.ready();
         let mut idle = server.socket().expect("idle socket");
         idle.write_all(b"GET /ready HTTP/1.1\r\nHost: fixture\r\n\r\n")
@@ -2161,7 +2177,7 @@ mod tests {
     fn second_signal_forces_before_budget_exhaustion() {
         let roots = Roots::new();
         let addr = address();
-        let mut server = Server::spawn(command("bare", &roots, addr), addr);
+        let mut server = Server::spawn(command("geo-supplied", &roots, addr), addr);
         server.ready();
         let mut client = server.socket().expect("pending socket");
         client
@@ -2180,15 +2196,19 @@ mod tests {
 
     #[test]
     fn stop_during_startup_never_binds_or_becomes_ready() {
-        let roots = Roots::new();
-        let addr = address();
-        let mut server = Server::spawn(command("starting", &roots, addr), addr);
-        server.wait_line("INITIALIZING");
-        TcpStream::connect_timeout(&addr, Duration::from_millis(50))
-            .expect_err("initialization precedes binding");
-        server.signal("TERM");
-        assert!(server.wait().success());
-        assert!(server.log().contains("STARTUP_DROPPED"));
+        for mode in ["starting", "geo-starting-supplied"] {
+            let roots = Roots::new();
+            let addr = address();
+            let mut server = Server::spawn(command(mode, &roots, addr), addr);
+            server.wait_line("INITIALIZING");
+            TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+                .expect_err("initialization precedes binding");
+            server.signal("TERM");
+            assert!(server.wait().success());
+            assert!(server.log().contains("STARTUP_DROPPED"));
+            assert!(!server.log().contains("INITIALIZED"));
+            assert!(!server.log().contains("ready"));
+        }
     }
 
     #[test]

@@ -42,7 +42,7 @@ policy below declares that those infrastructure controls are enforced. It does n
 or inspect AWS.
 
 ```rust
-use edgezero_adapter_axum::dev_server::{AxumRunOptions, run_app_with_options_and_initializer};
+use edgezero_adapter_axum::dev_server::{AxumRunOptions, run_production_app_with_options_and_initializer};
 use edgezero_adapter_axum::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
 use edgezero_core::app::Hooks;
 
@@ -53,8 +53,8 @@ fn run<A: Hooks>() -> anyhow::Result<()> {
     let options = AxumRunOptions::new("0.0.0.0:8787".parse()?)?
         .with_geo(NativeGeoSelection::CloudFront { policy });
     let capability = options.geo_capability()?;
-    run_app_with_options_and_initializer::<A, _, _>(
-        options, std::future::pending::<()>(), move |_app, _stores| {
+    run_production_app_with_options_and_initializer::<A, _>(
+        options, move |_app, _stores| {
             Box::pin(async move {
                 let _configured_capability = capability;
                 // Validate application requirements here, without inferring
@@ -144,10 +144,14 @@ initializer-based runner. No extra initializer argument or App registry is neede
 Capability is `NativeGeoCapability::Off` or `NativeGeoCapability::Selected { provider, source,
 trust_basis }`. The CloudFront example above captures it in the initializer closure.
 
-This embedding example waits indefinitely; supply your own stop future in a real host.
-Explicit-options runners install no process-wide signal handlers. Capability inspection returns
-`Result<NativeGeoCapability, NativeGeoConfigError>`. It confirms validated selection, not
-per-request coverage, infrastructure protection, or readiness of a downstream policy.
+The production runner above observes SIGINT and Unix SIGTERM, drains in-flight work, and
+forces non-success shutdown on a second signal. It uses the supplied options without merging
+ambient hosting/store settings. For embedding with a caller-owned stop future and no
+process-wide signal handlers, use `run_app_with_options_and_initializer` instead.
+
+Capability inspection returns `Result<NativeGeoCapability, NativeGeoConfigError>`. It confirms
+validated selection, not per-request coverage, infrastructure protection, or readiness of a
+downstream policy.
 
 ## Read the immutable request outcome
 

@@ -19,7 +19,7 @@ use bytes::Bytes;
 use edgezero_adapter_axum::context::AxumRequestContext;
 use edgezero_adapter_axum::dev_server::{
     AxumRunOptions, run_app, run_app_with_options_and_initializer, run_production_app,
-    run_production_app_with_initializer,
+    run_production_app_with_initializer, run_production_app_with_options_and_initializer,
 };
 use edgezero_adapter_axum::diagnostics::{
     IngressDisposition, NativeDiagnosticsHandle, NativeDiagnosticsSnapshot, NativeIngressMetadata,
@@ -864,7 +864,7 @@ fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
     )?;
     let selection = if selected == "geo-off" {
         NativeGeoSelection::Off
-    } else if selected.starts_with("geo-supplied") || selected == "geo-provider-failure" {
+    } else if selected.contains("supplied") || selected == "geo-provider-failure" {
         NativeGeoSelection::Supplied {
             policy,
             id: GeoProviderId::new("fixture-local")?,
@@ -873,43 +873,44 @@ fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
     } else {
         NativeGeoSelection::CloudFront { policy }
     };
-    let options = AxumRunOptions::new(address)?.with_geo(selection);
+    let options = AxumRunOptions::new(address)?
+        .with_shutdown_grace(Duration::from_secs(1))?
+        .with_json_body_limit_bytes(64)?
+        .with_geo(selection);
     // Capture from the same finalized options, without bypassing the runner's validation.
     let capability = options.geo_capability();
     let is_off = selected == "geo-off";
-    let (sender, receiver) = oneshot::channel();
-    run_app_with_options_and_initializer::<FixtureApp, _, _>(
-        options,
-        async move {
-            let _closed = receiver.await;
-        },
-        move |app, stores| {
-            Box::pin(async move {
-                assert!(
-                    stores.config().is_none(),
-                    "Geo fixture declares no config stores"
-                );
-                assert!(stores.kv().is_none(), "Geo fixture declares no KV stores");
-                assert!(
-                    stores.secrets().is_none(),
-                    "Geo fixture declares no secret stores"
-                );
-                let captured_capability = capability.map_err(EdgeError::internal)?;
-                assert_eq!(
-                    matches!(captured_capability, NativeGeoCapability::Off),
-                    is_off,
-                    "initializer sees the finalized selection capability"
-                );
-                app.insert_state(GeoOutcome::Selected {
-                    provider: GeoProviderId::new("forged-app-state").expect("fixture provider ID"),
-                    status: GeoStatus::Error(GeoError::ProviderFailure),
-                });
-                app.insert_state(Arc::new(StopState(Mutex::new(Some(sender)))));
-                println!("INITIALIZED");
-                Ok(())
-            })
-        },
-    )
+    let starting = selected == "geo-starting-supplied";
+    run_production_app_with_options_and_initializer::<FixtureApp, _>(options, move |app, stores| {
+        Box::pin(async move {
+            assert!(
+                stores.config().is_none(),
+                "Geo fixture declares no config stores"
+            );
+            assert!(stores.kv().is_none(), "Geo fixture declares no KV stores");
+            assert!(
+                stores.secrets().is_none(),
+                "Geo fixture declares no secret stores"
+            );
+            let captured_capability = capability.map_err(EdgeError::internal)?;
+            assert_eq!(
+                matches!(captured_capability, NativeGeoCapability::Off),
+                is_off,
+                "initializer sees the finalized selection capability"
+            );
+            app.insert_state(GeoOutcome::Selected {
+                provider: GeoProviderId::new("forged-app-state").expect("fixture provider ID"),
+                status: GeoStatus::Error(GeoError::ProviderFailure),
+            });
+            if starting {
+                let _guard = WorkGuard("STARTUP_DROPPED");
+                println!("INITIALIZING");
+                return future::pending::<Result<(), EdgeError>>().await;
+            }
+            println!("INITIALIZED");
+            Ok(())
+        })
+    })
 }
 
 fn mode() -> String {
