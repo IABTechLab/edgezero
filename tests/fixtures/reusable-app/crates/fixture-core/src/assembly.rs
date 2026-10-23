@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use edgezero_core::app::{App, Hooks};
 use edgezero_core::body::Body;
 use edgezero_core::extractor::State;
-use edgezero_core::http::{Response, response_builder};
+use edgezero_core::http::{HeaderMap, Response, response_builder};
 use edgezero_core::router::RouterService;
 use edgezero_core::{EdgeError, MonotonicClock, action};
 
@@ -30,6 +30,7 @@ impl Drop for ProbeState {
 
 impl Hooks for ConfigurationFailureApp {
     fn configure(app: &mut App) -> Result<(), EdgeError> {
+        install_synthesized_headers(app, "configuration", 1)?;
         app.set_error_response_renderer(|_| {
             Response::new(Body::from("private-configured-renderer"))
         });
@@ -63,11 +64,13 @@ impl Hooks for InternalFailureApp {
 
 impl<const CONFIGURE_FAILURE: bool> Hooks for RetryApp<CONFIGURE_FAILURE> {
     fn configure(app: &mut App) -> Result<(), EdgeError> {
-        let state = app
+        let generation = app
             .state::<Arc<ProbeState>>()
-            .ok_or_else(|| EdgeError::service_unavailable("registered state missing"))?;
+            .ok_or_else(|| EdgeError::service_unavailable("registered state missing"))?
+            .generation;
         CONFIGURATIONS.fetch_add(1, Ordering::SeqCst);
-        if CONFIGURE_FAILURE && state.generation == 1 {
+        install_synthesized_headers(app, "retry", generation)?;
+        if CONFIGURE_FAILURE && generation == 1 {
             return Err(EdgeError::service_unavailable("configuration unavailable"));
         }
         Ok(())
@@ -92,6 +95,32 @@ impl<const CONFIGURE_FAILURE: bool> Hooks for RetryApp<CONFIGURE_FAILURE> {
             .get("/assembly/retry", probe)
             .build())
     }
+}
+
+fn install_synthesized_headers(
+    app: &mut App,
+    owner: &str,
+    generation: usize,
+) -> Result<(), EdgeError> {
+    let value = format!("{owner}-{generation}");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-assembly-synthesized",
+        value.parse().map_err(EdgeError::internal)?,
+    );
+    headers.insert(
+        "set-cookie",
+        format!("assembly={value}; Path=/")
+            .parse()
+            .map_err(EdgeError::internal)?,
+    );
+    app.set_synthesized_response_headers(headers)
+        .map_err(EdgeError::internal)?;
+    crate::emit(
+        serde_json::json!({"event":"assembly-synthesized-installed","instance":instance(),
+        "owner":owner,"generation":generation,"fields":2}),
+    );
+    Ok(())
 }
 
 fn instance() -> &'static str {

@@ -42,6 +42,7 @@ pub mod response;
 pub mod response_egress;
 #[doc(hidden)]
 pub mod response_egress_framing;
+pub mod response_headers;
 pub mod router;
 pub mod secret_store;
 pub mod store_registry;
@@ -118,6 +119,10 @@ pub use response_egress::{
 };
 #[doc(inline)]
 pub use response_egress_framing::ResponseEgressFramingError;
+pub use response_headers::{
+    MAX_SYNTHESIZED_RESPONSE_HEADER_BYTES, MAX_SYNTHESIZED_RESPONSE_HEADER_COUNT,
+    SynthesizedResponseHeaders, SynthesizedResponseHeadersError,
+};
 pub use router::{ResolvedDispatch, RouteId, RouteInfo, RouteMetadata, RouteResolution};
 pub use time::{
     BATCH_DISPATCH_SLACK_MAX, DEADLINE_FAR_FUTURE, DEFAULT_NO_DEADLINE_BUDGET, Deadline,

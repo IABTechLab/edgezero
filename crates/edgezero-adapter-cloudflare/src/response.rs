@@ -1138,6 +1138,7 @@ mod tests {
     #[derive(Debug)]
     struct MockResponse {
         declared_length: Option<u64>,
+        headers: HeaderMap,
         status: StatusCode,
         transmits_body: bool,
     }
@@ -1173,7 +1174,7 @@ mod tests {
         fn prepare(
             &mut self,
             status: StatusCode,
-            _headers: &HeaderMap,
+            headers: &HeaderMap,
             declared_length: Option<u64>,
             transmits_body: bool,
         ) -> Result<(Self::Response, Self::Io), DeliveryError> {
@@ -1183,6 +1184,7 @@ mod tests {
             Ok((
                 MockResponse {
                     declared_length,
+                    headers: headers.clone(),
                     status,
                     transmits_body,
                 },
@@ -1244,7 +1246,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn framing_observer_preserves_each_typed_reason() {
         use edgezero_core::response_egress_framing::test_support::{
-            FRAMING_RULES, framing_fixture,
+            FRAMING_RULES, framing_fixture, has_full_synthesized_fixture_headers,
         };
         for reason in FRAMING_RULES {
             for detached in [false, true] {
@@ -1261,6 +1263,8 @@ mod tests {
                 let response = start_fallback(&method, cause, attempt, &clock, &mut committer)
                     .expect("fallback");
                 assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(response.headers["x-synthesized-fixture"], "configured");
+                assert!(has_full_synthesized_fixture_headers(&response.headers));
                 assert_eq!(state.borrow().writes.concat(), INTERNAL_FALLBACK_BODY);
                 let completed = fixture.completed.lock().expect("completion");
                 assert_eq!(completed.len(), 1);
@@ -1489,6 +1493,52 @@ mod tests {
         );
         assert_eq!(state.borrow().aborts, 1);
         assert_eq!(observer.reports()[0].outcome, cause);
+    }
+
+    #[test]
+    fn generated_overflow_retry_after_precedes_synthesized_headers() {
+        use edgezero_core::RequestBodyOverflowOrigin;
+        use edgezero_core::response_egress_framing::test_support::synthesized_error_fixture;
+        for (error, retry) in [
+            (
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound),
+                None,
+            ),
+            (
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::OutboundUpload),
+                None,
+            ),
+            (
+                EdgeError::config_out_of_date("private", "field"),
+                Some("60"),
+            ),
+        ] {
+            let envelope = synthesized_error_fixture(error).expect("fixture");
+            let Ok((prepared, policy, attempt, clock)) =
+                envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            else {
+                panic!("prepared error");
+            };
+            let (mut committer, _) = MockCommitter::new();
+            let StartOutcome::Started(response) = start_prepared(
+                prepared,
+                policy,
+                attempt,
+                clock,
+                EgressKind::Application,
+                &mut committer,
+            ) else {
+                panic!("started error");
+            };
+            assert_eq!(response.headers["x-synthesized-fixture"], "configured");
+            assert_eq!(
+                response
+                    .headers
+                    .get("retry-after")
+                    .map(|value| value.to_str().expect("text")),
+                retry
+            );
+        }
     }
 
     #[test]

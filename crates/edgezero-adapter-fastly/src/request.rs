@@ -271,8 +271,10 @@ impl<'app> FastlyService<'app> {
 
     /// Runs an already-received request through the closed `EdgeZero` lifecycle.
     ///
-    /// `prepare` may mutate the borrowed raw request and add portable extensions before
-    /// conversion. `finalize` may mutate only a routed response before egress policy/framing. The
+    /// `prepare` may mutate the borrowed raw request and add portable extensions before conversion and
+    /// ingress validation. Insert a validated `SynthesizedResponseHeaders` to replace the app's
+    /// generated-error/fallback headers for this request, including an explicitly empty set.
+    /// `finalize` may mutate only a routed response before egress policy/framing. The
     /// adapter retains response ownership and returns its disposition, last-body commitment and
     /// exact terminal report. Routed hook state survives failed delivery and fallback. Detached
     /// responses skip `finalize`. Inspect replacement permission before sending a native response.
@@ -424,7 +426,8 @@ fn dispatch_with_handles<Prepare>(
 where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
-    let scratch = apply_request_prepare(&mut req, prepare);
+    let mut scratch = apply_request_prepare(&mut req, prepare);
+    let synthesized_headers = scratch.remove::<edgezero_core::SynthesizedResponseHeaders>();
     let mut head_request =
         into_core_request_head(&req, app.monotonic_clock()).map_err(|failure| {
             FastlyNoAttempt::new(
@@ -433,13 +436,18 @@ where
             )
         })?;
     head_request.extensions_mut().extend(scratch);
-    Ok(dispatch_ingress_reader(
-        app,
-        head_request,
-        stores,
-        request_start,
-        move || Ok(req.take_body()),
-    ))
+    let outcome = dispatch_ingress_reader(app, head_request, stores, request_start, move || {
+        Ok(req.take_body())
+    });
+    Ok(match (outcome, synthesized_headers) {
+        (DispatchOutcome::Detached(envelope), Some(headers)) => {
+            DispatchOutcome::Detached(envelope.with_synthesized_response_headers(headers))
+        }
+        (DispatchOutcome::Routed(envelope), Some(headers)) => {
+            DispatchOutcome::Routed(envelope.with_synthesized_response_headers(headers))
+        }
+        (unchanged, _) => unchanged,
+    })
 }
 
 fn dispatch_ingress_reader<Source, MakeSource>(

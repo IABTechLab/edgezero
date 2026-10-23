@@ -102,7 +102,8 @@ pub async fn dispatch(
         signal,
         Some(Arc::clone(&returned)),
         edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM,
-    );
+    )
+    .map_err(|_| worker::Error::RustError("progress probe configuration failed".into()))?;
     let response =
         edgezero_adapter_cloudflare::dispatch_app::<ProgressHooks>(&app, request, env, ctx).await;
     returned.store(true, Ordering::SeqCst);

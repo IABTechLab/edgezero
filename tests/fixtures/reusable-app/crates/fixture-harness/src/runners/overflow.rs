@@ -13,7 +13,9 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
         "missing overflow source revision",
     )?;
     let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
-    let Some((mut command, port)) = progress::build(name, &run, records, &revision)? else {
+    let Some((mut command, port)) =
+        progress::build(name, &run, records, &revision, "outbound-overflow")?
+    else {
         return Ok(());
     };
     let log = run.join("runtime.log");

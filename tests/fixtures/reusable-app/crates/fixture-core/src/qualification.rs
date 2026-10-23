@@ -3,6 +3,7 @@
 pub mod framing;
 mod overflow;
 pub mod progress;
+pub mod response_headers;
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

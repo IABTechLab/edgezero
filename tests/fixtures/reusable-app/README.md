@@ -135,6 +135,45 @@ deployed Workers header delivery, consumer response parity, or Fastly outbound G
 compression still needs encoded wire counts, coding and decompressed source hashes for buffered
 and declared-stream sources on both HTTP versions; Viceroy does not supply that transformation.
 
+### Bounded Synthesized Headers
+
+```sh
+scripts/smoke_test_reusable_app.sh --adapter all --suite synthesized-headers
+```
+
+This independent suite uses the same production progress entrypoints with suite-only application
+configuration. It delivers an entire 32-value/4096-byte configured set: one fixture marker and
+31 distinct `Set-Cookie` values, verified in order without comma splitting. GET/HEAD fallbacks
+retain the canonical 500 body/suppression behavior. Canonical 404/405 responses are decorated;
+matched successes/errors and actual admission refusals are not. The 405 retains its single `Allow`.
+
+Viceroy additionally receives an absolute target over 9 KiB and about 72 KiB of headers in 60 added
+lines, below its parser boundaries but above EdgeZero's normalized limits. A correlated detached
+decision and exactly one terminal completion prove guest-side 414/431 generation, with no
+admission, handler or finalize invocation. Fastly preparation controls replace/clear the app set
+or reject a 4097-byte dynamic set without losing the valid app policy. Final logs are rechecked
+after runtime teardown; fallback reports must identify conversion failure, the fallback body,
+completed disposition and exact GET/HEAD byte counts.
+
+Raw HTTP/1 captures require a complete head and clean EOF, not a timeout or reset. HEAD checks
+all post-header octets, including bytes sent with the head or in a later write. The client uses
+one absolute five-second exchange deadline and a 16 KiB head/4 KiB body capture envelope.
+Cloudflare's local frontend requires a client write-half-close to end this controlled exchange;
+the other three use `Connection: close` without an early FIN, which their parsers treat as
+cancellation. The selected close mode is recorded. No production transport setting is changed.
+Capture/artifact failures are recorded without skipping later cases.
+
+The [local record](../../../docs/audits/evidence/2026-10-23-synthesized-response-headers.json)
+contains fingerprints for the passing matrix and retained failed diagnostic runs.
+These are local HTTP/1 working-tree observations, not hosted/HTTP2/HTTP3 or frozen-candidate
+qualification. The separate `assembly` suite installs policy before deliberate failure and checks
+GET/HEAD exclusion, successful recovered-policy 404 delivery and correlated lifecycle evidence.
+Axum instead proves its canonical pre-listener startup failure, without constructing a response.
+The [assembly record](../../../docs/audits/evidence/2026-10-23-assembly-response-headers.json)
+includes the repeated header matrix and final request-correlated assembly evidence.
+Consumer-owned header integration remains open. Neither suite reruns nor waives the failed
+Fastly SDK parity controls or G2, and does not establish Cloudflare overflow recovery.
+
 The default-off `progress` feature selects fixture-only SDK probes, independent of the hosted
 `qualification` application. Smoke also builds and runs these probes after its existing cases;
 their artifacts are staged separately. Eager single/batch SDK starts are compared with the

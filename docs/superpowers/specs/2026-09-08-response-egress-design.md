@@ -539,6 +539,41 @@ partially written response. A shared body/framing wrapper drops its source and a
 state before making a terminal `Err` item visible; cleanup never depends on the adapter polling
 that wrapper again or dropping it after observing the error.
 
+### 4.1.1 Bounded synthesized headers
+
+`App::set_synthesized_response_headers(HeaderMap)` validates a complete replacement and retains
+an immutable `SynthesizedResponseHeaders` snapshot. A rejected replacement returns
+`SynthesizedResponseHeadersError` without changing the installed set. Fields are bounded to 32
+values and 4096 bytes, including repeated names and `: `/CRLF per value plus final CRLF, excluding
+the status line. Validation rejects the EZ-19.5 framing/coding field list and values outside visible
+ASCII/interior HTAB, including leading/trailing whitespace. Empty values are valid. Accepted maps
+and field backing storage are copied into bounded retained storage; caller input allocations and
+provider allocations are not certified by this limit. Existing response/renderer fields remain
+subject to their separate limits; this bound covers only the configured decoration.
+
+The envelope captures the snapshot before conversion, with separate private eligibility for
+framework-generated initial responses. Detached normalized errors, admitted source errors and
+canonical unmatched/wrong-method errors are eligible; matched handler results/errors and admission
+refusals are not. Assembly failures have an empty set because no successfully configured app
+exists, including when configuration installed policies before returning an error. All
+envelopes retain the snapshot for a later adapter-built fallback, including initially ineligible
+routed/refusal responses. Fastly `prepare` can insert a validated per-request replacement into its
+extension bag. The adapter removes that value before forwarding ordinary extensions and replaces
+the returned envelope snapshot before `begin`; invalid construction leaves the app snapshot, while
+an explicitly empty set replaces it.
+
+Decoration precedes the policy-visible initial head. The snapshot transfers to the sole attempt
+before policy/deadline/framing preparation can fail. Fallback preparation merges the same validated
+set without callbacks, repeated validation, a second completion or an extended deadline. Axum's
+emergency detached fallback copies that snapshot before moving or terminalizing the original
+attempt. Existing response names win; ordered repeated configured values are preserved when a name
+is absent. Typed overflow suppression runs after initial composition and during final normalization;
+ordinary upstream 413 retry fields and effective config-503 retry fields remain unchanged.
+
+Local HTTP/1 fixtures exercise maximum-size delivery and partial-configuration exclusion; they
+are not hosted qualification or a promotion of egress guarantees. Consumer parity, deployed
+provider delivery and frozen-candidate acceptance retain their own gates.
+
 ### 4.2 Backpressure and memory
 
 Platform demand drives source polling. EdgeZero retains at most one source chunk plus explicitly

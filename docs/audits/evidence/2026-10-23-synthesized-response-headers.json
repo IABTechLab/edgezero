@@ -1,0 +1,1567 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-23",
+  "base_revision": "7fdef8b0a31f386f3c7e304ccf807f7ab500b19a",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "status": "local-http1-header-delivery-pass",
+  "scope": "F7b / EZ-19 local normalized rejection, full-size synthesized fields, GET/HEAD fallback, Fastly prepare replacement, exclusion and terminal controls",
+  "production_delta_this_runtime_slice": false,
+  "source_snapshot_scope": "Selected local production/fixture inputs, not a complete frozen candidate; source and executed artifacts are fingerprinted separately.",
+  "source_sha256": {
+    "Cargo.lock": "ded1da41b9bd6fae689e16d277d076e975c8f3ccfa2842cd53addf30a5c3e27e",
+    "Cargo.toml": "527a6f29fd231afb35dea70ba3ec41b9c9e78ce52324cb20fe9ed6c75afb415b",
+    "crates/edgezero-adapter-axum/src/response.rs": "b5068969a307261af438a8cf5fcd15a43fe03a045b57a7231f88de1df84b1ae8",
+    "crates/edgezero-adapter-cloudflare/src/response.rs": "bd7980085cd771ed3940591f8501aa84facb35d4281e9177fe6a71bbaa20c57a",
+    "crates/edgezero-adapter-fastly/src/request.rs": "279751032c2b7fdfb6e1aeec20cd9f2853f46095865ce4504a88b0d4152eb06b",
+    "crates/edgezero-adapter-fastly/src/response.rs": "e1ddc3774504da3ffbc5b2ed18ffd732a486ac17e9dca96dc47d0083da4f0a0c",
+    "crates/edgezero-adapter-fastly/tests/contract.rs": "bae55aab4b21dc048ee4defd5d276ef43ff9517019e2cbfa9b0ddc64f88c74e5",
+    "crates/edgezero-adapter-spin/src/response.rs": "43be730fb6244ce244b6adce80da37731b741ff8475c0ecdc693fc64c13d4f2d",
+    "crates/edgezero-core/src/app.rs": "30082b21f9a8c32dcd337fd353ea6ead3957be077b821bc0cfcb252d40c4e25f",
+    "crates/edgezero-core/src/lib.rs": "9e8570286ab192744e8089a656163ccbaa4c1720a36c1110f49679c50f77f2a1",
+    "crates/edgezero-core/src/response_egress.rs": "665f5363ff4c003eac513f3262dd1797d9b269cd20189eadcfefac50624db452",
+    "crates/edgezero-core/src/response_egress_framing_test_support.rs": "9eb3a368d428ff7a8463613f2738e0281c34ebcdb6f02d364e6577188a3695d6",
+    "crates/edgezero-core/src/response_headers.rs": "6ce849b0c1e64cb34d1a4468f031b753d612f2f6554c9681088327c96f2e5f75",
+    "examples/app-demo/crates/app-demo-core/src/lib.rs": "ec9aa401fd348c35ccb76999b648f4bf97a35f32560a64abcad448d7e0eccb3a",
+    "tests/fixtures/reusable-app/Cargo.lock": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee",
+    "tests/fixtures/reusable-app/Cargo.toml": "7665200757e4e565d11fa7eb036215aa583d21fd543bca39fdbdce470fee11ae",
+    "tests/fixtures/reusable-app/crates/fixture-axum/src/progress.rs": "1513e29d6b8fb8a16dbcbcec6e8119e73c764eb86f0635a97ddb86b4fa647d17",
+    "tests/fixtures/reusable-app/crates/fixture-cloudflare/src/progress.rs": "a67f65fe9990ce4adba50ffe5e01b5bf50809492a2f222a3cbc5c726ac4ace96",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification.rs": "b8ce27cccb0949eab4a03b7694cbe528e028fc42ae4b14880f13bd68bc85f1b8",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/progress.rs": "3ccea7b618f7ee3b9103bd5fd6ce597d65fa62fb2f118aabdb30c2544628c983",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/response_headers.rs": "e33aa3ca2375ac746900b75eecfbde33cf853e4777bd92f5b18300519a6bec9a",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_progress.rs": "057cd67c78725c19e24f2ce968138e3c38001c43ec656c015863834a0b87e706",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/main.rs": "605a337afb130d0eddafb58d910eaa1c4f7cbe06b2481648293308bf3aee75fd",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs": "734e56e9fa1beda4a4dbca09c7ac3914bd56c8bd33e4901e2db1c3626b99b9d0",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/framing.rs": "3cf08dbf5d6bcf45b7eb9f4793d6020bd3887d1af8f57a06353d2b3cfd9fa939",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/overflow.rs": "5597383d9e912ea20beda249e0b03c115055d31e459d6d9aa1aa48e3162761ea",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/progress.rs": "acfd1f42e71fbadc499df8db45f5852c1e7ef71944527a3c8479aecd06e5db36",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/response_headers.rs": "5a8545019592510864212a811059f1ee3c9c86fed4b59c26ce6ca246ebeaf98d",
+    "tests/fixtures/reusable-app/crates/fixture-spin/src/progress.rs": "47e765274ca5175ab5e80f6658e0c53fdfaf256edebb6a3c5337de9f2e138237"
+  },
+  "frozen_policy": {
+    "path": "docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md",
+    "bytes": 65279,
+    "sha256": "c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80"
+  },
+  "command": "CARGO_NET_OFFLINE=true scripts/smoke_test_reusable_app.sh --adapter all --suite synthesized-headers --output /private/tmp/edgezero-f7b-wire-final3",
+  "tool_overrides": {
+    "WORKER_BUILD_BIN": "/Users/ag/.asdf/installs/rust/1.98.1/bin/worker-build",
+    "WASM_BINDGEN_BIN": "/private/tmp/edgezero-pr275-tools/wasm-bindgen-0.2.129/bin/wasm-bindgen",
+    "ESBUILD_BIN": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+    "WASM_OPT_BIN": "/Users/ag/Library/Caches/worker-build/wasm-opt-arm64-macos-130/bin/wasm-opt",
+    "WRANGLER_BIN": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+    "WRANGLER_SEND_METRICS": "false",
+    "WRANGLER_LOG_PATH": "/private/tmp/edgezero-pr275-wrangler-logs",
+    "SSL_CERT_FILE": "/etc/ssl/cert.pem"
+  },
+  "sdk_versions": {
+    "fastly": "0.13.1",
+    "worker": "0.8.5",
+    "spin_sdk": "7.0.0"
+  },
+  "cloudflare_compatibility": {
+    "date": "2026-04-22",
+    "flags": ["enable_request_signal", "enable_weak_ref"]
+  },
+  "workerd": {
+    "path": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/@cloudflare/workerd-darwin-arm64/bin/workerd",
+    "bytes": 156374824,
+    "sha256": "eb132e3e489b47d804cc70b510a6da8f82dabec4748cdcdaba32a1a1c5c2e285",
+    "version": "workerd 2026-09-10",
+    "identification_basis": "Wrangler bundled executable; not independent per-process attestation"
+  },
+  "runtime_versions": [
+    {
+      "adapter": "fastly",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "revision": "7fdef8b0a31f386f3c7e304ccf807f7ab500b19a",
+      "source_state": "working-tree-characterization",
+      "version": "viceroy 0.21.0"
+    },
+    {
+      "adapter": "cloudflare",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+      "revision": "7fdef8b0a31f386f3c7e304ccf807f7ab500b19a",
+      "source_state": "working-tree-characterization",
+      "version": "4.131.0"
+    },
+    {
+      "adapter": "spin",
+      "event": "progress-runtime",
+      "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+      "revision": "7fdef8b0a31f386f3c7e304ccf807f7ab500b19a",
+      "source_state": "working-tree-characterization",
+      "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+    },
+    {
+      "adapter": "axum",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+      "revision": "7fdef8b0a31f386f3c7e304ccf807f7ab500b19a",
+      "source_state": "working-tree-characterization",
+      "version": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+    }
+  ],
+  "artifacts": [
+    {
+      "adapter": "fastly",
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/artifacts/fixture-fastly-outbound-progress.wasm",
+      "bytes": 2375095,
+      "sha256": "7f9275671e38c5f2fcbaff60f235820a45dd37adca3df9f627fb16eec853b7f0"
+    },
+    {
+      "adapter": "cloudflare",
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/artifacts/build/index_bg.wasm",
+      "bytes": 1947183,
+      "sha256": "2f14ca7e7f5ff1d9ecb92fa1f07583328813dc4925644d248dcf111ab3eb17d0"
+    },
+    {
+      "adapter": "spin",
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/artifacts/fixture_spin.wasm",
+      "bytes": 2606578,
+      "sha256": "380730d46315cc42a82146e6b2afaa620998d0105713f7d6204818ae9a52aa37"
+    },
+    {
+      "adapter": "axum",
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/artifacts/fixture-axum-outbound-progress",
+      "bytes": 9085536,
+      "sha256": "819c21681057ae0a92e243313a985b7e15d9d14e04120d083d6a27a66a186dac"
+    }
+  ],
+  "raw": [
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3/events.jsonl",
+      "bytes": 202039,
+      "sha256": "296c0e9f2db7995f06b44d6414fed3eb02d5df5ec6d50af7688678dd27cc9d2a"
+    },
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3/summary.json",
+      "bytes": 302,
+      "sha256": "fdad4ea9024508071acff823ee80f31b68f6c2e1980faefaaff86076ffc842e3"
+    },
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3/Cargo.lock",
+      "bytes": 84127,
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+    },
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3.log",
+      "bytes": 2445,
+      "sha256": "f3f405e88634e245a396ebe6d77666ae4a39da521d2ab06a484b3c9e34d809e1"
+    },
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/runtime.log",
+      "bytes": 12981,
+      "sha256": "0c58d9bb788ab04075ea99483bfc2ac91da46d6554cafb461f2d9064256c295a"
+    },
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/runtime.log",
+      "bytes": 3218,
+      "sha256": "aedd8d5b4213a5bcbb0b365b8f3f64b7fdc0c0bb21a719564d4ab65ba2d82fae"
+    },
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/runtime.log",
+      "bytes": 5691,
+      "sha256": "2be2dae71bb05eadfcc16799f2f26e8809639b587b6e78986619ea2f935a3377"
+    },
+    {
+      "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/runtime.log",
+      "bytes": 4439,
+      "sha256": "c58c230010705dfce4c8335e7633e3f2b01d494a3bdd650a6d83eadcb7bb630a"
+    }
+  ],
+  "coverage": [
+    {
+      "adapter": "fastly",
+      "attempted": 22,
+      "event": "synthesized-header-coverage",
+      "failed": 0,
+      "protocol": "HTTP/1.1",
+      "qualification": false
+    },
+    {
+      "adapter": "fastly",
+      "checked": 22,
+      "error": null,
+      "event": "synthesized-final-evidence",
+      "qualification": false,
+      "status": "pass"
+    },
+    {
+      "adapter": "cloudflare",
+      "attempted": 11,
+      "event": "synthesized-header-coverage",
+      "failed": 0,
+      "protocol": "HTTP/1.1",
+      "qualification": false
+    },
+    {
+      "adapter": "spin",
+      "attempted": 11,
+      "event": "synthesized-header-coverage",
+      "failed": 0,
+      "protocol": "HTTP/1.1",
+      "qualification": false
+    },
+    {
+      "adapter": "axum",
+      "attempted": 11,
+      "event": "synthesized-header-coverage",
+      "failed": 0,
+      "protocol": "HTTP/1.1",
+      "qualification": false
+    }
+  ],
+  "cases": [
+    {
+      "adapter": "fastly",
+      "case": "success-GET",
+      "token": "18e133eff4bc79a8-1205a-0",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 14,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff4bc79a8-1205a-0.http1",
+        "bytes": 90,
+        "sha256": "b00404ddd950a7f2c39447f0b9727ab0320594ff583be016d8b9bce6d3afb3da"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "handler-error-GET",
+      "token": "18e133eff57457f8-1205a-1",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 82,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff57457f8-1205a-1.http1",
+        "bytes": 199,
+        "sha256": "9c9a6acea56423833fc818385625baa8025fb7a8321c002defcbce39f57dec5b"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "refused-GET",
+      "token": "18e133eff5a76260-1205a-2",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 16,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff5a76260-1205a-2.http1",
+        "bytes": 109,
+        "sha256": "47de362c46f948cd70777bf9faa27045a7a990a49f2f0cc8d893f75cf3aded29"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "missing/path-GET",
+      "token": "18e133eff5d148f0-1205a-3",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 113,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff5d148f0-1205a-3.http1",
+        "bytes": 4323,
+        "sha256": "064b61d9c8294e6338b9661375175e6437de65aa6261b84570a73466f252071d"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-GET",
+      "token": "18e133eff6141a68-1205a-4",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 21,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff6141a68-1205a-4.http1",
+        "bytes": 4210,
+        "sha256": "9150bd70c59a61d37f6c08e2a8958c8f5342c287d31cb61e983e478457ea822c"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "success-HEAD",
+      "token": "18e133eff64c3998-1205a-5",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff64c3998-1205a-5.http1",
+        "bytes": 56,
+        "sha256": "7555c0531da70f2f00323b450d6011324043b6c6d6fbe2bfb0fa02e75bee85d8"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "handler-error-HEAD",
+      "token": "18e133eff67fc100-1205a-6",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff67fc100-1205a-6.http1",
+        "bytes": 97,
+        "sha256": "4d2e83fc1288b64e43612fb0218d3b0cc2de5f157c2b04651f0f6ac6a36ae3e1"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "refused-HEAD",
+      "token": "18e133eff6b1ae40-1205a-7",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff6b1ae40-1205a-7.http1",
+        "bytes": 73,
+        "sha256": "1c19811661ba747d4f7efe22b4c2a660aaa024e471476f5e2d5e5a9d9a699e2a"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "missing/path-HEAD",
+      "token": "18e133eff6e295c8-1205a-8",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff6e295c8-1205a-8.http1",
+        "bytes": 4189,
+        "sha256": "50188f960e528be673f4b0d0627fc84ec8f9429555699fe17b8b96f113544395"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-HEAD",
+      "token": "18e133eff71e7200-1205a-9",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff71e7200-1205a-9.http1",
+        "bytes": 4169,
+        "sha256": "ff76096f357c1e30e266331af00ad25783bff8974f4393a08b72e8e6f3c19b5b"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "wrong-method",
+      "token": "18e133eff75dc8d8-1205a-a",
+      "status": "pass",
+      "http_status": 405,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 108,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff75dc8d8-1205a-a.http1",
+        "bytes": 4345,
+        "sha256": "6c4d581626e5572467095907b5af6a11917ba6176b9946b51a154a52666e6a27"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "normalized-header-overflow",
+      "token": "18e133eff7a26740-1205a-b",
+      "status": "pass",
+      "http_status": 431,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 128,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 29,
+      "request_field_values": 65,
+      "request_field_wire_bytes": 74779,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff7a26740-1205a-b.http1",
+        "bytes": 4360,
+        "sha256": "ba835de782397d2cc992f33755dec25ee88678f6615b77c9984b375df913f7d3"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "normalized-target-overflow-app",
+      "token": "18e133eff7f2dce8-1205a-c",
+      "status": "pass",
+      "http_status": 414,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 109,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 9254,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 139,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff7f2dce8-1205a-c.http1",
+        "bytes": 4322,
+        "sha256": "3db55c890160de9d57ff6dfafaa60668de022337e60a286631b38bb72b653533"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "normalized-target-overflow-replace",
+      "token": "18e133eff83131f0-1205a-d",
+      "status": "pass",
+      "http_status": 414,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 109,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 9254,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 143,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff83131f0-1205a-d.http1",
+        "bytes": 4322,
+        "sha256": "b6712282dc92647f40af9414c72312c73d2c2ba2d84904c601e16274278de66e"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-replace-GET",
+      "token": "18e133eff8730580-1205a-e",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 21,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 143,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff8730580-1205a-e.http1",
+        "bytes": 4210,
+        "sha256": "e1e60e38da33358c6762198d19ea524a60605f5d1750dc7f4f5834d1f86b117c"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-replace-HEAD",
+      "token": "18e133eff8b70b90-1205a-f",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 143,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff8b70b90-1205a-f.http1",
+        "bytes": 4169,
+        "sha256": "14e7e48804a841c07c6c9136a193d102fc9852612d99f2649716e17317f41da0"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "normalized-target-overflow-invalid",
+      "token": "18e133eff903eb40-1205a-10",
+      "status": "pass",
+      "http_status": 414,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 109,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 9254,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 144,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff903eb40-1205a-10.http1",
+        "bytes": 4322,
+        "sha256": "3db55c890160de9d57ff6dfafaa60668de022337e60a286631b38bb72b653533"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-invalid-GET",
+      "token": "18e133eff9532868-1205a-11",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 21,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 144,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff9532868-1205a-11.http1",
+        "bytes": 4210,
+        "sha256": "9150bd70c59a61d37f6c08e2a8958c8f5342c287d31cb61e983e478457ea822c"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-invalid-HEAD",
+      "token": "18e133eff99a4b58-1205a-12",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 144,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff99a4b58-1205a-12.http1",
+        "bytes": 4169,
+        "sha256": "ff76096f357c1e30e266331af00ad25783bff8974f4393a08b72e8e6f3c19b5b"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "normalized-target-overflow-empty",
+      "token": "18e133eff9e611c8-1205a-13",
+      "status": "pass",
+      "http_status": 414,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 109,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 9254,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 142,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133eff9e611c8-1205a-13.http1",
+        "bytes": 228,
+        "sha256": "9386430faef68cdd70c752760db557d26e8cee113caf414ce552d0577c48459a"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-empty-GET",
+      "token": "18e133effa213a50-1205a-14",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 21,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 142,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133effa213a50-1205a-14.http1",
+        "bytes": 116,
+        "sha256": "4250744989e9a7e679ab74a8700a1d52b845c00942160619cfd9a9c6bef22634"
+      }
+    },
+    {
+      "adapter": "fastly",
+      "case": "fallback-empty-HEAD",
+      "token": "18e133effa516270-1205a-15",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 142,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-fastly/18e133effa516270-1205a-15.http1",
+        "bytes": 75,
+        "sha256": "d71beb69da73d4a72ecd8a9c075ef0c1582e7fdb0445b69892c09ade57695ac1"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "success-GET",
+      "token": "18e133f0fb4ed030-1205a-16",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 14,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f0fb4ed030-1205a-16.http1",
+        "bytes": 53,
+        "sha256": "605394fa5e0e59c7aeef09952395af12aae160f4a7b2cca9895829a90c3296ab"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "handler-error-GET",
+      "token": "18e133f10151b920-1205a-17",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 82,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f10151b920-1205a-17.http1",
+        "bytes": 162,
+        "sha256": "30620340332cfed06ce35d204a0754a03ebcab2bcebce5800dea6a41f8bcd10e"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "refused-GET",
+      "token": "18e133f101ce24b0-1205a-18",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 16,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f101ce24b0-1205a-18.http1",
+        "bytes": 72,
+        "sha256": "e8720a13e727055a818f91d872efa4fb3fc3b2ee224c48797a8ce9b78491c270"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "missing/path-GET",
+      "token": "18e133f101fdf6e0-1205a-19",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 113,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f101fdf6e0-1205a-19.http1",
+        "bytes": 4286,
+        "sha256": "d82ca802ce4cc925943ea796ba5afa21a5308e7e514158d646ca440c00d5a459"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "fallback-GET",
+      "token": "18e133f10239d318-1205a-1a",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 21,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f10239d318-1205a-1a.http1",
+        "bytes": 4173,
+        "sha256": "bc97d96348cb5042d7a727c4dc6bc1b6d2dfbbb58eb0371388ed955880978166"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "success-HEAD",
+      "token": "18e133f10275e600-1205a-1b",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f10275e600-1205a-1b.http1",
+        "bytes": 19,
+        "sha256": "5212f7a67551c4744fd1099622fe454a56221fcb231c76d1ab15efbdf44f1057"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "handler-error-HEAD",
+      "token": "18e133f102a4e928-1205a-1c",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f102a4e928-1205a-1c.http1",
+        "bytes": 80,
+        "sha256": "ffd8ea887297580af13c74461a1a4d33420e59f894da129bb4404bf57c5c00da"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "refused-HEAD",
+      "token": "18e133f102d46180-1205a-1d",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f102d46180-1205a-1d.http1",
+        "bytes": 36,
+        "sha256": "5ae6460b33a4847809ee7828d0d10942f4a74a21c1f0c13be39f9a25c8aec7f9"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "missing/path-HEAD",
+      "token": "18e133f103056460-1205a-1e",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f103056460-1205a-1e.http1",
+        "bytes": 4173,
+        "sha256": "6fae2fa48eab5cc1efb2bc918e2489d85b08b7e4bdb065a95e6870660fcfe5f7"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "fallback-HEAD",
+      "token": "18e133f103437700-1205a-1f",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f103437700-1205a-1f.http1",
+        "bytes": 4132,
+        "sha256": "26a13e011c7d6593aa681d8da047ebf43830f412a7128747bba7fdd46b19aa03"
+      }
+    },
+    {
+      "adapter": "cloudflare",
+      "case": "wrong-method",
+      "token": "18e133f10380f148-1205a-20",
+      "status": "pass",
+      "http_status": 405,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 108,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "write-half-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-cloudflare/18e133f10380f148-1205a-20.http1",
+        "bytes": 4308,
+        "sha256": "6f2be0f5fcdb5b5adae267667dc659600b0bc6c9d9eb7dacd2adfe79df6e6fd8"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "success-GET",
+      "token": "18e133f11a766630-1205a-21",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 14,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11a766630-1205a-21.http1",
+        "bytes": 109,
+        "sha256": "023e4df486a3ce7b6ed236e15f164df11d5cce3cf33b36ce44e7d204ce94b2a4"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "handler-error-GET",
+      "token": "18e133f11c2c20c8-1205a-22",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 82,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11c2c20c8-1205a-22.http1",
+        "bytes": 218,
+        "sha256": "473817a7b88ce2e86b25b054d370dc5ab32ea04c1452aa36975ac11331139880"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "refused-GET",
+      "token": "18e133f11c621d18-1205a-23",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 16,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11c621d18-1205a-23.http1",
+        "bytes": 128,
+        "sha256": "1e29092c680b3d984ee02fe6f95c008d740d22172145094234f5666feb2103b4"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "missing/path-GET",
+      "token": "18e133f11c98f810-1205a-24",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 113,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11c98f810-1205a-24.http1",
+        "bytes": 4342,
+        "sha256": "d911dc2cf6a02cc5b0bd770e38a69c4ffd0db680a6bcdd940cedf08b973ee186"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "fallback-GET",
+      "token": "18e133f11cd06778-1205a-25",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 21,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11cd06778-1205a-25.http1",
+        "bytes": 4229,
+        "sha256": "1c5b7b4fa164bfbc7e526fd86dcdc3069e3fcb4400b53e7aaec59ab06fe53d2d"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "success-HEAD",
+      "token": "18e133f11d108d58-1205a-26",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11d108d58-1205a-26.http1",
+        "bytes": 75,
+        "sha256": "a785ffdf4ff85f35539851107d6fc0a4b82ee4f342cae326064418724444e808"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "handler-error-HEAD",
+      "token": "18e133f11d3fdea0-1205a-27",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11d3fdea0-1205a-27.http1",
+        "bytes": 136,
+        "sha256": "6628cbdb103526dbe5afb12865312a885779f634eca8ee9cc70787cfa51ef47b"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "refused-HEAD",
+      "token": "18e133f11d6f6e68-1205a-28",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11d6f6e68-1205a-28.http1",
+        "bytes": 92,
+        "sha256": "2fb9022a0ee2d226b368406b710a7fe06e15a1abe8e9d0b6f3836d2cf50d3a54"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "missing/path-HEAD",
+      "token": "18e133f11d9f4480-1205a-29",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11d9f4480-1205a-29.http1",
+        "bytes": 4229,
+        "sha256": "64d0841d1582de4bcd0f07483d2aab2b54e547c828479aa468917abf96a38e9e"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "fallback-HEAD",
+      "token": "18e133f11ddef530-1205a-2a",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11ddef530-1205a-2a.http1",
+        "bytes": 4188,
+        "sha256": "b2dc23cf77b0b5431e8eed1ad5a58a53ca62a97c3da31925c75497fe6464ccba"
+      }
+    },
+    {
+      "adapter": "spin",
+      "case": "wrong-method",
+      "token": "18e133f11e215948-1205a-2b",
+      "status": "pass",
+      "http_status": 405,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 108,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-spin/18e133f11e215948-1205a-2b.http1",
+        "bytes": 4364,
+        "sha256": "e2237777ff8aabdbf45bf20778e65ae362e63db3ad1a34be2bca1df5fcba9a61"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "success-GET",
+      "token": "18e133f13d28c4e8-1205a-2c",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 14,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13d28c4e8-1205a-2c.http1",
+        "bytes": 109,
+        "sha256": "023e4df486a3ce7b6ed236e15f164df11d5cce3cf33b36ce44e7d204ce94b2a4"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "handler-error-GET",
+      "token": "18e133f13d541aa8-1205a-2d",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 82,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13d541aa8-1205a-2d.http1",
+        "bytes": 218,
+        "sha256": "473817a7b88ce2e86b25b054d370dc5ab32ea04c1452aa36975ac11331139880"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "refused-GET",
+      "token": "18e133f13d83fc78-1205a-2e",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 16,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13d83fc78-1205a-2e.http1",
+        "bytes": 128,
+        "sha256": "1e29092c680b3d984ee02fe6f95c008d740d22172145094234f5666feb2103b4"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "missing/path-GET",
+      "token": "18e133f13db2ad98-1205a-2f",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 113,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13db2ad98-1205a-2f.http1",
+        "bytes": 4342,
+        "sha256": "d911dc2cf6a02cc5b0bd770e38a69c4ffd0db680a6bcdd940cedf08b973ee186"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "fallback-GET",
+      "token": "18e133f13defaae0-1205a-30",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 21,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13defaae0-1205a-30.http1",
+        "bytes": 4229,
+        "sha256": "1c5b7b4fa164bfbc7e526fd86dcdc3069e3fcb4400b53e7aaec59ab06fe53d2d"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "success-HEAD",
+      "token": "18e133f13e2cc768-1205a-31",
+      "status": "pass",
+      "http_status": 200,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13e2cc768-1205a-31.http1",
+        "bytes": 75,
+        "sha256": "a785ffdf4ff85f35539851107d6fc0a4b82ee4f342cae326064418724444e808"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "handler-error-HEAD",
+      "token": "18e133f13e598c58-1205a-32",
+      "status": "pass",
+      "http_status": 400,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 35,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13e598c58-1205a-32.http1",
+        "bytes": 136,
+        "sha256": "6628cbdb103526dbe5afb12865312a885779f634eca8ee9cc70787cfa51ef47b"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "refused-HEAD",
+      "token": "18e133f13e88ca18-1205a-33",
+      "status": "pass",
+      "http_status": 503,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 0,
+      "synthesized_field_section_bytes": 0,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13e88ca18-1205a-33.http1",
+        "bytes": 92,
+        "sha256": "2fb9022a0ee2d226b368406b710a7fe06e15a1abe8e9d0b6f3836d2cf50d3a54"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "missing/path-HEAD",
+      "token": "18e133f13eb75428-1205a-34",
+      "status": "pass",
+      "http_status": 404,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 34,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13eb75428-1205a-34.http1",
+        "bytes": 4229,
+        "sha256": "64d0841d1582de4bcd0f07483d2aab2b54e547c828479aa468917abf96a38e9e"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "fallback-HEAD",
+      "token": "18e133f13ef2edf8-1205a-35",
+      "status": "pass",
+      "http_status": 500,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 0,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 30,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13ef2edf8-1205a-35.http1",
+        "bytes": 4188,
+        "sha256": "b2dc23cf77b0b5431e8eed1ad5a58a53ca62a97c3da31925c75497fe6464ccba"
+      }
+    },
+    {
+      "adapter": "axum",
+      "case": "wrong-method",
+      "token": "18e133f13f2f9938-1205a-36",
+      "status": "pass",
+      "http_status": 405,
+      "eof": true,
+      "capture_error": null,
+      "body_bytes": 108,
+      "synthesized_field_values": 32,
+      "synthesized_field_section_bytes": 4096,
+      "request_target_bytes": 29,
+      "request_field_values": 5,
+      "request_field_wire_bytes": 140,
+      "request_shutdown": "connection-close",
+      "wire_capture": {
+        "path": "/private/tmp/edgezero-f7b-wire-final3/synthesized-headers-axum/18e133f13f2f9938-1205a-36.http1",
+        "bytes": 4364,
+        "sha256": "e2237777ff8aabdbf45bf20778e65ae362e63db3ad1a34be2bca1df5fcba9a61"
+      }
+    }
+  ],
+  "retained_diagnostics": [
+    {
+      "run": "/private/tmp/edgezero-f7b-wire-01",
+      "status": "failed",
+      "reason": "Cloudflare frontend did not close on Connection: close; other three passed",
+      "events": {
+        "path": "/private/tmp/edgezero-f7b-wire-01/events.jsonl",
+        "bytes": 193471,
+        "sha256": "d23210978c7cf57e503643f475c9a3d6c9ff87fc07942ba8cfa74c7e9ff7de73"
+      },
+      "driver_log": {
+        "path": "/private/tmp/edgezero-f7b-wire-01.log",
+        "bytes": 30115,
+        "sha256": "605669b514be23f4c235b8865f1c4678e3c3796f6def552f11ed594c691a8ba2"
+      }
+    },
+    {
+      "run": "/private/tmp/edgezero-f7b-wire-halfclose",
+      "status": "failed",
+      "reason": "macOS repeated timeout-option update failed after FIN",
+      "events": {
+        "path": "/private/tmp/edgezero-f7b-wire-halfclose/events.jsonl",
+        "bytes": 9272,
+        "sha256": "41464648d359f67f12cb37c548a5c0f6ee85ed4df032dab58c0c4a73e8689600"
+      },
+      "driver_log": {
+        "path": "/private/tmp/edgezero-f7b-wire-halfclose.log",
+        "bytes": 6570,
+        "sha256": "163ed5a98d01cfbf1c747c051e70ff9e91fc574dffe7b01c863f3a7f92eecffc"
+      }
+    },
+    {
+      "run": "/private/tmp/edgezero-f7b-wire-halfclose-nonblocking",
+      "status": "pass-cloudflare-only",
+      "reason": "Nonblocking capture observes clean EOF with client write-half-close",
+      "events": {
+        "path": "/private/tmp/edgezero-f7b-wire-halfclose-nonblocking/events.jsonl",
+        "bytes": 30383,
+        "sha256": "86ad0cf53378a11809ed145a7e415dca84a161ed06dbdf375c540c16f08e5cd4"
+      },
+      "driver_log": {
+        "path": "/private/tmp/edgezero-f7b-wire-halfclose-nonblocking.log",
+        "bytes": 1509,
+        "sha256": "387bd29c20448b03c3997a0b75cc21a22e28ac758abcbf056aea0b858cf21502"
+      }
+    },
+    {
+      "run": "/private/tmp/edgezero-f7b-wire-final",
+      "status": "failed",
+      "reason": "Early write FIN cancels requests on the other frontends; capture mode is now explicitly scoped",
+      "events": {
+        "path": "/private/tmp/edgezero-f7b-wire-final/events.jsonl",
+        "bytes": 60832,
+        "sha256": "64c14eaf9e51064a94717b752aa8b55037d7e299b1b6c38cca44d4de965098ce"
+      },
+      "driver_log": {
+        "path": "/private/tmp/edgezero-f7b-wire-final.log",
+        "bytes": 32780,
+        "sha256": "335c5d346def50a883d2c89d58d17854d71a27aef7f9f9e0cf21628e9ec3e100"
+      }
+    },
+    {
+      "run": "/private/tmp/edgezero-f7b-wire-final2",
+      "status": "pass-before-writer-hardening",
+      "reason": "Repeated full matrix after extending absolute deadline to each nonblocking write",
+      "events": {
+        "path": "/private/tmp/edgezero-f7b-wire-final2/events.jsonl",
+        "bytes": 201765,
+        "sha256": "4db37b45f1a5b24a304a984562e479a2b69d8dd4f0e394273b6c4b41fd3f9848"
+      },
+      "driver_log": {
+        "path": "/private/tmp/edgezero-f7b-wire-final2.log",
+        "bytes": 3789,
+        "sha256": "e3cbdd9c311e83d0c3f107273c1467bf3730c85bd40b75feaa6dde9f31b53e05"
+      }
+    }
+  ],
+  "limitations": [
+    "Local HTTP/1 only; no hosted, HTTP2/HTTP3, consumer-owned integration or frozen-candidate qualification.",
+    "Temporary captures and binaries remain local artifacts, not durable release assets.",
+    "Assembly-failure exclusion has unit coverage but no new runtime control in this suite.",
+    "Fastly G2 remains failed; its blocked driver rewrite and all nine failed SDK parity controls remain open.",
+    "No claim of Cloudflare overflow recovery or capability promotion.",
+    "Cloudflare uses client write-half-close; the other frontends use Connection: close without early FIN. This changes only controlled probe input, not production serving."
+  ],
+  "verification": {
+    "workspace": {
+      "passed": 2193,
+      "binaries": 28,
+      "failed": 0,
+      "ignored": 1
+    },
+    "fixture": {
+      "core": 20,
+      "harness": 72,
+      "failed": 0
+    },
+    "executed_wire": {
+      "total": 55,
+      "head": 23,
+      "clean_eof": 55,
+      "failed": 0
+    },
+    "required_rust_gates": [
+      "cargo fmt --all -- --check",
+      "cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings",
+      "cargo test --offline --locked --workspace --all-targets",
+      "cargo check --offline --locked --workspace --all-targets --features fastly,cloudflare,spin",
+      "cargo check --offline --locked -p edgezero-adapter-spin --target wasm32-wasip2 --features spin"
+    ],
+    "logs": [
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-workspace-clippy.log",
+        "bytes": 327,
+        "sha256": "d62b38e72a387717f5846ee77c85124ad1955606a1e3dc4ca2bbb0200b41052b"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-workspace-tests-sockets.log",
+        "bytes": 184441,
+        "sha256": "f64f2d6cf6708f5473e1e08bb07314992a9986329ad69bcfb3553a564f239836"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-features.log",
+        "bytes": 327,
+        "sha256": "5403378695e19c3998cdafda6e194cf2c8a71bad57fe6fcf84038171295fc922"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-spin-check.log",
+        "bytes": 483,
+        "sha256": "4e0a873c8fcf3410a21f4a5ff328734064f07abc7eeabd5db38b5b912cc6f962"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-fixture-tests-final.log",
+        "bytes": 9335,
+        "sha256": "3e20d507ca667c24897f278a2214a03b351e9346caefa4187d11d8fc053638a7"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-fixture-lint-final.log",
+        "bytes": 665,
+        "sha256": "c40df9e9fb59c04afa00e292c71441221ea8a19742b9258cb5bb66b8bba54406"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-docs-format.log",
+        "bytes": 118,
+        "sha256": "43ba3f26abc1bc66ab5eaa42bcc64ba4c70edea76a4a621144b929d0812736f1"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-docs-lint.log",
+        "bytes": 40,
+        "sha256": "81521cc702a8a0674ad78ee506a2ec936217876334be26daf9c738d03779be16"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-docs-build.log",
+        "bytes": 234,
+        "sha256": "e95fb17753b9329153dbfe57601f9d6e613fe06f997b0684a9dd7263a837c5d3"
+      }
+    ],
+    "actual_target_clippy": [
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-validator-fastly.log",
+        "bytes": 1107,
+        "sha256": "9ad3600056e4c2f1e129112dae0f7cb18c836921000acf98eae60684b7f1d860"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-validator-cloudflare.log",
+        "bytes": 1123,
+        "sha256": "bd173500b9dbfa13077926509e165a09d0bb1b1a3f774a5499f1cde3be9e1a38"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-validator-spin.log",
+        "bytes": 1099,
+        "sha256": "3d9a5ec8393626dee7496de54ed589373697e34b7720c32df62dd708facb4300"
+      },
+      {
+        "path": "/private/tmp/edgezero-f7b-wire-validator-axum.log",
+        "bytes": 955,
+        "sha256": "f215c51f238ab7a966d97540375ce7a0ab3b2a2ca950236c1841551c9ea1a63a"
+      }
+    ],
+    "restricted_workspace_run": {
+      "status": "failed-environment",
+      "reason": "Socket bind denied; all affected tests rerun with loopback access",
+      "log": {
+        "path": "/private/tmp/edgezero-f7b-wire-workspace-tests.log",
+        "bytes": 53026,
+        "sha256": "f9a74900643a5ca81cc6e62aab81aecbaa1a6f16154d529e14456446b0de89bd"
+      }
+    },
+    "warnings": [
+      "Existing proc-macro-error2 2.0.1 future-incompatibility warning remains; no SDK/toolchain pin changes."
+    ]
+  }
+}

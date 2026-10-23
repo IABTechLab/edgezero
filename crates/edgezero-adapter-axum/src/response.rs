@@ -682,15 +682,20 @@ fn prepare_fallback(
     clock: &MonotonicClock,
     connection: &EgressConnection,
 ) -> Response<AxumEgressBody> {
+    let headers = attempt.synthesized_response_headers();
     if !attempt.begin_fallback(cause) {
         attempt.terminate(ResponseEgressOutcome::ConversionError, clock.now());
-        return detached_fallback(request_method, ResponseEgressOutcome::ConversionError);
+        return detached_fallback(
+            request_method,
+            ResponseEgressOutcome::ConversionError,
+            &headers,
+        );
     }
     let started_at = clock.now();
     let Some(fallback_deadline) = started_at.checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
     else {
         attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
-        return detached_fallback(request_method, cause);
+        return detached_fallback(request_method, cause, &headers);
     };
     let fallback = fallback_response(cause);
     let Ok(prepared) = attempt.prepare_response(
@@ -699,7 +704,7 @@ fn prepare_fallback(
         fallback,
     ) else {
         attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
-        return detached_fallback(request_method, cause);
+        return detached_fallback(request_method, cause, &headers);
     };
     match start_prepared(
         prepared,
@@ -713,7 +718,7 @@ fn prepare_fallback(
         Err(mut returned_attempt) => {
             returned_attempt
                 .finish_fallback(ResponseEgressFallbackDisposition::Aborted, clock.now());
-            detached_fallback(request_method, cause)
+            detached_fallback(request_method, cause, &headers)
         }
     }
 }
@@ -728,6 +733,7 @@ fn fallback_response(cause: ResponseEgressOutcome) -> CoreResponse {
 fn detached_fallback(
     request_method: &Method,
     cause: ResponseEgressOutcome,
+    headers: &edgezero_core::SynthesizedResponseHeaders,
 ) -> Response<AxumEgressBody> {
     let (status, body) = fallback_parts(cause);
     let payload = if *request_method == Method::HEAD {
@@ -737,6 +743,7 @@ fn detached_fallback(
     };
     let mut response = Response::new(AxumEgressBody::detached(payload));
     *response.status_mut() = status;
+    headers.apply(response.headers_mut());
     response
 }
 
@@ -880,9 +887,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn generated_overflow_retry_after_precedes_synthesized_headers() {
+        use edgezero_core::RequestBodyOverflowOrigin;
+        use edgezero_core::response_egress_framing::test_support::synthesized_error_fixture;
+        for (error, retry) in [
+            (
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound),
+                None,
+            ),
+            (
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::OutboundUpload),
+                None,
+            ),
+            (
+                EdgeError::config_out_of_date("private", "field"),
+                Some("60"),
+            ),
+        ] {
+            let envelope = synthesized_error_fixture(error).expect("fixture");
+            let connection = EgressConnection::default();
+            let response = super::prepare_egress_response(envelope, &connection).await;
+            assert_eq!(response.headers()["x-synthesized-fixture"], "configured");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("retry-after")
+                    .map(|value| value.to_str().expect("text")),
+                retry
+            );
+            let mut body = Box::pin(response.into_body());
+            while let Some(frame) = poll_future(|cx| body.as_mut().poll_frame(cx)).await {
+                frame.expect("body frame");
+            }
+            drop(body);
+            assert!(connection.is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn framing_observer_preserves_each_typed_reason() {
         use edgezero_core::response_egress_framing::test_support::{
-            FRAMING_RULES, framing_fixture,
+            FRAMING_RULES, framing_fixture, has_full_synthesized_fixture_headers,
         };
         for reason in FRAMING_RULES {
             for detached in [false, true] {
@@ -890,6 +935,8 @@ mod tests {
                 let connection = EgressConnection::default();
                 let response = super::prepare_egress_response(fixture.envelope, &connection).await;
                 assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(response.headers()["x-synthesized-fixture"], "configured");
+                assert!(has_full_synthesized_fixture_headers(response.headers()));
                 let mut pinned = Box::pin(response.into_body());
                 let mut bytes = Vec::new();
                 while let Some(frame) = poll_future(|cx| pinned.as_mut().poll_frame(cx)).await {
@@ -1293,6 +1340,49 @@ mod tests {
         assert_eq!(reports[0].bytes_written, 0);
         assert_eq!(reports[0].outcome, ResponseEgressOutcome::DeadlineExceeded);
         assert!(connection.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn emergency_fallback_retains_synthesized_headers_and_single_completion() {
+        use edgezero_core::ResponseEgressFramingError;
+        use edgezero_core::response_egress_framing::test_support::framing_fixture;
+        for method in [Method::GET, Method::HEAD] {
+            let fixture = framing_fixture(ResponseEgressFramingError::UnsupportedTrailers, false)
+                .await
+                .expect("fixture");
+            let Err(failure) = fixture
+                .envelope
+                .begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            else {
+                panic!("framing failure");
+            };
+            let (attempt, _, cause) = failure.into_parts();
+            let started = MonotonicInstant::now();
+            let ticks = Arc::new(AtomicUsize::new(0));
+            let clock = MonotonicClock::new(move || {
+                let tick = u64::try_from(ticks.fetch_add(1, Ordering::SeqCst)).expect("tick");
+                started + Duration::from_secs(2 * tick)
+            });
+            let connection = EgressConnection::default();
+            let response = prepare_fallback(&method, cause, attempt, &clock, &connection);
+            assert_eq!(response.headers()["x-synthesized-fixture"], "configured");
+            let mut body = Box::pin(response.into_body());
+            let mut bytes = Vec::new();
+            while let Some(frame) = poll_future(|cx| body.as_mut().poll_frame(cx)).await {
+                bytes.extend_from_slice(frame.expect("frame").data_ref().expect("data"));
+            }
+            assert_eq!(
+                bytes.as_slice(),
+                if method == Method::HEAD {
+                    b""
+                } else {
+                    INTERNAL_FALLBACK_BODY
+                }
+            );
+            drop(body);
+            assert_eq!(fixture.completed.lock().expect("completion").len(), 1);
+            assert!(connection.is_empty());
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

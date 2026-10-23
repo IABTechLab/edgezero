@@ -134,6 +134,19 @@ controls remain failed and keep the full framing suite nonzero. Hosted compressi
 candidate qualification and consumer comparisons remain open. No serverless capability is
 promoted, Fastly G2 remains failed, and neither full F7a nor P1 is complete.
 
+### F7b Synthesized Header Checkpoint
+
+The [F7b checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f7b-implementation-checkpoint-2026-10-23)
+adds bounded prevalidated framework-error/fallback header sets and Fastly per-request replacement,
+without decorating matched routed responses/errors or application refusals. Envelope/attempt
+snapshots retain the existing ownership and fallback budget; demos and scaffolds use the same core
+API. Required shared/target checks and independent review pass, including the generated app's
+executed tests and TCP probe. The separate local HTTP/1 suite passes 55 cases across all four
+runtimes, including complete maximum-size sets, GET/HEAD fallbacks and Fastly's normalized
+rejection/request-replacement paths. A further 40 serverless HTTP exchanges and one native startup
+control prove partial-configuration exclusion and recovered-policy delivery. Consumer integration
+and hosted/frozen-candidate acceptance remain gates. This does not complete P1 or waive failed Fastly G2.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

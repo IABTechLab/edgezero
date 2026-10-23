@@ -825,24 +825,145 @@ Fastly request preparation; fixture detached/error/fallback responses.
 **Dependencies:** Existing renderer/egress decisions; D1a/D2/D3/D4 for ownership-specific
 integration. F2 adds only the conditional combined overflow test; no F7a or D1b-D1d prerequisite.
 
-- [ ] Add bounded configured header sets for detached/error/fallback paths. Validate app-level
+- [x] Add bounded configured header sets for detached/error/fallback paths. Validate app-level
       sets at configuration; dynamic sets during normal prepare before installation. Invalid dynamic
       headers fail with the typed error while retaining the already-valid app set. Fallback executes
       no new application code and preserves response-scoped completion/deadline/abort decisions.
-- [ ] Where F2 is present, add `generated_overflow_retry_after_precedes_synthesized_headers`
+- [x] Where F2 is present, add `generated_overflow_retry_after_precedes_synthesized_headers`
       covering renderer plus app-level and Fastly per-request sets. Final generated cap errors omit
       Retry-After and retain unrelated headers; ordinary upstream 413 retains its surviving value;
       config 503 retains its effective retry value (default 60). Do not globally ban the header from
       validated sets. Run `scripts/run_test_nonzero.sh generated_overflow_retry_after_precedes_synthesized_headers cargo test -p edgezero-core --lib`
       plus each adapter response contract; Expected: real red/green assertions, not a skipped
       cross-feature case. Record the combined leg only when both follow-up parts are adopted.
-- [ ] Run core and four adapter response contracts; compare normal, fallback, admission refusal,
+- [x] Run core and four adapter response contracts; compare normal, fallback, admission refusal,
       normalized rejection, assembly failure, and postcommit failure paths. Preserve canonical Allow
       and effective config Retry-After policy. Add `synthesized_headers_preserve_detached_ownership`
       and run it with `scripts/run_test_nonzero.sh synthesized_headers_preserve_detached_ownership cargo test -p edgezero-core --features test-utils`.
       Expected red for missing policy, then bounded validation, preserved valid app headers and
       exactly-once completion pass. Apply the task lint card. Suggested commit:
       `feat: bound synthesized headers on every response path`.
+
+### F7b Implementation Checkpoint (2026-10-23)
+
+This checkpoint implements the guest-side policy, not full EZ-19 acceptance. The task's complete
+runtime/consumer checklist remains open, and no frozen Interfaces, policies, SDK pins or capability
+claims change.
+
+- [x] Add immutable typed sets with inclusive 32-value/4096-byte bounds, forbidden-field and portable
+      ASCII validation. Count repeated names and wire delimiters; compact retained map/backing
+      storage. Failed installation preserves the previous valid set.
+- [x] Snapshot the selected policy on envelopes and attempts. Decorate detached/admitted-source
+      and canonical 404/405 synthesis, not matched handler results/errors or admission refusals.
+      Preserve completion/deadline/abort ownership and omit configured policy on assembly failure.
+- [x] Apply the snapshot through shared fallback preparation and Axum's secondary detached fallback,
+      without application callbacks, repeat validation or a different fallback body/budget.
+- [x] Consume a validated Fastly `prepare` replacement before conversion/head checks and install it
+      on the returned envelope before egress begins. An invalid construction installs nothing;
+      an empty validated set explicitly replaces the app set.
+- [x] Add ownership/exclusion, field collision/order, repeated-value byte boundaries and typed
+      overflow/config-retry tests. Exercise maximum-size sets through shared adapter fallback
+      fixtures and align demo/template configuration with a framework-error version header.
+- [x] Finish all required shared/target checks and independent final review for this checkpoint.
+- [x] Record actual local normalized 414/431, GET/HEAD fallback, maximum-size provider delivery and
+      dynamic replacement runtime evidence through the canonical entrypoints.
+- [x] Exercise partial-configuration header exclusion and successful retained-policy recovery
+      through canonical serverless assembly delivery, plus Axum's pre-listener failure boundary.
+- [ ] Complete consumer-owned header integration and hosted/frozen-candidate qualification.
+      Local wire tests do not close these legs.
+
+Hilbert mapped the four delivery paths and recommended deferred envelope decoration over ingress
+API churn, identifying routed-error exclusions and Axum's secondary builder. Aquinas mapped
+acceptance and fixture seams and found weak completion/collision/precedence controls; the affected
+assertions were strengthened. The selected path uses one core merge implementation and validated
+snapshots, with no compatibility wrappers or duplicate transport. Fastly's prepare override had a
+real failing Viceroy control before dispatch integration and passes after integration. Failed G2,
+the full P1 hard cut, unresolved Cloudflare F2 recovery and the prior framing parity gates remain
+open; this checkpoint does not waive them.
+
+Final static review found no remaining objection after immediate completion/resource-release,
+refusal-witness, complete header-set capture and both Fastly dispatch-arm controls were added.
+The maximum-size captures verify all 32 configured values and their 4096-byte field-section
+charge, not just one marker. Fastly's two prepare contracts pass under Viceroy. Its admitted
+source-error/request-replacement composition is checked through the actual coordinator; this is
+not a claim that the canonical SDK `take_body` path produced a source-construction failure.
+
+All 12 native Spin response controls pass with `spin,test-utils`. The additional WASI library-unit
+attempt cannot start under bare pinned Wasmtime 48.0.2 because the binary imports
+`spin:key-value/key-value@3.0.0`, which that runner does not implement. That result remains an
+unexecuted-host boundary, not a passing target test. Target Clippy passes; no SDK import shim,
+feature suppression or hosted-evidence waiver was introduced to force execution.
+
+Verification passes the five required Rust gates: 2,193 tests across 28 workspace binaries,
+including 831 core tests, zero failures and one existing ignored generated-project gate. That
+ignored gate was run explicitly and passed: generated formatting, strict lint, target checks,
+23 generated-core tests and the actual Axum fallback TCP probe. Demo tests pass with 50 core
+tests. All three actual-target SDK Clippy runs and Fastly's native CLI-only variant pass, as do
+both required nonzero sentinels and documentation format/lint/build/contract checks. The generator
+initially exposed template formatting/import mistakes, which were corrected. Its nested Cargo
+commands require inherited `CARGO_NET_OFFLINE=true` in the restricted environment; the final run
+also has localhost socket access for the TCP probe. No failed environment run was counted as
+passing, and the separate bare-Wasmtime limitation above remains recorded.
+
+### F7b Local Wire Checkpoint (2026-10-23)
+
+The separate `synthesized-headers` fixture suite passes 55 actual HTTP/1 cases: Viceroy 0.21.0
+22/22, local Wrangler 4.131.0/workerd 2026-09-10 11/11, Spin 4.1.0 11/11 and native Axum 11/11.
+All configured values are checked, including 31 ordered cookies and the exact 4096-byte charge.
+Canonical 404/405, matched success/error exclusions and real admission refusals are exercised.
+Fastly's normalized 414/431 retain the set, while correlated detached and terminal events prove
+zero admission/handler/finalize calls. Its prepare replacement, invalid byte-overflow and empty
+replacement paths cover both early rejection and GET/HEAD framing fallback.
+
+Raw captures observe clean EOF and actual HEAD payload absence; GET fallback stays exactly
+`internal server error`. Final Fastly logs are rechecked after teardown for terminal count,
+outcome, body kind, fallback disposition and byte count. Mutation and TCP controls reject lost,
+reordered/changed/duplicate fields, payload in the header packet or a later write, changed/late
+terminal records and capture failures that might otherwise skip later cases. Ramanujan reviewed
+fixture design/bounds and target builds; Turing reviewed evidence assertions and identified the
+final-log and terminal-content controls. Implementation remains centralized.
+
+Earlier failed capture runs remain retained. Cloudflare's frontend keeps connections open despite
+the close field; a client write-half-close produces observable EOF. Applying that FIN to the
+other three frontends cancels parsing before dispatch, so the harness explicitly records the
+per-target close mode. A macOS timeout-option failure after FIN was removed by nonblocking reads
+under the unchanged absolute five-second budget. These are harness corrections, not production
+transport changes, timeout-as-success, alternate listeners or a Cloudflare overflow-recovery fix.
+
+The [local record](../../audits/evidence/2026-10-23-synthesized-response-headers.json) is working-tree
+characterization, not exact-candidate qualification. It does not
+close consumer-owned headers, assembly-failure runtime exclusion, hosted delivery, HTTP2/HTTP3,
+Fastly's nine failed SDK parity controls or failed G2, nor the full P1 hard cut.
+
+### F7b Assembly Exclusion Checkpoint (2026-10-23)
+
+The subsequent `assembly` suite passes 40 HTTP/1 exchanges: 18 Viceroy, 11 local workerd and
+11 Spin, plus one native Axum startup control. A validated two-field set is installed before
+configuration deliberately fails. Both configured names are absent from canonical failure GET
+and HEAD responses; config 503 retains its single retry field, and HEAD transmits no payload.
+The existing three-request retained recovery sequence is followed by a canonical 404 carrying
+only generation-two headers, proving that exclusion was not an inert configuration fixture.
+
+One bounded TCP capture implementation now serves both suites. It verifies exact GET framing,
+retains actual HEAD bytes through clean EOF and preserves failed captures. The superseded HEAD
+reader was removed, with its regression migrated to this path. Fastly's custom delivery reports
+match all four distinct request tokens. Failed-generation state release is observed before the
+recovery request starts; counts, generation/instance identity, reports and boot logs are rechecked
+after teardown. Negative controls cover malformed/competing fields, stale recovered values,
+missing/duplicate installation witnesses, count-preserving report duplication and delayed release.
+
+Axum uses its canonical startup function with the selected port already occupied. The partial
+installation witness, exact configuration-error boundary and nonzero exit establish configuration
+failure precedence over binding; no HTTP response or native response-delivery guarantee is claimed.
+Banach reviewed provider routing/ownership and target builds; Fermat identified the framing,
+per-request report correlation and immediate-release controls. Both reviews were addressed without
+production API, SDK/pin, frozen-policy or transport changes.
+
+This closes the local assembly-exclusion leg left open above, not consumer integration, hosted or
+frozen-candidate qualification. Fastly G2, the nine failed SDK parity controls, Cloudflare overflow
+recovery and the broader outbound migration remain open. The
+[local evidence record](../../audits/evidence/2026-10-23-assembly-response-headers.json) preserves
+both the earlier successful run and the stronger final controls; it is not a release certificate.
 
 ## Task F8: Declared KV Failure Bindings
 

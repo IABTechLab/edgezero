@@ -12,7 +12,8 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
         "cannot determine progress source revision",
     )?;
     let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
-    let Some((mut command, port)) = build(name, &run, records, &revision)? else {
+    let Some((mut command, port)) = build(name, &run, records, &revision, "outbound-progress")?
+    else {
         return Ok(());
     };
     let log = run.join("runtime.log");
@@ -347,6 +348,7 @@ pub(super) fn build(
     run: &Path,
     records: &mut Records,
     revision: &str,
+    suite: &str,
 ) -> Result<Option<(Command, u16)>> {
     let package = root().join("crates").join(format!("fixture-{name}"));
     let (variable, fallback) = match name {
@@ -383,6 +385,7 @@ pub(super) fn build(
                 ])
                 .env("CARGO_TARGET_DIR", root().join("target"))
                 .env("EDGEZERO_QUALIFICATION_REVISION", revision)
+                .env("EDGEZERO_QUALIFICATION_SUITE", suite)
                 .current_dir(&package),
         )?;
         let staged = stage(&package.join("build"), run)?;
@@ -404,7 +407,8 @@ pub(super) fn build(
                 "--features",
                 "progress",
             ])
-            .env("EDGEZERO_QUALIFICATION_REVISION", revision);
+            .env("EDGEZERO_QUALIFICATION_REVISION", revision)
+            .env("EDGEZERO_QUALIFICATION_SUITE", suite);
         if name == "spin" {
             command.args(["--target", "wasm32-wasip2"]);
         } else if name == "fastly" {

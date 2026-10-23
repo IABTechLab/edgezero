@@ -7,7 +7,7 @@ use crate::error::{
     suppress_overflow_retry_after,
 };
 use crate::http::header::CONTENT_TYPE;
-use crate::http::{HeaderValue, Method, Request, Response, StatusCode};
+use crate::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use crate::ingress::{
     AdmissionDecision, IngressAdmissionOutcome, IngressAdmissionPolicy, IngressBeginOutcome,
     IngressDispatchOutcome, IngressFraming, IngressHead, IngressHeadAccounting, IngressHeadLimits,
@@ -24,6 +24,7 @@ use crate::response_egress::{
     ResponseEgressObserverHandle, ResponseEgressPolicy, ResponseEgressPolicyCallback,
     ResponseEgressRequestMetadata, default_response_egress_policy,
 };
+use crate::response_headers::{SynthesizedResponseHeaders, SynthesizedResponseHeadersError};
 use crate::router::{RouteMetadata, RouterService};
 use crate::time::{MonotonicClock, MonotonicInstant};
 
@@ -51,6 +52,7 @@ pub struct App {
     response_egress_observer: ResponseEgressObserverHandle,
     response_egress_policy: ResponseEgressPolicyCallback,
     router: RouterService,
+    synthesized_response_headers: SynthesizedResponseHeaders,
 }
 
 impl App {
@@ -103,6 +105,7 @@ impl App {
             route,
             completion,
         )
+        .synthesized()
     }
 
     /// Prepares canonical assembly-error egress without constructing or retaining an application.
@@ -235,12 +238,15 @@ impl App {
                 response
                     .extensions_mut()
                     .insert(ResponseEgressDeadline::at(deadline));
-                IngressDispatchOutcome::Response(Box::new(self.detached_response_egress(
-                    response,
-                    request_method,
-                    request_start,
-                    completion,
-                )))
+                IngressDispatchOutcome::Response(Box::new(
+                    self.detached_response_egress(
+                        response,
+                        request_method,
+                        request_start,
+                        completion,
+                    )
+                    .synthesized(),
+                ))
             }
         }
     }
@@ -259,6 +265,7 @@ impl App {
             completion,
             self.monotonic_clock(),
         )
+        .with_synthesized_response_headers(self.synthesized_response_headers.clone())
     }
 
     /// Dispatches a request whose native body was wrapped after admission.
@@ -273,15 +280,26 @@ impl App {
         let request_start = prepared.request_start();
         let route = prepared.route_metadata().cloned();
         let (resolved, admitted, completion) = prepared.into_parts();
-        let response = match self
+        let (response, synthesized) = match self
             .router
             .dispatch_resolved(resolved, request, admitted)
             .await
         {
-            Ok(response) => response,
-            Err(error) => self.render_error_response(error),
+            Ok(response) => (response, false),
+            Err(error) => (self.render_error_response(error), route.is_none()),
         };
-        self.response_egress_envelope(response, request_method, request_start, route, completion)
+        let envelope = self.response_egress_envelope(
+            response,
+            request_method,
+            request_start,
+            route,
+            completion,
+        );
+        if synthesized {
+            envelope.synthesized()
+        } else {
+            envelope
+        }
     }
 
     /// Resolves, admits, and dispatches one normalized inbound request into owned egress.
@@ -425,6 +443,7 @@ impl App {
             self.response_egress_observer(),
             self.monotonic_clock(),
         )
+        .with_synthesized_response_headers(self.synthesized_response_headers.clone())
     }
 
     /// Returns an owned handle to the configured terminal response-egress observer.
@@ -478,8 +497,8 @@ impl App {
     /// The renderer is called exactly once for admitted dispatch errors and detached normalized
     /// ingress errors. Applications that require a bounded wire format should return a fixed-size
     /// response here. `EdgeZero` reapplies the error status and mandatory protocol headers after the
-    /// callback. Explicit admission-refusal and fallback terminal responses bypass this hook
-    /// because the application supplied those responses directly.
+    /// callback. Application-built admission refusals bypass this hook. Adapter-built egress
+    /// fallbacks also bypass it: fallback construction never executes application code.
     #[inline]
     pub fn set_error_response_renderer<Renderer>(&mut self, renderer: Renderer)
     where
@@ -539,6 +558,21 @@ impl App {
         self.response_egress_policy = Arc::new(policy);
     }
 
+    /// Validates and installs fields for framework-generated errors and adapter fallbacks.
+    ///
+    /// Routed responses, admission refusals and assembly failures are not decorated.
+    ///
+    /// # Errors
+    /// Returns a typed construction error without replacing the previous valid set.
+    #[inline]
+    pub fn set_synthesized_response_headers(
+        &mut self,
+        headers: HeaderMap,
+    ) -> Result<(), SynthesizedResponseHeadersError> {
+        self.synthesized_response_headers = SynthesizedResponseHeaders::new(headers)?;
+        Ok(())
+    }
+
     /// Borrows the registered state of exactly this type from the router's shared registry.
     ///
     /// Configuration, entrypoints and [`crate::extractor::State`] use this same source.
@@ -591,6 +625,7 @@ impl App {
             response_egress_observer: ResponseEgressObserverHandle::default(),
             response_egress_policy: Arc::new(default_response_egress_policy),
             router,
+            synthesized_response_headers: SynthesizedResponseHeaders::default(),
         }
     }
 }
@@ -1043,6 +1078,24 @@ mod tests {
             panic!("expected response");
         };
         complete_envelope(*envelope)
+    }
+
+    fn dispatch_request(app: &App, method: Method, target: &str, body: Body) -> Response {
+        complete_dispatch(
+            block_on(
+                app.dispatch_ingress(
+                    request_builder()
+                        .method(method)
+                        .uri(target)
+                        .body(body)
+                        .expect("request"),
+                    app.monotonic_now(),
+                    IngressHeadAccounting::HostManaged,
+                    IngressFraming::HostManaged,
+                ),
+            )
+            .expect("dispatch"),
+        )
     }
 
     fn counted_completion(calls: &Arc<AtomicUsize>) -> ResponseEgressCompletion {
@@ -2522,6 +2575,236 @@ mod tests {
             response.body().as_bytes().expect("buffered body"),
             b"bounded error"
         );
+    }
+
+    #[test]
+    fn synthesized_headers_preserve_detached_ownership() {
+        let mut app = App::new(empty_router());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-build", HeaderValue::from_static("original"));
+        app.set_synthesized_response_headers(headers)
+            .expect("configured");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::clone(&calls);
+        let retained = Arc::clone(&drops);
+        let mut invalid = HeaderMap::new();
+        invalid.insert("content-type", HeaderValue::from_static("text/plain"));
+        assert_eq!(
+            app.set_synthesized_response_headers(invalid),
+            Err(SynthesizedResponseHeadersError::ForbiddenName)
+        );
+        app.set_detached_response_egress_decision_factory(move |head| {
+            let count = Arc::clone(&completed);
+            let resource = GrantDropProbe(Arc::clone(&retained));
+            DetachedResponseEgressDecision::Send {
+                completion: ResponseEgressCompletion::new(move |_| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    drop(resource);
+                }),
+                deadline: head.write_deadline_after(Duration::from_secs(1)),
+            }
+        });
+        let started = app.monotonic_now();
+        let IngressDispatchOutcome::Response(envelope) = app.detached_ingress_error_egress(
+            EdgeError::uri_too_long("private request"),
+            Method::HEAD,
+            started,
+        ) else {
+            panic!("expected detached response");
+        };
+        app.set_synthesized_response_headers(HeaderMap::new())
+            .expect("new policy");
+        let Ok((prepared, policy, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
+            panic!("valid detached response");
+        };
+        assert!(!prepared.transmits_body());
+        assert_eq!(prepared.into_response().headers()["x-build"], "original");
+        assert_eq!(
+            policy.write_deadline.instant(),
+            started + Duration::from_secs(1)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(clock.now()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(attempt);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn synthesized_headers_do_not_decorate_routed_errors_or_refusals() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handled = Arc::clone(&calls);
+        let mut app = App::new(
+            RouterService::builder()
+                .get("/", move |_ctx: RequestContext| {
+                    handled.fetch_add(1, Ordering::SeqCst);
+                    async { Err::<String, _>(EdgeError::bad_request("routed error")) }
+                })
+                .build(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-build", HeaderValue::from_static("configured"));
+        app.set_synthesized_response_headers(headers)
+            .expect("configured");
+        let routed = dispatch_request(&app, Method::GET, "/", Body::empty());
+        assert_eq!(routed.status(), StatusCode::BAD_REQUEST);
+        assert!(!routed.headers().contains_key("x-build"));
+        app.set_ingress_admission_policy(|_| AdmissionDecision::Refuse {
+            completion: ResponseEgressCompletion::empty(),
+            response: Response::new(Body::from("refused")),
+        });
+        let refused = dispatch_request(&app, Method::GET, "/", Body::empty());
+        assert_eq!(refused.status(), StatusCode::OK);
+        assert_eq!(refused.body().as_bytes().expect("refusal body"), b"refused");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!refused.headers().contains_key("x-build"));
+    }
+
+    #[test]
+    fn generated_overflow_retry_after_precedes_synthesized_headers() {
+        fn source_error(app: &App, error: EdgeError) -> Response {
+            let request = Request::new(Body::empty());
+            let head = IngressHeadParts::from_request(
+                &request,
+                IngressHeadAccounting::HostManaged,
+                IngressFraming::HostManaged,
+            );
+            let IngressBeginOutcome::Admitted(prepared) = app
+                .begin_ingress(head, app.monotonic_now())
+                .expect("admitted")
+            else {
+                panic!("admitted");
+            };
+            complete_envelope(app.admitted_error_egress(prepared, error))
+        }
+        let mut app = App::new(
+            RouterService::builder()
+                .get("/", |_ctx: RequestContext| async {
+                    Ok::<_, EdgeError>(
+                        response_builder()
+                            .status(StatusCode::PAYLOAD_TOO_LARGE)
+                            .header("retry-after", "120")
+                            .body(Body::empty())
+                            .expect("upstream"),
+                    )
+                })
+                .build(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("180"));
+        headers.insert("x-build", HeaderValue::from_static("configured"));
+        headers.insert("allow", HeaderValue::from_static("POST"));
+        app.set_synthesized_response_headers(headers)
+            .expect("configured");
+        app.set_error_response_renderer(|_| {
+            response_builder()
+                .header("retry-after", "240")
+                .body(Body::from("fixed error"))
+                .expect("error")
+        });
+        for origin in [
+            crate::RequestBodyOverflowOrigin::Inbound,
+            crate::RequestBodyOverflowOrigin::OutboundUpload,
+        ] {
+            let response = source_error(&app, EdgeError::payload_too_large(origin));
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(!response.headers().contains_key("retry-after"));
+            assert_eq!(response.headers()["x-build"], "configured");
+        }
+        let config = source_error(&app, EdgeError::config_out_of_date("private", "field"));
+        assert_eq!(config.headers()["retry-after"], "60");
+        assert_eq!(config.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(config.headers()["x-build"], "configured");
+        assert_eq!(config.headers().get_all("retry-after").iter().count(), 1);
+        let wrong_method = dispatch_request(&app, Method::POST, "/", Body::empty());
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(wrong_method.headers()["x-build"], "configured");
+        assert_eq!(wrong_method.headers()["allow"], "GET");
+        assert_eq!(wrong_method.headers().get_all("allow").iter().count(), 1);
+        let upstream = dispatch_request(&app, Method::GET, "/", Body::empty());
+        assert_eq!(upstream.headers()["retry-after"], "120");
+        assert!(!upstream.headers().contains_key("x-build"));
+    }
+
+    #[test]
+    fn synthesized_headers_survive_begin_failure_without_reentering_application_code() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let retained = Arc::clone(&drops);
+        let mut app = App::new(
+            RouterService::builder()
+                .get("/", |_ctx: RequestContext| async {
+                    Ok::<_, EdgeError>(
+                        response_builder()
+                            .header("trailer", "private")
+                            .body(Body::from("x"))
+                            .expect("invalid response"),
+                    )
+                })
+                .build(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-build", HeaderValue::from_static("configured"));
+        app.set_synthesized_response_headers(headers)
+            .expect("configured");
+        app.set_error_response_renderer(|_| panic!("fallback must not invoke renderer"));
+        let mut invalid = HeaderMap::new();
+        invalid.insert(
+            "x-build",
+            HeaderValue::from_str(&"a".repeat(4096)).expect("field"),
+        );
+        assert_eq!(
+            app.set_synthesized_response_headers(invalid),
+            Err(SynthesizedResponseHeadersError::TooManyBytes)
+        );
+        app.set_ingress_admission_policy(move |head| {
+            let owned = GrantDropProbe(Arc::clone(&retained));
+            AdmissionDecision::Admit {
+                grant: IngressGrant::empty(),
+                completion: ResponseEgressCompletion::new(move |_| drop(owned)),
+                read_deadline: head.read_deadline_after(Duration::from_secs(1)),
+            }
+        });
+        let IngressDispatchOutcome::Response(envelope) = block_on(app.dispatch_ingress(
+            Request::new(Body::empty()),
+            app.monotonic_now(),
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        ))
+        .expect("dispatch") else {
+            panic!("response");
+        };
+        let Err(failure) = envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength) else {
+            panic!("framing failure");
+        };
+        let (mut attempt, clock, cause) = failure.into_parts();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(attempt.begin_fallback(cause));
+        let prepared = attempt
+            .prepare_response(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::GET,
+                response_builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("fixed fallback"))
+                    .expect("fallback"),
+            )
+            .expect("prepared fallback");
+        assert_eq!(prepared.into_response().headers()["x-build"], "configured");
+        assert!(attempt.begin_writing());
+        assert!(attempt.finish_fallback(
+            crate::ResponseEgressFallbackDisposition::Completed,
+            clock.now()
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(attempt);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]

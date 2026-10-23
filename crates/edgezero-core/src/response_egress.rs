@@ -5,13 +5,14 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use crate::error::EdgeError;
+use crate::error::{EdgeError, suppress_overflow_retry_after};
 use crate::error_detail::ProviderFailureDetail;
 use crate::http::{HeaderMap, Method, Response, StatusCode, Version};
 use crate::response_egress_framing::{
     PreparedResponseEgress, ResponseEgressFramingError, ResponseEgressFramingMode,
     prepare_response_egress, response_egress_source_error_category,
 };
+use crate::response_headers::SynthesizedResponseHeaders;
 use crate::router::RouteMetadata;
 use crate::time::{DEADLINE_FAR_FUTURE, Deadline, MonotonicClock, MonotonicInstant};
 
@@ -599,6 +600,8 @@ pub struct ResponseEgressEnvelope {
     request_start: MonotonicInstant,
     response: Response,
     route: Option<RouteMetadata>,
+    synthesized: bool,
+    synthesized_headers: SynthesizedResponseHeaders,
 }
 
 pub(crate) struct ResponseEgressRequestMetadata {
@@ -660,6 +663,10 @@ impl ResponseEgressEnvelope {
         Box<ResponseEgressBeginFailure>,
     > {
         let egress_started_at = self.clock.now();
+        if self.synthesized {
+            self.synthesized_headers.apply(self.response.headers_mut());
+            suppress_overflow_retry_after(&mut self.response);
+        }
         let application_deadline = self
             .response
             .extensions_mut()
@@ -680,6 +687,7 @@ impl ResponseEgressEnvelope {
             self.observer,
             self.clock.clone(),
         );
+        attempt.synthesized_headers = self.synthesized_headers;
         let Ok(selected_policy) =
             catch_unwind(AssertUnwindSafe(|| (self.policy)(&head, egress_started_at)))
         else {
@@ -755,6 +763,8 @@ impl ResponseEgressEnvelope {
             request_start: metadata.request_start,
             response,
             route: metadata.route,
+            synthesized: false,
+            synthesized_headers: SynthesizedResponseHeaders::default(),
         }
     }
 
@@ -771,6 +781,23 @@ impl ResponseEgressEnvelope {
     #[inline]
     pub fn response_mut(&mut self) -> &mut Response {
         &mut self.response
+    }
+
+    pub(crate) fn synthesized(mut self) -> Self {
+        self.synthesized = true;
+        self
+    }
+
+    /// Replaces the immutable policy before conversion, without decorating a routed/refused body.
+    #[doc(hidden)]
+    #[must_use]
+    #[inline]
+    pub fn with_synthesized_response_headers(
+        mut self,
+        headers: SynthesizedResponseHeaders,
+    ) -> Self {
+        self.synthesized_headers = headers;
+        self
     }
 }
 
@@ -826,6 +853,7 @@ pub struct ResponseEgressAttempt {
     route: Option<RouteMetadata>,
     source_failure: Option<ResponseEgressSourceFailure>,
     state: AttemptState,
+    synthesized_headers: SynthesizedResponseHeaders,
 }
 
 impl ResponseEgressAttempt {
@@ -975,6 +1003,7 @@ impl ResponseEgressAttempt {
             route: head.route().cloned(),
             source_failure: None,
             state: AttemptState::Initial,
+            synthesized_headers: SynthesizedResponseHeaders::default(),
         }
     }
 
@@ -989,8 +1018,13 @@ impl ResponseEgressAttempt {
         &mut self,
         framing: ResponseEgressFramingMode,
         request_method: &Method,
-        response: Response,
+        mut response: Response,
     ) -> Result<PreparedResponseEgress, ResponseEgressFramingError> {
+        if self.body_kind == ResponseEgressBodyKind::Fallback
+            && matches!(self.state, AttemptState::Initial)
+        {
+            self.synthesized_headers.apply(response.headers_mut());
+        }
         prepare_response_egress(framing, request_method, response).inspect_err(|reason| {
             if !matches!(self.state, AttemptState::Initial) {
                 return;
@@ -1052,6 +1086,14 @@ impl ResponseEgressAttempt {
             provider_detail: error.provider_failure_detail().copied(),
         });
         true
+    }
+
+    /// Copies the validated snapshot for a last-resort adapter fallback after ownership transfer.
+    #[doc(hidden)]
+    #[must_use]
+    #[inline]
+    pub fn synthesized_response_headers(&self) -> SynthesizedResponseHeaders {
+        self.synthesized_headers.clone()
     }
 
     /// Terminalizes an attempt with the supplied outcome.

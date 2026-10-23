@@ -16,7 +16,7 @@ fn main() -> Result<(), fastly::Error> {
         .get("case")
         .ok_or_else(|| fastly::Error::msg("missing assembly case"))?;
     let serve = Serve::new()
-        .with_max_requests(3)
+        .with_max_requests(4)
         .with_timeout(Duration::from_secs(5));
     match case.as_str() {
         "standard-retained" => {
@@ -24,6 +24,16 @@ fn main() -> Result<(), fastly::Error> {
         }
         "custom-retained" => {
             fixture_fastly::finish(serve_custom(serve, |req, retained: &mut Sandbox<App>| {
+                let token = req
+                    .get_header_str("x-request-token")
+                    .filter(|value| {
+                        !value.is_empty()
+                            && value.len() <= 64
+                            && value
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+                    .map(str::to_owned);
                 let clock = MonotonicClock::default();
                 let start = clock.now();
                 let delivered =
@@ -42,7 +52,7 @@ fn main() -> Result<(), fastly::Error> {
                 if let Some(delivery) = delivered.delivery() {
                     println!(
                         "{}",
-                        serde_json::json!({"event":"assembly-delivery",
+                        serde_json::json!({"event":"assembly-delivery","token":token,
                     "attempts":retained.initialization_attempts(),
                     "retained":retained.state().is_some(),
                     "disposition":if matches!(delivered, edgezero_adapter_fastly::delivery::FastlyRequestDelivery::Detached(_)) { "detached" } else { "routed" },

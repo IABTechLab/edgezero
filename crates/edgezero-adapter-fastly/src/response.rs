@@ -1270,7 +1270,7 @@ mod tests {
     fn framing_observer_preserves_each_typed_reason() {
         use crate::delivery::{DispatchOutcome, FastlyRequestDelivery, finish_request};
         use edgezero_core::response_egress_framing::test_support::{
-            FRAMING_RULES, framing_fixture,
+            FRAMING_RULES, framing_fixture, has_full_synthesized_fixture_headers,
         };
         for reason in FRAMING_RULES {
             for detached in [false, true] {
@@ -1305,6 +1305,13 @@ mod tests {
                     }
                 };
                 assert_eq!(delivery.error(), None);
+                assert_eq!(
+                    state.borrow().commits[0].1["x-synthesized-fixture"],
+                    "configured"
+                );
+                assert!(has_full_synthesized_fixture_headers(
+                    &state.borrow().commits[0].1
+                ));
                 assert_eq!(delivery.commitment(), FastlyResponseCommitState::Committed);
                 let snapshot = state.borrow();
                 assert_eq!(snapshot.commits.len(), 1);
@@ -1814,6 +1821,47 @@ mod tests {
         assert_eq!(headers.get("content-length").expect("length"), "3");
         assert!(*transmits_body);
         assert_eq!(observed_state.accepted, b"abc");
+    }
+
+    #[test]
+    fn generated_overflow_retry_after_precedes_synthesized_headers() {
+        use edgezero_core::RequestBodyOverflowOrigin;
+        use edgezero_core::response_egress_framing::test_support::synthesized_error_fixture;
+        for (error, retry) in [
+            (
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound),
+                None,
+            ),
+            (
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::OutboundUpload),
+                None,
+            ),
+            (
+                EdgeError::config_out_of_date("private", "field"),
+                Some("60"),
+            ),
+        ] {
+            let fixture_envelope = synthesized_error_fixture(error).expect("fixture");
+            let mut replacement = HeaderMap::new();
+            replacement.insert("x-synthesized-fixture", "request".parse().expect("field"));
+            replacement.insert("retry-after", "360".parse().expect("retry"));
+            let envelope = fixture_envelope.with_synthesized_response_headers(
+                edgezero_core::SynthesizedResponseHeaders::new(replacement)
+                    .expect("request policy"),
+            );
+            let state = Rc::new(RefCell::new(SinkState::default()));
+            let mut committer = MockCommitter::new(Rc::clone(&state));
+            assert_eq!(send_egress_with(envelope, &mut committer).error(), None);
+            let snapshot = state.borrow();
+            let headers = &snapshot.commits[0].1;
+            assert_eq!(headers["x-synthesized-fixture"], "request");
+            assert_eq!(
+                headers
+                    .get("retry-after")
+                    .map(|value| value.to_str().expect("text")),
+                retry
+            );
+        }
     }
 
     #[test]

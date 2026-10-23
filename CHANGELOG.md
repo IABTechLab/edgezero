@@ -46,6 +46,30 @@ separately from the portable API and must be considered when declaring required 
 - Add TCP policy, upload, streaming, HEAD, raw-head, local-work, store/state and cleanup controls.
   These do not promote capabilities or replace consumer/hosted qualification.
 
+### Bounded Synthesized Response Headers
+
+- Add `App::set_synthesized_response_headers` and immutable `SynthesizedResponseHeaders` for
+  detached ingress errors, admitted source errors, canonical 404/405 errors and adapter-built
+  fallbacks. Routed responses, routed handler errors, application admission refusals and
+  unconfigured assembly failures remain undecorated.
+- Validate at most 32 field values and 4096 serialized field-section bytes before installation;
+  reject framing/coding fields and nonportable values with payload-free typed errors. Compact
+  retained maps and field backing storage. Invalid replacements leave the valid policy intact.
+- Preserve response-owned names and ordered repeated configured values. Canonical `Allow`,
+  effective config retry policy and typed generated-overflow `Retry-After` suppression take
+  precedence. Fallback decoration performs no application callback or repeat validation.
+- Let Fastly `prepare` install a validated per-request replacement through its extension bag,
+  including an explicitly empty set. Retain snapshots through initial preparation failures and
+  Axum's emergency fallback without changing completion ownership or fallback deadlines.
+- Align demo/scaffold configuration and tests. Local contract checks are separate from consumer,
+  deployed runtime and frozen-candidate qualification; no capability is promoted.
+- Add an independent four-runtime HTTP/1 wire suite for maximum-size repeated fields, normalized
+  Fastly rejections, GET/HEAD fallbacks, request replacements and undecorated application paths.
+  Preserve failed captures and verify actual EOF and final correlated terminal reports.
+- Verify partial-configuration header exclusion on canonical assembly failures and generation-two
+  policy after retained recovery. Cover Axum's startup-failure precedence without an HTTP response;
+  correlate Fastly delivery reports per request and observe failed-state release before retry.
+
 ### Buffered Response Framing
 
 - Derive exact buffered response lengths, including empty and framework fallback bodies, on

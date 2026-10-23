@@ -66,7 +66,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response>
         "/assembly/internal" => {
             return edgezero_adapter_cloudflare::run_app::<InternalFailureApp>(req, env, ctx).await;
         }
-        "/assembly/retry" => {
+        "/assembly/retry" | "/assembly/retry/missing" => {
             return dispatch_selected::<RetryApp<false>>(req, env, ctx, retained, &ASSEMBLY_APP)
                 .await;
         }

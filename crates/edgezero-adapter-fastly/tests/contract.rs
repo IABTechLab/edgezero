@@ -41,7 +41,7 @@ mod tests {
     };
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
-    use edgezero_core::http::{Method, Response, StatusCode, response_builder};
+    use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
     use edgezero_core::response_egress::{ResponseEgressEnvelope, ResponseEgressReport};
     use edgezero_core::router::{RouteMetadata, RouterService};
     use edgezero_core::time::{Deadline, MonotonicClock};
@@ -344,6 +344,121 @@ mod tests {
             *events.lock().expect("events"),
             ["prepare", "handler", "finalize", "deliver"]
         );
+    }
+
+    #[test]
+    #[cfg(feature = "test-utils")]
+    fn prepare_synthesized_headers_replace_app_policy_before_head_validation() {
+        for replacement in ["request", "invalid", "empty"] {
+            let mut app = App::new(RouterService::builder().build());
+            let mut app_fields = HeaderMap::new();
+            app_fields.insert("x-build", "app".parse().expect("field"));
+            app.set_synthesized_response_headers(app_fields)
+                .expect("configured");
+            let request =
+                fastly_request(FastlyMethod::GET, &format!("/{}", "a".repeat(9000)), None);
+            let delivery = FastlyService::new(&app).run_request_with_hooks_for_test(
+                request,
+                |_, extensions| {
+                    let mut fields = HeaderMap::new();
+                    if replacement != "empty" {
+                        let value = if replacement == "invalid" {
+                            "a".repeat(4096)
+                        } else {
+                            "request".to_owned()
+                        };
+                        fields.insert("x-build", value.parse().expect("value"));
+                    }
+                    match edgezero_core::SynthesizedResponseHeaders::new(fields) {
+                        Ok(headers) => {
+                            extensions.insert(headers);
+                        }
+                        Err(reason) => {
+                            assert_eq!(
+                                reason,
+                                edgezero_core::SynthesizedResponseHeadersError::TooManyBytes
+                            );
+                        }
+                    }
+                },
+                |_| panic!("detached response must skip finalize"),
+                |envelope| {
+                    let (response, report) = complete_envelope_with_report(envelope);
+                    assert_eq!(response.status(), StatusCode::URI_TOO_LONG);
+                    let expected = match replacement {
+                        "request" => Some("request"),
+                        "invalid" => Some("app"),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get("x-build")
+                            .map(|value| value.to_str().expect("text")),
+                        expected
+                    );
+                    response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+                },
+            );
+            assert!(matches!(delivery, FastlyRequestDelivery::Detached(_)));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "test-utils")]
+    fn prepare_synthesized_headers_survive_routed_framing_failure() {
+        let app = App::new(
+            RouterService::builder()
+                .get("/", |_ctx: RequestContext| async {
+                    Ok::<_, EdgeError>(
+                        response_builder()
+                            .header("trailer", "private")
+                            .body(Body::from("x"))
+                            .expect("invalid response"),
+                    )
+                })
+                .build(),
+        );
+        let result = FastlyService::new(&app).run_request_with_hooks_for_test(
+            fastly_request(FastlyMethod::GET, "/", None),
+            |_, extensions| {
+                let mut fields = HeaderMap::new();
+                fields.insert("x-build", "request".parse().expect("field"));
+                extensions.insert(
+                    edgezero_core::SynthesizedResponseHeaders::new(fields).expect("validated"),
+                );
+            },
+            |_| (),
+            |envelope| {
+                let Err(failure) = envelope.begin(ResponseEgressFramingMode::HostAutomatic) else {
+                    panic!("framing failure");
+                };
+                let (mut attempt, clock, cause) = failure.into_parts();
+                assert!(attempt.begin_fallback(cause));
+                let prepared = attempt
+                    .prepare_response(
+                        ResponseEgressFramingMode::HostAutomatic,
+                        &Method::GET,
+                        response_builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from("fixed fallback"))
+                            .expect("fallback"),
+                    )
+                    .expect("prepared fallback");
+                assert_eq!(prepared.into_response().headers()["x-build"], "request");
+                assert!(attempt.begin_writing());
+                assert!(attempt.finish_fallback(
+                    edgezero_core::ResponseEgressFallbackDisposition::Completed,
+                    clock.now()
+                ));
+                response_delivery(
+                    FastlyResponseCommitState::Committed,
+                    attempt.into_terminal_report(),
+                    Ok(()),
+                )
+            },
+        );
+        assert!(matches!(result, FastlyRequestDelivery::Routed { .. }));
     }
 
     #[test]

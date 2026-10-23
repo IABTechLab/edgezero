@@ -22,5 +22,9 @@ name = "fixture-axum-outbound-progress"
 path = "src/bin/outbound_progress.rs"
 required-features = ["progress"]
 
+[[bin]]
+name = "fixture-axum-assembly"
+path = "src/bin/assembly.rs"
+
 [lints]
 workspace = true

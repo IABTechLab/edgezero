@@ -64,7 +64,7 @@ async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinRespo
         "/assembly/internal" => {
             return edgezero_adapter_spin::run_app::<InternalFailureApp>(req).await;
         }
-        "/assembly/retry" => {
+        "/assembly/retry" | "/assembly/retry/missing" => {
             return dispatch_selected::<RetryApp<false>>(req, retained, &ASSEMBLY_APP).await;
         }
         _ => {}

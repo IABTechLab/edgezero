@@ -186,6 +186,48 @@ untransformed source length. It deliberately does not interpret ambiguous hint v
 Hosted compression and HTTP/1.1/HTTP/2 SDK parity remain qualification gates, not claims inferred
 from Viceroy. See the [response egress capability matrix](/guide/capabilities#response-egress-matrix).
 
+## Framework Error Headers
+
+Configure a bounded header set once during application configuration:
+
+```rust
+use edgezero_core::app::App;
+use edgezero_core::http::{HeaderMap, HeaderValue};
+use edgezero_core::EdgeError;
+
+fn configure(app: &mut App) -> Result<(), EdgeError> {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-application-version", HeaderValue::from_static("1.0.0"));
+    app.set_synthesized_response_headers(headers)
+        .map_err(EdgeError::internal)?;
+    Ok(())
+}
+```
+
+The set applies to normalized ingress errors, admitted source errors, canonical 404/405 responses,
+and adapter-built egress fallbacks, including HEAD fallbacks. It does not decorate routed responses
+or routed handler errors, application-built admission refusals, or host parser responses. Assembly
+failures have no configured application and therefore no configured headers or renderer.
+
+Limits are **32 field values** and **4096 bytes**, inclusive. Repeated values count separately;
+bytes are `2 + sum(name.len() + value.len() + 4)`, including `: ` and CRLF per field and the final
+CRLF, but excluding the status line. Values must be ASCII text with optional interior tabs and no
+leading/trailing space or tab. Empty values are valid. Framing, hop-by-hop, authentication-proxy,
+`Content-Type` and `Content-Encoding` fields are forbidden. Construction errors expose no values.
+Accepted maps and backing storage are compacted; these bounds do not cover the caller's input
+allocation, existing response/renderer fields, or provider-owned serialization and transport memory.
+
+Existing response-owned names win; otherwise all configured values of that name are appended in
+order. Canonical `Allow`, the effective config-503 retry value and typed body-overflow retry
+suppression remain authoritative. The fixed fallback body and independent one-second budget do not
+change, and fallback decoration runs neither application code nor validation again.
+
+On Fastly, construct `SynthesizedResponseHeaders::new(fields)` inside `prepare` and insert the
+validated value into the provided extension bag. It replaces the app set for that request before
+egress preparation, including early normalized 414/431 errors. An empty validated set clears the
+request's decoration; failed construction installs nothing and leaves the app set available.
+The other adapters use the app snapshot. This guest-side policy does not qualify hosted delivery.
+
 ## Next Steps
 
 - Learn about [Outbound HTTP](/guide/proxying) for upstream requests

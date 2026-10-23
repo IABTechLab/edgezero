@@ -4,6 +4,7 @@ mod assembly;
 mod framing;
 mod overflow;
 mod progress;
+mod response_headers;
 fn cargo_build() -> Command {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -262,6 +263,9 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     }
     if args.suite == "response-framing" {
         return framing::run("fastly", run, records);
+    }
+    if args.suite == "synthesized-headers" {
+        return response_headers::run("fastly", run, records);
     }
     if args.suite == "outbound-overflow" {
         return overflow::run("fastly", run, records);
@@ -1026,6 +1030,9 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "synthesized-headers" {
+        return response_headers::run(name, run, records);
+    }
     if args.suite == "response-framing" {
         return framing::run(name, run, records);
     }

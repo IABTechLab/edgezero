@@ -42,7 +42,7 @@ impl Args {
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-progress|outbound-overflow|response-framing] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
+                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-progress|outbound-overflow|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
                 );
                 std::process::exit(0);
             }
@@ -72,6 +72,7 @@ impl Args {
                 "outbound-progress",
                 "outbound-overflow",
                 "response-framing",
+                "synthesized-headers",
             ]
             .contains(&a.suite.as_str()),
             "unknown suite",
@@ -204,14 +205,14 @@ fn kill_live_groups_and_exit() {
 }
 pub struct Process(Child);
 impl Process {
-    pub fn start(command: &mut Command, log: &Path, port: u16) -> Result<Self> {
+    pub fn spawn(command: &mut Command, log: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
         let file = fs::File::create(log)?;
-        let mut p = Self(
+        let p = Self(
             command
                 .stdout(Stdio::from(file.try_clone()?))
                 .stderr(Stdio::from(file))
@@ -221,6 +222,10 @@ impl Process {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(p.0.id());
+        Ok(p)
+    }
+    pub fn start(command: &mut Command, log: &Path, port: u16) -> Result<Self> {
+        let mut p = Self::spawn(command, log)?;
         let start = Instant::now();
         loop {
             if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {

@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use edgezero_core::app::App as EdgeZeroApp;
-use edgezero_core::http::StatusCode;
+use edgezero_core::http::{HeaderMap, HeaderValue, StatusCode};
 use edgezero_core::{
     AdmissionDecision, BufferedIngressResponse, ConfigExtractionLimits,
     DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision, EdgeError, IngressGrant,
@@ -161,6 +161,13 @@ pub struct DemoState {
 fn configure_app(app: &mut EdgeZeroApp) -> Result<(), EdgeError> {
     platform_memory_startup(app.platform()).map_err(EdgeError::internal)?;
     app.set_config_extraction_limits(ConfigExtractionLimits::default())?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-application-version",
+        HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+    );
+    app.set_synthesized_response_headers(headers)
+        .map_err(EdgeError::internal)?;
     app.set_detached_response_egress_decision_factory(|head| {
         let permit = ResponsePermit::new(Some(format!("detached:{}", head.error_kind())));
         let completion = ResponseEgressCompletion::new(move |_report| {
@@ -519,6 +526,30 @@ mod lifecycle_tests {
                     },
             }) if max_live_requests.get() == 2
         ));
+    }
+
+    #[test]
+    fn configured_synthesized_headers_cover_detached_errors() {
+        let app = EdgeZeroApp::build::<super::App>(edgezero_core::PlatformMetadata::default())
+            .expect("configured app");
+        let outcome = app.detached_ingress_error_egress(
+            EdgeError::uri_too_long("private target"),
+            Method::HEAD,
+            app.monotonic_now(),
+        );
+        let IngressDispatchOutcome::Response(envelope) = outcome else {
+            panic!("detached response");
+        };
+        let response = complete_envelope(*envelope);
+        assert_eq!(response.status(), StatusCode::URI_TOO_LONG);
+        assert_eq!(
+            response.headers()["x-application-version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            response.body().as_bytes().expect("suppressed body").len(),
+            0
+        );
     }
 
     #[test]

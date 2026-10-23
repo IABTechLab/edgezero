@@ -96,17 +96,57 @@ fn main() -> Result<(), fastly::Error> {
         .between_bytes_timeout(Duration::from_secs(2))
         .finish()?;
     }
-    let app = progress::application(
+    let mut app = progress::application(
         Arc::new(Runtime),
         signal,
         None,
         edgezero_adapter_fastly::FASTLY_PLATFORM,
-    );
+    )?;
+    let headers_probe = fixture_core::qualification::response_headers::enabled();
+    let probe_token = request
+        .get_header_str("x-request-token")
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .map(str::to_owned);
+    if headers_probe {
+        fixture_core::qualification::response_headers::detached_witness(
+            &mut app,
+            probe_token.clone(),
+        );
+    }
     fixture_fastly::strict_delivery(
         edgezero_adapter_fastly::request::FastlyService::new(&app).send_request_with_hooks(
             request,
-            |_, _| {},
-            |_| {},
+            |request, scratch| {
+                if !headers_probe { return; }
+                use edgezero_core::{SynthesizedResponseHeaders, SynthesizedResponseHeadersError};
+                let mode = request.get_header_str("x-fixture-synthesized-mode").unwrap_or("app");
+                let result = match mode {
+                    "replace" => SynthesizedResponseHeaders::new(fixture_core::qualification::response_headers::fields("request")),
+                    "empty" => SynthesizedResponseHeaders::new(edgezero_core::http::HeaderMap::new()),
+                    "invalid" => {
+                        let mut fields = fixture_core::qualification::response_headers::fields("request");
+                        fields.insert("x-synthesized-fixture", "request!".parse().unwrap());
+                        SynthesizedResponseHeaders::new(fields)
+                    }
+                    _ => { return; }
+                };
+                let outcome = match result {
+                    Ok(headers) => { scratch.insert(headers); "installed" },
+                    Err(SynthesizedResponseHeadersError::TooManyBytes) => "TooManyBytes",
+                    Err(SynthesizedResponseHeadersError::TooManyFields) => "TooManyFields",
+                    Err(_) => "unexpected-error",
+                };
+                eprintln!("{}",json!({"event":"synthesized-prepare","token":probe_token,"mode":mode,"outcome":outcome,"qualification":false}));
+            },
+            |_| {
+                if headers_probe { eprintln!("{}",json!({"event":"synthesized-finalize","token":probe_token,"qualification":false})); }
+            },
         ),
     )
 }

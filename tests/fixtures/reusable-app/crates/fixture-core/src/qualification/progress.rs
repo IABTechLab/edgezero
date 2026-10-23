@@ -87,6 +87,15 @@ pub fn router(
             Method::HEAD,
             super::framing::probe,
         )
+        .get(
+            "/progress/synthesized/{case}",
+            super::response_headers::probe,
+        )
+        .route(
+            "/progress/synthesized/{case}",
+            Method::HEAD,
+            super::response_headers::probe,
+        )
         .get("/progress/{case}", progress)
         .post("/progress/{case}", progress)
         .post("/progress/overflow/{case}", super::overflow::probe)
@@ -98,14 +107,15 @@ pub fn application(
     host_signal: Value,
     dispatch_returned: Option<Arc<AtomicBool>>,
     platform: edgezero_core::PlatformMetadata,
-) -> App {
+) -> Result<App, EdgeError> {
     let mut app = App::with_name_and_platform(
         router(runtime, host_signal, dispatch_returned),
         "outbound-progress-probe",
         platform,
     );
     app.set_response_egress_observer(FramingObserver);
-    app
+    super::response_headers::configure(&mut app)?;
+    Ok(app)
 }
 
 #[action]

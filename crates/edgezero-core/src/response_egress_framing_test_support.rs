@@ -7,9 +7,10 @@ use crate::app::App;
 use crate::body::Body;
 use crate::error::EdgeError;
 use crate::extractor::State;
-use crate::http::{HeaderValue, Method, Request, Response, StatusCode};
+use crate::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use crate::ingress::{
-    AdmissionDecision, IngressDispatchOutcome, IngressFraming, IngressGrant, IngressHeadAccounting,
+    AdmissionDecision, IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressGrant,
+    IngressHeadAccounting, IngressHeadParts,
 };
 use crate::response_egress::{
     ResponseEgressCompletion, ResponseEgressEnvelope, ResponseEgressObserver, ResponseEgressReport,
@@ -108,6 +109,31 @@ pub async fn framing_fixture(
             .build(),
     );
     app.set_monotonic_clock(MonotonicClock::new(move || now));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-synthesized-fixture",
+        HeaderValue::from_static("configured"),
+    );
+    for _ in 0..30_u8 {
+        headers.append("x-padding", HeaderValue::from_static("x"));
+    }
+    let used = headers.iter().try_fold(2_usize, |sum, (name, value)| {
+        sum.checked_add(name.as_str().len())
+            .and_then(|total| total.checked_add(value.as_bytes().len()))
+            .and_then(|total| total.checked_add(4))
+            .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("fixture header charge overflow")))
+    })?;
+    let padding = 4096_usize
+        .checked_sub(used)
+        .and_then(|remaining| remaining.checked_sub("x-padding".len()))
+        .and_then(|remaining| remaining.checked_sub(4))
+        .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("fixture header padding overflow")))?;
+    headers.append(
+        "x-padding",
+        HeaderValue::from_str(&"a".repeat(padding)).map_err(EdgeError::internal)?,
+    );
+    app.set_synthesized_response_headers(headers)
+        .map_err(EdgeError::internal)?;
     app.set_response_egress_observer(Observer(Arc::clone(&observed)));
     let completed_reports = Arc::clone(&completed);
     app.set_ingress_admission_policy(move |head| {
@@ -151,4 +177,59 @@ pub async fn framing_fixture(
         envelope: *envelope,
         observed,
     })
+}
+
+/// Makes a typed source error after admission with competing renderer/configured retry fields.
+///
+/// # Errors
+/// Returns the original construction/admission failure if the fixture cannot produce an envelope.
+#[inline]
+pub fn synthesized_error_fixture(error: EdgeError) -> Result<ResponseEgressEnvelope, EdgeError> {
+    let app_router = RouterService::builder().build();
+    let mut app = App::new(app_router);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-synthesized-fixture",
+        HeaderValue::from_static("configured"),
+    );
+    headers.insert("retry-after", HeaderValue::from_static("180"));
+    app.set_synthesized_response_headers(headers)
+        .map_err(EdgeError::internal)?;
+    app.set_error_response_renderer(|_| {
+        let mut response = Response::new(Body::from("fixed framework error"));
+        response
+            .headers_mut()
+            .insert("retry-after", HeaderValue::from_static("240"));
+        response
+    });
+    let request = Request::new(Body::empty());
+    let head = IngressHeadParts::from_request(
+        &request,
+        IngressHeadAccounting::HostManaged,
+        IngressFraming::HostManaged,
+    );
+    let IngressBeginOutcome::Admitted(prepared) = app.begin_ingress(head, app.monotonic_now())?
+    else {
+        return Err(EdgeError::internal(anyhow::anyhow!(
+            "source-error fixture was not admitted"
+        )));
+    };
+    Ok(app.admitted_error_egress(prepared, error))
+}
+
+/// Verifies every configured value in the maximum-size fixture, ignoring converter-owned fields.
+#[must_use]
+#[inline]
+pub fn has_full_synthesized_fixture_headers(headers: &HeaderMap) -> bool {
+    let padding: Vec<_> = headers.get_all("x-padding").iter().collect();
+    headers.get("x-synthesized-fixture") == Some(&HeaderValue::from_static("configured"))
+        && headers.get_all("x-synthesized-fixture").iter().count() == 1
+        && padding.len() == 31
+        && padding
+            .iter()
+            .take(30)
+            .all(|value| value.as_bytes() == b"x")
+        && padding.last().is_some_and(|value| {
+            value.as_bytes().len() == 3626 && value.as_bytes().iter().all(|byte| *byte == b'a')
+        })
 }

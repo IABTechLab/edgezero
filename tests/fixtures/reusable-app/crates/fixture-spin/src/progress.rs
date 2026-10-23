@@ -97,7 +97,7 @@ pub async fn dispatch(
         signal,
         Some(Arc::clone(&returned)),
         edgezero_adapter_spin::SPIN_PLATFORM,
-    );
+    )?;
     let response = edgezero_adapter_spin::dispatch_app::<ProgressHooks>(&app, request).await;
     returned.store(true, Ordering::SeqCst);
     eprintln!(
