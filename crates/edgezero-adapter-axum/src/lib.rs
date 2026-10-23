@@ -32,7 +32,7 @@ mod service;
 #[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
 
-#[cfg(test)]
+#[cfg(all(feature = "axum", any(test, feature = "test-utils")))]
 pub mod test_utils;
 
 /// Native Axum resource limits and accounting are operator-configured.

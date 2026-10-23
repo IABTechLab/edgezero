@@ -114,6 +114,15 @@ and Fastly retained retry. All three local serverless runtimes pass focused asse
 Axum retains pre-bind startup failure with a once-only boot diagnostic. Consumer acceptance,
 durable hosted qualification and full EZ-22 closure remain separate from those local results.
 
+### F9b Assembled-App TCP Checkpoint
+
+The independent [F9b assembled-app TCP checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f9b-assembled-app-tcp-checkpoint-2026-10-22)
+hard-cuts programmatic Axum servers to consume configured apps and adds an owned production-path
+TCP test helper. Supplied clients avoid default transport initialization. Upstream local policy,
+streaming and cleanup controls pass the root gates, all seven feature matrices, target lint,
+demo/generated checks and local TCP smoke. Independent spec/quality reviews passed. Consumer
+parity, the conditional begun-request leg and exact-candidate qualification remain open.
+
 ### P1 Foundation Checkpoint
 
 - [x] Verify the exact submitted Interfaces digest before implementation and record the scoped

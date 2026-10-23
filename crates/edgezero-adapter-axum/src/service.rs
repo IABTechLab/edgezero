@@ -17,13 +17,14 @@ use edgezero_core::ingress::{
     IngressHeadParts, validate_normalized_ingress_parts,
 };
 use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::outbound::HttpClient;
 #[cfg(test)]
 use edgezero_core::router::RouterService;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry,
 };
-use edgezero_core::time::MonotonicInstant;
+use edgezero_core::time::{MonotonicClock, MonotonicInstant};
 use hyper::body::Incoming;
 use hyper::service::Service as HyperService;
 #[cfg(test)]
@@ -50,7 +51,7 @@ pub(crate) struct AxumServiceState {
     config_store_handle: Option<ConfigStoreHandle>,
     kv_handle: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
-    outbound_transport: Option<Arc<reqwest::Client>>,
+    outbound_client: Option<HttpClient>,
     secret_handle: Option<SecretHandle>,
     secret_registry: Option<SecretRegistry>,
 }
@@ -64,13 +65,28 @@ impl AxumServiceState {
     #[must_use]
     #[inline]
     pub fn from_app(app: App) -> Self {
+        Self::from_app_with_client_factory(app, |clock| {
+            AxumOutboundClient::try_with_clock(clock)
+                .ok()
+                .map(HttpClient::with_client)
+        })
+    }
+
+    fn from_app_with_client_factory(
+        app: App,
+        initialize: impl FnOnce(MonotonicClock) -> Option<HttpClient>,
+    ) -> Self {
+        let outbound_client = app
+            .state::<HttpClient>()
+            .cloned()
+            .or_else(|| initialize(app.monotonic_clock()));
         Self {
             app: Arc::new(app),
             config_registry: None,
             config_store_handle: None,
             kv_handle: None,
             kv_registry: None,
-            outbound_transport: AxumOutboundClient::try_transport().ok(),
+            outbound_client,
             secret_handle: None,
             secret_registry: None,
         }
@@ -218,7 +234,7 @@ impl AxumServiceState {
         }
         let request_start = self.app.monotonic_now();
         let app = Arc::clone(&self.app);
-        let outbound_transport_handle = self.outbound_transport.clone();
+        let configured_client = self.outbound_client.clone();
         let (config_registry, kv_registry, secret_registry) = self.resolved_store_registries();
         let (parts, native_body) = request.into_parts();
         let request_method = parts.method.clone();
@@ -266,7 +282,7 @@ impl AxumServiceState {
         };
         let read_deadline = prepared.read_deadline();
         let monotonic_clock = prepared.monotonic_clock();
-        let Some(outbound_transport) = outbound_transport_handle else {
+        let Some(outbound_client) = configured_client else {
             let egress = app.admitted_error_egress(
                 prepared,
                 EdgeError::internal(anyhow::anyhow!(
@@ -275,23 +291,12 @@ impl AxumServiceState {
             );
             return Ok(prepare_egress_response(egress, connection).await);
         };
-        let mut core_request = match into_core_request_parts(
+        let mut core_request = into_core_request_parts(
             parts,
             native_body,
             Some((read_deadline, monotonic_clock)),
-            Some(outbound_transport),
-        ) {
-            Ok(converted) => converted,
-            Err(error) => {
-                let egress = app.admitted_error_egress(
-                    prepared,
-                    EdgeError::internal(anyhow::anyhow!(
-                        "failed to convert inbound request: {error}"
-                    )),
-                );
-                return Ok(prepare_egress_response(egress, connection).await);
-            }
-        };
+            outbound_client,
+        );
 
         if let Some(registry) = config_registry {
             core_request.extensions_mut().insert(registry);
@@ -393,7 +398,7 @@ mod tests {
     };
     use edgezero_core::key_value_store::KvStore;
     use edgezero_core::middleware::{Middleware, Next};
-    use edgezero_core::outbound::OutboundRequest;
+    use edgezero_core::outbound::{HttpClient, OutboundRequest};
     use edgezero_core::response_egress::{
         DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision, ResponseEgressCompletion,
         ResponseEgressFallbackDisposition, ResponseEgressObserver, ResponseEgressOutcome,
@@ -433,6 +438,22 @@ mod tests {
     }
 
     struct FixedConfigStore(String);
+
+    #[test]
+    fn state_client_skips_real_transport_initialization_factory() {
+        let supplied = HttpClient::with_client(AxumOutboundClient::try_new().expect("test client"))
+            .with_proxy_marker(false);
+        let app = App::new(RouterService::builder().with_state(supplied).build());
+        let service = AxumServiceState::from_app_with_client_factory(app, |_| {
+            panic!("supplied client must avoid transport initialization")
+        });
+        assert!(
+            !service
+                .outbound_client
+                .expect("supplied client")
+                .proxy_marker_enabled()
+        );
+    }
 
     struct CountingMiddleware(Arc<AtomicUsize>);
 
@@ -993,7 +1014,7 @@ mod tests {
         });
         app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
         let mut service = AxumServiceState::from_app(app);
-        service.outbound_transport = None;
+        service.outbound_client = None;
         let request = Request::builder()
             .uri("/owned")
             .body(AxumBody::empty())

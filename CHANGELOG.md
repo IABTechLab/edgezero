@@ -31,6 +31,21 @@ separately from the portable API and must be considered when declaring required 
 - Align bounded Axum secret reads with the prefixed uppercase environment mapping
   used by unbounded reads, preserving independent byte caps and deadlines.
 
+### Policy-Aware Axum Servers
+
+- **Breaking:** `AxumDevServer::{new, with_config}` consume an assembled `App`, not a router.
+  Preserve configured ingress/admission, renderers, extraction limits, clocks, state, platform
+  metadata and response-egress policies. `run_app` uses the same construction/serving path.
+- Add `AxumDevServer::serve(listener, shutdown)` and `test-utils::AxumTestServer`, with a real
+  bounded HTTP/1 listener and local executor. Explicit shutdown cancels connections and awaits
+  worker cleanup and the serving result; drop only signals cancellation. Document skipped
+  startup orchestration and absent foreign provider contexts in host-parity tests.
+- Prefer the router's supplied `HttpClient` without constructing an unused default transport;
+  otherwise construct the default once with the app clock. Remove the obsolete transport-only
+  request-conversion helper. Warn once when normalized head limits exceed the raw parser budget.
+- Add TCP policy, upload, streaming, HEAD, raw-head, local-work, store/state and cleanup controls.
+  These do not promote capabilities or replace consumer/hosted qualification.
+
 ### Bounded Local Config Snapshots
 
 - Hard-cut `ConfigStore::{get, get_bounded}` and matching handle APIs from owned `String`

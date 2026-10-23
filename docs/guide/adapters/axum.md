@@ -211,9 +211,10 @@ capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
 
 ## Outbound HTTP
 
-The Axum adapter injects `AxumOutboundClient`, backed by `reqwest`. Application handlers use the
-portable client from `RequestContext::http_client()`; direct wiring and tests can construct the
-adapter client with `AxumOutboundClient::try_new()`.
+The Axum adapter uses a `HttpClient` registered in the assembled app's router state when present,
+without initializing its default transport. Otherwise it injects `AxumOutboundClient`, backed by
+`reqwest` and the application clock. Handlers use `RequestContext::http_client()`; direct wiring
+can construct the adapter client with `AxumOutboundClient::try_new()`.
 
 Axum provides native total deadlines, completion-order batching, pending-future cancellation,
 batch slot isolation, cache bypass, wire-authority override, elastic phase budgeting, header
@@ -256,9 +257,17 @@ simple_logger::SimpleLogger::new()
 // Then call run_app::<App>() with owns_logging = true.
 ```
 
-Wiring
-`edgezero_core::app::App::build::<App>(edgezero_adapter_axum::AXUM_PLATFORM)` and `AxumDevServer` by hand remains the fallback if you also need
-to control the bind address or store setup.
+For custom bind addresses or store wiring, build an assembled application and pass it directly
+to `AxumDevServer::new(app)` or `AxumDevServer::with_config(app, config)`. These constructors no
+longer accept a router or rebuild default policies. All configured policies, state, clock, name
+and platform metadata are preserved. Attach store handles/registries with the server's setters.
+The standard `run_app` uses the same server construction and serving loop after startup setup.
+
+Use `server.run()` for a blocking runner, or
+`server.serve(listener, shutdown).await` for an already-bound Tokio listener. The listener's actual
+address takes precedence over `config.addr`. Resolving the shutdown future cancels active
+connections and waits for the local worker and its resources; it does not drain responses.
+Dropping the serving future signals cancellation but cannot wait for cleanup.
 
 ::: tip Logging status
 `run_app` wires logging automatically; custom entrypoints should install a logger explicitly.
@@ -266,32 +275,47 @@ to control the bind address or store setup.
 
 ## Testing
 
-The Axum adapter enables standard Rust testing:
+Enable `edgezero-adapter-axum`'s `test-utils` feature for `AxumTestServer`. It binds real TCP and
+runs the same bounded HTTP/1 parser, admission, body-read deadlines, response framing, streaming,
+write deadlines and egress coordinator as the production server, with its own local executor:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edgezero_adapter_axum::dev_server::{AxumDevServer, AxumDevServerConfig};
+    use edgezero_adapter_axum::test_utils::AxumTestServer;
     use edgezero_core::app::App as EdgeZeroApp;
-    use edgezero_core::http::{Request, Method};
 
     #[tokio::test]
     async fn test_handler() {
         let app = EdgeZeroApp::build::<App>(edgezero_adapter_axum::AXUM_PLATFORM)
             .expect("configured app");
-        let router = app.router();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("/hello")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
+        let server = AxumDevServer::with_config(app, AxumDevServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            enable_ctrl_c: false,
+            ..AxumDevServerConfig::default()
+        });
+        let running = AxumTestServer::start(server).await.unwrap();
+        let response = reqwest::get(format!("http://{}/hello", running.address()))
+            .await.unwrap();
         assert_eq!(response.status(), 200);
+        running.shutdown().await.unwrap();
     }
 }
 ```
+
+Use an HTTP client such as `reqwest` in the application's dev-dependencies. Select loopback port
+zero explicitly to avoid port conflicts. `shutdown().await` cancels live connections, waits for
+resource cleanup and returns the serving result; dropping the handle only signals cancellation.
+Startup binding failures are returned by `start`, and later serving failures by `shutdown`.
+
+The helper skips logger initialization, startup preflight and metadata-driven store opening;
+attach stores to the supplied server explicitly. It does not install a global test executor.
+An app assembled with Cloudflare or Spin platform metadata keeps that metadata and all configured
+policies, but receives Axum connection context, not a Cloudflare or Spin provider request context.
+`router.oneshot` remains a routing-only unit-test facility: it skips this ingress and egress path.
+Begun-outbound-request coverage additionally depends on the separate eager-dispatch implementation.
 
 Run tests:
 

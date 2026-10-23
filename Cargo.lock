@@ -724,6 +724,7 @@ dependencies = [
  "bytes",
  "ctor",
  "edgezero-adapter",
+ "edgezero-adapter-cloudflare",
  "edgezero-core",
  "flate2",
  "futures",

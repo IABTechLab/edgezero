@@ -1093,6 +1093,20 @@ if (
   )
 }
 const axumGuideSource = readFileSync(axumGuidePath, 'utf8')
+for (const fragment of [
+  'AxumDevServer::with_config(app, config)',
+  'AxumTestServer::start(server)',
+  'running.shutdown().await',
+  'without initializing its default transport',
+  'not a Cloudflare or Spin provider request context',
+]) {
+  if (!axumGuideSource.includes(fragment)) {
+    fail(`${axumGuidePath} is missing assembled-app serving contract: ${fragment}`)
+  }
+}
+if (axumGuideSource.includes('let router = app.router()')) {
+  fail(`${axumGuidePath} must test policies through bounded TCP ingress, not router.oneshot`)
+}
 if (
   !axumGuideSource.includes(
     'EdgeZeroApp::build::<App>(edgezero_adapter_axum::AXUM_PLATFORM)'

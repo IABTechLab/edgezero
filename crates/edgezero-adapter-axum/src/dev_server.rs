@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
+use futures_util::future::{Either, select};
 use futures_util::stream::FuturesUnordered;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -24,6 +25,7 @@ use edgezero_core::config_store::{ConfigStoreError, ConfigStoreHandle, ConfigSto
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET, resolve_logging_level};
+#[cfg(test)]
 use edgezero_core::router::RouterService;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
@@ -85,18 +87,24 @@ struct Stores {
 
 /// Blocking dev server runner used by the `EdgeZero` CLI.
 pub struct AxumDevServer {
+    app: App,
     config: AxumDevServerConfig,
-    router: RouterService,
     stores: Stores,
 }
 
 impl AxumDevServer {
+    pub(crate) async fn bind_listener(&self) -> anyhow::Result<TokioTcpListener> {
+        TokioTcpListener::bind(self.config.addr)
+            .await
+            .with_context(|| format!("failed to bind dev server to {}", self.config.addr))
+    }
+
     #[must_use]
     #[inline]
-    pub fn new(router: RouterService) -> Self {
+    pub fn new(app: App) -> Self {
         Self {
+            app,
             config: AxumDevServerConfig::default(),
-            router,
             stores: Stores::default(),
         }
     }
@@ -114,55 +122,50 @@ impl AxumDevServer {
     }
 
     async fn run_async(self) -> anyhow::Result<()> {
-        let AxumDevServer {
-            router,
-            config,
-            stores,
-        } = self;
-
-        // Allow binding to already-open listener if caller created one to surface errors early.
-        let std_listener = StdTcpListener::bind(config.addr)
-            .with_context(|| format!("failed to bind dev server to {}", config.addr))?;
-        std_listener
-            .set_nonblocking(true)
-            .context("failed to set listener to non-blocking")?;
-
-        let listener = TokioTcpListener::from_std(std_listener)
-            .context("failed to adopt std listener into tokio")?;
-
-        serve_with_stores(
-            App::new(router),
-            listener,
-            config.enable_ctrl_c,
-            config.ingress,
-            stores,
-        )
-        .await
+        let listener = self.bind_listener().await?;
+        self.serve(listener, future::pending()).await
     }
 
-    #[cfg(test)]
-    async fn run_with_listener(self, listener: TokioTcpListener) -> anyhow::Result<()> {
+    /// Serves this assembled application through the bounded HTTP/1 listener and local executor.
+    ///
+    /// The supplied listener's address wins over `config.addr`. Resolving `shutdown` cancels
+    /// active connections instead of draining their responses, then waits for worker cleanup.
+    /// Dropping this future also signals cancellation but cannot await its completion.
+    /// Platform metadata and policies are retained; foreign provider request contexts are absent.
+    ///
+    /// # Errors
+    /// Returns listener adoption, runtime, worker or serving failures.
+    #[inline]
+    pub async fn serve<Shutdown>(
+        self,
+        listener: TokioTcpListener,
+        shutdown: Shutdown,
+    ) -> anyhow::Result<()>
+    where
+        Shutdown: future::Future<Output = ()>,
+    {
         let AxumDevServer {
-            router,
+            app,
             config,
             stores,
         } = self;
         serve_with_stores(
-            App::new(router),
+            app,
             listener,
             config.enable_ctrl_c,
             config.ingress,
             stores,
+            shutdown,
         )
         .await
     }
 
     #[must_use]
     #[inline]
-    pub fn with_config(router: RouterService, config: AxumDevServerConfig) -> Self {
+    pub fn with_config(app: App, config: AxumDevServerConfig) -> Self {
         Self {
+            app,
             config,
-            router,
             stores: Stores::default(),
         }
     }
@@ -305,6 +308,7 @@ async fn serve_with_stores(
     enable_ctrl_c: bool,
     ingress: AxumIngressConfig,
     stores: Stores,
+    shutdown: impl future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     struct ShutdownOnDrop(Option<ShutdownSender<()>>);
 
@@ -335,9 +339,15 @@ async fn serve_with_stores(
             shutdown_receiver,
         )
     });
-    let result = worker.await.context("axum server thread failed")?;
+    let result = match select(worker, Box::pin(shutdown)).await {
+        Either::Left((result, _shutdown)) => result,
+        Either::Right(((), pending_worker)) => {
+            drop(shutdown_guard);
+            return pending_worker.await.context("axum server thread failed")?;
+        }
+    };
     drop(shutdown_guard);
-    result
+    result.context("axum server thread failed")?
 }
 
 fn serve_local(
@@ -348,6 +358,15 @@ fn serve_local(
     stores: Stores,
     shutdown_receiver: ShutdownReceiver<()>,
 ) -> anyhow::Result<()> {
+    if app.ingress_head_limits().max_request_target_bytes()
+        > u64::try_from(ingress.max_raw_head_bytes()).unwrap_or(u64::MAX)
+        || app.ingress_head_limits().max_request_header_bytes()
+            > u64::try_from(ingress.max_raw_head_bytes()).unwrap_or(u64::MAX)
+        || app.ingress_head_limits().max_request_header_count()
+            > u64::try_from(ingress.max_header_count()).unwrap_or(u64::MAX)
+    {
+        log::warn!(target: BOOT_LOG_TARGET, "application head limits exceed Axum raw ingress limits; the parser rejects first");
+    }
     let mut service = AxumServiceState::from_app(app);
     if let Some(registry) = stores.config_registry {
         service = service.with_config_registry(registry);
@@ -506,28 +525,21 @@ where
     let addr = resolution.addr;
     log::info!("[edgezero] starting axum server on http://{addr}");
 
-    let runtime = RuntimeBuilder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("failed to build tokio runtime")?;
-
-    runtime.block_on(async move {
-        let std_listener = StdTcpListener::bind(addr)
-            .with_context(|| format!("failed to bind dev server to {addr}"))?;
-        std_listener
-            .set_nonblocking(true)
-            .context("failed to set listener to non-blocking")?;
-        let listener = TokioTcpListener::from_std(std_listener)
-            .context("failed to adopt std listener into tokio")?;
-
-        let request_stores = Stores {
+    AxumDevServer {
+        app,
+        config: AxumDevServerConfig {
+            addr,
+            enable_ctrl_c: true,
+            ingress,
+        },
+        stores: Stores {
             config_registry,
             kv_registry,
             secret_registry,
             ..Stores::default()
-        };
-        serve_with_stores(app, listener, true, ingress, request_stores).await
-    })
+        },
+    }
+    .run()
 }
 
 /// Build the per-request KV registry from baked store metadata.
@@ -1004,7 +1016,7 @@ mod tests {
         use edgezero_core::router::RouterService;
 
         let router = RouterService::builder().build();
-        let server = AxumDevServer::new(router);
+        let server = AxumDevServer::new(App::new(router));
         assert_eq!(server.config.addr.port(), 8787);
         assert!(server.config.enable_ctrl_c);
     }
@@ -1019,7 +1031,7 @@ mod tests {
             enable_ctrl_c: false,
             ingress: AxumIngressConfig::default(),
         };
-        let server = AxumDevServer::with_config(router, config);
+        let server = AxumDevServer::with_config(App::new(router), config);
         assert_eq!(server.config.addr.port(), 9000);
         assert!(!server.config.enable_ctrl_c);
     }
@@ -1451,6 +1463,7 @@ mod bounded_ingress_tests {
                 false,
                 AxumIngressConfig::new(1, 8192, 100, Duration::from_secs(5)).expect("ingress"),
                 super::Stores::default(),
+                pending(),
             ));
             let mut client = TcpStream::connect(address).await.expect("client");
             client
@@ -1539,7 +1552,7 @@ mod bounded_ingress_tests {
             })
             .build();
         let server = AxumDevServer::with_config(
-            router,
+            App::new(router),
             AxumDevServerConfig {
                 addr: address,
                 enable_ctrl_c: false,
@@ -1552,7 +1565,7 @@ mod bounded_ingress_tests {
                 .unwrap(),
             },
         );
-        let task = tokio::spawn(server.run_with_listener(listener));
+        let task = tokio::spawn(server.serve(listener, pending()));
         Server {
             address,
             calls,
@@ -1642,6 +1655,7 @@ mod bounded_ingress_tests {
             false,
             AxumIngressConfig::new(2, 8192, 100, Duration::from_secs(10)).unwrap(),
             super::Stores::default(),
+            pending(),
         ));
         let mut handler = TcpStream::connect(address).await.unwrap();
         handler
@@ -1860,10 +1874,10 @@ mod integration_tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let kv_path = temp_dir.path().join("kv.redb");
         let kv_handle = kv_handle_from_path(&kv_path).expect("create kv store");
-        let server = AxumDevServer::with_config(router, config).with_kv_handle(kv_handle);
+        let server = AxumDevServer::with_config(App::new(router), config).with_kv_handle(kv_handle);
 
         let handle = tokio::spawn(async move {
-            let _result = server.run_with_listener(listener).await;
+            let _result = server.serve(listener, future::pending()).await;
         });
 
         TestServer {
@@ -1987,7 +2001,7 @@ mod integration_tests {
             enable_ctrl_c: false,
             ingress: AxumIngressConfig::default(),
         };
-        let server = AxumDevServer::with_config(router, config);
+        let server = AxumDevServer::with_config(App::new(router), config);
 
         // Run in blocking mode to capture the error
         let result = spawn_blocking(move || server.run()).await;
@@ -2215,12 +2229,12 @@ mod integration_tests {
             enable_ctrl_c: false,
             ingress: AxumIngressConfig::default(),
         };
-        let mut server = super::AxumDevServer::with_config(router, config);
+        let mut server = super::AxumDevServer::with_config(App::new(router), config);
         if let Some(handle) = secret_handle {
             server = server.with_secret_handle(handle);
         }
         let handle = tokio::spawn(async move {
-            let _result = server.run_with_listener(listener).await;
+            let _result = server.serve(listener, future::pending()).await;
         });
         TestServerWithStore {
             base_url: format!("http://{addr}"),

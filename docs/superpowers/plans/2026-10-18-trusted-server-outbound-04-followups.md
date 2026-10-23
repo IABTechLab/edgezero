@@ -1056,7 +1056,7 @@ core/macros callers only where required to consume F9a's assembled app; fixture 
 
 **Dependencies:** F9a and D2's local executor; independent of F6b's delivery report.
 
-- [ ] Make programmatic Axum servers accept the assembled app through the same bounded ingress,
+- [x] Make programmatic Axum servers accept the assembled app through the same bounded ingress,
       local executor and egress path as `run_app`. Provide policy-aware TCP/test helpers, not a public
       alternate router service that bypasses admission. A supplied HttpClient avoids constructing an
       unused default transport. Run core/macros, Axum TCP, and required retained-instance fixtures.
@@ -1103,6 +1103,66 @@ Run each upstream sentinel with `scripts/run_test_nonzero.sh <name> cargo test -
 Expected red: at least the configured-app/client-construction cases expose F's gap. Existing
 working ingress behaviors are regression controls, not forced failures. TS provides criterion 13's
 integration result; EdgeZero does not add a dependency on the consumer's crates to fake it.
+
+#### F9b Assembled-App TCP Checkpoint (2026-10-22)
+
+- [x] Hard-cut `AxumDevServer::new` and `with_config` to consume `App`; remove implicit default
+      reassembly. `run_app` uses the same server constructor/serving path after startup setup.
+- [x] Add `serve(listener, shutdown)` and `test-utils::AxumTestServer::{start, address, shutdown}`.
+      Both use the existing bounded HTTP/1 supervisor, current-thread runtime and LocalSet.
+      Explicit shutdown signals and awaits the same worker; drop signals without blocking.
+- [x] Prefer the registered `HttpClient` lazily, without invoking the default factory. Preserve
+      its complete policy handle; construct the ordinary fallback once with the application clock.
+      Remove the obsolete transport-only conversion helper, not retain a compatibility path.
+- [x] Exercise the twelve upstream sentinels through TCP or the zero-initialization factory seam,
+      plus refusal/recovery, detached Send/Abort, egress clock/observer/deadline, explicit store/state
+      parity, drop cancellation and serving-error controls. Foreign metadata uses the actual
+      Cloudflare export through a dev-only dependency, not a copied platform constant.
+- [x] Update the Axum guide, hard-migration changelog and documentation contract guard. Existing
+      demo, generated and fixture entrypoints use `run_app` and inherit the same production path.
+- [x] Finish final independent spec/quality reviews and broad Rust/docs/demo/generated verification.
+- [ ] Close criterion 13 with consumer-owned route/parity results, and criterion 12's conditional
+      begun-request leg after the separate head-first/eager hard cut. Complete exact-candidate
+      qualification separately; the whole F9b/EZ-23 task is not closed by this local checkpoint.
+
+Aristotle investigated constructor callers and worker ownership; Franklin mapped TCP acceptance
+and local-executor coverage. Both proposed consuming the complete app and reusing the bounded
+serving path, with no public router-only service. Central implementation follows that design.
+The initial tests failed on the missing TCP helper and router-only constructor signatures; the
+client test also failed on the absent lazy factory seam. An initial sandboxed run denied TCP bind;
+real loopback reruns passed. No test assertion or ingress resource bound was weakened.
+
+The helper deliberately skips logger setup, startup preflight and metadata-driven store opening;
+callers attach explicit handles/registries. Foreign-platform apps receive Axum context, not their
+provider's request context. Shutdown cancels rather than drains active responses. Local spawning
+is covered, but the not-yet-integrated begun-request API is not emulated by ordinary `send`.
+Fastly G2, P1 cutover, hosted qualification and all capability assignments remain unchanged.
+
+Spec review found missing actual Cloudflare metadata and refusal TCP controls; both are now
+covered. Quality review strengthened HEAD validation to reject every byte after the first header
+terminator, including a transport-generated chunk terminator. The negative control demonstrates
+the old suffix assertion accepted that illegal tail. Both reviewers signed off this checkpoint.
+The fabricated serving-task failure checks helper error forwarding, not an actual worker startup
+failure or JoinError. Cancelled-shutdown cleanup additionally relies on inspection of the existing
+drop-guard ownership; explicit shutdown and handle-drop cleanup have real TCP controls.
+
+Final source verification uses base `f29fd9f2910f3fe192b751b379507fa553209d47` and six changed
+Rust files, aggregate SHA-256 `b419afa3b3085ce19af0769042dc70d0725d26fe0aa879a6941be196a816e198`
+with F9a's sorted file-digest/path convention. The requirements, approved Interfaces, core
+outbound/compression modules and frozen policies remain unchanged; the policies digest remains
+`c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80`.
+The sole lockfile change records the dev-only Cloudflare metadata dependency; no pins changed.
+
+All five root gates pass on Rust 1.98.1, including 2,171 workspace tests across 28 binaries with
+one existing ignored gate, separately executed successfully. Axum passes 233 unit and 17 contract
+tests; all twelve required upstream sentinel invocations list and execute their named tests.
+Seven eight-combination adapter matrices, three real WASM-target strict clippy runs, public
+rustdoc, dependency/legacy/docs guards, docs format/lint/build, 49 demo tests, the generated
+workspace gate (including 22 generated-core tests and TCP fallback checks), 18 fixture-core and
+61 harness tests, and all 18 evidence-checker tests pass. The ordinary Axum smoke suite observes
+one cold and four reused requests. Local logs and smoke evidence are under
+`/private/tmp/edgezero-f9b-*`; they are working-tree characterization, not durable release evidence.
+The acceptance inventory remains 255 criteria / 511 planned legs with `qualified: false`.
 
 ## F10: Conditional Scripted-Client Task Group
 

@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use axum::body::{Body as AxumBody, BodyDataStream};
 use axum::extract::connect_info::ConnectInfo;
@@ -28,18 +27,22 @@ use crate::outbound::AxumOutboundClient;
 )]
 pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest, String> {
     let (parts, axum_body) = request.into_parts();
-    into_core_request_parts(parts, axum_body, None, None)
+    let client = AxumOutboundClient::try_new()
+        .map_err(|_error| "failed to build outbound HTTP client".to_owned())?;
+    Ok(into_core_request_parts(
+        parts,
+        axum_body,
+        None,
+        HttpClient::with_client(client),
+    ))
 }
 
 pub(crate) fn into_core_request_parts(
     parts: Parts,
     axum_body: AxumBody,
     read_lifetime: Option<(Deadline, MonotonicClock)>,
-    outbound_transport: Option<Arc<reqwest::Client>>,
-) -> Result<CoreRequest, String> {
-    let outbound_clock = read_lifetime
-        .as_ref()
-        .map_or_else(MonotonicClock::default, |(_, clock)| clock.clone());
+    outbound_client: HttpClient,
+) -> CoreRequest {
     let body = match read_lifetime {
         Some((deadline, monotonic_clock)) => {
             deadline_body(axum_body.into_data_stream(), deadline, monotonic_clock)
@@ -65,16 +68,9 @@ pub(crate) fn into_core_request_parts(
         );
     }
 
-    let outbound_client = match outbound_transport {
-        Some(transport) => AxumOutboundClient::with_transport_and_clock(transport, outbound_clock),
-        None => AxumOutboundClient::try_with_clock(outbound_clock)
-            .map_err(|_error| "failed to build outbound HTTP client".to_owned())?,
-    };
-    core_request
-        .extensions_mut()
-        .insert(HttpClient::with_client(outbound_client));
+    core_request.extensions_mut().insert(outbound_client);
 
-    Ok(core_request)
+    core_request
 }
 
 fn deadline_body(
@@ -211,8 +207,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supplied_outbound_transport_is_retained_by_the_core_request() {
-        let transport = AxumOutboundClient::try_transport().expect("transport");
+    async fn supplied_outbound_client_policy_is_retained_by_the_core_request() {
+        let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"))
+            .with_proxy_marker(false);
         let request = Request::builder()
             .method(Method::GET)
             .uri("/demo")
@@ -220,12 +217,14 @@ mod tests {
             .expect("request");
         let (parts, body) = request.into_parts();
 
-        let core_request = into_core_request_parts(parts, body, None, Some(Arc::clone(&transport)))
-            .expect("request conversion");
-
-        assert_eq!(Arc::strong_count(&transport), 2);
-        drop(core_request);
-        assert_eq!(Arc::strong_count(&transport), 1);
+        let core_request = into_core_request_parts(parts, body, None, client);
+        assert!(
+            !core_request
+                .extensions()
+                .get::<HttpClient>()
+                .expect("supplied client")
+                .proxy_marker_enabled()
+        );
     }
 
     #[tokio::test]

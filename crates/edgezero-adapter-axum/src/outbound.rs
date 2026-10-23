@@ -170,13 +170,6 @@ impl AxumOutboundClient {
     pub fn try_with_clock(clock: MonotonicClock) -> Result<Self, reqwest::Error> {
         Self::try_transport().map(|client| Self { client, clock })
     }
-
-    pub(crate) fn with_transport_and_clock(
-        client: Arc<reqwest::Client>,
-        clock: MonotonicClock,
-    ) -> Self {
-        Self { client, clock }
-    }
 }
 
 #[async_trait(?Send)]
