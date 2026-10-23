@@ -4,6 +4,7 @@ pub mod qualification;
 
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
 use edgezero_core::http::{Method, Response, response_builder};
+use edgezero_core::key_value_store::KvError;
 use edgezero_core::outbound::OutboundRequest;
 use edgezero_core::router::RouterService;
 use edgezero_core::{action, body::Body, context::RequestContext, error::EdgeError};
@@ -353,28 +354,55 @@ async fn declared_kv_free(ctx: RequestContext) -> Result<String, EdgeError> {
 #[action]
 async fn declared_kv(ctx: RequestContext) -> Result<String, EdgeError> {
     let mut report = record(&ctx).await?;
-    let name = match ctx.path_params().get("store") {
-        Some("missing") => "missing_fixture_kv",
-        Some("linked") => "fixture_kv",
+    let (store_label, name) = match ctx.path_params().get("store") {
+        Some("missing") => ("missing", "missing_fixture_kv"),
+        Some("linked") => ("linked", "fixture_kv"),
         _ => return Err(EdgeError::bad_request("unknown controlled KV store")),
     };
+    let operation = match ctx.path_params().get("operation") {
+        Some(operation @ ("read" | "write" | "delete" | "list")) => operation,
+        _ => return Err(EdgeError::bad_request("unknown controlled KV operation")),
+    };
+    let receipt = |event: &str, outcome: Option<&str>, reason: Option<String>| {
+        let event = serde_json::json!({"event":event,"token":report["token"],"instance":report["instance"],
+            "store":store_label,"operation":operation,"outcome":outcome,"reason":reason});
+        if let Some(sink) = TELEMETRY.get() {
+            sink(&event.to_string());
+        } else {
+            // The ordinary Fastly fixture keeps its named logger; receipts use stdout.
+            println!("{event}");
+        }
+    };
+    receipt("declared_kv_enter", None, None);
     let store = ctx
         .kv_store(name)
         .ok_or_else(|| missing_binding("declared KV handle absent"))?;
-    let outcome = match ctx.path_params().get("operation") {
-        Some("read") => serde_json::json!(store.get::<String>("f8-key").await?),
-        Some("write") => {
-            store.put("f8-key", &"f8-value").await?;
-            serde_json::json!("written")
-        }
-        Some("delete") => {
-            store.delete("f8-key").await?;
-            serde_json::json!("deleted")
-        }
-        Some("list") => serde_json::json!(store.list_keys_page("f8-", None, 100).await?.keys),
+    let outcome = match operation {
+        "read" => store
+            .get::<String>("f8-key")
+            .await
+            .map(|value| serde_json::json!(value)),
+        "write" => store
+            .put("f8-key", &"f8-value")
+            .await
+            .map(|()| serde_json::json!("written")),
+        "delete" => store
+            .delete("f8-key")
+            .await
+            .map(|()| serde_json::json!("deleted")),
+        "list" => store
+            .list_keys_page("f8-", None, 100)
+            .await
+            .map(|page| serde_json::json!(page.keys)),
         _ => return Err(EdgeError::bad_request("unknown controlled KV operation")),
     };
-    report["kv_outcome"] = outcome;
+    let (status, reason) = match &outcome {
+        Ok(_) => ("success", None),
+        Err(KvError::OpenFailed { reason }) => ("open-failed", Some(format!("{reason:?}"))),
+        Err(_) => ("operation-failed", None),
+    };
+    receipt("declared_kv_result", Some(status), reason);
+    report["kv_outcome"] = outcome?;
     Ok(report.to_string())
 }
 

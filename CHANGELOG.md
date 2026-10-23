@@ -140,6 +140,8 @@ separately from the portable API and must be considered when declaring required 
 - Retain explicit fail-before-dispatch required-store behavior and Axum startup semantics.
   Add SDK/source-harness tests and real local runtime cases for unused declarations,
   sanitized errors, warning deduplication, completion ownership and linked-store CRUD.
+  Extend local wire checks to failed writes, deletes and lists, verify deleted state,
+  correlate actual typed operation results, and recheck every completion after shutdown.
   These do not qualify hosted outage recovery, KV allocation, or stronger capabilities.
 
 ### Fastly Custom Delivery Reports

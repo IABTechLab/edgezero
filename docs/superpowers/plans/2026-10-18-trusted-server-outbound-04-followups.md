@@ -1031,6 +1031,43 @@ All 255 acceptance criteria and the reviewed leg set remain unchanged. The inven
 the implementation adoption separately; its formal release approvals and planned cutover commands
 are not promoted by these local smoke results.
 
+### F8 Operation Delivery Checkpoint (2026-10-23)
+
+- [x] Preserve the original same-instance `free/read/read/free` sequence and 0/1/1/1 warning
+      assertions. Append failed write/delete/list operations through each canonical local serverless
+      entrypoint, with exact sanitized 500 JSON and actual typed `KvError::OpenFailed` receipts.
+- [x] Require one operation-handler entry/result pair per operation and none for KV-free routes.
+      Match request token, observed instance, store selector and operation; reject a generic internal
+      error masquerading as the expected missing-binding failure. Enforce start/entry/result/terminal
+      order, including after shutdown; reject a terminal notification before the operation result.
+- [x] Retain healthy linked-store write/read/list/delete checks, then require an explicit null read
+      result and empty list after delete. This is continuity of a different, linked declaration,
+      not restoration of the missing declaration.
+- [x] Revalidate all 13 request tokens per adapter after runtime shutdown, including when an earlier
+      smoke check failed. Check exactly-once terminal events and warning counts across the observed
+      instances; preserve the original error alongside any separately recorded teardown failure.
+      Cloudflare/Spin warning attribution is per instance; Fastly checks sequential aggregate
+      endpoint totals because those warning lines do not carry an instance tag.
+- [ ] Complete consumer acceptance, actual missing-binding outage/restoration and frozen/hosted
+      qualification before closing F8.
+
+The [operation-delivery record](../../audits/evidence/2026-10-23-declared-kv-operations.json)
+retains 39 passing request cases and three passing post-shutdown validations. The complete
+four-adapter smoke run exits 2, not 0: Spin retained-mode overlap remains unverified. The final run
+observed per-request overlap; preceding runs left both modes unverified. Neither closes hosted evidence.
+This checkpoint changes fixture instrumentation and validation only. Production store adapters,
+outbound behavior, capabilities, SDK/decoder pins and the approved interface contract are unchanged.
+
+The first expanded run correctly failed its new, overbroad seven-request same-instance assertion.
+Pinned Viceroy 0.21.0 has `NEXT_REQ_ACCEPT_MAX = 5`, limiting a guest to its initial request plus
+five follow-ups. The final test keeps the original four-request proof unchanged and permits natural
+turnover only in the added operations. Cloudflare/Spin require one warning per missing-operation
+instance and none for healthy-only instances; Fastly checks its endpoint total after each request
+against the number of observed missing-operation instances. The latter cannot independently
+attribute late warnings across different instances. The test does not restart the prefix, retry a
+failed observation, alter production serving settings or claim a hosted reuse guarantee. The failed
+run remains in the evidence record. Original SDK/source-harness recovery tests remain separate.
+
 ## F9: Application Assembly and Axum Task Group
 
 ### Task F9a: Fallible Retained Application Assembly

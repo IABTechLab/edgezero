@@ -559,9 +559,24 @@ The retained serverless smoke fixtures also declare an unlinked KV ID alongside 
 healthy default. `/declared-kv/free`, two `/declared-kv/missing/read` requests, then
 `/declared-kv/free` must produce 200/500/500/200 in one observed instance, with warning
 counts 0/1/1/1. A separate linked-store write/read/list/delete sequence checks continuity.
-Each request has exactly one actual egress terminal; counts are checked again after
-runtime shutdown. Fastly endpoint receipts are distinguished from stdout echoes;
+Failed write/delete/list requests follow that unchanged four-request prefix. The linked-store
+sequence also reads and lists after delete, requiring `null` and an empty list. All 13 requests
+per serverless adapter require exactly one actual egress terminal. Operation handlers emit one
+entry and one typed-result receipt derived from the actual `KvError`, not the rendered status;
+the KV-free requests must emit neither. Start, entry, result and terminal events must be ordered;
+the post-delete read must contain an explicit `kv_outcome: null`, not merely omit that field.
+Missing bindings must retain the exact sanitized 500 JSON.
+Every token, instance, typed result and terminal count is checked again after runtime shutdown,
+including when an earlier smoke check failed. Fastly endpoint receipts are distinguished from stdout echoes;
 Cloudflare/Spin use a fixture-owned logger with instance-tagged structured receipts.
+Pinned Viceroy 0.21.0 accepts at most five follow-up requests in one guest, so the additional
+operations may naturally cross guests. The original four-request prefix still requires one
+instance; the extension records every observed instance without restarting or retrying that prefix.
+Cloudflare/Spin require one warning per missing-operation instance and none for healthy-only
+instances. Fastly's named-endpoint warnings have no instance tag: after each request and shutdown,
+their aggregate count must equal the number of observed missing-operation instances. That checks
+sequential totals, not independent attribution of late warnings across different instances.
+This is local host characterization, not a hosted reuse guarantee.
 Fastly reports `Completed`, Cloudflare/Spin `HostHandoff`; neither qualifies peer delivery.
 SDK/source-harness tests separately cover all failed operations, typed reasons, and
 fresh-request recovery. Linked-store continuity is not a provider outage/restoration proof.

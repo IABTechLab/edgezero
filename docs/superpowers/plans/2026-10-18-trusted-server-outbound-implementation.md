@@ -62,6 +62,13 @@ for compiled IDs survives requests. Explicit required-store and Axum startup pol
 Local unit/runtime evidence is separate from consumer integration and hosted restoration.
 This follow-up does not unblock G2 or change the frozen P1 API migration.
 
+The [operation-delivery checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#f8-operation-delivery-checkpoint-2026-10-23)
+adds real local failed write/delete/list cases, post-delete state checks and post-shutdown
+validation of all 39 request lifecycles. The original four-request same-instance warning proof
+remains unchanged; Viceroy's six-request guest ceiling permits natural turnover in the added
+operations. The final smoke run still exits 2 for the separately unverified Spin retained-mode overlap.
+Consumer integration and actual provider outage/restoration remain open.
+
 ### F6a Diagnostic Foundation Checkpoint
 
 The independent [F6a foundation](2026-10-18-trusted-server-outbound-04-followups.md#f6a-foundation-checkpoint-2026-10-21)

@@ -1,5 +1,5 @@
 use crate::{evidence::*, net::Backend, *};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 mod assembly;
 mod framing;
 mod overflow;
@@ -453,6 +453,7 @@ fn fastly_variant(
 ) -> Result<()> {
     records.push(json!({"event":"build","variant":variant,"repetition":repetition,"target":"wasm32-wasip1","artifact":artifact(&wasm(run, variant))?,"config":artifact(config)?}))?;
     let log = run.join(format!("{variant}-{repetition}.log"));
+    let mut declared = DeclaredKvChecks::default();
     let outcome = (|| -> Result<()> {
         let backend = Backend::start()?;
         let port = net::port()?;
@@ -479,7 +480,7 @@ fn fastly_variant(
             ))?;
         }
         if args.suite == "smoke" && variant == "c" {
-            declared_kv_checks("fastly", port, &log, records)?;
+            declared_kv_checks("fastly", port, &log, records, &mut declared)?;
         }
         let bindings = req(port, "/bindings")?;
         require(
@@ -514,21 +515,214 @@ fn fastly_variant(
         }
         records.push(json!({"status":"pass","variant":variant,"repetition":repetition,"assertions":["initialization","isolation","cookies","rendered_error"]}))
     })();
-    let outcome = outcome.and_then(|()| {
-        if args.suite == "smoke" && variant == "c" {
-            let count = declared_kv_warning_count(&fs::read_to_string(&log)?);
-            records.push(json!({"event":"declared-kv-after-shutdown","adapter":"fastly","warnings":count,"qualification":false}))?;
-            require(count == 1, "declared KV warning repeated during teardown")?;
-        }
+    let teardown = if args.suite == "smoke" && variant == "c" {
+        finish_declared_kv_checks("fastly", &log, records, &declared)
+    } else {
         Ok(())
-    });
+    };
     settle(
         records,
         &log,
         json!({"variant":variant,"repetition":repetition}),
         json!({"adapter":"fastly"}),
-        outcome,
+        outcome.and(teardown),
     )
+}
+
+const DECLARED_KV_FAILURE_CASES: [(&str, u16, usize); 7] = [
+    ("/declared-kv/free", 200, 0),
+    ("/declared-kv/missing/read", 500, 1),
+    ("/declared-kv/missing/read", 500, 1),
+    ("/declared-kv/free", 200, 1),
+    ("/declared-kv/missing/write", 500, 1),
+    ("/declared-kv/missing/delete", 500, 1),
+    ("/declared-kv/missing/list", 500, 1),
+];
+const DECLARED_KV_LINKED_OPERATIONS: [&str; 6] =
+    ["write", "read", "list", "delete", "read", "list"];
+
+struct DeclaredKvRequest {
+    token: String,
+    path: String,
+    instance: Option<String>,
+}
+
+#[derive(Default)]
+struct DeclaredKvChecks {
+    instance: Option<String>,
+    requests: Vec<DeclaredKvRequest>,
+}
+
+impl DeclaredKvChecks {
+    fn failed_instances(&self) -> BTreeSet<&str> {
+        self.requests
+            .iter()
+            .filter(|request| request.path.starts_with("/declared-kv/missing/"))
+            .filter_map(|request| request.instance.as_deref())
+            .collect()
+    }
+
+    fn warning_count(&self, text: &str, adapter: &str) -> Result<usize> {
+        let failed = self.failed_instances();
+        let count = if adapter == "fastly" {
+            declared_kv_warning_count(text)
+        } else {
+            let instances: BTreeSet<_> = self
+                .requests
+                .iter()
+                .filter_map(|request| request.instance.as_deref())
+                .collect();
+            let mut count = 0;
+            for instance in instances {
+                let observed = provider_kv_warning_count(text, adapter, instance);
+                require(
+                    observed == usize::from(failed.contains(instance)),
+                    "declared KV warning count mismatch within an instance",
+                )?;
+                count += observed;
+            }
+            count
+        };
+        require(count == failed.len(), "declared KV warning count mismatch")?;
+        Ok(count)
+    }
+
+    fn validate(&self, events: &[Value], adapter: &str) -> Result<()> {
+        require(
+            self.requests.len()
+                == DECLARED_KV_FAILURE_CASES.len() + DECLARED_KV_LINKED_OPERATIONS.len(),
+            "declared KV matrix did not execute every request",
+        )?;
+        let prefix_instance = self
+            .instance
+            .as_deref()
+            .ok_or("missing declared KV instance")?;
+        let mut tokens = HashSet::new();
+        for (index, request) in self.requests.iter().enumerate() {
+            require(
+                tokens.insert(request.token.as_str()),
+                "declared KV request token reused",
+            )?;
+            let expected = request
+                .instance
+                .as_deref()
+                .ok_or("missing declared KV request instance")?;
+            if let Some((path, _, _)) = DECLARED_KV_FAILURE_CASES.get(index) {
+                require(
+                    request.path == *path && (index >= 4 || expected == prefix_instance),
+                    "declared KV failure prefix changed or turned over",
+                )?;
+            } else {
+                let operation =
+                    DECLARED_KV_LINKED_OPERATIONS[index - DECLARED_KV_FAILURE_CASES.len()];
+                require(
+                    request.path == format!("/declared-kv/linked/{operation}"),
+                    "declared KV linked sequence changed",
+                )?;
+            }
+            validate_declared_kv_lifecycle(
+                events,
+                &request.token,
+                Some(expected),
+                if adapter == "fastly" {
+                    "Completed"
+                } else {
+                    "HostHandoff"
+                },
+            )?;
+            validate_declared_kv_operation(
+                events,
+                &request.token,
+                expected,
+                adapter,
+                &request.path,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_declared_kv_operation(
+    events: &[Value],
+    token: &str,
+    instance: &str,
+    adapter: &str,
+    path: &str,
+) -> Result<()> {
+    let matching: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["token"] == token
+                && matches!(
+                    event["event"].as_str(),
+                    Some(
+                        "request_start"
+                            | "declared_kv_enter"
+                            | "declared_kv_result"
+                            | "egress_terminal"
+                    )
+                )
+        })
+        .collect();
+    if path == "/declared-kv/free" {
+        return require(
+            matching.len() == 2
+                && matching[0]["event"] == "request_start"
+                && matching[1]["event"] == "egress_terminal",
+            "KV-free route invoked an operation handler or reordered its lifecycle",
+        );
+    }
+    let (store, operation) = path
+        .strip_prefix("/declared-kv/")
+        .and_then(|path| path.split_once('/'))
+        .ok_or("invalid declared KV fixture path")?;
+    require(
+        matching.len() == 4
+            && matching[0]["event"] == "request_start"
+            && matching[1]["event"] == "declared_kv_enter"
+            && matching[2]["event"] == "declared_kv_result"
+            && matching[3]["event"] == "egress_terminal",
+        "declared KV handler/result receipt missing, repeated or reordered",
+    )?;
+    require(
+        matching.iter().all(|event| event["instance"] == instance)
+            && matching[1..3]
+                .iter()
+                .all(|event| event["store"] == store && event["operation"] == operation),
+        "declared KV operation receipt mismatched its request",
+    )?;
+    let (outcome, reason) = if store == "missing" {
+        (
+            "open-failed",
+            json!(if adapter == "spin" {
+                "InvalidConfiguration"
+            } else {
+                "MissingBinding"
+            }),
+        )
+    } else {
+        ("success", json!(null))
+    };
+    require(
+        matching[2]["outcome"] == outcome && matching[2]["reason"] == reason,
+        "declared KV operation lost its typed outcome",
+    )
+}
+
+fn finish_declared_kv_checks(
+    adapter: &str,
+    log: &Path,
+    records: &mut Records,
+    checks: &DeclaredKvChecks,
+) -> Result<()> {
+    let text = fs::read_to_string(log)?;
+    let warnings = checks.warning_count(&text, adapter);
+    let count = warnings.as_ref().ok().copied();
+    let result = checks
+        .validate(&logs(log), adapter)
+        .and(warnings.map(|_count| ()));
+    records.push(json!({"event":"declared-kv-after-shutdown","adapter":adapter,"instance":checks.instance,"failed_instances":checks.failed_instances(),"requests":checks.requests.len(),"warnings":count,"status":if result.is_ok() {"pass"} else {"fail"},"error":result.as_ref().err().map(ToString::to_string),"qualification":false}))?;
+    result
 }
 
 fn declared_kv_warning_count(text: &str) -> usize {
@@ -598,20 +792,36 @@ fn provider_kv_warning_count(text: &str, adapter: &str, instance: &str) -> usize
         .count()
 }
 
+fn validate_declared_kv_linked_response(response: &Value, expected: &Value) -> Result<()> {
+    require(
+        guest(response)?.get("kv_outcome") == Some(expected),
+        "linked KV operation failed after declared failure",
+    )
+}
+
+fn validate_declared_kv_guest(response: &Value, token: &str, instance: &str) -> Result<()> {
+    let body = guest(response)?;
+    require(
+        body.get("token").and_then(Value::as_str) == Some(token)
+            && body.get("instance").and_then(Value::as_str) == Some(instance),
+        "declared KV success body does not match its request lifecycle",
+    )
+}
+
 fn declared_kv_checks(
     adapter: &str,
     port: u16,
     log: &Path,
     records: &mut Records,
-) -> Result<String> {
-    let mut instance = None;
-    for (path, status, warnings) in [
-        ("/declared-kv/free", 200, 0),
-        ("/declared-kv/missing/read", 500, 1),
-        ("/declared-kv/missing/read", 500, 1),
-        ("/declared-kv/free", 200, 1),
-    ] {
+    checks: &mut DeclaredKvChecks,
+) -> Result<()> {
+    for (index, (path, status, warnings)) in DECLARED_KV_FAILURE_CASES.into_iter().enumerate() {
         let token = token();
+        checks.requests.push(DeclaredKvRequest {
+            token: token.clone(),
+            path: path.to_owned(),
+            instance: None,
+        });
         let response = net::request(port, path, &token, None, None)?;
         require(response["status"] == status, "declared KV status mismatch")?;
         if status == 200 {
@@ -639,28 +849,48 @@ fn declared_kv_checks(
             current = Some(validate_declared_kv_lifecycle(
                 &logs(log),
                 &token,
-                instance.as_deref(),
+                if index < 4 {
+                    checks.instance.as_deref()
+                } else {
+                    None
+                },
                 if adapter == "fastly" {
                     "Completed"
                 } else {
                     "HostHandoff"
                 },
             )?);
+            validate_declared_kv_operation(
+                &logs(log),
+                &token,
+                current.as_deref().ok_or("missing declared KV instance")?,
+                adapter,
+                path,
+            )?;
             Ok(())
         })?;
-        instance = current;
+        checks
+            .requests
+            .last_mut()
+            .ok_or("missing declared KV request")?
+            .instance = current.clone();
+        if index < 4 {
+            checks.instance = current.clone();
+        }
+        if status == 200 {
+            validate_declared_kv_guest(
+                &response,
+                &token,
+                current.as_deref().ok_or("missing declared KV instance")?,
+            )?;
+        }
         let text = fs::read_to_string(log)?;
-        let count = if adapter == "fastly" {
-            declared_kv_warning_count(&text)
-        } else {
-            provider_kv_warning_count(
-                &fs::read_to_string(log)?,
-                adapter,
-                instance.as_deref().ok_or("missing declared KV instance")?,
-            )
-        };
-        require(count == warnings, "declared KV warning count mismatch")?;
-        records.push(json!({"event":"declared-kv-case","adapter":adapter,"path":path,"token":token,"instance":instance,
+        let count = checks.warning_count(&text, adapter)?;
+        require(
+            index >= 4 || count == warnings,
+            "declared KV prefix warning count mismatch",
+        )?;
+        records.push(json!({"event":"declared-kv-case","adapter":adapter,"path":path,"token":token,"instance":current,
             "client":response,"warnings":count,"status":"pass","qualification":false}))?;
     }
     for (operation, expected) in [
@@ -668,20 +898,23 @@ fn declared_kv_checks(
         ("read", json!("f8-value")),
         ("list", json!(["f8-key"])),
         ("delete", json!("deleted")),
+        ("read", json!(null)),
+        ("list", json!([])),
     ] {
-        let response = req(port, &format!("/declared-kv/linked/{operation}"))?;
-        require(
-            guest(&response)?["kv_outcome"] == expected,
-            "linked KV operation failed after declared failure",
-        )?;
-        let token = response["token"]
-            .as_str()
-            .ok_or("missing linked KV token")?;
+        let path = format!("/declared-kv/linked/{operation}");
+        let token = token();
+        checks.requests.push(DeclaredKvRequest {
+            token: token.clone(),
+            path: path.clone(),
+            instance: None,
+        });
+        let response = net::request(port, &path, &token, None, None)?;
+        validate_declared_kv_linked_response(&response, &expected)?;
         let mut linked_instance = None;
         await_evidence(|| {
             linked_instance = Some(validate_declared_kv_lifecycle(
                 &logs(log),
-                token,
+                &token,
                 None,
                 if adapter == "fastly" {
                     "Completed"
@@ -689,23 +922,33 @@ fn declared_kv_checks(
                     "HostHandoff"
                 },
             )?);
+            validate_declared_kv_operation(
+                &logs(log),
+                &token,
+                linked_instance
+                    .as_deref()
+                    .ok_or("missing linked KV instance")?,
+                adapter,
+                &path,
+            )?;
             Ok(())
         })?;
+        checks
+            .requests
+            .last_mut()
+            .ok_or("missing linked KV request")?
+            .instance = linked_instance.clone();
+        validate_declared_kv_guest(
+            &response,
+            &token,
+            linked_instance
+                .as_deref()
+                .ok_or("missing linked KV instance")?,
+        )?;
         records.push(json!({"event":"declared-kv-linked","adapter":adapter,"operation":operation,"instance":linked_instance,"client":response,"status":"pass","qualification":false}))?;
     }
-    require(
-        if adapter == "fastly" {
-            declared_kv_warning_count(&fs::read_to_string(log)?)
-        } else {
-            provider_kv_warning_count(
-                &fs::read_to_string(log)?,
-                adapter,
-                instance.as_deref().ok_or("missing declared KV instance")?,
-            )
-        } == 1,
-        "declared KV warning repeated after successful linked operations",
-    )?;
-    instance.ok_or_else(|| "missing declared KV instance".into())
+    checks.warning_count(&fs::read_to_string(log)?, adapter)?;
+    checks.validate(&logs(log), adapter)
 }
 fn fastly_probes(
     args: &Args,
@@ -1059,30 +1302,27 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
         let mut command = provider_command(name, mode, &exe, &staged, &package, run, port)?;
         let log = run.join(format!("{name}-{mode}.log"));
         let mut failure = json!({"phase":"startup"});
-        let mut declared_instance = None;
+        let mut declared = DeclaredKvChecks::default();
         let outcome = Process::start(&mut command, &log, port).and_then(|_process| {
             // Establish single-instance dedup before overlap creates additional instances.
             if args.suite == "smoke" && mode == "retained" && name != "axum" {
                 failure = json!({"phase":"declared_kv"});
-                declared_instance = Some(declared_kv_checks(name, port, &log, records)?);
+                declared_kv_checks(name, port, &log, records, &mut declared)?;
             }
             provider_checks(name, mode, port, args, records, &mut failure)?;
             Ok(())
         });
-        let outcome = outcome.and_then(|()| {
-            if let Some(instance) = declared_instance {
-                let count = provider_kv_warning_count(&fs::read_to_string(&log)?, name, &instance);
-                require(count == 1, "declared KV warning repeated during shutdown")?;
-                records.push(json!({"event":"declared-kv-after-shutdown","adapter":name,"instance":instance,"warnings":count,"status":"pass","qualification":false}))?;
-            }
+        let teardown = if args.suite == "smoke" && mode == "retained" && name != "axum" {
+            finish_declared_kv_checks(name, &log, records, &declared)
+        } else {
             Ok(())
-        });
+        };
         settle(
             records,
             &log,
             json!({"adapter":name,"mode":mode}),
             failure,
-            outcome,
+            outcome.and(teardown),
         )?;
     }
     if args.suite == "smoke" {
@@ -1596,6 +1836,309 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_kv_success_body_requires_request_and_instance_correlation() {
+        let response = |body: Value| json!({"status":200,"body":body.to_string()});
+        let valid = json!({"token":"request","instance":"one"});
+        validate_declared_kv_guest(&response(valid.clone()), "request", "one").unwrap();
+        for body in [
+            json!({}),
+            json!({"token":"request"}),
+            json!({"instance":"one"}),
+            json!({"token":"other","instance":"one"}),
+            json!({"token":"request","instance":"other"}),
+        ] {
+            assert!(validate_declared_kv_guest(&response(body), "request", "one").is_err());
+        }
+        assert!(
+            validate_declared_kv_guest(
+                &json!({"status":500,"body":valid.to_string()}),
+                "request",
+                "one"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn declared_kv_linked_result_requires_a_present_field_even_when_null() {
+        let response = |body: Value| json!({"status":200,"body":body.to_string()});
+        validate_declared_kv_linked_response(&response(json!({"kv_outcome":null})), &json!(null))
+            .unwrap();
+        assert!(validate_declared_kv_linked_response(&response(json!({})), &json!(null)).is_err());
+        assert!(
+            validate_declared_kv_linked_response(
+                &response(json!({"kv_outcome":"stale"})),
+                &json!(null)
+            )
+            .is_err()
+        );
+        validate_declared_kv_linked_response(&response(json!({"kv_outcome":[]})), &json!([]))
+            .unwrap();
+        assert!(
+            validate_declared_kv_linked_response(
+                &response(json!({"kv_outcome":["stale"]})),
+                &json!([])
+            )
+            .is_err()
+        );
+        assert!(
+            validate_declared_kv_linked_response(&json!({"status":500,"body":"{}"}), &json!(null))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn declared_kv_operation_receipts_require_the_actual_typed_result() {
+        let start = json!({"event":"request_start","token":"case","instance":"one"});
+        let terminal = json!({"event":"egress_terminal","token":"case","instance":"one"});
+        let entry = json!({"event":"declared_kv_enter","token":"case","instance":"one","store":"missing","operation":"write"});
+        let result = json!({"event":"declared_kv_result","token":"case","instance":"one","store":"missing","operation":"write","outcome":"open-failed","reason":"MissingBinding"});
+        let valid = vec![
+            start.clone(),
+            entry.clone(),
+            result.clone(),
+            terminal.clone(),
+        ];
+        validate_declared_kv_operation(
+            &valid,
+            "case",
+            "one",
+            "fastly",
+            "/declared-kv/missing/write",
+        )
+        .unwrap();
+        assert!(
+            validate_declared_kv_operation(
+                &valid,
+                "case",
+                "one",
+                "spin",
+                "/declared-kv/missing/write"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_declared_kv_operation(&valid, "case", "one", "fastly", "/declared-kv/free")
+                .is_err()
+        );
+        validate_declared_kv_operation(
+            &[start.clone(), terminal.clone()],
+            "case",
+            "one",
+            "fastly",
+            "/declared-kv/free",
+        )
+        .unwrap();
+        for invalid in [
+            vec![],
+            vec![entry.clone()],
+            vec![result.clone()],
+            vec![entry.clone(), entry.clone(), result.clone()],
+            vec![entry.clone(), result.clone(), result.clone()],
+            vec![
+                terminal.clone(),
+                start.clone(),
+                entry.clone(),
+                result.clone(),
+            ],
+            vec![
+                start.clone(),
+                terminal.clone(),
+                entry.clone(),
+                result.clone(),
+            ],
+            vec![
+                start.clone(),
+                result.clone(),
+                entry.clone(),
+                terminal.clone(),
+            ],
+        ] {
+            assert!(
+                validate_declared_kv_operation(
+                    &invalid,
+                    "case",
+                    "one",
+                    "fastly",
+                    "/declared-kv/missing/write"
+                )
+                .is_err()
+            );
+        }
+        for (field, value) in [
+            ("token", json!("other")),
+            ("instance", json!("other")),
+            ("store", json!("linked")),
+            ("operation", json!("read")),
+            ("outcome", json!("operation-failed")),
+            ("reason", json!("Unavailable")),
+            ("reason", json!(null)),
+        ] {
+            let mut changed = result.clone();
+            changed[field] = value;
+            assert!(
+                validate_declared_kv_operation(
+                    &[start.clone(), entry.clone(), changed, terminal.clone()],
+                    "case",
+                    "one",
+                    "fastly",
+                    "/declared-kv/missing/write"
+                )
+                .is_err()
+            );
+        }
+        let mut linked_entry = entry.clone();
+        linked_entry["store"] = json!("linked");
+        let mut linked_result = result;
+        linked_result["store"] = json!("linked");
+        linked_result["outcome"] = json!("success");
+        linked_result["reason"] = json!(null);
+        validate_declared_kv_operation(
+            &[start, linked_entry, linked_result, terminal],
+            "case",
+            "one",
+            "spin",
+            "/declared-kv/linked/write",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn declared_kv_final_validation_rejects_late_duplicates_and_missing_cases() {
+        let mut checks = DeclaredKvChecks::default();
+        let mut events = Vec::new();
+        for (index, path) in [
+            "/declared-kv/free",
+            "/declared-kv/missing/read",
+            "/declared-kv/missing/read",
+            "/declared-kv/free",
+            "/declared-kv/missing/write",
+            "/declared-kv/missing/delete",
+            "/declared-kv/missing/list",
+            "/declared-kv/linked/write",
+            "/declared-kv/linked/read",
+            "/declared-kv/linked/list",
+            "/declared-kv/linked/delete",
+            "/declared-kv/linked/read",
+            "/declared-kv/linked/list",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let token = index.to_string();
+            let instance = if index < 7 { "one" } else { "healthy-turnover" };
+            checks.requests.push(DeclaredKvRequest {
+                token: token.clone(),
+                path: path.to_owned(),
+                instance: Some(instance.to_owned()),
+            });
+            events.push(json!({"event":"request_start","token":token,"instance":instance}));
+            if path != "/declared-kv/free" {
+                let (store, operation) = path
+                    .strip_prefix("/declared-kv/")
+                    .unwrap()
+                    .split_once('/')
+                    .unwrap();
+                events.push(json!({"event":"declared_kv_enter","token":token,"instance":instance,"store":store,"operation":operation}));
+                events.push(json!({"event":"declared_kv_result","token":token,"instance":instance,"store":store,"operation":operation,"outcome":if store == "missing" {"open-failed"} else {"success"},"reason":if store == "missing" {json!("MissingBinding")} else {json!(null)}}));
+            }
+            events.push(json!({"event":"egress_terminal","token":token,"instance":instance,"outcome":"Completed","body_kind":"Application","fallback":null}));
+        }
+        checks.instance = Some("one".to_owned());
+        checks.validate(&events, "fastly").unwrap();
+        let mut premature = events.clone();
+        let result = premature
+            .iter()
+            .position(|event| event["token"] == "1" && event["event"] == "declared_kv_result")
+            .unwrap();
+        let terminal = premature
+            .iter()
+            .position(|event| event["token"] == "1" && event["event"] == "egress_terminal")
+            .unwrap();
+        premature.swap(result, terminal);
+        assert!(checks.validate(&premature, "fastly").is_err());
+        let mut late = events.clone();
+        late.push(events[1].clone());
+        assert!(checks.validate(&late, "fastly").is_err());
+        let mut changed = events.clone();
+        for event in &mut changed {
+            if event["token"] == "2" {
+                event["instance"] = json!("turned-over");
+            }
+        }
+        assert!(checks.validate(&changed, "fastly").is_err());
+        let mut natural_turnover = events.clone();
+        for event in &mut natural_turnover {
+            if event["token"] == "4" {
+                event["instance"] = json!("next-missing-instance");
+            }
+        }
+        checks.requests[4].instance = Some("next-missing-instance".to_owned());
+        checks.validate(&natural_turnover, "fastly").unwrap();
+        assert_eq!(checks.failed_instances().len(), 2);
+        let warning = "fixture-logs :: WARN declared Fastly KV store 'missing_fixture_kv' failed to open: missing binding\n";
+        assert!(checks.warning_count(warning, "fastly").is_err());
+        assert_eq!(
+            checks.warning_count(&warning.repeat(2), "fastly").unwrap(),
+            2
+        );
+        assert!(checks.warning_count(&warning.repeat(3), "fastly").is_err());
+        checks.requests.pop();
+        assert!(checks.validate(&events, "fastly").is_err());
+        checks.requests.clear();
+        assert!(checks.validate(&events, "fastly").is_err());
+    }
+
+    #[test]
+    fn declared_kv_provider_warnings_cannot_offset_between_instances() {
+        let checks = DeclaredKvChecks {
+            instance: Some("one".to_owned()),
+            requests: [
+                ("one", "/declared-kv/missing/read"),
+                ("two", "/declared-kv/missing/write"),
+                ("healthy", "/declared-kv/linked/read"),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (instance, path))| DeclaredKvRequest {
+                token: index.to_string(),
+                instance: Some(instance.to_owned()),
+                path: path.to_owned(),
+            })
+            .collect(),
+        };
+        for (adapter, platform, reason) in [
+            ("spin", "Spin", "invalid binding configuration"),
+            ("cloudflare", "Cloudflare", "missing binding"),
+        ] {
+            let warning = |instance: &str| {
+                json!({"event":"fixture_log","instance":instance,"level":"WARN","target":"edgezero::boot","message":format!("declared {platform} KV store 'missing_fixture_kv' failed to open: {reason}")}).to_string()
+            };
+            let valid = format!("{}\n{}\n", warning("one"), warning("two"));
+            assert_eq!(checks.warning_count(&valid, adapter).unwrap(), 2);
+            assert!(checks.warning_count(&warning("one"), adapter).is_err());
+            assert!(
+                checks
+                    .warning_count(
+                        &format!("{}\n{}\n", warning("one"), warning("one")),
+                        adapter
+                    )
+                    .is_err()
+            );
+            assert!(
+                checks
+                    .warning_count(&format!("{valid}{}\n", warning("healthy")), adapter)
+                    .is_err()
+            );
+            assert!(
+                checks
+                    .warning_count(&format!("{valid}{}\n", warning("two")), adapter)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn declared_kv_lifecycle_rejects_missing_duplicate_failed_and_cross_instance() {
