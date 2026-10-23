@@ -244,7 +244,26 @@ and the generated-workspace gate including 22 executed generated-core tests. Doc
 audits, both nonzero original-coding sentinels and the fixture's tests/clippy passed. Two independent
 read-only reviews found no blocking defect; their additional declared/observed cap controls were
 added and verified. Local coding results are retained in the feasibility report, not claimed as
-release evidence. The forwarding-example checker is still a later Q2 deliverable, not present yet.
+release evidence. The forwarding-example checker was delivered in the separate Q1/Q2 checkpoint below.
+
+### Q1/Q2 Forwarding Documentation Checkpoint
+
+The mandatory EZ-1.14 checker extracts the actual forwarding fence from `docs/guide/proxying.md`,
+builds core offline/locked and discovers its rlib, dependency directory and edition through Cargo
+JSON. It requires exactly one listed and passed non-ignored rustdoc test. A checker-owned empty
+entrypoint prevents handler invocation; a delimiter longer than every source backtick run keeps
+embedded fences from bypassing compilation or the empty entrypoint. Fifteen passing Node cases
+cover missing/duplicate fences, weakened annotations, zero tests and actual compilation failures,
+including removal of `into_request()?` and both independently reproduced embedded-fence failures.
+The existing workspace CI leg runs both Node commands after locked fetches with pinned Node.
+This is supplementary compile-only coverage outside the reviewed 511 runtime/environment legs:
+it does not adopt optional EZ-25.42, prove GET/HEAD/POST forwarding or close P2 or failed Fastly G2.
+
+Local checkpoint verification passes all five Rust gates (2,193 workspace tests, zero failures,
+one existing ignored test), the 15 checker cases, 18 inventory tests and docs format/lint/build.
+Independent review reproduced the embedded-fence bug before its fix and cleared the final checker.
+Inventory validation still reports 255 criteria and 511 planned, unqualified environment legs.
+These results are local source verification, not hosted CI or frozen-candidate qualification.
 
 ### P1/P3 Marker Checkpoint
 

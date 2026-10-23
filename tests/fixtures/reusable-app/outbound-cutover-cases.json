@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "86691fe7f0dfae0e489678f01eeb4385c9acdc238778801d700c7ef8585f2fd6",
-  "status": "planned inventory; commands and applicability require owner review before activation",
+  "status": "planned inventory; commands and applicability require owner review before activation; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",

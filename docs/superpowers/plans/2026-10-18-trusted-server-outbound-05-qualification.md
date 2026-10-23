@@ -44,7 +44,7 @@ guide-snippet checker/tests below; Q2 owns CI activation, with Q1 supplying exac
       GET/HEAD/POST ingress, requests original coding, and suppresses only EdgeZero's marker. Show
       explicit follow policy, credential/target restrictions, scheduler requirements, budgets/idle
       precedence, and cancellation ownership. Do not show GET/HEAD body dropping as a workaround.
-- [ ] Unconditionally compile the actual forwarding example for blocking EZ-1.14, independently
+- [x] Unconditionally compile the actual forwarding example for blocking EZ-1.14, independently
       of EZ-25.42 adoption. The narrow checker extracts the single Rust fence under
       `Forward An Inbound Request` in `docs/guide/proxying.md`, without maintaining a copied example.
       Build core with `cargo build --offline --locked -p edgezero-core --lib --message-format=json`;
@@ -55,8 +55,10 @@ guide-snippet checker/tests below; Q2 owns CI activation, with Q1 supplying exac
       compile failure fail the gate. Add negative fixtures for each case, including the missing
       `into_request()?`. Run `node --test scripts/check_forwarding_example.test.mjs` and
       `node scripts/check_forwarding_example.mjs` before/after the example correction.
-      Expected: the current invalid example fails; the corrected actual example passes a nonzero
-      rustdoc run. This does not substitute for P2's real GET/HEAD/POST forwarding tests.
+      The example was corrected by an earlier checkpoint. The checker now rejects a real mutation
+      removing `into_request()?` and passes the unchanged actual example in a nonzero rustdoc run.
+      Its empty entrypoint compiles item definitions without invoking the network handler.
+      This does not substitute for P2's real GET/HEAD/POST forwarding tests.
 - [ ] Explain that original coding preserves only representation fields surviving ordinary
       normalization, never stripped hop-by-hop/nominated or filtered fields. Document cause-based
       generated-overflow Retry-After suppression and its precedence over synthesized headers,
@@ -174,11 +176,13 @@ for Q4a. Qualification binaries/tooling remain owned by G2/Q3, not duplicated he
   These runner contracts do not replace actual workerd/Spin HTTP fixtures. Add new nonzero
   outbound sentinels for this work instead of relying only on routing sentinels.
 
-- [ ] Run `node --test scripts/check_forwarding_example.test.mjs` and
+- [x] Run `node --test scripts/check_forwarding_example.test.mjs` and
       `node scripts/check_forwarding_example.mjs` unconditionally in the existing Rust-capable
       workspace CI job after locked dependency preparation. Preserve the one-doctest assertion;
       deferring EZ-25.42 does not skip this blocking EZ-1.14 gate. Do not pass Node through
       `run_test_nonzero.sh`, which parses Rust listings.
+      Implemented in the workspace host-test leg with the repository-pinned Node toolchain;
+      local execution is separate from a hosted CI result and frozen-candidate qualification.
 - [ ] Activate each adopted conditional branch, not just its compilation: P3's individual metadata
       sentinels, F10a cancellation on selected targets, F10b's new assertions in the existing generated/
       demo test gates and F10c's

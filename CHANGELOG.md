@@ -31,6 +31,13 @@ separately from the portable API and must be considered when declaring required 
 - Align bounded Axum secret reads with the prefixed uppercase environment mapping
   used by unbounded reads, preserving independent byte caps and deadlines.
 
+### Forwarding Documentation Gate
+
+- Compile the forwarding example directly from the guide using offline/locked Cargo artifacts
+  and rustdoc. Require one non-ignored passing test without invoking the network handler.
+- Add real compiler regressions and workspace CI activation with pinned Node. This compile-only
+  prerequisite does not replace runtime forwarding tests or provider qualification.
+
 ### Policy-Aware Axum Servers
 
 - **Breaking:** `AxumDevServer::{new, with_config}` consume an assembled `App`, not a router.

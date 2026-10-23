@@ -80,6 +80,27 @@ for the lifetime of the pin, not a CI artifact. This validator checks recorded f
 it does not authenticate telemetry, approvers, deployment identities or continued remote retention.
 Independent owner review remains necessary.
 
+#### Mandatory Forwarding Example Doctest
+
+Blocking EZ-1.14 has a supplementary compile-only prerequisite owned by Q1 (checker) and
+Q2 (workspace CI). Run from the repository root:
+
+```sh
+node --test scripts/check_forwarding_example.test.mjs
+node scripts/check_forwarding_example.mjs
+```
+
+The checker extracts the actual `Forward An Inbound Request` fence in `docs/guide/proxying.md`,
+builds core offline/locked and requires exactly one listed and passed non-ignored rustdoc test.
+It compiles item definitions with an empty entrypoint; the network handler is never invoked.
+Missing/duplicate fences, weakening annotations, zero tests and compile failures fail the gate.
+Regression tests include the missing `into_request()?` mutation and embedded-fence bypasses
+through real compilation.
+
+This CI prerequisite is outside the reviewed 511 environment legs. It grants no runtime
+forwarding acceptance and does not adopt optional EZ-25.42's broader guide checker. P2's real
+GET/HEAD/POST behavior tests and provider/consumer qualification remain separate requirements.
+
 ### Fastly Readiness Diagnostic
 
 ```sh
