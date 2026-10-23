@@ -247,48 +247,17 @@ mod tests {
         log
     }
 
-    fn upload(
-        server: &Server,
-        path: &str,
-        media: Option<&str>,
-        body: Vec<u8>,
-        chunked: bool,
-    ) -> String {
-        let mut socket = server.socket().expect("upload connection");
-        let mut writer = socket.try_clone().expect("upload writer");
-        let content_type =
-            media.map_or_else(String::new, |value| format!("Content-Type: {value}\r\n"));
-        let framing = if chunked {
-            "Transfer-Encoding: chunked\r\n".to_owned()
-        } else {
-            format!("Content-Length: {}\r\n", body.len())
-        };
-        let request_head = format!(
-            "POST {path} HTTP/1.1\r\nHost: fixture\r\n{content_type}{framing}Connection: close\r\n\r\n"
+    fn post_json(server: &Server, path: &str, body: &str) -> String {
+        let response = raw_request(
+            server.addr,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
         );
-        let sending = thread::spawn(move || -> io::Result<()> {
-            writer.write_all(request_head.as_bytes())?;
-            for chunk in body.chunks(0x4000) {
-                if chunked {
-                    write!(writer, "{:x}\r\n", chunk.len())?;
-                }
-                writer.write_all(chunk)?;
-                if chunked {
-                    writer.write_all(b"\r\n")?;
-                }
-            }
-            if chunked {
-                writer.write_all(b"0\r\n\r\n")?;
-            }
-            Ok(())
-        });
-        let mut response = String::new();
-        let reading = socket.read_to_string(&mut response);
-        let sent = sending.join().expect("bounded upload writer");
         let (head, payload) = response
             .split_once("\r\n\r\n")
             .expect("usable response head");
-        let is_413 = head.starts_with("HTTP/1.1 413");
         let length = head
             .lines()
             .find_map(|line| {
@@ -298,29 +267,7 @@ mod tests {
             })
             .expect("finite response framing");
         assert_eq!(payload.len(), length, "complete response: {response}");
-        if let Err(error) = reading {
-            assert!(
-                is_413 && error.kind() == io::ErrorKind::ConnectionReset,
-                "response read: {error}"
-            );
-        }
-        if let Err(error) = sent {
-            assert!(is_413, "upload failure without 413: {error}");
-        }
         response
-    }
-
-    fn assert_upload_status(response: &str, status: u16) {
-        assert!(
-            response.starts_with(&format!("HTTP/1.1 {status}")),
-            "{response}"
-        );
-        if status == 413 {
-            let (_, body) = response.split_once("\r\n\r\n").expect("response");
-            let value: Value = serde_json::from_str(body).expect("usable error body");
-            assert_eq!(value["error"]["kind"], "payload_too_large");
-            assert_eq!(value["error"]["message"], "request body too large");
-        }
     }
 
     fn captured_json(log: &str, marker: &str) -> Vec<Value> {
@@ -1002,14 +949,8 @@ mod tests {
         assert!(extension_response.starts_with("HTTP/1.1 405"));
         assert!(!extension_response.contains("SENTINEL"));
         assert!(extension_response.to_ascii_lowercase().contains("allow:"));
-        let json_response = upload(
-            &server,
-            "/native-json-number",
-            Some("application/json"),
-            b"\"PAYLOAD_SENTINEL\"".to_vec(),
-            false,
-        );
-        assert_upload_status(&json_response, 400);
+        let json_response = post_json(&server, "/native-json-number", "\"PAYLOAD_SENTINEL\"");
+        assert!(json_response.starts_with("HTTP/1.1 400"), "{json_response}");
         assert!(!json_response.contains("PAYLOAD_SENTINEL"));
         assert_eq!(
             response_json(&json_response)["error"]["message"],
@@ -1053,13 +994,7 @@ mod tests {
             custom.contains("CUSTOM_ROUTE_SENTINEL"),
             "custom renderer retains original routing detail"
         );
-        let parsed = upload(
-            &server,
-            "/native-json-number",
-            Some("application/json"),
-            b"\"PAYLOAD_SENTINEL\"".to_vec(),
-            false,
-        );
+        let parsed = post_json(&server, "/native-json-number", "\"PAYLOAD_SENTINEL\"");
         assert!(parsed.starts_with("HTTP/1.1 400"));
         assert!(parsed.ends_with("invalid JSON payload"));
         assert!(!parsed.contains("PAYLOAD_SENTINEL"));
