@@ -54,6 +54,7 @@ use crate::config_store::AxumConfigStore;
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::serve_http1_with_shutdown;
 use crate::diagnostics::{NativeDiagnosticsHandle, NativeSession};
+use crate::geo::NativeGeo;
 use crate::ingress_config::AxumIngressConfig;
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
@@ -473,9 +474,10 @@ fn serve_local(
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct NativeHosting {
     diagnostics: NativeDiagnosticsHandle,
+    geo: NativeGeo,
     policy: TrustedProxyPolicy,
     request_records: bool,
 }
@@ -486,6 +488,7 @@ impl Default for NativeHosting {
             diagnostics: NativeDiagnosticsHandle::new(),
             policy: TrustedProxyPolicy::no_trust(),
             request_records: true,
+            geo: NativeGeo::default(),
         }
     }
 }
@@ -707,6 +710,7 @@ where
     let session = NativeSession::new(native.diagnostics, native.request_records)?;
     let mut service =
         AxumServiceState::with_transport(app, transport, json_body_limit, session, native.policy)
+            .with_geo(native.geo)
             .with_phase(reader.clone());
 
     if let Some(registry) = stores.config {
@@ -1012,6 +1016,7 @@ where
             policy,
             request_records,
             diagnostics: NativeDiagnosticsHandle::new(),
+            geo: NativeGeo::default(),
         },
     ))
 }
@@ -1162,6 +1167,13 @@ where
         &'startup PreparedStores,
     ) -> LocalStartupFuture<'startup>,
 {
+    let geo = options.native_geo()?;
+    let native = NativeHosting {
+        diagnostics: options.diagnostics(),
+        policy: options.trusted_proxy_policy(),
+        request_records: options.request_records(),
+        geo,
+    };
     run_local(
         ListenerSource::Bind(options.addr()),
         signals,
@@ -1183,17 +1195,7 @@ where
                 );
                 failure("initializer", "application", &category)
             })?;
-            Ok((
-                app,
-                stores,
-                transport,
-                options.json_body_limit(),
-                NativeHosting {
-                    diagnostics: options.diagnostics(),
-                    policy: options.trusted_proxy_policy(),
-                    request_records: options.request_records(),
-                },
-            ))
+            Ok((app, stores, transport, options.json_body_limit(), native))
         },
     )
 }
@@ -1239,12 +1241,10 @@ async fn build_production_stores(
     let mut kv = BTreeMap::new();
     let mut secrets = BTreeMap::new();
     let mut resident = 0_usize;
-    let mut aws = sources.session()?;
+    let mut sessions = sources.sessions()?;
     for (id, source) in sources.config {
         let binding = match source {
-            NativeStoreSource::BuiltIn(builtin) => {
-                native_stores::prepare_aws_config(builtin, &mut aws, id).await?
-            }
+            NativeStoreSource::BuiltIn(builtin) => sessions.prepare_config(builtin, id).await?,
             local @ (NativeStoreSource::Local
             | NativeStoreSource::Ready(_)
             | NativeStoreSource::Prepare(_)) => {
@@ -1305,9 +1305,7 @@ async fn build_production_stores(
     }
     for (id, source) in sources.kv {
         let handle = match source {
-            NativeStoreSource::BuiltIn(builtin) => {
-                native_stores::prepare_aws_kv(builtin, &mut aws, id).await?
-            }
+            NativeStoreSource::BuiltIn(builtin) => sessions.prepare_kv(builtin, id).await?,
             local @ (NativeStoreSource::Local
             | NativeStoreSource::Ready(_)
             | NativeStoreSource::Prepare(_)) => {
@@ -1333,9 +1331,7 @@ async fn build_production_stores(
     let environment_secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));
     for (id, source) in sources.secrets {
         let binding = match source {
-            NativeStoreSource::BuiltIn(builtin) => {
-                native_stores::prepare_aws_secrets(builtin, &mut aws, id).await?
-            }
+            NativeStoreSource::BuiltIn(builtin) => sessions.prepare_secrets(builtin, id).await?,
             local @ (NativeStoreSource::Local
             | NativeStoreSource::Ready(_)
             | NativeStoreSource::Prepare(_)) => {
@@ -2079,11 +2075,12 @@ mod tests {
         assert_eq!(selected.get().get(), 0x0020_0000);
         assert!(env.adapter_host().is_none());
         assert_eq!(env.store_name("kv", "default"), "default");
-        let error = capture_dev_environment([(
+        let Err(error) = capture_dev_environment([(
             OsString::from("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES"),
             binary,
-        )])
-        .expect_err("recognized binary setting");
+        )]) else {
+            panic!("recognized binary setting must fail");
+        };
         assert!(error.to_string().contains("JSON_BODY_LIMIT_BYTES"));
         assert_eq!(error.chain().count(), 1);
     }
@@ -3682,6 +3679,53 @@ mod native_store_tests {
             .await?
             .unwrap_or_default();
         Ok(format!("{}:{state}", value.as_str()))
+    }
+
+    #[cfg(not(feature = "geo-cloudfront"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn geo_unavailable_selection_fails_before_runner_resources() {
+        use crate::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
+        let root = tempfile::tempdir().unwrap();
+        let options = options()
+            .with_config_dir(root.path())
+            .unwrap()
+            .with_data_dir(root.path())
+            .unwrap()
+            .with_geo(NativeGeoSelection::CloudFront {
+                policy: ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture")
+                    .unwrap(),
+            });
+        let address = options.addr();
+        let prepared = Rc::new(Cell::new(false));
+        let initialized = Rc::new(Cell::new(false));
+        let prepare_observed = Rc::clone(&prepared);
+        let initialize_observed = Rc::clone(&initialized);
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .prepare_config("first", async move {
+                prepare_observed.set(true);
+                Err(NativeStorePreparationError::Unavailable)
+            })
+            .unwrap();
+        // Existing Tokio runtime would reject nested runner construction if validation were late.
+        let error = run_app_with_native_stores::<CustomApp, _, _>(
+            options,
+            overrides,
+            future::pending::<()>(),
+            move |_app, _stores| {
+                Box::pin(async move {
+                    initialize_observed.set(true);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unavailable"));
+        assert!(!prepared.get());
+        assert!(!initialized.get());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        let listener = StdTcpListener::bind(address).expect("runner never bound listener");
+        drop(listener);
     }
 
     #[test]

@@ -43,6 +43,7 @@ mod tests {
         reason: &'static str,
         body: String,
         content_type: &'static str,
+        headers: &'static str,
     }
 
     impl Reply {
@@ -52,6 +53,7 @@ mod tests {
                 reason: "OK",
                 body,
                 content_type,
+                headers: "",
             }
         }
     }
@@ -198,11 +200,12 @@ mod tests {
     fn send_response(stream: &mut TcpStream, reply: &Reply) {
         write!(
             stream,
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
             reply.status,
             reply.reason,
             reply.content_type,
-            reply.body.len()
+            reply.body.len(),
+            reply.headers
         )
         .expect("write response headers");
         stream
@@ -399,6 +402,7 @@ mod tests {
                 reason: "Service Unavailable",
                 body: "AGENT_BODY_SENTINEL".to_owned(),
                 content_type: "text/plain",
+                headers: "",
             }
         }
     }
@@ -426,6 +430,7 @@ mod tests {
             })
             .to_string(),
             content_type: "application/x-amz-json-1.1",
+            headers: "",
         }
     }
 
@@ -491,6 +496,77 @@ secret_id = "{ARN}"
         assert_eq!(body["SecretId"], ARN);
         assert!(body.get("VersionStage").is_none());
         assert!(body.get("VersionId").is_none());
+    }
+
+    #[cfg(feature = "celld-config")]
+    #[test]
+    fn production_runner_composes_celld_config_aws_secret_and_local_secret() {
+        let root = tempfile::tempdir().expect("isolated mixed-provider process");
+        let document = envelope("token", "celld-startup-greeting");
+        assert!(
+            document.len() > 128,
+            "celld document exceeds the independent AWS payload budget"
+        );
+        let config = FixtureServer::once(
+            Reply {
+                headers: "x-celld-store-version: 1\r\n",
+                ..Reply::ok(document, "application/octet-stream")
+            },
+            true,
+        );
+        let secrets = FixtureServer::once(secrets_reply(TOKEN_SENTINEL), true);
+        let path = root.path().join("mixed-native-stores.toml");
+        fs::write(
+            &path,
+            format!(
+                r#"version = 1
+[config.app]
+provider = "celld-config"
+endpoint = "{}"
+default_key = "settings"
+[config.app.access]
+mode = "trusted-network"
+[config.app.documents.settings]
+store = "app-config"
+key = "settings"
+[secrets.vault]
+provider = "aws-secrets-manager"
+region = "us-east-1"
+[secrets.vault.entries.token]
+secret_id = "{ARN}"
+[limits.aws]
+max_snapshot_bytes = 128
+max_config_document_bytes = 128
+max_secret_value_bytes = 128
+"#,
+                config.endpoint()
+            ),
+        )
+        .expect("mixed binding variants");
+        let mut child = ChildHost::spawn(&root, &path, secrets.endpoint());
+        assert_eq!(
+            response_body(&child.wait_http("/snapshot")),
+            "celld-startup-greeting|native-fixture-secret-value"
+        );
+        assert_eq!(
+            response_body(&child.wait_http("/local-secret")),
+            LOCAL_SENTINEL
+        );
+        let request = config.take_request();
+        assert!(
+            request
+                .headers
+                .starts_with("get /v1/stores/app-config/value?key=settings "),
+            "scoped config request"
+        );
+        assert!(
+            !request.headers.contains("authorization:"),
+            "unrelated Agent token must not enter trusted celld transport"
+        );
+        request_body_is_serialized_get_secret(&secrets.take_request());
+        child.stop();
+        assert!(config.finish().is_some());
+        assert!(secrets.finish().is_some());
     }
 
     #[test]

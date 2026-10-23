@@ -226,8 +226,21 @@ mod tests {
         }
     }
 
+    fn forged_geo() -> edgezero_core::geo::GeoOutcome {
+        use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+        GeoOutcome::Selected {
+            provider: GeoProviderId::new("forged-portable").expect("fixture provider ID"),
+            status: GeoStatus::Error(GeoError::ProviderFailure),
+        }
+    }
+
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
+            assert_eq!(ctx.geo(), &edgezero_core::geo::GeoOutcome::NoSelection);
+            assert_eq!(
+                ctx.extensions().get::<edgezero_core::geo::GeoOutcome>(),
+                Some(&forged_geo())
+            );
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
                 .status(StatusCode::OK)
@@ -329,7 +342,9 @@ mod tests {
             .get("/secret-value", secret_value)
             .build();
 
-        App::new(router)
+        let mut app = App::new(router);
+        app.insert_state(forged_geo());
+        app
     }
 
     #[test]
@@ -609,6 +624,19 @@ mod tests {
         use spin_sdk::http::{FromRequest as _, IntoRequest as _, Request as SpinRequest};
 
         use super::*;
+
+        #[test]
+        fn geo_managed_dispatch_ignores_forged_extensions() {
+            let app = build_test_app();
+            let response = block_on(dispatch_ingress_stream_for_test(
+                &app,
+                Method::GET,
+                "http://example.com/uri".parse().expect("URI"),
+                empty::<Result<Bytes, io::Error>>(),
+            ))
+            .expect("Spin admitted dispatch");
+            assert_eq!(captured_body(response).as_ref(), b"http://example.com/uri");
+        }
 
         #[test]
         fn admission_abort() {

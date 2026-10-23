@@ -112,8 +112,21 @@ mod tests {
         }
     }
 
+    fn forged_geo() -> edgezero_core::geo::GeoOutcome {
+        use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+        GeoOutcome::Selected {
+            provider: GeoProviderId::new("forged-portable").expect("fixture provider ID"),
+            status: GeoStatus::Error(GeoError::ProviderFailure),
+        }
+    }
+
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
+            assert_eq!(ctx.geo(), &edgezero_core::geo::GeoOutcome::NoSelection);
+            assert_eq!(
+                ctx.extensions().get::<edgezero_core::geo::GeoOutcome>(),
+                Some(&forged_geo())
+            );
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
                 .status(StatusCode::OK)
@@ -171,7 +184,9 @@ mod tests {
             .get("/config", config_value)
             .build();
 
-        App::new(router)
+        let mut app = App::new(router);
+        app.insert_state(forged_geo());
+        app
     }
 
     fn fastly_request(method: FastlyMethod, path: &str, body: Option<&[u8]>) -> FastlyRequest {
@@ -180,6 +195,8 @@ mod tests {
         let mut req = FastlyRequest::new(method, format!("http://example.com{path}"));
         req.set_header("host", "example.com");
         req.set_header("x-edgezero-test", "1");
+        req.set_header("cloudfront-viewer-country", "US");
+        req.set_header("cloudfront-viewer-country-region", "CA");
         if let Some(bytes) = body {
             req.set_body(bytes.to_vec());
         }
@@ -264,6 +281,11 @@ mod tests {
                 let request_events = Arc::clone(&handler_events);
                 async move {
                     request_events.lock().expect("events").push("handler");
+                    assert_eq!(ctx.geo(), &edgezero_core::geo::GeoOutcome::NoSelection);
+                    assert_eq!(
+                        ctx.extensions().get::<edgezero_core::geo::GeoOutcome>(),
+                        Some(&forged_geo())
+                    );
                     let value = ctx
                         .extensions()
                         .get::<HookValue>()
@@ -285,6 +307,7 @@ mod tests {
                     prepare_events.lock().expect("events").push("prepare");
                     raw.set_url("http://example.com/hook");
                     extensions.insert(HookValue("visible"));
+                    extensions.insert(forged_geo());
                 },
                 move |response| {
                     finalize_events.lock().expect("events").push("finalize");

@@ -262,6 +262,29 @@ keeps its supplied cap and existing 400 overflow behavior. The ceiling bounds lo
 body bytes, not parsed JSON allocations, host buffers, concurrent requests, or process memory.
 It does not promise client receipt or keep-alive reuse after rejection.
 
+## Checked ingress and diagnostics
+
+Managed hosting validates the original normalized request head, removes raw forwarding fields,
+and exposes checked metadata from the actual socket peer. Proxy trust is off by default.
+Configure a bounded `TrustedProxyPolicy` only for deployment-owned peers. Native request records
+omit raw headers, addresses, paths/queries, and source error strings; application-owned loggers
+and observers remain responsible for their own output. See
+[Axum diagnostics and trusted proxies](../axum-diagnostics.md) for configuration, metadata,
+request identity, counters, and deployment examples.
+
+## Native Geo providers
+
+Geo is off by default and selected only through `AxumRunOptions::with_geo`. The opt-in
+`geo-cloudfront` feature adds a bounded local CloudFront parser, not AWS SDKs or store setup.
+Both built-in and supplied providers require a separate `ProtectedCloudFrontAlb` policy using
+the actual socket peer. Ordinary trusted-proxy configuration does not admit geographic assertions.
+
+Read the immutable outcome through `RequestContext::geo()`. Missing metadata, untrusted ingress,
+invalid assertions, and provider failures remain distinct; none grants permission or chooses an
+HTTP status. The [native Geo guide](../native-geo.md) covers the Rust API, mandatory HTTPS origin
+credential gate and network isolation, header generation, disabled shared caching, rotation,
+and the separate cloud/downstream acceptance checks.
+
 ## Outbound HTTP
 
 The Axum adapter injects `AxumOutboundClient`, backed by `reqwest`. Application handlers use the
@@ -395,6 +418,8 @@ With explicit AWS bindings, the runner fetches mapped values before its initiali
 and before it accepts requests. It does not fall back to a local provider when an AWS
 lookup or preparation fails. See the [native AWS stores guide](../native-aws-stores.md)
 for the schema, feature selection, permissions, and lifecycle limits.
+The independent [native celld providers](../native-celld-stores.md) add startup
+configuration snapshots and live KV through a scoped listener inside celld.
 
 The native binding file path must be absolute. `EDGEZERO__STORE_BINDINGS_FILE` is
 read only by the environment-loading runner. Explicit `AxumRunOptions` selection

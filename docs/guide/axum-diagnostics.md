@@ -6,7 +6,8 @@ trust by itself.
 
 These APIs belong to `edgezero_adapter_axum`, with the `axum` feature enabled. They apply to
 `run_app`, `run_production_app`, the explicit-options runners, and `AxumDevServer`. Other
-adapters retain their existing behavior.
+adapters retain their existing behavior. Geographic source admission is a separate policy;
+ordinary proxy trust never admits CloudFront geography. See [Native Geo providers](./native-geo.md).
 
 ## Startup settings
 
@@ -217,8 +218,9 @@ trusted, it falls back to the direct peer as unresolved.
 Restrict origin access to the intended Cloudflare producers, including verification appropriate
 to your zone and route. Restrict EdgeZero access to the final load balancer. Provider defaults,
 address membership alone, or an HTTPS load-balancer hop do not prove correct visitor metadata.
-Maintain the allowlist and inspect your deployed header mode. EdgeZero has no built-in
-Cloudflare/AWS trust policy and does not consume `CF-Connecting-IP` automatically.
+Maintain the allowlist and inspect your deployed header mode. EdgeZero has no built-in Cloudflare/AWS forwarding trust list and does not consume
+`CF-Connecting-IP` automatically. The separate protected CloudFront/ALB Geo policy does not
+select a forwarding family or establish checked reader-IP metadata.
 Cloudflare's [header documentation](https://developers.cloudflare.com/fundamentals/reference/http-request-headers/)
 explains how Workers, transforms, and Pseudo IPv4 can change assertions.
 
@@ -279,7 +281,7 @@ socket-owned proxy checking, and raw `ForwardedHost` behavior can remain there. 
 ConnectInfo or setting an environment variable does not turn that converter into a trusted
 ingress. Use managed hosting for this policy. The converter still attaches the native JSON
 buffering policy, so its framework-generated JSON parse errors also use fixed text; the bypass
-is for managed admission and proxy checking. Do not recreate removed headers for automatic
+is for managed admission and proxy checking. It acquires no Geo outcome. Do not recreate removed headers for automatic
 outbound propagation; outbound assertions need their own explicit authorization decision.
 
 ## Records and logger ownership

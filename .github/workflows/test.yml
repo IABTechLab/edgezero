@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Native-store PRs are currently stacked on the outbound HTTP specification.
-    branches: [main, docs/outbound-http-spec]
+    # Keep checks active for native-store and Geo stacked PRs.
+    branches: [main, docs/outbound-http-spec, feat/native-celld-stores]
 
 permissions:
   contents: read
@@ -139,6 +139,38 @@ jobs:
       - name: Native store dependency isolation
         run: bash scripts/check_native_store_dependency_contract.sh
 
+      - name: Geo dependency isolation
+        run: bash scripts/check_geo_dependency_contract.sh
+
+      - name: Immutable core Geo outcome
+        run: scripts/run_test_nonzero.sh geo_owned_outcome_survives_public_request_mutation cargo test --offline --locked -p edgezero-core --lib geo_
+
+      - name: Native Geo disabled implementation and policy unit contracts
+        run: |
+          scripts/run_test_nonzero.sh geo_protected_policy_reuses_network_bounds cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum --lib geo::
+          scripts/run_test_nonzero.sh geo_unavailable_selection_fails_before_runner_resources cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum --lib geo_
+
+      - name: Native Geo supplied-provider unit contract without built-in
+        run: scripts/run_test_nonzero.sh source_admission_precedes_header_inspection_and_provider_calls cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum --lib source_admission_precedes_header_inspection_and_provider_calls
+
+      - name: Native Geo enabled implementation and managed dispatch unit contracts
+        run: |
+          scripts/run_test_nonzero.sh geo_cloudfront_parsing_matches_spec cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features geo-cloudfront --lib geo::
+          scripts/run_test_nonzero.sh geo_managed_resolution_runs_once_from_owned_ingress cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features geo-cloudfront --lib geo_
+          cargo test --offline --locked -p edgezero-adapter-axum --features geo-cloudfront --lib service::tests
+
+      - name: Native Geo disabled built-in hosting (loopback only)
+        run: scripts/run_test_nonzero.sh geo_hosting_rejects_unavailable_cloudfront cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --test production_hosting geo_hosting_rejects_unavailable_cloudfront
+
+      - name: Native Geo supplied provider without built-in (loopback only)
+        run: scripts/run_test_nonzero.sh geo_hosting_supplied_provider_without_builtin cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --test production_hosting geo_hosting_supplied_provider_without_builtin
+
+      - name: Native Geo real-peer hosting (loopback only)
+        run: scripts/run_test_nonzero.sh geo_hosting_proves_real_peer_and_shared_outcome cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features geo-cloudfront,test-utils --test production_hosting geo_hosting_proves_real_peer_and_shared_outcome
+
+      - name: Native Geo public examples
+        run: cargo test --offline --locked -p edgezero-adapter-axum --features geo-cloudfront --doc
+
       - name: Native AWS provider and startup contracts (loopback only)
         run: |
           cargo test --offline --locked -p edgezero-store-aws --no-default-features --features appconfig-agent --lib
@@ -146,6 +178,16 @@ jobs:
           cargo test --offline --locked -p edgezero-store-aws --no-default-features --features dynamodb-kv --lib
           cargo test --offline --locked -p edgezero-store-aws --all-features --lib
           scripts/run_test_nonzero.sh production_runner_loads_envelope_and_real_sdk_secret_before_serving_mixed_stores cargo test --offline --locked -p edgezero-adapter-axum --features aws-stores,test-utils --test native_aws_startup
+
+      - name: Native celld independent provider and startup contracts (loopback only)
+        run: |
+          cargo test --offline --locked -p edgezero-store-celld --no-default-features --lib
+          cargo test --offline --locked -p edgezero-store-celld --no-default-features --features config --lib
+          cargo test --offline --locked -p edgezero-store-celld --no-default-features --features kv --lib
+          cargo test --offline --locked -p edgezero-store-celld --all-features --lib
+          cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features native-bindings --lib
+          cargo test --offline --locked -p edgezero-adapter-axum --features celld-config,celld-kv,test-utils --test native_celld_startup
+          cargo test --offline --locked -p edgezero-adapter-axum --features aws-stores,aws-dynamodb,celld-config,celld-kv,test-utils --lib --test native_aws_startup --test native_celld_startup
 
       - name: Bundled demo logging contract
         if: matrix.suite == 'cli'
@@ -214,8 +256,13 @@ jobs:
           EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
         run: scripts/run_test_nonzero.sh --ignored generated_cli_default_off_and_enabled_dynamodb_crud_list_ttl_restart cargo test --offline --locked -p edgezero-cli --test dynamodb_generated_proof
 
-      - name: Native AWS integration runner tests
-        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs
+      - name: Generated native celld startup and KV (deterministic loopback fixture)
+        env:
+          EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
+        run: scripts/run_test_nonzero.sh --ignored generated_celld_default_off_kv_and_config_restart cargo test --offline --locked -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum --test celld_generated_proof generated_celld_default_off_kv_and_config_restart
+
+      - name: Native provider integration runner tests
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs
 
       - name: Generated native AWS independent service contracts
         env:

@@ -12,10 +12,12 @@ use axum::http::{Request, Response};
 use edgezero_core::app::{App, FrameworkErrorDetail};
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::error::EdgeError;
+use edgezero_core::geo::GeoOutcome;
 use edgezero_core::http::{Method, RequestParts};
 use edgezero_core::ingress::{
     IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
-    IngressHeadParts, PreparedIngress, validate_normalized_ingress_parts_with_summary,
+    IngressHeadParts, NormalizedIngressHeadSummary, PreparedIngress,
+    validate_normalized_ingress_parts_with_summary,
 };
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::probe::{LifecyclePhase, LifecycleReader};
@@ -41,6 +43,7 @@ use crate::diagnostics::{
     ConnectionActivity, ConnectionGuard, IngressDisposition, NativeIngressMetadata, NativeSession,
     RequestGuard,
 };
+use crate::geo::NativeGeo;
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
 #[cfg(test)]
@@ -62,6 +65,7 @@ pub(crate) struct AxumServiceState {
     app: Arc<App>,
     config_registry: Option<ConfigRegistry>,
     config_store_handle: Option<ConfigStoreHandle>,
+    geo: NativeGeo,
     json_body_limit: JsonBodyLimit,
     kv_handle: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
@@ -101,6 +105,7 @@ impl AxumServiceState {
     ) -> Self {
         Self {
             activity: None,
+            geo: NativeGeo::default(),
             app: Arc::new(app),
             config_registry: None,
             config_store_handle: None,
@@ -115,6 +120,11 @@ impl AxumServiceState {
             secret_registry: None,
             trusted_proxy_policy,
         }
+    }
+
+    pub(crate) fn with_geo(mut self, geo: NativeGeo) -> Self {
+        self.geo = geo;
+        self
     }
 
     #[must_use]
@@ -254,6 +264,17 @@ impl AxumServiceState {
             .is_none_or(|phase| *phase.borrow() == LifecyclePhase::Ready)
     }
 
+    fn sanitize_received_head(
+        &self,
+        parts: &mut RequestParts,
+    ) -> Result<NormalizedIngressHeadSummary, EdgeError> {
+        // Original accounting precedes credential removal, including rejected ingress.
+        let received =
+            validate_normalized_ingress_parts_with_summary(parts, self.app.ingress_head_limits());
+        self.geo.strip_credential(&mut parts.headers);
+        received
+    }
+
     async fn dispatch_prepared(
         &self,
         prepared: PreparedIngress,
@@ -261,9 +282,9 @@ impl AxumServiceState {
         native_body: AxumBody,
         connection: &EgressConnection,
         guard: RequestGuard,
+        geo: GeoOutcome,
     ) -> Response<AxumEgressBody> {
         let app = &self.app;
-
         let read_deadline = prepared.read_deadline();
         let monotonic_clock = prepared.monotonic_clock();
         let Some(outbound_transport) = self.outbound_transport.clone() else {
@@ -309,10 +330,11 @@ impl AxumServiceState {
             core_request.extensions_mut().insert(registry);
         }
         let egress = app
-            .dispatch_admitted_with_framework_error_detail(
+            .dispatch_admitted_with_geo(
                 prepared,
                 core_request,
                 FrameworkErrorDetail::CategoryOnly,
+                geo,
             )
             .await;
         prepare_native_egress(egress, connection, guard).await
@@ -337,7 +359,6 @@ impl AxumServiceState {
         }
         // Only the owning socket supplies native peer facts, including an absent peer.
         request.extensions_mut().remove::<AxumRequestContext>();
-
         if let Some(peer_addr) = remote_addr {
             request.extensions_mut().insert(ConnectInfo(peer_addr));
         } else {
@@ -346,22 +367,22 @@ impl AxumServiceState {
         let app = Arc::clone(&self.app);
         let (mut parts, native_body) = request.into_parts();
         let request_method = parts.method.clone();
-        let received =
-            match validate_normalized_ingress_parts_with_summary(&parts, app.ingress_head_limits())
-            {
-                Ok(summary) => summary,
-                Err(error) => {
-                    return prepare_detached_ingress_error(
-                        &app,
-                        error,
-                        request_method.clone(),
-                        request_start,
-                        connection,
-                        guard,
-                    )
-                    .await;
-                }
-            };
+        // Account for the original received head, but remove credentials before any error
+        // renderer or admission callback. Sanitization must also cover rejected ingress.
+        let received = match self.sanitize_received_head(&mut parts) {
+            Ok(summary) => summary,
+            Err(error) => {
+                return prepare_detached_ingress_error(
+                    &app,
+                    error,
+                    request_method.clone(),
+                    request_start,
+                    connection,
+                    guard,
+                )
+                .await;
+            }
+        };
         let checked = normalize(&self.trusted_proxy_policy, remote_addr, &parts);
         guard.set_forwarding_result(checked.forwarding_result());
         strip_forwarding_headers(&mut parts.headers);
@@ -409,8 +430,9 @@ impl AxumServiceState {
                 .await;
             }
         };
+        let geo = self.geo.resolve(remote_addr, &parts.headers);
         Ok(self
-            .dispatch_prepared(prepared, parts, native_body, connection, guard)
+            .dispatch_prepared(prepared, parts, native_body, connection, guard, geo)
             .await)
     }
 }
@@ -574,6 +596,287 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::{sleep, timeout};
     use tower::ServiceExt as _;
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one counted-provider scenario verifies admission and terminal boundaries without resetting shared evidence"
+    )]
+    #[tokio::test(flavor = "current_thread")]
+    async fn geo_managed_resolution_runs_once_from_owned_ingress() {
+        use crate::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
+        use edgezero_core::geo::{
+            GeoError, GeoInput, GeoOutcome, GeoProvider, GeoProviderId, GeoResolution, GeoStatus,
+            GeoUnavailableReason,
+        };
+        use futures_util::FutureExt as _;
+        use futures_util::stream::iter as result_stream;
+        use std::future::pending;
+        struct Counted(Arc<Mutex<Vec<GeoInput>>>);
+        impl GeoProvider for Counted {
+            fn resolve(&self, input: &GeoInput) -> GeoResolution {
+                self.0.lock().unwrap().push(input.clone());
+                if input.country.as_bytes().is_err() {
+                    GeoResolution::Error(GeoError::InvalidAssertion)
+                } else {
+                    GeoResolution::MissingMetadata
+                }
+            }
+        }
+        struct ObserveAndMutate;
+        #[async_trait::async_trait(?Send)]
+        impl Middleware for ObserveAndMutate {
+            async fn handle(
+                &self,
+                mut ctx: RequestContext,
+                next: Next<'_>,
+            ) -> Result<CoreResponse, EdgeError> {
+                assert!(!ctx.headers().contains_key("x-origin-verify-fixture"));
+                let owned = ctx.geo().clone();
+                ctx.extensions_mut().insert(GeoOutcome::NoSelection);
+                ctx.headers_mut()
+                    .insert("cloudfront-viewer-country", HeaderValue::from_static("DE"));
+                assert_eq!(ctx.geo(), &owned);
+                next.run(ctx).await
+            }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let selection = NativeGeoSelection::Supplied {
+            policy: ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture")
+                .unwrap(),
+            id: GeoProviderId::new("counted").unwrap(),
+            provider: Arc::new(Counted(Arc::clone(&calls))),
+        };
+        let geo = NativeGeo::validate(&selection).unwrap();
+        let admission_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let observed_handler = Arc::clone(&handler_calls);
+        let router = RouterService::builder()
+            .middleware(ObserveAndMutate)
+            .get("/{mode}", move |mut ctx: RequestContext| {
+                let handler = Arc::clone(&observed_handler);
+                async move {
+                    handler.fetch_add(1, Ordering::SeqCst);
+                    assert!(!ctx.headers().contains_key("x-origin-verify-fixture"));
+                    let owned = ctx.geo().clone();
+                    assert!(matches!(owned, GeoOutcome::Selected { .. }));
+                    ctx.extensions_mut().remove::<GeoOutcome>();
+                    assert_eq!(ctx.geo(), &owned);
+                    if ctx.uri().path() == "/handler-cancel" {
+                        pending::<()>().await;
+                    }
+                    let label = match ctx.geo() {
+                        GeoOutcome::Selected {
+                            status: GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+                            ..
+                        } => "admitted",
+                        GeoOutcome::Selected {
+                            status: GeoStatus::Error(_),
+                            ..
+                        } => "error",
+                        GeoOutcome::NoSelection | GeoOutcome::Selected { .. } => "untrusted",
+                    };
+                    let body = if ctx.uri().path() == "/egress-fail" {
+                        Body::from_stream(result_stream([Err(EdgeError::bad_request(
+                            "fixture egress failure",
+                        ))]))
+                    } else {
+                        Body::from(label)
+                    };
+                    response_builder()
+                        .body(body)
+                        .map_err(|error| EdgeError::internal(anyhow::Error::new(error)))
+                }
+            })
+            .build();
+        let mut app = App::new(router);
+        app.set_ingress_head_limits(
+            IngressHeadLimits::default()
+                .with_max_request_header_bytes(128)
+                .unwrap(),
+        );
+        let observed_admission = Arc::clone(&admission_calls);
+        app.set_ingress_admission_policy(move |head| {
+            observed_admission.fetch_add(1, Ordering::SeqCst);
+            assert!(!head.headers().contains_key("x-origin-verify-fixture"));
+            match head.target().path() {
+                "/refuse" => AdmissionDecision::Refuse {
+                    completion: ResponseEgressCompletion::empty(),
+                    response: response_builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Body::empty())
+                        .unwrap(),
+                },
+                "/abort" => AdmissionDecision::Abort,
+                _ => AdmissionDecision::Admit {
+                    completion: ResponseEgressCompletion::empty(),
+                    grant: IngressGrant::empty(),
+                    read_deadline: head.read_deadline_after(Duration::from_secs(1)),
+                },
+            }
+        });
+        let mut service = AxumServiceState::from_app(app);
+        service.geo = geo;
+        let trusted: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        for (peer, country, path, expected) in [
+            (Some(trusted), Some("US"), "/good", "admitted"),
+            (None, Some("US"), "/forged", "untrusted"),
+            (
+                Some("127.0.0.2:1234".parse().unwrap()),
+                Some("US"),
+                "/forged",
+                "untrusted",
+            ),
+            (Some(trusted), None, "/missing", "admitted"),
+        ] {
+            let mut request = Request::builder()
+                .uri(path)
+                .body(AxumBody::empty())
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(trusted));
+            request.extensions_mut().insert(AxumRequestContext {
+                remote_addr: Some(trusted),
+            });
+            request.extensions_mut().insert(GeoOutcome::NoSelection);
+            request.headers_mut().append(
+                "x-origin-verify-fixture",
+                HeaderValue::from_static("secret-one"),
+            );
+            request.headers_mut().append(
+                "x-origin-verify-fixture",
+                HeaderValue::from_static("secret-two"),
+            );
+            if let Some(assertion) = country {
+                request.headers_mut().insert(
+                    "cloudfront-viewer-country",
+                    HeaderValue::from_static(assertion),
+                );
+            }
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), peer)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(to_bytes(response.into_body(), 128).await.unwrap(), expected);
+        }
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            calls.lock().unwrap()[0].country.as_bytes().unwrap(),
+            Some(b"US".as_slice())
+        );
+        assert_eq!(calls.lock().unwrap()[1].country.as_bytes().unwrap(), None);
+        for path in ["/invalid", "/egress-drop", "/egress-fail"] {
+            let expected_calls = calls.lock().unwrap().len().checked_add(1).unwrap();
+            let mut request = Request::builder()
+                .uri(path)
+                .body(AxumBody::empty())
+                .unwrap();
+            if path == "/invalid" {
+                request
+                    .headers_mut()
+                    .append("cloudfront-viewer-country", HeaderValue::from_static("US"));
+                request
+                    .headers_mut()
+                    .append("cloudfront-viewer-country", HeaderValue::from_static("US"));
+            }
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), Some(trusted))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "Geo errors remain outcomes, not HTTP errors"
+            );
+            assert_eq!(calls.lock().unwrap().len(), expected_calls);
+            match path {
+                "/invalid" => {
+                    assert_eq!(to_bytes(response.into_body(), 128).await.unwrap(), "error");
+                }
+                "/egress-drop" => drop(response),
+                _ => {
+                    to_bytes(response.into_body(), 128).await.unwrap_err();
+                }
+            }
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                expected_calls,
+                "terminal work does not resolve Geo again"
+            );
+        }
+        calls.lock().unwrap()[2].country.as_bytes().unwrap_err();
+        for path in ["/refuse", "/abort"] {
+            let request = Request::builder()
+                .uri(path)
+                .body(AxumBody::empty())
+                .unwrap();
+            let outcome = service
+                .dispatch_request(request, &EgressConnection::default(), Some(trusted))
+                .await;
+            if path == "/refuse" {
+                assert_eq!(outcome.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+            } else {
+                assert!(outcome.is_err());
+            }
+        }
+        let before = admission_calls.load(Ordering::SeqCst);
+        let invalid = Request::builder()
+            .uri("/oversized")
+            .header("x-origin-verify-fixture", "x".repeat(256))
+            .body(AxumBody::empty())
+            .unwrap();
+        let (mut parts, _) = invalid.into_parts();
+        parts.headers.append(
+            "x-origin-verify-fixture",
+            HeaderValue::from_static("duplicate-secret"),
+        );
+        service.sanitize_received_head(&mut parts).unwrap_err();
+        assert!(!parts.headers.contains_key("x-origin-verify-fixture"));
+        let request = Request::builder()
+            .uri("/oversized")
+            .header("x-origin-verify-fixture", "x".repeat(256))
+            .body(AxumBody::empty())
+            .unwrap();
+        let response = service
+            .dispatch_request(request, &EgressConnection::default(), Some(trusted))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+        assert_eq!(admission_calls.load(Ordering::SeqCst), before);
+        drop(response);
+        let cancelled = Request::builder()
+            .uri("/handler-cancel")
+            .body(AxumBody::empty())
+            .unwrap();
+        assert!(
+            service
+                .dispatch_request(cancelled, &EgressConnection::default(), Some(trusted))
+                .now_or_never()
+                .is_none()
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            6,
+            "cancellation does not resolve again"
+        );
+        let (phase_owner, reader) = watch::channel(LifecyclePhase::Draining);
+        service.phase = Some(reader);
+        let draining = Request::builder()
+            .uri("/draining")
+            .body(AxumBody::empty())
+            .unwrap();
+        assert!(
+            service
+                .dispatch_request(draining, &EgressConnection::default(), Some(trusted))
+                .await
+                .is_err()
+        );
+        drop(phase_owner);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 8);
+        assert_eq!(calls.lock().unwrap().len(), 6);
+    }
 
     async fn to_bytes(mut body: AxumEgressBody, limit: usize) -> Result<Bytes, anyhow::Error> {
         let mut buffered = BytesMut::new();

@@ -10,7 +10,7 @@ use std::future;
 use std::net::SocketAddr;
 use std::panic::set_hook;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -25,9 +25,14 @@ use edgezero_adapter_axum::diagnostics::{
     IngressDisposition, NativeDiagnosticsHandle, NativeDiagnosticsSnapshot, NativeIngressMetadata,
     NativeRequestFailure, NativeRequestObserver, NativeRequestOutcome, NativeRequestRecord,
 };
+use edgezero_adapter_axum::geo::{NativeGeoCapability, NativeGeoSelection, ProtectedCloudFrontAlb};
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
 use edgezero_core::context::RequestContext;
 use edgezero_core::extractor::{AppConfig, ForwardedHost, FromRequest as _, Json, State};
+use edgezero_core::geo::{
+    CountryCode, GeoError, GeoInput, GeoLocation, GeoOutcome, GeoProvider, GeoProviderId,
+    GeoResolution, GeoStatus, GeoUnavailableReason, SubdivisionCode,
+};
 use edgezero_core::http::{HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use edgezero_core::ingress::{
     AdmissionDecision, CheckedEffectiveHost, CheckedHostSource, IngressGrant,
@@ -58,6 +63,7 @@ static MIDDLEWARE_FACTS: Mutex<Option<Value>> = Mutex::new(None);
 static PANIC_COMPLETION: AtomicBool = AtomicBool::new(false);
 static LOGGER_FAULT_REPORTED: AtomicBool = AtomicBool::new(false);
 static NATIVE_LOGGER: NativeFixtureLogger = NativeFixtureLogger;
+static GEO_RESOLUTIONS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Default)]
 struct NativeFailureInputs {
@@ -146,6 +152,13 @@ impl ResponseEgressObserver for FixtureEgressObserver {
 
 struct NativeFactsMiddleware;
 
+#[derive(Clone)]
+struct GeoObserved(GeoOutcome);
+
+struct GeoMutationMiddleware(bool);
+
+struct FixtureGeoProvider(bool);
+
 #[async_trait(?Send)]
 impl Middleware for NativeFactsMiddleware {
     #[inline]
@@ -182,12 +195,29 @@ struct StopState(Mutex<Option<oneshot::Sender<()>>>);
     reason = "fixture retains unused Hooks defaults"
 )]
 impl Hooks for FixtureApp {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test-only admission assertion proves credential removal before application callbacks"
+    )]
     fn configure(app: &mut App) -> Result<(), EdgeError> {
         println!("HOOK_ENTERED");
+        let selected = mode();
+        if selected.starts_with("geo-") {
+            app.set_ingress_admission_policy(|head| {
+                assert!(
+                    !head.headers().contains_key("x-origin-verify-fixture"),
+                    "origin credential must be removed before admission"
+                );
+                AdmissionDecision::Admit {
+                    completion: ResponseEgressCompletion::empty(),
+                    grant: IngressGrant::empty(),
+                    read_deadline: head.read_deadline_after(Duration::from_secs(30)),
+                }
+            });
+        }
         if mode() == "hook-error" {
             return Err(EdgeError::internal(anyhow::anyhow!("HOOK_SENTINEL")));
         }
-        let selected = mode();
         if selected.starts_with("diagnostics") {
             configure_native_fixture(app, &selected);
         }
@@ -224,6 +254,7 @@ impl Hooks for FixtureApp {
             .get("/distinct", distinct)
             .get("/snapshot", snapshot)
             .get("/stop", stop)
+            .get("/geo", geo_observation)
             .get("/native-metadata", native_metadata)
             .get("/native-error", native_error)
             .get("/native-upstream", native_upstream)
@@ -239,23 +270,27 @@ impl Hooks for FixtureApp {
             .get("/native-refuse", native_status503)
             .get("/native-abort", native_status503)
             .middleware(NativeFactsMiddleware)
+            .middleware(GeoMutationMiddleware(false))
+            .middleware(GeoMutationMiddleware(true))
             .build()
     }
 
     fn stores() -> StoresMetadata {
-        if matches!(
-            mode().as_str(),
-            "bare"
-                | "bare-dev"
-                | "hook-error"
-                | "initializer-error"
-                | "starting"
-                | "embedding-bare"
-                | "diagnostics"
-                | "diagnostics-panic"
-                | "diagnostics-optout"
-                | "diagnostics-custom"
-        ) {
+        if mode().starts_with("geo-")
+            || matches!(
+                mode().as_str(),
+                "bare"
+                    | "bare-dev"
+                    | "hook-error"
+                    | "initializer-error"
+                    | "starting"
+                    | "embedding-bare"
+                    | "diagnostics"
+                    | "diagnostics-panic"
+                    | "diagnostics-optout"
+                    | "diagnostics-custom"
+            )
+        {
             return StoresMetadata::default();
         }
         StoresMetadata {
@@ -271,6 +306,73 @@ impl Hooks for FixtureApp {
                 ids: &["vault"],
                 default: "vault",
             }),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+#[expect(
+    clippy::expect_used,
+    reason = "fixture assertions require the first middleware observation and known-valid provider ID"
+)]
+impl Middleware for GeoMutationMiddleware {
+    async fn handle(&self, mut ctx: RequestContext, next: Next<'_>) -> Result<Response, EdgeError> {
+        if ctx.uri().path() != "/geo" {
+            return next.run(ctx).await;
+        }
+        assert!(
+            !ctx.headers().contains_key("x-origin-verify-fixture"),
+            "origin credential must be absent before middleware"
+        );
+        let original = if self.0 {
+            ctx.extensions()
+                .get::<GeoObserved>()
+                .expect("first Geo middleware")
+                .0
+                .clone()
+        } else {
+            ctx.geo().clone()
+        };
+        assert_eq!(
+            ctx.geo(),
+            &original,
+            "middleware must share the owned outcome"
+        );
+        if self.0 {
+            ctx.extensions_mut().clear();
+        } else {
+            ctx.parts_mut()
+                .headers
+                .insert("cloudfront-viewer-country", HeaderValue::from_static("GB"));
+            ctx.parts_mut().headers.insert(
+                "cloudfront-viewer-country-region",
+                HeaderValue::from_static("LND"),
+            );
+        }
+        ctx.extensions_mut().insert(GeoOutcome::Selected {
+            provider: GeoProviderId::new("forged-extension").expect("fixture provider ID"),
+            status: GeoStatus::Error(GeoError::ProviderFailure),
+        });
+        ctx.extensions_mut().insert(GeoObserved(original.clone()));
+        assert_eq!(ctx.geo(), &original, "public mutation cannot replace Geo");
+        next.run(ctx).await
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "supplied fixture provider returns fixed validated country and subdivision values"
+)]
+impl GeoProvider for FixtureGeoProvider {
+    fn resolve(&self, _input: &GeoInput) -> GeoResolution {
+        GEO_RESOLUTIONS.fetch_add(1, Ordering::SeqCst);
+        if self.0 {
+            GeoResolution::Error(GeoError::ProviderFailure)
+        } else {
+            GeoResolution::Located(GeoLocation::new(
+                CountryCode::new("US").expect("fixture country"),
+                Some(SubdivisionCode::new("CA").expect("fixture subdivision")),
+            ))
         }
     }
 }
@@ -671,6 +773,145 @@ async fn native_counts(
     }))
 }
 
+fn geo_json(outcome: &GeoOutcome) -> Value {
+    match outcome {
+        GeoOutcome::NoSelection => json!({"status": "no_selection"}),
+        GeoOutcome::Selected { provider, status } => match status {
+            GeoStatus::Unavailable(reason) => {
+                json!({"provider": provider.as_str(), "status": match reason {
+                    GeoUnavailableReason::MissingMetadata => "missing_metadata",
+                    GeoUnavailableReason::UntrustedIngress => "untrusted_ingress",
+                }})
+            }
+            GeoStatus::Error(error) => {
+                json!({"provider": provider.as_str(), "status": match error {
+                    GeoError::InvalidAssertion => "invalid_assertion",
+                    GeoError::ProviderFailure => "provider_failure",
+                }})
+            }
+            GeoStatus::Located {
+                location,
+                source,
+                trust_basis,
+            } => json!({
+                "provider": provider.as_str(),
+                "status": "located",
+                "country": location.country().as_str(),
+                "subdivision": location.subdivision().map(SubdivisionCode::as_str),
+                "source": format!("{source:?}"),
+                "trust_basis": format!("{trust_basis:?}"),
+            }),
+        },
+    }
+}
+
+#[action]
+async fn geo_observation(mut ctx: RequestContext) -> Result<Response, EdgeError> {
+    let original = ctx
+        .extensions()
+        .get::<GeoObserved>()
+        .ok_or_else(|| {
+            EdgeError::internal(anyhow::anyhow!(
+                "fixture Geo middleware observation missing"
+            ))
+        })?
+        .0
+        .clone();
+    assert_eq!(
+        ctx.geo(),
+        &original,
+        "handler must share middleware outcome"
+    );
+    ctx.extensions_mut().remove::<GeoOutcome>();
+    assert_eq!(
+        ctx.geo(),
+        &original,
+        "removing public outcome cannot affect Geo"
+    );
+    let credential_absent = !ctx.headers().contains_key("x-origin-verify-fixture");
+    let mutated_country = ctx
+        .headers()
+        .get("cloudfront-viewer-country")
+        .and_then(|value| value.to_str().ok());
+    json_response(&json!({
+        "geo": geo_json(ctx.geo()),
+        "credential_absent": credential_absent,
+        "immutable": ctx.geo() == &original,
+        "mutated_country": mutated_country,
+        "resolutions": GEO_RESOLUTIONS.load(Ordering::SeqCst),
+    }))
+}
+
+#[expect(
+    clippy::panic_in_result_fn,
+    clippy::expect_used,
+    reason = "test-only initializer asserts root-free startup, capability capture and known-valid forged state"
+)]
+fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
+    let address: SocketAddr = env::var("FIXTURE_BIND")?.parse()?;
+    let peer_network = if selected.ends_with("untrusted") {
+        "192.0.2.1/32"
+    } else {
+        "127.0.0.1/32"
+    };
+    let policy = ProtectedCloudFrontAlb::new(
+        if selected == "geo-invalid-policy" {
+            Vec::new()
+        } else {
+            vec![peer_network]
+        },
+        "x-origin-verify-fixture",
+    )?;
+    let selection = if selected == "geo-off" {
+        NativeGeoSelection::Off
+    } else if selected.starts_with("geo-supplied") || selected == "geo-provider-failure" {
+        NativeGeoSelection::Supplied {
+            policy,
+            id: GeoProviderId::new("fixture-local")?,
+            provider: Arc::new(FixtureGeoProvider(selected == "geo-provider-failure")),
+        }
+    } else {
+        NativeGeoSelection::CloudFront { policy }
+    };
+    let options = AxumRunOptions::new(address)?.with_geo(selection);
+    // Capture from the same finalized options, without bypassing the runner's validation.
+    let capability = options.geo_capability();
+    let is_off = selected == "geo-off";
+    let (sender, receiver) = oneshot::channel();
+    run_app_with_options_and_initializer::<FixtureApp, _, _>(
+        options,
+        async move {
+            let _closed = receiver.await;
+        },
+        move |app, stores| {
+            Box::pin(async move {
+                assert!(
+                    stores.config().is_none(),
+                    "Geo fixture declares no config stores"
+                );
+                assert!(stores.kv().is_none(), "Geo fixture declares no KV stores");
+                assert!(
+                    stores.secrets().is_none(),
+                    "Geo fixture declares no secret stores"
+                );
+                let captured_capability = capability.map_err(EdgeError::internal)?;
+                assert_eq!(
+                    matches!(captured_capability, NativeGeoCapability::Off),
+                    is_off,
+                    "initializer sees the finalized selection capability"
+                );
+                app.insert_state(GeoOutcome::Selected {
+                    provider: GeoProviderId::new("forged-app-state").expect("fixture provider ID"),
+                    status: GeoStatus::Error(GeoError::ProviderFailure),
+                });
+                app.insert_state(Arc::new(StopState(Mutex::new(Some(sender)))));
+                println!("INITIALIZED");
+                Ok(())
+            })
+        },
+    )
+}
+
 fn mode() -> String {
     env::var("FIXTURE_MODE").unwrap_or_else(|_| "initialized".to_owned())
 }
@@ -815,12 +1056,16 @@ async fn stop(State(state): State<Arc<StopState>>) -> Result<&'static str, EdgeE
 
 #[expect(
     clippy::panic_in_result_fn,
-    reason = "test-only executable asserts initializer ownership and call counts"
+    clippy::too_many_lines,
+    reason = "test-only executable keeps hosting-mode selection and initializer ownership checks together"
 )]
 fn main() -> anyhow::Result<()> {
     let selected = mode();
     if selected.starts_with("diagnostics") {
         return run_native_fixture(&selected);
+    }
+    if selected.starts_with("geo-") {
+        return run_geo_fixture(&selected);
     }
     if matches!(selected.as_str(), "development" | "bare-dev") {
         return run_app::<FixtureApp>();

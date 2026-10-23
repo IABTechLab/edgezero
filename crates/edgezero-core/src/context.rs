@@ -5,6 +5,7 @@ use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
     BadGatewayReason, BudgetSource, EdgeError, ResponseLimitReason, StoreExtractionReason,
 };
+use crate::geo::GeoOutcome;
 use crate::http::{Extensions, HeaderMap, Method, Request, RequestParts, Uri, Version};
 use crate::ingress::{AdmittedIngress, IngressGrant};
 use crate::outbound::HttpClient;
@@ -204,7 +205,9 @@ impl StoredError {
 pub struct RequestContext {
     body: RefCell<BodyState>,
     body_policy: Option<BufferedJsonPolicy>,
+    category_only_json_errors: bool,
     config_extraction_limits: ConfigExtractionLimits,
+    geo: GeoOutcome,
     ingress_grant: RefCell<Option<IngressGrant>>,
     monotonic_clock: MonotonicClock,
     parts: RequestParts,
@@ -425,6 +428,13 @@ impl RequestContext {
             .map_err(|err| EdgeError::bad_request(format!("invalid form payload: {err}")))
     }
 
+    /// Returns this request's immutable geographic outcome. Public extensions do not replace it.
+    #[must_use]
+    #[inline]
+    pub fn geo(&self) -> &GeoOutcome {
+        &self.geo
+    }
+
     #[must_use]
     #[inline]
     pub fn headers(&self) -> &HeaderMap {
@@ -478,7 +488,7 @@ impl RequestContext {
     {
         let bytes = self.buffered_bytes(ReadKind::Json, max).await?;
         serde_json::from_slice(bytes.as_ref()).map_err(|err| {
-            if self.body_policy.is_some() {
+            if self.body_policy.is_some() || self.category_only_json_errors {
                 EdgeError::bad_request("invalid JSON payload")
             } else {
                 EdgeError::bad_request(format!("invalid JSON payload: {err}"))
@@ -526,6 +536,8 @@ impl RequestContext {
         Self {
             body: RefCell::new(BodyState::from_transfer(transfer)),
             body_policy,
+            geo: GeoOutcome::NoSelection,
+            category_only_json_errors: false,
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
             monotonic_clock: MonotonicClock::default(),
@@ -541,8 +553,9 @@ impl RequestContext {
         request: Request,
         params: PathParams,
         route_metadata: RouteMetadata,
-        ingress: AdmittedIngress,
+        mut ingress: AdmittedIngress,
     ) -> Self {
+        let (geo, category_only_json_errors) = ingress.take_request_context();
         let (request_start, read_deadline, grant, config_extraction_limits, monotonic_clock) =
             ingress.into_parts();
         let (parts, body) = request.into_parts();
@@ -550,6 +563,8 @@ impl RequestContext {
         Self {
             body: RefCell::new(BodyState::from_transfer(transfer)),
             body_policy,
+            geo,
+            category_only_json_errors,
             config_extraction_limits,
             ingress_grant: RefCell::new(Some(grant)),
             monotonic_clock,

@@ -1879,6 +1879,213 @@ mod tests {
         }
     }
 
+    fn geo_command(mode: &str, cwd: &TempDir, addr: SocketAddr) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_edgezero-hosting-fixture"));
+        command
+            .env_clear()
+            .current_dir(cwd.path())
+            .env("FIXTURE_MODE", mode)
+            .env("FIXTURE_BIND", addr.to_string());
+        command
+    }
+
+    fn geo_response(server: &Server, headers: &str) -> Value {
+        let response = raw_request(
+            server.addr,
+            &format!("GET /geo HTTP/1.1\r\nHost: fixture\r\n{headers}Connection: close\r\n\r\n"),
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(!response.contains("ORIGIN_CREDENTIAL_SENTINEL"));
+        assert!(!response.contains("x-origin-verify-fixture"));
+        let value = response_json(&response);
+        assert_eq!(value["immutable"], true);
+        assert_eq!(value["credential_absent"], true);
+        assert_eq!(value["mutated_country"], "GB");
+        value
+    }
+
+    fn finish_geo(server: &mut Server, cwd: &TempDir) {
+        assert!(
+            server
+                .request("/stop")
+                .expect("Geo caller stop")
+                .ends_with("stopping")
+        );
+        assert!(server.wait().success(), "{}", server.log());
+        let log = server.log();
+        assert_eq!(log.matches("INITIALIZED").count(), 1);
+        assert!(!log.contains("ORIGIN_CREDENTIAL_SENTINEL"));
+        assert!(!log.contains("x-origin-verify-fixture"));
+        assert_eq!(
+            fs::read_dir(cwd.path()).expect("unrelated cwd").count(),
+            0,
+            "Geo-only startup must not create store roots or local databases"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "geo-cloudfront"))]
+    fn geo_hosting_rejects_unavailable_cloudfront() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut server = Server::spawn(geo_command("geo-cloudfront", &cwd, addr), addr);
+        assert!(!server.wait().success());
+        let log = server.log();
+        assert!(!log.is_empty(), "bounded startup error must be reported");
+        assert!(!log.contains("INITIALIZED"));
+        assert!(!log.contains("HOOK_ENTERED"));
+        assert!(!log.contains("ready"));
+        TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+            .expect_err("unavailable implementation never binds");
+        assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);
+    }
+
+    #[test]
+    #[cfg(not(feature = "geo-cloudfront"))]
+    fn geo_hosting_supplied_provider_without_builtin() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut server = Server::spawn(geo_command("geo-supplied", &cwd, addr), addr);
+        server.ready();
+        let headers = "CloudFront-Viewer-Country: us\r\nCloudFront-Viewer-Country-Region: ca\r\nx-origin-verify-fixture: ORIGIN_CREDENTIAL_SENTINEL\r\nx-origin-verify-fixture: SECOND_ORIGIN_CREDENTIAL_SENTINEL\r\n";
+        let first = geo_response(&server, headers);
+        assert_eq!(first["geo"]["status"], "located");
+        assert_eq!(first["geo"]["provider"], "fixture-local");
+        assert_eq!(first["geo"]["country"], "US");
+        assert_eq!(first["geo"]["subdivision"], "CA");
+        assert_eq!(first["geo"]["source"], "CloudFront");
+        assert_eq!(first["geo"]["trust_basis"], "DeclaredProtectedAlb");
+        let second = geo_response(&server, "");
+        assert_eq!(second["geo"]["status"], "located");
+        assert_eq!(
+            second["resolutions"].as_u64().expect("count"),
+            first["resolutions"].as_u64().expect("count") + 1
+        );
+        finish_geo(&mut server, &cwd);
+    }
+
+    #[test]
+    fn geo_hosting_default_off_untrusted_supplied_and_failure_stay_outcomes() {
+        for (mode, expected, provider) in [
+            ("geo-off", "no_selection", None),
+            (
+                "geo-supplied-untrusted",
+                "untrusted_ingress",
+                Some("fixture-local"),
+            ),
+            (
+                "geo-provider-failure",
+                "provider_failure",
+                Some("fixture-local"),
+            ),
+        ] {
+            let cwd = tempfile::tempdir().expect("unrelated cwd");
+            let addr = address();
+            let mut server = Server::spawn(geo_command(mode, &cwd, addr), addr);
+            server.ready();
+            let headers = if mode == "geo-off" {
+                "CloudFront-Viewer-Country: us\r\nCloudFront-Viewer-Country-Region: ca\r\n"
+            } else {
+                "CloudFront-Viewer-Country: us\r\nCloudFront-Viewer-Country-Region: ca\r\nx-origin-verify-fixture: ORIGIN_CREDENTIAL_SENTINEL\r\n"
+            };
+            let value = geo_response(&server, headers);
+            assert_eq!(value["geo"]["status"], expected);
+            assert_eq!(value["geo"]["provider"].as_str(), provider);
+            if mode == "geo-provider-failure" {
+                assert!(value["resolutions"].as_u64().expect("provider invoked") >= 1);
+            } else {
+                assert_eq!(value["resolutions"], 0_u64);
+            }
+            finish_geo(&mut server, &cwd);
+        }
+    }
+
+    #[test]
+    fn geo_hosting_invalid_policy_never_initializes_or_listens() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut server = Server::spawn(geo_command("geo-invalid-policy", &cwd, addr), addr);
+        assert!(!server.wait().success());
+        assert!(!server.log().contains("INITIALIZED"));
+        assert!(!server.log().contains("HOOK_ENTERED"));
+        assert!(!server.log().contains("x-origin-verify-fixture"));
+        TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+            .expect_err("invalid policy never binds");
+        assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "geo-cloudfront")]
+    fn geo_hosting_proves_real_peer_and_shared_outcome() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut server = Server::spawn(geo_command("geo-cloudfront", &cwd, addr), addr);
+        server.ready();
+        for (headers, expected, subdivision) in [
+            (
+                "CloudFront-Viewer-Country: us\r\nCloudFront-Viewer-Country-Region: ca\r\n",
+                "located",
+                Some("CA"),
+            ),
+            ("CloudFront-Viewer-Country: US\r\n", "located", None),
+            (
+                "CloudFront-Viewer-Country: US\r\nCloudFront-Viewer-Country-Region: ZZ\r\n",
+                "located",
+                Some("ZZ"),
+            ),
+            ("", "missing_metadata", None),
+            (
+                "CloudFront-Viewer-Country: US\r\nCloudFront-Viewer-Country: US\r\n",
+                "invalid_assertion",
+                None,
+            ),
+            (
+                "CloudFront-Viewer-Country: XX\r\n",
+                "invalid_assertion",
+                None,
+            ),
+            (
+                "CloudFront-Viewer-Country-Region: CA\r\n",
+                "invalid_assertion",
+                None,
+            ),
+            (
+                "CloudFront-Viewer-Country: US,CA\r\n",
+                "invalid_assertion",
+                None,
+            ),
+        ] {
+            let value = geo_response(
+                &server,
+                &format!(
+                    "{headers}x-origin-verify-fixture: ORIGIN_CREDENTIAL_SENTINEL\r\nx-origin-verify-fixture: SECOND_ORIGIN_CREDENTIAL_SENTINEL\r\n"
+                ),
+            );
+            assert_eq!(value["geo"]["status"], expected);
+            assert_eq!(value["geo"]["provider"], "cloudfront");
+            if expected == "located" {
+                assert_eq!(value["geo"]["country"], "US");
+                assert_eq!(value["geo"]["subdivision"].as_str(), subdivision);
+                assert_eq!(value["geo"]["source"], "CloudFront");
+                assert_eq!(value["geo"]["trust_basis"], "DeclaredProtectedAlb");
+            }
+        }
+        finish_geo(&mut server, &cwd);
+        let untrusted_addr = address();
+        let mut untrusted = Server::spawn(
+            geo_command("geo-cloudfront-untrusted", &cwd, untrusted_addr),
+            untrusted_addr,
+        );
+        untrusted.ready();
+        let value = geo_response(
+            &untrusted,
+            "CloudFront-Viewer-Country: US\r\nx-origin-verify-fixture: ORIGIN_CREDENTIAL_SENTINEL\r\n",
+        );
+        assert_eq!(value["geo"]["status"], "untrusted_ingress");
+        assert_eq!(value["geo"]["provider"], "cloudfront");
+        finish_geo(&mut untrusted, &cwd);
+    }
+
     #[test]
     fn both_signals_stop_idle_processes() {
         for signal in ["INT", "TERM"] {

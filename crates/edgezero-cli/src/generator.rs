@@ -1791,20 +1791,39 @@ unpinned = { path = "somewhere" }
         let axum_cargo =
             fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/Cargo.toml"))
                 .expect("read generated axum Cargo.toml");
+        let parsed: toml::Value =
+            toml::from_str(&axum_cargo).expect("parse generated Axum Cargo.toml");
+        let features = parsed
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .expect("generated native features");
         for feature in [
             "aws-appconfig-agent",
             "aws-secrets-manager",
-            "aws-stores",
             "aws-dynamodb",
+            "celld-config",
+            "celld-kv",
         ] {
-            assert!(
-                axum_cargo.contains(feature),
-                "missing generated native feature {feature}"
+            assert_eq!(
+                features.get(feature),
+                Some(&toml::Value::Array(vec![toml::Value::String(format!(
+                    "edgezero-adapter-axum/{feature}"
+                ))])),
+                "incorrect generated native forwarding for {feature}"
             );
         }
-        assert!(
-            axum_cargo.contains("default = []"),
-            "AWS features must be opt-in"
+        assert_eq!(
+            features.get("default"),
+            Some(&toml::Value::Array(Vec::new())),
+            "native providers must be opt-in"
+        );
+        assert_eq!(
+            features.get("aws-stores"),
+            Some(&toml::Value::Array(vec![
+                toml::Value::String("aws-appconfig-agent".to_owned()),
+                toml::Value::String("aws-secrets-manager".to_owned())
+            ])),
+            "AWS alias membership must not acquire other providers"
         );
         let axum_main =
             fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/src/main.rs"))

@@ -132,8 +132,21 @@ mod tests {
         }
     }
 
+    fn forged_geo() -> edgezero_core::geo::GeoOutcome {
+        use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+        GeoOutcome::Selected {
+            provider: GeoProviderId::new("forged-portable").expect("fixture provider ID"),
+            status: GeoStatus::Error(GeoError::ProviderFailure),
+        }
+    }
+
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
+            assert_eq!(ctx.geo(), &edgezero_core::geo::GeoOutcome::NoSelection);
+            assert_eq!(
+                ctx.extensions().get::<edgezero_core::geo::GeoOutcome>(),
+                Some(&forged_geo())
+            );
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
                 .status(StatusCode::OK)
@@ -208,7 +221,9 @@ mod tests {
             .get("/config-value", config_value)
             .build();
 
-        App::new(router)
+        let mut app = App::new(router);
+        app.insert_state(forged_geo());
+        app
     }
 
     fn cf_request(method: CfMethod, path: &str, body: Option<&[u8]>) -> CfRequest {
@@ -219,6 +234,12 @@ mod tests {
 
         let headers = worker::Headers::new();
         headers.set("host", "example.com").expect("host header");
+        headers
+            .set("cloudfront-viewer-country", "US")
+            .expect("country header");
+        headers
+            .set("cloudfront-viewer-country-region", "CA")
+            .expect("subdivision header");
         headers.set("x-edgezero-test", "1").expect("custom header");
         init.with_headers(headers);
 
