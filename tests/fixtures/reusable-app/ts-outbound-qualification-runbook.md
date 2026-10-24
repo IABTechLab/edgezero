@@ -56,6 +56,7 @@ identities. Record unavailable provider revisions as typed, reasoned unknowns.
 | Entitlements and origins       | UNSET: required feature entitlements, controlled origins, approved delays/failure modes and non-secret settings references                             |
 | Execution mapping              | UNSET: each G1 leg, actual command/cwd, unique sentinel, expected assertions/case counts, samples/thresholds where required, artifact and owner        |
 | Measurement approvals          | UNSET: M1/M2/M5/M7 comparison definitions, thresholds, sampling/randomization, 14b control and H(K) numerical rule/domain/maximum/tolerance            |
+| Image performance comparison   | UNSET: matched TS/SDK-only controls, asset/profile corpus, cache classification, GET/HEAD/S3 groups, instrumentation, samples and acceptance/noise rules |
 | Handoff and retention          | UNSET: sanitized artifact manifest, independent review, durable non-expiring retention and consumer confirmation                                       |
 
 Use the frozen values from the external record; never substitute the current `HEAD`:
@@ -180,6 +181,13 @@ Preserve these distinct measurement obligations from the requirements and Q4b:
   report-only, not subject to a product threshold. M6 keeps criteria 4/5's fixed deadline
   windows. Preserve ordinary deadline plus 5 ms acceptance windows and original on-time-success
   rules; these do not become negotiable product thresholds.
+- Confirm EZ-8.12's native-path comparison separately: identical region/options/image bytes,
+  negotiation and transport/cache settings; verified cache-hit/miss groups; GET/HEAD and
+  application-owned S3 preflight groups; matched client rate/concurrency and randomized build
+  order. Record latency distributions, throughput, allocation/copy/buffering and host-call counts,
+  plus origin receipts/connection identities where observable. Disclose unavailable counters and
+  agree how they will be evidenced before replay. Neither SDK-shaped code, Viceroy rejection nor
+  an unmeasured/missing control proves performance parity. Do not reuse bidder-latency tolerance.
 - For 14b, both SDK-only control and candidate need positive cross-execution origin connection
   IDs across fresh single-request executions. Registration counts, POP or TLS resumption alone
   do not prove pooling. A negative/inconclusive control blocks qualification. Separately deferred

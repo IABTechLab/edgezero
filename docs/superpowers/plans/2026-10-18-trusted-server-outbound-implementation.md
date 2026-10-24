@@ -275,6 +275,39 @@ the Spin wasm32-wasip2 gate passed. Docs format/lint/build, outbound documentati
 code and documentation reviews found no actionable issue. The inventory remains 255 criteria /
 511 planned legs, `qualified: false`; these checks do not qualify the full outbound migration.
 
+### Native Image Optimizer Parity Preparation
+
+- [x] Inspect the native TS path and compare the optimizer DTO/profile/adapter sources at
+      `f9281917a7260b723f5f22175911c6d2147ef650` with baseline `a9037770a`; these files match.
+      Confirm direct native dispatch and lazy response handling, with application-owned profiles,
+      SVG exclusion, query stripping and conditional S3 signing/HEAD/raw-error sends.
+- [x] Record the requester's 2026-10-24 scope approval separately from numerical Fastly-policy,
+      measurement and deployment decisions. Keep the current Interfaces unchanged.
+- [x] Strengthen EZ-8.12 and its existing hosted criterion with native-path performance parity;
+      synchronize that one inventory leg and the source digest without changing applicability.
+- [x] Expand D1d with exact mapping/request-round-trip/laziness/identity sentinels and document
+      the paired TS/SDK-only hosted comparison in Q4b and the existing runbook template.
+- [x] Complete independent review and preparation checks.
+- [ ] Resume runtime integration only after its existing D1c/P3/P5, G2 and numerical B/H(K)
+      prerequisites. No request attachment, SDK mapping, optimizer dispatch or new examples are
+      implemented by this preparation checkpoint, and no compatibility path is added.
+- [ ] Obtain measurement definitions/acceptance rules, explicit staging authorization and an
+      entitled service; implement and execute the paired comparison. No performance result is
+      claimed from local validation or Viceroy's unsupported response.
+
+Two bounded investigations selected direct native mapping through the existing pipeline over
+extra serialization or a separate image client. The approved scope retains every existing
+outbound deadline, limit, error, ownership and batch contract. The finite Image Optimizer host-call
+horizon remains unproved/unapproved; an instruction to continue is not its numerical approval.
+Demo and generator remain on their working request API until the atomic migration; do not add
+examples that compile yet cannot optimize. The inventory remains planned, not qualified.
+
+All five root Rust gates passed on the unchanged runtime: 2,225 tests passed across 29 binaries,
+zero failed and one existing test remained ignored. Docs format/lint/build, outbound documentation
+and legacy guards, 29 evidence-checker tests and manifest/API identity checks passed. Independent
+plan/spec and mechanical evidence reviews found no actionable issue. The inventory still contains
+255 criteria / 511 planned legs and `qualified: false`. No hosted request or deployment was made.
+
 ### P1/P4 Ownership Checkpoint
 
 - [x] Add the approved local `OutboundExchangeOwner` and `OutboundPending` types with private

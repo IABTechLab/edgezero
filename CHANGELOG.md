@@ -40,6 +40,10 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Record native Image Optimizer parity requirements and exact integration/test steps. Require
+  direct typed SDK mapping, lazy bodies, unchanged backend reuse and no extra fetch, plus paired
+  hosted application/SDK-only performance evidence. Runtime integration, numerical horizon/policy
+  approval and performance qualification remain open; no optimizer execution is enabled.
 - Add bounded native/WASI/empty-select timer controls and raw ABI timing inside the opt-in Fastly
   diagnostic. Retain lateness and matched stock/repaired artifacts without inferring a timer fix,
   changing +5 ms acceptance or replacing previous failed evidence. Production APIs/pins are unchanged.

@@ -164,6 +164,50 @@ and fixture qualification/hosted probe cases from G2.
 **Dependencies:** D1c, P3/P5 and G4's separately approved EZ-8.10 horizon. Missing approval stops
 this task; missing hosted entitlement leaves its production qualification blocking, not passed.
 
+**Native-parity scope approved by the requester, 2026-10-24:** use generic typed request options
+and Fastly's native optimizer, retaining the existing outbound pipeline. The source inspection
+used TS `f9281917a7260b723f5f22175911c6d2147ef650`; its optimizer DTO/profile/adapter files match
+the `a9037770a` baseline. This inspection is not a new qualification baseline or a passing run.
+The approval supplies neither numerical H(K)/B nor performance thresholds, entitlement or
+deployment authorization. Runtime integration still waits for D1c/P3/P5, G2 and numerical B/H(K)
+approval. Measurement approval and staging authorization separately gate hosted comparison.
+
+- [ ] Recheck D1c/P3/P5, the current attributed API approval plus scoped amendments, passing G2
+      and the separately approved numerical H(K)/B records. Stop before production changes if
+      any prerequisite is missing. Preserve all baseline outbound fields and behavior; no old-trait
+      helper, separate image client, ignored options or software-optimization fallback is allowed.
+- [ ] At the atomic request/driver cut, add `image_optimizer_options_round_trip` in core
+      `outbound/image_optimizer.rs` and the external public API test. Exercise all selectors,
+      query preservation, replacement, `into_parts`/`from_parts` and prepared redirect transfer.
+      Run `scripts/run_test_nonzero.sh image_optimizer_options_round_trip cargo test --locked -p edgezero-core`.
+      Expected: missing request attachment is red, then exact option readback passes without
+      changing signed targets/headers. Leave query/profile parsing and aliases in application
+      configuration; validate a missing required region before SDK serialization rather than
+      inventing a default or letting an SDK-built invalid option reach the host.
+- [ ] Put the direct SDK value mapping in Fastly `src/outbound/image_optimizer.rs`, called from
+      the existing Send/Follow dispatch, not a second transport. Add colocated
+      `image_optimizer_native_mapping_matches_sdk` cases for seven regions, eight formats,
+      five filters, quality boundaries, pixel dimensions, all crop modes and explicit false/true
+      query preservation. Run
+      `scripts/run_test_nonzero.sh image_optimizer_native_mapping_matches_sdk cargo test --locked -p edgezero-adapter-fastly --features fastly,test-utils`.
+      Expected: missing mapping is red, then exact SDK-field assertions pass. Enum matches and
+      numeric widening must not allocate a string/JSON/query intermediate; SDK-internal
+      serialization remains the SDK's work. The non-optimizer dispatch branch does not construct
+      or clone optimizer options.
+- [ ] Add `image_optimizer_stream_is_lazy_and_releases_once` and
+      `image_optimizer_backend_identity_matches_plain_send` at the scripted provider boundary.
+      Before first application body polling, assert zero payload reads, one send and unchanged
+      transport configuration identity; after polling, assert bounded chunks, existing caps,
+      typed errors and exactly-once release on completion/drop/failure. Cover HEAD/204/205/304
+      suppression and a permanently pending/truncated stream. Run each via
+      `scripts/run_test_nonzero.sh <sentinel> cargo test --locked -p edgezero-adapter-fastly --features fastly,test-utils`.
+      Scripted identity/count proofs are not hosted pooling or performance evidence.
+- [ ] Keep TS-specific policy outside core: profiles, SVG selection, query stripping before
+      signing, SigV4 and conditional S3 HEAD/raw-error GET stay with the application. Add no
+      automatic HEAD/retry/fetch. Update the generic attachment/streaming guide and applicable
+      demo/generated examples only with the working request API, and compile them in the same
+      hard migration. Do not present an unsupported target as serving optimized images.
+
 - [ ] Add `image_optimizer_follow_uses_single_send_mapping` at the Fastly boundary and run it
       with `scripts/run_test_nonzero.sh image_optimizer_follow_uses_single_send_mapping cargo test -p edgezero-adapter-fastly --features test-utils`.
       Expected red for missing mapping, then Send/Follow preserve options and Begin/Batch reject

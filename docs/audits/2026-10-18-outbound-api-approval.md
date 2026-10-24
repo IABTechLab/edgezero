@@ -116,6 +116,21 @@ submission; the historical requirements digest above is not asserted against tod
 This amendment does not change requirements or approve their intervening changes. Fastly policy,
 optimizer horizon, applicability, measurement and hosted-qualification decisions stay open.
 
+### Scoped Native Optimizer Parity Instruction
+
+On 2026-10-24 the requester approved generic typed request options mapped directly to the native
+Fastly optimizer, retaining streaming, cache/backend reuse, exact targets/signature-bearing headers,
+all outbound limits and cleanup, without an extra fetch or representation layer. Profiles, SVG
+selection, query stripping and S3 signing/preflight remain application policy. The instruction also
+requires a measured performance comparison against the native application path and an SDK-only
+control rather than inferring parity from API shape.
+
+This scope is recorded in requirements EZ-8.12 and the existing EZ-8 hosted criterion, plan D1d,
+and qualification Q4b/runbook. It does not change the approved Interfaces or supply a numerical
+B/H(K), performance thresholds, a staging service/entitlement, deployment authorization or passing
+evidence. G2 and the corresponding implementation/qualification gates remain open. No production
+optimizer path was implemented under this instruction while those prerequisites are missing.
+
 ### Included Contract Decisions
 
 - One required `dispatch_head` network primitive, synchronous support validation and paired

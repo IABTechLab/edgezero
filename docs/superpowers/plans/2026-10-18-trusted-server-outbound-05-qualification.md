@@ -367,6 +367,20 @@ pre-approved measurement definitions. None can be replaced with local CI success
       a timely head with a pending body against the unchanged ordinary deadline. Deterministic
       nanosecond/millisecond boundary proofs complement hosted executions; an expired-before-send
       sample is not a hosted horizon pass. Violations fail qualification, not trigger threshold inflation.
+- [ ] Run EZ-8.12's native-path performance comparison on the same frozen candidate and matched
+      native TS and SDK-only controls. Before replay, obtain explicit approval of asset/profile
+      corpus, verified cache-hit/miss classification, GET/HEAD and conditional S3-preflight groups,
+      sample/warm-up counts, randomized order, client read rate, concurrency and acceptance/noise
+      rules. Hold region, content negotiation, image bytes, transformation parameters, origin/cache
+      settings, transport settings and execution mode constant. Do not import M2's bidder threshold.
+      Record p50/p95 first-byte and completion latency, throughput, allocations/copies/peak buffering,
+      registrations, send/readiness/read host calls and origin connection/request identities where
+      measurable. Mark unavailable counters explicitly and obtain a reviewed evidence method;
+      omitting them silently cannot certify parity. Reject extra automatic preflights/fetches,
+      image-specific backend identities, pre-drained streamed bodies or altered transformation
+      semantics. A warm-looking edge header alone is not proof of a cache hit at every relevant
+      tier; correlate the available provider evidence and origin receipts. Keep failed/inconclusive
+      controls and results; do not claim no regression until the approved comparison passes.
 - [ ] For 14b, run both the SDK-only control and candidate across fresh single-request executions
       with approved sample counts and origin connection/execution IDs. Require positive cross-
       execution connection reuse in both plus M1's connection/full-TLS/resumed-TLS counts and
