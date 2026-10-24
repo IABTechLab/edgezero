@@ -213,6 +213,20 @@ for Q4a. Qualification binaries/tooling remain owned by G2/Q3, not duplicated he
       acknowledgement, staging authorization and candidate-specific package acceptance remain Q4a
       gates, not implied by committing this template.
 
+### Q2 Runbook Source Preparation Checkpoint (2026-10-23)
+
+- [x] Add the unaccepted source template with explicit external candidate/build placeholders,
+      G1/G4 references, current preparation/response-egress commands, expected count domains and
+      separate freeze, ownership, authorization, entitlement and package-acceptance records.
+- [x] Correct G1's stale G4 prerequisite description to acknowledge API-only AG approval without
+      approving Fastly primitive/policy, B, H(K), applicability or measurements. No leg changes.
+- [ ] Complete the full-outbound probe/export implementation and exact runnable command/sentinel/
+      expected-count bindings before closing the Q2 runbook task or accepting Q4a's external copy.
+
+The template explicitly marks planned commands and frozen export as unimplemented. Existing
+lifecycle-egress probes are not the full outbound package. It is a source-preparation checkpoint,
+not execution readiness, candidate freeze, hosted acceptance or a waiver of failed G2.
+
 ## Task Q3: Evidence Preparation, Candidate Freeze and Local Acceptance
 
 **Files:** Extend G1's inventory/checker, fixture harness `net.rs`, `runners.rs`, `evidence.rs`,

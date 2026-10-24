@@ -265,6 +265,29 @@ Independent review reproduced the embedded-fence bug before its fix and cleared 
 Inventory validation still reports 255 criteria and 511 planned, unqualified environment legs.
 These results are local source verification, not hosted CI or frozen-candidate qualification.
 
+### Q2 Runbook Source Preparation Checkpoint
+
+The [runbook source template](../../../tests/fixtures/reusable-app/ts-outbound-qualification-runbook.md)
+records implemented preparation/lifecycle-egress commands separately from unimplemented full
+outbound probe/export bindings. It includes G1/G4 references, external candidate/build placeholders,
+count domains and separate owner acceptance, staging authorization, entitlements and approval fields.
+No new checker or second qualification system is introduced. G1's stale G4 reason now acknowledges
+AG's API-only approval; all 511 legs and pending policy decisions remain unchanged. Exact runnable
+bindings and the Q2/Q4a acceptance gates stay open. No candidate freeze, runtime pin, transport,
+capability or failed Fastly G2 disposition changes.
+
+Local checks pass all five Rust gates (2,193 tests, 28 binaries, one existing ignored), 34 evidence/
+egress Node cases, 15 forwarding-checker cases, the actual one-test doctest and exact Rust assembly
+sentinel. Docs format/lint/build, documentation/legacy guards and all six runbook links pass.
+The complete TCP-enabled test rerun replaces the sandbox-denied attempt. These checks do not
+establish hosted execution or frozen-candidate acceptance.
+
+Independent command-map and approval reviews favored a static unaccepted template over a second
+checker. Spec review corrected product-threshold scope; operator-safety review caught a fail-open
+Git status check. Separate assignments now preserve Git failures and explicitly include untracked
+files. Negative shell probes cover both errors, wrong SHA, tracked/untracked changes and a clean
+control. Final scoped reviews are clear; they do not close full Q2 or Q4 acceptance.
+
 ### Q3 Evidence Preparation Checkpoint
 
 The [pre-freeze assembly checkpoint](2026-10-18-trusted-server-outbound-05-qualification.md#q3-pre-freeze-assembly-checkpoint-2026-10-23)

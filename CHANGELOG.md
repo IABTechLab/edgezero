@@ -40,6 +40,9 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Add an unaccepted TS qualification runbook source template with explicit freeze/build inputs,
+  command/count ownership and separate approval/authorization gates. Mark full-outbound execution
+  and frozen export as unimplemented; existing egress probes do not qualify the full package.
 - Add `--assemble` and `--report` to the existing outbound evidence checker. Preserve per-leg
   outcomes, counts and raw SHA-256 hashes; drafts remain explicitly pre-freeze and unqualified.
 - Require explicit clean/frozen provenance and linked SHA-256 build identities for release

@@ -12,7 +12,7 @@
     {
       "requirement": "G4",
       "status": "Pending",
-      "reason": "No attributed API, literal B or numerical H(K) approval exists."
+      "reason": "API-only exact-digest approval is attributed to AG; Fastly primitive/policy, literal B and numerical H(K) remain unproved/unapproved."
     },
     {
       "requirement": "EZ-2/M1-M7",

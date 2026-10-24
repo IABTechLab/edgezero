@@ -60,6 +60,11 @@ implementation targets, not existing passing tests. `consumer-runbook` and `host
 external execution recipes whose owners must replace them with exact runnable commands before
 setting a leg to `ready`. No staging deployment or approval is inferred from this inventory.
 
+The [TS qualification runbook source template](ts-outbound-qualification-runbook.md) separates
+implemented preparation/egress commands from missing full-outbound execution/export bindings.
+It is unaccepted and unqualified. Q3 must freeze the candidate before Q4a fills an external copy;
+actual TS ownership acknowledgement, staging authorization and package acceptance remain open.
+
 Release validation is a different, fail-closed command:
 
 ```sh
