@@ -132,6 +132,24 @@ claim that feasibility has already been established.
       report must list runnable, cancelled, and deferred tasks by ID; no legacy client, blocking-read
       fallback, cutoff widening, or automatic BestEffort waiver is an alternative branch.
 
+### G2 Local Runtime Repair Checkpoint (2026-10-23)
+
+- [x] Carry an exact-source Viceroy 0.21.0 patch and co-located tests in PR #275, with explicit
+      apply/build/runtime-override instructions. No SDK/runtime version pin or installed binary changes.
+- [x] Reproduce nine failing new tests before the repair; pass all ten afterward and all 135
+      upstream library tests. Preserve owned typed errors, empty-frame safety, cancellation/append
+      ownership, first-poll read bounds and cooperative decoder progress.
+- [x] Retain separately identified stock/repaired guest runs using identical guest bytes: three
+      stock comparisons fail, three repaired comparisons preserve UnexpectedEof. Patched probe
+      exit 2 remains unverified overall; old failed evidence is unchanged.
+- [ ] Complete the remaining full G2 ABI scenarios and exact-version review, then obtain the
+      separate B/H(K) and hosted evidence/approval gates before dependent qualification.
+
+See the [repair record](../../audits/evidence/2026-10-23-viceroy-readiness-repair.json) and
+[source patch](../../../patches/viceroy/README.md). This fixes the measured local runtime defect,
+not the unmodified runtime or hosted service. Strict upstream clippy reports the same stock and
+repaired diagnostics under Rust 1.98.1; no unrelated lint changes/suppressions are included.
+
 ## Task G3: Eager Scheduling and Empty-Body Host Premises
 
 **Files:** Modify `tests/fixtures/reusable-app/crates/fixture-core/src/qualification.rs`, the

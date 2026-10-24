@@ -40,6 +40,10 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Carry a Viceroy 0.21.0 source patch with co-located readiness regressions and an explicit build/
+  runtime-override recipe. Preserve typed errors and yield on empty/no-output frames. Retain
+  stock-versus-repaired guest evidence separately; version pins, installed runtime, production
+  transport and full G2/hosted qualification remain unchanged.
 - Add an unaccepted TS qualification runbook source template with explicit freeze/build inputs,
   command/count ownership and separate approval/authorization gates. Mark full-outbound execution
   and frozen export as unimplemented; existing egress probes do not qualify the full package.

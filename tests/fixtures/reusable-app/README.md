@@ -171,6 +171,12 @@ later passes, this initial suite exits 2 until the remaining G2 scenarios are im
 Working-tree characterization is labelled as such, never as exact-commit release evidence.
 See the [feasibility report](../../../docs/audits/2026-10-18-outbound-feasibility.md).
 
+PR #275 also carries an [exact-version local Viceroy repair](../../../patches/viceroy/README.md).
+Select its built executable explicitly with `VICEROY_BIN`; the default installed runtime and
+version pins are not changed. The separate repair record retains three failing stock controls
+and three repaired comparisons preserving UnexpectedEof with identical guest bytes. A repaired
+run still exits 2 because remaining G2/hosted proof is pending; do not treat it as a full gate pass.
+
 ### Scheduling and Empty-Body Characterization
 
 ```sh

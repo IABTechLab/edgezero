@@ -113,6 +113,27 @@ cutoff/tolerance, or waive the failed gate as BestEffort. The next Fastly step i
 of a provider/runtime primitive that preserves body errors, followed by a new exact-version
 report and the remaining local and hosted probes. Production adoption remains blocked meanwhile.
 
+## Local Runtime Repair (2026-10-23)
+
+PR #275 now carries an [exact-version Viceroy source patch and build recipe](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md).
+It retains original body errors in the chunk queue, skips empty frames before reporting readiness,
+and yields when decompression produces no bytes. It does not add an SDK-side blocking fallback,
+change dependency/runtime version pins or replace the installed runtime. A repaired executable
+must be selected explicitly with `VICEROY_BIN` and identified by its source/patch/binary hashes.
+
+The [separate repair record](evidence/2026-10-23-viceroy-readiness-repair.json) preserves a fresh
+stock failure and repaired success using the same guest binary at `ff60e5ac9d6d673648ca5e06b1bdddfaab68083a`.
+All three stock pairs lose `UnexpectedEof`; all three repaired pairs preserve it. The repaired
+suite intentionally exits 2, not a G2 pass. Ten new explicit-poll regressions went red (nine fail)
+before the repair and green afterward; all 135 runtime library tests pass. Strict upstream clippy
+has the same diagnostics on stock and repaired source under Rust 1.98.1; those are not suppressed.
+
+This fixes the measured error-loss/empty-frame defects in the locally repaired runtime only.
+The unmodified pinned runtime remains a failed control. The remaining G2 stalled/trickle/sibling/
+framing/buffered/streamed ABI cases, exact-version review, B/H(K) approvals and hosted evidence are
+still open. The earlier failed evidence is unchanged; this report does not approve the atomic
+production migration or promote any capability.
+
 ## G3 Local Characterization
 
 The initial default-off `progress` fixture feature uses direct SDK operations, not a second production

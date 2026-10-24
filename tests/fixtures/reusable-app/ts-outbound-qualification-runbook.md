@@ -13,6 +13,9 @@ editing this source after freeze. This document changes no outbound contract or 
 - [G2 feasibility](../../../docs/audits/2026-10-18-outbound-feasibility.md) remains failed.
   Fastly timed readiness loses body errors in pinned Viceroy. The atomic outbound migration
   remains blocked; no blocking-read fallback, compatibility path or pin change is authorized.
+  A separately identified [local runtime repair](../../../patches/viceroy/README.md) fixes the
+  measured error loss in a patched executable. It does not qualify stock 0.21.0, the full G2
+  scenario set or hosted Fastly; remaining exact-version/policy review stays open.
 - [G4 approval record](../../../docs/audits/2026-10-18-outbound-api-approval.md) records AG's
   API-only approval of Interfaces SHA-256
   `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a`.

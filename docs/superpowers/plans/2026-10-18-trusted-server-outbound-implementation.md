@@ -265,6 +265,20 @@ Independent review reproduced the embedded-fence bug before its fix and cleared 
 Inventory validation still reports 255 criteria and 511 planned, unqualified environment legs.
 These results are local source verification, not hosted CI or frozen-candidate qualification.
 
+### G2 Local Runtime Repair Checkpoint
+
+The [tracked runtime patch](../../../patches/viceroy/README.md) repairs the measured Viceroy
+body-readiness error loss and empty-frame hazard without a blocking-read fallback or SDK/runtime
+version change. Two independent investigations selected owned queue-based error retention over an
+adapter workaround that cannot recover a consumed host error. Ten co-located regressions went red
+(nine failures) and then green; all 135 upstream library tests pass. Stock and repaired guest
+controls use identical Wasm: three stock comparisons fail, three repaired comparisons preserve
+UnexpectedEof. The separate [record](../../audits/evidence/2026-10-23-viceroy-readiness-repair.json)
+binds upstream/patch/host/guest identities and retains both event streams. Strict upstream clippy
+has identical existing diagnostics on stock/repaired source; no suppression is introduced.
+The repaired probe exits 2: full G2 ABI coverage/review, B/H(K), hosted execution, candidate freeze
+and production qualification remain open. Historical failure records and all 511 legs are unchanged.
+
 ### Q2 Runbook Source Preparation Checkpoint
 
 The [runbook source template](../../../tests/fixtures/reusable-app/ts-outbound-qualification-runbook.md)
