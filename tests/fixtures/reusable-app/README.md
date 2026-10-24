@@ -17,6 +17,23 @@ applications. The shell script only launches it through Cargo.
 
 ## Outbound Cutover Gates
 
+### Scoped Timing and Integration Override (2026-10-24)
+
+The requester's [scoped approval](../../../docs/audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+permits the [D1d Send-first checkpoint](../../../docs/superpowers/plans/2026-10-18-trusted-server-outbound-03-drivers.md#send-first-checkpoint-2026-10-24),
+not a qualification pass. The +5 ms diagnostic windows/tests remain measured qualification
+targets, not hard scheduler guarantees. Keep every late/error observation and historical exit
+unchanged; timing-only G2 failure no longer prohibits this scoped implementation. The optimizer
+synchronous blocking horizon is explicitly **UNKNOWN** until provider evidence, not inferred from
+timers or a Viceroy rejection. Hosted/performance qualification stays blocked.
+
+The checkpoint uses the current trait and existing `execute`/`process_response`, leaving the
+ordinary SDK send branch unchanged. Full EZ-1 settlement, Follow, engine and atomic trait migration
+remain open. B/backend policy, timers, slack and resource constraints are unchanged and unapproved;
+typed body-error preservation and fresh-readiness/subsequent-read safety remain requirements.
+This override governs older implementation-stop wording below without changing diagnostic
+acceptance tests, 255 criteria/511 legs, IDs, statuses, applicability or comparison requirements.
+
 ### Focused Assembly Checks
 
 ```sh

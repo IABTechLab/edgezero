@@ -6,6 +6,19 @@ editing this source after freeze. This document changes no outbound contract or 
 
 ## Authorities and Entry Gates
 
+**Current scoped override, 2026-10-24:** the requester's [timing and native integration approval](../../../docs/audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+permits a Send-first implementation checkpoint, not qualification/deployment. It supersedes the
+implementation-blocking interpretation of the earlier G2/H(K) statements below: +5 ms stays a
+measured qualification target with unchanged tests; the synchronous optimizer blocking horizon
+is explicitly **UNKNOWN** until provider evidence. Original deadlines/sources and late-result
+rejection remain. No old failure becomes a pass, and no numerical horizon is approved here.
+
+The existing trait, ordinary SDK send branch, B/backend policy, timers, slack and resource
+constraints remain unchanged. Typed body errors and fresh-readiness/read safety remain required.
+Full EZ-1 settlement, Follow, engine and atomic head-first/full-trait migration remain open.
+The external numerical-policy/H(K), hosted evidence and performance-comparison gates below
+still block qualification; an unknown horizon cannot satisfy their finite-bound assertions.
+
 - [Requirements](../../../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md)
   define acceptance; [G1 inventory](outbound-cutover-cases.json) maps criteria to environments,
   sentinels, owners and applicability decisions. Its 255 criteria / 511 planned legs are a

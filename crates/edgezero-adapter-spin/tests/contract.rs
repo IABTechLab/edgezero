@@ -1781,7 +1781,21 @@ mod outbound_contract_tests {
     use edgezero_core::http::{Method, Uri};
     use edgezero_core::outbound::OutboundRequest;
     use futures_util::stream;
+    use std::time::Duration;
 
+    #[test]
+    fn image_optimizer_rejection_precedes_other_preflight() {
+        let request = OutboundRequest::get("https://example.com/image")
+            .unwrap()
+            .image_optimizer(edgezero_core::OutboundImageOptimizerOptions::new())
+            .body(Body::from_stream(stream::pending()))
+            .timeout(Duration::ZERO);
+        for validate in [validate_request_for_test, validate_batch_request_for_test] {
+            let error = validate(&request).expect_err("unsupported option");
+            assert!(error.message().contains("image_optimizer"));
+            assert!(error.message().contains("spin"));
+        }
+    }
     fn request() -> OutboundRequest {
         OutboundRequest::new(
             Method::POST,

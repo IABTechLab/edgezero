@@ -1752,6 +1752,11 @@ fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
 
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
 fn validate_request(request: &OutboundRequest) -> Result<(), EdgeError> {
+    if request.image_optimizer_options().is_some() {
+        return Err(EdgeError::bad_request(
+            "image_optimizer is not supported by spin",
+        ));
+    }
     validate_for_dispatch(request)?;
     if request.has_host_authority_override() {
         return Err(EdgeError::bad_request(

@@ -29,6 +29,8 @@ pub enum BadGatewayDecodeReason {
 #[non_exhaustive]
 pub enum BadGatewayReason {
     Decode(BadGatewayDecodeReason),
+    /// The native optimizer is unavailable, including local runtimes without the entitlement.
+    ImageOptimizerUnavailable,
     Protocol,
     Transport,
     Unreachable,

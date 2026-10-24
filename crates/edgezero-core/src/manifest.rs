@@ -104,6 +104,7 @@ pub enum Capability {
     OutboundFlexiblePhaseBudget,
     OutboundHeaderFidelity,
     OutboundHttp,
+    OutboundImageOptimizer,
     RawIngressFramingValidation,
     RawIngressHeadLimits,
     ResponseEgressAbort,
@@ -144,6 +145,7 @@ impl Capability {
             Self::OutboundFlexiblePhaseBudget => "outbound-flexible-phase-budget",
             Self::OutboundHeaderFidelity => "outbound-header-fidelity",
             Self::OutboundHttp => "outbound-http",
+            Self::OutboundImageOptimizer => "outbound-image-optimizer",
             Self::RawIngressFramingValidation => "raw-ingress-framing-validation",
             Self::RawIngressHeadLimits => "raw-ingress-head-limits",
             Self::ResponseEgressAbort => "response-egress-abort",
@@ -1684,6 +1686,18 @@ env = "APP_TOKEN"
     }
 
     #[test]
+    fn outbound_image_optimizer_capability_round_trip() {
+        let name = "outbound-image-optimizer";
+        let capability: Capability = serde_json::from_value(serde_json::json!(name)).unwrap();
+        assert_eq!(capability, Capability::OutboundImageOptimizer);
+        assert_eq!(capability.as_str(), name);
+        assert_eq!(
+            serde_json::to_value(capability).unwrap(),
+            serde_json::json!(name)
+        );
+    }
+
+    #[test]
     fn provider_failure_diagnostics_capability_round_trip() {
         let name = "outbound-failure-diagnostics";
         let capability: Capability =
@@ -1737,6 +1751,7 @@ required = [
     "outbound-flexible-phase-budget",
     "outbound-header-fidelity",
     "outbound-http",
+    "outbound-image-optimizer",
     "raw-ingress-framing-validation",
     "raw-ingress-head-limits",
     "response-egress-abort",
@@ -1770,6 +1785,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             Capability::OutboundFlexiblePhaseBudget,
             Capability::OutboundHeaderFidelity,
             Capability::OutboundHttp,
+            Capability::OutboundImageOptimizer,
             Capability::RawIngressFramingValidation,
             Capability::RawIngressHeadLimits,
             Capability::ResponseEgressAbort,
@@ -1807,6 +1823,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             "outbound-flexible-phase-budget",
             "outbound-header-fidelity",
             "outbound-http",
+            "outbound-image-optimizer",
             "raw-ingress-framing-validation",
             "raw-ingress-head-limits",
             "response-egress-abort",

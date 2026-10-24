@@ -14,6 +14,22 @@ Read the [index](2026-10-18-trusted-server-outbound-implementation.md) and its b
 This phase does not claim any requirement implemented merely because an SDK declares an API.
 Apply the index's per-task test/format/clippy procedure after every eventual code change.
 
+## Scoped Gate Override (2026-10-24)
+
+Apply the requester's [scoped timing and native integration approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+before the older G2/G4 implementation prerequisites and phase exits below. The +5 ms tests remain
+measured qualification targets, not hard scheduler guarantees. Timing-only G2 failures and missing
+finite H(K) approval no longer block the [D1d Send-first checkpoint](2026-10-18-trusted-server-outbound-03-drivers.md#send-first-checkpoint-2026-10-24).
+The synchronous optimizer horizon stays explicitly **UNKNOWN** until provider evidence; this
+does not mark G2 Passed or supply a finite horizon. Preserve every historical failed observation.
+
+The checkpoint leaves the current trait, ordinary SDK send branch, backend B/policy, timers,
+slack and resources unchanged. B/domain/cardinality approval still gates backend implementation;
+typed body-error preservation and fresh-readiness/subsequent-read safety are not waived.
+Full EZ-1 settlement, Follow, engine and atomic trait migration remain open. Hosted/performance
+qualification and the remaining numerical-policy decisions stay blocked. This supersedes the
+blanket implementation stops in G2/G4 only to that extent; the prior execution record remains below.
+
 ## Execution Record
 
 G1's draft inventory and fail-closed checker are implemented: 255 source acceptance cases,

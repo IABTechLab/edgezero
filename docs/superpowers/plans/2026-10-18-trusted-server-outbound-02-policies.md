@@ -15,6 +15,15 @@ Paths below are relative to the worktree root. All new public names are proposed
 for superseded implementer signatures. Update every in-tree implementation in the same buildable
 series; phase 3 supplies adapter integration, not a releasable default-stub period.
 
+> **Scoped sequencing override, 2026-10-24:** the requester's [timing and native integration amendment](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+> permits the [D1d Send-first checkpoint](2026-10-18-trusted-server-outbound-03-drivers.md#send-first-checkpoint-2026-10-24)
+> on the unchanged current trait before the later atomic head-first/full-trait migration. The
+> Interfaces block below remains byte-identical. Its optimizer horizon gate is qualification-only
+> for this subset: synchronous blocking horizon **UNKNOWN**, +5 ms a measured target, original
+> logical deadlines and late rejection unchanged. B/backend policy, timers, slack, resources and
+> typed body-error/readiness safety are not waived. The full migration remains pending; this
+> sequencing decision is not approval of alternative signatures or a compatibility helper.
+
 ## Interfaces: Proposed Hard-Cut Contract
 
 G4 owns approval of this single interface contract before P1 changes runtime code. The following

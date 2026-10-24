@@ -260,21 +260,32 @@ not included. These limitations block whole-response-lifetime certification.
 
 ## Outbound Matrix
 
-| Capability                              | Axum                              | Cloudflare                        | Fastly                            | Spin                              |
-| --------------------------------------- | --------------------------------- | --------------------------------- | --------------------------------- | --------------------------------- |
-| `outbound-http`                         | Native                            | Native                            | BestEffort⁹                       | Native                            |
-| `outbound-authority-override`           | Native                            | BestEffort⁸                       | Native                            | Unsupported[^spin-authority]      |
-| `outbound-batch-cancellation`           | Native                            | BestEffort⁸                       | BestEffort⁴                       | BestEffort⁸                       |
-| `outbound-batch-completion-order`       | Native                            | Native                            | BestEffort⁴                       | Native                            |
-| `outbound-batch-slot-isolation`         | Native                            | Native                            | BestEffort⁴                       | Native                            |
-| `outbound-cache-bypass`                 | Native                            | Native                            | Native                            | Native                            |
-| `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] |
-| `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                            | BestEffort[^spin-header-fidelity] |
-| `outbound-deadlines`                    | Native                            | BestEffort⁸                       | BestEffort¹                       | BestEffort⁸                       |
-| `outbound-failure-diagnostics`          | BestEffort                        | BestEffort                        | Native                            | Native                            |
-| `outbound-flexible-phase-budget`        | Native                            | Native                            | BestEffort⁵                       | BestEffort⁵                       |
-| `streamed-upload-deadlines`             | Native                            | BestEffort⁸                       | BestEffort²                       | BestEffort⁸                       |
-| `lazy-streamed-response-passthrough`    | Native³                           | Native                            | BestEffort⁶                       | BestEffort⁷                       |
+| Capability                              | Axum                              | Cloudflare                        | Fastly                              | Spin                              |
+| --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------------------- | --------------------------------- |
+| `outbound-http`                         | Native                            | Native                            | BestEffort⁹                         | Native                            |
+| `outbound-authority-override`           | Native                            | BestEffort⁸                       | Native                              | Unsupported[^spin-authority]      |
+| `outbound-batch-cancellation`           | Native                            | BestEffort⁸                       | BestEffort⁴                         | BestEffort⁸                       |
+| `outbound-batch-completion-order`       | Native                            | Native                            | BestEffort⁴                         | Native                            |
+| `outbound-batch-slot-isolation`         | Native                            | Native                            | BestEffort⁴                         | Native                            |
+| `outbound-cache-bypass`                 | Native                            | Native                            | Native                              | Native                            |
+| `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting]   | Unsupported[^resource-accounting] |
+| `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                              | BestEffort[^spin-header-fidelity] |
+| `outbound-deadlines`                    | Native                            | BestEffort⁸                       | BestEffort¹                         | BestEffort⁸                       |
+| `outbound-failure-diagnostics`          | BestEffort                        | BestEffort                        | Native                              | Native                            |
+| `outbound-image-optimizer`              | Unsupported                       | Unsupported                       | BestEffort[^native-image-optimizer] | Unsupported                       |
+| `outbound-flexible-phase-budget`        | Native                            | Native                            | BestEffort⁵                         | BestEffort⁵                       |
+| `streamed-upload-deadlines`             | Native                            | BestEffort⁸                       | BestEffort²                         | BestEffort⁸                       |
+| `lazy-streamed-response-passthrough`    | Native³                           | Native                            | BestEffort⁶                         | BestEffort⁷                       |
+
+[^native-image-optimizer]:
+    Fastly single sends with explicit native optimizer options use the SDK's synchronous
+    optimizer service. Region is required; only bodiless GET/HEAD with default caching are
+    supported. Viceroy has no optimizer and returns typed `ImageOptimizerUnavailable` (502).
+    The synchronous call cannot be interrupted and its full blocking horizon is unknown.
+    The original absolute deadline is checked before dispatch and after return; late results
+    are rejected, not granted additional budget. Existing response limits and lazy streamed
+    handling apply afterward. Batch slots reject the option; begun/redirect integration remains
+    pending. No hosted transformation, pooling or performance qualification is claimed.
 
 [^resource-accounting]:
     Complete accounting includes provider parsing and field-section

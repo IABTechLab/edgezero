@@ -143,12 +143,12 @@ impl FastlyNoAttempt {
 
     #[cfg(any(test, feature = "fastly", feature = "test-utils"))]
     pub(crate) fn new(reason: FastlyNoAttemptReason, standard_error: anyhow::Error) -> Self {
-        #[cfg(not(any(test, feature = "fastly")))]
-        drop(standard_error);
+        // Own both inputs even when this build does not retain the source field.
+        let failure = (reason, standard_error);
         Self {
-            reason,
+            reason: failure.0,
             #[cfg(any(test, feature = "fastly"))]
-            standard_error,
+            standard_error: failure.1,
         }
     }
 

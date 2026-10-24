@@ -15,6 +15,14 @@ depending on Fastly timed reads. Do not introduce a background reader that buffe
 Apply the index's scoped test/fmt/clippy card after each implementation increment, not only at
 phase completion. The target checks below supplement, not replace, all five root CI gates.
 
+**Scoped precedence, 2026-10-24:** the requester's [timing and native integration amendment](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+permits the Send-first checkpoint below before full D1a-D1d sequencing. Missing finite H(K) and
+timing-only G2 failures do not block that subset. Original deadlines and late-result rejection,
++5 ms measured targets/tests, typed body errors and fresh-readiness/subsequent-read safety remain.
+The optimizer blocking horizon is **UNKNOWN** until provider evidence. B/backend policy, timers,
+slack and resources are unchanged and unapproved; their dependent implementation stays gated.
+The current trait remains unchanged until the later atomic head-first/full-trait migration.
+
 Each D1-D4 migration implements plan 02's synchronous `validate_supported_options` and paired
 `time()` hooks as well as dispatch. Replace clock-only constructors per plan 02's migration table,
 preserving Axum's fallible `try_with_time` and transport-sharing setup, and migrate request-context
@@ -160,6 +168,72 @@ and fixture qualification/hosted probe cases from G2.
 
 **Files:** Fastly `src/outbound.rs`, `src/outbound/backend.rs`, `tests/contract.rs`,
 and fixture qualification/hosted probe cases from G2.
+
+#### Send-First Checkpoint (2026-10-24)
+
+This is an implementation sequencing decision under the [scoped integration authorization](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment),
+not a claim that the requester explicitly approved different signatures. Its scope is bounded;
+the synchronous optimizer wall time is not. Do not wait for full D1c/P3/P5, finite H(K) or a
+timing-only G2 pass to implement this subset. Do not mark full D1d or its acceptance legs complete.
+
+**Timing anchor:** the current trait's production async `send` selects its budget at existing
+adapter method entry on first poll, not at facade invocation. Preserve that selected budget before
+SDK preparation/registration and across the native call. Facade-invocation capture remains pending
+with P1's later atomic head-first/full-trait migration; this checkpoint does not complete P1.
+
+**Checkpoint files:** core `outbound.rs`, `outbound/image_optimizer.rs` and the external request
+API tests; each adapter's existing outbound validation/dispatch and contract tests; Fastly's
+direct SDK mapping. Do not change `src/outbound/backend.rs`, backend policy, phase timers or slack.
+
+- [x] Attach existing typed optimizer values to `OutboundRequest`/parts with builder/readback and
+      lossless `into_parts`/`from_parts` round trips. Keep `OutboundHttpClient`'s current trait
+      unchanged. Add no default, alias, compatibility helper or alternative transport.
+- [x] Validate support first in all four adapters before budget rejection, body polling, backend
+      registration or dispatch. Axum/Cloudflare/Spin reject options; Fastly Batch rejects only its
+      option-bearing slot and allows siblings to proceed. Only Fastly single Send is integrated
+      here; Begin, Follow and fire-and-forget remain outside this checkpoint, not silently enabled.
+      Preserve method/body/default-cache restrictions; do not claim full EZ-1 settlement is done.
+- [x] Map typed values directly to native Fastly SDK options in the existing `execute` single-Send
+      branch and use existing `process_response`. Leave the ordinary SDK send branch unchanged.
+      Preserve built targets/signature-bearing headers, header/body/decoder limits, lazy streamed
+      bodies and exactly-once cleanup. No extra fetch, option serialization layer or prebuffering.
+- [x] Keep the budget selected at existing adapter method entry on first poll, including its
+      `t0`, `D` and `BudgetSource`, through SDK preparation/registration and host return. Do not
+      claim facade-invocation capture. Reject
+      observed pre-send expiry without dispatch. At/after `D`, discard host success and classify
+      host failure as the original attributed 504. Before `D`, map SDK
+      `SendErrorCause::ImageOptimizerUnsupported` to a 502 with
+      `BadGatewayReason::ImageOptimizerUnavailable` on core's non-exhaustive reason enum. Preserve
+      the existing message `Fastly outbound request failed` exactly; only the typed reason and
+      provider detail distinguish this cause, without provider-text parsing. State blocking horizon
+      **UNKNOWN**; infer no finite bound from SDK timers or an unsupported Viceroy response.
+- [x] Demonstrate nonzero red/green tests for attachment/parts round trips, support-first rejection
+      with expired budgets and unread bodies, batch sibling isolation, direct typed SDK mapping,
+      `BadGatewayReason::ImageOptimizerUnavailable` 502 versus late-504 precedence, retained provider
+      detail, lazy response limits and exact cleanup. Run the
+      index's scoped test/fmt/clippy card and actual applicable WASM contracts. Typed body-error
+      preservation and fresh-readiness/subsequent-read safety remain requirements; no lost-error
+      EOF conversion or blocking-body fallback is permitted. Retain +5 ms targets and failed traces.
+
+**Local evidence boundary:** core request/parts option readbacks and exports are stable. Static
+inspection confirms that optimizer options select native SDK `.send`, not `.send_async`; this is
+not runtime host-entry evidence. `image_optimizer_unavailable_is_typed_on_viceroy` proves the option
+is not dropped and unavailable errors are typed, but cannot prove host entry: SDK `.send_async`
+can return the same `ImageOptimizerUnsupported` without entering the host. Successful shared-response
+cap/laziness checks use synthetic successful SDK responses, not hosted image transformation.
+Neither test category proves runtime optimizer host entry or hosted transformation; broader
+verification and qualification remain separate.
+
+Full EZ-1 settlement, Follow, B/backend policy, the new engine and head-first/full-trait migration
+remain open. The later trait cut still migrates every implementer/caller atomically, not through
+compatibility paths. Hosted/performance qualification, numerical horizon/policy approval and
+deployment remain blocked. This checkpoint asserts no optimized hosted result or performance parity.
+
+#### Remaining Full D1d Work
+
+The dependencies and earlier prerequisite statements below apply to completing full D1d, not to
+the Send-first checkpoint. Read finite-horizon and G2 timing language under the scoped override;
+provider evidence/numerical approval remain qualification gates, while B and read-safety gates persist.
 
 **Dependencies:** D1c, P3/P5 and G4's separately approved EZ-8.10 horizon. Missing approval stops
 this task; missing hosted entitlement leaves its production qualification blocking, not passed.

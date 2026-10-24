@@ -1393,7 +1393,20 @@ mod outbound_contract_tests {
     use edgezero_core::http::{Method, Uri};
     use edgezero_core::outbound::OutboundRequest;
     use futures_util::stream;
+    use std::time::Duration;
 
+    #[test]
+    fn image_optimizer_batch_rejection_precedes_other_preflight() {
+        let request = OutboundRequest::get("https://example.com/image")
+            .unwrap()
+            .image_optimizer(edgezero_core::OutboundImageOptimizerOptions::new())
+            .body(Body::from_stream(stream::pending()))
+            .timeout(Duration::ZERO);
+        let error =
+            validate_batch_request_for_test(&request).expect_err("unsupported batch option");
+        assert!(error.message().contains("image_optimizer"));
+        assert!(error.message().contains("fastly"));
+    }
     fn request() -> OutboundRequest {
         OutboundRequest::new(
             Method::POST,
@@ -1454,6 +1467,35 @@ mod outbound_contract_tests {
         use futures::executor::block_on;
 
         use super::*;
+
+        #[test]
+        fn image_optimizer_unavailable_is_typed_on_viceroy() {
+            let request = OutboundRequest::get("http://127.0.0.1:9/native-image")
+                .unwrap()
+                .image_optimizer(
+                    edgezero_core::OutboundImageOptimizerOptions::new()
+                        .region(edgezero_core::OutboundImageOptimizerRegion::UsEast),
+                )
+                .stream_response()
+                .timeout(Duration::from_secs(5));
+            let error = block_on(FastlyOutboundClient::new().send(request))
+                .expect_err("Viceroy has no optimizer");
+            assert!(matches!(
+                error,
+                EdgeError::BadGateway {
+                    reason: edgezero_core::BadGatewayReason::ImageOptimizerUnavailable,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                error.provider_failure_detail(),
+                Some(edgezero_core::ProviderFailureDetail::Fastly {
+                    cause: edgezero_core::FastlyFailureCause::ImageOptimizerUnsupported,
+                    ..
+                })
+            ));
+            assert!(!error.message().contains("127.0.0.1"));
+        }
 
         #[test]
         fn request_preparation_consumes_entry_budget() {

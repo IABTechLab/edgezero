@@ -1,8 +1,9 @@
 use super::{
-    OutboundCropFocus, OutboundImageFormat, OutboundImageOptimizerOptions,
-    OutboundImageOptimizerRegion, OutboundResizeFilter,
+    OutboundCachePolicy, OutboundCropFocus, OutboundImageFormat, OutboundImageOptimizerOptions,
+    OutboundImageOptimizerRegion, OutboundRequest, OutboundResizeFilter,
 };
 use crate::error::EdgeError;
+use crate::http::Method;
 
 impl OutboundImageOptimizerOptions {
     /// Selects a nonzero crop ratio and validates both percentage coordinates, if present.
@@ -193,12 +194,66 @@ impl OutboundImageOptimizerRegion {
     }
 }
 
+pub(super) fn validate_options(request: &OutboundRequest) -> Result<(), EdgeError> {
+    let Some(options) = request.image_optimizer_options() else {
+        return Ok(());
+    };
+    if !matches!(request.method(), &Method::GET | &Method::HEAD) {
+        return Err(EdgeError::bad_request(
+            "image_optimizer requires GET or HEAD",
+        ));
+    }
+    if request.cache_policy != OutboundCachePolicy::PlatformDefault {
+        return Err(EdgeError::bad_request(
+            "image_optimizer requires default cache policy",
+        ));
+    }
+    if options.region_setting().is_none() {
+        return Err(EdgeError::bad_request(
+            "image_optimizer requires an explicit region",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         EdgeError, OutboundCropFocus, OutboundImageFormat, OutboundImageOptimizerOptions,
-        OutboundImageOptimizerRegion, OutboundResizeFilter,
+        OutboundImageOptimizerRegion, OutboundRequest, OutboundResizeFilter,
     };
+
+    #[test]
+    fn image_optimizer_dispatch_rejects_missing_region_method_and_cache_bypass() {
+        use crate::http::Method;
+        use crate::outbound::{OutboundCachePolicy, validate_for_dispatch};
+
+        let options =
+            OutboundImageOptimizerOptions::new().region(OutboundImageOptimizerRegion::Asia);
+        for request in [
+            OutboundRequest::get("https://example.com/image")
+                .unwrap()
+                .image_optimizer(OutboundImageOptimizerOptions::new()),
+            OutboundRequest::new(Method::POST, "https://example.com/image".parse().unwrap())
+                .unwrap()
+                .image_optimizer(options.clone()),
+            OutboundRequest::get("https://example.com/image")
+                .unwrap()
+                .image_optimizer(options.clone())
+                .cache_policy(OutboundCachePolicy::Bypass),
+        ] {
+            let error = validate_for_dispatch(&request).expect_err("invalid optimizer combination");
+            assert!(matches!(error, EdgeError::BadRequest { .. }));
+            assert!(error.message().contains("image_optimizer"));
+        }
+        for method in [Method::GET, Method::HEAD] {
+            let request =
+                OutboundRequest::new(method, "https://example.com/image".parse().unwrap())
+                    .unwrap()
+                    .image_optimizer(options.clone());
+            validate_for_dispatch(&request).expect("valid native request");
+        }
+    }
 
     #[test]
     fn image_optimizer_defaults_leave_every_selector_unset() {

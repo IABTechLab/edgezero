@@ -7,8 +7,9 @@ use edgezero_core::error::EdgeError;
 use edgezero_core::extractor::{Headers, Json, Path};
 use edgezero_core::http::{self, Method, Response, StatusCode, Uri};
 use edgezero_core::outbound::{
-    OutboundBatchTermination, OutboundCachePolicy, OutboundRequest, OutboundSlotResult,
-    ResponseDecoding,
+    OutboundBatchTermination, OutboundCachePolicy, OutboundImageFormat,
+    OutboundImageOptimizerOptions, OutboundImageOptimizerRegion, OutboundRequest,
+    OutboundSlotResult, ResponseDecoding,
 };
 use edgezero_core::response::Text;
 use futures::{StreamExt as _, stream};
@@ -124,6 +125,31 @@ pub async fn admission(RequestContext(ctx): RequestContext) -> Result<Response, 
         grant_consumed_once,
         route_class,
     })
+}
+
+#[action]
+pub async fn image_demo(RequestContext(ctx): RequestContext) -> Result<Response, EdgeError> {
+    let Some(client) = ctx.http_client() else {
+        return proxy_not_available_response();
+    };
+    client
+        .with_proxy_marker(false)
+        .send(image_demo_request()?)
+        .await?
+        .into_response()
+}
+
+fn image_demo_request() -> Result<OutboundRequest, EdgeError> {
+    let options = OutboundImageOptimizerOptions::new()
+        .region(OutboundImageOptimizerRegion::UsEast)
+        .format(OutboundImageFormat::WebP)
+        .width(100)?;
+    Ok(
+        outbound_policy(OutboundRequest::get("https://httpbin.org/image/jpeg")?)
+            .cache_policy(OutboundCachePolicy::PlatformDefault)
+            .image_optimizer(options)
+            .stream_response(),
+    )
 }
 
 #[action]
@@ -589,6 +615,35 @@ mod tests {
         let ctx = context_with_params("/proxy/status/200", &[("rest", "status/200")]);
         let response = block_on(proxy_demo(ctx)).expect("response");
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[test]
+    fn image_demo_uses_default_cache_and_preserves_outbound_limits() {
+        let request = image_demo_request().expect("native image example");
+        let options = request
+            .image_optimizer_options()
+            .expect("optimizer options");
+        assert_eq!(
+            options.region_setting(),
+            Some(&OutboundImageOptimizerRegion::UsEast)
+        );
+        assert_eq!(options.width_setting(), Some(100));
+        assert_eq!(options.format_setting(), Some(OutboundImageFormat::WebP));
+        let parts = request.into_parts();
+        assert_eq!(parts.cache_policy, OutboundCachePolicy::PlatformDefault);
+        assert_eq!(parts.response_mode, edgezero_core::ResponseMode::Streamed);
+        assert_eq!(
+            parts.max_encoded_response_bytes,
+            Some(MAX_ENCODED_RESPONSE_BYTES)
+        );
+        assert_eq!(
+            parts.max_decoded_response_bytes,
+            Some(MAX_DECODED_RESPONSE_BYTES)
+        );
+        assert_eq!(
+            parts.max_response_header_bytes,
+            Some(MAX_RESPONSE_HEADER_BYTES)
+        );
     }
 
     #[test]

@@ -146,6 +146,13 @@ const expectedOutboundRows = [
   ['outbound-deadlines', 'Native', 'BestEffort', 'BestEffort', 'BestEffort'],
   ['outbound-failure-diagnostics', 'BestEffort', 'BestEffort', 'Native', 'Native'],
   [
+    'outbound-image-optimizer',
+    'Unsupported',
+    'Unsupported',
+    'BestEffort',
+    'Unsupported',
+  ],
+  [
     'outbound-flexible-phase-budget',
     'Native',
     'Native',

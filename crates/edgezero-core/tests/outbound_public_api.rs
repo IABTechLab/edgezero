@@ -1,7 +1,49 @@
 use edgezero_core::{
     OutboundCropFocus, OutboundImageFormat, OutboundImageOptimizerOptions,
-    OutboundImageOptimizerRegion, OutboundResizeFilter,
+    OutboundImageOptimizerRegion, OutboundRequest, OutboundResizeFilter,
 };
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "external supplied-client API integration test"
+)]
+fn image_optimizer_options_round_trip() {
+    let options = OutboundImageOptimizerOptions::new()
+        .region(OutboundImageOptimizerRegion::UsWest)
+        .preserve_origin_query(true)
+        .format(OutboundImageFormat::WebP)
+        .quality(80)
+        .expect("quality")
+        .resize_filter(OutboundResizeFilter::Bicubic)
+        .width(100)
+        .expect("width")
+        .height(50)
+        .expect("height")
+        .crop(2, 1, OutboundCropFocus::Percent { x: 25, y: 75 })
+        .expect("crop");
+    let request = OutboundRequest::get("https://example.com/image%20one.jpg?signed=one%2Ftwo")
+        .expect("target")
+        .header("authorization", "fixture-signature")
+        .expect("signature")
+        .image_optimizer(options.clone());
+    assert_eq!(request.image_optimizer_options(), Some(&options));
+    let target = request.uri().clone();
+    let parts = request.into_parts();
+    assert_eq!(parts.image_optimizer, Some(options.clone()));
+    let rebuilt = OutboundRequest::from_parts(parts).expect("parts");
+    assert_eq!(rebuilt.image_optimizer_options(), Some(&options));
+    assert_eq!(rebuilt.uri(), &target);
+    assert_eq!(rebuilt.headers()["authorization"], "fixture-signature");
+    let replacement =
+        OutboundImageOptimizerOptions::new().region(OutboundImageOptimizerRegion::Asia);
+    let replaced = rebuilt.image_optimizer(replacement.clone());
+    assert_eq!(replaced.image_optimizer_options(), Some(&replacement));
+    let mut cleared_parts = replaced.into_parts();
+    cleared_parts.image_optimizer = None;
+    let cleared = OutboundRequest::from_parts(cleared_parts).expect("cleared parts");
+    assert!(cleared.image_optimizer_options().is_none());
+}
 
 #[test]
 #[expect(

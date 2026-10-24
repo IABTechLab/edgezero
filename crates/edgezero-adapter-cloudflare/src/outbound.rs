@@ -113,7 +113,7 @@ mod worker_impl {
         OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse,
         ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
         ResponseMode, apply_response_body_policy, collect_response_stream, insert_proxy_header,
-        normalize_for_dispatch, normalize_response_headers, validate_for_dispatch,
+        normalize_for_dispatch, normalize_response_headers,
     };
     use edgezero_core::time::{
         Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
@@ -306,7 +306,7 @@ mod worker_impl {
             request: OutboundRequest,
             started_at: MonotonicInstant,
         ) -> Result<PreparedRequest, EdgeError> {
-            validate_for_dispatch(&request)?;
+            super::validate_request(&request)?;
             Self::prepare_validated(request, started_at, None)
         }
 
@@ -2094,7 +2094,7 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
     feature = "test-utils"
 ))]
 fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
-    validate_for_dispatch(request)?;
+    validate_request(request)?;
     if request.is_stream_body() {
         return Err(EdgeError::bad_request(
             "outbound batches require buffered request bodies; use send for a streamed upload",
@@ -2106,6 +2106,19 @@ fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(any(
+    all(feature = "cloudflare", target_arch = "wasm32"),
+    feature = "test-utils"
+))]
+fn validate_request(request: &OutboundRequest) -> Result<(), EdgeError> {
+    if request.image_optimizer_options().is_some() {
+        return Err(EdgeError::bad_request(
+            "image_optimizer is not supported by cloudflare",
+        ));
+    }
+    validate_for_dispatch(request)
 }
 
 /// Runs the target-neutral Cloudflare batch preflight contract in native tests.

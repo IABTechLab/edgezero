@@ -18,6 +18,22 @@ clippy card. G4's approved interface digest and G2's recorded feasibility dispos
 qualification cannot silently approve an API change or convert pending/failed provider evidence
 into a waiver.
 
+## Scoped Qualification Boundary (2026-10-24)
+
+The requester's [scoped timing and native integration amendment](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+allows the D1d Send-first checkpoint, not qualification or deployment. The +5 ms windows and
+tests remain measured qualification targets, not hard scheduler guarantees; preserve negative
+timing/error evidence. The optimizer blocking horizon is explicitly **UNKNOWN** until provider
+evidence. A finite H(K) is not needed before this scoped integration, but unknown is not a passing
+finite-horizon result. Q3/Q4's numerical horizon/policy and hosted/performance gates stay open.
+No criterion, applicability, comparison requirement or failed result is waived.
+
+Q1 must publish the current unknown horizon rather than imply a finite rule is already approved.
+The checkpoint leaves the current trait, backend B/policy, timers, slack and resources unchanged;
+typed body-error/readiness safety remains required. Full EZ-1 settlement, Follow, engine and the
+later atomic head-first/full-trait migration remain pending. Earlier checkpoint statements below
+are historical preparation records, not a denial of this newer scoped implementation authorization.
+
 ## Task Q1: Active Guides, CHANGELOG, and Anti-Drift Checks
 
 **Files:** Modify `docs/guide/proxying.md`, `streaming.md`, `capabilities.md`, `handlers.md`,
@@ -63,8 +79,10 @@ guide-snippet checker/tests below; Q2 owns CI activation, with Q1 supplying exac
       normalization, never stripped hop-by-hop/nominated or filtered fields. Document cause-based
       generated-overflow Retry-After suppression and its precedence over synthesized headers,
       without changing ordinary upstream 413 or the effective config-503 retry policy.
-- [ ] Publish only G4's approved Image Optimizer horizon rule/maximum and tolerance, with original
-      entry/preparation/host-call measurements and the unchanged post-head deadline. Reject current-
+- [ ] Publish the Image Optimizer blocking horizon as **UNKNOWN** until provider evidence and
+      separate numerical approval, with original entry/preparation/host-call measurement anchors,
+      the unchanged post-head deadline and +5 ms measured qualification target. Publish a finite
+      rule/maximum only after that approval and proof, not as a preimplementation condition. Reject current-
       state guide claims of a universal twice-effective-budget bound; historical audit text remains
       provenance, not a promise. Document callback-scope exit separately from helper/egress completion.
 - [ ] Align capabilities in core `src/manifest.rs`, four adapter `src/cli.rs`, guide tables and

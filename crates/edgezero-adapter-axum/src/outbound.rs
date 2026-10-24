@@ -106,6 +106,7 @@ impl AxumOutboundClient {
         request: OutboundRequest,
         started_at: MonotonicInstant,
     ) -> Result<PreparedRequest, EdgeError> {
+        Self::validate_options(&request)?;
         validate_for_dispatch(&request)?;
         Self::prepare_validated(request, started_at, None)
     }
@@ -115,6 +116,7 @@ impl AxumOutboundClient {
         started_at: MonotonicInstant,
         observation_cutoff: Deadline,
     ) -> Result<PreparedRequest, EdgeError> {
+        Self::validate_options(&request)?;
         validate_for_dispatch(&request)?;
         if request.is_stream_body() {
             return Err(EdgeError::bad_request(
@@ -169,6 +171,15 @@ impl AxumOutboundClient {
     #[inline]
     pub fn try_with_clock(clock: MonotonicClock) -> Result<Self, reqwest::Error> {
         Self::try_transport().map(|client| Self { client, clock })
+    }
+
+    fn validate_options(request: &OutboundRequest) -> Result<(), EdgeError> {
+        if request.image_optimizer_options().is_some() {
+            return Err(EdgeError::bad_request(
+                "image_optimizer is not supported by axum",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -627,6 +638,86 @@ mod clock_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             Poll::Pending
         }
+    }
+
+    #[test]
+    fn image_optimizer_rejection_precedes_pending_body_and_expired_budget() {
+        use edgezero_core::OutboundImageOptimizerOptions;
+        use futures::executor::block_on;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let polls = Rc::new(Cell::new(0_usize));
+        let counted = Rc::clone(&polls);
+        let body = Body::from_stream(stream::poll_fn(move |_| {
+            counted.set(counted.get().saturating_add(1));
+            Poll::Pending
+        }));
+        let request = OutboundRequest::get("http://127.0.0.1:9/image")
+            .unwrap()
+            .image_optimizer(OutboundImageOptimizerOptions::new())
+            .body(body)
+            .timeout(Duration::ZERO);
+        let client = AxumOutboundClient::try_new().unwrap();
+        let error = block_on(client.send(request)).expect_err("unsupported");
+        assert!(matches!(error, EdgeError::BadRequest { .. }));
+        assert!(error.message().contains("image_optimizer"));
+        assert!(error.message().contains("axum"));
+        assert_eq!(polls.get(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_optimizer_batch_rejection_keeps_live_plain_sibling() {
+        use edgezero_core::OutboundImageOptimizerOptions;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}/plain", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                assert!(head.len() < 1024, "bounded fixture request head");
+                head.push(socket.read_u8().await.unwrap());
+            }
+            assert!(head.starts_with(b"GET /plain HTTP/1.1\r\n"));
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let client = AxumOutboundClient::try_new().unwrap();
+        let image = OutboundRequest::get(&target)
+            .unwrap()
+            .image_optimizer(OutboundImageOptimizerOptions::new())
+            .body(Body::from_stream(stream::pending()))
+            .timeout(Duration::ZERO);
+        let plain = OutboundRequest::get(&target).unwrap();
+        let results = client
+            .start_batch_until(vec![image, plain], Deadline::after(Duration::from_secs(2)))
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            results.termination,
+            edgezero_core::OutboundBatchTermination::Completed
+        );
+        assert!(matches!(
+            results.slots.first(),
+            Some(Some(edgezero_core::OutboundSlotResult {
+                outcome: Err(EdgeError::BadRequest { .. }),
+                ..
+            }))
+        ));
+        assert!(
+            matches!(results.slots.get(1), Some(Some(edgezero_core::OutboundSlotResult {
+            outcome: Ok(response), ..
+        })) if response.status() == StatusCode::NO_CONTENT)
+        );
+        server.await.unwrap();
     }
 
     fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {

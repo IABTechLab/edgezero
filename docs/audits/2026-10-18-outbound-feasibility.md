@@ -2,6 +2,26 @@
 
 ## Status
 
+### Current Scoped Disposition (2026-10-24)
+
+The requester's [scoped timing and native integration approval](2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+supersedes this index's older blanket implementation stops for timing-only G2 failures and missing
+finite H(K). The [D1d Send-first checkpoint](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/docs/superpowers/plans/2026-10-18-trusted-server-outbound-03-drivers.md#send-first-checkpoint-2026-10-24)
+may use the current trait and existing `execute`/`process_response`, with the ordinary SDK send
+branch unchanged. Original deadlines, sources, late-result rejection and +5 ms measured targets/
+tests remain. The synchronous optimizer blocking horizon is explicitly **UNKNOWN** until provider
+evidence; no finite horizon or optimizer/performance qualification is established by these probes.
+
+G2's retained failures remain failures. Typed body-error preservation and fresh-readiness/read
+safety are still required; the stock runtime's lost errors are not waived. Backend B/domain/
+cardinality/resource approval, backend policy, timers and slack remain unchanged and gated.
+Full EZ-1 settlement, Follow, engine and atomic head-first/full-trait migration remain open.
+Hosted/performance qualification and deployment remain blocked. The experiment accounts, exact
+measurements, commands, exits, source identities and linked evidence below are historical and
+unchanged; this additive disposition does not reclassify them as passing results.
+
+### Historical Execution Status
+
 Executed locally on 2026-10-19. **G2: Failed.** The pinned Viceroy body-readiness
 primitive discards a source error, confirmed by three independently dispatched paired controls.
 Hosted Fastly remains **PendingExternal**. No capability is promoted. G2 itself did not change a

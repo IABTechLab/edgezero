@@ -10,8 +10,9 @@ requirement changes, dependency repinning or production adoption. The other deci
 pending. Preparing this record or passing tests does not supply their approval.
 
 The [2026-10-24 region-enum amendment](#scoped-region-enum-amendment) records the requester's
-later, narrower approval separately. The current contract is the original API subject plus that
-amendment, not a newly approved whole-contract digest.
+later, narrower approval separately. The [scoped timing and native integration amendment](#scoped-timing-and-native-integration-amendment)
+records the subsequent implementation authorization. Neither supplies a newly approved
+whole-contract digest or changes the frozen Interfaces signatures.
 
 The inspected checkout is PR 275 at `7cccaf10734914161803317aec6c55c22c2bccc9` plus the uncommitted
 G1-G3 work and Spin response-egress repair. Its local characterization does not qualify that commit.
@@ -84,7 +85,7 @@ assert.notEqual(currentStart, -1);
 const currentEnd = current.indexOf('## Task P1:', currentStart);
 assert.ok(currentEnd > currentStart);
 assert.equal(digest(current.slice(currentStart, currentEnd)), '0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404');
-assert.equal(digest(current), '037f7fbd4407a1071e91e0327b352ed82bdf29f1f65dab83dc14d89330a86a0a');
+assert.equal(digest(current), '7752a1ca231ab41b9d1b28855d31813e9c43a30c7e55ce3453176f2f51a6f946');
 console.log('Original subject and amended API identities match; approval scope is recorded separately.');
 JS
 ```
@@ -106,7 +107,7 @@ is amended.
 | Current Source Identity | Value                                                              |
 | ----------------------- | ------------------------------------------------------------------ |
 | Interfaces SHA-256      | `0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404` |
-| Complete plan SHA-256   | `037f7fbd4407a1071e91e0327b352ed82bdf29f1f65dab83dc14d89330a86a0a` |
+| Complete plan SHA-256   | `7752a1ca231ab41b9d1b28855d31813e9c43a30c7e55ce3453176f2f51a6f946` |
 | Interfaces size         | 683 LF-terminated lines, 42,364 UTF-8 bytes                        |
 
 These are verification identities, not fresh exact-digest approval evidence. The original
@@ -132,6 +133,11 @@ evidence. G2 and the corresponding implementation/qualification gates remain ope
 optimizer path was implemented under this instruction while those prerequisites are missing.
 
 ### Included Contract Decisions
+
+The full migration decisions below remain the target contract. The
+[scoped amendment](#scoped-timing-and-native-integration-amendment) permits a Send-first checkpoint
+on the current trait before that atomic migration; it supersedes only the stated implementation
+prerequisites, not these signatures or the remaining acceptance requirements.
 
 - One required `dispatch_head` network primitive, synchronous support validation and paired
   `time()`, plus mandatory eager `begin`/batch scheduling. Supplied implementations use the same
@@ -181,6 +187,63 @@ allow backdating a terminal instant. No summary here expands that normative cont
 
 The optimizer mode matrix is also fixed: Fastly Send/Follow only, subject to entitlement and
 horizon gates; Fastly Begin/Batch and all modes on other adapters reject it synchronously.
+
+### Scoped Timing and Native Integration Amendment
+
+**Decision G4-TIMING-INTEGRATION: approved by the requester in the conversation on 2026-10-24.**
+The requester answered `Approve scoped change and continue implementation` to this question:
+
+> May I make a scoped requirements change to unblock implementation: preserve original logical
+> deadlines and late-result rejection, treat +5ms as a measured qualification target rather than
+> a hard scheduler guarantee, and allow native Image Optimizer integration with its blocking
+> horizon explicitly unknown until provider evidence exists? Hosted qualification and performance
+> claims would remain blocked.
+
+This is an attributed scoped authorization, not numerical H(K)/B approval, approval of different
+signatures, or a claim that a new whole-contract digest was reviewed. The original API approval,
+historical submitted digests and region-enum amendment retain their separate scopes. The current
+Interfaces bytes are unchanged; a refreshed complete-plan digest verifies only edits outside them.
+
+This section takes precedence over earlier implementation-blocking G2 timing and optimizer-horizon
+wording in this packet, the requirements, plans, feasibility index and fixture documentation:
+
+- Preserve original entry `t0`, absolute deadline `D` and `BudgetSource`. Do not extend or round
+  the logical deadline, restart the budget after preparation, accept a late result, or send after
+  observed expiry. A synchronous optimizer return at or after `D`, success or failure, becomes the
+  original attributed 504. Before expiry, missing optimizer entitlement remains a typed 502 with
+  the unchanged message `Fastly outbound request failed`; its typed reason/provider detail carry
+  the distinction, not new display text.
+- Keep +5 ms as the measured qualification target and retain its tests, raw timings, cleanup
+  endpoints and negative results. It is not a deterministic scheduler-resumption guarantee.
+  Timing-only G2 failures no longer prohibit the scoped integration; they are not relabeled passes.
+- The synchronous optimizer blocking horizon is explicitly **UNKNOWN** until provider evidence.
+  Finite numerical H(K) is no longer a preimplementation prerequisite. Do not infer it from SDK
+  timers, observed maxima, runtime termination or a fabricated policy. Horizon approval and hosted
+  evidence still gate qualification; an unknown horizon cannot pass a finite-bound assertion.
+- Backend B/domain/cardinality and resource-policy approval remain pending. No backend identity,
+  policy, phase timer, dispatch slack, resource limit or SDK/runtime pin changes are authorized.
+  Typed body-error preservation and fresh-readiness/subsequent-read safety remain requirements;
+  no blocking-body fallback or lost-error-to-EOF conversion is permitted.
+
+The [D1d Send-first checkpoint](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/docs/superpowers/plans/2026-10-18-trusted-server-outbound-03-drivers.md#send-first-checkpoint-2026-10-24)
+is an implementation sequencing decision under this integration authorization. Attach typed
+options to requests/parts, validate support first on all four adapters, and map Fastly single
+Send directly to SDK options inside existing `execute` and `process_response`. Keep the ordinary
+SDK send branch and current `OutboundHttpClient` trait unchanged. No separate transport,
+compatibility helper, default implementation or alias is introduced. This does not claim the
+requester explicitly approved alternative signatures.
+
+For this checkpoint, budget selection remains at existing adapter async `send` method entry
+on first poll, before SDK preparation/registration. Preserve that selected budget across the native
+call; this is not a new facade-invocation snapshot or completion of P1. Invocation-time capture
+remains pending with the later atomic head-first/full-trait migration. The full contract's
+invocation-time target is unchanged, not asserted as implemented by this subset.
+
+Full EZ-1 settlement, Follow, B/backend policy, the new engine and the head-first/full-trait
+migration remain open; the latter still migrates all implementers/callers atomically. The
+checkpoint does not complete D1d or any full criterion. No deployment, Native capability promotion,
+hosted qualification or performance-parity claim is authorized. Existing failed evidence,
+255 acceptance criteria and 511 legs retain their IDs, statuses, applicability and comparison gates.
 
 ## Hard-Migration Inventory
 
@@ -275,6 +338,11 @@ Fastly's empty-response progress controls do not repair G2's body-readiness erro
 header-derived zero-length hints are not raw framing evidence; no known-empty fast path is approved.
 
 ### Independent Decision Requirements
+
+Apply the [scoped amendment](#scoped-timing-and-native-integration-amendment) to the original
+task effects below: H(K) and timing-only G2 proof no longer block the Send-first checkpoint.
+G4-FASTLY-POLICY still blocks backend-policy implementation; G4-OPTIMIZER-HORIZON remains pending
+for numerical horizon approval and qualification, not for this scoped integration.
 
 | Decision             | Required Attributed Review                                                                                                                                                                                                                                            | Task Effect                                                                                                                                                          |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

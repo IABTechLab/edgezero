@@ -133,7 +133,7 @@ fn app_demo_manifest_declares_outbound_http_optional() {
         ManifestLoader::from_path(&app_manifest_path).expect("parse shipped app-demo manifest");
     assert_eq!(
         manifest.manifest().capabilities.optional,
-        [Capability::OutboundHttp]
+        [Capability::OutboundHttp, Capability::OutboundImageOptimizer]
     );
     let hosts = manifest
         .manifest()

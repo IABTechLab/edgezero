@@ -587,6 +587,7 @@ fn build_base_data(
         "dep_edgezero_core": core_crate_line,
         "dep_edgezero_cli": cli_crate_line,
         "adapter_list": adapter_list_str,
+        "native_image_example": artifacts.adapter_ids.iter().any(|id| id == "fastly"),
         "workspace_members": artifacts.workspace_members.join("\n"),
         "adapter_manifest_sections": artifacts.manifest_sections,
         "readme_adapter_crates": artifacts.readme_adapter_crates,
@@ -1151,7 +1152,7 @@ unpinned = { path = "somewhere" }
             let manifest = ManifestLoader::load_from_str(&source);
             assert_eq!(
                 manifest.manifest().capabilities.optional,
-                [Capability::OutboundHttp]
+                [Capability::OutboundHttp, Capability::OutboundImageOptimizer]
             );
             let hosts = manifest
                 .manifest()
@@ -1161,6 +1162,14 @@ unpinned = { path = "somewhere" }
                 .as_deref()
                 .expect("generated outbound hosts");
             assert_eq!(hosts, ["https://*:*"]);
+            let image = manifest
+                .manifest()
+                .triggers
+                .http
+                .iter()
+                .find(|route| route.id.as_deref() == Some("image-demo"))
+                .expect("Fastly image route");
+            assert_eq!(image.adapters, ["fastly"]);
 
             let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README.md");
             assert!(

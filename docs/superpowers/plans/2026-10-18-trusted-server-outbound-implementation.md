@@ -12,6 +12,67 @@
 
 ## Status and Authority
 
+### Scoped Timing and Send-First Override (2026-10-24)
+
+The requester's [scoped approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
+supersedes earlier preimplementation finite-H(K) and timing-only G2 blockers below. Original
+logical deadlines, sources and late-result rejection remain exact; +5 ms stays a measured
+qualification target with unchanged tests and negative evidence, not a hard scheduler guarantee.
+The synchronous optimizer blocking horizon is explicitly **UNKNOWN** until provider evidence.
+Hosted/performance qualification remains blocked; no historical experiment is relabeled.
+
+The [D1d Send-first checkpoint](2026-10-18-trusted-server-outbound-03-drivers.md#send-first-checkpoint-2026-10-24)
+is an implementation sequencing decision under that authorization, not approval of different
+signatures. It attaches typed options to requests/parts, validates support first on all four
+adapters, and maps Fastly single Send directly through existing `execute`/`process_response`.
+Keep the ordinary SDK send branch and current trait unchanged; introduce no separate transport,
+compatibility helper, default or alias. Typed optimizer-unavailable 502 and post-return original
+attributed 504 are required, with existing limits, lazy streams, cleanup and target/header fidelity.
+
+Budget selection still occurs at existing adapter async `send` method entry on first poll, before
+SDK preparation/registration; the checkpoint preserves that selected budget across the native call.
+It does not introduce facade-invocation capture or complete P1. Invocation-time capture remains
+pending with the later atomic head-first/full-trait cut, alongside the existing open engine work.
+
+Full EZ-1 settlement, Follow, B/backend policy, the new engine and atomic head-first/full-trait
+migration remain open. This subset does not depend on completing D1c/P3/P5 or full G2 first,
+but does not complete those tasks. B/domain/cardinality/resource approval, backend policy,
+timers and slack are unchanged; no backend-policy implementation is enabled. Typed body-error
+preservation and fresh-readiness/subsequent-read safety remain requirements. Earlier checkpoint
+prerequisite lists, the EZ-8.10 draft summary and Decisions Before Runtime Changes are read with
+this override. The historical execution/checkpoint records follow unchanged.
+
+### Send-First Implementation Checkpoint
+
+- [x] Attach/read back typed optimizer settings through request parts without changing targets
+      or signature-bearing headers. Demonstrate missing-API red and passing round trips.
+- [x] Reject unsupported adapters/batch modes before ordinary validation, body polling or budget
+      rejection. Prove a rejected Axum image slot leaves its live plain TCP sibling eligible.
+- [x] Map every portable selector directly to pinned SDK fields; use native synchronous Send only
+      for attached options and retain the ordinary async branch and existing backend policy.
+- [x] Preserve selected deadlines through native return and shared response handoff, including
+      equality, late-error detail and release of late successful resources. Retain exact public
+      error text while exposing typed optimizer unavailability.
+- [x] Retain shared body/header limits and lazy streaming; align the Fastly-only demo/scaffold
+      route and capability publication. Keep all historical failed qualification evidence unchanged.
+
+Local verification passes 2,233 workspace tests (one existing ignored build test), all five root
+Rust gates, target lints, all 193 Fastly WASI unit cases and two focused optimizer contract cases,
+384 native Fastly `cli,test-utils` tests, generated-project builds/tests, demo tests, fixture
+replays and documentation guards. These are implementation checks, not hosted transformation,
+deadline-tail or performance certification. The source-selection proof is static; the Viceroy
+unavailable result alone cannot prove optimizer host entry. The full P1/D1d cut remains open.
+
+Two read-only investigations compared Send-first integration with another disconnected mapping
+foundation. The selected path keeps one existing transport and preserves the pending atomic
+trait replacement. An independent final review checked mapping, unsupported-option precedence,
+deadlines, ownership, caps and generated routing; its message/provenance corrections were applied.
+The extra native `cli,test-utils` lint leg exposed an existing no-attempt constructor conditional;
+owning both inputs before selecting the source field removes that redundant conditional drop
+without allocating, cloning or changing source ownership. That lint combination now passes too.
+
+### Prior Execution Status
+
 Execution started with G1's inventory/checker and G2's opt-in host diagnostic. No production
 runtime migration below is complete. The local G2 control failed: timed body readiness consumes a
 source error on pinned Viceroy. See the [feasibility report](../../audits/2026-10-18-outbound-feasibility.md)

@@ -9,6 +9,21 @@
 
 ## 1. Overview
 
+### Native Image Optimizer Checkpoint (2026-10-24)
+
+`OutboundRequest::image_optimizer` attaches typed region, format, quality, resize, dimension,
+crop and query-preservation settings, retained through request parts. Fastly single sends map
+them directly to native SDK options and share ordinary response handling. Other adapters and
+Fastly batch slots reject the option before ordinary preflight or body polling. Begun requests,
+redirect following and forwarded empty GET/HEAD settlement remain adoption-plan work, not
+implemented by this checkpoint. No compatibility client or alternate transport is introduced.
+
+The [scoped timing amendment](../../audits/2026-10-18-outbound-api-approval.md)
+preserves original deadlines and rejection of late results. The synchronous optimizer call cannot
+be interrupted; its full blocking horizon is unknown. The +5 ms timing target is qualification
+evidence, not a hard scheduler guarantee. Existing failed evidence is retained. Native mapping
+and local entitlement rejection do not qualify hosted transforms, pooling or performance.
+
 ### 1.1 Goal
 
 Make EdgeZero a production-safe substrate for **outbound HTTP fan-out**: an app must be
@@ -2991,6 +3006,7 @@ pub enum BadGatewayDecodeReason { Brotli, Deflate, Gzip, Json }
 #[non_exhaustive]
 pub enum BadGatewayReason {
     Decode(BadGatewayDecodeReason),
+    ImageOptimizerUnavailable,
     Protocol,
     Transport,
     Unreachable,
@@ -3819,9 +3835,16 @@ Capability matrix (all four adapters):
 | `outbound-header-fidelity` | Native | BestEffort⁸ | Native | BestEffort⁸ |
 | `outbound-deadlines` | Native | BestEffort⁸ | BestEffort¹ | BestEffort⁸ |
 | `outbound-failure-diagnostics` | BestEffort | BestEffort | Native | Native |
+| `outbound-image-optimizer` | Unsupported | Unsupported | BestEffort[^native-image-optimizer] | Unsupported |
 | `outbound-flexible-phase-budget` | Native | Native | BestEffort⁵ | BestEffort⁵ |
 | `streamed-upload-deadlines` | Native | BestEffort⁸ | BestEffort² | BestEffort⁸ |
 | `lazy-streamed-response-passthrough` | Native³ | Native | BestEffort⁶ | BestEffort⁷ |
+
+[^native-image-optimizer]: Fastly single sends require optimizer entitlement and an explicit
+    region, bodiless GET/HEAD and default caching. The synchronous call has no proved total
+    blocking horizon; late returns become the original attributed 504. Viceroy returns typed
+    `BadGatewayReason::ImageOptimizerUnavailable` (502). Buffered/streamed response caps,
+    provenance and normalization are unchanged. Hosted behavior and performance remain unqualified.
 
 [^spin-authority]: Spin's WASI HTTP authority is both the connection target and outgoing HTTP
     authority. EdgeZero rejects an explicit override before body polling or provider dispatch

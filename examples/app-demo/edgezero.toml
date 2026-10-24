@@ -8,7 +8,7 @@ kind = "http"
 entry = "crates/app-demo-core"
 
 [capabilities]
-optional = ["outbound-http"]
+optional = ["outbound-http", "outbound-image-optimizer"]
 
 [capabilities.outbound]
 hosts = ["https://*:*"]
@@ -84,6 +84,15 @@ handler = "app_demo_core::handlers::fanout"
 adapters = ["axum", "cloudflare", "fastly", "spin"]
 class = "outbound"
 description = "Concurrent positional outbound batch with per-slot elapsed time"
+
+[[triggers.http]]
+id = "image-demo"
+path = "/image-demo"
+methods = ["GET"]
+handler = "app_demo_core::handlers::image_demo"
+adapters = ["fastly"]
+class = "outbound"
+description = "Native image optimization; requires Fastly entitlement"
 
 [[triggers.http]]
 id = "config_get"

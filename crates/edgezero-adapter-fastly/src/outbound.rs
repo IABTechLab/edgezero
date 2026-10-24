@@ -1,6 +1,13 @@
 #![cfg_attr(
     feature = "fastly",
     expect(
+        clippy::self_named_module_files,
+        reason = "retain the repository module-file convention despite contradictory restriction lints"
+    )
+)]
+#![cfg_attr(
+    feature = "fastly",
+    expect(
         clippy::arbitrary_source_item_ordering,
         reason = "the target-gated implementation module is kept before shared test seams"
     )
@@ -12,6 +19,9 @@
         reason = "the target-gated implementation keeps Fastly imports out of native builds"
     )
 )]
+
+#[cfg(feature = "fastly")]
+mod image_optimizer;
 
 #[cfg(any(feature = "fastly", test))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +49,7 @@ static NEXT_BACKEND_NAMESPACE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SendFailure {
     BudgetedTimeout,
+    ImageOptimizerUnavailable,
     LocalInvariant,
     PlatformInternal,
     ProviderTimeout,
@@ -75,6 +86,10 @@ fn classify_send_failure(
     }
     match failure {
         SendFailure::BudgetedTimeout => timeout_error(budget.cause),
+        SendFailure::ImageOptimizerUnavailable => EdgeError::bad_gateway_with_reason(
+            "Fastly outbound request failed",
+            BadGatewayReason::ImageOptimizerUnavailable,
+        ),
         SendFailure::ProviderTimeout => timeout_error(BudgetSource::Unspecified),
         SendFailure::Unreachable => EdgeError::bad_gateway_with_reason(
             "outbound destination could not be reached",
@@ -108,6 +123,43 @@ fn test_budget(started_at: MonotonicInstant, cause: BudgetSource) -> DispatchBud
     }
 }
 
+#[cfg(any(feature = "fastly", test))]
+fn synchronous_send_until<Output, Send>(
+    budget: DispatchBudget,
+    clock: &edgezero_core::MonotonicClock,
+    send: Send,
+) -> Result<Output, EdgeError>
+where
+    Send: FnOnce() -> Result<Output, EdgeError>,
+{
+    let entered = clock.now();
+    if budget.deadline.is_expired_at(entered) {
+        return Err(timeout_error(budget.cause));
+    }
+    let outcome = send();
+    let returned = clock.now();
+    if returned < entered {
+        return Err(EdgeError::internal(anyhow::anyhow!(
+            "outbound clock moved backwards during native send"
+        )));
+    }
+    if budget.deadline.is_expired_at(returned) {
+        let mut selected = timeout_error(budget.cause);
+        if let EdgeError::GatewayTimeout {
+            provider_detail, ..
+        } = &mut selected
+        {
+            *provider_detail = outcome
+                .as_ref()
+                .err()
+                .and_then(EdgeError::provider_failure_detail)
+                .copied();
+        }
+        return Err(selected);
+    }
+    outcome
+}
+
 #[cfg(test)]
 fn assert_send_failure_error(failure: SendFailure, error: &EdgeError, selected: BudgetSource) {
     match failure {
@@ -132,6 +184,13 @@ fn assert_send_failure_error(failure: SendFailure, error: &EdgeError, selected: 
             error,
             EdgeError::BadGateway {
                 reason: BadGatewayReason::Transport,
+                ..
+            }
+        )),
+        SendFailure::ImageOptimizerUnavailable => assert!(matches!(
+            error,
+            EdgeError::BadGateway {
+                reason: BadGatewayReason::ImageOptimizerUnavailable,
                 ..
             }
         )),
@@ -432,6 +491,7 @@ mod fastly_impl {
                 body,
                 cache_policy,
                 headers,
+                image_optimizer,
                 max_decoder_bytes,
                 max_brotli_window_bits,
                 max_chunk_bytes,
@@ -452,12 +512,23 @@ mod fastly_impl {
                 Body::Once(bytes) => {
                     validate_request_body_length(&bytes, max_request_body_bytes)?;
                     let mut buffered_request = fastly_request;
-                    buffered_request.set_body(bytes.to_vec());
-                    dispatch_guard(started_at, budget, &self.clock)?;
-                    let pending = buffered_request
-                        .send_async(backend)
-                        .map_err(|error| map_send_error(&error, budget, &self.clock))?;
-                    wait_pending(pending, budget, &self.clock)?
+                    if let Some(options) = image_optimizer {
+                        buffered_request
+                            .set_image_optimizer(super::image_optimizer::native_options(&options)?);
+                        dispatch_guard(started_at, budget, &self.clock)?;
+                        super::synchronous_send_until(budget, &self.clock, || {
+                            buffered_request
+                                .send(backend)
+                                .map_err(|error| map_send_error(&error, budget, &self.clock))
+                        })?
+                    } else {
+                        buffered_request.set_body(bytes.to_vec());
+                        dispatch_guard(started_at, budget, &self.clock)?;
+                        let pending = buffered_request
+                            .send_async(backend)
+                            .map_err(|error| map_send_error(&error, budget, &self.clock))?;
+                        wait_pending(pending, budget, &self.clock)?
+                    }
                 }
                 Body::Stream(source) => {
                     send_streamed(
@@ -1089,8 +1160,10 @@ mod fastly_impl {
             | SendErrorCause::HttpRequestCacheKeyInvalid
             | SendErrorCause::HttpRequestUriInvalid => super::SendFailure::LocalInvariant,
             SendErrorCause::InternalError(_) => super::SendFailure::PlatformInternal,
+            SendErrorCause::ImageOptimizerUnsupported => {
+                super::SendFailure::ImageOptimizerUnavailable
+            }
             SendErrorCause::FanoutNotEnabled
-            | SendErrorCause::ImageOptimizerUnsupported
             | SendErrorCause::RequestCollapse
             | SendErrorCause::Custom(_)
             | _ => super::SendFailure::Unknown,
@@ -1158,6 +1231,7 @@ mod fastly_impl {
             HeaderValue::from_static("fastly"),
         )?;
         if disposition == ResponseBodyDisposition::FramingBodyless {
+            budget_remaining(budget, &clock)?;
             return Ok(OutboundResponse::new(
                 request_method,
                 status,
@@ -1182,6 +1256,7 @@ mod fastly_impl {
                     item?;
                 }
             }
+            budget_remaining(budget, &clock)?;
             return Ok(OutboundResponse::new(
                 request_method,
                 status,
@@ -1213,6 +1288,7 @@ mod fastly_impl {
             }
             ResponseMode::Streamed => Body::from_stream(deadline_bound),
         };
+        budget_remaining(budget, &response_clock)?;
         Ok(OutboundResponse::new(
             request_method,
             status,
@@ -1576,6 +1652,116 @@ mod fastly_impl {
                 cause: BudgetSource::PerCallTimeout,
                 deadline: Deadline::at_instant(start.checked_add(duration).expect("deadline")),
                 duration,
+            }
+        }
+
+        #[test]
+        fn image_optimizer_response_processing_rejects_late_handoff() {
+            for (method, status) in [
+                (Method::HEAD, StatusCode::OK),
+                (Method::GET, StatusCode::NO_CONTENT),
+                (Method::GET, StatusCode::OK),
+            ] {
+                let start = MonotonicInstant::now();
+                let budget = clock_budget(start, Duration::from_secs(1));
+                let clock = scripted_clock(vec![start, budget.deadline.instant()]);
+                let response = FastlyResponse::from_status(status);
+                let result = block_on(process_response(
+                    response,
+                    method,
+                    OutboundProxyMarker::Off,
+                    ResponseDecoding::Decode,
+                    ResponseMode::Streamed,
+                    budget,
+                    0x0010_0000,
+                    24,
+                    None,
+                    Some(16),
+                    Some(16),
+                    Some(1024),
+                    Some(10),
+                    clock,
+                ));
+                assert!(
+                    matches!(
+                        result,
+                        Err(EdgeError::GatewayTimeout {
+                            cause: BudgetSource::PerCallTimeout,
+                            ..
+                        })
+                    ),
+                    "late finalization must not hand off a successful response"
+                );
+            }
+        }
+
+        #[test]
+        fn image_optimizer_response_uses_shared_limits_and_lazy_stream() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            for (mode, encoded, decoded, expected) in [
+                (ResponseMode::Streamed, 8, 8, None),
+                (
+                    ResponseMode::Streamed,
+                    7,
+                    8,
+                    Some(ResponseLimitReason::EncodedBody),
+                ),
+                (
+                    ResponseMode::Streamed,
+                    8,
+                    7,
+                    Some(ResponseLimitReason::DecodedBody),
+                ),
+                (
+                    ResponseMode::Buffered { max_bytes: 7 },
+                    8,
+                    8,
+                    Some(ResponseLimitReason::BufferedBody),
+                ),
+            ] {
+                let start = MonotonicInstant::now();
+                let samples = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&samples);
+                let clock = MonotonicClock::new(move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    start
+                });
+                let native = FastlyResponse::from_body("12345678");
+                let processed = block_on(process_response(
+                    native,
+                    Method::GET,
+                    OutboundProxyMarker::Off,
+                    ResponseDecoding::Decode,
+                    mode,
+                    clock_budget(start, Duration::from_secs(1)),
+                    0x0010_0000,
+                    24,
+                    None,
+                    Some(decoded),
+                    Some(encoded),
+                    Some(1024),
+                    Some(10),
+                    clock,
+                ));
+                let outcome = match processed {
+                    Ok(response) => {
+                        assert!(response.body().is_stream());
+                        assert_eq!(
+                            samples.load(Ordering::SeqCst),
+                            2,
+                            "no native body read before handoff"
+                        );
+                        block_on(response.into_bytes_bounded(8))
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Some(expected_reason) = expected {
+                    assert!(
+                        matches!(outcome, Err(EdgeError::ResponseTooLarge { reason, .. }) if reason == expected_reason)
+                    );
+                } else {
+                    assert_eq!(outcome.unwrap(), Bytes::from_static(b"12345678"));
+                }
             }
         }
 
@@ -2962,7 +3148,7 @@ mod fastly_impl {
                 ),
                 (
                     SendErrorCause::ImageOptimizerUnsupported,
-                    super::super::SendFailure::Unknown,
+                    super::super::SendFailure::ImageOptimizerUnavailable,
                 ),
                 (
                     SendErrorCause::InternalError(None),
@@ -3037,6 +3223,11 @@ fn reassociate_selection<Metadata>(
 
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
 fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
+    if request.image_optimizer_options().is_some() {
+        return Err(EdgeError::bad_request(
+            "image_optimizer is not supported by fastly batches",
+        ));
+    }
     validate_for_dispatch(request)?;
     if request.is_stream_body() {
         return Err(EdgeError::bad_request(
@@ -3081,6 +3272,95 @@ mod send_failure_policy_tests {
     use futures_util::stream;
 
     use super::*;
+
+    #[test]
+    fn image_optimizer_sync_call_preserves_original_deadline_and_releases_late_response() {
+        use edgezero_core::MonotonicClock;
+        use std::sync::{Arc, Mutex};
+
+        struct Release(Arc<AtomicU64>);
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "Drop::pin_drop is unstable and conflicts with drop"
+        )]
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        for cause in [
+            BudgetSource::Default,
+            BudgetSource::PerCallTimeout,
+            BudgetSource::RequestDeadline,
+            BudgetSource::BatchCutoff,
+        ] {
+            for delta in [999_999_999, 1_000_000_000, 1_000_000_001] {
+                let start = MonotonicInstant::now();
+                let now = Arc::new(Mutex::new(start));
+                let samples = Arc::clone(&now);
+                let clock = MonotonicClock::new(move || *samples.lock().unwrap());
+                let drops = Arc::new(AtomicU64::new(0));
+                let released = Arc::clone(&drops);
+                let result = synchronous_send_until(test_budget(start, cause), &clock, || {
+                    *now.lock().unwrap() = start.checked_add(Duration::from_nanos(delta)).unwrap();
+                    Ok(Release(released))
+                });
+                if delta < 1_000_000_000 {
+                    assert!(result.is_ok());
+                    assert_eq!(drops.load(Ordering::SeqCst), 0);
+                    drop(result);
+                } else {
+                    assert!(
+                        matches!(result, Err(EdgeError::GatewayTimeout { cause: selected, .. }) if selected == cause)
+                    );
+                }
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn image_optimizer_sync_call_preserves_late_error_detail_and_skips_expired_dispatch() {
+        use edgezero_core::{
+            FastlyFailureCause, MonotonicClock, ProviderFailureDetail, ProviderFailurePhase,
+        };
+        use std::sync::{Arc, Mutex};
+
+        let start = MonotonicInstant::now();
+        let budget = test_budget(start, BudgetSource::RequestDeadline);
+        let now = Arc::new(Mutex::new(start));
+        let samples = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *samples.lock().unwrap());
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::Send,
+            cause: FastlyFailureCause::ImageOptimizerUnsupported,
+        };
+        let error = synchronous_send_until::<(), _>(budget, &clock, || {
+            *now.lock().unwrap() = budget.deadline.instant();
+            Err(EdgeError::bad_gateway_with_detail(
+                "Fastly outbound request failed",
+                BadGatewayReason::ImageOptimizerUnavailable,
+                detail,
+            ))
+        })
+        .expect_err("late provider failure");
+        assert!(matches!(
+            error,
+            EdgeError::GatewayTimeout {
+                cause: BudgetSource::RequestDeadline,
+                ..
+            }
+        ));
+        assert_eq!(error.provider_failure_detail(), Some(&detail));
+        synchronous_send_until::<(), _>(budget, &clock, || {
+            panic!("expired request must not dispatch")
+        })
+        .expect_err("already expired");
+        let unavailable =
+            classify_send_failure(SendFailure::ImageOptimizerUnavailable, budget, start);
+        assert_eq!(unavailable.message(), "Fastly outbound request failed");
+        assert_eq!(unavailable.to_string(), "Fastly outbound request failed");
+    }
 
     #[test]
     fn independent_clients_use_distinct_backend_names() {
@@ -3252,9 +3532,10 @@ mod send_failure_policy_tests {
         ));
     }
 
-    fn failures() -> [SendFailure; 8] {
+    fn failures() -> [SendFailure; 9] {
         [
             SendFailure::BudgetedTimeout,
+            SendFailure::ImageOptimizerUnavailable,
             SendFailure::LocalInvariant,
             SendFailure::PlatformInternal,
             SendFailure::ProviderTimeout,

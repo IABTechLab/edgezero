@@ -230,10 +230,11 @@ pub enum OutboundImageOptimizerRegion {
     UsWest,
 }
 
-/// Standalone validated transformation settings with no implicit selectors.
+/// Validated native transformation settings with no implicit selectors.
 ///
-/// These values support construction and readback only in this foundation. Request attachment
-/// and provider execution are not yet implemented. Query preservation defaults to false.
+/// Attach with [`OutboundRequest::image_optimizer`]. Only Fastly single sends support these
+/// settings; their synchronous provider call cannot be interrupted. Query preservation
+/// defaults to false. Transformation and performance qualification require hosted evidence.
 ///
 /// ```compile_fail
 /// use edgezero_core::OutboundImageOptimizerOptions;
@@ -265,6 +266,7 @@ pub struct OutboundRequest {
     deadline: Option<Deadline>,
     headers: HeaderMap,
     host_authority_override: Option<Authority>,
+    image_optimizer: Option<OutboundImageOptimizerOptions>,
     max_brotli_window_bits: u8,
     max_chunk_bytes: Option<NonZeroU64>,
     max_decoded_response_bytes: Option<u64>,
@@ -289,6 +291,7 @@ pub struct OutboundRequestParts {
     pub deadline: Option<Deadline>,
     pub headers: HeaderMap,
     pub host_authority_override: Option<Authority>,
+    pub image_optimizer: Option<OutboundImageOptimizerOptions>,
     pub max_brotli_window_bits: u8,
     pub max_chunk_bytes: Option<NonZeroU64>,
     pub max_decoded_response_bytes: Option<u64>,
@@ -1183,6 +1186,7 @@ impl OutboundRequest {
                 .host_authority_override
                 .map(validate_host_authority_override)
                 .transpose()?,
+            image_optimizer: parts.image_optimizer,
             max_decoder_bytes: parts.max_decoder_bytes,
             max_brotli_window_bits: parts.max_brotli_window_bits,
             max_chunk_bytes: parts.max_chunk_bytes,
@@ -1311,6 +1315,24 @@ impl OutboundRequest {
             .unwrap_or(host)
     }
 
+    /// Attaches native optimizer settings without changing the target or headers.
+    ///
+    /// Fastly supports these only for bodiless GET/HEAD single sends with default caching.
+    /// Its synchronous optimizer call has no established blocking-time bound; late results
+    /// are rejected against the original deadline when control returns.
+    #[must_use]
+    #[inline]
+    pub fn image_optimizer(mut self, options: OutboundImageOptimizerOptions) -> Self {
+        self.image_optimizer = Some(options);
+        self
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn image_optimizer_options(&self) -> Option<&OutboundImageOptimizerOptions> {
+        self.image_optimizer.as_ref()
+    }
+
     #[must_use]
     #[inline]
     pub fn into_parts(self) -> OutboundRequestParts {
@@ -1320,6 +1342,7 @@ impl OutboundRequest {
             deadline: self.deadline,
             headers: self.headers,
             host_authority_override: self.host_authority_override,
+            image_optimizer: self.image_optimizer,
             max_decoder_bytes: self.max_decoder_bytes,
             max_brotli_window_bits: self.max_brotli_window_bits,
             max_chunk_bytes: self.max_chunk_bytes,
@@ -1540,6 +1563,7 @@ impl OutboundRequest {
             deadline: None,
             headers: HeaderMap::new(),
             host_authority_override: None,
+            image_optimizer: None,
             max_decoder_bytes: DEFAULT_MAX_DECODER_BYTES,
             max_brotli_window_bits: 24,
             max_chunk_bytes: None,
@@ -1909,6 +1933,7 @@ pub fn rechunk_stream(mut source: BodyStream, optional_maximum: Option<NonZeroU6
 /// adapters may reject additional target-specific constraints during request preparation.
 #[inline]
 pub fn validate_for_dispatch(request: &OutboundRequest) -> Result<(), EdgeError> {
+    image_optimizer::validate_options(request)?;
     if !matches!(
         request.method,
         Method::GET

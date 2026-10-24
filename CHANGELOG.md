@@ -38,6 +38,36 @@ separately from the portable API and must be considered when declaring required 
 - Add real compiler regressions and workspace CI activation with pinned Node. This compile-only
   prerequisite does not replace runtime forwarding tests or provider qualification.
 
+### Native Image Optimizer
+
+- Record the requester's scoped 2026-10-24 timing/native-integration approval: original logical
+  deadlines and late-result rejection remain; +5 ms stays a measured qualification target/test,
+  not a hard scheduler guarantee. The synchronous optimizer blocking horizon is explicitly UNKNOWN
+  until provider evidence. Preserve historical failures; hosted/performance qualification stays blocked.
+- Add a Send-first optimizer checkpoint through existing `execute`/`process_response`, with typed
+  request/parts attachment, support-first checks on all four adapters, direct SDK single-Send mapping,
+  `BadGatewayReason::ImageOptimizerUnavailable` on the non-exhaustive core reason enum and post-return
+  original attributed 504. Map SDK `SendErrorCause::ImageOptimizerUnsupported` to a 502 while preserving
+  the existing message `Fastly outbound request failed` exactly; only the typed reason/provider detail
+  distinguish this cause. Keep the ordinary SDK send branch
+  and current trait unchanged; add no separate transport, default, alias or compatibility helper.
+  This is an implementation sequencing decision, not approval of different signatures or a claim
+  of full migration completion. Full EZ-1 settlement, Follow, B/backend policy, engine and atomic head-first
+  migration stay open. Backend B/resource constraints, policy, timers and slack are not approved or
+  changed; typed body-error/readiness safety remains required. No deployment or performance claim.
+- Clarify the checkpoint's timing anchor: the current async `send` selects its budget at adapter
+  method entry on first poll, before SDK preparation/registration, and preserves it across the native
+  call. Facade-invocation capture and full P1 remain pending with the later atomic head-first/trait
+  cut. Static inspection confirms native SDK `.send` selection, not runtime host entry. The
+  `image_optimizer_unavailable_is_typed_on_viceroy` test proves option retention and typed unavailable
+  errors only; SDK `.send_async` can return the same unsupported error without host entry. Synthetic
+  successful-response cap/laziness checks do not establish hosted image transformation or qualification.
+- Publish `outbound-image-optimizer` as BestEffort for Fastly single sends and Unsupported on
+  other adapters. Add a Fastly-only `/image-demo` example to the demo and matching generated
+  projects, retaining response limits, native default caching and explicit typed settings.
+- Remove the redundant conditional source-error drop from Fastly's no-attempt constructor;
+  retain original private source ownership and check the native `cli,test-utils` build too.
+
 ### Qualification Evidence Preparation
 
 - Reject empty measurement lists for comparison-required legs and mark hosted Image Optimizer

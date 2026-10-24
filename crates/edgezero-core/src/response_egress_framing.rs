@@ -253,6 +253,9 @@ pub fn response_egress_source_error_category(error: &EdgeError) -> &'static str 
                 BadGatewayDecodeReason::Gzip => "bad_gateway_decode_gzip",
                 BadGatewayDecodeReason::Json => "bad_gateway_decode_json",
             },
+            BadGatewayReason::ImageOptimizerUnavailable => {
+                "bad_gateway_image_optimizer_unavailable"
+            }
             BadGatewayReason::Protocol => "bad_gateway_protocol",
             BadGatewayReason::Transport => "bad_gateway_transport",
             BadGatewayReason::Unreachable => "bad_gateway_unreachable",

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
-  "source_digest": "590d3bb05f2908df08ed5f4cab19d2cd373041eb3206b26fda401d74682dec4e",
+  "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
   "status": "planned inventory; commands and applicability require owner review before activation; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
@@ -12,7 +12,7 @@
     {
       "requirement": "G4",
       "status": "Pending",
-      "reason": "API-only exact-digest approval is attributed to AG; Fastly primitive/policy, literal B and numerical H(K) remain unproved/unapproved."
+      "reason": "Original API approval and the requester's scoped 2026-10-24 timing/native-integration amendment are recorded in docs/audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment. Send-first integration may proceed on the unchanged current trait with UNKNOWN synchronous blocking horizon; timing-only G2/finite-H(K) proof is not a preimplementation gate. Literal B/backend policy/resources remain unapproved; timers/slack and typed body-error/readiness safety are unchanged. Full settlement/Follow/engine/atomic migration and hosted/performance qualification remain open."
     },
     {
       "requirement": "EZ-2/M1-M7",
@@ -10016,7 +10016,7 @@
     {
       "case_id": "EZ-8/acceptance/02",
       "source_id": "EZ-8/acceptance/02",
-      "source_digest": "689deddef99ec188cec77cb48eefd24138d6e4945c72a51e81f00efb20381527",
+      "source_digest": "66faae98ff4c480aa7c8747a41e291d7259ec51f9638bf5339d4fa3c6e56e10c",
       "requirement_ids": [
         "EZ-8.1",
         "EZ-8.2",
@@ -10045,7 +10045,7 @@
       "substep": "EZ-8-acceptance-02-unit-fastly",
       "sentinel": "ez_8_acceptance_02_unit_fastly",
       "command": "scripts/run_test_nonzero.sh ez_8_acceptance_02_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
-      "expected": "Unit with injected time and a scripted host-call boundary. Budgets of 1 ns, 100 microseconds, 999,999 ns, 1 ms, and 1,000,001 ns keep their original deadlines and attributed timeout sources. Zero/expired budgets dispatch nothing. With the same 1 s per-call timeout and different absolute deadlines (including a 100-microsecond effective budget), plain and optimized requests retain the same eligible backend `K` and timers, with `H(K)` from the approved rule. Cover each deadline-only policy boundary and maximum-domain case, preparation consuming almost all budget, and registration returning late. A successful or failed host return at `D` becomes the original attributed 504; no pre-dispatch refusal is counted as proof of a bounded host call. A timely optimized head followed by a permanently pending body still reaches its ordinary deadline +5 ms bound.",
+      "expected": "Unit with injected time and a scripted host-call boundary. Budgets of 1 ns, 100 microseconds, 999,999 ns, 1 ms, and 1,000,001 ns keep their original deadlines and attributed timeout sources. Zero/expired budgets dispatch nothing. With the same 1 s per-call timeout and different absolute deadlines (including a 100-microsecond effective budget), plain and optimized requests retain the same eligible backend `K` and timers; the synchronous blocking horizon remains explicitly UNKNOWN until provider evidence. Cover each deadline-only policy boundary and maximum-domain case, preparation consuming almost all budget, and registration returning late. A successful or failed host return at `D` becomes the original attributed 504; no pre-dispatch refusal is counted as proof of a bounded host call. A timely optimized head followed by a permanently pending body retains its original deadline and measured +5 ms qualification target, without a hard scheduler guarantee or an uninterruptible body-read fallback.",
       "artifact_path": "outbound/EZ-8/acceptance/02/unit/fastly.json",
       "implementation": "planned",
       "comparison": false

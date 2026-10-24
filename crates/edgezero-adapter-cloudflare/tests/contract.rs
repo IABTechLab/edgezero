@@ -1515,6 +1515,19 @@ mod native_tests {
         use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
         use edgezero_core::outbound::OutboundRequest;
         use futures_util::stream;
+        use std::time::Duration;
+
+        #[test]
+        fn image_optimizer_rejection_precedes_other_preflight() {
+            let request = OutboundRequest::get("https://example.com/image")
+                .unwrap()
+                .image_optimizer(edgezero_core::OutboundImageOptimizerOptions::new())
+                .body(Body::from_stream(stream::pending()))
+                .timeout(Duration::ZERO);
+            let error = validate_batch_request_for_test(&request).expect_err("unsupported option");
+            assert!(error.message().contains("image_optimizer"));
+            assert!(error.message().contains("cloudflare"));
+        }
 
         fn message(result: Result<(), EdgeError>) -> Option<String> {
             if let Err(EdgeError::BadRequest { message, .. }) = result {

@@ -1329,7 +1329,7 @@ mod tests {
 
     #[test]
     fn adapter_capability_matrix_matches_contracts() {
-        let expected = [
+        for (capability, support) in [
             (
                 Capability::ConfigReadAllocationBounds,
                 CapabilitySupport::Unsupported,
@@ -1411,6 +1411,10 @@ mod tests {
             ),
             (Capability::OutboundCacheBypass, CapabilitySupport::Native),
             (
+                Capability::OutboundImageOptimizer,
+                CapabilitySupport::Unsupported,
+            ),
+            (
                 Capability::StreamedUploadDeadlines,
                 CapabilitySupport::BestEffort,
             ),
@@ -1418,9 +1422,7 @@ mod tests {
                 Capability::LazyStreamedResponsePassthrough,
                 CapabilitySupport::BestEffort,
             ),
-        ];
-
-        for (capability, support) in expected {
+        ] {
             assert_eq!(
                 SPIN_ADAPTER.capability(capability),
                 support,

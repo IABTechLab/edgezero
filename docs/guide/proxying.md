@@ -4,6 +4,49 @@ EdgeZero exposes one provider-neutral HTTP client to handlers. Adapters inject a
 into request extensions, while application code builds `OutboundRequest` values and receives
 typed `OutboundResponse` or `EdgeError` outcomes.
 
+## Native Image Optimization
+
+Fastly single sends can request native image optimization from portable code:
+
+```rust
+use edgezero_core::{OutboundImageFormat, OutboundImageOptimizerOptions,
+    OutboundImageOptimizerRegion, OutboundRequest};
+
+let options = OutboundImageOptimizerOptions::new()
+    .region(OutboundImageOptimizerRegion::UsEast)
+    .format(OutboundImageFormat::WebP)
+    .width(100)?;
+let request = OutboundRequest::get("https://images.example.com/photo.jpg")?
+    .image_optimizer(options)
+    .max_encoded_response_bytes(2 * 1024 * 1024)
+    .max_decoded_response_bytes(4 * 1024 * 1024)
+    .max_response_header_bytes(64 * 1024)
+    .max_response_header_count(100)
+    .stream_response()
+    .timeout(std::time::Duration::from_secs(2));
+assert!(request.image_optimizer_options().is_some());
+// Send through the existing request-context HttpClient.
+```
+
+Only bodiless GET/HEAD and `PlatformDefault` caching are supported. Do not combine this with
+cache bypass. Region is required; no default region or transformation is invented. Other
+adapters and Fastly batch slots reject `image_optimizer` before body polling or dispatch.
+Viceroy and services without the feature return typed `BadGatewayReason::ImageOptimizerUnavailable`
+(502), retaining text-free provider detail. There is no software fallback or automatic extra fetch.
+
+The SDK's optimizer call is synchronous and cannot be cancelled while executing. Its complete
+blocking horizon is **unknown**: a timeout does not promise prompt return from that call. When
+control returns, the original absolute deadline wins, including over a late successful transform.
+Normal header/body limits, content-encoding policy and lazy streamed delivery apply to the result.
+Hosted transformation and performance parity remain unqualified.
+
+EdgeZero retains the built target and signature-bearing headers subject to normal filtering.
+The provider separately interprets optimizer query parameters, with explicit options taking
+precedence. `preserve_origin_query(true)` preserves only other query parameters at the origin;
+it does not stop that transformation. Query stripping before signing, SVG selection, profiles,
+authorization and any preflight requests remain application policy. Forwarded inbound GET/HEAD
+settlement and optimizer redirect following are not implemented by this checkpoint.
+
 ## Forward An Inbound Request
 
 This example preserves the inbound method and body, replaces the target URI, removes a private

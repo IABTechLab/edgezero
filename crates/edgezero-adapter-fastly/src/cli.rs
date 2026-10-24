@@ -2054,6 +2054,7 @@ impl Adapter for FastlyCliAdapter {
             | Capability::OutboundDeadlines
             | Capability::OutboundFlexiblePhaseBudget
             | Capability::OutboundHttp
+            | Capability::OutboundImageOptimizer
             | Capability::ResponseEgressAbort
             | Capability::ResponseEgressBackpressure
             | Capability::ResponseEgressCompletion
@@ -6864,7 +6865,7 @@ mod tests {
 
     #[test]
     fn adapter_capability_matrix_matches_outbound_spec() {
-        let expected = [
+        for (capability, support) in [
             (
                 Capability::ConfigReadAllocationBounds,
                 CapabilitySupport::Unsupported,
@@ -6946,6 +6947,10 @@ mod tests {
             ),
             (Capability::OutboundCacheBypass, CapabilitySupport::Native),
             (
+                Capability::OutboundImageOptimizer,
+                CapabilitySupport::BestEffort,
+            ),
+            (
                 Capability::StreamedUploadDeadlines,
                 CapabilitySupport::BestEffort,
             ),
@@ -6953,9 +6958,7 @@ mod tests {
                 Capability::LazyStreamedResponsePassthrough,
                 CapabilitySupport::BestEffort,
             ),
-        ];
-
-        for (capability, support) in expected {
+        ] {
             assert_eq!(
                 FASTLY_ADAPTER.capability(capability),
                 support,
