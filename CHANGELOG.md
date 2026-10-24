@@ -40,6 +40,11 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Expand the opt-in Fastly readiness diagnostic to eleven controlled origin cases, buffered and
+  pull-streamed consumption, two read capacities and three repetitions: 135 probes / 147 requests.
+  Require complete inventories, fresh per-slot readiness, unchanged absolute deadlines, typed
+  source errors and joined bounded origins. Persist partial traces before failures. Retain negative
+  timing evidence without widening +5 ms or promoting production/hosted guarantees.
 - Carry a Viceroy 0.21.0 source patch with co-located readiness regressions and an explicit build/
   runtime-override recipe. Preserve typed errors and yield on empty/no-output frames. Retain
   stock-versus-repaired guest evidence separately; version pins, installed runtime, production

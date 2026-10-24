@@ -134,6 +134,48 @@ framing/buffered/streamed ABI cases, exact-version review, B/H(K) approvals and 
 still open. The earlier failed evidence is unchanged; this report does not approve the atomic
 production migration or promote any capability.
 
+## G2 Expanded Primitive Matrix (2026-10-23)
+
+The [separate matrix record](evidence/2026-10-23-fastly-readiness-matrix.json) extends the
+diagnostic, not the production client. Eleven cases cover silent heads, pending bodies, trickle,
+two siblings with only the second body ready, ready-then-exhausted, ordinary/empty EOF, truncated
+bodies, malformed heads/chunks and pre-head connection closure. Each selected case runs buffered
+and pull-streamed, with capacities 1/16384 and three repetitions. Three finite direct truncation
+controls bring each full run to 135 probes and 147 correlated origin requests.
+
+The guest borrows live handle identities for timed ABI select, then consumes a ready pending head
+through nonblocking `PendingRequestHandle::poll`, not `wait`. Body reads consume one fresh
+same-slot readiness result each. Positive millisecond waits are recomputed from one 500 ms absolute
+deadline, floored with a one-millisecond minimum; early timer wakes rearm against that same instant.
+Expiry wins over late readiness/read outcomes. Stream ownership transfers before any body read,
+without resetting the clock; its consumer discards chunks instead of retaining the buffered body.
+The two capacities are diagnostic variations, not an approved production maximum. Backend
+registration is outside this window and phase timers are fixed at two seconds, so this is not a
+backend-policy or whole-entry synchronous-call bound.
+
+The validator requires complete unique identities, origin receipts/cleanup, monotonic raw samples,
+fresh selection (including a final matching wait for each timeout), actual read/EOF/error outcomes,
+matching terminal summaries and all completion
+times within 505 ms. FNV is only a tiny known-payload checksum, not a provenance hash. Source,
+guest, runtime and retained trace identities use SHA-256. Completed samples are also logged
+incrementally, including failed ABI outcomes, so a failed guest does not erase its preceding trace.
+
+The first complete repaired run failed: pending-body/streamed/1/repetition-0 completed at
+507.794 ms (the timed select itself returned at 507.153 ms). Its source errors were preserved.
+The same guest bytes on stock Viceroy lost truncated/malformed-body errors and had late samples.
+After the trace-retention/deadline-check repairs, a fresh identical-guest stock/repaired pair
+still failed: stock lost 24 selected source errors; repaired preserved them but completed
+siblings/selected/streamed/1/repetition-1 at 507.233 ms. All four runs (540 probes) are retained
+and replayed by the validator's regression test; the earlier failures are not replaced by later runs.
+The lateness is observed at the host-call boundary; these traces do not isolate an OS/runtime
+scheduling cause or establish a deterministic interruption bound. The +5 ms limit is unchanged.
+
+Each origin owns at most two workers, a 4096-byte request-head cap and a three-second watchdog;
+finish/drop closes sockets, wakes timers and joins workers. Harness-forced shutdown is labelled,
+not SDK cancellation. Guest handle release is not proof of hosted transport teardown. All results
+remain working-tree characterization. Full G2 is **Failed**, hosted remains **PendingExternal**,
+and B/H(K), exact-version review, production migration and candidate freeze remain separate gates.
+
 ## G3 Local Characterization
 
 The initial default-off `progress` fixture feature uses direct SDK operations, not a second production

@@ -265,6 +265,20 @@ Independent review reproduced the embedded-fence bug before its fix and cleared 
 Inventory validation still reports 255 criteria and 511 planned, unqualified environment legs.
 These results are local source verification, not hosted CI or frozen-candidate qualification.
 
+### G2 Expanded Diagnostic Checkpoint
+
+The opt-in SDK/ABI fixture now executes eleven controlled origins with buffered and pull-streamed
+consumption, capacities 1/16384 and three repetitions, plus finite direct controls: 135 probes and
+147 origin requests. Every selected read needs fresh matching readiness and the original absolute
+deadline. Origins own bounded workers/sockets and join them on every exit; partial traces survive
+ABI failures. Strict mutation tests reject missing inventories, malformed outcomes and error loss.
+
+The first complete repaired run returned one pending-body probe at 507.794 ms and failed the
+unchanged 505 ms boundary. Stock also loses source errors. The separate
+[matrix record](../../audits/evidence/2026-10-23-fastly-readiness-matrix.json) retains negative
+observations. No capability, SDK/runtime pin, production API, inventory leg or G4 approval changes.
+Full G2, B/H(K), the atomic production migration and hosted qualification remain open.
+
 ### G2 Local Runtime Repair Checkpoint
 
 The [tracked runtime patch](../../../patches/viceroy/README.md) repairs the measured Viceroy

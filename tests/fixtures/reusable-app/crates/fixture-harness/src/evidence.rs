@@ -1,6 +1,9 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+mod readiness;
+pub use readiness::{readiness_legs, validate_outbound_readiness};
+
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub fn require(condition: bool, message: impl Into<String>) -> Result<()> {
     if condition {
@@ -82,79 +85,6 @@ pub fn validate_outbound_progress(probe: &Value, receipts: &[Value]) -> Result<(
             },
             "origin receipt did not match eager/lazy dispatch window",
         )?;
-    }
-    Ok(())
-}
-pub fn validate_outbound_readiness(probes: &[Value]) -> Result<()> {
-    require(!probes.is_empty(), "no readiness probes executed")?;
-    for probe in probes {
-        require(
-            probe["revision"]
-                .as_str()
-                .is_some_and(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-                && probe["read_limit"] == 1
-                && probe["deadline_us"].as_u64() == Some(500_000),
-            "readiness identity or bounded-read policy missing",
-        )?;
-        let samples = probe["samples"].as_array().ok_or("missing read samples")?;
-        require(!samples.is_empty(), "empty read samples")?;
-        require(
-            samples.last().is_some_and(|s| {
-                s["operation"] == "read"
-                    && (s["bytes"] == 0 || s["error"].as_str().is_some_and(|e| !e.is_empty()))
-            }),
-            "no terminal body read; readiness timeout/error is not evidence of source-error loss",
-        )?;
-        require(
-            samples.iter().any(|s| s["operation"] == "head-select")
-                && samples.iter().any(|s| s["operation"] == "read"),
-            "missing head wait or body read sample",
-        )?;
-        for sample in samples {
-            let start = sample["start_us"].as_u64().ok_or("missing start")?;
-            let end = sample["end_us"].as_u64().ok_or("missing end")?;
-            require(
-                start <= end && end <= 505_000,
-                "unbounded or late operation",
-            )?;
-            if matches!(
-                sample["operation"].as_str(),
-                Some("head-select" | "body-select")
-            ) {
-                require(
-                    sample["timeout_ms"]
-                        .as_u64()
-                        .is_some_and(|ms| (1..=500).contains(&ms)),
-                    "zero/unbounded readiness timeout",
-                )?;
-            } else {
-                require(
-                    sample["operation"] == "read"
-                        && (sample["bytes"].as_u64().is_some_and(|n| n <= 1)
-                            || sample["error"].as_str().is_some_and(|s| !s.is_empty())),
-                    "missing bounded read outcome",
-                )?;
-            }
-        }
-        if probe["mode"] == "selected" {
-            for (index, _) in samples
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| s["operation"] == "read")
-            {
-                require(
-                    index
-                        .checked_sub(1)
-                        .and_then(|i| samples.get(i))
-                        .is_some_and(|s| {
-                            s["operation"] == "body-select"
-                                && s["status"] == "FastlyStatus::OK"
-                                && s["selected"] == 0
-                        }),
-                    "body read lacks successful immediately preceding readiness",
-                )?;
-            }
-        }
     }
     Ok(())
 }
@@ -1041,40 +971,6 @@ mod tests {
         assert!(validate_limit_summaries(&events).is_err());
         events.push(json!({"event":"request_start","instance":"two"}));
         assert!(validate_limit_summaries(&events).is_err());
-    }
-}
-#[cfg(test)]
-mod readiness_tests {
-    use serde_json::json;
-
-    #[test]
-    fn outbound_readiness_rejects_empty_or_unbounded_measurements() {
-        assert!(super::validate_outbound_readiness(&[]).is_err());
-        let valid = json!({"case":"truncated", "mode":"direct", "revision":"a".repeat(40),
-        "read_limit":1, "deadline_us":500_000, "samples":[
-            {"operation":"head-select", "start_us":0, "end_us":10, "timeout_ms":500, "status":"ready"},
-            {"operation":"read", "start_us":10, "end_us":11, "bytes":0, "error":"UnexpectedEof"}
-        ]});
-        assert!(super::validate_outbound_readiness(std::slice::from_ref(&valid)).is_ok());
-        for field in ["samples", "revision", "deadline_us", "read_limit"] {
-            let mut broken = valid.clone();
-            broken.as_object_mut().unwrap().remove(field);
-            assert!(super::validate_outbound_readiness(&[broken]).is_err());
-        }
-        let mut broken = valid.clone();
-        broken["mode"] = json!("selected");
-        broken["samples"][1]
-            .as_object_mut()
-            .unwrap()
-            .remove("error");
-        broken["samples"][1]["bytes"] = json!(1);
-        assert!(super::validate_outbound_readiness(&[broken]).is_err());
-        let mut broken = valid.clone();
-        broken["samples"][0]["timeout_ms"] = json!(0);
-        assert!(super::validate_outbound_readiness(&[broken]).is_err());
-        broken = valid;
-        broken["samples"][1]["end_us"] = json!(505_001);
-        assert!(super::validate_outbound_readiness(&[broken]).is_err());
     }
 }
 

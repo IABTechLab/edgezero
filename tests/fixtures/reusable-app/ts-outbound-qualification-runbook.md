@@ -16,6 +16,9 @@ editing this source after freeze. This document changes no outbound contract or 
   A separately identified [local runtime repair](../../../patches/viceroy/README.md) fixes the
   measured error loss in a patched executable. It does not qualify stock 0.21.0, the full G2
   scenario set or hosted Fastly; remaining exact-version/policy review stays open.
+  The [expanded local matrix](../../../docs/audits/evidence/2026-10-23-fastly-readiness-matrix.json)
+  executes all eleven diagnostic scenarios but retains a repaired-runtime result beyond +5 ms.
+  Error retention is repaired locally; timing acceptance and qualification remain failed/open.
 - [G4 approval record](../../../docs/audits/2026-10-18-outbound-api-approval.md) records AG's
   API-only approval of Interfaces SHA-256
   `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a`.

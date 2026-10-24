@@ -1,5 +1,7 @@
 use crate::evidence::{Result, require};
 pub mod overflow;
+mod readiness;
+pub use readiness::ReadinessOrigin;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -271,11 +273,7 @@ fn serve(
             return Ok(());
         }
     }
-    if path.starts_with("/readiness/truncated") {
-        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nx")?;
-        stream.flush()?;
-        thread::sleep(Duration::from_millis(50));
-    } else if path.starts_with("/chunks") {
+    if path.starts_with("/chunks") {
         stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nfirst\r\n")?;
         stream.flush()?;
         let (ready, _) = signal
@@ -780,6 +778,16 @@ mod tests {
         worker.join().unwrap().unwrap();
         assert!(reply.starts_with("HTTP/1.1 200"));
     }
+    #[test]
+    fn backend_readiness_paths_have_no_special_response() {
+        let backend = Backend::start().unwrap();
+        for path in ["/readiness/truncated", "/readiness/truncated/0"] {
+            let response = request(backend.port, path, "generic", None, None).unwrap();
+            assert_eq!(response["status"], 200);
+            assert_eq!(response["body"], "ok");
+        }
+    }
+
     #[test]
     fn progressive_body_and_abort() {
         let backend = Backend::start().unwrap();

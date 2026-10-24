@@ -4,6 +4,7 @@ mod assembly;
 mod framing;
 mod overflow;
 mod progress;
+mod readiness;
 mod response_headers;
 fn cargo_build() -> Command {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
@@ -354,93 +355,7 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
 }
 
 fn outbound_readiness(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
-    let revision = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(root())
-        .output()?;
-    require(revision.status.success(), "cannot record source revision")?;
-    let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
-    checked(
-        cargo_build()
-            .args([
-                "build",
-                "--offline",
-                "--locked",
-                "--release",
-                "-p",
-                "fixture-fastly",
-                "--features",
-                "readiness",
-                "--bin",
-                "fixture-fastly-outbound-readiness",
-                "--target",
-                "wasm32-wasip1",
-            ])
-            .env("EDGEZERO_QUALIFICATION_REVISION", &revision),
-    )?;
-    let binary = stage(
-        &root().join("target/wasm32-wasip1/release/fixture-fastly-outbound-readiness.wasm"),
-        run,
-    )?;
-    records.push(json!({"event":"readiness-build", "revision":revision,
-        "source_state":"working-tree-characterization", "sdk":"0.13.1", "artifact":artifact(&binary)?}))?;
-    let config = run.join("fastly.toml");
-    fs::copy(root().join("crates/fixture-fastly/fastly.toml"), &config)?;
-    let port = net::port()?;
-    let log = run.join("readiness.log");
-    let _process = Process::start(
-        &mut fastly_command(exe, &config, run, "outbound-readiness", port),
-        &log,
-        port,
-    )?;
-    let backend = Backend::start()?;
-    let mut probes = Vec::new();
-    for repetition in 0..3 {
-        for mode in ["direct", "selected"] {
-            let reply = net::request(
-                port,
-                &format!("/{mode}"),
-                &token(),
-                Some(&backend.url("/readiness/truncated")),
-                None,
-            )?;
-            let mut probe = guest(&reply)?;
-            probe["repetition"] = json!(repetition);
-            records.push(probe.clone())?;
-            probes.push(probe);
-        }
-    }
-    validate_outbound_readiness(&probes)?;
-    require(
-        probes.len() == 6 && backend.receipts.lock().unwrap().len() == 6,
-        "readiness controls must execute six real origin requests",
-    )?;
-    let mut lost = false;
-    for pair in probes.as_chunks::<2>().0 {
-        let error = |probe: &Value| {
-            probe["samples"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find_map(|s| s["error"].as_str().map(str::to_owned))
-        };
-        let direct = error(&pair[0]);
-        let selected = error(&pair[1]);
-        require(
-            direct.as_deref() == Some("UnexpectedEof"),
-            "truncated direct-read control did not observe UnexpectedEof",
-        )?;
-        lost |= direct != selected;
-        records.push(
-            json!({"event":"readiness-error-preservation", "direct":direct, "selected":selected,
-            "status":if direct == selected {"pass"} else {"fail"}, "qualification":false}),
-        )?;
-    }
-    require(
-        !lost,
-        "pinned Viceroy body readiness consumed the source error; Fastly G2 fails",
-    )?;
-    records.push(json!({"status":"unverified", "reason":"paired error control passed; remaining G2 timed-read scenarios are still pending", "qualification":false}))
+    readiness::run(exe, run, records)
 }
 fn fastly_variant(
     args: &Args,

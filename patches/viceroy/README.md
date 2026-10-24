@@ -67,11 +67,12 @@ unset CARGO_TARGET_DIR
 VICEROY_BIN="$VICEROY_SOURCE/target/debug/viceroy" scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output NEW_EVIDENCE_DIRECTORY
 ```
 
-The fixture must still use its own target directory, as the existing launcher enforces. Retain
-all six origin receipts and three direct/selected error comparisons. Unmodified 0.21.0 must
-remain a failed control; the repaired executable must preserve `UnexpectedEof` in both modes.
-The suite deliberately exits 2 after that comparison passes: all other G2 timed-read scenarios
-and hosted evidence are still required. Do not turn this exit into an overall gate pass.
+The fixture must still use its own target directory, as the existing launcher enforces. The
+expanded suite requires 135 probes and 147 origin receipts, including three direct/selected
+error comparisons. Unmodified 0.21.0 remains a failed control; the repaired executable must
+preserve `UnexpectedEof` in both modes. Any primitive or timing failure exits 1. Even a passing
+matrix exits 2: production-path integration, exact-version review, backend policy and hosted
+evidence are still required. Do not turn either disposition into an overall gate pass.
 
 Keep the historical failed report and raw evidence unchanged. A separate repair record must
 include exact upstream/patch/host-binary/guest-binary identities, commands, counts and outcomes.

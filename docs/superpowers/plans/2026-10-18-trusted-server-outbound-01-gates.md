@@ -96,12 +96,12 @@ claim that feasibility has already been established.
       every 300 ms under a 500 ms deadline; two pending bodies with only one ready; one ready body
       becoming exhausted between reads; EOF, malformed framing, and transport failure. Prove both
       buffered and streamed reads return by deadline +5 ms and preserve typed source errors.
-- [ ] Add an `outbound-readiness` fixture suite and a nonzero case-count assertion. Run
+- [x] Add an `outbound-readiness` fixture suite and a nonzero case-count assertion. Run
       `scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness` after adding
       support for that suite. Capture per-read start/end times, readiness outcome, and candidate SHA.
       This command is a planned extension, not an existing passing suite at F.
-- [ ] Name the harness guard `outbound_readiness_rejects_empty_or_unbounded_measurements` and run
-      `scripts/run_test_nonzero.sh outbound_readiness_rejects_empty_or_unbounded_measurements cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness`
+- [x] Name the harness guard `outbound_readiness_rejects_empty_or_unbounded_measurements` and run
+      `scripts/run_test_nonzero.sh outbound_readiness_rejects_empty_or_unbounded_measurements cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness outbound_readiness_rejects_empty_or_unbounded_measurements`
       before/after adding the suite and evidence assertions. Expected: red for missing case/measurement
       validation, then a nonzero pass rejecting empty counts or missing read/timer samples. Execute
       the actual `outbound-readiness` command above afterward; its measured host reads, not the
@@ -144,6 +144,23 @@ claim that feasibility has already been established.
       exit 2 remains unverified overall; old failed evidence is unchanged.
 - [ ] Complete the remaining full G2 ABI scenarios and exact-version review, then obtain the
       separate B/H(K) and hosted evidence/approval gates before dependent qualification.
+
+### G2 Expanded Diagnostic Checkpoint (2026-10-23)
+
+- [x] Implement eleven owned loopback scenarios with bounded sockets, request heads, workers,
+      lifetime and joined cleanup; remove the superseded shared-origin truncation shortcut.
+- [x] Run a fixed 135-probe / 147-request inventory: buffered and pull-streamed consumption,
+      one-byte and 16 KiB reads, three repetitions and finite direct truncation controls.
+- [x] Reject incomplete/duplicate identities, contradictory reads, missing fresh readiness,
+      changed clocks/deadlines, invented terminal outcomes, mismatched errors and late operations.
+      Persist completed samples incrementally so failed guests retain their preceding trace.
+- [ ] Establish the fixed +5 ms bound. The first complete repaired run retained a 507.794 ms
+      pending-body result, so local timing acceptance remains failed. Do not widen or waive it.
+- [ ] Complete production-path and exact-version review, B/H(K) decisions and hosted evidence.
+
+The [expanded diagnostic record](../../audits/evidence/2026-10-23-fastly-readiness-matrix.json)
+is working-tree characterization, not frozen-candidate qualification. Earlier failed stock and
+repair evidence remains unchanged. Implemented cases do not imply a passing G2 gate.
 
 See the [repair record](../../audits/evidence/2026-10-23-viceroy-readiness-repair.json) and
 [source patch](../../../patches/viceroy/README.md). This fixes the measured local runtime defect,

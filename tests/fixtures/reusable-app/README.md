@@ -157,17 +157,30 @@ filesystem, and neither verifies telemetry authenticity nor publishes artifacts.
 scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness
 ```
 
-This opt-in suite uses direct pinned SDK/ABI calls only in the diagnostic fixture. It runs three
-pairs against a controlled, truncated loopback response. Each pair compares a direct one-byte
-read control with a timed readiness check before every one-byte read. It records head waits,
-readiness waits, read outcomes and timings; zero samples or an unbounded readiness timeout fail.
-The direct control intentionally uses a blocking read against an origin that closes after 50 ms;
-it is never a proposed production fallback. A stuck experiment is terminated by the harness's
-finite client timeout and runtime process-group cleanup, not counted as successful cancellation.
+This opt-in suite uses direct pinned SDK/ABI calls only in the diagnostic fixture. Eleven cases
+cover silent heads, pending/trickled bodies, sibling readiness, exhausted bodies, ordinary/empty
+EOF, truncation, malformed heads/chunks and connection closure before a response. Each runs with
+buffered and pull-streamed consumption, read capacities 1 and 16384, and three repetitions.
+Three additional finite direct-read truncation controls produce 135 probes and 147 origin requests.
+Those capacities are diagnostic variations, not an approved production read maximum.
 
-Pinned Viceroy 0.21.0 currently loses the body error on the readiness path, so this diagnostic
-intentionally exits 1. It is not part of normal smoke or unit-test gates. Even if the paired control
-later passes, this initial suite exits 2 until the remaining G2 scenarios are implemented and run.
+Every head is selected with a positive remaining timeout, then nonblocking-polled. Every selected
+body read requires fresh same-slot readiness. One original 500 ms absolute deadline survives the
+stream handoff; trickle never resets it. Traces must finish within +5 ms, retain exact EOF/error
+outcomes, and cover the complete inventory with unique correlated origin receipts. Streamed
+consumption discards each pulled chunk; buffered consumption retains it under a finite byte cap.
+The direct control alone bypasses body readiness against a source that closes after 50 ms;
+it is never a production fallback. Backend phase timers are fixed at two seconds, outside the
+measured exchange window; backend registration is not timed by this proof.
+
+Each origin owns at most two socket workers, a 4096-byte request-head cap and a three-second
+watchdog. Finish/Drop wakes, closes and joins its workers, retaining errors and cleanup reasons.
+Harness-forced cleanup is not SDK cancellation evidence. A stuck guest is contained by the
+12-second client timeout and runtime process-group cleanup, not counted as successful cancellation.
+
+Pinned Viceroy 0.21.0 loses source errors on the readiness path and fails validation. The suite
+is separate from normal smoke/unit gates. Even a complete primitive matrix exits 2: migrated
+production paths, exact-version review, backend policy and hosted qualification remain separate.
 Working-tree characterization is labelled as such, never as exact-commit release evidence.
 See the [feasibility report](../../../docs/audits/2026-10-18-outbound-feasibility.md).
 
@@ -175,7 +188,7 @@ PR #275 also carries an [exact-version local Viceroy repair](../../../patches/vi
 Select its built executable explicitly with `VICEROY_BIN`; the default installed runtime and
 version pins are not changed. The separate repair record retains three failing stock controls
 and three repaired comparisons preserving UnexpectedEof with identical guest bytes. A repaired
-run still exits 2 because remaining G2/hosted proof is pending; do not treat it as a full gate pass.
+run still exits 2 because full G2/hosted proof is pending; do not treat it as a full gate pass.
 
 ### Scheduling and Empty-Body Characterization
 
