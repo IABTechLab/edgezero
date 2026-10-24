@@ -38,6 +38,16 @@ separately from the portable API and must be considered when declaring required 
 - Add real compiler regressions and workspace CI activation with pinned Node. This compile-only
   prerequisite does not replace runtime forwarding tests or provider qualification.
 
+### Qualification Evidence Preparation
+
+- Add `--assemble` and `--report` to the existing outbound evidence checker. Preserve per-leg
+  outcomes, counts and raw SHA-256 hashes; drafts remain explicitly pre-freeze and unqualified.
+- Require explicit clean/frozen provenance and linked SHA-256 build identities for release
+  records. Aggregate independent blockers using the same rules as fail-closed release validation.
+- Bound artifact hashing to regular files of at most 256 MiB with 64 KiB scratch space; refuse
+  unsafe paths and evidence overwrites. Exercise the actual Node CLI from the fixture's Rust
+  sentinel and existing workspace CI. No transport contract, runtime pin or capability changes.
+
 ### Policy-Aware Axum Servers
 
 - **Breaking:** `AxumDevServer::{new, with_config}` consume an assembled `App`, not a router.

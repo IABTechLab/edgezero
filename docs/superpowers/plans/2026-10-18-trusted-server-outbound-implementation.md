@@ -265,6 +265,27 @@ Independent review reproduced the embedded-fence bug before its fix and cleared 
 Inventory validation still reports 255 criteria and 511 planned, unqualified environment legs.
 These results are local source verification, not hosted CI or frozen-candidate qualification.
 
+### Q3 Evidence Preparation Checkpoint
+
+The [pre-freeze assembly checkpoint](2026-10-18-trusted-server-outbound-05-qualification.md#q3-pre-freeze-assembly-checkpoint-2026-10-23)
+adds one Node-owned draft assembler and shared release/report validation. A Rust fixture test
+invokes the actual CLI and checks preserved case/sample counts, candidate/build identities,
+raw SHA-256 hashes, non-overwrite behavior and release refusal. Draft assembly is always
+unqualified, not an automatic conversion of working-tree smoke evidence. Reports retain
+independent blockers without accepting ambiguous rows or counting invalid artifacts as passed.
+All 511 reviewed legs and applicability decisions remain unchanged. Frozen export, controlled
+origins, approvals, source freeze and local/hosted/consumer qualification remain open; this does
+not change production APIs, complete P1 or waive failed Fastly G2.
+
+Independent architecture/coverage proposals selected Node-owned assembly with an actual Rust CLI
+test instead of a second constructor/validator. Spec and quality review reproduced and closed
+acceptance-count and catalog-isolation errors; final reviews found no remaining scoped issue.
+Local verification passes all five Rust gates (2,193 tests, 28 binaries, one existing ignored),
+85 harness and 20 qualification-core tests, the exact nonzero CI sentinel, 29 evidence-tool tests,
+15 forwarding-checker tests and the one actual doctest. Fixture strict clippy/format, docs
+format/lint/build and documentation/legacy guards pass. Complete TCP-enabled reruns replace the
+initial sandbox-denied attempts. Inventory remains 255 criteria / 511 planned legs, unqualified.
+
 ### P1/P3 Marker Checkpoint
 
 - [x] Add the approved client default, effective inspector and per-request Inherit/On/Off APIs;

@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import * as checker from "./check_outbound_cutover_evidence.mjs";
 import {
   acceptanceCriteria,
   validateManifest as validateManifestWithPolicy,
@@ -67,7 +78,16 @@ function inventory(input = source) {
 function evidence(manifest = inventory()) {
   return {
     schema: 1,
+    stage: "frozen-candidate",
+    source_state: "clean",
     candidate_sha: sha,
+    builds: [
+      {
+        build_id: "d".repeat(64),
+        candidate_sha: sha,
+        artifact_path: "build/app.bin",
+      },
+    ],
     runner_image: "qualification@sha256:" + "b".repeat(64),
     toolchain: {
       rust: "1.98.1",
@@ -91,6 +111,7 @@ function evidence(manifest = inventory()) {
       case_id: c.case_id,
       environment: c.environment,
       candidate_sha: sha,
+      build_id: "d".repeat(64),
       source_digest: c.source_digest,
       status: "passed",
       command: c.command,
@@ -380,4 +401,324 @@ test("CLI help is usable without evidence and unknown arguments fail", () => {
   assert.match(help.stdout, /--manifest/);
   assert.match(help.stdout, /--release/);
   assert.notEqual(spawnSync(process.execPath, [script, "--made-up"]).status, 0);
+});
+
+function assemblyFixture(t) {
+  const artifactsRoot = mkdtempSync(join(tmpdir(), "edgezero-record-"));
+  t.after(() => rmSync(artifactsRoot, { recursive: true, force: true }));
+  const manifest = inventory();
+  const input = evidence(manifest);
+  const build = Buffer.from("abc");
+  input.builds[0].build_id = digest(build);
+  mkdirSync(join(artifactsRoot, "build"));
+  writeFileSync(join(artifactsRoot, "build/app.bin"), build);
+  for (const [index, result] of input.results.entries()) {
+    result.build_id = digest(build);
+    delete result.artifact_sha256;
+    const path = join(artifactsRoot, result.artifact_path);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ candidate_sha: sha, sample: index }));
+  }
+  const options = {
+    candidateSha: sha,
+    source,
+    reviewedLegSetSha256: fixtureLegPolicy(source),
+    artifactsRoot,
+  };
+  return { artifactsRoot, manifest, input, options };
+}
+
+test("assembly preserves counts, identities and raw hashes without qualification", (t) => {
+  assert.equal(typeof checker.assembleRecord, "function");
+  const { manifest, input, options, artifactsRoot } = assemblyFixture(t);
+  input.results[0].status = "failed";
+  input.results[0].samples = 3;
+  input.results[0].assertions[0].passed = false;
+  input.results[1].status = "pending";
+  input.results[1].samples = 5;
+  const original = clone(input);
+  const assembled = checker.assembleRecord(manifest, input, options);
+  assert.deepEqual(input, original);
+  assert.equal(assembled.candidate_sha, sha);
+  assert.equal(assembled.stage, "pre-freeze");
+  assert.equal(assembled.qualified, false);
+  assert.deepEqual(assembled.assembly, {
+    observed_legs: 2,
+    passed: 0,
+    failed: 1,
+    pending: 1,
+    samples: 8,
+  });
+  for (const [index, result] of assembled.results.entries()) {
+    assert.equal(result.status, input.results[index].status);
+    assert.equal(result.samples, input.results[index].samples);
+    assert.deepEqual(result.assertions, input.results[index].assertions);
+    assert.equal(result.build_id, digest(Buffer.from("abc")));
+    assert.equal(
+      result.artifact_sha256,
+      digest(readFileSync(join(artifactsRoot, result.artifact_path))),
+    );
+  }
+  const report = checker.inspectRelease(manifest, assembled, options);
+  assert.equal(report.status, "blocked");
+  assert.equal(report.qualified, false);
+  assert.ok(
+    report.findings.some((finding) => /pre-freeze/.test(finding.message)),
+  );
+  assert.throws(() => release(manifest, assembled), /pre-freeze/);
+});
+
+test("assembly never promotes working-tree observations or fills missing results", (t) => {
+  const { manifest, input, options } = assemblyFixture(t);
+  input.source_state = "working-tree";
+  input.qualification = false;
+  input.results.pop();
+  const assembled = checker.assembleRecord(manifest, input, options);
+  assert.equal(assembled.source_state, "working-tree");
+  assert.equal(assembled.qualification, false);
+  assert.equal(assembled.results.length, 1);
+  assert.ok(
+    checker
+      .inspectRelease(manifest, assembled, options)
+      .findings.some((finding) => /missing result/.test(finding.message)),
+  );
+});
+
+test("assembly rejects incomplete or mismatched candidate, build and case provenance", (t) => {
+  const { manifest, input, options } = assemblyFixture(t);
+  for (const change of [
+    (record) => delete record.source_state,
+    (record) => delete record.candidate_sha,
+    (record) => (record.results[0].candidate_sha = "e".repeat(40)),
+    (record) => (record.builds[0].candidate_sha = "e".repeat(40)),
+    (record) => delete record.builds,
+    (record) => (record.builds[0].build_id = "e".repeat(64)),
+    (record) => (record.results[0].build_id = "e".repeat(64)),
+    (record) => (record.results[0].source_digest = "e".repeat(64)),
+    (record) => (record.results[0].environment = "unknown"),
+    (record) => record.results.push(clone(record.results[0])),
+    (record) => (record.results[0].artifact_sha256 = "e".repeat(64)),
+    (record) => (record.results[0].status = "unverified"),
+    (record) => (record.results[0].samples = -1),
+  ]) {
+    const record = clone(input);
+    change(record);
+    assert.throws(() => checker.assembleRecord(manifest, record, options));
+  }
+});
+
+test("assembly rejects artifact traversal, directories and symlink escapes", (t) => {
+  const { manifest, input, options, artifactsRoot } = assemblyFixture(t);
+  for (const path of ["../outside.bin", "/outside.bin", "build"]) {
+    const record = clone(input);
+    record.builds[0].artifact_path = path;
+    assert.throws(
+      () => checker.assembleRecord(manifest, record, options),
+      /artifact/,
+    );
+  }
+  const outside = mkdtempSync(join(tmpdir(), "edgezero-outside-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  writeFileSync(join(outside, "raw.json"), "not evidence");
+  const path = join(artifactsRoot, input.results[0].artifact_path);
+  rmSync(path);
+  symlinkSync(join(outside, "raw.json"), path);
+  assert.throws(
+    () => checker.assembleRecord(manifest, input, options),
+    /escapes/,
+  );
+});
+
+test("assembly rejects a FIFO before opening it", (t) => {
+  const { manifest, input, options, artifactsRoot } = assemblyFixture(t);
+  const fifo = join(artifactsRoot, "build/pending");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  input.builds[0].artifact_path = "build/pending";
+  const script = fileURLToPath(
+    new URL("./check_outbound_cutover_evidence.mjs", import.meta.url),
+  );
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import {assembleRecord} from ${JSON.stringify(script)};
+     const {manifest,input,options}=JSON.parse(process.argv[1]);
+     assembleRecord(manifest,input,options);`,
+      JSON.stringify({ manifest, input, options }),
+    ],
+    { encoding: "utf8", timeout: 2000, killSignal: "SIGKILL" },
+  );
+  assert.equal(
+    child.error,
+    undefined,
+    "non-regular artifact blocked the exporter",
+  );
+  assert.equal(child.status, 1);
+  assert.match(child.stderr, /regular file/);
+});
+
+test("assembly hashes multiple read buffers and rejects oversized artifacts before reading", (t) => {
+  const { manifest, input, options, artifactsRoot } = assemblyFixture(t);
+  const path = join(artifactsRoot, input.results[0].artifact_path);
+  const bytes = Buffer.alloc(128 * 1024 + 7, 0x5a);
+  writeFileSync(path, bytes);
+  assert.equal(
+    checker.assembleRecord(manifest, input, options).results[0].artifact_sha256,
+    digest(bytes),
+  );
+  truncateSync(path, 256 * 1024 * 1024 + 1);
+  assert.throws(
+    () => checker.assembleRecord(manifest, input, options),
+    /256 MiB/,
+  );
+});
+
+test("report and release both verify build and raw artifact hashes", (t) => {
+  const { manifest, input, options, artifactsRoot } = assemblyFixture(t);
+  const record = checker.assembleRecord(manifest, input, options);
+  record.stage = "frozen-candidate";
+  assert.equal(
+    checker.validateRelease(manifest, record, options).status,
+    "passed",
+  );
+  writeFileSync(
+    join(artifactsRoot, record.results[0].artifact_path),
+    "changed capture",
+  );
+  assert.equal(checker.inspectRelease(manifest, record, options).passed, 1);
+  writeFileSync(join(artifactsRoot, "build/app.bin"), "changed build");
+  const report = checker.inspectRelease(manifest, record, options);
+  assert.equal(report.status, "blocked");
+  assert.equal(
+    report.passed,
+    0,
+    "corrupt build/artifact evidence cannot count as accepted",
+  );
+  for (const pattern of [
+    /build artifact hash mismatch/,
+    /raw artifact hash mismatch/,
+  ]) {
+    assert.ok(report.findings.some((finding) => pattern.test(finding.message)));
+  }
+  assert.throws(
+    () => checker.validateRelease(manifest, record, options),
+    /hash mismatch/,
+  );
+});
+
+test("report lists independent blockers using the same release rules", () => {
+  assert.equal(typeof checker.inspectRelease, "function");
+  const manifest = inventory();
+  const record = evidence(manifest);
+  record.toolchain.rust = "wrong";
+  record.results[0].samples = 0;
+  record.results.pop();
+  const report = checker.inspectRelease(manifest, record, {
+    candidateSha: sha,
+    source,
+    reviewedLegSetSha256: fixtureLegPolicy(source),
+  });
+  assert.equal(report.status, "blocked");
+  for (const pattern of [
+    /wrong toolchain rust/,
+    /zero samples/,
+    /missing result/,
+  ]) {
+    assert.ok(
+      report.findings.some((finding) => pattern.test(finding.message)),
+      String(pattern),
+    );
+  }
+  assert.throws(() => release(manifest, record), /wrong toolchain rust/);
+  record.results = null;
+  assert.doesNotThrow(() =>
+    checker.inspectRelease(manifest, record, {
+      candidateSha: sha,
+      source,
+      reviewedLegSetSha256: fixtureLegPolicy(source),
+    }),
+  );
+});
+
+test("report rejects invalid deferral totals and exposes planned commands without results", () => {
+  const followup = source.replaceAll("EZ-1", "EZ-10");
+  const manifest = inventory(followup);
+  manifest.cases[1].applicability = "follow-up";
+  const record = evidence(manifest);
+  const options = {
+    candidateSha: sha,
+    source: followup,
+    reviewedLegSetSha256: fixtureLegPolicy(followup),
+  };
+  assert.equal(checker.inspectRelease(manifest, record, options).deferred, 0);
+  manifest.cases[0].implementation = "planned";
+  record.results = [];
+  const report = checker.inspectRelease(manifest, record, options);
+  for (const rule of ["implementation", "result"]) {
+    assert.ok(
+      report.findings.some(
+        (finding) =>
+          finding.scope === "EZ-10/acceptance/01@axum" && finding.rule === rule,
+      ),
+    );
+  }
+});
+
+test("a duplicate catalog entry does not erase unrelated evidence", () => {
+  const manifest = inventory();
+  const options = {
+    candidateSha: sha,
+    source,
+    reviewedLegSetSha256: fixtureLegPolicy(source),
+  };
+  for (const field of ["results", "applicability"]) {
+    const record = evidence(manifest);
+    record[field].push(clone(record[field][0]));
+    record.results[1].candidate_sha = "e".repeat(40);
+    const report = checker.inspectRelease(manifest, record, options);
+    assert.ok(
+      report.findings.some((finding) => /duplicate/.test(finding.message)),
+    );
+    assert.ok(
+      report.findings.some(
+        (finding) =>
+          finding.scope === "EZ-1/acceptance/01@workerd" &&
+          /revision mismatch/.test(finding.message),
+      ),
+    );
+    assert.equal(report.passed, 0);
+  }
+  const record = evidence(manifest);
+  record.builds.push({
+    build_id: "e".repeat(64),
+    candidate_sha: "e".repeat(40),
+    artifact_path: "bad.bin",
+  });
+  const report = checker.inspectRelease(manifest, record, options);
+  assert.ok(
+    report.findings.some((finding) =>
+      /build identity or candidate mismatch/.test(finding.message),
+    ),
+  );
+  assert.ok(
+    !report.findings.some(
+      (finding) =>
+        finding.scope === "EZ-1/acceptance/01@axum" && finding.rule === "build",
+    ),
+  );
+});
+
+test("release rejects draft, dirty or unbound build identities", () => {
+  for (const change of [
+    (record) => (record.stage = "pre-freeze"),
+    (record) => (record.source_state = "working-tree"),
+    (record) => (record.qualification = false),
+    (record) => delete record.builds,
+    (record) => (record.results[0].build_id = "e".repeat(64)),
+  ]) {
+    const record = evidence();
+    change(record);
+    assert.throws(() => release(inventory(), record));
+  }
 });

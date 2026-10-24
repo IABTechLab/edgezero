@@ -591,6 +591,147 @@ pub fn summarize(records: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outbound_evidence_assembly_retains_case_counts_and_hashes() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!("outbound-record-{}", crate::token()));
+        std::fs::create_dir(&directory)?;
+        let run = || -> Result<()> {
+            let repository = crate::root().join("../../..").canonicalize()?;
+            let script = repository.join("scripts/check_outbound_cutover_evidence.mjs");
+            let inventory: Value = serde_json::from_slice(&std::fs::read(
+                repository.join("tests/fixtures/reusable-app/outbound-cutover-cases.json"),
+            )?)?;
+            let candidate = "a".repeat(40);
+            let build = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+            let raw_hash = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+            std::fs::write(directory.join("app.bin"), b"abc")?;
+            let mut results = Vec::new();
+            for (index, case) in inventory["cases"]
+                .as_array()
+                .ok_or("missing inventory cases")?
+                .iter()
+                .take(2)
+                .enumerate()
+            {
+                let path =
+                    directory.join(case["artifact_path"].as_str().ok_or("missing artifact")?);
+                std::fs::create_dir_all(path.parent().ok_or("missing artifact parent")?)?;
+                std::fs::write(path, b"{}")?;
+                results.push(json!({
+                    "case_id":case["case_id"], "environment":case["environment"],
+                    "candidate_sha":candidate, "build_id":build,
+                    "source_digest":case["source_digest"], "command":case["command"],
+                    "sentinel":case["sentinel"], "artifact_path":case["artifact_path"],
+                    "status":if index == 0 {"failed"} else {"pending"},
+                    "samples":if index == 0 {3} else {0},
+                    "assertions":[{"name":"synthetic negative control", "passed":false}],
+                    "measurements":[]
+                }));
+            }
+            let input = json!({"schema":1, "candidate_sha":candidate,
+                "source_state":"working-tree", "qualification":false,
+                "builds":[{"build_id":build,"candidate_sha":candidate,"artifact_path":"app.bin"}],
+                "results":results});
+            let input_path = directory.join("input.json");
+            let output_path = directory.join("draft.json");
+            std::fs::write(&input_path, serde_json::to_vec(&input)?)?;
+            let invoke = || {
+                std::process::Command::new("node")
+                    .arg(&script)
+                    .args(["--assemble", "--candidate", &candidate, "--input"])
+                    .arg(&input_path)
+                    .arg("--artifacts")
+                    .arg(&directory)
+                    .arg("--output")
+                    .arg(&output_path)
+                    .output()
+            };
+            let output = invoke()?;
+            require(
+                output.status.code() == Some(1) && output_path.is_file(),
+                format!(
+                    "draft assembly did not expose blocked qualification: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )?;
+            let bytes = std::fs::read(&output_path)?;
+            let draft: Value = serde_json::from_slice(&bytes)?;
+            require(
+                draft["candidate_sha"] == candidate && draft["builds"][0]["build_id"] == build,
+                "assembly changed candidate or build identity",
+            )?;
+            require(
+                draft["qualified"] == false
+                    && draft["stage"] == "pre-freeze"
+                    && draft["qualification"] == false
+                    && draft["source_state"] == "working-tree",
+                "assembly promoted development evidence",
+            )?;
+            require(
+                draft["assembly"]
+                    == json!({"observed_legs":2,"passed":0,"failed":1,"pending":1,"samples":3}),
+                "assembly lost outcome or sample counts",
+            )?;
+            for (index, result) in draft["results"]
+                .as_array()
+                .ok_or("missing results")?
+                .iter()
+                .enumerate()
+            {
+                require(
+                    result["artifact_sha256"] == raw_hash
+                        && result["build_id"] == build
+                        && result["candidate_sha"] == candidate
+                        && result["case_id"] == input["results"][index]["case_id"]
+                        && result["samples"] == input["results"][index]["samples"],
+                    "assembly changed case counts, provenance or raw hashes",
+                )?;
+            }
+            require(
+                !invoke()?.status.success() && std::fs::read(&output_path)? == bytes,
+                "assembly overwrote existing evidence",
+            )?;
+            let report = std::process::Command::new("node")
+                .arg(&script)
+                .args(["--report", "--candidate", &candidate, "--record"])
+                .arg(&output_path)
+                .arg("--artifacts")
+                .arg(&directory)
+                .output()?;
+            require(
+                report.status.code() == Some(1),
+                "report lost blocked exit status",
+            )?;
+            let report: Value = serde_json::from_slice(&report.stdout)?;
+            require(
+                report["status"] == "blocked"
+                    && report["qualified"] == false
+                    && report["passed"] == 0
+                    && report["findings"]
+                        .as_array()
+                        .is_some_and(|findings| findings.len() > 2)
+                    && std::fs::read(&output_path)? == bytes,
+                "report omitted independent gates or modified evidence",
+            )?;
+            let release = std::process::Command::new("node")
+                .arg(&script)
+                .args(["--release", "--candidate", &candidate, "--record"])
+                .arg(&output_path)
+                .arg("--artifacts")
+                .arg(&directory)
+                .output()?;
+            require(
+                !release.status.success()
+                    && String::from_utf8_lossy(&release.stderr).contains("pre-freeze"),
+                "pre-freeze draft passed release validation",
+            )
+        };
+        let result = run();
+        std::fs::remove_dir_all(directory)?;
+        result
+    }
+
     #[test]
     fn missing_observation_is_unknown_and_mixed_builds_are_rejected() {
         let summary = summarize(&[

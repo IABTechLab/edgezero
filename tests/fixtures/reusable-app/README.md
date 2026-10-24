@@ -101,6 +101,51 @@ This CI prerequisite is outside the reviewed 511 environment legs. It grants no 
 forwarding acceptance and does not adopt optional EZ-25.42's broader guide checker. P2's real
 GET/HEAD/POST behavior tests and provider/consumer qualification remain separate requirements.
 
+### Pre-Freeze Evidence Assembly
+
+Q3 preparation uses the existing checker rather than a second exporter:
+
+```sh
+node scripts/check_outbound_cutover_evidence.mjs --assemble \
+  --candidate SOURCE_SHA --input OBSERVATIONS.json --artifacts EVIDENCE_DIRECTORY \
+  --output NEW_DRAFT.json
+node scripts/check_outbound_cutover_evidence.mjs --report \
+  --candidate SOURCE_SHA --record NEW_DRAFT.json --artifacts EVIDENCE_DIRECTORY
+scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness outbound_evidence_assembly_retains_case_counts_and_hashes
+```
+
+Both assembly and report exit nonzero while release gates are blocked. Successful draft creation
+is identified by `record_output` in the report and a new output file; malformed input or an
+existing output path produces an error instead. Assembly never overwrites evidence.
+
+Inputs use schema 1 with an explicit `candidate_sha`, `source_state` (`clean` or `working-tree`),
+nonempty `builds` and nonempty `results`. Each build supplies its candidate SHA, relative
+`artifact_path` and `build_id`, the SHA-256 of that file. Each result supplies its exact inventory
+case/environment, candidate SHA, linked `build_id`, source digest, command, sentinel, artifact
+path, status (`passed`, `failed` or `pending`), sample count, assertions and measurements.
+The tool verifies build hashes and computes raw artifact hashes; supplied hashes must agree.
+It preserves observation statuses and sample counts, including failed or pending observations,
+without filling absent results, changing applicability or approving a deferred part.
+
+Drafts always have `stage: "pre-freeze"` and `qualified: false`. Runner, toolchain, retention,
+comparison and applicability metadata is copied only if supplied; missing fields remain gates.
+Working-tree records and explicit `qualification: false` cannot pass release validation.
+Release records require `stage: "frozen-candidate"`, `source_state: "clean"` and linked build
+identities. These are declared provenance, not proof that a binary was built from the claimed
+SHA. Candidate freeze, runtime mapping, approvals and independent evidence review remain required.
+Changing a draft's label does not perform those steps.
+
+`--report` lists independently evaluable blockers by leg/rule using the same checks as
+`--release`, which still fails closed. Invalid or ambiguous entries receive no acceptance credit
+without hiding unrelated observations. Assembly does not interpret generic smoke JSONL as
+qualification results or substitute FNV fingerprints for SHA-256. All 511 reviewed inventory
+legs retain their existing state. No source freeze or hosted qualification is performed here.
+
+Use stable artifact snapshots: the tool rejects absolute/traversing paths, symlink escapes,
+directories and nonregular files. Artifacts are capped at 256 MiB and hashed with a 64 KiB buffer;
+JSON inputs/outputs are capped at 16 MiB. It is not a defense against concurrently mutating a
+filesystem, and neither verifies telemetry authenticity nor publishes artifacts.
+
 ### Fastly Readiness Diagnostic
 
 ```sh

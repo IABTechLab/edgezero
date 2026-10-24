@@ -94,6 +94,12 @@ jobs:
           node --test scripts/check_forwarding_example.test.mjs
           node scripts/check_forwarding_example.mjs
 
+      - name: Outbound evidence tool contracts
+        if: matrix.suite == 'workspace'
+        run: |
+          node --test scripts/check_outbound_cutover_evidence.test.mjs
+          node scripts/check_outbound_cutover_evidence.mjs --manifest
+
       - name: Build strict public API documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -126,6 +132,7 @@ jobs:
       - name: Lifecycle fixture host tests
         if: matrix.suite == 'workspace'
         run: |
+          scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness outbound_evidence_assembly_retains_case_counts_and_hashes
           cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core --features fixture-core/qualification
           node --test scripts/qualify_response_egress.test.mjs
 

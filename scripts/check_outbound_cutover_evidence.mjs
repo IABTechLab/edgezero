@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -286,84 +295,114 @@ function validateMeasurement(measurement) {
   requireFact(pass && pass(), "failed measurement bound");
 }
 
-export function validateRelease(
+function validateBuildIdentity(build, candidateSha) {
+  requireFact(
+    hex(build?.build_id, 64) && build.candidate_sha === candidateSha,
+    "build identity or candidate mismatch",
+  );
+  requireFact(nonempty(build.artifact_path), "build artifact path required");
+}
+
+function buildIdentities(record, candidateSha) {
+  requireFact(
+    Array.isArray(record?.builds) && record.builds.length > 0,
+    "build identities required",
+  );
+  const builds = unique(record.builds, (build) => build?.build_id);
+  for (const build of builds.values()) {
+    validateBuildIdentity(build, candidateSha);
+  }
+  return builds;
+}
+
+function artifactHash(root, name) {
+  requireFact(
+    nonempty(name) && !isAbsolute(name) && !name.split(/[\\/]/u).includes(".."),
+    "unsafe artifact path",
+  );
+  const path = realpathSync(resolve(root, name));
+  const within = relative(root, path);
+  requireFact(
+    within !== "" && !isAbsolute(within) && within.split(/[\\/]/u)[0] !== "..",
+    "artifact escapes evidence directory",
+  );
+  const limit = 256 * 1024 * 1024;
+  const before = statSync(path);
+  requireFact(
+    before.isFile() && before.size <= limit,
+    "artifact must be a regular file at most 256 MiB",
+  );
+  const file = openSync(path, "r");
+  try {
+    const metadata = fstatSync(file);
+    requireFact(
+      metadata.isFile() && metadata.size <= limit,
+      "artifact must be a regular file at most 256 MiB",
+    );
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    let total = 0;
+    for (;;) {
+      const bytes = readSync(file, buffer);
+      if (bytes === 0) break;
+      total += bytes;
+      requireFact(total <= limit, "artifact exceeds 256 MiB while reading");
+      hash.update(buffer.subarray(0, bytes));
+    }
+    requireFact(total === metadata.size, "artifact changed while reading");
+    return hash.digest("hex");
+  } finally {
+    closeSync(file);
+  }
+}
+
+export function assembleRecord(
   manifest,
-  record,
-  { candidateSha, source, reviewedLegSetSha256 },
+  input,
+  { candidateSha, source, reviewedLegSetSha256, artifactsRoot },
 ) {
   validateManifest(manifest, source, reviewedLegSetSha256);
   requireFact(
     hex(candidateSha, 40) &&
-      record?.schema === 1 &&
-      record.candidate_sha === candidateSha,
+      input?.schema === 1 &&
+      input.candidate_sha === candidateSha,
     "candidate revision mismatch",
   );
-  requireFact(nonempty(record.runner_image), "runner image required");
-  const versions = {
-    rust: "1.98.1",
-    fastly_sdk: "0.13.1",
-    viceroy: "0.21.0",
-    spin: "4.1.0",
-  };
-  for (const [tool, version] of Object.entries(versions))
-    requireFact(
-      record.toolchain?.[tool] === version,
-      `wrong toolchain ${tool}`,
-    );
-  requireFact(nonempty(record.toolchain.workerd), "workerd revision required");
-  const retention = record.retention;
   requireFact(
-    ["release-asset", "repository"].includes(retention?.kind) &&
-      nonempty(retention.uri) &&
-      retention.expires_at === null,
-    "durable non-expiring retention required while the candidate is pinned",
+    ["clean", "working-tree"].includes(input.source_state),
+    "explicit source provenance required",
   );
-  if (record.comparisons !== null)
+  const root = realpathSync(resolve(artifactsRoot));
+  const builds = buildIdentities(input, candidateSha);
+  for (const build of builds.values()) {
     requireFact(
-      nonempty(record.comparisons?.baseline) &&
-        record.comparisons?.candidate === candidateSha,
-      "comparison build identities required",
+      artifactHash(root, build.artifact_path) === build.build_id,
+      "build artifact hash mismatch",
     );
+  }
   requireFact(
-    Array.isArray(record.results) && Array.isArray(record.applicability),
-    "results and applicability map required",
+    Array.isArray(input.results) &&
+      input.results.length > 0 &&
+      input.results.length <= manifest.cases.length,
+    "nonzero bounded observation list required",
   );
-  const results = unique(record.results, key);
-  const applicability = unique(record.applicability, key);
   const cases = unique(manifest.cases, key);
-  const decisions = unique(manifest.decisions, (d) => d.id);
-  for (const id of [...results.keys(), ...applicability.keys()])
-    requireFact(cases.has(id), `unknown case/environment ${id}`);
-  let passed = 0;
-  let deferred = 0;
-  for (const [id, c] of cases) {
-    const required = disposition(c, decisions);
-    const mapping = applicability.get(id);
+  const results = unique(input.results, key);
+  const assembly = {
+    observed_legs: results.size,
+    passed: 0,
+    failed: 0,
+    pending: 0,
+    samples: 0,
+  };
+  const output = structuredClone(input);
+  output.results = [...results.values()].map((result) => {
+    const id = key(result);
+    const c = cases.get(id);
+    requireFact(c, `unknown case/environment ${id}`);
     requireFact(
-      mapping?.disposition === required,
-      `${id}: wrong or missing applicability`,
-    );
-    if (required === "deferred") {
-      const approved = decisions.get(c.approval)?.status === "approved";
-      requireFact(
-        approved
-          ? mapping.approval === c.approval
-          : mapping.condition ===
-              (c.condition ?? "follow-up not promoted or confirmed present"),
-        `${id}: unjustified applicability deferral`,
-      );
-      deferred++;
-      continue;
-    }
-    const result = results.get(id);
-    requireFact(result, `${id}: missing result`);
-    requireFact(
-      c.implementation === "ready",
-      `${id}: planned command is not implemented evidence`,
-    );
-    requireFact(
-      result.candidate_sha === candidateSha,
-      `${id}: result revision mismatch`,
+      result.candidate_sha === candidateSha && builds.has(result.build_id),
+      `${id}: observation candidate/build mismatch`,
     );
     requireFact(
       result.source_digest === c.source_digest &&
@@ -373,47 +412,323 @@ export function validateRelease(
       `${id}: result contract mismatch`,
     );
     requireFact(
-      result.status === "passed" &&
+      ["passed", "failed", "pending"].includes(result.status) &&
         Number.isSafeInteger(result.samples) &&
-        result.samples > 0,
-      `${id}: pending/failed result or zero samples`,
+        result.samples >= 0,
+      `${id}: invalid observation status or sample count`,
     );
     requireFact(
-      hex(result.artifact_sha256, 64),
-      `${id}: raw artifact hash required`,
+      Array.isArray(result.assertions) && Array.isArray(result.measurements),
+      `${id}: assertion and measurement lists required`,
     );
+    const hash = artifactHash(root, result.artifact_path);
     requireFact(
-      Array.isArray(result.assertions) &&
-        result.assertions.length > 0 &&
-        result.assertions.every((a) => nonempty(a.name) && a.passed === true),
-      `${id}: missing or failed assertions`,
+      result.artifact_sha256 === undefined || result.artifact_sha256 === hash,
+      `${id}: raw artifact hash mismatch`,
     );
+    assembly[result.status] += 1;
+    assembly.samples += result.samples;
     requireFact(
-      Array.isArray(result.measurements),
-      `${id}: measurement list required`,
+      Number.isSafeInteger(assembly.samples),
+      "aggregate sample count overflow",
     );
-    for (const measurement of result.measurements)
-      validateMeasurement(measurement);
-    if (c.comparison === true)
+    return { ...structuredClone(result), artifact_sha256: hash };
+  });
+  output.stage = "pre-freeze";
+  output.qualified = false;
+  output.assembly = assembly;
+  return output;
+}
+
+export function inspectRelease(
+  manifest,
+  record,
+  { candidateSha, source, reviewedLegSetSha256, artifactsRoot },
+) {
+  validateManifest(manifest, source, reviewedLegSetSha256);
+  const findings = [];
+  const check = (scope, rule, validate) => {
+    try {
+      validate();
+      return true;
+    } catch (error) {
+      findings.push({ scope, rule, message: error.message });
+      return false;
+    }
+  };
+  check("record", "candidate", () =>
+    requireFact(
+      hex(candidateSha, 40) &&
+        record?.schema === 1 &&
+        record.candidate_sha === candidateSha,
+      "candidate revision mismatch",
+    ),
+  );
+  check("record", "stage", () =>
+    requireFact(
+      record?.stage === "frozen-candidate",
+      "pre-freeze or missing-stage evidence cannot qualify a release",
+    ),
+  );
+  check("record", "source", () =>
+    requireFact(
+      record?.source_state === "clean" && record?.qualification !== false,
+      "working-tree characterization cannot qualify a release",
+    ),
+  );
+  check("record", "runner", () =>
+    requireFact(nonempty(record?.runner_image), "runner image required"),
+  );
+  const versions = {
+    rust: "1.98.1",
+    fastly_sdk: "0.13.1",
+    viceroy: "0.21.0",
+    spin: "4.1.0",
+  };
+  for (const [tool, version] of Object.entries(versions))
+    check("record", `toolchain:${tool}`, () =>
       requireFact(
-        record.comparisons !== null,
-        `${id}: baseline comparison required`,
-      );
-    passed++;
+        record?.toolchain?.[tool] === version,
+        `wrong toolchain ${tool}`,
+      ),
+    );
+  check("record", "toolchain:workerd", () =>
+    requireFact(
+      nonempty(record?.toolchain?.workerd),
+      "workerd revision required",
+    ),
+  );
+  const retention = record?.retention;
+  check("record", "retention", () =>
+    requireFact(
+      ["release-asset", "repository"].includes(retention?.kind) &&
+        nonempty(retention.uri) &&
+        retention.expires_at === null,
+      "durable non-expiring retention required while the candidate is pinned",
+    ),
+  );
+  if (record?.comparisons !== null)
+    check("record", "comparisons", () =>
+      requireFact(
+        nonempty(record?.comparisons?.baseline) &&
+          record?.comparisons?.candidate === candidateSha,
+        "comparison build identities required",
+      ),
+    );
+  const map = (field, describe) => {
+    const values = new Map();
+    const ambiguous = new Set();
+    if (
+      !check("record", field, () =>
+        requireFact(Array.isArray(record?.[field]), `${field} map required`),
+      )
+    )
+      return values;
+    for (const [index, value] of record[field].entries()) {
+      let id;
+      if (
+        !check("record", `${field}:${index}`, () => {
+          requireFact(
+            value && typeof value === "object" && !Array.isArray(value),
+            `invalid ${field} entry`,
+          );
+          id = describe(value);
+          requireFact(nonempty(id), `invalid ${field} identity`);
+        })
+      )
+        continue;
+      if (values.has(id) || ambiguous.has(id)) {
+        check(field === "builds" ? "record" : id, `${field}:duplicate`, () =>
+          requireFact(false, `duplicate ${id}`),
+        );
+        values.delete(id);
+        ambiguous.add(id);
+      } else values.set(id, value);
+    }
+    return values;
+  };
+  const legIdentity = (value) =>
+    nonempty(value.case_id) && nonempty(value.environment)
+      ? key(value)
+      : undefined;
+  const results = map("results", legIdentity);
+  const applicability = map("applicability", legIdentity);
+  const cases = unique(manifest.cases, key);
+  const decisions = unique(manifest.decisions, (d) => d.id);
+  const builds = map("builds", (build) => build.build_id);
+  check("record", "builds:nonempty", () =>
+    requireFact(builds.size > 0, "build identities required"),
+  );
+  for (const [id, build] of builds) {
+    if (
+      !check("record", `build:${id}`, () =>
+        validateBuildIdentity(build, candidateSha),
+      )
+    )
+      builds.delete(id);
   }
+  let root;
+  if (artifactsRoot !== undefined) {
+    check("record", "artifacts", () => {
+      root = realpathSync(resolve(artifactsRoot));
+    });
+    for (const build of builds.values()) {
+      check("record", `build:${build.build_id}`, () =>
+        requireFact(
+          root && artifactHash(root, build.artifact_path) === build.build_id,
+          "build artifact hash mismatch",
+        ),
+      );
+    }
+  }
+  for (const id of [...results.keys(), ...applicability.keys()])
+    check(id, "known-leg", () =>
+      requireFact(cases.has(id), `unknown case/environment ${id}`),
+    );
+  const passed = [];
+  const deferred = [];
+  for (const [id, c] of cases) {
+    const start = findings.length;
+    let required;
+    if (
+      !check(id, "disposition", () => {
+        required = disposition(c, decisions);
+      })
+    )
+      continue;
+    const mapping = applicability.get(id);
+    check(id, "applicability", () =>
+      requireFact(
+        mapping?.disposition === required,
+        `${id}: wrong or missing applicability`,
+      ),
+    );
+    if (required === "deferred") {
+      const approved = decisions.get(c.approval)?.status === "approved";
+      check(id, "deferral", () =>
+        requireFact(
+          approved
+            ? mapping?.approval === c.approval
+            : mapping?.condition ===
+                (c.condition ?? "follow-up not promoted or confirmed present"),
+          `${id}: unjustified applicability deferral`,
+        ),
+      );
+      if (start === findings.length) deferred.push(id);
+      continue;
+    }
+    check(id, "implementation", () =>
+      requireFact(
+        c.implementation === "ready",
+        `${id}: planned command is not implemented evidence`,
+      ),
+    );
+    if (c.comparison === true)
+      check(id, "comparison", () =>
+        requireFact(
+          record?.comparisons !== null,
+          `${id}: baseline comparison required`,
+        ),
+      );
+    const result = results.get(id);
+    if (
+      !check(id, "result", () => requireFact(result, `${id}: missing result`))
+    )
+      continue;
+    check(id, "candidate", () =>
+      requireFact(
+        result.candidate_sha === candidateSha,
+        `${id}: result revision mismatch`,
+      ),
+    );
+    check(id, "build", () =>
+      requireFact(
+        builds.has(result.build_id),
+        `${id}: missing or unknown result build identity`,
+      ),
+    );
+    check(id, "contract", () =>
+      requireFact(
+        result.source_digest === c.source_digest &&
+          result.command === c.command &&
+          result.sentinel === c.sentinel &&
+          result.artifact_path === c.artifact_path,
+        `${id}: result contract mismatch`,
+      ),
+    );
+    check(id, "outcome", () =>
+      requireFact(
+        result.status === "passed" &&
+          Number.isSafeInteger(result.samples) &&
+          result.samples > 0,
+        `${id}: pending/failed result or zero samples`,
+      ),
+    );
+    check(id, "artifact-digest", () =>
+      requireFact(
+        hex(result.artifact_sha256, 64),
+        `${id}: raw artifact hash required`,
+      ),
+    );
+    check(id, "assertions", () =>
+      requireFact(
+        Array.isArray(result.assertions) &&
+          result.assertions.length > 0 &&
+          result.assertions.every((a) => nonempty(a.name) && a.passed === true),
+        `${id}: missing or failed assertions`,
+      ),
+    );
+    if (
+      check(id, "measurements", () =>
+        requireFact(
+          Array.isArray(result.measurements),
+          `${id}: measurement list required`,
+        ),
+      )
+    ) {
+      for (const [index, measurement] of result.measurements.entries())
+        check(id, `measurement:${index}`, () =>
+          validateMeasurement(measurement),
+        );
+    }
+    if (start === findings.length) passed.push(id);
+  }
+  if (artifactsRoot !== undefined) {
+    for (const [id, result] of results) {
+      check(id, "raw-artifact", () =>
+        requireFact(
+          root &&
+            artifactHash(root, result.artifact_path) === result.artifact_sha256,
+          "raw artifact hash mismatch",
+        ),
+      );
+    }
+  }
+  const invalid = new Set(findings.map((finding) => finding.scope));
+  const accepted = (ids) =>
+    invalid.has("record") ? 0 : ids.filter((id) => !invalid.has(id)).length;
   return {
-    status: "passed",
+    status: findings.length === 0 ? "passed" : "blocked",
     candidate_sha: candidateSha,
-    passed,
-    deferred,
+    passed: accepted(passed),
+    deferred: accepted(deferred),
     capabilities_changed: false,
+    qualified: false,
+    findings,
   };
 }
 
+export function validateRelease(manifest, record, options) {
+  const report = inspectRelease(manifest, record, options);
+  requireFact(report.findings.length === 0, report.findings[0]?.message);
+  return report;
+}
+
 function readJson(path) {
+  const metadata = statSync(path);
   requireFact(
-    statSync(path).size <= 16 * 1024 * 1024,
-    "JSON input exceeds 16 MiB",
+    metadata.isFile() && metadata.size <= 16 * 1024 * 1024,
+    "JSON input must be a regular file at most 16 MiB",
   );
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -421,14 +736,14 @@ function readJson(path) {
 function run(args) {
   if (args.length === 1 && args[0] === "--help") {
     process.stdout.write(
-      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nManifest validation permits planned/pending legs; release validation never does.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
+      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate SHA --input OBSERVATIONS.json --artifacts DIRECTORY --output NEW_DRAFT.json [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --report|--release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nAssembly preserves observations in an unqualified pre-freeze draft and exits nonzero for open release gates. It refuses overwrites.\nManifest validation permits planned/pending legs; release validation never does.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
     );
     return;
   }
   const mode = args.shift();
   requireFact(
-    ["--manifest", "--release"].includes(mode),
-    "choose --manifest or --release; see --help",
+    ["--manifest", "--assemble", "--report", "--release"].includes(mode),
+    "choose --manifest, --assemble, --report or --release; see --help",
   );
   let inventory = resolve(ROOT, INVENTORY);
   const options = {};
@@ -437,9 +752,14 @@ function run(args) {
   while (args.length) {
     const name = args.shift();
     requireFact(
-      ["--candidate", "--record", "--artifacts", "--inventory"].includes(
-        name,
-      ) &&
+      [
+        "--candidate",
+        "--record",
+        "--artifacts",
+        "--inventory",
+        "--input",
+        "--output",
+      ].includes(name) &&
         nonempty(args[0]) &&
         !args[0].startsWith("--") &&
         options[name] === undefined,
@@ -469,29 +789,64 @@ function run(args) {
     );
     return;
   }
+  const allowed =
+    mode === "--assemble"
+      ? ["--candidate", "--input", "--artifacts", "--output", "--inventory"]
+      : ["--candidate", "--record", "--artifacts", "--inventory"];
+  requireFact(
+    Object.keys(options).every((name) => allowed.includes(name)),
+    "arguments do not match selected mode",
+  );
+  requireFact(
+    options["--candidate"] && options["--artifacts"],
+    "candidate and artifacts directory required",
+  );
+  const context = {
+    candidateSha: options["--candidate"],
+    source,
+    artifactsRoot: resolve(options["--artifacts"]),
+  };
+  if (mode === "--assemble") {
+    requireFact(
+      options["--input"] && options["--output"],
+      "assembly needs --input and --output",
+    );
+    const draft = assembleRecord(
+      manifest,
+      readJson(resolve(options["--input"])),
+      context,
+    );
+    const result = inspectRelease(manifest, draft, context);
+    const output = JSON.stringify(draft, null, 2) + "\n";
+    requireFact(
+      Buffer.byteLength(output) <= 16 * 1024 * 1024,
+      "assembled JSON exceeds 16 MiB",
+    );
+    writeFileSync(resolve(options["--output"]), output, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    process.stdout.write(
+      JSON.stringify(
+        { ...result, record_output: resolve(options["--output"]) },
+        null,
+        2,
+      ) + "\n",
+    );
+    process.exitCode = result.status === "passed" ? 0 : 1;
+    return;
+  }
   requireFact(
     options["--record"] && options["--artifacts"],
     "release needs --record and --artifacts",
   );
   const record = readJson(resolve(options["--record"]));
-  const result = validateRelease(manifest, record, {
-    candidateSha: options["--candidate"],
-    source,
-  });
-  const root = realpathSync(resolve(options["--artifacts"]));
-  for (const artifact of record.results) {
-    const path = realpathSync(resolve(root, artifact.artifact_path));
-    const within = relative(root, path);
-    requireFact(
-      within !== "" && !isAbsolute(within) && within.split(/[\\/]/)[0] !== "..",
-      "artifact escapes evidence directory",
-    );
-    requireFact(
-      sha256(readFileSync(path)) === artifact.artifact_sha256,
-      "raw artifact hash mismatch",
-    );
-  }
-  process.stdout.write(JSON.stringify(result) + "\n");
+  const result =
+    mode === "--report"
+      ? inspectRelease(manifest, record, context)
+      : validateRelease(manifest, record, context);
+  process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+  process.exitCode = result.status === "passed" ? 0 : 1;
 }
 
 if (

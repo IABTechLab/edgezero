@@ -223,7 +223,7 @@ Finish the source-producing steps below and Q2's runbook/template preparation be
 Pre-freeze runs are development checks, not the authoritative EZ-Q1 record. After the freeze
 checkpoint, Q3/Q4 collect evidence externally without editing candidate source.
 
-- [ ] Add `outbound_evidence_assembly_retains_case_counts_and_hashes` to fixture-harness tests and
+- [x] Add `outbound_evidence_assembly_retains_case_counts_and_hashes` to fixture-harness tests and
       run `scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness`.
       Expected: red for incomplete record assembly, then nonzero case counts, exact candidate/build
       identities and raw artifact hashes survive export. Run the Node evidence-validator test file
@@ -262,6 +262,28 @@ checkpoint, Q3/Q4 collect evidence externally without editing candidate source.
       runner image, case counts, seed, measurements and sample counts. An offline compile,
       successful stub, skipped case, or safe refusal of a required bounded operation cannot
       satisfy an acceptance leg. These are the authoritative local results Q4a/Q5 consume.
+
+### Q3 Pre-Freeze Assembly Checkpoint (2026-10-23)
+
+- [x] Keep assembly and artifact validation in the existing Node checker. Add `--assemble` for
+      explicit per-leg observations and `--report` for all independently evaluable release gates.
+      The fixture Rust sentinel exercises that actual CLI; no duplicate Rust validator or JSONL
+      conversion is added.
+- [x] Preserve status/sample/assertion/measurement values, candidate SHA and linked SHA-256 build
+      identity. Compute raw hashes from bounded regular files, reject escapes and refuse overwrites.
+      Drafts remain pre-freeze/unqualified and release validation rejects dirty/characterization
+      evidence. No missing metadata, result, applicability decision or approval is invented.
+- [x] Share release checks and artifact hashing with the diagnostic collector. Invalid catalog
+      entries do not erase unrelated evidence. Accepted totals exclude invalid artifacts/deferrals;
+      planned-command and comparison gates are evaluated even when results are missing.
+- [x] Activate Node regressions and the nonzero Rust sentinel in the existing workspace CI leg.
+- [ ] Finish controlled origins, frozen-candidate export/mapping, approved H(K)/pooling validation,
+      the runbook, candidate freeze and all local/hosted/consumer qualification before closing Q3.
+
+This is preparatory tooling only. Its synthetic tests do not establish runtime measurements,
+source-to-build provenance, maintainer approvals or hosted delivery. The full record-writer/export
+step above remains open for frozen-candidate integration. The reviewed 511-leg set, frozen APIs,
+transport behavior and failed Fastly G2 are unchanged.
 
 ## Q4: Hosted Qualification Handoff Task Group
 
