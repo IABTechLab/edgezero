@@ -218,6 +218,9 @@ not provider guarantees inferred from these foundation tests.
 
 ### P1 Image Optimizer Values Checkpoint
 
+Historical checkpoint at `08bfb89d`; the region-enum amendment below supersedes only the region
+representation and its privacy doctest.
+
 - [x] Reverify the frozen Interfaces digest and the seven region tokens against the installed
       Fastly SDK 0.13.1 source, without adding that SDK to core.
 - [x] Add the approved selector enums, private region/options types and exact consuming
@@ -247,6 +250,30 @@ compile-fail examples), core no-default-features builds for wasm32-unknown-unkno
 and the Spin wasm32-wasip2 gate passed. Docs format/lint/build, outbound documentation/legacy
 guards and 29 evidence-checker tests passed. Independent spec and quality reviews found no issue
 in this subset. The inventory remains 255 criteria / 511 planned legs, `qualified: false`.
+
+### P1 Region Enum Amendment
+
+- [x] Apply the requester's 2026-10-24 scoped approval: replace the string-backed region with
+      the public Copy/Clone/Debug/PartialEq/Eq enum Asia/Australia/EuCentral/EuWest/UsCentral/
+      UsEast/UsWest. Keep canonical `parse`/`as_str` conversions without a compatibility wrapper.
+- [x] Update the current Interfaces and retain the original exact-digest approval as history
+      in the [approval record](../../audits/2026-10-18-outbound-api-approval.md#scoped-region-enum-amendment).
+- [x] Demonstrate missing-variant red in the external API test; cover exhaustive external
+      matching, direct construction, Copy readback and exact token/variant pairs. Replace the
+      obsolete privacy doctest with a typed construction example; retain invalid-input tests.
+- [x] Complete broad verification and independent review for the amendment.
+
+Only the standalone region value changes. Request attachment, adapters, demo and generator do
+not yet consume these optimizer settings; their existing outbound contracts stay unchanged.
+Fastly feasibility/policy/horizon and hosted qualification remain open.
+
+All five workspace Rust gates passed: 2,225 tests passed across 29 binaries, zero failed and one
+existing test remained ignored. The 861 core unit tests, both external API tests and 11 core
+doctests passed; core no-default-features checks for wasm32-unknown-unknown/wasm32-wasip1 and
+the Spin wasm32-wasip2 gate passed. Docs format/lint/build, outbound documentation/legacy guards,
+29 evidence-checker tests and the historical/current API identity verifier passed. Independent
+code and documentation reviews found no actionable issue. The inventory remains 255 criteria /
+511 planned legs, `qualified: false`; these checks do not qualify the full outbound migration.
 
 ### P1/P4 Ownership Checkpoint
 

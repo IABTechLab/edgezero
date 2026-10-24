@@ -162,7 +162,15 @@ impl OutboundImageOptimizerRegion {
     #[must_use]
     #[inline]
     pub fn as_str(&self) -> &str {
-        self.token
+        match self {
+            Self::Asia => "asia",
+            Self::Australia => "australia",
+            Self::EuCentral => "eu_central",
+            Self::EuWest => "eu_west",
+            Self::UsCentral => "us_central",
+            Self::UsEast => "us_east",
+            Self::UsWest => "us_west",
+        }
     }
 
     /// Accepts exactly the seven region tokens serialized by Fastly SDK 0.13.1.
@@ -172,16 +180,16 @@ impl OutboundImageOptimizerRegion {
     #[inline]
     pub fn parse(token: &str) -> Result<Self, EdgeError> {
         let region = match token {
-            "asia" => "asia",
-            "australia" => "australia",
-            "eu_central" => "eu_central",
-            "eu_west" => "eu_west",
-            "us_central" => "us_central",
-            "us_east" => "us_east",
-            "us_west" => "us_west",
+            "asia" => Self::Asia,
+            "australia" => Self::Australia,
+            "eu_central" => Self::EuCentral,
+            "eu_west" => Self::EuWest,
+            "us_central" => Self::UsCentral,
+            "us_east" => Self::UsEast,
+            "us_west" => Self::UsWest,
             _ => return Err(EdgeError::bad_request("invalid image optimizer region")),
         };
-        Ok(Self { token: region })
+        Ok(region)
     }
 }
 
@@ -208,18 +216,21 @@ mod tests {
 
     #[test]
     fn image_optimizer_regions_match_the_pinned_sdk_tokens() {
-        for token in [
-            "us_east",
-            "us_central",
-            "us_west",
-            "eu_central",
-            "eu_west",
-            "asia",
-            "australia",
+        for (token, region) in [
+            ("asia", OutboundImageOptimizerRegion::Asia),
+            ("australia", OutboundImageOptimizerRegion::Australia),
+            ("eu_central", OutboundImageOptimizerRegion::EuCentral),
+            ("eu_west", OutboundImageOptimizerRegion::EuWest),
+            ("us_central", OutboundImageOptimizerRegion::UsCentral),
+            ("us_east", OutboundImageOptimizerRegion::UsEast),
+            ("us_west", OutboundImageOptimizerRegion::UsWest),
         ] {
-            let region = OutboundImageOptimizerRegion::parse(token).expect("SDK region");
+            assert_eq!(
+                OutboundImageOptimizerRegion::parse(token).expect("SDK region"),
+                region
+            );
             assert_eq!(region.as_str(), token);
-            let options = OutboundImageOptimizerOptions::new().region(region.clone());
+            let options = OutboundImageOptimizerOptions::new().region(region);
             assert_eq!(options.region_setting(), Some(&region));
         }
     }
@@ -331,9 +342,9 @@ mod tests {
 
     #[test]
     fn image_optimizer_readbacks_preserve_independent_settings_and_replacement() {
-        let region = OutboundImageOptimizerRegion::parse("eu_west").expect("region");
+        let region = OutboundImageOptimizerRegion::EuWest;
         let options = OutboundImageOptimizerOptions::new()
-            .region(region.clone())
+            .region(region)
             .preserve_origin_query(true)
             .format(OutboundImageFormat::WebP)
             .quality(0)
@@ -372,8 +383,11 @@ mod tests {
             .expect("height replacement")
             .crop(1, 2, OutboundCropFocus::Smart)
             .expect("crop replacement")
-            .region(OutboundImageOptimizerRegion::parse("asia").expect("replacement region"));
-        assert_eq!(changed.region_setting().expect("region").as_str(), "asia");
+            .region(OutboundImageOptimizerRegion::Asia);
+        assert_eq!(
+            changed.region_setting(),
+            Some(&OutboundImageOptimizerRegion::Asia)
+        );
         assert!(!changed.preserve_origin_query_setting());
         assert_eq!(changed.format_setting(), Some(OutboundImageFormat::Auto));
         assert_eq!(

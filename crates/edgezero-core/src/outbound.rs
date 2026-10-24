@@ -212,15 +212,22 @@ pub enum OutboundCropFocus {
     Smart,
 }
 
-/// A validated Image Optimizer region from the pinned SDK's portable subset.
+/// An Image Optimizer region from the pinned SDK's portable subset.
 ///
-/// ```compile_fail
-/// use edgezero_core::OutboundImageOptimizerRegion;
-/// let _ = OutboundImageOptimizerRegion { token: "unvalidated" };
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OutboundImageOptimizerRegion {
-    token: &'static str,
+/// use edgezero_core::OutboundImageOptimizerRegion;
+/// let region = OutboundImageOptimizerRegion::UsWest;
+/// assert_eq!(region.as_str(), "us_west");
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundImageOptimizerRegion {
+    Asia,
+    Australia,
+    EuCentral,
+    EuWest,
+    UsCentral,
+    UsEast,
+    UsWest,
 }
 
 /// Standalone validated transformation settings with no implicit selectors.

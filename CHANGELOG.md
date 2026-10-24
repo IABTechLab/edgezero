@@ -224,7 +224,8 @@ separately from the portable API and must be considered when declaring required 
 ### Outbound HTTP And Batches
 
 - Add standalone validated Image Optimizer values with typed format/filter/focus selectors,
-  exact pinned-SDK region tokens, private settings and complete builder readback. Validate
+  a public seven-variant region enum with exact pinned-SDK token conversions, private settings
+  and complete builder readback. Remove the string-backed region wrapper. Validate
   quality, nonzero dimensions and paired percentage focus without provider dependencies.
   Request attachment, support-first preflight and Fastly execution remain unimplemented/gated;
   these values do not enable optimization or add ignored request options.

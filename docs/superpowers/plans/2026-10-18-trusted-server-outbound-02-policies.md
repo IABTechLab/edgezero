@@ -81,6 +81,9 @@ pub enum OutboundProxyMarker { Inherit, On, Off }
 pub enum OutboundImageFormat { Auto, Avif, Gif, Jpeg, JpegXl, Mp4, Png, WebP }
 pub enum OutboundResizeFilter { Nearest, Bilinear, Bicubic, Lanczos2, Lanczos3 }
 pub enum OutboundCropFocus { Default, Smart, Percent { x: u8, y: u8 } }
+pub enum OutboundImageOptimizerRegion {
+    Asia, Australia, EuCentral, EuWest, UsCentral, UsEast, UsWest,
+}
 
 impl OutboundRequest {
     pub fn connect_timeout(self, timeout: Duration) -> Self;
@@ -120,9 +123,10 @@ impl OutboundImageOptimizerOptions {
 }
 ```
 
-The small selector enums are Copy/Debug/equality values. Region/options have private fields;
-region parsing accepts exactly the pinned SDK's seven region tokens without making core depend
-on that SDK. Options support Default/Clone/Debug/equality; `new` leaves selectors unset and query
+The selector enums, including region, are Copy/Clone/Debug/PartialEq/Eq values. Region supports
+direct typed construction and exhaustive matching; `parse` and `as_str` convert exactly the pinned
+SDK's seven region tokens without making core depend on that SDK. Only options have private
+fields and support Default/Clone/Debug/equality; `new` leaves selectors unset and query
 preservation false. Quality above 100, zero dimensions/crop ratio and percent focus above 100 fail
 at construction as typed client errors. Paired percentage focus makes incomplete offsets and
 smart-plus-offset combinations unrepresentable. Core validates public enum payloads at

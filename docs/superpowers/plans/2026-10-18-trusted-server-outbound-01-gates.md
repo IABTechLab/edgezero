@@ -269,6 +269,12 @@ question naming the exact API digest, then supplied AG as the approving maintain
 records this API-only approval, not any Fastly-policy approval. P1's paired-time foundation starts
 under that instruction. The remaining G4 decisions stay open.
 
+**Scoped amendment, 2026-10-24:** the requester approved replacing the private string-backed
+region with a public seven-variant enum, retaining `parse`/`as_str` at string boundaries and
+removing the wrapper. The [approval record](../../audits/2026-10-18-outbound-api-approval.md#scoped-region-enum-amendment)
+preserves the original exact-digest approval and records this amendment separately. No other
+G4 decision is approved by that instruction.
+
 - [x] The plan owner presents the exact Interfaces block, its SHA-256 digest, the old/new
       implementer migration table, mixed-collection semantics, marker default, and timeout cause
       variants to the EdgeZero maintainer. Include synchronous pre-settlement support rejection and

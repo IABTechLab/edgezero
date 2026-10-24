@@ -9,6 +9,10 @@ That scoped response authorizes API implementation, not Fastly policy, capabilit
 requirement changes, dependency repinning or production adoption. The other decisions remain
 pending. Preparing this record or passing tests does not supply their approval.
 
+The [2026-10-24 region-enum amendment](#scoped-region-enum-amendment) records the requester's
+later, narrower approval separately. The current contract is the original API subject plus that
+amendment, not a newly approved whole-contract digest.
+
 The inspected checkout is PR 275 at `7cccaf10734914161803317aec6c55c22c2bccc9` plus the uncommitted
 G1-G3 work and Spin response-egress repair. Its local characterization does not qualify that commit.
 The [implementation index](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md)
@@ -28,15 +32,15 @@ the conversation, not inferred from Git. This does not close G4 as a whole. A co
 decision must retain its maintainer, date, exact subject digest and scope. Proposal hashes do not
 approve the other subjects; missing, rejected or stale approval blocks their dependent work.
 
-## Exact API Subject
+## Original Exact API Subject
 
 Review the complete [Interfaces: Proposed Hard-Cut Contract](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md#interfaces-proposed-hard-cut-contract),
 not just its opening trait declaration or the summaries in this packet. The subject includes every
 signature, supporting type, ownership/default rule, migration table and acceptance sentinel in
 that section, ending immediately before `## Task P1:`. It is referenced once rather than copied
 into a second potentially conflicting contract.
-These source links use the immutable base revision because internal plans are excluded from the
-published documentation site; verify the local submitted bytes with the command below.
+These source links use the immutable submission revision because internal plans are excluded from
+the published documentation site. The identities below are historical, not the amended local file.
 
 | Property                       | Submitted Value                                                            |
 | ------------------------------ | -------------------------------------------------------------------------- |
@@ -46,7 +50,7 @@ published documentation site; verify the local submitted bytes with the command 
 | Complete source-file SHA-256   | `c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80`         |
 | Normative requirements SHA-256 | `5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec`         |
 
-Run from the repository/worktree root before approval and again before P1. The extraction includes
+Run from the repository/worktree root to verify the original subject and current amendment. The extraction includes
 the trailing blank lines before the next task; it does not normalize whitespace or line endings.
 Any changed Interfaces byte needs a new digest and review. Changes elsewhere in the plan or in
 the requirements also require reviewing their effect, not silently refreshing these identities.
@@ -54,11 +58,13 @@ the requirements also require reviewing their effect, not silently refreshing th
 ```sh
 node --input-type=module <<'JS'
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 const path = 'docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md';
-const source = readFileSync(path, 'utf8');
+const revision = '7cccaf10734914161803317aec6c55c22c2bccc9';
+const source = execFileSync('git', ['show', `${revision}:${path}`], { encoding: 'utf8' });
 const start = source.indexOf('## Interfaces: Proposed Hard-Cut Contract\n');
 assert.notEqual(start, -1);
 const end = source.indexOf('## Task P1:', start);
@@ -69,11 +75,46 @@ assert.equal(Buffer.byteLength(section), 42166);
 assert.equal(section.split('\n').length - 1, 679);
 assert.equal(digest(section), 'c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a');
 assert.equal(digest(source), 'c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80');
-const requirements = readFileSync('docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md');
+const requirementsPath = 'docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md';
+const requirements = execFileSync('git', ['show', `${revision}:${requirementsPath}`]);
 assert.equal(digest(requirements), '5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec');
-console.log('Submitted API and requirement identities match; approval is still a separate decision.');
+const current = readFileSync(path, 'utf8');
+const currentStart = current.indexOf('## Interfaces: Proposed Hard-Cut Contract\n');
+assert.notEqual(currentStart, -1);
+const currentEnd = current.indexOf('## Task P1:', currentStart);
+assert.ok(currentEnd > currentStart);
+assert.equal(digest(current.slice(currentStart, currentEnd)), '0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404');
+assert.equal(digest(current), '037f7fbd4407a1071e91e0327b352ed82bdf29f1f65dab83dc14d89330a86a0a');
+console.log('Original subject and amended API identities match; approval scope is recorded separately.');
 JS
 ```
+
+### Scoped Region Enum Amendment
+
+On 2026-10-24 the requester explicitly asked for an enum and replied `ok` to the proposal for a
+public, core-owned seven-variant region enum, typed `parse`/`as_str` conversions, corresponding
+spec/tests and no compatibility wrapper. This is approval of that described API change, not a
+claim that the requester reviewed the new whole-section digest computed afterward.
+
+The current [Interfaces contract](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md#interfaces-proposed-hard-cut-contract)
+differs from the original only by declaring `OutboundImageOptimizerRegion::{Asia, Australia,
+EuCentral, EuWest, UsCentral, UsEast, UsWest}` and specifying its Copy/Clone/Debug/PartialEq/Eq,
+direct construction and exhaustive matching semantics. Options alone retain private fields;
+existing getters and canonical token/error behavior are unchanged. No other interface or gate
+is amended.
+
+| Current Source Identity | Value                                                              |
+| ----------------------- | ------------------------------------------------------------------ |
+| Interfaces SHA-256      | `0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404` |
+| Complete plan SHA-256   | `037f7fbd4407a1071e91e0327b352ed82bdf29f1f65dab83dc14d89330a86a0a` |
+| Interfaces size         | 683 LF-terminated lines, 42,364 UTF-8 bytes                        |
+
+These are verification identities, not fresh exact-digest approval evidence. The original
+AG approval remains attributed as recorded above; this amendment is attributed to the requester's
+explicit conversation approval. The requirements file had already changed since the original
+submission; the historical requirements digest above is not asserted against today's file.
+This amendment does not change requirements or approve their intervening changes. Fastly policy,
+optimizer horizon, applicability, measurement and hosted-qualification decisions stay open.
 
 ### Included Contract Decisions
 

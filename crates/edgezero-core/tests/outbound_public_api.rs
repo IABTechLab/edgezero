@@ -9,9 +9,9 @@ use edgezero_core::{
     reason = "external supplied-client API integration test"
 )]
 fn public_image_optimizer_value_readbacks_compile_contract() {
-    let region = OutboundImageOptimizerRegion::parse("us_west").expect("region");
+    let region = OutboundImageOptimizerRegion::UsWest;
     let options = OutboundImageOptimizerOptions::new()
-        .region(region.clone())
+        .region(region)
         .preserve_origin_query(true)
         .format(OutboundImageFormat::WebP)
         .quality(80)
@@ -43,4 +43,36 @@ fn public_image_optimizer_value_readbacks_compile_contract() {
         OutboundImageOptimizerOptions::new(),
         OutboundImageOptimizerOptions::default()
     );
+}
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "external supplied-client API integration test"
+)]
+fn public_image_optimizer_regions_support_exhaustive_matching() {
+    for region in [
+        OutboundImageOptimizerRegion::Asia,
+        OutboundImageOptimizerRegion::Australia,
+        OutboundImageOptimizerRegion::EuCentral,
+        OutboundImageOptimizerRegion::EuWest,
+        OutboundImageOptimizerRegion::UsCentral,
+        OutboundImageOptimizerRegion::UsEast,
+        OutboundImageOptimizerRegion::UsWest,
+    ] {
+        let token = match region {
+            OutboundImageOptimizerRegion::Asia => "asia",
+            OutboundImageOptimizerRegion::Australia => "australia",
+            OutboundImageOptimizerRegion::EuCentral => "eu_central",
+            OutboundImageOptimizerRegion::EuWest => "eu_west",
+            OutboundImageOptimizerRegion::UsCentral => "us_central",
+            OutboundImageOptimizerRegion::UsEast => "us_east",
+            OutboundImageOptimizerRegion::UsWest => "us_west",
+        };
+        assert_eq!(region.as_str(), token);
+        assert_eq!(
+            OutboundImageOptimizerRegion::parse(token).expect("region"),
+            region
+        );
+    }
 }
