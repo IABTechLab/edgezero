@@ -40,6 +40,9 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Add bounded native/WASI/empty-select timer controls and raw ABI timing inside the opt-in Fastly
+  diagnostic. Retain lateness and matched stock/repaired artifacts without inferring a timer fix,
+  changing +5 ms acceptance or replacing previous failed evidence. Production APIs/pins are unchanged.
 - Expand the opt-in Fastly readiness diagnostic to eleven controlled origin cases, buffered and
   pull-streamed consumption, two read capacities and three repetitions: 135 probes / 147 requests.
   Require complete inventories, fresh per-slot readiness, unchanged absolute deadlines, typed

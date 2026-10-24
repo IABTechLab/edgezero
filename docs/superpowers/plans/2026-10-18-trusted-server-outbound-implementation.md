@@ -265,6 +265,17 @@ Independent review reproduced the embedded-fence bug before its fix and cleared 
 Inventory validation still reports 255 criteria and 511 planned, unqualified environment legs.
 These results are local source verification, not hosted CI or frozen-candidate qualification.
 
+### G2 Timer-Control Checkpoint
+
+The [timer-control investigation](../../audits/evidence/2026-10-23-fastly-timer-controls.json)
+adds raw ABI timestamps and 72 controls per stock/repaired comparison without changing production
+code or runtime pins. Native sleep exceeded +5 ms in the initial pair. After excluding formatting
+from timer-only measurements, one stock 100 ms WASI sleep returned at 106.952 ms without body
+handles. Repaired HTTP matrices passed locally, while stock still lost 24 source errors.
+Earlier repaired timing failures remain retained/replayed; these samples do not identify their
+cause or establish a bound. G2 stays Failed, with dependent Fastly work gated and approved
+portable work independently eligible. B/H(K) and hosted qualification remain separate decisions.
+
 ### G2 Expanded Diagnostic Checkpoint
 
 The opt-in SDK/ABI fixture now executes eleven controlled origins with buffered and pull-streamed

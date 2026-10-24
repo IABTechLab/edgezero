@@ -228,6 +228,18 @@ fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
             )?;
         }
         if operation == "select" {
+            if sample.get("abi_enter_us").is_some() || sample.get("abi_return_us").is_some() {
+                let entered = sample["abi_enter_us"]
+                    .as_u64()
+                    .ok_or("missing raw ABI entry")?;
+                let returned = sample["abi_return_us"]
+                    .as_u64()
+                    .ok_or("missing raw ABI return")?;
+                require(
+                    start <= entered && entered <= returned && returned <= end,
+                    "raw ABI timestamps outside observed selection",
+                )?;
+            }
             require(
                 permission.is_none() && dispatched.iter().all(|v| *v),
                 "unused readiness or undispatched slot",
@@ -862,6 +874,61 @@ mod tests {
     }
 
     #[test]
+    fn readiness_replays_raw_instrumented_matrices_without_overwriting_history() {
+        use std::{
+            collections::BTreeMap,
+            fs::File,
+            io::{BufRead, BufReader},
+        };
+        let path = crate::root()
+            .join("../../../docs/audits/evidence/2026-10-23-fastly-timer-controls-probes.jsonl");
+        let mut runs: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        for line in BufReader::new(File::open(path).unwrap()).lines() {
+            let row: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if row["kind"] == "body-probe" {
+                runs.entry(row["run"].as_str().unwrap().to_owned())
+                    .or_default()
+                    .push(row["probe"].clone());
+            }
+        }
+        assert_eq!(runs.len(), 4);
+        for (name, probes) in &runs {
+            assert_eq!(probes.len(), 135);
+            assert_eq!(
+                probes
+                    .iter()
+                    .map(|p| p["origin"]["accepted"].as_u64().unwrap())
+                    .sum::<u64>(),
+                147
+            );
+            for probe in probes {
+                for sample in probe["samples"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|s| s["operation"] == "select")
+                {
+                    assert!(sample["abi_enter_us"].is_u64());
+                    assert!(sample["abi_return_us"].is_u64());
+                }
+                assert_eq!(probe["qualification"], false);
+            }
+            let result =
+                validate_outbound_readiness(probes, "77819f712ad971ada5494c563dd86a3b64a2afa6");
+            if name.starts_with("repaired") {
+                result.unwrap();
+            } else {
+                let message = result.unwrap_err().to_string();
+                assert!(
+                    message.starts_with("24 readiness leg(s) failed:\n"),
+                    "{message}"
+                );
+                assert_eq!(message.matches("wrong case terminal").count(), 24);
+            }
+        }
+    }
+
+    #[test]
     fn readiness_rejects_mutated_matrix() {
         type Mutation = (&'static str, fn(&mut Vec<Value>));
         let mutations: &[Mutation] = &[
@@ -950,6 +1017,20 @@ mod tests {
             }),
             ("bad selection status", |p| {
                 operation(&mut p[0], "select")["status"] = json!("FastlyStatus::BADF");
+            }),
+            ("missing raw return timestamp", |p| {
+                let selection = operation(&mut p[0], "select");
+                selection["abi_enter_us"] = selection["start_us"].clone();
+            }),
+            ("reversed raw interval", |p| {
+                let selection = operation(&mut p[0], "select");
+                selection["abi_enter_us"] = selection["end_us"].clone();
+                selection["abi_return_us"] = selection["start_us"].clone();
+            }),
+            ("raw return outside observed interval", |p| {
+                let selection = operation(&mut p[0], "select");
+                selection["abi_enter_us"] = selection["start_us"].clone();
+                selection["abi_return_us"] = json!(selection["end_us"].as_u64().unwrap() + 1);
             }),
             ("out of range selection", |p| {
                 operation(&mut p[0], "select")["selected"] = json!(1);

@@ -70,7 +70,9 @@ VICEROY_BIN="$VICEROY_SOURCE/target/debug/viceroy" scripts/smoke_test_reusable_a
 The fixture must still use its own target directory, as the existing launcher enforces. The
 expanded suite requires 135 probes and 147 origin receipts, including three direct/selected
 error comparisons. Unmodified 0.21.0 remains a failed control; the repaired executable must
-preserve `UnexpectedEof` in both modes. Any primitive or timing failure exits 1. Even a passing
+preserve `UnexpectedEof` in both modes. Any HTTP-readiness primitive or exchange-timing failure
+exits 1. Timer-only controls are separate observations: lateness remains recorded, not waived.
+Even a passing
 matrix exits 2: production-path integration, exact-version review, backend policy and hosted
 evidence are still required. Do not turn either disposition into an overall gate pass.
 

@@ -1,0 +1,574 @@
+{
+  "schema": 1,
+  "execution_date": "2026-10-23",
+  "timezone": "America/Los_Angeles",
+  "status": "Non-body guest timer lateness retained; original timing cause and guarantee remain open",
+  "qualification": false,
+  "edgezero_base_revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+  "source_state": "working-tree characterization; not a frozen qualification record",
+  "command": "VICEROY_BIN=<explicit stock or repaired executable> scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output <new empty directory>",
+  "controls": {
+    "sources": ["native-sleep", "empty-select", "wasi-sleep"],
+    "budgets_ms": [1, 100, 500],
+    "repetitions": 8,
+    "observations_per_run": 72,
+    "excluded_warmups_per_run": 3,
+    "warmup_ms": 1,
+    "new_outbound_requests": 0,
+    "native_controls": "independent matched observations in each runtime run, not shared samples",
+    "late_observations": "retained with within_five_ms=false; not a passing G2 assertion",
+    "raw_intervals": "Reviewed timer controls end at captured primitive return, before formatting; the G2 operation and whole-exchange intervals still include all guest overhead.",
+    "comparison_phases": ["before-review", "reviewed"],
+    "runs": 4,
+    "total_observations": 288
+  },
+  "unchanged_gate": {
+    "body_probes_per_run": 135,
+    "origin_requests_per_run": 147,
+    "absolute_deadline_us": 500000,
+    "maximum_completion_us": 505000,
+    "historical_failure_record": "2026-10-23-fastly-readiness-matrix.json",
+    "historical_observations_rewritten": false,
+    "overall_G2": "Failed; later passing samples do not establish a bound or erase failures"
+  },
+  "runtime": {
+    "sdk": "fastly 0.13.1",
+    "runtime_version": "Viceroy 0.21.0; repaired executable is distinct from stock",
+    "upstream_revision": "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+    "stock_binary_sha256": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30",
+    "repaired_binary_sha256": "98ea0536478ce2e641f093b2619b7ac7c6c237402f140e5792d854575abc7100",
+    "build_details": "2026-10-23-viceroy-readiness-repair.json",
+    "tokio": "1.53.1",
+    "wasmtime_wasi": "39.0.2",
+    "runtime_code_changed": false,
+    "pins_changed": false,
+    "installed_runtime_replaced": false
+  },
+  "source_review": [
+    "Viceroy constructs a relative Tokio timeout after decoding the guest handle list; this is not an absolute guest deadline.",
+    "Tokio rounds timer deadlines and park calculations at millisecond granularity; source arithmetic does not explain the entire observed 7.297 ms overrun.",
+    "Tokio polls readiness before its timeout; guest code still arbitrates expiry before consuming a late result.",
+    "Guest WASI and Tokio elapsed clocks are host-monotonic based; source inspection supplies no clock-scale mismatch explanation.",
+    "Guest WASI sleep uses the shared async timer machinery here; it is not an independent native-sleep control.",
+    "Source exposes scheduling/driver/resumption opportunities but no deterministic +5 ms resume bound; actual cause of the earlier failure is not isolated."
+  ],
+  "interpretation": [
+    "Each stock/repaired comparison uses identical guest bytes; before-review and reviewed pairs have distinct byte identities. Requests are sequential without concurrent builds.",
+    "Native sleep lateness shows the observation window can be exceeded without HTTP bodies or the Viceroy select path; it does not identify the cause of the previous select failure.",
+    "No guest control exceeded +5 ms in the first pair. Reviewed stock WASI sleep requested 100 ms and returned at 106.952 ms, 6952 us after the request duration and 1952 us beyond its +5 ms window. Eight repetitions do not establish a tail guarantee.",
+    "This repaired HTTP matrix met the window once and exits 2 unverified; the earlier repaired timing failures remain retained and replayed.",
+    "Stock still loses all 24 selected truncation/malformed-body errors and exits 1.",
+    "No margin, shorter budget, blocking-body fallback, source substitution, backend policy approval, capability promotion or production migration is introduced.",
+    "Full event/log files and binaries are identified by hash, not retained release assets. Raw controls and body probes are retained separately.",
+    "Dependent Fastly engine work remains gated. Approved portable work may proceed independently; B/H(K), exact-version review, candidate freeze and hosted qualification remain open.",
+    "Earlier failed selection intervals included status formatting and lack raw ABI timestamps; new measurements cannot retroactively attribute their delay.",
+    "Review corrected the timer-only endpoint (4330 us versus raw return at 4325 us in the red control), and validation now rejects ABI waits shorter than their positive timeout. Both measurement phases are retained, not overwritten."
+  ],
+  "source_files": [
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_readiness.rs",
+      "sha256": "47d3f8be81c1531ad732d12ac1d645d70deba7328a0d8ded5be12bc0b7e752eb"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence.rs",
+      "sha256": "bf497a757f36427120e7deab1e1e70e415977ce88b73b138e750df8032e5b4ca"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence/readiness.rs",
+      "sha256": "5842b53b024b383ebdc6f9356e6e1cc58d6dbb3f1f08ae133f15698967f55687"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence/timers.rs",
+      "sha256": "07a4c42569e1403da5847d02b3b2a33380253d54f83ffd595f746ba30d7d8748"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/readiness.rs",
+      "sha256": "6010f19a22282cca84b675b3d3d271e3006d27a1a463c3162910d7baef73e7f8"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/Cargo.lock",
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+    },
+    {
+      "path": "patches/viceroy/0.21.0-body-readiness.patch",
+      "sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759"
+    }
+  ],
+  "runs": [
+    {
+      "id": "repaired",
+      "exit_code": 2,
+      "directory": "/private/tmp/edgezero-fastly-timer-controls-repaired-20261023-01",
+      "events_sha256": "2455df72b9a49ffa7c4c9fac05402816068fa755d5013fed1775f30b8396cb70",
+      "log_sha256": "7174987ca8cea9c4b6d4519636173e62b855d9df0f139724dad94785ab8f3021",
+      "guest_sha256": "b8935d601fade70fb030047fdf2b8c2211cbd483c45820f1db6d5dd97fe5b14b",
+      "controls": 72,
+      "warmups": [
+        {
+          "budget_ms": 1,
+          "elapsed_us": 1007,
+          "event": "readiness-timer-warmup",
+          "overrun_us": 7,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "native-sleep",
+          "token": "18e160dcd62fde48-5dc4-0",
+          "within_five_ms": true
+        },
+        {
+          "abi_enter_us": 2,
+          "abi_return_us": 2669,
+          "abi_status": "FastlyStatus::OK",
+          "budget_ms": 1,
+          "elapsed_us": 2671,
+          "event": "readiness-timer-warmup",
+          "overrun_us": 1671,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "selected": null,
+          "source": "empty-select",
+          "source_state": "working-tree-characterization",
+          "token": "18e160dcd6426c48-5dc4-1",
+          "within_five_ms": true
+        },
+        {
+          "budget_ms": 1,
+          "elapsed_us": 2916,
+          "event": "readiness-timer-warmup",
+          "overrun_us": 1916,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "wasi-sleep",
+          "source_state": "working-tree-characterization",
+          "token": "18e160dcd7087b68-5dc4-2",
+          "within_five_ms": true
+        }
+      ],
+      "summaries": [
+        {
+          "source": "native-sleep",
+          "count": 24,
+          "late": 5,
+          "max_overrun_us": 5015,
+          "max_raw_select_overrun_us": null
+        },
+        {
+          "source": "empty-select",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 2229,
+          "max_raw_select_overrun_us": 2219
+        },
+        {
+          "source": "wasi-sleep",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 2242,
+          "max_raw_select_overrun_us": null
+        }
+      ],
+      "body_probes": 135,
+      "origin_requests": 147,
+      "body_max_completion_us": 502235,
+      "body_late": 0,
+      "body_source_error_losses": 0,
+      "validation_failures": [],
+      "local_matrix_pass": true,
+      "qualification": false,
+      "phase": "before-review"
+    },
+    {
+      "id": "stock",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-fastly-timer-controls-stock-20261023-01",
+      "events_sha256": "865ac2d7791d355410d073e97b45418b34dd8b9471c868a0e0f301354d4903b7",
+      "log_sha256": "8aebcff3fb17bc5880ee9afa02a2ccc92f5dd065d01288d19c941d591d014087",
+      "guest_sha256": "b8935d601fade70fb030047fdf2b8c2211cbd483c45820f1db6d5dd97fe5b14b",
+      "controls": 72,
+      "warmups": [
+        {
+          "budget_ms": 1,
+          "elapsed_us": 1008,
+          "event": "readiness-timer-warmup",
+          "overrun_us": 8,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "native-sleep",
+          "token": "18e160edac7524d0-6a3d-0",
+          "within_five_ms": true
+        },
+        {
+          "abi_enter_us": 0,
+          "abi_return_us": 5016,
+          "abi_status": "FastlyStatus::OK",
+          "budget_ms": 1,
+          "elapsed_us": 5022,
+          "event": "readiness-timer-warmup",
+          "overrun_us": 4022,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "selected": null,
+          "source": "empty-select",
+          "source_state": "working-tree-characterization",
+          "token": "18e160edac884358-6a3d-1",
+          "within_five_ms": true
+        },
+        {
+          "budget_ms": 1,
+          "elapsed_us": 4247,
+          "event": "readiness-timer-warmup",
+          "overrun_us": 3247,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "wasi-sleep",
+          "source_state": "working-tree-characterization",
+          "token": "18e160edadfda548-6a3d-2",
+          "within_five_ms": true
+        }
+      ],
+      "summaries": [
+        {
+          "source": "native-sleep",
+          "count": 24,
+          "late": 7,
+          "max_overrun_us": 10012,
+          "max_raw_select_overrun_us": null
+        },
+        {
+          "source": "empty-select",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 3533,
+          "max_raw_select_overrun_us": 3522
+        },
+        {
+          "source": "wasi-sleep",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 3381,
+          "max_raw_select_overrun_us": null
+        }
+      ],
+      "body_probes": 135,
+      "origin_requests": 147,
+      "body_max_completion_us": 503628,
+      "body_late": 0,
+      "body_source_error_losses": 24,
+      "validation_failures": [
+        "readiness: 24 readiness leg(s) failed:\ntruncated/selected/buffered/1/0: wrong case terminal\ntruncated/selected/buffered/16384/0: wrong case terminal\ntruncated/selected/streamed/1/0: wrong case terminal\ntruncated/selected/streamed/16384/0: wrong case terminal\nmalformed-body/selected/buffered/1/0: wrong case terminal\nmalformed-body/selected/buffered/16384/0: wrong case terminal\nmalformed-body/selected/streamed/1/0: wrong case terminal\nmalformed-body/selected/streamed/16384/0: wrong case terminal\ntruncated/selected/buffered/1/1: wrong case terminal\ntruncated/selected/buffered/16384/1: wrong case terminal\ntruncated/selected/streamed/1/1: wrong case terminal\ntruncated/selected/streamed/16384/1: wrong case terminal\nmalformed-body/selected/buffered/1/1: wrong case terminal\nmalformed-body/selected/buffered/16384/1: wrong case terminal\nmalformed-body/selected/streamed/1/1: wrong case terminal\nmalformed-body/selected/streamed/16384/1: wrong case terminal\ntruncated/selected/buffered/1/2: wrong case terminal\ntruncated/selected/buffered/16384/2: wrong case terminal\ntruncated/selected/streamed/1/2: wrong case terminal\ntruncated/selected/streamed/16384/2: wrong case terminal\nmalformed-body/selected/buffered/1/2: wrong case terminal\nmalformed-body/selected/buffered/16384/2: wrong case terminal\nmalformed-body/selected/streamed/1/2: wrong case terminal\nmalformed-body/selected/streamed/16384/2: wrong case terminal"
+      ],
+      "local_matrix_pass": false,
+      "qualification": false,
+      "phase": "before-review"
+    },
+    {
+      "id": "repaired-reviewed",
+      "runtime": "repaired",
+      "phase": "reviewed",
+      "exit_code": 2,
+      "directory": "/private/tmp/edgezero-fastly-timer-controls-repaired-20261023-02",
+      "events_sha256": "572a738000b5b087bc7ee1999298b7d17540565ff8fc4c560eab0cfd8e91286e",
+      "log_sha256": "f0063db3b4059e4c3065117fb8117310fc6bdffa3a9333b5bde6d44f2cc5a6b1",
+      "guest_sha256": "4d3cf68793b593fe3d527176b2e0d00adfec434f330287bbfebe07f0b2f419e0",
+      "controls": 72,
+      "warmups": [
+        {
+          "budget_ms": 1,
+          "elapsed_us": 1258,
+          "event": "readiness-timer-warmup",
+          "measurement_end": "primitive-return",
+          "overrun_us": 258,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "native-sleep",
+          "token": "18e161a30df2af60-10a77-0",
+          "within_five_ms": true
+        },
+        {
+          "abi_enter_us": 4,
+          "abi_return_us": 7139,
+          "abi_status": "FastlyStatus::OK",
+          "budget_ms": 1,
+          "elapsed_us": 7139,
+          "event": "readiness-timer-warmup",
+          "measurement_end": "primitive-return",
+          "overrun_us": 6139,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "selected": null,
+          "source": "empty-select",
+          "source_state": "working-tree-characterization",
+          "token": "18e161a30e097b50-10a77-1",
+          "within_five_ms": false
+        },
+        {
+          "budget_ms": 1,
+          "elapsed_us": 3127,
+          "event": "readiness-timer-warmup",
+          "measurement_end": "primitive-return",
+          "overrun_us": 2127,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "wasi-sleep",
+          "source_state": "working-tree-characterization",
+          "token": "18e161a30f229828-10a77-2",
+          "within_five_ms": true
+        }
+      ],
+      "summaries": [
+        {
+          "source": "native-sleep",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 4557,
+          "max_raw_select_overrun_us": null
+        },
+        {
+          "source": "empty-select",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 2421,
+          "max_raw_select_overrun_us": 2421
+        },
+        {
+          "source": "wasi-sleep",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 2138,
+          "max_raw_select_overrun_us": null
+        }
+      ],
+      "body_probes": 135,
+      "origin_requests": 147,
+      "body_max_completion_us": 502553,
+      "body_late": 0,
+      "body_source_error_losses": 0,
+      "validation_failures": [],
+      "local_matrix_pass": true,
+      "qualification": false
+    },
+    {
+      "id": "stock-reviewed",
+      "runtime": "stock",
+      "phase": "reviewed",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-fastly-timer-controls-stock-20261023-02",
+      "events_sha256": "4f0cf5574d49293d27b03296490f56b48a37c3bdb4ac402028892898403a7232",
+      "log_sha256": "b85e4aff249a6c9d5194b9521dcb1b18f76d28453b53e0a0f8ab74c4b1bf5f4d",
+      "guest_sha256": "4d3cf68793b593fe3d527176b2e0d00adfec434f330287bbfebe07f0b2f419e0",
+      "controls": 72,
+      "warmups": [
+        {
+          "budget_ms": 1,
+          "elapsed_us": 1254,
+          "event": "readiness-timer-warmup",
+          "measurement_end": "primitive-return",
+          "overrun_us": 254,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "native-sleep",
+          "token": "18e161b773b613f0-11a68-0",
+          "within_five_ms": true
+        },
+        {
+          "abi_enter_us": 0,
+          "abi_return_us": 2150,
+          "abi_status": "FastlyStatus::OK",
+          "budget_ms": 1,
+          "elapsed_us": 2150,
+          "event": "readiness-timer-warmup",
+          "measurement_end": "primitive-return",
+          "overrun_us": 1150,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "selected": null,
+          "source": "empty-select",
+          "source_state": "working-tree-characterization",
+          "token": "18e161b773ccf368-11a68-1",
+          "within_five_ms": true
+        },
+        {
+          "budget_ms": 1,
+          "elapsed_us": 2502,
+          "event": "readiness-timer-warmup",
+          "measurement_end": "primitive-return",
+          "overrun_us": 1502,
+          "qualification": false,
+          "revision": "77819f712ad971ada5494c563dd86a3b64a2afa6",
+          "schema": 1,
+          "source": "wasi-sleep",
+          "source_state": "working-tree-characterization",
+          "token": "18e161b774dc7b20-11a68-2",
+          "within_five_ms": true
+        }
+      ],
+      "summaries": [
+        {
+          "source": "native-sleep",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 4751,
+          "max_raw_select_overrun_us": null
+        },
+        {
+          "source": "empty-select",
+          "count": 24,
+          "late": 0,
+          "max_overrun_us": 2281,
+          "max_raw_select_overrun_us": 2281
+        },
+        {
+          "source": "wasi-sleep",
+          "count": 24,
+          "late": 1,
+          "max_overrun_us": 6952,
+          "max_raw_select_overrun_us": null
+        }
+      ],
+      "body_probes": 135,
+      "origin_requests": 147,
+      "body_max_completion_us": 502413,
+      "body_late": 0,
+      "body_source_error_losses": 24,
+      "validation_failures": [
+        "readiness: 24 readiness leg(s) failed:\ntruncated/selected/buffered/1/0: wrong case terminal\ntruncated/selected/buffered/16384/0: wrong case terminal\ntruncated/selected/streamed/1/0: wrong case terminal\ntruncated/selected/streamed/16384/0: wrong case terminal\nmalformed-body/selected/buffered/1/0: wrong case terminal\nmalformed-body/selected/buffered/16384/0: wrong case terminal\nmalformed-body/selected/streamed/1/0: wrong case terminal\nmalformed-body/selected/streamed/16384/0: wrong case terminal\ntruncated/selected/buffered/1/1: wrong case terminal\ntruncated/selected/buffered/16384/1: wrong case terminal\ntruncated/selected/streamed/1/1: wrong case terminal\ntruncated/selected/streamed/16384/1: wrong case terminal\nmalformed-body/selected/buffered/1/1: wrong case terminal\nmalformed-body/selected/buffered/16384/1: wrong case terminal\nmalformed-body/selected/streamed/1/1: wrong case terminal\nmalformed-body/selected/streamed/16384/1: wrong case terminal\ntruncated/selected/buffered/1/2: wrong case terminal\ntruncated/selected/buffered/16384/2: wrong case terminal\ntruncated/selected/streamed/1/2: wrong case terminal\ntruncated/selected/streamed/16384/2: wrong case terminal\nmalformed-body/selected/buffered/1/2: wrong case terminal\nmalformed-body/selected/buffered/16384/2: wrong case terminal\nmalformed-body/selected/streamed/1/2: wrong case terminal\nmalformed-body/selected/streamed/16384/2: wrong case terminal"
+      ],
+      "local_matrix_pass": false,
+      "qualification": false
+    }
+  ],
+  "retained_probes": {
+    "path": "docs/audits/evidence/2026-10-23-fastly-timer-controls-probes.jsonl",
+    "sha256": "bfd2d672c0540b3a63ffbe51ca9a2ea76afff28c541425d3e70f49f001566898",
+    "records": 828,
+    "timer_controls": 288,
+    "body_probes": 540
+  },
+  "reviewed_dependency_sources": [
+    {
+      "package": "Viceroy a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+      "path": "src/async_io.rs",
+      "sha256": "49a73f24b6c495e5240768b4e3af47af21252ae6e4c891df80c635395e3025c3"
+    },
+    {
+      "package": "Viceroy a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+      "path": "Cargo.lock",
+      "sha256": "d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a"
+    },
+    {
+      "package": "tokio 1.53.1",
+      "path": "tokio-1.53.1/src/time/timeout.rs",
+      "sha256": "5b1b20cb77de63fb5071b696ac644706a9749e0aeb6dbea57220834cba6dc953"
+    },
+    {
+      "package": "tokio 1.53.1",
+      "path": "tokio-1.53.1/src/runtime/time/source.rs",
+      "sha256": "02e85457f988c0cffd50c9fe92f4a12b33486803b331a254672dec89d5727443"
+    },
+    {
+      "package": "tokio 1.53.1",
+      "path": "tokio-1.53.1/src/runtime/time/mod.rs",
+      "sha256": "3123856cc9f93bb319c3c428f4e14f1b6bddad4344240150c616079004e41058"
+    },
+    {
+      "package": "wasmtime-wasi 39.0.2",
+      "path": "wasmtime-wasi-39.0.2/src/p1.rs",
+      "sha256": "c14dbcbb3b7c8f2efc8ff4f20429639c46848e98cdf216105d93b8d6bd6915b2"
+    },
+    {
+      "package": "wasmtime-wasi 39.0.2",
+      "path": "wasmtime-wasi-39.0.2/src/clocks.rs",
+      "sha256": "41cba705f75663a6c02344cfbcc4278dc7aa94c3d8ec1b6f00dcd9a13946c43e"
+    },
+    {
+      "package": "wasmtime-wasi 39.0.2",
+      "path": "wasmtime-wasi-39.0.2/src/p2/host/clocks.rs",
+      "sha256": "bfa64ad9a4a24f2062c809c991e92b1dc95f7018744e51dda0707eb746cf2900"
+    }
+  ],
+  "verification": {
+    "fixture_core_tests": 6,
+    "fixture_harness_tests": 118,
+    "retained_replay_tests": 3,
+    "strict_native_harness_clippy": "passed",
+    "strict_wasip1_guest_clippy": "passed",
+    "fixture_format": "passed",
+    "qualification_inventory_unchanged": true,
+    "root_gates": {
+      "format": "passed",
+      "strict_workspace_clippy": "passed",
+      "workspace_tests": {
+        "passed": 2193,
+        "failed": 0,
+        "ignored": 1
+      },
+      "feature_check": "passed",
+      "spin_wasip2": "passed",
+      "test_execution": "localhost-authorized rerun after sandbox bind denials; both logs retained",
+      "status_log_sha256": "2292731c26db03f8b938da30d1a9cb80746d8be08a4c60556efb90a1239fbb6e"
+    },
+    "final_workspace_rerun": {
+      "passed": 2193,
+      "failed": 0,
+      "ignored": 1,
+      "log_sha256": "8b06944de09d38a8031ac1affb71babf1c26665fd759397bd6bd2c4ac8b54ecb",
+      "other_four_gates": "passed on final working tree"
+    }
+  },
+  "prior_retained_prefix": {
+    "bytes": 564456,
+    "records": 414,
+    "sha256": "a3d1badd60cd5cda2486c72a9b615c5fb63bc0596e969384195931af34a65db5"
+  },
+  "source_files_before_review": [
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_readiness.rs",
+      "sha256": "3dd9cebd97cf6921157470727f951b1f412136d430aacc93a95b54c2e8ac59b2"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence.rs",
+      "sha256": "bf497a757f36427120e7deab1e1e70e415977ce88b73b138e750df8032e5b4ca"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence/readiness.rs",
+      "sha256": "20d40c71bf6f4124126a7e72f53da9897d55da341aae664257697773eb9b14da"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence/timers.rs",
+      "sha256": "ea4fca7c091c25bad017c6b7132c8075a7d088f90ca59428e5edc55302e91f76"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/readiness.rs",
+      "sha256": "51341b2d7cfac23d07803c2d72cc227299a21fa409864fabaa0fbfdd840b4ad0"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/Cargo.lock",
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+    },
+    {
+      "path": "patches/viceroy/0.21.0-body-readiness.patch",
+      "sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759"
+    }
+  ],
+  "review_regressions": {
+    "timer_only_endpoint": {
+      "before_elapsed_us": 4330,
+      "before_abi_return_us": 4325,
+      "red_assertion_failed": true,
+      "reviewed_empty_select_endpoint_equality_enforced": true
+    },
+    "raw_abi_duration": "red and green regression rejects waits shorter than the positive timeout",
+    "declared_endpoint": "red and green regression rejects post-primitive work in a declared primitive-return measurement"
+  }
+}

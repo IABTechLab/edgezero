@@ -6,13 +6,22 @@ use std::time::{Duration, Instant};
 
 const DEADLINE_US: u64 = 500_000;
 
+struct Selection {
+    status: String,
+    index: Option<usize>,
+    valid: bool,
+    entered: Instant,
+    returned: Instant,
+}
+
 // Only this opt-in host-primitive experiment calls the raw readiness ABI.
 #[allow(
     unsafe_code,
     reason = "probe the pinned ABI with live borrowed handles"
 )]
-fn select(handles: &[u32], timeout_ms: u32) -> (String, Option<usize>, bool) {
+fn select(handles: &[u32], timeout_ms: u32) -> Selection {
     let mut selected = u32::MAX;
+    let entered = Instant::now();
     // SAFETY: slices remain live, and the caller retains ownership of every handle.
     let status = unsafe {
         fastly_sys::fastly_async_io::select(
@@ -22,9 +31,16 @@ fn select(handles: &[u32], timeout_ms: u32) -> (String, Option<usize>, bool) {
             &mut selected,
         )
     };
+    let returned = Instant::now();
     let index = (selected != u32::MAX).then_some(selected as usize);
     let valid = status.is_ok() && index.is_none_or(|index| index < handles.len());
-    (format!("{status:?}"), index, valid)
+    Selection {
+        status: format!("{status:?}"),
+        index,
+        valid,
+        entered,
+        returned,
+    }
 }
 
 #[allow(
@@ -142,19 +158,21 @@ impl Exchange {
                     continue;
                 }
                 let timeout_ms = ((DEADLINE_US - start) / 1000).max(1) as u32;
-                let (status, index, valid) = select(&handles, timeout_ms);
+                let selection = select(&handles, timeout_ms);
                 let end = self.now();
                 self.record(json!({"operation":"select", "start_us":start, "end_us":end,
                     "slots":live.iter().map(|(slot, _, _)| *slot).collect::<Vec<_>>(),
                     "phases":live.iter().map(|(_, phase, _)| *phase).collect::<Vec<_>>(),
-                    "timeout_ms":timeout_ms, "status":status, "selected":index}))?;
-                if !valid {
+                    "timeout_ms":timeout_ms, "status":selection.status, "selected":selection.index,
+                    "abi_enter_us":selection.entered.duration_since(self.start).as_micros(),
+                    "abi_return_us":selection.returned.duration_since(self.start).as_micros()}))?;
+                if !selection.valid {
                     return Err(std::io::Error::other("invalid readiness status or index").into());
                 }
                 if end >= DEADLINE_US {
                     continue;
                 }
-                let Some(index) = index else {
+                let Some(index) = selection.index else {
                     continue;
                 };
                 live[index].0
@@ -271,6 +289,57 @@ impl PullBody {
     }
 }
 
+fn request_token(request: &Request) -> Result<&str, fastly::Error> {
+    let token = request
+        .get_header_str("x-request-token")
+        .ok_or_else(|| std::io::Error::other("missing token"))?;
+    if token.is_empty()
+        || token.len() > 128
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(std::io::Error::other("invalid token").into());
+    }
+    Ok(token)
+}
+
+fn timer_control(request: &Request, source: &str, budget: &str) -> Result<(), fastly::Error> {
+    let budget_ms: u32 = budget.parse()?;
+    if ![1, 100, 500].contains(&budget_ms) || !["empty-select", "wasi-sleep"].contains(&source) {
+        return Err(std::io::Error::other("invalid timer control").into());
+    }
+    let token = request_token(request)?;
+    let start = Instant::now();
+    let selection = if source == "empty-select" {
+        Some(select(&[], budget_ms))
+    } else {
+        std::thread::sleep(Duration::from_millis(u64::from(budget_ms)));
+        None
+    };
+    let elapsed_us = match &selection {
+        Some(selection) => selection.returned.duration_since(start),
+        None => start.elapsed(),
+    }
+    .as_micros() as u64;
+    let budget_us = u64::from(budget_ms) * 1000;
+    let mut result = json!({"schema":1, "event":"readiness-timer-control", "source":source,
+        "budget_ms":budget_ms, "token":token, "elapsed_us":elapsed_us,
+        "overrun_us":elapsed_us.saturating_sub(budget_us),
+        "within_five_ms":elapsed_us <= budget_us + 5000, "qualification":false,
+        "revision":option_env!("EDGEZERO_QUALIFICATION_REVISION").unwrap_or("unrecorded"),
+        "source_state":"working-tree-characterization", "measurement_end":"primitive-return"});
+    if let Some(selection) = selection {
+        result["abi_status"] = json!(selection.status);
+        result["selected"] = json!(selection.index);
+        result["abi_enter_us"] = json!(selection.entered.duration_since(start).as_micros());
+        result["abi_return_us"] = json!(selection.returned.duration_since(start).as_micros());
+    }
+    println!("{result}");
+    Response::from_body(serde_json::to_string(&result)?).send_to_client();
+    Ok(())
+}
+
 fn main() -> Result<(), fastly::Error> {
     fastly::init();
     let request = Request::from_client();
@@ -279,6 +348,9 @@ fn main() -> Result<(), fastly::Error> {
         .trim_start_matches('/')
         .split('/')
         .collect();
+    if let ["timer-control", source, budget] = segments.as_slice() {
+        return timer_control(&request, source, budget);
+    }
     let [case, mode, consumption, limit] = segments.as_slice() else {
         return Err(std::io::Error::other("invalid readiness route").into());
     };
@@ -323,17 +395,7 @@ fn main() -> Result<(), fastly::Error> {
     {
         return Err(std::io::Error::other("origin must be controlled loopback endpoint").into());
     }
-    let token = request
-        .get_header_str("x-request-token")
-        .ok_or_else(|| std::io::Error::other("missing token"))?;
-    if token.is_empty()
-        || token.len() > 128
-        || !token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        return Err(std::io::Error::other("invalid token").into());
-    }
+    let token = request_token(&request)?;
     let backend = Backend::builder("readiness-origin", authority.as_str())
         .connect_timeout(Duration::from_secs(2))
         .first_byte_timeout(Duration::from_secs(2))

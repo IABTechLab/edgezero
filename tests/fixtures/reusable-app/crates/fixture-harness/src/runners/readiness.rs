@@ -1,6 +1,56 @@
 use super::*;
 use crate::net::ReadinessOrigin;
 
+fn timer_control(port: u16, source: &str, budget_ms: u64, revision: &str) -> Result<Value> {
+    let token = token();
+    let result = if source == "native-sleep" {
+        let start = Instant::now();
+        thread::sleep(Duration::from_millis(budget_ms));
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        json!({"schema":1,"event":"readiness-timer-control","source":source,
+            "budget_ms":budget_ms,"token":token,"revision":revision,"qualification":false,
+            "elapsed_us":elapsed_us,"overrun_us":elapsed_us.saturating_sub(budget_ms * 1000),
+            "within_five_ms":elapsed_us <= budget_ms * 1000 + 5000,
+            "measurement_end":"primitive-return"})
+    } else {
+        guest(&net::request(
+            port,
+            &format!("/timer-control/{source}/{budget_ms}"),
+            &token,
+            None,
+            None,
+        )?)?
+    };
+    require(
+        result["token"] == token
+            && result["source"] == source
+            && result["budget_ms"] == budget_ms
+            && result["revision"] == revision,
+        "foreign timer-control result",
+    )?;
+    Ok(result)
+}
+
+fn timer_controls(port: u16, revision: &str, records: &mut Records) -> Result<Vec<Value>> {
+    for source in ["native-sleep", "empty-select", "wasi-sleep"] {
+        let mut warmup = timer_control(port, source, 1, revision)?;
+        warmup["event"] = json!("readiness-timer-warmup");
+        records.push(warmup)?;
+    }
+    let mut controls = Vec::new();
+    for leg in timer_legs() {
+        let mut value = timer_control(port, leg.source, leg.budget_ms, revision)?;
+        value["repetition"] = json!(leg.repetition);
+        records.push(value.clone())?;
+        controls.push(value);
+    }
+    records.push(json!({"event":"readiness-timer-inventory", "samples":controls.len(),
+        "late_samples":controls.iter().filter(|c| c["within_five_ms"] == false).count(),
+        "status":"unverified", "qualification":false,
+        "reason":"timer controls characterize scheduling; no deterministic bound or G2 acceptance is inferred"}))?;
+    Ok(controls)
+}
+
 pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -42,6 +92,7 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
             &log,
             port,
         )?;
+        let controls = timer_controls(port, &revision, records)?;
         let mut probes = Vec::new();
         for leg in readiness_legs() {
             let token = token();
@@ -89,7 +140,17 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                 "direct":direct, "selected":selected,
                 "status":if direct == "UnexpectedEof" && direct == selected {"pass"} else {"fail"}, "qualification":false}))?;
         }
-        validate_outbound_readiness(&probes, &revision)?;
+        let failures: Vec<_> = [
+            (
+                "timer controls",
+                validate_timer_controls(&controls, &revision),
+            ),
+            ("readiness", validate_outbound_readiness(&probes, &revision)),
+        ]
+        .into_iter()
+        .filter_map(|(scope, result)| result.err().map(|error| format!("{scope}: {error}")))
+        .collect();
+        require(failures.is_empty(), failures.join("\n"))?;
         records.push(json!({"event":"readiness-inventory", "status":"pass", "probes":probes.len(),
             "origin_requests":probes.iter().map(|probe| probe["origin"]["accepted"].as_u64().unwrap_or(0)).sum::<u64>(),
             "qualification":false}))?;

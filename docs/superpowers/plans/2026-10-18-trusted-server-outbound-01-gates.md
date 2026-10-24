@@ -167,6 +167,25 @@ See the [repair record](../../audits/evidence/2026-10-23-viceroy-readiness-repai
 not the unmodified runtime or hosted service. Strict upstream clippy reports the same stock and
 repaired diagnostics under Rust 1.98.1; no unrelated lint changes/suppressions are included.
 
+### G2 Timer-Control Checkpoint (2026-10-23)
+
+- [x] Capture raw ABI entry/return before formatting while retaining the outer operation and
+      whole-exchange +5 ms checks. Reject missing/reversed/outside raw timestamp pairs.
+- [x] Run identical guest bytes on stock/repaired runtimes with 72 timer-only controls each:
+      eight repetitions, 1/100/500 ms, native sleep, guest WASI sleep and empty select. Exclude
+      three recorded warm-ups and repeat the unchanged 135-probe / 147-request HTTP inventory.
+- [x] Retain both measurement phases: native lateness in the first pair and, after review, one
+      100 ms stock WASI sleep returning at 106.952 ms without HTTP body handles. Preserve locally
+      passing repaired matrices, stock source-error failures and earlier failed evidence.
+- [x] Exclude status formatting from timer-only comparisons; enforce positive raw wait duration
+      and the declared primitive-return endpoint. Keep the G2 outer exchange deadline unchanged.
+- [ ] Identify or establish a bound for the original late select. Source inspection and these
+      samples narrow hypotheses, not prove a scheduling cause, fix or deterministic +5 ms bound.
+
+The [timer-control record](../../audits/evidence/2026-10-23-fastly-timer-controls.json) is unqualified.
+G2 remains Failed. Do not shorten budgets, add margins or promote the pending Fastly engine/policy.
+Approved portable work can proceed independently of this failed provider gate.
+
 ## Task G3: Eager Scheduling and Empty-Body Host Premises
 
 **Files:** Modify `tests/fixtures/reusable-app/crates/fixture-core/src/qualification.rs`, the

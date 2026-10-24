@@ -164,6 +164,21 @@ buffered and pull-streamed consumption, read capacities 1 and 16384, and three r
 Three additional finite direct-read truncation controls produce 135 probes and 147 origin requests.
 Those capacities are diagnostic variations, not an approved production read maximum.
 
+Before the HTTP matrix, timer-only controls run eight repetitions at 1/100/500 ms using
+native thread sleep, guest WASI sleep and empty-handle timed ABI select: 72 observations.
+Three one-millisecond warm-ups are recorded separately and excluded from those counts.
+These controls send no outbound HTTP requests. Lateness flags are derived from measured
+elapsed time and retained even when false; they do not change the 135-probe acceptance rules.
+Timer-only measurements end at primitive return, before status formatting. Declared ABI
+endpoints must agree with that timestamp and cannot report less than the positive timeout.
+The two guest controls share Viceroy's asynchronous execution/timer machinery; native sleep
+does not exercise its reactor. Differences narrow hypotheses, not prove a scheduling cause.
+
+Raw ABI entry/return timestamps are captured immediately around select, before status formatting.
+The outer operation and whole-exchange intervals still include guest overhead and enforce the
+same deadline. Paired raw timestamps must lie within their enclosing operation. Earlier retained
+traces do not contain this additional instrumentation and are not rewritten.
+
 Every head is selected with a positive remaining timeout, then nonblocking-polled. Every selected
 body read requires fresh same-slot readiness. One original 500 ms absolute deadline survives the
 stream handoff; trickle never resets it. Traces must finish within +5 ms, retain exact EOF/error

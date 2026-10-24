@@ -176,6 +176,54 @@ not SDK cancellation. Guest handle release is not proof of hosted transport tear
 remain working-tree characterization. Full G2 is **Failed**, hosted remains **PendingExternal**,
 and B/H(K), exact-version review, production migration and candidate freeze remain separate gates.
 
+## G2 Timer-Control Investigation (2026-10-23)
+
+The [timer-control record](evidence/2026-10-23-fastly-timer-controls.json) retains a separately
+identified stock/repaired comparison with identical new guest bytes. Eight repetitions at
+1/100/500 ms compare native thread sleep, guest WASI sleep and empty-handle timed ABI select:
+72 controls per runtime, plus three excluded warm-ups. The existing 135-probe / 147-origin-request
+matrix follows unchanged. Raw ABI entry/return timestamps are captured before status formatting;
+outer operation and exchange timing still include guest overhead and enforce the same limit.
+Earlier failed traces included status formatting inside the observed selection interval;
+they lack raw ABI timestamps, so this instrumentation cannot retroactively isolate that overhead.
+
+| Runtime / Phase         | Native Sleep Late / Maximum Overrun | Empty Select Late / Maximum Overrun | WASI Sleep Late / Maximum Overrun |
+| ----------------------- | ----------------------------------- | ----------------------------------- | --------------------------------- |
+| Repaired, before review | 5/24; 5015 us                       | 0/24; 2229 us                       | 0/24; 2242 us                     |
+| Stock, before review    | 7/24; 10012 us                      | 0/24; 3533 us                       | 0/24; 3381 us                     |
+| Repaired, reviewed      | 0/24; 4557 us                       | 0/24; 2421 us                       | 0/24; 2138 us                     |
+| Stock, reviewed         | 0/24; 4751 us                       | 0/24; 2281 us                       | 1/24; 6952 us                     |
+
+Late means elapsed time exceeds the requested duration plus 5 ms. Controls retain false
+`within_five_ms` flags rather than rejecting or relabelling those observations. They are not a
+replacement G2 acceptance rule. Native controls are collected independently in each comparison,
+not shared observations. The two guest controls share Viceroy's async execution/timer machinery;
+native sleep does not exercise its reactor. Native lateness proves the window can be exceeded
+without HTTP-body processing, not that it caused the earlier select failure.
+
+Review corrected the timer-only endpoint to captured primitive return, excluding status
+formatting, and rejected raw ABI waits shorter than their positive timeout. The G2 outer
+operation and exchange checks did not change. Both matched pairs are retained with distinct
+guest hashes. The reviewed stock's late WASI control requested 100 ms and returned at 106.952 ms,
+1.952 ms beyond the +5 ms window, with no HTTP body. This narrows the issue beyond body readiness
+but does not establish the original cause. Earlier observations are not relabelled or overwritten.
+
+Pinned source inspection shows guest monotonic time delegates to a host monotonic clock;
+Tokio uses host monotonic elapsed time too. No scale mismatch was found. Viceroy starts a
+relative Tokio timeout after decoding guest handles. Tokio's millisecond rounding, readiness-first
+poll order, driver service and task resumption expose possible extra latency, but rounding alone
+does not explain the earlier 7.297 ms overrun. Source provides no deterministic +5 ms resumption
+bound. WASI sleep is also asynchronous here, not an independent native-clock shortcut. Exact
+dependency source identities and the limits of these inferences are retained with the record.
+
+The initial repaired body matrix met the window in all 135 observations (maximum 502.235 ms);
+the reviewed repaired matrix also met it (maximum 502.553 ms). Each repaired run
+exits **2, unverified**. Stock still loses 24 source errors and exits **1**. The earlier repaired
+timing failures remain retained and replayed. These new observations do not establish a tail
+bound, isolate the original scheduling cause, repair a runtime defect or qualify hosted behavior.
+No runtime code, pin, deadline, margin, policy approval or capability changes. G2 remains **Failed**;
+dependent Fastly engine work stays gated while approved portable work may proceed independently.
+
 ## G3 Local Characterization
 
 The initial default-off `progress` fixture feature uses direct SDK operations, not a second production
