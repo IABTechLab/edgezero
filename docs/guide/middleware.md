@@ -58,7 +58,8 @@ middleware = [
 ]
 ```
 
-Middleware are applied in order before routes are matched.
+Middleware runs in registration order after a route matches, before its handler.
+Use a pre-dispatch hook for work that must happen before route lookup.
 
 ### Programmatically
 
@@ -227,6 +228,14 @@ EdgeZero provides these middleware out of the box:
 
 If you already hold an `Arc<dyn Middleware>` (`BoxMiddleware`), register it with
 `.middleware_arc(...)` instead of `.middleware(...)`.
+
+## Work before route lookup
+
+Ordinary middleware runs after route selection and router-owned extension setup.
+For method-independent interception before 404/405, use the
+[pre-dispatch hook](./routing#intercepting-before-dispatch). A terminal hook
+response or error bypasses ordinary middleware and handlers. A continuing hook
+passes its request mutations into the existing middleware chain.
 
 ## Next Steps
 
