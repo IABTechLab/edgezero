@@ -4,6 +4,7 @@
 )]
 
 mod exchange;
+mod head;
 mod progress;
 
 use std::future::Future;
@@ -42,7 +43,7 @@ use crate::http::{
     Authority, HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri,
     response_builder,
 };
-use crate::time::{Deadline, MonotonicClock, MonotonicInstant};
+use crate::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
 
 pub const DEFAULT_MAX_DECODER_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
@@ -88,6 +89,86 @@ pub struct OutboundPending {
     completion: Option<OutboundFuture<OutboundResponse>>,
     outcome: Option<Result<OutboundResponse, EdgeError>>,
     owner: Option<OutboundExchangeOwner>,
+}
+
+/// The facade operation whose effective policies were captured before dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundSendMode {
+    Batch,
+    Begin,
+    Follow,
+    Send,
+}
+
+/// Validated, owned policy and time inputs for one response.
+///
+/// This foundation has no public constructor: the head-first facade migration will supply
+/// contexts to client implementations. Fields cannot be reset, cloned or decomposed.
+///
+/// ```compile_fail
+/// use edgezero_core::OutboundResponseContext;
+/// fn duplicate(context: OutboundResponseContext) { let _ = context.clone(); }
+/// ```
+/// ```compile_fail
+/// use edgezero_core::OutboundResponseContext;
+/// fn reset(context: &mut OutboundResponseContext) { context.entered_at = context.clock().now(); }
+/// ```
+/// ```compile_fail
+/// use edgezero_core::OutboundResponseContext;
+/// let _ = OutboundResponseContext::default();
+/// ```
+#[derive(Debug)]
+pub struct OutboundResponseContext {
+    body_policy: ResponseBodyPolicy,
+    budget: DispatchBudget,
+    entered_at: MonotonicInstant,
+    max_response_header_bytes: Option<u64>,
+    max_response_header_count: Option<u64>,
+    mode: OutboundSendMode,
+    original_chain_deadline: Option<Deadline>,
+    proxy_marker: OutboundProxyMarker,
+    request_method: Method,
+    time: OutboundTime,
+}
+
+/// Whether original field boundaries are available at the adapter boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundHeaderFidelity {
+    AdapterVisibleFields,
+    ProviderFieldBoundariesUnknown,
+}
+
+/// One adapter-visible header map, consumed before normalization and payload processing.
+pub struct OutboundHeaderInput {
+    adapter: &'static str,
+    fidelity: OutboundHeaderFidelity,
+    headers: HeaderMap,
+}
+
+/// Immutable original Location facts; no raw header value is copied into this evidence.
+#[derive(Debug)]
+pub struct OutboundLocationEvidence {
+    fidelity: OutboundHeaderFidelity,
+    has_non_text: bool,
+    missing_or_empty: bool,
+    observed_count: usize,
+    retained_singleton: bool,
+}
+
+/// An owned response head whose payload has not been processed.
+///
+/// Construction validates header syntax and caps, not declared payload limits or compression.
+/// Discard never polls the body. Finalization applies ordinary body policy and transfers cleanup
+/// to a live streamed response. Client integration remains part of the head-first migration.
+#[must_use]
+pub struct OutboundHead {
+    context: OutboundResponseContext,
+    encoded: BodyStream,
+    headers: HeaderMap,
+    location_evidence: OutboundLocationEvidence,
+    normalization: ResponseHeadNormalization,
+    owner: OutboundExchangeOwner,
+    status: StatusCode,
 }
 
 #[derive(Clone, Copy)]

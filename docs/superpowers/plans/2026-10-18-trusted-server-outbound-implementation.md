@@ -171,6 +171,51 @@ and hosted/frozen-candidate acceptance remain gates. This does not complete P1 o
 The foundation does not change transport behavior or qualify a runtime. G1 applicability, remaining
 G3 premises, Fastly B/H(K), and hosted results retain their own open gates.
 
+### P1 Head Foundation Checkpoint
+
+- [x] Reverify the frozen Interfaces and policies-file digests; retain AG's scoped API approval.
+- [x] Add the approved head/header/fidelity/Location-evidence types, response-context readbacks
+      and send-mode enum, with no public context constructor, Clone, Default or mutable fields.
+- [x] Charge original headers and the effective marker before exposing a head. Capture original
+      Location facts before filtering, retaining provider-unknown fidelity and Content-Type
+      uncertainty without a second raw header/value copy.
+- [x] Reuse existing normalization unchanged. Body-independent framing validation, including
+      malformed/conflicting lengths, still runs at construction; payload-length cap checks,
+      decoding and collection wait for final disposition. Retain the original 205 declared-body flag.
+- [x] Implement zero-read discard and finalization with the captured clock/budget, one teardown
+      owner and live streamed handoff. Release terminal/cancelled reads and timer registrations.
+      Yield between encoded reads, before decoding, so ready empty/no-output input cannot prevent
+      the outer timer from waking. Strictly earlier original chain deadlines remain binding;
+      equal deadlines retain the already-selected budget cause.
+- [x] Establish missing-type/export red, empty-input starvation red, and both independent review
+      regressions red/green. Add 22 deterministic head tests, including pending fake-clock wakeup,
+      timer setup before source polling, typed error identity, cancellation, bodyless/205,
+      header/body caps, original/partial coding and retained Location facts. Add privacy doctests.
+- [x] Complete broad verification and independent final review for this checkpoint.
+- [ ] Integrate the validated facade producer, progress-scope token and all client/adapter
+      implementations in the atomic hard cut. Complete external supplied-client conformance,
+      eager progress, settlement, batch-ledger migration and redirect following separately.
+
+This is a core-internal execution foundation, not live head-first dispatch. Unit tests construct
+private contexts; external implementations cannot manufacture them. The existing facade/trait and
+adapter constructors have not changed, so demo, generator and fixtures keep their current valid
+implementations until the atomic migration. No compatibility alias, silent option default or second
+transport was added. The current inventory is eleven implementation blocks, including the fully
+qualified qualification-fixture client; rediscover all callers before that cut.
+
+Two read-only investigations compared this buildable foundation against an atomic full cut and
+selected the former. API approval does not waive Fastly G2, B/H(K), the remaining G3 premises or
+hosted/frozen-candidate qualification. Existing evidence records and the frozen Interfaces are unchanged.
+
+All five workspace Rust gates passed on the final source snapshot, including 853 core unit tests;
+core doctests and direct core builds for wasm32-unknown-unknown and wasm32-wasip1 passed too.
+Docs format/lint/build, outbound documentation/legacy guards and 29 evidence-checker tests passed.
+The inventory remains 255 criteria / 511 planned legs with `qualified: false`. Independent spec
+review found and rechecked the encoded-read starvation and equal-deadline attribution fixes;
+final quality review found no actionable defect in this subset. Broader terminal-race, delayed
+timer-error/clock-regression and streamed pending-cancellation matrices remain integration coverage,
+not provider guarantees inferred from these foundation tests.
+
 ### P1/P4 Ownership Checkpoint
 
 - [x] Add the approved local `OutboundExchangeOwner` and `OutboundPending` types with private

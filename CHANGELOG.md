@@ -223,6 +223,13 @@ separately from the portable API and must be considered when declaring required 
 
 ### Outbound HTTP And Batches
 
+- Add the portable head/finalizer foundation: original Location evidence and field fidelity,
+  pre-normalization header caps, policy-controlled markers and exactly-once exchange ownership.
+  Discard never reads payloads; finalization preserves coding, independent caps, bodyless/205
+  semantics, paired-clock deadlines and typed failures. Yield between encoded reads before
+  decoding so ready empty/no-output input cannot starve the deadline race. Contexts remain opaque;
+  the live facade/adapter trait migration, progress scopes and redirect API are still pending.
+  No compatibility path, new transport, provider pin or capability promotion is introduced.
 - Add a separate bounded local overflow characterization suite through all four standard
   entrypoints. Preserve exact cap boundaries, typed 413/no-retry rendering and ordinary upstream
   413 metadata. Axum, Viceroy and Spin pass; retain Cloudflare's post-overflow proxy failure,
