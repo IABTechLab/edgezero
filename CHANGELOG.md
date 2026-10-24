@@ -40,6 +40,10 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Reject empty measurement lists for comparison-required legs and mark hosted Image Optimizer
+  acceptance as comparison-required. This checks evidence presence, not metric-policy sufficiency.
+  Retain a fresh stock/repaired local recheck and replay its negative cleanup/timing/error results;
+  runtime integration, hosted performance and Fastly policy approval remain open. No deployment.
 - Record native Image Optimizer parity requirements and exact integration/test steps. Require
   direct typed SDK mapping, lazy bodies, unchanged backend reuse and no extra fetch, plus paired
   hosted application/SDK-only performance evidence. Runtime integration, numerical horizon/policy

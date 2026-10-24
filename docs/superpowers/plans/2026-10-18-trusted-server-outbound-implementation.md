@@ -308,6 +308,39 @@ and legacy guards, 29 evidence-checker tests and manifest/API identity checks pa
 plan/spec and mechanical evidence reviews found no actionable issue. The inventory still contains
 255 criteria / 511 planned legs and `qualified: false`. No hosted request or deployment was made.
 
+### Local-Only Recheck And Comparison Guard
+
+The requester instructed continuation without deployment on 2026-10-24. No service,
+entitlement or deployment authorization is inferred from that instruction.
+
+- [x] Recheck the stock/repaired executable hashes and run the existing offline/loopback G2
+      suite on identical guest bytes from clean `98a1d0e8`; do not replace either runtime or pin.
+- [x] Retain both failed runs and 414 canonical control/probe records separately. Repaired
+      preserves source errors but completes one probe at 505.158 ms; its terminal release window
+      crosses the unchanged 505 ms bound after a within-bound ABI return. Stock still loses 24
+      selected source errors. Do not backdate, omit cleanup or infer its precise latency cause.
+- [x] Add a co-located fixture replay guard for those complete inventories, retained late timer
+      controls, distinct failure counts and the repaired cleanup/completion boundary.
+- [x] Reproduce the evidence checker's acceptance of empty comparison measurements and the
+      missing hosted optimizer comparison flag, then reject both with the existing schema. Keep
+      this as a presence check, not a substitute for approved metrics, controls or review.
+- [x] Complete independent review and all preparation checks before committing.
+
+See the [local recheck record](../../audits/evidence/2026-10-24-fastly-local-recheck.json).
+No production client, optimizer mapping, deadline, batch behavior, capability or current
+Interfaces change. G2 remains Failed and B/H(K)/hosted gates stay open. This is local diagnostic
+and evidence-tool progress, not implementation or performance qualification of Image Optimizer.
+
+All five root Rust gates passed: 2,225 tests passed across 29 binaries, zero failed and one
+existing test remained ignored. All 119 fixture-harness tests, fixture fmt/clippy, 31 evidence-tool
+tests, docs format/lint/build, script formatting and outbound docs/legacy guards passed. The first
+sandboxed fixture run denied existing TCP binds; the unchanged loopback-enabled rerun passed.
+Independent reviews verified the evidence identities/replay and comparison-presence fix without
+finding an actionable issue. Documentation-only formatting options also fail on the baseline
+script files; their existing local formatting passes and is retained. All 511 inventory legs
+remain planned and unqualified. The live local G2 diagnostic exits 1 on both runtimes, unchanged
+by these passing development checks; no deployment was made.
+
 ### P1/P4 Ownership Checkpoint
 
 - [x] Add the approved local `OutboundExchangeOwner` and `OutboundPending` types with private

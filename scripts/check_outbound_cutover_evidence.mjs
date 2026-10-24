@@ -635,6 +635,13 @@ export function inspectRelease(
       !check(id, "result", () => requireFact(result, `${id}: missing result`))
     )
       continue;
+    if (c.comparison === true)
+      check(id, "comparison-measurements", () =>
+        requireFact(
+          Array.isArray(result.measurements) && result.measurements.length > 0,
+          `${id}: comparison measurements required`,
+        ),
+      );
     check(id, "candidate", () =>
       requireFact(
         result.candidate_sha === candidateSha,

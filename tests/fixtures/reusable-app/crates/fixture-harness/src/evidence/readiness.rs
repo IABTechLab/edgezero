@@ -929,6 +929,85 @@ mod tests {
     }
 
     #[test]
+    fn readiness_replays_local_cleanup_overrun_without_hiding_failures() {
+        use std::{
+            fs::File,
+            io::{BufRead, BufReader},
+        };
+        let path = crate::root()
+            .join("../../../docs/audits/evidence/2026-10-24-fastly-local-recheck-probes.jsonl");
+        let rows: Vec<Value> = BufReader::new(File::open(path).unwrap())
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 414);
+        let revision = "98a1d0e8c3ac3e0bd9e3f0986ae0390527d7a4a8";
+        for (run, late_controls, failures) in [("repaired", 2, 1), ("stock", 3, 24)] {
+            let probes: Vec<Value> = rows
+                .iter()
+                .filter(|row| row["run"] == run && row["kind"] == "body-probe")
+                .map(|row| row["probe"].clone())
+                .collect();
+            let controls: Vec<Value> = rows
+                .iter()
+                .filter(|row| row["run"] == run && row["kind"] == "timer-control")
+                .map(|row| row["probe"].clone())
+                .collect();
+            assert_eq!(probes.len(), 135);
+            assert_eq!(controls.len(), 72);
+            assert_eq!(
+                probes
+                    .iter()
+                    .map(|p| p["origin"]["accepted"].as_u64().unwrap())
+                    .sum::<u64>(),
+                147
+            );
+            crate::evidence::validate_timer_controls(&controls, revision).unwrap();
+            assert_eq!(
+                controls
+                    .iter()
+                    .filter(|p| p["within_five_ms"] == false)
+                    .count(),
+                late_controls
+            );
+            let message = validate_outbound_readiness(&probes, revision)
+                .unwrap_err()
+                .to_string();
+            assert!(message.starts_with(&format!("{failures} readiness leg(s) failed:\n")));
+            if run == "stock" {
+                assert_eq!(message.matches("wrong case terminal").count(), 24);
+                continue;
+            }
+            assert!(
+                message.contains("trickle/selected/buffered/16384/1: reordered or late operation")
+            );
+            let probe = probes
+                .iter()
+                .find(|p| {
+                    p["case"] == "trickle"
+                        && p["mode"] == "selected"
+                        && p["consumption"] == "buffered"
+                        && p["read_limit"] == 16384
+                        && p["repetition"] == 1
+                })
+                .unwrap();
+            let samples = probe["samples"].as_array().unwrap();
+            let selected = samples
+                .iter()
+                .rev()
+                .find(|s| s["operation"] == "select")
+                .unwrap();
+            let finish = samples.iter().find(|s| s["operation"] == "finish").unwrap();
+            let bound =
+                probe["deadline_us"].as_u64().unwrap() + probe["tolerance_us"].as_u64().unwrap();
+            assert!(selected["abi_return_us"].as_u64().unwrap() <= bound);
+            assert!(finish["start_us"].as_u64().unwrap() <= bound);
+            assert!(finish["end_us"].as_u64().unwrap() > bound);
+            assert!(probe["completed_us"].as_u64().unwrap() > bound);
+        }
+    }
+
+    #[test]
     fn readiness_rejects_mutated_matrix() {
         type Mutation = (&'static str, fn(&mut Vec<Value>));
         let mutations: &[Mutation] = &[

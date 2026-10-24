@@ -140,6 +140,12 @@ identities. These are declared provenance, not proof that a binary was built fro
 SHA. Candidate freeze, runtime mapping, approvals and independent evidence review remain required.
 Changing a draft's label does not perform those steps.
 
+For a leg marked `comparison: true`, release/report validation requires comparison build
+identities and a nonempty valid measurement list. The hosted Image Optimizer leg is marked this
+way. This is a basic evidence-presence check, not proof that the required controls, groups,
+sampling or acceptance rules were approved or completely exercised. Those still require the
+paired native-path record and independent review; arbitrary measurement names do not certify parity.
+
 `--report` lists independently evaluable blockers by leg/rule using the same checks as
 `--release`, which still fails closed. Invalid or ambiguous entries receive no acceptance credit
 without hiding unrelated observations. Assembly does not interpret generic smoke JSONL as

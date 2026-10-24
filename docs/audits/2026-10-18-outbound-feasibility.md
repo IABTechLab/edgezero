@@ -224,6 +224,29 @@ bound, isolate the original scheduling cause, repair a runtime defect or qualify
 No runtime code, pin, deadline, margin, policy approval or capability changes. G2 remains **Failed**;
 dependent Fastly engine work stays gated while approved portable work may proceed independently.
 
+## Local-Only Recheck (2026-10-24)
+
+The [new recheck record](evidence/2026-10-24-fastly-local-recheck.json) retains identical guest
+bytes built from clean commit `98a1d0e8c3ac3e0bd9e3f0986ae0390527d7a4a8` on the explicitly
+selected stock and repaired binaries, with unchanged runtime hashes/pins. Each run executes
+135 body probes, 147 bounded loopback origin requests and 72 timer controls. No deployment or
+external origin is used; this is local characterization, not a frozen qualification build.
+
+Both runs exit 1. Repaired retains all selected body errors but the
+`trickle/selected/buffered/16384/1` probe completes at 505.158 ms. Its last select returns at
+502.614 ms; the terminal cleanup window runs from 502.707 to 505.117 ms. That window includes
+SDK-handle release and ends before JSON/checksum formatting. The anchors do not distinguish
+release cost from descheduling or clock-sampling latency, so no specific cause or repair is
+claimed. Mandatory cleanup and completion exceed the unchanged 505 ms bound; neither may be
+backdated or excluded. Two native 100 ms sleep controls also exceed +5 ms.
+
+Stock loses the same 24 selected source errors, with a maximum body completion of 502.445 ms.
+It records three late timer controls: two native sleeps and a 500 ms empty select returning at
+506.343 ms. The separate retained JSONL contains all 270 body probes and 144 controls; a fixture
+regression replays both failures and the repaired cleanup boundary without rewriting earlier
+evidence. These observations do not qualify Image Optimizer or prove performance parity.
+G2 remains Failed; numerical B/H(K), production integration and hosted qualification stay open.
+
 ## G3 Local Characterization
 
 The initial default-off `progress` fixture feature uses direct SDK operations, not a second production

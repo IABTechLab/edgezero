@@ -143,6 +143,43 @@ test("manifest validation accepts pending work, not qualification", () => {
 test("complete exact-revision evidence passes", () => {
   assert.equal(release(inventory(), evidence()).passed, 2);
 });
+test("comparison legs require measured observations as well as build identities", () => {
+  const manifest = inventory();
+  manifest.cases[0].comparison = true;
+  const record = evidence(manifest);
+  record.comparisons = { baseline: "native-control", candidate: sha };
+  assert.throws(() => release(manifest, record), /comparison measurements/);
+
+  record.results[0].measurements = [
+    {
+      name: "fixture comparison",
+      samples: 1,
+      value: 1,
+      rule: "le",
+      bound: 1,
+      passed: true,
+    },
+  ];
+  assert.equal(release(manifest, record).passed, 2);
+  record.comparisons = null;
+  assert.throws(() => release(manifest, record), /baseline comparison/);
+});
+test("hosted optimizer acceptance requires a native-path comparison", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const legs = manifest.cases.filter(
+    (c) => c.source_id === "EZ-8/acceptance/08",
+  );
+  assert.equal(legs.length, 1);
+  assert.equal(legs[0].comparison, true);
+});
 test("rejects a missing blocking environment leg", () => {
   const record = evidence();
   record.results.pop();
