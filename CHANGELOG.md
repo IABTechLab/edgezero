@@ -223,6 +223,11 @@ separately from the portable API and must be considered when declaring required 
 
 ### Outbound HTTP And Batches
 
+- Add standalone validated Image Optimizer values with typed format/filter/focus selectors,
+  exact pinned-SDK region tokens, private settings and complete builder readback. Validate
+  quality, nonzero dimensions and paired percentage focus without provider dependencies.
+  Request attachment, support-first preflight and Fastly execution remain unimplemented/gated;
+  these values do not enable optimization or add ignored request options.
 - Add the portable head/finalizer foundation: original Location evidence and field fidelity,
   pre-normalization header caps, policy-controlled markers and exactly-once exchange ownership.
   Discard never reads payloads; finalization preserves coding, independent caps, bodyless/205

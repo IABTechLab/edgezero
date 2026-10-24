@@ -5,6 +5,7 @@
 
 mod exchange;
 mod head;
+mod image_optimizer;
 mod progress;
 
 use std::future::Future;
@@ -169,6 +170,79 @@ pub struct OutboundHead {
     normalization: ResponseHeadNormalization,
     owner: OutboundExchangeOwner,
     status: StatusCode,
+}
+
+/// Explicit image output format; no format is selected by default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundImageFormat {
+    Auto,
+    Avif,
+    Gif,
+    Jpeg,
+    JpegXl,
+    Mp4,
+    Png,
+    WebP,
+}
+
+/// Resampling filter for an explicitly configured image transformation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundResizeFilter {
+    Bicubic,
+    Bilinear,
+    Lanczos2,
+    Lanczos3,
+    Nearest,
+}
+
+/// Crop focus with paired percentage coordinates, validated by the options builder.
+///
+/// ```compile_fail
+/// use edgezero_core::OutboundCropFocus;
+/// let _ = OutboundCropFocus::Percent { x: 25 };
+/// ```
+/// ```compile_fail
+/// use edgezero_core::OutboundCropFocus;
+/// let _ = OutboundCropFocus::Smart { x: 25, y: 75 };
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundCropFocus {
+    Default,
+    Percent { x: u8, y: u8 },
+    Smart,
+}
+
+/// A validated Image Optimizer region from the pinned SDK's portable subset.
+///
+/// ```compile_fail
+/// use edgezero_core::OutboundImageOptimizerRegion;
+/// let _ = OutboundImageOptimizerRegion { token: "unvalidated" };
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutboundImageOptimizerRegion {
+    token: &'static str,
+}
+
+/// Standalone validated transformation settings with no implicit selectors.
+///
+/// These values support construction and readback only in this foundation. Request attachment
+/// and provider execution are not yet implemented. Query preservation defaults to false.
+///
+/// ```compile_fail
+/// use edgezero_core::OutboundImageOptimizerOptions;
+/// let mut options = OutboundImageOptimizerOptions::new();
+/// options.quality = Some(255);
+/// ```
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OutboundImageOptimizerOptions {
+    crop: Option<(u32, u32, OutboundCropFocus)>,
+    format: Option<OutboundImageFormat>,
+    height: Option<u32>,
+    preserve_origin_query: bool,
+    quality: Option<u8>,
+    region: Option<OutboundImageOptimizerRegion>,
+    resize_filter: Option<OutboundResizeFilter>,
+    width: Option<u32>,
 }
 
 #[derive(Clone, Copy)]

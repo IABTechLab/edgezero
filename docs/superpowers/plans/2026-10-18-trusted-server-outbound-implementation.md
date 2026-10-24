@@ -216,6 +216,38 @@ final quality review found no actionable defect in this subset. Broader terminal
 timer-error/clock-regression and streamed pending-cancellation matrices remain integration coverage,
 not provider guarantees inferred from these foundation tests.
 
+### P1 Image Optimizer Values Checkpoint
+
+- [x] Reverify the frozen Interfaces digest and the seven region tokens against the installed
+      Fastly SDK 0.13.1 source, without adding that SDK to core.
+- [x] Add the approved selector enums, private region/options types and exact consuming
+      builders/readbacks. Leave every selector unset and query preservation false by default.
+- [x] Validate quality 0..=100, nonzero dimensions/ratio components and both percentage coordinates
+      before values can be retained. The focus enum makes partial/conflicting coordinates
+      unrepresentable; public Percent payloads are still checked by the crop builder.
+- [x] Establish missing-type/export failures in both colocated and external tests, followed by
+      eight passing unit tests and `public_image_optimizer_value_readbacks_compile_contract`.
+      Include privacy/invalid-focus compile-fail doctests, fixed invalid-input diagnostics,
+      selector/default/clone equality, full quality-domain boundaries and replacement semantics.
+- [x] Complete broad verification and independent spec/quality review for this checkpoint.
+- [ ] Attach values to requests/parts and prepared redirects with the required synchronous support
+      hook in the atomic migration. Implement permitted Fastly Send/Follow mapping only after
+      its separate prerequisites and numerical host-call horizon are approved.
+
+Both read-only investigations selected standalone validation over premature request attachment.
+Applications can construct, validate, clone, compare and inspect these values, not send optimized
+requests yet. The facade, request/parts, adapters, demo and generator remain on their current
+working contracts. No compatibility alias, ignored option, SDK dependency, provider pin or capability
+claim was added. This advances the portable construction portion of P1/EZ-8.3, not all of P1 or EZ-8.
+Fastly G2, B/H(K), the live hard cut and hosted/frozen-candidate qualification remain open.
+
+All five workspace Rust gates passed on the unchanged final source snapshot: 2,224 tests passed
+and one existing generated-project test remained ignored. Core doctests (including the four new
+compile-fail examples), core no-default-features builds for wasm32-unknown-unknown/wasm32-wasip1,
+and the Spin wasm32-wasip2 gate passed. Docs format/lint/build, outbound documentation/legacy
+guards and 29 evidence-checker tests passed. Independent spec and quality reviews found no issue
+in this subset. The inventory remains 255 criteria / 511 planned legs, `qualified: false`.
+
 ### P1/P4 Ownership Checkpoint
 
 - [x] Add the approved local `OutboundExchangeOwner` and `OutboundPending` types with private
