@@ -12,7 +12,7 @@ use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use edgezero_core::outbound::{
     OutboundBatch, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
-    OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse,
+    OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse, OutboundSendMode,
     ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
     ResponseMode, apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
     validate_for_dispatch,
@@ -108,7 +108,7 @@ impl AxumOutboundClient {
         started_at: MonotonicInstant,
     ) -> Result<PreparedRequest, EdgeError> {
         Self::validate_options(&request)?;
-        validate_for_dispatch(&request)?;
+        validate_for_dispatch(&request, OutboundSendMode::Send)?;
         Self::prepare_validated(request, started_at, None)
     }
 
@@ -118,17 +118,7 @@ impl AxumOutboundClient {
         observation_cutoff: Deadline,
     ) -> Result<PreparedRequest, EdgeError> {
         Self::validate_options(&request)?;
-        validate_for_dispatch(&request)?;
-        if request.is_stream_body() {
-            return Err(EdgeError::bad_request(
-                "outbound batches require buffered request bodies; use send for a streamed upload",
-            ));
-        }
-        if request.is_stream_response() {
-            return Err(EdgeError::bad_request(
-                "outbound batches require buffered responses; use send for a streamed response",
-            ));
-        }
+        validate_for_dispatch(&request, OutboundSendMode::Batch)?;
         Self::prepare_validated(request, started_at, Some(observation_cutoff))
     }
 

@@ -142,6 +142,102 @@ positive control, not a duplicate command registry or execution framework. Subse
 quality reviews found no remaining scoped defect. Generated-project and hosted qualification
 were not executed or credited by this checkpoint.
 
+### Spin Existing-Path Support Precedence Checkpoint (2026-10-25)
+
+The live Spin Send/Batch validators now reject unsupported authority overrides before portable
+method/body/response-policy errors, retaining optimizer-first ordering and unchanged diagnostics.
+Native red/green coverage proves a pending GET stream previously masked the authority error.
+The regression covers GET/HEAD/CONNECT/POST, invalid Brotli settings and zero timeout with no
+body polls; the actual SDK test exercises both Send and Batch. See
+[F3c's scoped checkpoint](2026-10-18-trusted-server-outbound-04-followups.md#existing-path-support-precedence-checkpoint-2026-10-25).
+
+That ordering repair changes no public signature, client constructor, timer, transport, runtime
+pin, cutoff rule or capability. The separately approved core helper change is recorded below;
+neither slice completes shared preparation, P1/F3c/D4, or qualification.
+
+### Shared Live-Validation Checkpoint (2026-10-25)
+
+The requester's scoped approval hard-cuts the public helper to
+`validate_for_dispatch(&request, OutboundSendMode)`. All four live Send/Batch paths now use the
+same common validator; the four copied buffered-batch checks are removed. All old in-tree calls
+are migrated directly, including the external compile contract and optimizer fixtures. There
+is no one-argument wrapper. Target-specific unsupported checks still run first, including
+Fastly's existing optimizer Batch diagnostic and Spin's optimizer/authority ordering.
+
+Core regressions cover Send/Follow/Begin/Batch validation without body polling, method and upload
+cap precedence, and unsupported optimizer modes before ordinary validation. Begin does not inherit
+Batch's buffered-response restriction, but rejects streamed uploads as EZ-6.3 requires. The
+corrected upload assertion failed before adding the Begin guard. The new external contract first failed to compile against
+the old signature. The scoped core run passes 869 unit tests and four public API tests. Adapter
+and target checks verify the actual live paths separately; these tests do not implement Begin,
+Follow, paired invocation-time preparation, an eager scheduler or new arrival semantics.
+
+The original frozen Interfaces and requirements, Fastly G2/backend-policy gates, runtime pins,
+cutoff short circuit, existing transport behavior and capability levels remain unchanged. Demo
+and templates do not call this adapter helper; their application request API needs no shim or
+cosmetic migration. The full atomic client/driver migration remains P1/P4/P5 and D1-D6.
+
+Local verification passes all five primary Rust gates, all three scoped WASM Clippy checks,
+seven eight-feature adapter/target matrices, the native adapter contracts, 35 Fastly/Viceroy
+contracts, 13 Spin WASI SDK tests and 47 Cloudflare Node/WASM unit tests. The excluded demo
+workspace passes its all-target/all-feature check. Docs format/lint/build, the forwarding doctest,
+docs/legacy guards and approval-identity verifier pass. Independent source-contract and code-quality
+reviews found and corrected the Begin upload assertion, then found no remaining scoped blocker.
+The Cloudflare browser-contract attempt failed in the local Safari WebDriver (HTTP 500/SIGKILL),
+so it is not credited as a passing test or replaced by the Node results. Consumer suites and
+hosted qualification were not run. No acceptance leg is newly ready or qualified.
+
+### Consumer Contract Retention Audit (2026-10-25)
+
+Reviewed external consumer PR #21 at exact source commit
+`1626f72fca8d837dba697977eaa139dd4694ffd3`, using immutable Git objects rather than its working
+tree. Its six workspace declarations and eight resolved SDK packages pin
+`bc300ace5ca1ffe7060594a7bdb01c1da80de305`, not the older revision still described in its PR body.
+This is a source-level integration/requirements audit, not execution of that application's
+tests, proof of its resource arithmetic, or candidate qualification. Keep the Non-Negotiable
+Baseline above every TS consolidation decision. Do not preserve old APIs for source compatibility
+or drop a consumer contract to make the new pipeline simpler.
+
+| Surface                                     | Current Contract And Hard-Cut Path                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Buffered wave dispatch                      | The consumer submits buffered requests through `HttpClient::start_batch_until`, observes indexed completions and distinguishes Completed/Cutoff/fault. Preserve positional identity, trailing-event validation, partial failures and cancellation. Eager implementation replaces the driver protocol, not these semantics.                                                                                                                                                                           |
+| Independent limits and cache policy         | The consumer supplies absolute call deadlines, Bypass, upload/encoded/decoded/final/header/decoder/window/chunk caps. Keep each independent. Original coding for proxy use stays explicit; ordinary decoded responses and typed passthrough reasons remain available. Application wave sizing and protocol classification stay application policy.                                                                                                                                                   |
+| Timing and clocks                           | Keep the application clock domain, one terminal per-slot elapsed sample and no later sibling-based reinterpretation. The paired-time cutover must migrate native and scripted clients together without reanchoring absolute call deadlines or inventing Native guarantees.                                                                                                                                                                                                                           |
+| Header provenance                           | The consumer's source uses the retired public normalization helper in tests. Migrate those fixtures to `OutboundHeaderInput::normalize`, supplying actual header fidelity and policy. Preserve original Content-Type evidence through filtering and body lifting; never reconstruct eligibility from surviving text headers. No compatibility export or extra raw-header copy.                                                                                                                       |
+| Implementer and collection APIs             | Scripted/test clients currently implement send/raw-request batches and construct indexed events. P1 migrates them to prepared contexts, raw terminal observations and one exchange owner. Replace mutable receipt/collection field access with the approved consuming accessors and explicit AlreadyDelivered/Resolved/Unresolved states; preserve errors and owned partial results. Do not retain old constructors, lazy defaults or raw-count overloads.                                           |
+| Configuration and request/response lifetime | Keep typed declared-store failures, bounded extraction/structural limits, admission/fallback grants, detached Send/Abort, completion join/late binding, and absolute/relative write policy. Startup registry, credentials, catalog/schema residency and application admission sizes remain application-owned. Adapter cancellation/allocation evidence remains capability-scoped.                                                                                                                    |
+| Axum resolved resource facts                | **Open implementation gap:** the runner enforces configured connection/parser limits but assembly still receives static unknown `AXUM_PLATFORM`. A scoped follow-up must derive metadata from the same validated runner configuration before assembly, accept only explicit operator ceiling/scope declarations with provenance, and test independent ceiling/population changes, invalid startup settings and unchanged unknown facts. Do not publish an application arithmetic cap as an OS quota. |
+| Hosted ingress resource facts               | **Open enforcement/evidence gaps:** Cloudflare has no justified per-instance inbound-population bound; all-target host-ingress accounting remains unknown. A guest gate must precede the allocation it claims to bound, and cannot certify earlier provider-created storage. Keep Unknown/Indeterminate until enforced bounds or provider evidence exist; outbound connection limits are not inbound limits.                                                                                         |
+| Deployment and qualification                | Hosted versus generic Spin selection and application stack requirements need deployment/application evidence. Raw ingress, egress, deadlines and total provider allocations retain their actual capability levels. No full resource certification, hosted approval or consumer repin is implied by green EdgeZero unit tests.                                                                                                                                                                        |
+
+Required migration controls, not claimed executions:
+
+- A buffered successful slot must already own a complete, finalized body under every effective
+  cap. The consumer's subsequent collection uses an unbounded numeric sentinel in reliance on
+  that contract; head-first dispatch must not substitute an unfinished stream for buffered success.
+- Preserve decoded-by-default bidder responses. Original coding is the explicit proxy policy,
+  not a setting used by the audited buffered client. Compressed 206 is a separate migration case:
+  current EdgeZero preserves partial-representation coding, whereas the pinned consumer's cap-row
+  classifier assumes every supported coding is already decoded. Require status/coding-aware
+  application handling and a regression; do not undo 206 preservation or silently decode it upstream.
+- Bind captured extraction funding before the read, retained configuration through rejection and
+  terminal egress, completed response storage outliving stream leases, and boot/strict resource
+  parity to the existing consumer test targets `config_funding`, `auction_config_retention`,
+  `response_retention` and `boot_strict_parity`. Rerun them with the selected pin and migrated
+  fixtures; their source presence is not a passing execution record.
+- Preserve upstream terminal timing without a later sibling-based recheck, while retaining the
+  consumer's separate deadline/elapsed accounting for its own settlement work. Driver failures
+  retain valid upstream partials; application policy may still reject the entire operation.
+- The older TS companion draft's retained application transport, universal ingress buffering and
+  custom lifecycle exceptions are superseded by the approved requirements here. They are not a
+  fallback plan or permission to retain the plumbing this migration removes.
+
+The Axum resolved-fact and hosted-resource follow-ups are recorded requirements/gaps, not added
+runtime implementation, approved policy changes or newly ready legs in the existing 511-leg
+inventory. They need their own scoped design/acceptance before implementation. Keep their eventual
+consumer repin atomic with source and fixture migrations; never solve them with a second transport,
+unknown-as-zero accounting, or removal of the existing buffered fanout behavior.
+
 ### P2 Cloudflare Native-Body-Absence Checkpoint (2026-10-25)
 
 Continue P2's existing known-empty ingress subtask without changing the frozen Interfaces,
@@ -1055,7 +1151,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-10       | F2                   | Follow-up unless approved as promoted/present                             | **Local implementation with a known failure:** [typed overflow/uploads/rendering](#f2-overflow-checkpoint); generated/demo TCP proof exists.                    | Cloudflare front-proxy recovery failure, required hosted HTTP/2 and consumer end-to-end acceptance. Passing sibling cases do not waive the failure.                    |
 | EZ-11       | F3a                  | Follow-up                                                                 | **Not implemented:** cache tags.                                                                                                                                | Tag validation/deduplication, provider mapping, mode/support matrix and actual cache probes.                                                                           |
 | EZ-12       | F3b                  | Follow-up                                                                 | **Not implemented:** TLS name-check policy.                                                                                                                     | Typed setting/readback, backend-key isolation and trusted-chain/wrong-name fixture; no global verification bypass.                                                     |
-| EZ-13       | F3c                  | Follow-up; closes with Unsupported evidence                               | **Baseline Unsupported retained** on Spin.                                                                                                                      | Support-first zero-activity ordering test plus pinned WASI/Spin limitation evidence and consumer configuration rejection.                                              |
+| EZ-13       | F3c                  | Follow-up; closes with Unsupported evidence                               | **Unsupported retained**, with [existing-path ordering repaired](#spin-existing-path-support-precedence-checkpoint-2026-10-25).                                 | Full support-hook integration, timer/provider activity controls, pinned WASI/Spin limitation evidence and consumer configuration rejection.                            |
 | EZ-14       | F4                   | Follow-up; includes acceptance 10/11                                      | **Not implemented:** opted-in idle-body policy.                                                                                                                 | New mode, encoded-progress resets, absolute-deadline precedence and actual adapter read races; existing total deadlines are not idle-mode support.                     |
 | EZ-15       | F5                   | Follow-up; reuse legs separately conditional                              | **Not implemented:** explicit bounded fire-and-forget operation.                                                                                                | Separate capacity/ownership, 64 KiB response ceiling, cancellation/recovery and provider-lifetime proof.                                                               |
 | EZ-16       | F6a                  | Follow-up                                                                 | **Diagnostic checkpoints implemented:** [SDK/source details and capability publication](#f6a-capability-publication-checkpoint).                                | Full token-safe acceptance matrix, remaining integration cases and consumer/provider qualification. Capability publication itself has landed.                          |

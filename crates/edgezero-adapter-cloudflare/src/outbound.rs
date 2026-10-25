@@ -23,7 +23,7 @@ use edgezero_core::error::{BadGatewayReason, BudgetSource};
     all(feature = "cloudflare", target_arch = "wasm32"),
     feature = "test-utils"
 ))]
-use edgezero_core::outbound::{OutboundRequest, validate_for_dispatch};
+use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
 
 #[cfg(any(all(feature = "cloudflare", target_arch = "wasm32"), test))]
 mod header_bridge {
@@ -306,7 +306,7 @@ mod worker_impl {
             request: OutboundRequest,
             started_at: MonotonicInstant,
         ) -> Result<PreparedRequest, EdgeError> {
-            super::validate_request(&request)?;
+            super::validate_request(&request, super::OutboundSendMode::Send)?;
             Self::prepare_validated(request, started_at, None)
         }
 
@@ -2094,31 +2094,20 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
     feature = "test-utils"
 ))]
 fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
-    validate_request(request)?;
-    if request.is_stream_body() {
-        return Err(EdgeError::bad_request(
-            "outbound batches require buffered request bodies; use send for a streamed upload",
-        ));
-    }
-    if request.is_stream_response() {
-        return Err(EdgeError::bad_request(
-            "outbound batches require buffered responses; use send for a streamed response",
-        ));
-    }
-    Ok(())
+    validate_request(request, OutboundSendMode::Batch)
 }
 
 #[cfg(any(
     all(feature = "cloudflare", target_arch = "wasm32"),
     feature = "test-utils"
 ))]
-fn validate_request(request: &OutboundRequest) -> Result<(), EdgeError> {
+fn validate_request(request: &OutboundRequest, mode: OutboundSendMode) -> Result<(), EdgeError> {
     if request.image_optimizer_options().is_some() {
         return Err(EdgeError::bad_request(
             "image_optimizer is not supported by cloudflare",
         ));
     }
-    validate_for_dispatch(request)
+    validate_for_dispatch(request, mode)
 }
 
 /// Runs the target-neutral Cloudflare batch preflight contract in native tests.

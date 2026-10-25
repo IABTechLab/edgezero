@@ -36,7 +36,7 @@ use edgezero_core::outbound::{
     OutboundBatchDriverEvent, OutboundBatchItem, OutboundResponse, finish_batch_item,
 };
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
-use edgezero_core::outbound::{OutboundRequest, validate_for_dispatch};
+use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::time::Deadline;
 #[cfg(any(feature = "fastly", test))]
@@ -445,7 +445,7 @@ mod fastly_impl {
             request: OutboundRequest,
             started_at: MonotonicInstant,
         ) -> Result<PreparedRequest, EdgeError> {
-            validate_for_dispatch(&request)?;
+            validate_for_dispatch(&request, super::OutboundSendMode::Send)?;
             self.prepare_validated(request, started_at, None, false)
         }
 
@@ -3228,18 +3228,7 @@ fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
             "image_optimizer is not supported by fastly batches",
         ));
     }
-    validate_for_dispatch(request)?;
-    if request.is_stream_body() {
-        return Err(EdgeError::bad_request(
-            "outbound batches require buffered request bodies; use send for a streamed upload",
-        ));
-    }
-    if request.is_stream_response() {
-        return Err(EdgeError::bad_request(
-            "outbound batches require buffered responses; use send for a streamed response",
-        ));
-    }
-    Ok(())
+    validate_for_dispatch(request, OutboundSendMode::Batch)
 }
 
 #[cfg(any(feature = "fastly", test))]

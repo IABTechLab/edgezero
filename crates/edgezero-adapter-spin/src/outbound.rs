@@ -15,7 +15,7 @@
 
 use edgezero_core::error::EdgeError;
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
-use edgezero_core::outbound::{OutboundRequest, validate_for_dispatch};
+use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
 
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
 use edgezero_core::error::{BadGatewayReason, BudgetSource};
@@ -327,7 +327,7 @@ mod spin_impl {
             request: OutboundRequest,
             started_at: MonotonicInstant,
         ) -> Result<PreparedRequest, EdgeError> {
-            super::validate_request(&request)?;
+            super::validate_request(&request, super::OutboundSendMode::Send)?;
             Self::prepare_validated(request, started_at, None)
         }
 
@@ -1735,34 +1735,22 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
 
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
 fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
-    validate_request(request)?;
-    if request.is_stream_body() {
-        return Err(EdgeError::bad_request(
-            "outbound batches require buffered request bodies; use send for a streamed upload",
-        ));
-    }
-    if request.is_stream_response() {
-        return Err(EdgeError::bad_request(
-            "outbound batches require buffered responses; use send for a streamed response",
-        ));
-    }
-    Ok(())
+    validate_request(request, OutboundSendMode::Batch)
 }
 
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
-fn validate_request(request: &OutboundRequest) -> Result<(), EdgeError> {
+fn validate_request(request: &OutboundRequest, mode: OutboundSendMode) -> Result<(), EdgeError> {
     if request.image_optimizer_options().is_some() {
         return Err(EdgeError::bad_request(
             "image_optimizer is not supported by spin",
         ));
     }
-    validate_for_dispatch(request)?;
     if request.has_host_authority_override() {
         return Err(EdgeError::bad_request(
             "Spin cannot separate the outbound Host authority from the connection target",
         ));
     }
-    Ok(())
+    validate_for_dispatch(request, mode)
 }
 
 /// Runs the target-neutral Spin batch preflight contract in native tests.
@@ -1782,7 +1770,7 @@ pub fn validate_batch_request_for_test(request: &OutboundRequest) -> Result<(), 
 #[cfg(feature = "test-utils")]
 #[inline]
 pub fn validate_request_for_test(request: &OutboundRequest) -> Result<(), EdgeError> {
-    validate_request(request)
+    validate_request(request, OutboundSendMode::Send)
 }
 
 /// Exposes the real pinned SDK classifier to WASI resource contract tests.

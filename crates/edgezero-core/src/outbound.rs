@@ -1926,13 +1926,25 @@ pub fn rechunk_stream(mut source: BodyStream, optional_maximum: Option<NonZeroU6
 }
 
 /// Validates the adapter-independent outbound method, body, and response-policy contract.
+/// Adapter-specific supported-option checks must run first. Begin requires buffered
+/// uploads; Batch requires buffered uploads and responses. Validation never polls a body.
 ///
 /// # Errors
 /// Returns [`EdgeError::PayloadTooLarge`] for a buffered upload over its byte cap,
 /// or [`EdgeError::BadRequest`] when a common contract invariant is invalid. Individual
 /// adapters may reject additional target-specific constraints during request preparation.
 #[inline]
-pub fn validate_for_dispatch(request: &OutboundRequest) -> Result<(), EdgeError> {
+pub fn validate_for_dispatch(
+    request: &OutboundRequest,
+    mode: OutboundSendMode,
+) -> Result<(), EdgeError> {
+    if request.image_optimizer_options().is_some()
+        && matches!(mode, OutboundSendMode::Begin | OutboundSendMode::Batch)
+    {
+        return Err(EdgeError::bad_request(
+            "image_optimizer is not supported for eager outbound requests",
+        ));
+    }
     image_optimizer::validate_options(request)?;
     if !matches!(
         request.method,
@@ -1977,6 +1989,23 @@ pub fn validate_for_dispatch(request: &OutboundRequest) -> Result<(), EdgeError>
         return Err(EdgeError::payload_too_large(
             RequestBodyOverflowOrigin::OutboundUpload,
         ));
+    }
+    if mode == OutboundSendMode::Begin && request.is_stream_body() {
+        return Err(EdgeError::bad_request(
+            "begin requires a buffered request body; use send for a streamed upload",
+        ));
+    }
+    if mode == OutboundSendMode::Batch {
+        if request.is_stream_body() {
+            return Err(EdgeError::bad_request(
+                "outbound batches require buffered request bodies; use send for a streamed upload",
+            ));
+        }
+        if request.is_stream_response() {
+            return Err(EdgeError::bad_request(
+                "outbound batches require buffered responses; use send for a streamed response",
+            ));
+        }
     }
     Ok(())
 }
@@ -2352,7 +2381,8 @@ mod tests {
     use crate::body::Body;
     use crate::compression::{ContentEncoding, PassthroughReason, classify_content_encoding};
     use crate::error::{
-        BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError, ResponseLimitReason,
+        BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError,
+        RequestBodyOverflowOrigin, ResponseLimitReason,
     };
     use crate::http::{
         Authority, HeaderMap, HeaderValue, Method, StatusCode, Uri, request_builder,
@@ -2365,7 +2395,7 @@ mod tests {
     use super::{
         HttpClient, OutboundBatch, OutboundBatchDriverEvent, OutboundBatchItem, OutboundBatchNext,
         OutboundBatchTermination, OutboundCachePolicy, OutboundHttpClient, OutboundProxyMarker,
-        OutboundRequest, OutboundResponse, OutboundSlotResult, PROXY_HEADER,
+        OutboundRequest, OutboundResponse, OutboundSendMode, OutboundSlotResult, PROXY_HEADER,
         ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
         ResponseMode, apply_response_body_policy, collect_response_stream,
         enforce_payload_content_length, finish_batch_item, insert_proxy_header,
@@ -5145,13 +5175,113 @@ mod tests {
     }
 
     #[test]
+    fn portable_dispatch_modes_share_batch_shape_validation_without_polling() {
+        for mode in [
+            OutboundSendMode::Send,
+            OutboundSendMode::Follow,
+            OutboundSendMode::Begin,
+            OutboundSendMode::Batch,
+        ] {
+            for streamed_upload in [false, true] {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let source_polls = Arc::clone(&polls);
+                let mut request = OutboundRequest::post("https://example.com/")
+                    .expect("request")
+                    .stream_response()
+                    .timeout(Duration::ZERO);
+                if streamed_upload {
+                    request = request.body(Body::from_stream(stream::poll_fn(move |_cx| {
+                        source_polls.fetch_add(1, Ordering::SeqCst);
+                        Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+                    })));
+                }
+                let result = validate_for_dispatch(&request, mode);
+                if mode == OutboundSendMode::Batch
+                    || (mode == OutboundSendMode::Begin && streamed_upload)
+                {
+                    assert_eq!(
+                        bad_request_message(result.expect_err("batch shape")),
+                        if mode == OutboundSendMode::Begin {
+                            "begin requires a buffered request body; use send for a streamed upload"
+                        } else if streamed_upload {
+                            "outbound batches require buffered request bodies; use send for a streamed upload"
+                        } else {
+                            "outbound batches require buffered responses; use send for a streamed response"
+                        }
+                    );
+                } else {
+                    result.expect("single exchange accepts streams before budget selection");
+                }
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn portable_dispatch_modes_keep_method_and_upload_cap_precedence() {
+        for mode in [
+            OutboundSendMode::Send,
+            OutboundSendMode::Follow,
+            OutboundSendMode::Begin,
+            OutboundSendMode::Batch,
+        ] {
+            let request = OutboundRequest::get("https://example.com/")
+                .expect("request")
+                .body(Body::from_stream(stream::pending()))
+                .stream_response();
+            assert_eq!(
+                bad_request_message(validate_for_dispatch(&request, mode).expect_err("GET stream")),
+                "GET/HEAD request must not carry a streamed body; emptiness cannot be determined without consuming the stream"
+            );
+            let request = OutboundRequest::post("https://example.com/")
+                .expect("request")
+                .body("too large")
+                .max_request_body_bytes(1)
+                .stream_response();
+            assert_eq!(
+                validate_for_dispatch(&request, mode)
+                    .expect_err("upload cap")
+                    .request_body_overflow_origin(),
+                Some(RequestBodyOverflowOrigin::OutboundUpload)
+            );
+        }
+    }
+
+    #[test]
+    fn image_optimizer_mode_rejection_precedes_ordinary_validation() {
+        for mode in [OutboundSendMode::Begin, OutboundSendMode::Batch] {
+            let request = OutboundRequest::post("https://example.com/")
+                .expect("request")
+                .image_optimizer(super::OutboundImageOptimizerOptions::new())
+                .body(Body::from_stream(stream::pending()))
+                .max_brotli_window_bits(9)
+                .timeout(Duration::ZERO);
+            assert_eq!(
+                bad_request_message(
+                    validate_for_dispatch(&request, mode).expect_err("unsupported mode")
+                ),
+                "image_optimizer is not supported for eager outbound requests"
+            );
+        }
+        for mode in [OutboundSendMode::Send, OutboundSendMode::Follow] {
+            let request = OutboundRequest::get("https://example.com/")
+                .expect("request")
+                .image_optimizer(
+                    super::OutboundImageOptimizerOptions::new()
+                        .region(super::OutboundImageOptimizerRegion::Asia),
+                );
+            validate_for_dispatch(&request, mode).expect("single-send optimizer combination");
+        }
+    }
+
+    #[test]
     fn buffered_upload_overflow_is_rejected_during_common_preflight() {
         for len in [7_usize, 8, 9] {
             let request = OutboundRequest::post("https://example.com/upload")
                 .expect("request")
                 .body(vec![b'x'; len])
                 .max_request_body_bytes(8);
-            let result = validate_for_dispatch(&request);
+            let result = validate_for_dispatch(&request, OutboundSendMode::Send);
             if len > 8 {
                 let error = result.expect_err("buffered overflow before dispatch");
                 assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -5176,7 +5306,7 @@ mod tests {
             let request =
                 OutboundRequest::new(method, Uri::from_static("https://example.com/resource"))
                     .expect("portable request");
-            validate_for_dispatch(&request).expect("portable method");
+            validate_for_dispatch(&request, OutboundSendMode::Send).expect("portable method");
         }
 
         let request = OutboundRequest::new(
@@ -5185,7 +5315,9 @@ mod tests {
         )
         .expect("request");
         assert_eq!(
-            bad_request_message(validate_for_dispatch(&request).expect_err("custom method")),
+            bad_request_message(
+                validate_for_dispatch(&request, OutboundSendMode::Send).expect_err("custom method")
+            ),
             "method CONNECT is not portable; supported: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
         );
 
@@ -5193,7 +5325,9 @@ mod tests {
             .expect("request")
             .body("not empty");
         assert_eq!(
-            bad_request_message(validate_for_dispatch(&request).expect_err("GET body")),
+            bad_request_message(
+                validate_for_dispatch(&request, OutboundSendMode::Send).expect_err("GET body")
+            ),
             "GET/HEAD request must not carry a body"
         );
 
@@ -5202,7 +5336,9 @@ mod tests {
             .body(Body::stream(stream::iter([Bytes::new()])));
         assert!(request.is_stream_body());
         assert_eq!(
-            bad_request_message(validate_for_dispatch(&request).expect_err("GET stream")),
+            bad_request_message(
+                validate_for_dispatch(&request, OutboundSendMode::Send).expect_err("GET stream")
+            ),
             "GET/HEAD request must not carry a streamed body; emptiness cannot be determined without consuming the stream"
         );
 
@@ -5212,19 +5348,22 @@ mod tests {
             .stream_response();
         assert!(request.is_stream_body());
         assert!(request.is_stream_response());
-        validate_for_dispatch(&request).expect("POST stream");
+        validate_for_dispatch(&request, OutboundSendMode::Send).expect("POST stream");
 
         for bits in [9, 31] {
             let request = OutboundRequest::get("https://example.com")
                 .expect("request")
                 .max_brotli_window_bits(bits);
-            assert!(validate_for_dispatch(&request).is_err(), "accepted {bits}");
+            assert!(
+                validate_for_dispatch(&request, OutboundSendMode::Send).is_err(),
+                "accepted {bits}"
+            );
         }
         for bits in [10, 30] {
             let request = OutboundRequest::get("https://example.com")
                 .expect("request")
                 .max_brotli_window_bits(bits);
-            validate_for_dispatch(&request).expect("valid Brotli window");
+            validate_for_dispatch(&request, OutboundSendMode::Send).expect("valid Brotli window");
         }
     }
 

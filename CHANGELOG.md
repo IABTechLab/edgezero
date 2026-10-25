@@ -56,6 +56,26 @@ separately from the portable API and must be considered when declaring required 
 - Correct existing Spin fallback contract expectations to require the exact `Content-Length`
   added by explicit buffered framing. Preserve status/body checks and all resource-release assertions.
 
+### Spin Supported-Option Precedence
+
+- Reject unsupported Host authority overrides before portable method/body/policy validation on
+  both existing single-send and batch paths. Keep Image Optimizer rejection first and preserve
+  the authority diagnostic. Pending GET/HEAD bodies, nonportable methods, invalid Brotli settings
+  and zero timeouts cannot mask the unsupported setting or cause body polling.
+- Add native and actual WASI SDK preflight regressions. This changes no public signature,
+  transport, timer, capability, runtime pin or batch-cutoff semantics; full shared preparation
+  and the head-first/eager migration remain pending.
+
+### Shared Dispatch Validation
+
+- Hard-cut the public adapter helper to `validate_for_dispatch(&request, OutboundSendMode)`.
+  Migrate every in-tree caller without a one-argument wrapper. Core owns buffered Batch shape
+  checks instead of four adapter copies; supported-option checks remain adapter-owned and first.
+- Preserve method/upload-cap precedence, existing batch diagnostics, zero source polling and
+  observation-cutoff behavior. Begin requires buffered uploads but permits streamed responses;
+  Image Optimizer remains unavailable in Begin/Batch. This does not implement eager dispatch
+  or redirect following, change handler/demo/template APIs, or upgrade provider capabilities.
+
 ### Axum Host-Known-Empty Ingress
 
 - Preserve transport-certified `is_end_stream()` bodies as buffered empty after admission on

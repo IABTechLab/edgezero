@@ -95,6 +95,10 @@ Spin exposes raw header bytes and drives isolated batch slots in completion orde
 adds no synthetic origin header because the adapter owns no intermediary cache. A wire-authority
 override is rejected during preflight: WASI HTTP uses the same authority for connection routing,
 so Spin cannot preserve URI-owned routing and TLS identity while changing only the HTTP authority.
+Unsupported Image Optimizer settings are rejected first, then an unsupported authority override,
+before portable method/body validation and budget selection. A pending GET/HEAD source or invalid
+response policy cannot mask the authority diagnostic or trigger a body read. The existing batch
+observation-cutoff short circuit remains unchanged; this does not add eager dispatch support.
 Deadline, batch cancellation, and streamed-upload cancellation remain BestEffort until host
 teardown has a documented observed bound, and provider phase-timer defaults may prevent a fully
 elastic budget. Downstream response

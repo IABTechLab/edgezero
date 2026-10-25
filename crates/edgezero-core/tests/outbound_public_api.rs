@@ -118,3 +118,40 @@ fn public_image_optimizer_regions_support_exhaustive_matching() {
         );
     }
 }
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "external implementer validation API contract"
+)]
+fn public_dispatch_validation_modes_compile_contract() {
+    use edgezero_core::{Body, EdgeError, OutboundSendMode, validate_for_dispatch};
+    use futures_util::stream;
+
+    let validate: fn(&OutboundRequest, OutboundSendMode) -> Result<(), EdgeError> =
+        validate_for_dispatch;
+    let request = OutboundRequest::post("https://example.com/")
+        .expect("request")
+        .stream_response();
+    for mode in [
+        OutboundSendMode::Send,
+        OutboundSendMode::Begin,
+        OutboundSendMode::Follow,
+    ] {
+        validate(&request, mode).expect("single exchange shape");
+    }
+    assert!(matches!(
+        validate(&request, OutboundSendMode::Batch),
+        Err(EdgeError::BadRequest { .. })
+    ));
+    let streamed_upload = OutboundRequest::post("https://example.com/")
+        .expect("request")
+        .body(Body::from_stream(stream::pending()));
+    validate(&streamed_upload, OutboundSendMode::Send).expect("send accepts streamed upload");
+    validate(&streamed_upload, OutboundSendMode::Follow)
+        .expect("follow accepts non-replayable upload");
+    assert!(matches!(
+        validate(&streamed_upload, OutboundSendMode::Begin),
+        Err(EdgeError::BadRequest { .. })
+    ));
+}

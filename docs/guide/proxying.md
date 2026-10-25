@@ -32,6 +32,13 @@ use `OutboundHeaderInput::normalize`. Adapter authors migrate the retired separa
 helpers as described in [response provenance](./capabilities.md#outbound-content-type-provenance).
 Ordinary handler, demo and template request APIs are unchanged by that consolidation.
 
+Adapter implementations now call `validate_for_dispatch(&request, OutboundSendMode::Send)` or
+`OutboundSendMode::Batch` after target-specific supported-option checks. Core owns the common
+method/body/policy validation and buffered Batch restrictions; delete duplicated adapter checks
+and migrate the retired one-argument call directly. The mode argument alone does not implement
+Begin or Follow. It does not change indexed results, partial failures, observation cutoff,
+per-slot timing, independent caps, coding/provenance, application clocks or lifecycle ownership.
+
 ## Native Image Optimization
 
 Fastly single sends can request native image optimization from portable code:

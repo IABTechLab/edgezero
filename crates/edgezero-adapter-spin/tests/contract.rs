@@ -1793,6 +1793,8 @@ mod outbound_contract_tests {
         let request = OutboundRequest::get("https://example.com/image")
             .unwrap()
             .image_optimizer(edgezero_core::OutboundImageOptimizerOptions::new())
+            .host_authority_override("virtual.example")
+            .expect("authority")
             .body(Body::from_stream(stream::pending()))
             .timeout(Duration::ZERO);
         for validate in [validate_request_for_test, validate_batch_request_for_test] {
@@ -1801,6 +1803,38 @@ mod outbound_contract_tests {
             assert!(error.message().contains("spin"));
         }
     }
+
+    #[test]
+    fn unsupported_authority_precedes_generic_validation_without_polling() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        for method in [Method::GET, Method::HEAD, Method::CONNECT, Method::POST] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let source_polls = Arc::clone(&polls);
+            let source = stream::poll_fn(move |_cx| {
+                source_polls.fetch_add(1, Ordering::SeqCst);
+                Poll::<Option<Result<Bytes, edgezero_core::EdgeError>>>::Pending
+            });
+            let request = OutboundRequest::new(method, Uri::from_static("https://example.com/"))
+                .expect("request")
+                .host_authority_override("virtual.example")
+                .expect("authority")
+                .body(Body::from_stream(source))
+                .max_brotli_window_bits(9)
+                .timeout(Duration::ZERO);
+            for validate in [validate_request_for_test, validate_batch_request_for_test] {
+                let error = validate(&request).expect_err("unsupported authority wins");
+                assert_eq!(
+                    error.message(),
+                    "Spin cannot separate the outbound Host authority from the connection target"
+                );
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+    }
+
     fn request() -> OutboundRequest {
         OutboundRequest::new(
             Method::POST,

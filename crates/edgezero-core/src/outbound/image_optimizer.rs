@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn image_optimizer_dispatch_rejects_missing_region_method_and_cache_bypass() {
         use crate::http::Method;
-        use crate::outbound::{OutboundCachePolicy, validate_for_dispatch};
+        use crate::outbound::{OutboundCachePolicy, OutboundSendMode, validate_for_dispatch};
 
         let options =
             OutboundImageOptimizerOptions::new().region(OutboundImageOptimizerRegion::Asia);
@@ -242,7 +242,8 @@ mod tests {
                 .image_optimizer(options.clone())
                 .cache_policy(OutboundCachePolicy::Bypass),
         ] {
-            let error = validate_for_dispatch(&request).expect_err("invalid optimizer combination");
+            let error = validate_for_dispatch(&request, OutboundSendMode::Send)
+                .expect_err("invalid optimizer combination");
             assert!(matches!(error, EdgeError::BadRequest { .. }));
             assert!(error.message().contains("image_optimizer"));
         }
@@ -251,7 +252,7 @@ mod tests {
                 OutboundRequest::new(method, "https://example.com/image".parse().unwrap())
                     .unwrap()
                     .image_optimizer(options.clone());
-            validate_for_dispatch(&request).expect("valid native request");
+            validate_for_dispatch(&request, OutboundSendMode::Send).expect("valid native request");
         }
     }
 

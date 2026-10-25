@@ -73,6 +73,72 @@ mod tests {
     }
 
     #[test]
+    fn spin_unsupported_authority_precedes_generic_validation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        use edgezero_core::http::{Method, Uri};
+        use edgezero_core::{Body, OutboundBatchTermination};
+        use futures_util::stream::poll_fn;
+
+        let start = MonotonicInstant::now();
+        let client = SpinOutboundClient::with_clock(MonotonicClock::new(move || start));
+        let observation_cutoff = Deadline::at_instant(
+            start
+                .checked_add(Duration::from_secs(1))
+                .expect("observation cutoff"),
+        );
+        for method in [Method::GET, Method::HEAD, Method::CONNECT, Method::POST] {
+            for batch in [false, true] {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let source_polls = Arc::clone(&polls);
+                let owner = Arc::new(());
+                let released = Arc::downgrade(&owner);
+                let source = poll_fn(move |_cx| {
+                    let _keep_alive = Arc::clone(&owner);
+                    source_polls.fetch_add(1, Ordering::SeqCst);
+                    Poll::<Option<Result<bytes::Bytes, EdgeError>>>::Pending
+                });
+                let request =
+                    OutboundRequest::new(method.clone(), Uri::from_static("https://example.com/"))
+                        .expect("request")
+                        .host_authority_override("virtual.example")
+                        .expect("authority")
+                        .body(Body::from_stream(source))
+                        .max_brotli_window_bits(9)
+                        .timeout(Duration::ZERO);
+                assert!(released.upgrade().is_some());
+                let error = if batch {
+                    let results = block_on(
+                        client
+                            .start_batch_until(vec![request], observation_cutoff)
+                            .collect(),
+                    )
+                    .expect("batch");
+                    assert_eq!(results.termination, OutboundBatchTermination::Completed);
+                    results
+                        .slots
+                        .into_iter()
+                        .next()
+                        .flatten()
+                        .expect("slot")
+                        .outcome
+                        .expect_err("unsupported authority")
+                } else {
+                    block_on(client.send(request)).expect_err("unsupported authority")
+                };
+                assert!(matches!(error, EdgeError::BadRequest { .. }));
+                assert_eq!(
+                    error.message(),
+                    "Spin cannot separate the outbound Host authority from the connection target"
+                );
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert!(released.upgrade().is_none(), "rejected source released");
+            }
+        }
+    }
+
+    #[test]
     fn sdk_fields_preserve_duplicate_values() {
         let fields = Fields::new();
         fields

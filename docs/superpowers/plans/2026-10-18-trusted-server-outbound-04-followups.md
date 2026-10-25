@@ -96,7 +96,7 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
 ### F2 Implementation Checkpoint (2026-10-21)
 
 - [x] Implement `PayloadTooLarge { origin }` and `RequestBodyOverflowOrigin::{Inbound,
-  OutboundUpload}` with fixed public text, typed access and sticky replay. Keep malformed
+OutboundUpload}` with fixed public text, typed access and sticky replay. Keep malformed
       JSON/form at 400, admitted expiry at 408, and strict cached-cap rejection reusable.
 - [x] Refuse an oversized single normalized Content-Length without source polling or poisoning;
       match admission's whitespace normalization and let an already-expired admitted deadline win.
@@ -256,6 +256,21 @@ fixture Spin entrypoint and `docs/guide/adapters/spin.md`/`capabilities.md`.
       budget. Existing Unsupported cases may already pass; the new ordering assertion is the red/green
       target. Repeat actual SDK/Spin fixture legs from D4 and apply the task lint card.
       Suggested commit: `docs: qualify Spin authority override limitation`.
+
+#### Existing-Path Support Precedence Checkpoint (2026-10-25)
+
+Keep the current Unsupported authority policy and its diagnostic, but reject it before generic
+method/body/response-policy validation in the live Send and Batch validators. Image Optimizer
+support rejection still precedes authority rejection. The native regression first returned the
+generic GET-stream error; moving the existing authority check earlier preserves the correct
+unsupported error with zero source polls across GET/HEAD/CONNECT/POST, invalid Brotli policy and
+zero timeout. An actual WASI SDK regression exercises both operation paths with the same inputs.
+
+This is the existing-path ordering portion of P1/F3c, not completion of either task. It adds no
+support hook, paired-time constructor, public API, scheduling, timer or transport. The existing
+expired batch observation-cutoff short circuit is unchanged. Full support-hook integration,
+instrumented timer/provider activity and actual Spin/provider limitation qualification remain
+open with D4. No capability is promoted and no acceptance leg is qualified by these checks.
 
 ## Task F4: Stream Idle Policy and Deadline-First Classification
 

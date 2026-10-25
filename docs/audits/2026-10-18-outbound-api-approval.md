@@ -439,3 +439,16 @@ suite had no failures and one existing ignored generated-project test. Strict cl
 dependency audits, outbound docs/legacy guards, the 18 evidence-checker tests and docs format,
 lint and build passed. These are local checks, not hosted qualification or acceptance of G1's
 511 still-planned legs.
+
+## Scoped Live-Validation Helper Approval (2026-10-25)
+
+The requester approved the exact checkpoint question in this conversation with
+**"Approve hard-cut helper change"**: change the existing public helper to
+`validate_for_dispatch(&request, OutboundSendMode)` and migrate every caller without a
+compatibility wrapper. Consolidate live Send/Batch validation and preserve existing outbound
+requirements. This is a separate helper-signature approval, not an interpretation of the
+original exact Interfaces digest as covering a signature it did not declare.
+
+The frozen head-first Interfaces and their identities remain unchanged. This approval does not
+authorize alternative implementer traits, new transport paths, a Fastly backend policy/bound,
+runtime or SDK repins, weaker timer/slack/read-safety requirements, deployment or qualification.

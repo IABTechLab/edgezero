@@ -44,7 +44,7 @@ mod tests {
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
-    use edgezero_core::outbound::{OutboundRequest, validate_for_dispatch};
+    use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
     use edgezero_core::response_egress::ResponseEgressCompletion;
     use edgezero_core::response_egress::{ResponseEgressEnvelope, ResponseEgressReport};
     use edgezero_core::router::{RouteMetadata, RouterService};
@@ -301,7 +301,7 @@ mod tests {
         let target = "http://example.com/forward".parse().expect("target");
         let outbound = OutboundRequest::from_request(core, target).expect("forward");
         assert_eq!(
-            validate_for_dispatch(&outbound)
+            validate_for_dispatch(&outbound, OutboundSendMode::Send)
                 .expect_err("streamed GET stays unresolved")
                 .status(),
             StatusCode::BAD_REQUEST
