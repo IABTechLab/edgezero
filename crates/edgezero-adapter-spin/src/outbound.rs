@@ -260,11 +260,10 @@ mod spin_impl {
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundHttpClient, OutboundProxyMarker, OutboundRequest,
-        OutboundRequestParts, OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy,
-        ResponseDecoding, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
-        collect_response_stream, insert_proxy_header, normalize_for_dispatch,
-        normalize_response_headers,
+        OutboundBatch, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
+        OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse,
+        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
+        ResponseMode, apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
     };
     use edgezero_core::time::{
         Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
@@ -778,18 +777,18 @@ mod spin_impl {
                 BadGatewayReason::Protocol,
             )
         })?;
-        let mut headers = response_headers(&response)?;
-        let mut header_limiter =
-            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count);
-        header_limiter.observe(&headers)?;
-        let normalization = normalize_response_headers(&request_method, status, &mut headers)?;
-        let disposition = normalization.body_disposition;
-        insert_proxy_header(
-            &mut headers,
-            &mut header_limiter,
+        let (mut headers, normalization, _) = OutboundHeaderInput::new(
+            "spin",
+            response_headers(&response)?,
+            OutboundHeaderFidelity::AdapterVisibleFields,
+        )
+        .normalize(
+            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count),
+            &request_method,
+            status,
             proxy_marker,
-            HeaderValue::from_static("spin"),
         )?;
+        let disposition = normalization.body_disposition;
 
         let native = response_stream(response, budget, clock.clone());
         if disposition == ResponseBodyDisposition::FramingBodyless {

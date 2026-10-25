@@ -99,9 +99,8 @@ pub use outbound::{
     OutboundResponseContext, OutboundSendMode, OutboundSlotResult, OutboundTime, PROXY_HEADER,
     ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeadNormalization,
     ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
-    collect_response_stream_until_with_clock, enforce_payload_content_length, insert_proxy_header,
-    limit_decoded_stream, limit_encoded_stream, normalize_for_dispatch, normalize_response_headers,
-    rechunk_stream, validate_for_dispatch,
+    collect_response_stream_until_with_clock, enforce_payload_content_length, limit_decoded_stream,
+    limit_encoded_stream, normalize_for_dispatch, rechunk_stream, validate_for_dispatch,
 };
 pub use platform::{
     HostIngressMemoryAccounting, InboundRequestPopulationBound, MemoryCeiling, MemoryCeilingScope,

@@ -10,10 +10,11 @@ use futures_util::{Stream, StreamExt as _};
 
 use super::{
     ContentTypeProvenance, OutboundExchangeOwner, OutboundFuture, OutboundHead,
-    OutboundHeaderFidelity, OutboundHeaderInput, OutboundLocationEvidence, OutboundResponse,
-    OutboundResponseContext, OutboundSendMode, OutboundTime, ResponseBodyDisposition,
-    ResponseBodyPolicy, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
-    collect_response_stream, insert_proxy_header, normalize_response_headers,
+    OutboundHeaderFidelity, OutboundHeaderInput, OutboundLocationEvidence, OutboundProxyMarker,
+    OutboundResponse, OutboundResponseContext, OutboundSendMode, OutboundTime,
+    ResponseBodyDisposition, ResponseBodyPolicy, ResponseHeadNormalization, ResponseHeaderLimiter,
+    ResponseMode, apply_response_body_policy, collect_response_stream, insert_proxy_header,
+    normalize_response_headers,
 };
 use crate::body::{Body, BodyStream};
 use crate::error::{BudgetSource, EdgeError};
@@ -94,6 +95,77 @@ impl OutboundHeaderInput {
             fidelity,
             headers,
         }
+    }
+
+    /// Charges original fields, captures their evidence, normalizes, then charges the marker.
+    ///
+    /// Pass a limiter that has not yet charged this field section. Body disposition must be
+    /// retained: normalizing a 205 a second time would lose
+    /// whether its original declared length requires immediate body suppression.
+    /// Unknown provider field boundaries never certify Content-Type provenance.
+    ///
+    /// # Errors
+    /// Returns typed header-limit, protocol-framing or invalid adapter-identity errors.
+    ///
+    /// ```
+    /// use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
+    /// use edgezero_core::{OutboundHeaderFidelity, OutboundHeaderInput,
+    ///     OutboundProxyMarker, ResponseHeaderLimiter};
+    /// let mut headers = HeaderMap::new();
+    /// headers.insert("content-type", HeaderValue::from_static("application/json"));
+    /// let (headers, facts, _) = OutboundHeaderInput::new(
+    ///     "custom", headers, OutboundHeaderFidelity::AdapterVisibleFields,
+    /// ).normalize(
+    ///     ResponseHeaderLimiter::new(Some(1024), Some(8)),
+    ///     &Method::GET, StatusCode::OK, OutboundProxyMarker::Off,
+    /// )?;
+    /// assert_eq!(headers["content-type"], "application/json");
+    /// assert_eq!(facts.content_type_provenance,
+    ///     edgezero_core::ContentTypeProvenance::SingleTextUnchanged);
+    /// # Ok::<(), edgezero_core::EdgeError>(())
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use edgezero_core::normalize_response_headers;
+    /// ```
+    /// ```compile_fail
+    /// use edgezero_core::outbound::insert_proxy_header;
+    /// ```
+    #[inline]
+    pub fn normalize(
+        self,
+        mut limiter: ResponseHeaderLimiter,
+        method: &Method,
+        status: StatusCode,
+        marker: OutboundProxyMarker,
+    ) -> Result<
+        (
+            HeaderMap,
+            ResponseHeadNormalization,
+            OutboundLocationEvidence,
+        ),
+        EdgeError,
+    > {
+        let Self {
+            adapter,
+            mut headers,
+            fidelity,
+        } = self;
+        limiter.observe(&headers)?;
+        let mut location = original_location_evidence(&headers, fidelity);
+        let mut normalized = normalize_response_headers(method, status, &mut headers)?;
+        location.retained_singleton = location.observed_count == 1
+            && !location.has_non_text
+            && headers.contains_key(LOCATION);
+        if fidelity == OutboundHeaderFidelity::ProviderFieldBoundariesUnknown {
+            normalized.content_type_provenance = ContentTypeProvenance::Unknown;
+        }
+        let adapter_value = HeaderValue::from_maybe_shared(Bytes::from_static(adapter.as_bytes()))
+            .map_err(|_error| {
+                EdgeError::internal(anyhow::anyhow!("invalid outbound adapter identity"))
+            })?;
+        insert_proxy_header(&mut headers, &mut limiter, marker, adapter_value)?;
+        Ok((headers, normalized, location))
     }
 }
 
@@ -228,29 +300,15 @@ impl OutboundHead {
         mut context: OutboundResponseContext,
         owner: OutboundExchangeOwner,
     ) -> Result<Self, EdgeError> {
-        let OutboundHeaderInput {
-            adapter,
-            mut headers,
-            fidelity,
-        } = input;
-        let mut limiter = ResponseHeaderLimiter::new(
-            context.max_response_header_bytes,
-            context.max_response_header_count,
-        );
-        limiter.observe(&headers)?;
-        let mut location_evidence = original_location_evidence(&headers, fidelity);
-        let mut normalization =
-            normalize_response_headers(&context.request_method, status, &mut headers)?;
-        location_evidence.retained_singleton = location_evidence.observed_count == 1
-            && !location_evidence.has_non_text
-            && headers.contains_key(LOCATION);
-        if fidelity == OutboundHeaderFidelity::ProviderFieldBoundariesUnknown {
-            normalization.content_type_provenance = ContentTypeProvenance::Unknown;
-        }
-        let marker = HeaderValue::from_str(adapter).map_err(|_error| {
-            EdgeError::internal(anyhow::anyhow!("invalid outbound adapter identity"))
-        })?;
-        insert_proxy_header(&mut headers, &mut limiter, context.proxy_marker, marker)?;
+        let (headers, normalization, location_evidence) = input.normalize(
+            ResponseHeaderLimiter::new(
+                context.max_response_header_bytes,
+                context.max_response_header_count,
+            ),
+            &context.request_method,
+            status,
+            context.proxy_marker,
+        )?;
         context.body_policy.status = status;
         Ok(Self {
             context,
@@ -463,7 +521,8 @@ mod tests {
         BodyStream, BudgetSource, ContentTypeProvenance, DispatchBudget, EdgeError, MonotonicClock,
         OutboundExchangeOwner, OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput,
         OutboundProxyMarker, OutboundResponseContext, OutboundSendMode, OutboundTime,
-        ResponseBodyPolicy, ResponseDecoding, ResponseLimitReason, ResponseMode,
+        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
+        ResponseLimitReason, ResponseMode,
     };
 
     #[derive(Clone)]
@@ -627,6 +686,114 @@ mod tests {
             headers,
             OutboundHeaderFidelity::AdapterVisibleFields,
         )
+    }
+
+    #[test]
+    fn shared_header_policy_preserves_original_evidence_before_filtering() {
+        for fidelity in [
+            OutboundHeaderFidelity::AdapterVisibleFields,
+            OutboundHeaderFidelity::ProviderFieldBoundariesUnknown,
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append("content-type", HeaderValue::from_static("application/json"));
+            headers.append(
+                "content-type",
+                HeaderValue::from_bytes(&[0xff]).expect("opaque"),
+            );
+            headers.append("location", HeaderValue::from_static("/next"));
+            headers.append(
+                "location",
+                HeaderValue::from_bytes(&[0xff]).expect("opaque"),
+            );
+            let (retained, normalized, location) =
+                OutboundHeaderInput::new("test", headers, fidelity)
+                    .normalize(
+                        ResponseHeaderLimiter::new(None, Some(4)),
+                        &Method::GET,
+                        StatusCode::FOUND,
+                        OutboundProxyMarker::Off,
+                    )
+                    .expect("all four original fields fit");
+            assert_eq!(retained.get_all("content-type").iter().count(), 1);
+            assert_eq!(retained.get_all("location").iter().count(), 1);
+            assert_eq!(location.observed_count(), 2);
+            assert!(location.has_non_text());
+            assert!(!location.retained_singleton());
+            assert!(!location.is_missing_or_empty());
+            assert_eq!(location.fidelity(), fidelity);
+            assert_eq!(
+                normalized.content_type_provenance,
+                if fidelity == OutboundHeaderFidelity::AdapterVisibleFields {
+                    ContentTypeProvenance::Ineligible(
+                        crate::ContentTypeIneligibility::MultipleValues,
+                    )
+                } else {
+                    ContentTypeProvenance::Unknown
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn shared_header_policy_charges_filtered_fields_and_marker_once() {
+        for marker in [
+            OutboundProxyMarker::Off,
+            OutboundProxyMarker::On,
+            OutboundProxyMarker::Inherit,
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(
+                "x-filtered",
+                HeaderValue::from_bytes(&[0xff]).expect("opaque"),
+            );
+            let marker_enabled = marker != OutboundProxyMarker::Off;
+            let count = if marker_enabled { 2 } else { 1 };
+            let bytes = if marker_enabled { 31 } else { 11 };
+            for (max_bytes, max_count, expected) in [
+                (bytes, count, None),
+                (bytes - 1, count, Some(ResponseLimitReason::HeaderBytes)),
+                (bytes, count - 1, Some(ResponseLimitReason::HeaderCount)),
+            ] {
+                let result = input(headers.clone()).normalize(
+                    ResponseHeaderLimiter::new(Some(max_bytes), Some(max_count)),
+                    &Method::GET,
+                    StatusCode::OK,
+                    marker,
+                );
+                if let Some(reason) = expected {
+                    assert!(
+                        matches!(result, Err(EdgeError::ResponseTooLarge { reason: actual, .. }) if actual == reason)
+                    );
+                } else {
+                    let (normalized, _, _) = result.expect("exact byte/count cap");
+                    assert!(!normalized.contains_key("x-filtered"));
+                    assert_eq!(normalized.contains_key("x-edgezero-proxy"), marker_enabled);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_header_policy_retains_reset_and_marker_off_semantics() {
+        let mut headers = HeaderMap::new();
+        headers.append("content-length", HeaderValue::from_static("9"));
+        headers.append("x-edgezero-proxy", HeaderValue::from_static("upstream"));
+        let (retained, normalized, _) = input(headers)
+            .normalize(
+                ResponseHeaderLimiter::new(None, Some(2)),
+                &Method::GET,
+                StatusCode::RESET_CONTENT,
+                OutboundProxyMarker::Off,
+            )
+            .expect("marker-off does not charge or replace the upstream field");
+        assert_eq!(retained["x-edgezero-proxy"], "upstream");
+        assert_eq!(retained["content-length"], "0");
+        assert_eq!(
+            normalized.body_disposition,
+            ResponseBodyDisposition::ResetContent {
+                declared_body: true
+            }
+        );
     }
 
     #[test]

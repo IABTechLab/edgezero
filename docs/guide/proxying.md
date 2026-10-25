@@ -4,6 +4,34 @@ EdgeZero exposes one provider-neutral HTTP client to handlers. Adapters inject a
 into request extensions, while application code builds `OutboundRequest` values and receives
 typed `OutboundResponse` or `EdgeError` outcomes.
 
+## Hard-Cut Adoption
+
+Replace an application's transport layer rather than wrapping it around EdgeZero or keeping
+raw-SDK fallback clients. EdgeZero owns transport dispatch, backend registration, response
+normalization, transport decoding, bounded buffering and adapter delivery. Applications retain
+target authorization, signing, image-profile selection, content rewriting and scheduling policy.
+An application-owned rewrite codec is not a second outbound transport.
+
+The current client already provides indexed batch outcomes, partial-result preservation on
+driver failure, observation cutoff and cancellation, per-slot elapsed time, typed errors and
+independent response limits. These contracts remain requirements of consolidation, together
+with encoding policy, original-header provenance and ingress/egress ownership. Simplifying
+internals does not remove them or upgrade the published target capabilities.
+
+The atomic head-first dispatch migration is **not complete**. Eager origin overlap, nonblocking
+batch observation, general GET/HEAD settlement and shared policy-driven redirect following
+remain open. Applications needing those behaviors must gate their cutover on their delivered
+replacement and target evidence, not emulate them by discarding bodies, supplying lazy futures
+as eager work, or maintaining another SDK client. The eventual migration replaces old
+implementer APIs in the same change as adapters, supplied test clients, demo and generator;
+there is no compatibility mode. Existing single/batch transports remain until that replacement
+is ready, not as an optional parallel API afterward.
+
+Header-policy consolidation is already active: all four adapters and the head-first constructor
+use `OutboundHeaderInput::normalize`. Adapter authors migrate the retired separate header
+helpers as described in [response provenance](./capabilities.md#outbound-content-type-provenance).
+Ordinary handler, demo and template request APIs are unchanged by that consolidation.
+
 ## Native Image Optimization
 
 Fastly single sends can request native image optimization from portable code:

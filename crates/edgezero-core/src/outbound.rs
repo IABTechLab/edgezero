@@ -1091,7 +1091,7 @@ impl OutboundResponse {
     #[must_use]
     /// Constructs an adapter response paired with its application clock.
     ///
-    /// `headers` must already have passed [`normalize_response_headers`], including bodyless
+    /// `headers` must already have passed [`OutboundHeaderInput::normalize`], including bodyless
     /// disposition handling, before the response is exposed through app-facing accessors.
     /// `content_type_provenance` must come from that pre-filter pass, not a second inspection of
     /// normalized headers. Use `Unknown` if original field boundaries or bytes are unavailable.
@@ -1796,7 +1796,7 @@ fn enforce_declared_payload_length(
 /// Returns a typed response-header limit error before insertion when the marker would exceed the
 /// configured cumulative byte or field-count cap.
 #[inline]
-pub fn insert_proxy_header(
+fn insert_proxy_header(
     headers: &mut HeaderMap,
     limiter: &mut ResponseHeaderLimiter,
     setting: OutboundProxyMarker,
@@ -1837,7 +1837,7 @@ pub fn normalize_for_dispatch(request: &mut OutboundRequest) -> Result<(), EdgeE
 /// # Errors
 /// Returns a protocol-classified 502 when `connection` or payload framing is malformed.
 #[inline]
-pub fn normalize_response_headers(
+fn normalize_response_headers(
     request_method: &Method,
     status: StatusCode,
     headers: &mut HeaderMap,

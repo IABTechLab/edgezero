@@ -38,6 +38,24 @@ separately from the portable API and must be considered when declaring required 
 - Add real compiler regressions and workspace CI activation with pinned Node. This compile-only
   prerequisite does not replace runtime forwarding tests or provider qualification.
 
+### Shared Outbound Header Policy
+
+- Route all four adapter response paths and `OutboundHead::new` through
+  `OutboundHeaderInput::normalize`. Charge original fields before filtering, retain Content-Type
+  and Location evidence, then charge the optional synthetic marker once. Preserve unknown
+  provider fidelity, bodyless/205 disposition and marker-off upstream fields. Reuse static
+  adapter-marker bytes without another allocation or retained raw-header copy.
+- Remove the separate public `normalize_response_headers` and `insert_proxy_header` helpers
+  and their root exports. Adapter implementations use the shared operation; defensive final
+  response normalization remains private and does not repeat accounting or marker insertion.
+- Document hard-cut adoption without a second application transport, while retaining current
+  positional/partial batch results, cancellation, cutoff, timing, typed errors, limits, encoding,
+  provenance and ingress/egress ownership. Demo and template request APIs are unchanged here.
+  This checkpoint does not complete eager/head-first/redirect dispatch or change SDK ownership,
+  provider deadlines, backend policy, capability levels or hosted qualification.
+- Correct existing Spin fallback contract expectations to require the exact `Content-Length`
+  added by explicit buffered framing. Preserve status/body checks and all resource-release assertions.
+
 ### Axum Host-Known-Empty Ingress
 
 - Preserve transport-certified `is_end_stream()` bodies as buffered empty after admission on

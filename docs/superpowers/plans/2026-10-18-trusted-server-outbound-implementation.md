@@ -148,6 +148,53 @@ rejected zero-host-length inference; real SDK tests demonstrate both buffer coun
 Independent review found no remaining scoped defect after replacing a wall-clock-sensitive
 prepare test with the injected app clock. No historical evidence or protected API identity changed.
 
+### Shared Header-Policy Consolidation Checkpoint
+
+The requester approved consolidation around one EdgeZero implementation and a documented
+hard-cut consumer migration, then explicitly required preservation of existing consumer
+contracts. Two read-only solution reviews selected a permanent shared header operation rather
+than a second transport, a public response-context constructor or premature dispatch replacement.
+This checkpoint does not change the frozen Interfaces or claim a new exact-interface approval.
+
+- [x] Extract `OutboundHeaderInput::normalize` from `OutboundHead::new` and use it immediately
+      in all four adapter response paths. Preserve pre-filter field accounting, immutable
+      Content-Type/Location evidence, unknown provider fidelity, marker accounting and original
+      body disposition. Retain static marker bytes without allocating or copying raw headers.
+- [x] Privatize the separate normalization/marker helpers and remove their root exports;
+      retain private defensive response normalization without a second upstream charge or marker.
+- [x] Establish missing-operation compile red, then cover exact count/byte boundaries, filtered
+      duplicates, unknown fidelity, original positive-205 disposition and marker-off retention.
+      Add public usage and retired-helper compile-fail doctests.
+- [x] Align the capability guide, outbound adoption path and changelog. Handler/demo/template
+      APIs remain unchanged; their atomic implementer migration remains with P1.
+- [x] Complete independent spec/quality reviews, all five root Rust gates, three WASM lint
+      legs, Fastly and Spin contract execution, core doctests and documentation checks.
+- [x] Complete the fresh generated-project native/three-WASM build, 24 generated core cases
+      and actual TCP fallback gate. An initial sandboxed run denied loopback; the unchanged
+      loopback-enabled rerun passes.
+- [ ] Complete the genuine prepared-context, paired-time, eager scheduling, arrival-ledger and
+      Follow migration; remove superseded implementer APIs atomically, not through compatibility
+      adapters or lazy scheduling defaults. Existing positional/partial results, cutoff/cancellation,
+      timing, typed failures, all caps, encoding/provenance and ingress/egress ownership remain required.
+
+Payload decoding/collection, SDK resources and abort/EOF acknowledgement, deadline races,
+native Image Optimizer, backend identity/timers/slack and all capability levels are unchanged.
+Fastly readiness/error-preservation and B/backend-policy constraints still gate their affected
+engine work; no numerical policy, provider guarantee or hosted qualification is inferred.
+This is a header-only consolidation, not completion of P1/P2 or the full approved scope.
+
+The scoped workspace run passes 2,244 tests across 29 binaries (one existing ignored), including
+866 core cases. Fastly passes 193 WASI unit cases and 35 contracts; Spin passes all 35 contracts
+on pinned Wasmtime 48.0.2 after correcting a baseline-proven stale exact-header expectation:
+explicit buffered framing adds Content-Length. The corrected fixture still asserts the exact
+header set, body, status and lifecycle counts. All 57 demo tests and the approval-identity verifier
+pass. The shared-header documentation guard includes nine positive/negative self-checks.
+
+Cloudflare target compilation/lint passes. Local browser execution is unverified: the installed
+0.2.121 runner first mismatched the locked 0.2.128 schema; an isolated exact-version runner then
+encountered OS-killed Safari/Firefox WebDrivers. No repository dependency or installed-tool pin
+was changed, no browser result is called passing, and no hosted qualification is inferred.
+
 ### Prior Execution Status
 
 Execution started with G1's inventory/checker and G2's opt-in host diagnostic. No production

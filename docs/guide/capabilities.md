@@ -446,10 +446,19 @@ unrelated field changes. The private original evidence stays immutable; the acce
 `Ineligible(Modified)` for a previously eligible response. Originally ineligible or unknown
 evidence never upgrades, even if the application inserts a valid singleton or restores old bytes.
 
-For adapter authors, `normalize_response_headers(method, status, &mut headers)` now returns
-`ResponseHeadNormalization { body_disposition, content_type_provenance }`. Use
-`.body_disposition` for body handling. Pass the original `.content_type_provenance` (always
-`Unknown` on Cloudflare) explicitly to the six-argument
+For adapter authors, `OutboundHeaderInput::normalize(limiter, method, status, marker)` consumes
+the original headers and a `ResponseHeaderLimiter`, returning the normalized header map,
+`ResponseHeadNormalization { body_disposition, content_type_provenance }`, and immutable
+Location evidence. Pass a limiter that has not already charged this field section. This is the
+same operation used by all four adapters and `OutboundHead::new`: it charges original fields
+before filtering, captures original evidence, normalizes, then charges the optional synthetic
+marker against the same cumulative budget. The separate public `normalize_response_headers`
+and `insert_proxy_header` helpers are removed, not retained as compatibility aliases.
+
+Use the returned `.body_disposition` without a second normalization pass; a 205 must retain
+whether its original declared length requires immediate suppression. Pass the original
+`.content_type_provenance` (always `Unknown` for `ProviderFieldBoundariesUnknown`, including
+Cloudflare) explicitly to the six-argument
 `OutboundResponse::new(method, status, headers, body, clock, content_type_provenance)`;
 never infer it from the normalized header map. `into_parts()` returns the five-tuple
 `(method, status, headers, body, provenance)` without another normalization pass.

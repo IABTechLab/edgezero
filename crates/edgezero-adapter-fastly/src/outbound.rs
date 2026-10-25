@@ -253,11 +253,11 @@ mod fastly_impl {
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundHttpClient,
-        OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse,
-        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
-        ResponseMode, apply_response_body_policy, collect_response_stream, insert_proxy_header,
-        normalize_for_dispatch, normalize_response_headers, validate_for_dispatch,
+        OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundHeaderFidelity,
+        OutboundHeaderInput, OutboundHttpClient, OutboundProxyMarker, OutboundRequest,
+        OutboundRequestParts, OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy,
+        ResponseDecoding, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
+        collect_response_stream, normalize_for_dispatch, validate_for_dispatch,
     };
     use edgezero_core::time::{
         BATCH_DISPATCH_SLACK_MAX, Deadline, DispatchBudget, MonotonicClock, MonotonicInstant,
@@ -1218,18 +1218,18 @@ mod fastly_impl {
                 BadGatewayReason::Protocol,
             )
         })?;
-        let mut headers = response_headers(&response);
-        let mut header_limiter =
-            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count);
-        header_limiter.observe(&headers)?;
-        let normalization = normalize_response_headers(&request_method, status, &mut headers)?;
-        let disposition = normalization.body_disposition;
-        insert_proxy_header(
-            &mut headers,
-            &mut header_limiter,
+        let (mut headers, normalization, _) = OutboundHeaderInput::new(
+            "fastly",
+            response_headers(&response),
+            OutboundHeaderFidelity::AdapterVisibleFields,
+        )
+        .normalize(
+            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count),
+            &request_method,
+            status,
             proxy_marker,
-            HeaderValue::from_static("fastly"),
         )?;
+        let disposition = normalization.body_disposition;
         if disposition == ResponseBodyDisposition::FramingBodyless {
             budget_remaining(budget, &clock)?;
             return Ok(OutboundResponse::new(

@@ -796,7 +796,79 @@ function observationCutoffContract(outboundCoreSource) {
   }
 }
 
+function headerNormalizationContractError(source, fidelity) {
+  const code = maskObservationCutoffNonCode(source)
+  if (
+    (code.match(/OutboundHeaderInput::new\(/gu)?.length ?? 0) !== 1 ||
+    (code.match(/\.normalize\(/gu)?.length ?? 0) !== 1 ||
+    !code.includes(`OutboundHeaderFidelity::${fidelity}`) ||
+    /\b(?:normalize_response_headers|insert_proxy_header)\s*\(/u.test(code)
+  ) {
+    return 'must use the shared header operation with its original provider fidelity'
+  }
+  const constructors = code.match(/OutboundResponse::new\(/gu)?.length ?? 0
+  const paired =
+    code.match(
+      /response_clock,\s*normalization\.content_type_provenance,\s*\)\)/gu
+    )?.length ?? 0
+  if (
+    constructors === 0 ||
+    constructors !== paired ||
+    !code.includes('let response_clock = clock.clone();')
+  ) {
+    return 'must pass the paired clock and shared original provenance to every response'
+  }
+  return null
+}
+
+function runHeaderNormalizationContractSelfTests() {
+  const source = `
+    let response_clock = clock.clone();
+    let (headers, normalization, _) = OutboundHeaderInput::new(
+      "cloudflare", response_headers(&response)?,
+      OutboundHeaderFidelity::ProviderFieldBoundariesUnknown,
+    ).normalize(limiter, method, status, marker)?;
+    Ok(OutboundResponse::new(method, status, headers, body,
+      response_clock, normalization.content_type_provenance,))
+  `
+  const unknown = 'ProviderFieldBoundariesUnknown'
+  const cases = [
+    [source, unknown, true],
+    [source, 'AdapterVisibleFields', false],
+    [source.replace('.normalize(', '.bypass('), unknown, false],
+    [source.replace('OutboundHeaderInput::new(', 'raw_head('), unknown, false],
+    [
+      source.replace(
+        'normalization.content_type_provenance',
+        'ContentTypeProvenance::Unknown'
+      ),
+      unknown,
+      false,
+    ],
+    [source.replace('let response_clock = clock.clone();', ''), unknown, false],
+    [
+      source
+        .split('\n')
+        .map((line) => `// ${line}`)
+        .join('\n'),
+      unknown,
+      false,
+    ],
+    [`/* ${source} */`, unknown, false],
+    [`${source}\ninsert_proxy_header(headers);`, unknown, false],
+  ]
+  for (const [index, [fixture, fidelity, valid]] of cases.entries()) {
+    if (
+      (headerNormalizationContractError(fixture, fidelity) === null) !==
+      valid
+    ) {
+      fail(`shared header-operation checker self-test ${index} failed`)
+    }
+  }
+}
+
 runObservationCutoffContractSelfTests()
+runHeaderNormalizationContractSelfTests()
 if (process.argv.includes('--observation-cutoff-self-test')) {
   process.exit(0)
 }
@@ -1893,26 +1965,29 @@ if (!outboundResponseConstructor.test(outboundCoreSource)) {
     'OutboundResponse::new must require the application clock and original Content-Type provenance'
   )
 }
+const outboundHeadSource = readFileSync(
+  'crates/edgezero-core/src/outbound/head.rs',
+  'utf8'
+)
+if (
+  !/if fidelity == OutboundHeaderFidelity::ProviderFieldBoundariesUnknown\s*\{\s*normalized\.content_type_provenance = ContentTypeProvenance::Unknown;/u.test(
+    outboundHeadSource
+  )
+) {
+  fail(
+    'shared header normalization must preserve unknown provider Content-Type fidelity'
+  )
+}
 for (const adapterPath of outboundAdapterPaths) {
   const adapterSource = readFileSync(adapterPath, 'utf8')
-  const constructorCount =
-    adapterSource.match(/OutboundResponse::new\(/gu)?.length ?? 0
-  const provenance = adapterPath.includes('cloudflare')
-    ? 'ContentTypeProvenance::Unknown'
-    : 'normalization\\.content_type_provenance'
-  const pairedClockCount =
-    adapterSource.match(
-      new RegExp(`response_clock,\\s*${provenance},\\s*\\)\\)`, 'gu')
-    )?.length ?? 0
-  if (
-    constructorCount === 0 ||
-    constructorCount !== pairedClockCount ||
-    !adapterSource.includes('let response_clock = clock.clone();')
-  ) {
-    fail(
-      `${adapterPath} must pass the paired client clock and original Content-Type provenance (Unknown on Cloudflare) to every outbound response`
-    )
-  }
+  const fidelity = adapterPath.includes('cloudflare')
+    ? 'ProviderFieldBoundariesUnknown'
+    : 'AdapterVisibleFields'
+  const normalizationError = headerNormalizationContractError(
+    adapterSource,
+    fidelity
+  )
+  if (normalizationError !== null) fail(`${adapterPath} ${normalizationError}`)
   if (!adapterSource.includes('converted_response_retains_injected_clock')) {
     fail(`${adapterPath} must behaviorally test the returned response clock`)
   }

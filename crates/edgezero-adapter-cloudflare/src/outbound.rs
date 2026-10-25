@@ -109,11 +109,11 @@ mod worker_impl {
     use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use edgezero_core::outbound::{
-        ContentTypeProvenance, OutboundBatch, OutboundCachePolicy, OutboundHttpClient,
-        OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse,
-        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
-        ResponseMode, apply_response_body_policy, collect_response_stream, insert_proxy_header,
-        normalize_for_dispatch, normalize_response_headers,
+        OutboundBatch, OutboundCachePolicy, OutboundHeaderFidelity, OutboundHeaderInput,
+        OutboundHttpClient, OutboundProxyMarker, OutboundRequest, OutboundRequestParts,
+        OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
+        ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
+        normalize_for_dispatch,
     };
     use edgezero_core::time::{
         Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
@@ -529,18 +529,18 @@ mod worker_impl {
         budget_remaining(budget, &clock)?;
         let response_clock = clock.clone();
         let status = StatusCode::from_u16(response.status_code()).map_err(EdgeError::internal)?;
-        let mut headers = response_headers(&response)?;
-        let mut header_limiter =
-            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count);
-        header_limiter.observe(&headers)?;
-        let normalization = normalize_response_headers(&request_method, status, &mut headers)?;
-        let disposition = normalization.body_disposition;
-        insert_proxy_header(
-            &mut headers,
-            &mut header_limiter,
+        let (mut headers, normalization, _) = OutboundHeaderInput::new(
+            "cloudflare",
+            response_headers(&response)?,
+            OutboundHeaderFidelity::ProviderFieldBoundariesUnknown,
+        )
+        .normalize(
+            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count),
+            &request_method,
+            status,
             proxy_marker,
-            HeaderValue::from_static("cloudflare"),
         )?;
+        let disposition = normalization.body_disposition;
 
         if disposition == ResponseBodyDisposition::FramingBodyless {
             return Ok(OutboundResponse::new(
@@ -549,7 +549,7 @@ mod worker_impl {
                 headers,
                 Body::empty(),
                 response_clock,
-                ContentTypeProvenance::Unknown,
+                normalization.content_type_provenance,
             ));
         }
 
@@ -590,7 +590,7 @@ mod worker_impl {
                 headers,
                 Body::empty(),
                 response_clock,
-                ContentTypeProvenance::Unknown,
+                normalization.content_type_provenance,
             ));
         }
 
@@ -622,7 +622,7 @@ mod worker_impl {
             headers,
             body,
             response_clock,
-            ContentTypeProvenance::Unknown,
+            normalization.content_type_provenance,
         ))
     }
 

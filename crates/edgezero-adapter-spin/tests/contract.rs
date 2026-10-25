@@ -1115,8 +1115,13 @@ mod tests {
             body: &[u8],
         ) {
             let response = capture_response(envelope);
+            let mut framed_headers = expected_headers.clone();
+            framed_headers.insert(
+                "content-length",
+                HeaderValue::from_str(&body.len().to_string()).expect("buffered body length"),
+            );
             assert_eq!(response.status(), status);
-            assert_eq!(response.headers(), expected_headers);
+            assert_eq!(response.headers(), &framed_headers);
             let bytes = captured_response_body(response);
             assert_eq!(bytes.as_ref(), body);
         }
@@ -1699,14 +1704,14 @@ mod tests {
                     source,
                 ))
                 .expect("response");
-                let response = capture_response(envelope);
-
                 let mut expected_headers = HeaderMap::new();
                 expected_headers.insert("x-ingress-refusal", HeaderValue::from_static("saturated"));
-                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-                assert_eq!(response.headers(), &expected_headers);
-                let bytes = captured_response_body(response);
-                assert_eq!(bytes.as_ref(), b"spin unavailable\n");
+                assert_terminal_response(
+                    envelope,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &expected_headers,
+                    b"spin unavailable\n",
+                );
                 assert_eq!(body_polls.load(Ordering::SeqCst), 0);
                 assert_eq!(unobserved_grant.load(Ordering::SeqCst), 0);
                 assert_eq!(source_drops.load(Ordering::SeqCst), 1);
