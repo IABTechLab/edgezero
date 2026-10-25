@@ -1491,6 +1491,43 @@ mod tests {
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     }
 
+    #[tokio::test]
+    async fn known_empty_first_body_read_retains_sticky_admission_timeout() {
+        use edgezero_core::context::BodyKind;
+
+        #[edgezero_core::action]
+        async fn read_empty(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            assert_eq!(ctx.body_kind(), BodyKind::Initial);
+            let error = ctx
+                .body_bytes(0)
+                .await
+                .expect_err("initial deadline still applies");
+            assert_eq!(error.status(), StatusCode::REQUEST_TIMEOUT);
+            assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+            assert_eq!(
+                ctx.take_body().expect_err("sticky timeout").status(),
+                error.status()
+            );
+            Err(error)
+        }
+
+        let mut app = App::new(RouterService::builder().get("/", read_empty).build());
+        app.set_ingress_admission_policy(|head| AdmissionDecision::Admit {
+            completion: ResponseEgressCompletion::empty(),
+            grant: IngressGrant::empty(),
+            read_deadline: Deadline::at_instant(head.request_start()),
+        });
+        let mut service = AxumServiceState::from_app(app);
+        let response = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(Request::new(AxumBody::empty()))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn with_config_store_handle_injects_into_request() {
         // Hard-cutoff: legacy `ctx.config_handle()` is

@@ -38,6 +38,20 @@ separately from the portable API and must be considered when declaring required 
 - Add real compiler regressions and workspace CI activation with pinned Node. This compile-only
   prerequisite does not replace runtime forwarding tests or provider qualification.
 
+### Axum Host-Known-Empty Ingress
+
+- Preserve transport-certified `is_end_stream()` bodies as buffered empty after admission on
+  Axum, for every method, without polling the native body. Keep request-context state Initial,
+  not Cached, and ingress framing HostManaged. Unknown streams and all other adapters are unchanged.
+- Forward actual HTTP/1 GET/HEAD requests with absent framing or `Content-Length: 0` through
+  the existing client API, even after the inbound read deadline. Chunked-empty and nonempty
+  streamed GET controls still return 400 without contacting the origin and preserve connection
+  boundaries. Demo and generated proxy handlers benefit from the same converter without API changes.
+- Implement only P2's existing known-empty conversion subtask as an engineering sequencing
+  clarification, not a new approval or full P2 completion. Core first-`body_bytes` deadline
+  precedence stays unchanged. General outbound settlement and support/time/head hooks remain
+  with atomic P1; no capability row, promotion, backend policy, timer or slack changes.
+
 ### Native Image Optimizer
 
 - Record the requester's scoped 2026-10-24 timing/native-integration approval: original logical

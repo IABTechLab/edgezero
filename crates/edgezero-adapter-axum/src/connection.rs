@@ -271,11 +271,15 @@ mod tests {
     use std::task::Poll;
     use std::time::Duration;
 
+    use axum::body::{Body as AxumBody, to_bytes};
     use bytes::Bytes;
     use edgezero_core::app::App;
     use edgezero_core::body::Body;
+    use edgezero_core::context::BodyKind;
     use edgezero_core::error::EdgeError;
-    use edgezero_core::http::{HeaderMap, Method, StatusCode, Version, response_builder};
+    use edgezero_core::extractor::State;
+    use edgezero_core::http::Response as CoreResponse;
+    use edgezero_core::http::{HeaderMap, Method, StatusCode, Uri, Version, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::response_egress::{
         ResponseEgressAttempt, ResponseEgressCompletion, ResponseEgressHead,
@@ -284,10 +288,12 @@ mod tests {
     };
     use edgezero_core::router::{RouteMetadata, RouterService};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+    use futures::future::join;
     use futures_util::stream::{pending, poll_fn, repeat_with};
     use hyper::Request;
     use hyper::Response;
     use hyper::body::Incoming;
+    use hyper::server::conn::http1::Builder as Http1Builder;
     use hyper::service::service_fn;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
@@ -434,6 +440,201 @@ mod tests {
                 (String::from_utf8(wire).expect("ASCII response"), exit)
             })
             .await
+    }
+
+    #[edgezero_core::action]
+    async fn forward_inbound(
+        ctx: RequestContext,
+        State(target): State<Uri>,
+    ) -> Result<CoreResponse, EdgeError> {
+        assert_eq!(ctx.body_kind(), BodyKind::Initial);
+        let client = ctx.http_client().expect("injected outbound client");
+        let request = edgezero_core::OutboundRequest::from_request(ctx.into_request()?, target)?
+            .timeout(Duration::from_secs(1));
+        client.send(request).await?.into_response()
+    }
+
+    async fn record_forwarded_request(
+        listener: TcpListener,
+    ) -> (bool, Option<(Method, HeaderMap, Bytes)>) {
+        use hyper_util::rt::TokioIo;
+
+        let Ok(Ok((socket, _peer))) = timeout(Duration::from_millis(500), listener.accept()).await
+        else {
+            return (false, None);
+        };
+        let receipt = Arc::new(Mutex::new(None));
+        let recorded = Arc::clone(&receipt);
+        let service = service_fn(move |request: Request<Incoming>| {
+            let request_receipt = Arc::clone(&recorded);
+            async move {
+                let (parts, body) = request.into_parts();
+                let bytes = to_bytes(AxumBody::new(body), 16)
+                    .await
+                    .expect("bounded upstream body");
+                *request_receipt.lock().expect("receipt") =
+                    Some((parts.method, parts.headers, bytes));
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .header("connection", "close")
+                        .body(AxumBody::empty())
+                        .expect("origin response"),
+                )
+            }
+        });
+        Http1Builder::new()
+            .serve_connection(TokioIo::new(socket), service)
+            .await
+            .expect("origin connection");
+        let request = receipt.lock().expect("receipt").take();
+        (true, request)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_known_empty_get_and_head_forward_over_tcp_after_read_deadline() {
+        for method in [Method::GET, Method::HEAD] {
+            for framing in ["", "Content-Length: 0\r\n"] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+                let target: Uri =
+                    format!("http://{}/asset", listener.local_addr().expect("address"))
+                        .parse()
+                        .expect("target");
+                let router = RouterService::builder()
+                    .with_state(target)
+                    .route("/", method.clone(), forward_inbound)
+                    .build();
+                let mut app = App::new(router);
+                app.set_ingress_admission_policy(|head| {
+                    assert_eq!(head.framing(), edgezero_core::IngressFraming::HostManaged);
+                    AdmissionDecision::Admit {
+                        completion: ResponseEgressCompletion::empty(),
+                        grant: IngressGrant::empty(),
+                        read_deadline: Deadline::at_instant(head.request_start()),
+                    }
+                });
+                let request = format!(
+                    "{method} / HTTP/1.1\r\nHost: localhost\r\n{framing}Connection: close\r\n\r\n"
+                );
+                let ((response, exit), (accepted, receipt)) = timeout(
+                    Duration::from_secs(2),
+                    join(
+                        exchange_with_wire(app, request),
+                        record_forwarded_request(listener),
+                    ),
+                )
+                .await
+                .expect("bounded forwarding");
+                assert!(response.starts_with("HTTP/1.1 204"), "{method}: {response}");
+                assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
+                assert!(accepted, "origin accepted the forward");
+                let (received_method, headers, body) = receipt.expect("origin received request");
+                assert_eq!(received_method, method);
+                assert!(body.is_empty());
+                assert!(!headers.contains_key("transfer-encoding"));
+                assert!(!headers.contains_key("content-length"));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_get_bodies_still_reject_before_dispatch_and_preserve_pipeline_boundaries() {
+        #[edgezero_core::action]
+        async fn healthy() -> &'static str {
+            "healthy"
+        }
+
+        for (framing, body) in [
+            ("Content-Length: 4", "data"),
+            ("Transfer-Encoding: chunked", "4\r\ndata\r\n0\r\n\r\n"),
+            ("Transfer-Encoding: chunked", "0\r\n\r\n"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+            let target: Uri = format!("http://{}/asset", listener.local_addr().expect("address"))
+                .parse()
+                .expect("target");
+            let router = RouterService::builder()
+                .with_state(target)
+                .get("/", forward_inbound)
+                .get("/healthy", healthy)
+                .build();
+            let request = format!(
+                "GET / HTTP/1.1\r\nHost: localhost\r\n{framing}\r\n\r\n{body}\
+                 GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            );
+            let ((response, exit), (accepted, receipt)) = timeout(
+                Duration::from_secs(2),
+                join(
+                    exchange_with_wire(App::new(router), request),
+                    record_forwarded_request(listener),
+                ),
+            )
+            .await
+            .expect("bounded rejection and connection cleanup");
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            assert_eq!(
+                exit.expect("closed or correctly reused"),
+                ConnectionExit::Completed
+            );
+            assert!(
+                receipt.is_none(),
+                "a rejected body must never reach an origin"
+            );
+            assert!(
+                !accepted,
+                "rejection must not even open an origin connection"
+            );
+            assert!(
+                rejection_pipeline_is_safe(&response),
+                "unread body bytes must not become a new request: {response}"
+            );
+        }
+    }
+
+    fn rejection_pipeline_is_safe(response: &str) -> bool {
+        let mut responses = response.split("HTTP/1.1 ").skip(1);
+        match (responses.next(), responses.next(), responses.next()) {
+            (Some(first), None, None) => first.starts_with("400 "),
+            (Some(first), Some(second), None) => {
+                first.starts_with("400 ")
+                    && second.starts_with("200 ")
+                    && second.ends_with("healthy")
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn rejection_pipeline_guard_rejects_corrupted_second_response() {
+        let rejected = "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n";
+        let corrupt =
+            "HTTP/1.1 405 Method Not Allowed\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
+        let healthy = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 7\r\n\r\nhealthy";
+        assert!(rejection_pipeline_is_safe(rejected));
+        assert!(rejection_pipeline_is_safe(&format!("{rejected}{healthy}")));
+        assert!(!rejection_pipeline_is_safe(&format!("{rejected}{corrupt}")));
+        assert!(!rejection_pipeline_is_safe(&format!(
+            "{rejected}{corrupt}{healthy}"
+        )));
+    }
+
+    #[tokio::test]
+    async fn origin_recorder_distinguishes_connection_from_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+        let address = listener.local_addr().expect("address");
+        let ((accepted, request), ()) = timeout(
+            Duration::from_secs(2),
+            join(record_forwarded_request(listener), async move {
+                let socket = TcpStream::connect(address)
+                    .await
+                    .expect("connect without sending");
+                drop(socket);
+            }),
+        )
+        .await
+        .expect("bounded empty connection observation");
+        assert!(accepted);
+        assert!(request.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

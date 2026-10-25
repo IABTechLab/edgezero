@@ -71,6 +71,43 @@ The extra native `cli,test-utils` lint leg exposed an existing no-attempt constr
 owning both inputs before selecting the source field removes that redundant conditional drop
 without allocating, cloning or changing source ownership. That lint combination now passes too.
 
+### P2 Axum Host-Known-Empty Checkpoint
+
+This implements P2's existing known-empty conversion subtask as an engineering sequencing
+clarification, not a new user approval or an alternative public contract. Outbound settlement
+and the support-first/paired-time/head hooks remain with atomic P1. Preserving an existing
+transport fact at ingress does not require those hooks or change the frozen Interfaces.
+
+- [x] After admission, preserve Axum `is_end_stream()` bodies as `Body::empty()` for any method,
+      without polling or inferring emptiness from headers or size hints. Keep Initial rather
+      than Cached state, `IngressFraming::HostManaged`, context metadata and supplied clients.
+- [x] Keep unknown bodies on the existing lazy stream/read-deadline path; retain source bytes,
+      empty chunks, errors and ownership. Core first-`body_bytes` deadline precedence is unchanged:
+      an initial buffered-empty body can still produce 408 through that accessor after expiry.
+- [x] Pass actual HTTP/1 TCP GET/HEAD forwarding checks for absent framing and explicit zero
+      length through `into_request` despite an expired inbound read deadline, with no outbound
+      body bytes, Content-Length or Transfer-Encoding. Chunked-empty and nonempty GET controls
+      still return 400 with no origin request and preserve unread-body connection boundaries.
+- [x] Update the active guides and changelog without new capability rows or promotions. Demo
+      and generated proxy handlers benefit from the same Axum converter with unchanged APIs.
+- [ ] Complete general streamed GET/HEAD settlement, support-first preparation, paired outbound
+      timers, eager/follow integration and the remaining adapter/runtime qualification with the
+      atomic migration. This checkpoint does not complete P2 or EZ-1.
+
+Fastly, Cloudflare and Spin conversion is unchanged. No core deadline precedence, public API,
+backend policy, B/H(K), phase timer, slack, resource limit or SDK/runtime pin changes. The
+checkpoint supplies no new approval or hosted/capability qualification; historical evidence and
+the frozen Interfaces remain unchanged.
+
+Verification passes all five root Rust gates, 2,241 workspace tests (one existing ignored),
+245 Axum unit tests plus 17 contracts, 57 demo tests, and the explicit generated-project native/
+three-WASM build and TCP fallback gate. Documentation formatting, lint, build, forwarding doctest
+and its 15 checker tests, docs/legacy guards and approval-identity verification pass. Converter
+and TCP regressions were red before the fix. Independent protocol and implementation reviews
+selected this existing ingress fact over partial outbound hooks, and tightened the pipeline
+guard to reject extra/wrong responses and the origin recorder to distinguish connection setup
+from HTTP receipt. This remains local implementation evidence, not hosted qualification.
+
 ### Prior Execution Status
 
 Execution started with G1's inventory/checker and G2's opt-in host diagnostic. No production
@@ -664,9 +701,12 @@ working-tree characterization at base `0250edc9`, not qualification of that comm
 adapter or API changed, no compatibility path was added, and Fastly G2 remains failed. Local relay
 does not prove forwarding actual inbound GET/HEAD bodies or the new eager APIs.
 
-Both read-only investigations kept P2 with atomic P1: current clock-only constructors and lazy
-implementer sends cannot satisfy the approved support-first/time/head boundary by partial hooks.
-The independent P3 proof was selected instead of adding unused foundations or weakening that cut.
+Both read-only investigations kept P2's outbound settlement and support-first/time/head hooks
+with atomic P1: current clock-only constructors and lazy implementer sends cannot satisfy that
+boundary by partial hooks. The independent P3 proof was selected instead of adding unused
+foundations or weakening that cut. The later Axum host-known-empty checkpoint independently
+preserves an existing transport fact during ingress conversion; it does not implement settlement,
+add partial hooks or change a public API.
 Future P1 rediscovery must include the new fully qualified test implementation
 `impl edgezero_core::OutboundHttpClient for RelayClient`; the frozen approval inventory remains
 submission-time history. Scoped spec and reader/validator reviews found no blocking defect. The

@@ -216,6 +216,23 @@ without initializing its default transport. Otherwise it injects `AxumOutboundCl
 `reqwest` and the application clock. Handlers use `RequestContext::http_client()`; direct wiring
 can construct the adapter client with `AxumOutboundClient::try_new()`.
 
+After admission, request conversion preserves a transport-certified empty body
+(`http_body::Body::is_end_stream()`) as buffered empty without polling it. This applies to every
+method, not only GET/HEAD; headers and size hints alone never certify emptiness. The request
+context still reports Initial, not Cached, and ingress framing stays `HostManaged`.
+
+Local HTTP/1 TCP checks forward GET/HEAD with absent framing or `Content-Length: 0`, even with an
+expired inbound read deadline, without outbound body bytes or length/chunked framing. The demo
+and generated proxy handlers benefit through this same converter and their unchanged client API.
+This does not change core's first `body_bytes` deadline check: that accessor can still return 408
+for an initial buffered-empty body after expiry.
+
+Unknown bodies retain their existing lazy stream and read-deadline handling. In particular,
+chunked-empty and nonempty streamed GET bodies still fail outbound preflight with 400 and no
+origin request; local TCP controls also preserve unread-body connection boundaries. General
+GET/HEAD settlement and the atomic outbound dispatch migration remain open. Other adapters are
+unchanged, and no capability row or support level is added or promoted by this checkpoint.
+
 Axum provides native total deadlines, completion-order batching, pending-future cancellation,
 batch slot isolation, cache bypass, wire-authority override, elastic phase budgeting, header
 fidelity, and streamed upload cancellation. Downstream responses run on a connection-local Hyper

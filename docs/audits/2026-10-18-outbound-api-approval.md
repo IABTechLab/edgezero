@@ -85,7 +85,7 @@ assert.notEqual(currentStart, -1);
 const currentEnd = current.indexOf('## Task P1:', currentStart);
 assert.ok(currentEnd > currentStart);
 assert.equal(digest(current.slice(currentStart, currentEnd)), '0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404');
-assert.equal(digest(current), '7752a1ca231ab41b9d1b28855d31813e9c43a30c7e55ce3453176f2f51a6f946');
+assert.equal(digest(current), '39c2ae866be8775b6b34879cbabff92a97f1c9f7010d76f275027690c0b6dd51');
 console.log('Original subject and amended API identities match; approval scope is recorded separately.');
 JS
 ```
@@ -107,7 +107,7 @@ is amended.
 | Current Source Identity | Value                                                              |
 | ----------------------- | ------------------------------------------------------------------ |
 | Interfaces SHA-256      | `0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404` |
-| Complete plan SHA-256   | `7752a1ca231ab41b9d1b28855d31813e9c43a30c7e55ce3453176f2f51a6f946` |
+| Complete plan SHA-256   | `39c2ae866be8775b6b34879cbabff92a97f1c9f7010d76f275027690c0b6dd51` |
 | Interfaces size         | 683 LF-terminated lines, 42,364 UTF-8 bytes                        |
 
 These are verification identities, not fresh exact-digest approval evidence. The original
@@ -116,6 +116,14 @@ explicit conversation approval. The requirements file had already changed since 
 submission; the historical requirements digest above is not asserted against today's file.
 This amendment does not change requirements or approve their intervening changes. Fastly policy,
 optimizer horizon, applicability, measurement and hosted-qualification decisions stay open.
+
+The current complete-plan identity also includes the 2026-10-24 Task P2 sequencing
+clarification outside Interfaces: Axum can preserve its existing transport-certified empty
+body during ingress conversion independently of outbound settlement. This implements an
+existing subtask without changing public signatures, core deadline precedence or any provider
+policy. Interfaces and normative requirements are unchanged by this checkpoint. This maintenance
+identity is not new API, feasibility or policy approval; the original approval identities above
+remain historical.
 
 ### Scoped Native Optimizer Parity Instruction
 

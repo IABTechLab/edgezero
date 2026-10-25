@@ -108,6 +108,16 @@ effective limits, accept-loop overshoot, parser storage assumptions, and respons
 safety policy. These controls do not supply independent raw-target/field-section accounting or
 the strict framing policy, so they do not promote either raw-ingress capability above.
 
+Separately, Axum preserves transport-certified empty bodies (`is_end_stream()`) as buffered empty
+after admission for any method, without reading them. The body remains Initial, not Cached, and
+framing remains `HostManaged`. Local HTTP/1 GET/HEAD forwards with absent framing or
+`Content-Length: 0` succeed even after the inbound read deadline when passed through
+`into_request`; core's first `body_bytes` deadline check is unchanged and can still return 408.
+Unknown streams, including chunked-empty and nonempty GET controls that still return 400 without
+origin contact, retain their existing behavior. Other adapters are unchanged. This narrow
+conversion checkpoint does not complete general GET/HEAD settlement, add a capability row or
+promote any matrix cell.
+
 Inbound readers and body extractors return 413 for byte-cap overflow, 400 for malformed
 payloads, and 408 for an expired admitted read deadline. Demo and scaffold fallback policies
 select 413 for overflow and 408 for timeout; applications may select their own bounded responses.

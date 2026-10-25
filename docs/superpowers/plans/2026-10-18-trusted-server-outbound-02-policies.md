@@ -788,6 +788,23 @@ API; generic trait-conformance assertions remain trait assertions. Do not add an
 **Files:** Modify core `src/outbound.rs`, `context.rs`, `body.rs`; four adapters' `src/request.rs`
 and `src/outbound.rs`; Axum `src/connection.rs` tests; adapter `tests/contract.rs`.
 
+**Engineering sequencing clarification:** the existing known-empty conversion subtask can
+proceed independently at the ingress boundary without changing the public dispatch contract.
+The Axum-only checkpoint preserves transport-certified `is_end_stream()` as `Body::empty()`
+after admission for any method, without polling or consulting headers/size hints for emptiness.
+Initial state is not Cached; ingress framing remains `HostManaged`, and core's first
+`body_bytes` deadline precedence is unchanged. Unknown streams retain their existing lazy
+conversion and read deadlines. Fastly, Cloudflare and Spin remain unchanged.
+
+Actual HTTP/1 TCP GET/HEAD forwards with absent framing or `Content-Length: 0` pass through
+`into_request` even after the inbound read deadline, with no outbound bytes or length/chunked
+framing. Chunked-empty and nonempty GET controls still fail with 400 and no origin request,
+preserving connection boundaries. Demo and generated proxy handlers benefit through the same
+converter and unchanged API. This is not a new approval, capability row/promotion or completion
+of P2/EZ-1. The remaining settlement and support-first/paired-time/head hooks stay with atomic P1;
+no backend policy, timer, slack, resource or SDK/runtime pin changes are enabled. The Interfaces
+section remains unchanged.
+
 - [ ] Add core tests for streamed empty chunks then EOF, first nonempty byte, failed/taken/cached
       bodies, unsupported option with permanently pending input, expired outbound budget with zero
       polls, and competing 408/504 limits. Run `cargo test -p edgezero-core --lib` to show failures.

@@ -10,6 +10,7 @@ use edgezero_core::http::Request as CoreRequest;
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::{StreamExt as _, stream};
+use http_body::Body as _;
 use tokio::time::timeout;
 
 use crate::context::AxumRequestContext;
@@ -43,11 +44,16 @@ pub(crate) fn into_core_request_parts(
     read_lifetime: Option<(Deadline, MonotonicClock)>,
     outbound_client: HttpClient,
 ) -> CoreRequest {
-    let body = match read_lifetime {
-        Some((deadline, monotonic_clock)) => {
-            deadline_body(axum_body.into_data_stream(), deadline, monotonic_clock)
+    // A zero size hint can still leave trailers; only the transport's terminal signal is enough.
+    let body = if axum_body.is_end_stream() {
+        Body::empty()
+    } else {
+        match read_lifetime {
+            Some((deadline, monotonic_clock)) => {
+                deadline_body(axum_body.into_data_stream(), deadline, monotonic_clock)
+            }
+            None => Body::from_external_stream(axum_body.into_data_stream()),
         }
-        None => Body::from_external_stream(axum_body.into_data_stream()),
     };
 
     let mut core_request = CoreRequest::from_parts(parts, body);
@@ -132,9 +138,37 @@ mod tests {
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::Poll;
+    use std::task::{Context, Poll};
 
     struct DropSignal(Arc<AtomicUsize>);
+
+    struct EndSignalBody {
+        ended: bool,
+        polls: Arc<AtomicUsize>,
+        release: DropSignal,
+    }
+
+    impl http_body::Body for EndSignalBody {
+        type Data = Bytes;
+        type Error = io::Error;
+
+        fn is_end_stream(&self) -> bool {
+            self.ended
+        }
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(self.release.0.load(Ordering::SeqCst), 0);
+            Poll::Ready(None)
+        }
+
+        fn size_hint(&self) -> http_body::SizeHint {
+            http_body::SizeHint::with_exact(0)
+        }
+    }
 
     #[expect(
         clippy::missing_trait_methods,
@@ -170,6 +204,109 @@ mod tests {
             .expect_err("timeout");
         assert_eq!(error.status(), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn host_known_empty_body_is_preserved_without_reading() {
+        let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+        for (method, admitted) in [
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::OPTIONS,
+            Method::DELETE,
+        ]
+        .into_iter()
+        .flat_map(|method| [false, true].map(|admitted| (method.clone(), admitted)))
+        {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let request = Request::builder()
+                .method(method)
+                .uri("/demo")
+                .body(AxumBody::new(EndSignalBody {
+                    ended: true,
+                    polls: Arc::clone(&polls),
+                    release: DropSignal(Arc::clone(&drops)),
+                }))
+                .expect("request");
+            let now = MonotonicInstant::now();
+            let lifetime =
+                admitted.then(|| (Deadline::at_instant(now), MonotonicClock::new(move || now)));
+            let (parts, native) = request.into_parts();
+            let core = into_core_request_parts(parts, native, lifetime, client.clone());
+            assert_eq!(core.body().as_bytes(), Some(b"".as_slice()));
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            drop(core);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_size_hint_and_zero_content_length_do_not_certify_empty_body() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/demo")
+            .header("content-length", "0")
+            .body(AxumBody::new(EndSignalBody {
+                ended: false,
+                polls: Arc::clone(&polls),
+                release: DropSignal(Arc::clone(&drops)),
+            }))
+            .expect("request");
+        let core = into_core_request(request).await.expect("conversion");
+        assert!(core.body().is_stream());
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(core);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_body_preserves_empty_chunks_then_data_and_source_errors() {
+        for source_error in [false, true] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&polls);
+            let drops = Arc::new(AtomicUsize::new(0));
+            let release = DropSignal(Arc::clone(&drops));
+            let mut chunks = vec![
+                Ok(Bytes::new()),
+                if source_error {
+                    Err(io::Error::other("inbound fixture source error"))
+                } else {
+                    Ok(Bytes::from_static(b"data"))
+                },
+            ]
+            .into_iter();
+            let source = stream::poll_fn(move |_cx| {
+                let _retain_release = &release;
+                observed.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(chunks.next())
+            });
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("/demo")
+                .header("content-length", "0")
+                .body(AxumBody::from_stream(source))
+                .expect("request");
+            let core = into_core_request(request).await.expect("conversion");
+            assert!(core.body().is_stream());
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            let outcome = core.into_body().into_bytes_bounded(4).await;
+            if source_error {
+                assert_eq!(
+                    outcome.expect_err("original source failure").status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                );
+            } else {
+                assert_eq!(outcome.expect("data survives"), Bytes::from_static(b"data"));
+            }
+            assert!(polls.load(Ordering::SeqCst) >= 2);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[tokio::test]

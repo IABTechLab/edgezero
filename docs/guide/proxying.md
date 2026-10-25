@@ -52,9 +52,21 @@ settlement and optimizer redirect following are not implemented by this checkpoi
 This example preserves the inbound method and body, replaces the target URI, removes a private
 header, and converts the outbound response back into a core response.
 
-At this implementation checkpoint, use it only for methods that carry a body. Forwarded inbound
-GET/HEAD requests still carry lazy bodies and fail with 400; bounded empty-body settlement is not
-implemented yet. Do not discard an inbound body to bypass that check.
+On Axum, the converter preserves a transport-certified empty body (`is_end_stream()`) as buffered
+empty after admission, for any method, without reading it. Actual HTTP/1 GET/HEAD forwards with
+absent framing or `Content-Length: 0` succeed through this path even after the inbound read
+deadline, with no outbound body bytes, `Transfer-Encoding` or `Content-Length`.
+
+Unknown bodies remain lazy. Forwarded streamed GET/HEAD requests still fail with 400 before
+origin contact; local TCP controls include chunked-empty and nonempty GET bodies. General bounded
+empty-body settlement is not implemented, and other adapters' conversion is unchanged. Do not
+discard an inbound body to bypass that check. Methods that accept streamed bodies keep their
+existing behavior.
+
+The known-empty body remains Initial, not Cached. `take_body` and `into_request` expose buffered
+empty, but core's first `body_bytes` call still checks the inbound read deadline and can return 408. Ingress framing remains `HostManaged`. The demo and generated proxy handlers use the same
+Axum converter and benefit without changing their forwarding API; this is not full P2 completion
+or a capability promotion.
 
 ```rust
 use edgezero_core::action;
