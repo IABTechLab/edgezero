@@ -108,6 +108,46 @@ selected this existing ingress fact over partial outbound hooks, and tightened t
 guard to reject extra/wrong responses and the origin recorder to distinguish connection setup
 from HTTP receipt. This remains local implementation evidence, not hosted qualification.
 
+### P2 Fastly SDK-Body-Absence Checkpoint
+
+This selects only preservation of actual SDK body absence as an engineering sequencing decision,
+not new user approval, a new public contract or full P2 completion. The preceding Axum checkpoint
+and its verification remain historical. Outbound settlement and support-first/paired-time/head
+hooks remain with atomic P1; the frozen Interfaces, plan 02, requirements and approval record
+are unchanged.
+
+- [x] In direct conversion and admitted dispatch, use `try_take_body()` to preserve `None` as
+      core `Body::empty()` without creating an SDK body. Acquire the admitted source only after
+      admission and transfer the final SDK body after the prepare hook.
+- [x] Keep every `Some(body)` on the existing lazy stream/read-deadline path, even when host
+      known length is zero. Preserve prefetched read bytes and pending writes without header/
+      hint inference, repacking, reads or flushes during conversion. Generic test-reader seams
+      remain present sources, not SDK-absence evidence.
+- [x] Cover actual WASI SDK bodies with zero host length but payload remaining in prefetched
+      read bytes and pending writes. Host length is not EOF even beyond SDK buffering: Viceroy
+      uses Hyper exact size hints, not a terminal-body signal.
+- [x] Preserve Initial rather than Cached context state and `IngressFraming::HostManaged`.
+      Core's first `body_bytes` read-deadline check remains unchanged and can still return 408.
+- [ ] Fix ordinary Fastly bodiless forwarding and complete general settlement and the remaining
+      P2/EZ-1 acceptance through the separately gated atomic migration.
+
+G3's actual `from_client()` requests always supplied `Some(body)`, including absent framing and
+CL0. This checkpoint therefore does not establish ordinary Fastly GET/HEAD forwarding success.
+Demo and generated proxy handlers automatically share the converter with unchanged APIs; this
+does not mean raw Fastly GET proxying works. No Native claim, new capability row or promotion,
+B/backend-policy, slack, timer, resource-limit or SDK/runtime-pin change is enabled. Historical
+failures and qualification gates remain; this is not hosted or full Fastly G2 qualification.
+
+Verification passes all five root Rust gates, 2,241 workspace tests (one existing ignored),
+193 Fastly WASI unit tests, 35 WASI contracts including six new SDK-body cases, target clippy,
+57 demo tests and the generated-project native/three-WASM/TCP gate. All four existing local
+Viceroy progress groups pass, including 24 relay cases, as working-tree characterization only.
+Docs formatting/lint/build, forwarding-doctest, docs/legacy and approval-identity guards pass.
+The absence test was red before implementation. Independent source and runtime investigations
+rejected zero-host-length inference; real SDK tests demonstrate both buffer counterexamples.
+Independent review found no remaining scoped defect after replacing a wall-clock-sensitive
+prepare test with the injected app clock. No historical evidence or protected API identity changed.
+
 ### Prior Execution Status
 
 Execution started with G1's inventory/checker and G2's opt-in host diagnostic. No production

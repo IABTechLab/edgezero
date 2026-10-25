@@ -23,9 +23,10 @@ mod secret_store_compile_check {
 )]
 mod tests {
     use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read as _, Write as _};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use edgezero_adapter_fastly::context::FastlyRequestContext;
@@ -39,12 +40,15 @@ mod tests {
         BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
         finish_bounded_config_read,
     };
-    use edgezero_core::context::RequestContext;
+    use edgezero_core::context::{BodyKind, RequestContext};
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
+    use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
+    use edgezero_core::outbound::{OutboundRequest, validate_for_dispatch};
+    use edgezero_core::response_egress::ResponseEgressCompletion;
     use edgezero_core::response_egress::{ResponseEgressEnvelope, ResponseEgressReport};
     use edgezero_core::router::{RouteMetadata, RouterService};
-    use edgezero_core::time::{Deadline, MonotonicClock};
+    use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use fastly::Request as FastlyRequest;
     use fastly::http::Method as FastlyMethod;
     use futures::{executor::block_on, stream};
@@ -233,6 +237,187 @@ mod tests {
         let body =
             block_on(core_request.into_body().into_bytes_bounded(1024)).expect("request body");
         assert_eq!(body.as_ref(), b"payload");
+    }
+
+    #[test]
+    fn sdk_body_absence_is_preserved_without_creating_a_stream() {
+        for method in [FastlyMethod::GET, FastlyMethod::HEAD, FastlyMethod::POST] {
+            let request = fastly_request(method, "/empty", None);
+            assert!(!request.has_body());
+            let core = into_core_request(request).expect("conversion");
+            assert_eq!(core.body().as_bytes(), Some(b"".as_slice()));
+        }
+    }
+
+    #[test]
+    fn sdk_body_zero_host_length_preserves_unread_read_buffer() {
+        let mut request = fastly_request(FastlyMethod::POST, "/buffered", Some(b"data"));
+        let body = request.get_body_mut();
+        let mut prefix = [0_u8; 1];
+        body.read_exact(&mut prefix).expect("prefetch body");
+        assert_eq!(&prefix, b"d");
+        assert_eq!(
+            body.known_length(),
+            Some(0),
+            "host no longer holds the read buffer"
+        );
+
+        let core = into_core_request(request).expect("conversion");
+        assert!(
+            core.body().is_stream(),
+            "a host length is not a terminal signal"
+        );
+        let bytes = block_on(core.into_body().into_bytes_bounded(4)).expect("remaining bytes");
+        assert_eq!(bytes.as_ref(), b"ata");
+    }
+
+    #[test]
+    fn sdk_body_zero_host_length_preserves_pending_write_buffer() {
+        let mut request = fastly_request(FastlyMethod::POST, "/buffered", None);
+        let body = request.get_body_mut();
+        body.write_all(b"data").expect("buffer body write");
+        assert_eq!(
+            body.known_length(),
+            Some(0),
+            "host does not hold buffered writes"
+        );
+
+        let core = into_core_request(request).expect("conversion");
+        assert!(
+            core.body().is_stream(),
+            "a host length is not a terminal signal"
+        );
+        let bytes = block_on(core.into_body().into_bytes_bounded(4)).expect("buffered bytes");
+        assert_eq!(bytes.as_ref(), b"data");
+    }
+
+    #[test]
+    fn sdk_body_present_empty_handle_is_not_certified_as_absent() {
+        let mut request = fastly_request(FastlyMethod::GET, "/empty", Some(b""));
+        assert!(request.has_body());
+        assert_eq!(request.get_body_mut().known_length(), Some(0));
+        let core = into_core_request(request).expect("conversion");
+        assert!(core.body().is_stream());
+        let target = "http://example.com/forward".parse().expect("target");
+        let outbound = OutboundRequest::from_request(core, target).expect("forward");
+        assert_eq!(
+            validate_for_dispatch(&outbound)
+                .expect_err("streamed GET stays unresolved")
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn sdk_body_shape_is_resolved_after_prepare_without_losing_buffered_bytes() {
+        #[edgezero_core::action]
+        async fn inspect_body(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let absent = *ctx.extensions().get::<bool>().expect("prepare marker");
+            assert_eq!(ctx.body_kind(), BodyKind::Initial);
+            let body = ctx.take_body()?;
+            assert_eq!(!body.is_stream(), absent);
+            let bytes = body.into_bytes_bounded(4).await?;
+            response_builder()
+                .body(Body::from(bytes))
+                .map_err(EdgeError::internal)
+        }
+
+        for mode in ["absent", "taken", "prefetched", "pending-write"] {
+            let absent = matches!(mode, "absent" | "taken");
+            let mut app = App::new(
+                RouterService::builder()
+                    .post("/hook-body", inspect_body)
+                    .build(),
+            );
+            let started_at = MonotonicInstant::now();
+            app.set_monotonic_clock(MonotonicClock::new(move || started_at));
+            app.set_ingress_admission_policy(move |head| AdmissionDecision::Admit {
+                completion: ResponseEgressCompletion::empty(),
+                grant: IngressGrant::empty(),
+                read_deadline: head.read_deadline_after(if absent {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(1)
+                }),
+            });
+            let request = fastly_request(
+                FastlyMethod::POST,
+                "/hook-body",
+                matches!(mode, "taken" | "prefetched").then_some(b"data".as_slice()),
+            );
+            let request_delivery = FastlyService::new(&app).run_request_with_hooks_for_test(
+                request,
+                |raw, extensions| {
+                    extensions.insert(absent);
+                    match mode {
+                        "taken" => drop(raw.try_take_body().expect("existing body")),
+                        "prefetched" => {
+                            let body = raw.get_body_mut();
+                            let mut prefix = [0_u8; 1];
+                            body.read_exact(&mut prefix).expect("prepare read");
+                            assert_eq!(&prefix, b"d");
+                            assert_eq!(body.known_length(), Some(0));
+                        }
+                        "pending-write" => {
+                            let body = raw.get_body_mut();
+                            body.write_all(b"data").expect("prepare write");
+                            assert_eq!(body.known_length(), Some(0));
+                        }
+                        _ => assert!(!raw.has_body()),
+                    }
+                },
+                |_| (),
+                |envelope| {
+                    let (response, report) = complete_envelope_with_report(envelope);
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let bytes = block_on(response.into_body().into_bytes_bounded(4))
+                        .expect("response bytes");
+                    let expected: &[u8] = match mode {
+                        "prefetched" => b"ata",
+                        "pending-write" => b"data",
+                        _ => b"",
+                    };
+                    assert_eq!(bytes.as_ref(), expected);
+                    response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+                },
+            );
+            let FastlyRequestDelivery::Routed { delivery, .. } = request_delivery else {
+                panic!("expected routed response");
+            };
+            assert_eq!(delivery.error(), None);
+        }
+    }
+
+    #[test]
+    fn sdk_body_absence_first_read_retains_sticky_admission_timeout() {
+        #[edgezero_core::action]
+        async fn read_empty(ctx: RequestContext) -> Result<Response, EdgeError> {
+            assert_eq!(ctx.body_kind(), BodyKind::Initial);
+            let error = ctx
+                .body_bytes(0)
+                .await
+                .expect_err("first-read deadline applies");
+            assert_eq!(error.status(), StatusCode::REQUEST_TIMEOUT);
+            assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+            assert_eq!(
+                ctx.take_body().expect_err("sticky failure").status(),
+                error.status()
+            );
+            Err(error)
+        }
+
+        let mut app = App::new(RouterService::builder().get("/empty", read_empty).build());
+        app.set_ingress_admission_policy(|head| AdmissionDecision::Admit {
+            completion: ResponseEgressCompletion::empty(),
+            grant: IngressGrant::empty(),
+            read_deadline: Deadline::at_instant(head.request_start()),
+        });
+        let response = complete_envelope(
+            FastlyService::new(&app)
+                .capture_egress_for_test(fastly_request(FastlyMethod::GET, "/empty", None))
+                .expect("egress"),
+        );
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     }
 
     #[test]

@@ -42,7 +42,8 @@ separately from the portable API and must be considered when declaring required 
 
 - Preserve transport-certified `is_end_stream()` bodies as buffered empty after admission on
   Axum, for every method, without polling the native body. Keep request-context state Initial,
-  not Cached, and ingress framing HostManaged. Unknown streams and all other adapters are unchanged.
+  not Cached, and ingress framing HostManaged. At that checkpoint, unknown streams and all
+  other adapters were unchanged.
 - Forward actual HTTP/1 GET/HEAD requests with absent framing or `Content-Length: 0` through
   the existing client API, even after the inbound read deadline. Chunked-empty and nonempty
   streamed GET controls still return 400 without contacting the origin and preserve connection
@@ -51,6 +52,23 @@ separately from the portable API and must be considered when declaring required 
   clarification, not a new approval or full P2 completion. Core first-`body_bytes` deadline
   precedence stays unchanged. General outbound settlement and support/time/head hooks remain
   with atomic P1; no capability row, promotion, backend policy, timer or slack changes.
+
+### Fastly SDK Body Absence
+
+- Preserve only actual SDK body absence (`try_take_body() == None`) as core `Body::empty()`
+  in direct conversion and admitted dispatch, without creating an SDK body. Every present
+  SDK body remains lazy, even with known host length zero. Preserve prefetched read bytes
+  and pending writes after the prepare hook, with no header/hint inference, repacking, read
+  or flush during conversion. Request-context state remains Initial, not Cached; core's first
+  `body_bytes` read-deadline check can still return 408.
+- Add actual WASI SDK regressions showing payload remains in prefetched read and pending-write
+  buffers despite zero host length. Host length is not EOF even beyond SDK buffering:
+  Viceroy uses Hyper exact size hints, not a terminal-body signal.
+- G3's actual `from_client()` requests always supplied a body, including absent framing and
+  CL0. This checkpoint does not fix ordinary Fastly bodiless forwarding or general settlement.
+  Demo/generated proxy APIs remain unchanged and share the converter; this does not establish
+  raw Fastly GET proxy success. This is scope selection, not new user approval or a Native
+  claim; no capability rows/promotions, B/backend policy, slack, timers or SDK/runtime pins change.
 
 ### Native Image Optimizer
 

@@ -59,14 +59,23 @@ deadline, with no outbound body bytes, `Transfer-Encoding` or `Content-Length`.
 
 Unknown bodies remain lazy. Forwarded streamed GET/HEAD requests still fail with 400 before
 origin contact; local TCP controls include chunked-empty and nonempty GET bodies. General bounded
-empty-body settlement is not implemented, and other adapters' conversion is unchanged. Do not
+empty-body settlement is not implemented, and Cloudflare/Spin conversion is unchanged. Do not
 discard an inbound body to bypass that check. Methods that accept streamed bodies keep their
 existing behavior.
 
-The known-empty body remains Initial, not Cached. `take_body` and `into_request` expose buffered
-empty, but core's first `body_bytes` call still checks the inbound read deadline and can return 408. Ingress framing remains `HostManaged`. The demo and generated proxy handlers use the same
-Axum converter and benefit without changing their forwarding API; this is not full P2 completion
-or a capability promotion.
+Fastly separately preserves actual SDK body absence: only `try_take_body() == None` becomes core
+`Body::empty()`, without creating an SDK body. Both direct conversion and admitted dispatch keep
+every present SDK body lazy, even when `known_length()` reports zero; that query omits SDK buffers
+and is not an EOF signal. Normal Fastly `from_client()` requests carry a body handle even when
+bodiless, so this does not fix their GET/HEAD forwarding. Do not remove a present SDK body to
+force the absence path. See [Fastly ingress conversion](./adapters/fastly.md#ingress-body-conversion).
+
+The certified Axum empty body or absent Fastly SDK body remains Initial, not Cached. `take_body`
+and `into_request` expose buffered empty, but core's first `body_bytes` call still checks the
+inbound read deadline and can return 408. Ingress framing remains `HostManaged`. Demo and generated
+proxy handlers automatically share their adapter's converter with unchanged APIs; the Axum
+forwarding result above does not establish raw Fastly GET proxy success. Neither checkpoint is
+general body settlement or a capability promotion.
 
 ```rust
 use edgezero_core::action;

@@ -437,7 +437,7 @@ where
         })?;
     head_request.extensions_mut().extend(scratch);
     let outcome = dispatch_ingress_reader(app, head_request, stores, request_start, move || {
-        Ok(req.take_body())
+        Ok(req.try_take_body())
     });
     Ok(match (outcome, synthesized_headers) {
         (DispatchOutcome::Detached(envelope), Some(headers)) => {
@@ -459,7 +459,7 @@ fn dispatch_ingress_reader<Source, MakeSource>(
 ) -> DispatchOutcome
 where
     Source: Read + 'static,
-    MakeSource: FnOnce() -> Result<Source, EdgeError>,
+    MakeSource: FnOnce() -> Result<Option<Source>, EdgeError>,
 {
     let request_method = head_request.method().clone();
     let head_parts = IngressHeadParts::from_request(
@@ -754,18 +754,22 @@ fn attach_core_body(
     mut request: Request,
     read_lifetime: Option<(Deadline, MonotonicClock)>,
 ) -> Request {
-    *request.body_mut() = fastly_deadline_body(req.take_body(), read_lifetime);
+    *request.body_mut() = fastly_deadline_body(req.try_take_body(), read_lifetime);
     request
 }
 
 fn fastly_deadline_body<Source>(
-    source: Source,
+    source: Option<Source>,
     read_lifetime: Option<(Deadline, MonotonicClock)>,
 ) -> Body
 where
     Source: Read + 'static,
 {
-    let mut native_body = Some(source);
+    // SDK host length omits unread/read-ahead and pending-write buffers; only absence is enough.
+    let Some(reader) = source else {
+        return Body::empty();
+    };
+    let mut native_body = Some(reader);
     let mut terminal = false;
     let stream = stream::poll_fn(move |_cx| {
         if terminal {
@@ -845,7 +849,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        move || Ok(source),
+        move || Ok(Some(source)),
     )
     .into_envelope()
 }
@@ -880,7 +884,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        make_source,
+        move || make_source().map(Some),
     );
     match outcome {
         DispatchOutcome::Aborted => Err(FastlyError::msg("ingress admission aborted")),
@@ -913,7 +917,7 @@ pub fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
-        || -> Result<Cursor<Vec<u8>>, EdgeError> {
+        || -> Result<Option<Cursor<Vec<u8>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "fastly source construction failed"
             )))

@@ -192,6 +192,28 @@ using a manifest command. Staging and any deployment that
 declares a Config, KV, or Secret Store require the verified release-backed
 managed command above.
 
+## Ingress Body Conversion
+
+Direct request conversion and admitted dispatch preserve actual SDK body absence:
+`try_take_body() == None` becomes core `Body::empty()` without constructing an SDK body.
+Every `Some(body)` stays on the existing lazy stream/read-deadline path, even when
+`known_length()` reports zero. The admitted path transfers the body after the prepare hook,
+preserving SDK-prefetched read bytes and pending writes. Conversion does not infer emptiness
+from headers or hints, repack the SDK body, read it or flush it.
+
+Actual WASI SDK tests demonstrate that prefetched read bytes and pending writes can contain
+payload despite zero host length. Host length is not EOF even beyond SDK buffering: Viceroy
+uses Hyper exact size hints, not a terminal-body signal. A present body is never discarded
+on that basis. An absent body remains Initial, not Cached, in the request context; core's first
+`body_bytes` read-deadline check is unchanged and can still return 408. Ingress framing remains
+`HostManaged`.
+
+Normal `from_client()` requests carry a body handle even with absent framing or `Content-Length: 0`.
+This absence-only checkpoint does not fix ordinary Fastly bodiless GET/HEAD forwarding or
+general settlement. Demo and generated proxy handlers automatically share the converter with
+unchanged APIs, but raw Fastly GET proxy success is not established. No capability row or cell
+is promoted; backend settings, dispatch slack, timers and SDK/runtime pins are unchanged.
+
 ## Backends
 
 Outbound HTTP uses deterministic **dynamic backends** derived from the canonical target,
