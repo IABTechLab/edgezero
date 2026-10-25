@@ -20,6 +20,20 @@ Hosted/performance qualification and deployment remain blocked. The experiment a
 measurements, commands, exits, source identities and linked evidence below are historical and
 unchanged; this additive disposition does not reclassify them as passing results.
 
+### Backend Policy Review Packet (2026-10-25)
+
+The [new G2/G4 packet](2026-10-25-fastly-backend-policy-proposal.md) supplies a numerical candidate:
+B31 with upward-rounded coupled timers, compared with a B1 fixed-ceiling alternative. Its model
+passes 93 boundary samples and 16 timeout-anchor controls over the full seven-day clamped domain.
+This is arithmetic-only proposal evidence. The requester selected B31 for final review on
+2026-10-25; resource/primitive approval and implementation remain pending. The older
+"not proposed" descriptions below are historical. SDK representability is not provider acceptance.
+
+The packet also records the exact repaired readiness sequence, tested capacities versus unproved
+full-sized-copy/fairness domains, stock error loss, retained timing failures and unavailable runtime
+getters. It does not approve the preserving primitive, a read cap, idle mapping or a runtime change.
+G2 remains failed and its dependent work remains gated; no new host run or capability claim is made.
+
 ### Historical Execution Status
 
 Executed locally on 2026-10-19. **G2: Failed.** The pinned Viceroy body-readiness

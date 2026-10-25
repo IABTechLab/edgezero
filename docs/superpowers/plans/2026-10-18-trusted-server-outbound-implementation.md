@@ -14,8 +14,7 @@
 
 ### Current Delivery Dashboard (2026-10-25)
 
-Reconciled against implementation commit `622f996a405445221799765c21da4dbc74ffce69` and the
-scoped working-tree connect-refusal checkpoint below.
+Reconciled against implementation commit `b33342d600765e5e17928f3f2164e11941a999b4`.
 This is the current task-level implementation summary, not qualification of that SHA. The
 recorded [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
 activates eleven existing criteria without changing the production implementation snapshot.
@@ -79,6 +78,23 @@ same commit, naming its implemented scope, nonzero tests/evidence and next unclo
 its inventory bindings rather than reporting a percentage from checkbox or test counts. Close a
 parent task only after every applicable child and acceptance leg closes. Requirements/digest
 changes need explicit review; neither a dashboard edit nor a passing checker supplies approval.
+
+### G2/G4 Policy Review Packet (2026-10-25)
+
+The [review packet](../../audits/2026-10-25-fastly-backend-policy-proposal.md) proposes literal
+B31, selected by the requester for final review on 2026-10-25, with a B1 comparison, full positive
+selected-budget/timeout-anchor domains, upward integer rounding and complete coupled timer-vector
+counting. Its executable proposal model passes
+93 boundary samples and 16 timeout-anchor controls, including equal timeouts across different
+deadline-only buckets. This is not production code, SDK setter evidence or policy approval.
+
+Two read-only investigations/proposals reviewed timer/resource tradeoffs and the exact repaired
+primitive separately. The packet preserves stock error loss, repaired negative timing traces,
+untested full-sized-copy and mixed-head/body fairness domains, SDK/provider distinctions and
+Viceroy's unavailable timer getters. No production API, backend, timer, slack, resource limit,
+dependency or runtime pin changes. G2's gate is not passed, no acceptance leg is promoted, and
+no conditional follow-up is adopted. The next step is explicit candidate/resource/primitive
+review in G4, followed by its still-required evidence and the approved atomic migration.
 
 ### G1/F9b Inventory-Driven Suite Consolidation (2026-10-25)
 

@@ -171,6 +171,9 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Prepare a pending Fastly G2/G4 backend-policy/readiness review packet. Compare literal B31/B1,
+  execute full-domain boundary/timeout-anchor arithmetic, and retain separate SDK/provider,
+  runtime, resource and qualification gates. No production policy or runtime changes.
 - Reject empty measurement lists for comparison-required legs and mark hosted Image Optimizer
   acceptance as comparison-required. This checks evidence presence, not metric-policy sufficiency.
   Retain a fresh stock/repaired local recheck and replay its negative cleanup/timing/error results;

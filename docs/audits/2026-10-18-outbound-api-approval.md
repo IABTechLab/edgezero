@@ -28,6 +28,15 @@ There is no compatibility branch, alternate transport or lazy default proposed h
 | G4-APPLICABILITY     | Pending; G1 scope lock open             | Unset                                      | Unset         | Unset                                                              |
 | G4-MEASUREMENTS      | Pending; replay definitions unconfirmed | Unset                                      | Unset         | Unset                                                              |
 
+The [2026-10-25 policy/readiness packet](2026-10-25-fastly-backend-policy-proposal.md) now proposes
+B31 and a B1 comparison with complete aggregate-budget arithmetic. On 2026-10-25 the requester
+selected `B = 31 bounded ladder (Recommended)` as the proposal to finalize for review. The question
+explicitly excluded production integration, runtime changes and hosted qualification.
+G4-FASTLY-POLICY resource/primitive approval remains pending; the table above stays unapproved.
+Review resource exposure, emitted settings, anchor rules, provider maxima and the repaired-versus-
+stock primitive disposition separately. Preparing or selecting a proposal does not authorize
+backend implementation, runtime promotion or hosted execution.
+
 The scoped API response and its exact digest are attributed to the maintainer name supplied in
 the conversation, not inferred from Git. This does not close G4 as a whole. A completed
 decision must retain its maintainer, date, exact subject digest and scope. Proposal hashes do not
@@ -339,6 +348,7 @@ unknowns and cancelled/deferred work. These hashes identify submitted inputs, no
 | [G2 readiness evidence](evidence/2026-10-19-fastly-readiness.json)                  | `bf0911474b9f2dd50a5c0b1d1927edb1eafc865d7ff816e39bc686c379a88ac3` | Failed error preservation; hosted PendingExternal                         |
 | [Initial G3 evidence](evidence/2026-10-19-outbound-progress.json)                   | `46effcfd323756d861efef16f46d4652741692db44df595dfcdc5cf8e93a9a9c` | Historical Spin failure, Cloudflare unavailable                           |
 | [Repaired Spin/G3 evidence](evidence/2026-10-19-spin-response-egress.json)          | `59006383b01abbde4ad5a97a04841ccfe2cc4cb4627d14b5e13ad80febcc20f6` | Native/Viceroy/Spin exercised cases pass; smoke exit 2, not qualification |
+| [G2/G4 policy/readiness proposal](2026-10-25-fastly-backend-policy-proposal.md)     | `011b090e21c7e8e6424b53303c55b1b2eacb7c896e51a81b6492c13fa65ce3e1` | B31 selected for review; resource/primitive/read-cap approvals pending    |
 
 G3 does not yet prove Cloudflare execution, every protocol, missing active scheduler detection,
 callback/export-return lifetime, all cancellation interleavings or the future public begin API.
