@@ -16,7 +16,9 @@
 
 Reconciled against implementation commit `40ad2dc17a6102795ab248e040695652c50072eb`.
 This is the current task-level implementation summary, not qualification of that SHA. The
-checkpoint sections below retain their historical commands, results and limitations. The
+subsequent [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
+activates eleven existing criteria without changing the production implementation snapshot.
+The checkpoint sections below retain their historical commands, results and limitations. The
 [Requirement Coverage](#requirement-coverage) table maps every EZ requirement group to its owning
 tasks, current implementation/checkpoint and remaining closure work.
 
@@ -39,9 +41,10 @@ Keep three different status questions separate:
 - **Executable acceptance coverage:** G1's
   [inventory](../../../tests/fixtures/reusable-app/outbound-cutover-cases.json) covers 255 source
   criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
-  readiness of that leg's declared command/sentinel, not overall feature implementation. All 511
-  remain `planned`: binding actual tests/commands to those legs is unfinished G1/Q3 work, not
-  evidence that 511 features are absent. Do not count local checkpoint tests as activated legs.
+  readiness of that leg's declared command/sentinel, not overall feature implementation.
+  EZ-23 local criteria 01-11 are `ready`; the other 500 legs remain `planned`. G1/Q3 binding work
+  remains unfinished, not evidence that 500 features are absent. Only the explicitly bound
+  commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
   passing, exact-candidate evidence. The inventory check remains `qualified: false`.
@@ -75,6 +78,46 @@ same commit, naming its implemented scope, nonzero tests/evidence and next unclo
 its inventory bindings rather than reporting a percentage from checkbox or test counts. Close a
 parent task only after every applicable child and acceptance leg closes. Requirements/digest
 changes need explicit review; neither a dashboard edit nor a passing checker supplies approval.
+
+### G1/F9b Local Acceptance Binding Checkpoint
+
+- [x] Bind EZ-23 criteria 01-11 at `axum/native-tcp` to the existing guarded Cargo tests,
+      with explicit filters and `--include-ignored` during both discovery and execution.
+      Preserve all 511 case/environment identities, source text/digests, applicability and approvals.
+- [x] Strengthen criterion 01 with a 100-byte target accepted by the same unconfigured router.
+      Observe the new control fail before adding the test-only route, then pass with configured
+      414 through both server paths and unconfigured 200. This is a current positive control,
+      not a newly executed historical-F comparison.
+- [x] Run all eleven inventory commands: twelve distinct tests pass, including both the supplied-
+      client TCP and default-factory failure-seam tests selected by criterion 10. Guard the factory
+      sentinel separately in the existing Axum CI job so deleting it cannot silently reduce coverage.
+- [x] Observe the inventory-binding regression fail while the legs are still planned, then pass
+      after wiring the exact commands into the existing CI job. No new checker, execution framework,
+      capability or job name is introduced.
+- [ ] Implement criterion 12's begun-request branch after the eager API migration and obtain
+      criterion 13's consumer-owned route/parity evidence; both legs remain `planned`.
+- [ ] Reconcile the remaining 500 executable bindings and all required applicability decisions;
+      freeze and qualify a candidate separately through Q3-Q5.
+
+The inventory now reports 255 criteria, 511 legs, 500 planned and `qualified: false`.
+The eleven ready legs point to future raw `.log` artifacts rather than nonexistent JSON exports.
+Frozen-candidate execution must capture stdout/stderr there, preserve the guarded exit status
+and bind the actual source/build identity through Q3. The local runs are not that record and
+neither readiness nor CI supplies promotion/confirmed-present approval for these follow-ups.
+Criterion 10 proves avoidance of automatic default transport initialization; its separate factory
+fixture may itself construct a client. No network restriction or hosted behavior is inferred.
+
+Only acceptance bindings, tests, CI and tracking documentation change. The production APIs,
+transport paths, SDK/runtime pins, frozen Interfaces, requirements and retained failed evidence
+remain unchanged. Full P1-P5/D1-D6 integration and every existing Fastly/provider gate remain open.
+
+Verification passes all five primary Rust gates, 2,244 workspace tests (one existing ignored),
+245 scoped Axum unit tests and 17 contracts, 32 evidence-checker and seven nonzero-guard tests,
+docs format/lint/build, docs/legacy guards and the approval-identity verifier. Independent
+inventory and criterion-coverage reviews selected the existing tests/CI path plus the missing
+positive control, not a duplicate command registry or execution framework. Subsequent spec and
+quality reviews found no remaining scoped defect. Generated-project and hosted qualification
+were not executed or credited by this checkpoint.
 
 ### Scoped Timing and Send-First Override (2026-10-24)
 

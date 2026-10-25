@@ -34,9 +34,11 @@ blanket implementation stops in G2/G4 only to that extent; the prior execution r
 
 G1's draft inventory and fail-closed checker are implemented: 255 source acceptance cases,
 including two consumer prose checks, plus supplemental template/demo checks produce 511
-reviewed split/environment legs. Individual
-execution commands remain planned until their task owners implement and activate them; no
-applicability or product approval is fabricated. Scope lock awaits those owner decisions.
+reviewed split/environment legs. The subsequent
+[local acceptance binding checkpoint](2026-10-18-trusted-server-outbound-implementation.md#g1f9b-local-acceptance-binding-checkpoint)
+activates EZ-23 local criteria 01-11 with actual guarded tests and CI commands. The remaining
+500 commands are planned, including EZ-23's begun-request and consumer gaps. No applicability,
+product or qualification approval is fabricated. Scope lock awaits those owner decisions.
 
 G2's first measured error-preservation control **failed** on pinned Viceroy 0.21.0. The opt-in
 `outbound-readiness` suite and its nonzero measurement guard are implemented. Three direct reads

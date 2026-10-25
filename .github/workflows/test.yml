@@ -218,7 +218,20 @@ jobs:
 
       - name: Run Axum host tests
         if: matrix.suite == 'axum'
-        run: cargo test -p edgezero-adapter-axum --all-targets --features axum
+        run: |
+          cargo test -p edgezero-adapter-axum --all-targets --features axum
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::configured_target_limit_applies_on_tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::configured_target_limit_applies_on_tcp
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::configured_renderer_applies_to_not_found cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::configured_renderer_applies_to_not_found
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::admission_abort_prevents_response_and_dispatch cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::admission_abort_prevents_response_and_dispatch
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::test_server_preserves_upload_and_read_deadline cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::test_server_preserves_upload_and_read_deadline
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::test_server_streams_before_source_completion cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::test_server_streams_before_source_completion
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::test_server_buffers_with_exact_content_length cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::test_server_buffers_with_exact_content_length
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::test_server_suppresses_head_payload cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::test_server_suppresses_head_payload
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::raw_head_limit_precedes_admission cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::raw_head_limit_precedes_admission
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::test_server_shutdown_releases_live_source cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::test_server_shutdown_releases_live_source
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::state_client_skips_real_transport_initialization cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib state_client_skips_real_transport_initialization
+          scripts/run_test_nonzero.sh --include-ignored service::tests::state_client_skips_real_transport_initialization_factory cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib service::tests::state_client_skips_real_transport_initialization_factory
+          scripts/run_test_nonzero.sh --include-ignored test_utils::tests::foreign_platform_app_keeps_configured_policies cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib test_utils::tests::foreign_platform_app_keeps_configured_policies
 
       - name: Run app-demo workspace tests
         if: matrix.suite == 'app-demo'

@@ -1295,7 +1295,7 @@ Expected: all existing TCP tests and the 13 mapped acceptance cases execute and 
 router-only response test, compile-only helper, or a new service bypassing production ingress is
 not equivalent evidence.
 
-F9b's required new sentinel map (names are targets to add, not existing passing tests):
+F9b's sentinel map (current execution/readiness is recorded in the checkpoints below):
 
 | EZ-23 Criterion | Sentinel / Owner                                   | Expected Assertion                                                                                     |
 | --------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -1377,6 +1377,15 @@ workspace gate (including 22 generated-core tests and TCP fallback checks), 18 f
 one cold and four reused requests. Local logs and smoke evidence are under
 `/private/tmp/edgezero-f9b-*`; they are working-tree characterization, not durable release evidence.
 The acceptance inventory remains 255 criteria / 511 planned legs with `qualified: false`.
+
+The later [G1/F9b binding checkpoint](2026-10-18-trusted-server-outbound-implementation.md#g1f9b-local-acceptance-binding-checkpoint)
+activates criteria 01-11 using the actual tests in the map above, strengthens criterion 01's
+unconfigured success control, and runs the exact guarded commands in the existing Axum CI job.
+Criterion 10 selects both TCP and factory tests, with a separate CI guard for the factory sentinel.
+Criteria 12/13 remain planned for their outstanding begun-request/consumer portions. The earlier
+511-planned count is historical; current bindings have eleven ready and 500 planned legs without
+changing source criteria, applicability or qualification. The local execution record above remains
+characterization of its original source, not passing evidence for a later candidate.
 
 ## F10: Conditional Scripted-Client Task Group
 

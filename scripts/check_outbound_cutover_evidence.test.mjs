@@ -404,6 +404,75 @@ test("real inventory covers all 26 acceptance sections with distinct caching/poo
       manifest.cases.some((c) => c.case_id === `EZ-2/acceptance/${suffix}`),
     );
 });
+test("local assembled-app criteria bind guarded tests without closing pending legs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  const sentinels = [
+    "configured_target_limit_applies_on_tcp",
+    "configured_renderer_applies_to_not_found",
+    "admission_abort_prevents_response_and_dispatch",
+    "test_server_preserves_upload_and_read_deadline",
+    "test_server_streams_before_source_completion",
+    "test_server_buffers_with_exact_content_length",
+    "test_server_suppresses_head_payload",
+    "raw_head_limit_precedes_admission",
+    "test_server_shutdown_releases_live_source",
+    "state_client_skips_real_transport_initialization",
+    "foreign_platform_app_keeps_configured_policies",
+  ];
+  const cases = manifest.cases.filter((c) => c.task === "F9b");
+  assert.equal(cases.length, 13);
+  for (const [index, name] of sentinels.entries()) {
+    const criterion = String(index + 1).padStart(2, "0");
+    const c = cases.find(
+      (entry) => entry.case_id === `EZ-23/acceptance/${criterion}`,
+    );
+    assert.ok(c, criterion);
+    const sentinel = `test_utils::tests::${name}`;
+    // Criterion 10 also exercises the separate default-factory failure seam.
+    const filter = criterion === "10" ? name : sentinel;
+    const command = `scripts/run_test_nonzero.sh --include-ignored ${sentinel} cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib ${filter}`;
+    assert.equal(c.implementation, "ready", criterion);
+    assert.equal(c.environment, "axum/native-tcp", criterion);
+    assert.equal(c.applicability, "follow-up", criterion);
+    assert.equal(c.approval, null, criterion);
+    assert.equal(c.sentinel, sentinel, criterion);
+    assert.equal(c.command, command, criterion);
+    assert.equal(
+      c.artifact_path,
+      `outbound/EZ-23/acceptance/${criterion}/axum/native-tcp.log`,
+    );
+    assert.ok(
+      workflow.includes(`\n          ${command}\n`),
+      `${criterion} CI command`,
+    );
+  }
+  for (const criterion of ["12", "13"]) {
+    const c = cases.find(
+      (entry) => entry.case_id === `EZ-23/acceptance/${criterion}`,
+    );
+    assert.equal(c.implementation, "planned", criterion);
+    assert.equal(c.approval, null, criterion);
+  }
+  const factory =
+    "service::tests::state_client_skips_real_transport_initialization_factory";
+  const factoryCommand = `scripts/run_test_nonzero.sh --include-ignored ${factory} cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib ${factory}`;
+  assert.ok(
+    workflow.includes(`\n          ${factoryCommand}\n`),
+    "factory CI guard",
+  );
+});
 test("rejects deletion of reviewed split cases or environment legs", () => {
   const path = new URL(
     "../tests/fixtures/reusable-app/outbound-cutover-cases.json",

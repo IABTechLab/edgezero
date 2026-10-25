@@ -85,10 +85,19 @@ setting a leg to `ready`. No staging deployment or approval is inferred from thi
 
 Specifically, `implementation: planned | ready` means the declared leg's command/sentinel is
 planned or implemented and executable with its full assertions. It does not mean the corresponding
-feature is absent or qualified. At implementation snapshot `40ad2dc1`, all 511 legs remain
-`planned` despite the separately recorded implemented checkpoints: G1/Q3 must still reconcile
-their executable bindings. A `ready` leg also needs applicable, passing exact-candidate evidence
-before release credit; do not promote it solely from a checkpoint test count or green CI.
+feature is absent or qualified. EZ-23 local criteria 01-11 now bind guarded Cargo tests and the
+existing Axum CI job; the remaining 500 legs are planned. Criteria 12/13 stay planned for their
+begun-request and consumer-owned gaps. G1/Q3 must still reconcile the other executable bindings.
+A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
+do not promote it solely from a checkpoint test count or green CI.
+
+The EZ-23 commands include ignored tests and filter to their named sentinel; criterion 10's
+shorter filter deliberately runs both its TCP and default-factory failure-seam tests. CI separately
+guards the factory sentinel. Their inventory `.log` paths are future raw Cargo output artifacts,
+not JSON result exports. At the frozen candidate, capture stdout and stderr, retain the guarded
+exit status and bind the source/build identities through Q3's record assembly. Current local/CI
+runs are not a qualification record, and executable follow-ups are not automatically promoted or
+confirmed present. Other `outbound-cutover` placeholders remain implementation targets.
 
 The [TS qualification runbook source template](ts-outbound-qualification-runbook.md) separates
 implemented preparation/egress commands from missing full-outbound execution/export bindings.

@@ -310,6 +310,7 @@ mod tests {
         fn routes() -> Result<RouterService, EdgeError> {
             Ok(RouterService::builder()
                 .get("/", |_| async { Ok::<_, EdgeError>("hello") })
+                .get("/target/{*rest}", |_| async { Ok::<_, EdgeError>("hello") })
                 .build())
         }
     }
@@ -361,9 +362,11 @@ mod tests {
 
     #[tokio::test]
     async fn configured_target_limit_applies_on_tcp() {
+        let target = format!("/target/{}", "a".repeat(92));
+        assert_eq!(target.len(), 100);
         let app = App::build::<ConfiguredApp>(crate::AXUM_PLATFORM).unwrap();
         let running = AxumTestServer::start(server(app)).await.unwrap();
-        let response = reqwest::get(format!("http://{}/{}", running.address(), "a".repeat(99)))
+        let response = reqwest::get(format!("http://{}{target}", running.address()))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::URI_TOO_LONG);
@@ -379,16 +382,25 @@ mod tests {
         }));
         let direct_response = exchange(
             address,
-            format!(
-                "GET /{} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                "a".repeat(99)
-            )
-            .as_bytes(),
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
         )
         .await;
         assert!(direct_response.starts_with(b"HTTP/1.1 414"));
         stop.send(()).unwrap();
         task.await.unwrap().unwrap();
+
+        let unconfigured = App::new(ConfiguredApp::routes().unwrap());
+        let control = AxumTestServer::start(server(unconfigured)).await.unwrap();
+        let control_response = exchange(
+            control.address(),
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await;
+        assert!(control_response.starts_with(b"HTTP/1.1 200"));
+        assert!(control_response.ends_with(b"\r\n\r\nhello"));
+        control.shutdown().await.unwrap();
     }
 
     #[tokio::test]
