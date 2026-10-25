@@ -12,6 +12,70 @@
 
 ## Status and Authority
 
+### Current Delivery Dashboard (2026-10-24)
+
+Reconciled against implementation commit `40ad2dc17a6102795ab248e040695652c50072eb`.
+This is the current task-level implementation summary, not qualification of that SHA. The
+checkpoint sections below retain their historical commands, results and limitations. The
+[Requirement Coverage](#requirement-coverage) table maps every EZ requirement group to its owning
+tasks, current implementation/checkpoint and remaining closure work.
+
+The six approved consolidation commitments are **not collectively complete**:
+
+| Commitment                                                            | Current Implementation                                                                                                                                              | Remaining Work                                                                                                                                                                                               |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Shared preparation, validation, normalization, decoding and limits | **Partial.** Core already owns codecs/body caps; `40ad2dc1` makes all four adapters use one header accounting/normalization operation. Time/head foundations exist. | Integrate invocation-time preparation, paired time, prepared contexts and one shared response finalizer into every live dispatch path (P1-P3, D1-D4).                                                        |
+| 2. One pipeline for send, begin, batches and redirects                | **Partial foundations only.** Current sends/batches remain usable; pending ownership and head types are not the new live pipeline.                                  | Eager scheduling, arrival recording, nonblocking observation, mixed collection and explicit same-client Follow (P1/P4/P5, D1-D6).                                                                            |
+| 3. Remove superseded implementations and APIs without compatibility   | **Partial.** Separate public normalization/marker helpers were retired in `40ad2dc1`.                                                                               | Replace the current implementer send/batch protocol and migrate every implementation/caller atomically; no aliases, stubs or alternate transport (P1).                                                       |
+| 4. Preserve direct native Image Optimizer                             | **Single Send implemented** in `8b460dd6`, with direct typed SDK mapping and no extra fetch, buffering or serialization.                                            | Integrate with the full pipeline and Follow; qualify actual hosted transformation and performance. The synchronous blocking horizon remains UNKNOWN (D1d/Q4b).                                               |
+| 5. Migrate demo, templates, clients and docs together                 | **Partial.** Shipped coding, marker, optimizer and lifecycle changes have matching examples/tests/docs.                                                             | Migrate all of them again in the same atomic new-protocol change, including new-mode behavior tests. Current alignment does not mean the target API is implemented (P1/Q1/Q2).                               |
+| 6. Document the TS hard-cut ownership boundary                        | **Documented** in the [adoption guide](../../guide/proxying.md#hard-cut-adoption). Transport stays upstream; application policies stay in the consumer.             | Implement the remaining EdgeZero prerequisites and obtain consumer composition/qualification evidence before cutover. Do not delegate body dropping, buffering or transport workarounds to TS (P1-P5/Q4/Q5). |
+
+Keep three different status questions separate:
+
+- **Implementation:** this dashboard and the requirement table describe code present at the
+  snapshot. A foundation or a local checkpoint does not complete its parent task. No full P1-P6
+  or D1-D6 migration task is closed by the checkpoints recorded so far.
+- **Executable acceptance coverage:** G1's
+  [inventory](../../../tests/fixtures/reusable-app/outbound-cutover-cases.json) covers 255 source
+  criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
+  readiness of that leg's declared command/sentinel, not overall feature implementation. All 511
+  remain `planned`: binding actual tests/commands to those legs is unfinished G1/Q3 work, not
+  evidence that 511 features are absent. Do not count local checkpoint tests as activated legs.
+- **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
+  or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
+  passing, exact-candidate evidence. The inventory check remains `qualified: false`.
+
+The implemented outbound baseline is protected by [Non-Negotiable Baseline](#non-negotiable-baseline).
+The tables track the additional adoption work; they do not authorize replacing or deleting the
+existing batch/cutoff/cancellation, timing, cap, encoding, provenance or lifecycle guarantees.
+Normative requirements, attributed approval amendments and explicit applicability decisions
+remain authoritative over this summary. Pending follow-ups are not silently promoted or waived.
+
+### Current Work Queue and Gates
+
+1. **G1/Q3 acceptance binding:** replace planned placeholder commands with actual, nonzero
+   sentinels and environment-specific assertions/artifacts as each owning task lands. Reconcile
+   applicability/approval records separately; mark a leg `ready` only when its complete declared
+   command/assertions are implemented. Historical characterization is not exact-candidate acceptance.
+2. **P1-P5 and D2-D4 integration:** complete the approved portable policies and other-adapter work
+   in buildable slices, then make the live trait/caller migration atomic across all four adapters.
+   Do not add lazy compatibility implementations or more unused foundations instead of integration.
+3. **Fastly D1 prerequisites:** the stock readiness/error-preservation failure and separately
+   unapproved literal B/backend policy still gate their dependent engine work. The isolated runtime
+   repair is not a changed production pin. G2 does not globally prohibit approved portable or
+   other-adapter work. The scoped timing amendment permits the recorded Send-first subset, not a
+   readiness waiver, backend-policy approval or qualification.
+4. **Q1/Q2 then Q3-Q5:** update examples/docs/checks with each implementation change. Finish source
+   work before freezing and qualifying a candidate. Hosted deployment remains unauthorized;
+   entitlement, operator acceptance, measurement definitions and provider evidence remain open.
+
+For every subsequent behavior change, update the affected requirement row and checkpoint in the
+same commit, naming its implemented scope, nonzero tests/evidence and next unclosed step. Reconcile
+its inventory bindings rather than reporting a percentage from checkbox or test counts. Close a
+parent task only after every applicable child and acceptance leg closes. Requirements/digest
+changes need explicit review; neither a dashboard edit nor a passing checker supplies approval.
+
 ### Scoped Timing and Send-First Override (2026-10-24)
 
 The requester's [scoped approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
@@ -869,28 +933,40 @@ strong replacement assertion.
 
 ## Requirement Coverage
 
-| Requirement | Implementation Tasks                      | Production Applicability                                               |
-| ----------- | ----------------------------------------- | ---------------------------------------------------------------------- |
-| EZ-1        | Policies P2; drivers D1-D4                | Blocking, including actual ingress forwarding                          |
-| EZ-2        | Gates G2/G4; drivers D1/D5; follow-ups F1 | Blocking ranges exactly as spec; reuse-only ranges deferred            |
-| EZ-3        | Drivers D1/D5                             | Blocking; remove slack only with verified bounded waits                |
-| EZ-4        | Policies P1; drivers D1-D4                | Blocking; Native/BestEffort distinctions retained                      |
-| EZ-5        | Policies P3; drivers D1-D4                | Blocking; Spin conditional host result recorded                        |
-| EZ-6        | Policies P4; drivers D1-D6                | Blocking except EZ-6.31 reuse-only                                     |
-| EZ-7        | Policies P3; drivers D1-D4                | Blocking                                                               |
-| EZ-8        | Policies P1; drivers D1/D5                | Blocking; Fastly single send only                                      |
-| EZ-9        | Policies P1/P5; drivers D1-D5             | Blocking; supplied clients use the same dispatch boundary              |
-| EZ-10       | Follow-ups F2                             | Follow-up unless approved as promoted/present                          |
-| EZ-11/12/13 | Follow-ups F3                             | Follow-up; EZ-13 closes with Unsupported evidence                      |
-| EZ-14       | Follow-ups F4                             | Follow-up; deadline-first classification includes new acceptance 10/11 |
-| EZ-15       | Follow-ups F5                             | Follow-up; reuse legs separately conditional                           |
-| EZ-16/17/21 | Follow-ups F6                             | Follow-up                                                              |
-| EZ-18/19    | Follow-ups F7                             | Follow-up                                                              |
-| EZ-20       | Follow-ups F8                             | Follow-up                                                              |
-| EZ-22/23    | Follow-ups F9                             | Follow-up; individual SHOULD parts require applicability decisions     |
-| EZ-24       | Policies P6; follow-ups F10               | Proposed host/WASI core promotion is a decision, not assumed approved  |
-| EZ-25       | Qualification Q1/Q2                       | Documentation updates accompany each affected behavior                 |
-| EZ-Q1       | Gates G1; qualification Q3-Q5             | Required blocking, approved promoted, and confirmed-present parts only |
+This is the current implementation/next-gap view at the dashboard's snapshot, not a list of
+qualified requirements. **All rows retain open acceptance/qualification work.** Local checkpoint
+links identify the implemented scope and its test/evidence record; they do not close another
+mode, adapter, conditional part or hosted leg. The inventory remains the criterion-level coverage
+map; completing its executable bindings is an explicit open task, not hidden by this table.
+
+| Requirement | Implementation Tasks | Production Applicability                                                  | Current Implementation / Checkpoint                                                                                                                             | Next Unclosed Work                                                                                                                                                     |
+| ----------- | -------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Partial:** [Axum known-empty conversion](#p2-axum-host-known-empty-checkpoint) and [Fastly SDK absence](#p2-fastly-sdk-body-absence-checkpoint).              | General streamed GET/HEAD settlement, paired deadlines and all-target forwarding. Ordinary Fastly bodiless forwarding is not established.                              |
+| EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial proof work:** [readiness repair/negative evidence](#g2-local-runtime-repair-checkpoint); existing transport retained.                                 | Reviewed preserving primitive, B/domain approval, multiplexer, stable backend identity and registration observations. F1 retirement/reuse is separate unfinished work. |
+| EZ-3        | D1/D5                | Blocking; remove slack only with verified bounded waits                   | **Not implemented:** current slack retained.                                                                                                                    | D1a bounded waits plus D1b approved backend policy before joint slack removal; M7 comparison.                                                                          |
+| EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Baseline deadlines retained; new connect option/mapping pending.**                                                                                            | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |
+| EZ-5        | P3; D1-D4            | Blocking; Spin conditional host result recorded                           | **Current-API slice implemented:** [original coding](#p1p3-original-coding-checkpoint) and [local relay](#p3-downstream-relay-checkpoint).                      | Head-first/new-mode integration, complete normalization/limit matrices and separately adopted optional metadata legs.                                                  |
+| EZ-6        | P4; D1-D6            | Blocking except EZ-6.31 reuse-only                                        | **Partial foundations:** [pending ownership](#p1p4-ownership-checkpoint) and local progress characterization.                                                   | Eager begin/batches on all adapters, arrival ledger/check, mixed collection/accumulator, callback/body scopes and lifetime/late-collection proof.                      |
+| EZ-7        | P3; D1-D4            | Blocking                                                                  | **Current-API slice implemented:** [marker policy](#p1p3-marker-checkpoint), [shared header accounting](#shared-header-policy-consolidation-checkpoint).        | Same policies through every new dispatch/follow path and full applicable adapter/normalization matrices.                                                               |
+| EZ-8        | P1; D1d/D5           | Blocking; Fastly single send only                                         | **Single Send implemented:** [direct native mapping](#send-first-implementation-checkpoint), `8b460dd6`.                                                        | New-pipeline/Follow integration and actual hosted transformation/performance evidence. Blocking horizon UNKNOWN; no finite-bound claim.                                |
+| EZ-9        | P1/P5; D1-D5         | Blocking; supplied clients use the same dispatch boundary                 | **Follow not implemented:** head/Location foundations only.                                                                                                     | Explicit per-hop supplied-client policy, original chain deadline, unread followed-body disposal and complete redirect decision table.                                  |
+| EZ-10       | F2                   | Follow-up unless approved as promoted/present                             | **Local implementation with a known failure:** [typed overflow/uploads/rendering](#f2-overflow-checkpoint); generated/demo TCP proof exists.                    | Cloudflare front-proxy recovery failure, required hosted HTTP/2 and consumer end-to-end acceptance. Passing sibling cases do not waive the failure.                    |
+| EZ-11       | F3a                  | Follow-up                                                                 | **Not implemented:** cache tags.                                                                                                                                | Tag validation/deduplication, provider mapping, mode/support matrix and actual cache probes.                                                                           |
+| EZ-12       | F3b                  | Follow-up                                                                 | **Not implemented:** TLS name-check policy.                                                                                                                     | Typed setting/readback, backend-key isolation and trusted-chain/wrong-name fixture; no global verification bypass.                                                     |
+| EZ-13       | F3c                  | Follow-up; closes with Unsupported evidence                               | **Baseline Unsupported retained** on Spin.                                                                                                                      | Support-first zero-activity ordering test plus pinned WASI/Spin limitation evidence and consumer configuration rejection.                                              |
+| EZ-14       | F4                   | Follow-up; includes acceptance 10/11                                      | **Not implemented:** opted-in idle-body policy.                                                                                                                 | New mode, encoded-progress resets, absolute-deadline precedence and actual adapter read races; existing total deadlines are not idle-mode support.                     |
+| EZ-15       | F5                   | Follow-up; reuse legs separately conditional                              | **Not implemented:** explicit bounded fire-and-forget operation.                                                                                                | Separate capacity/ownership, 64 KiB response ceiling, cancellation/recovery and provider-lifetime proof.                                                               |
+| EZ-16       | F6a                  | Follow-up                                                                 | **Diagnostic checkpoints implemented:** [SDK/source details and capability publication](#f6a-capability-publication-checkpoint).                                | Full token-safe acceptance matrix, remaining integration cases and consumer/provider qualification. Capability publication itself has landed.                          |
+| EZ-17       | F6b                  | Follow-up                                                                 | **Local implementation:** [owned delivery reports/safe replacement](#f6b-delivery-report-checkpoint); subsequent F9a assembly integration has landed.           | Consumer canonical-lifecycle acceptance and full required qualification, not another assembly integration implementation.                                              |
+| EZ-18       | F7a                  | Follow-up                                                                 | **Local implementation:** [buffered framing](#f7a-buffered-framing-checkpoint); 80 production cases passed, nine SDK reference controls failed.                 | Resolve/qualify parity and hosted compression while preserving strict suppression. The complete local suite remains nonzero.                                           |
+| EZ-19       | F7b                  | Follow-up                                                                 | **Local implementation:** [bounded synthesized headers](#f7b-synthesized-header-checkpoint), wire and assembly-exclusion checkpoints.                           | Consumer-owned header integration and hosted/frozen-candidate qualification; local assembly exclusion is not still missing.                                            |
+| EZ-20       | F8                   | Follow-up                                                                 | **Local implementation:** [declared KV bindings and operation delivery](#f8-declared-kv-checkpoint) on all three adopted serverless adapters.                   | Actual provider outage/restoration, consumer acceptance and qualification; the separate Spin retained-overlap uncertainty remains disclosed.                           |
+| EZ-21       | F6c                  | Follow-up                                                                 | **Local implementation:** [six typed framing reasons](#f6c-framing-checkpoint), observer/log controls.                                                          | Consumer Viceroy acceptance and separately required hosted evidence across applicable failure paths.                                                                   |
+| EZ-22       | F9a                  | Follow-up; individual SHOULD decisions explicit                           | **Local implementation:** [unified fallible assembly/failure delivery](#f9a-assembly-foundation-checkpoint), including adopted macro/serverless parts.          | Consumer acceptance and exact-candidate qualification; no compatibility assembly path to add.                                                                          |
+| EZ-23       | F9b                  | Follow-up                                                                 | **Local implementation:** [assembled-App Axum/TCP helpers](#f9b-assembled-app-tcp-checkpoint), twelve upstream sentinels.                                       | Criterion 12's conditional begun-request portion and criterion 13's consumer route/parity evidence.                                                                    |
+| EZ-24       | P6; F10a/F10b/F10c   | Host/WASI publication and each optional extension need separate decisions | **Not implemented as the proposed published utility; adoption pending.** Existing private doubles are not P6.                                                   | Attributed applicability decisions, P1-P5 semantics, then selected published-client/cancellation/demo/JS work. Pending is not approved deferral.                       |
+| EZ-25       | Q1/Q2                | Documentation updates accompany each affected behavior                    | **Partial:** [mandatory forwarding doctest](#q1q2-forwarding-documentation-checkpoint), shipped API/demo/template/docs changes and drift guards.                | Complete source-to-fix coverage and new-protocol migration, mode tests, selected checker decisions and CI/runtime matrix.                                              |
+| EZ-Q1       | G1; Q3-Q5            | Required blocking, approved promoted, and confirmed-present parts only    | **Preparation only:** inventory/checker, [evidence assembly](#q3-evidence-preparation-checkpoint), [runbook source](#q2-runbook-source-preparation-checkpoint). | Executable leg bindings and scope decisions, remaining sources, candidate freeze, accepted Q4a package, authorized Q4b runs and durable passing Q5 record.             |
 
 This summary inherits the normative-range-to-leaf ownership table in
 [plan 04](2026-10-18-trusted-server-outbound-04-followups.md#explicit-requirement-ownership).

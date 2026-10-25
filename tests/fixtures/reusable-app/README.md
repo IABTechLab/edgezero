@@ -57,6 +57,12 @@ nor closes the separate Fastly readiness/scheduling gate.
 
 ### Qualification Inventory
 
+Start with the implementation plan's
+[current delivery dashboard](../../../docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md#current-delivery-dashboard-2026-10-24)
+for shipped checkpoints, unfinished implementation and blockers. Its requirement table tracks
+task-level progress; this inventory tracks criterion/environment execution readiness and the
+qualification checker validates separate evidence. These are not interchangeable completion claims.
+
 The acceptance inventory is `outbound-cutover-cases.json`. It records acceptance criteria,
 including the unnumbered lists and consumer end-to-end prose checks, expanded into individual
 environment legs. Source and criterion SHA-256 digests require explicit review when the
@@ -76,6 +82,13 @@ planned commands; it is not qualification. Per-case sentinels and `outbound-cuto
 implementation targets, not existing passing tests. `consumer-runbook` and `hosted-runbook` denote
 external execution recipes whose owners must replace them with exact runnable commands before
 setting a leg to `ready`. No staging deployment or approval is inferred from this inventory.
+
+Specifically, `implementation: planned | ready` means the declared leg's command/sentinel is
+planned or implemented and executable with its full assertions. It does not mean the corresponding
+feature is absent or qualified. At implementation snapshot `40ad2dc1`, all 511 legs remain
+`planned` despite the separately recorded implemented checkpoints: G1/Q3 must still reconcile
+their executable bindings. A `ready` leg also needs applicable, passing exact-candidate evidence
+before release credit; do not promote it solely from a checkpoint test count or green CI.
 
 The [TS qualification runbook source template](ts-outbound-qualification-runbook.md) separates
 implemented preparation/egress commands from missing full-outbound execution/export bindings.
