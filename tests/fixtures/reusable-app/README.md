@@ -91,9 +91,17 @@ begun-request and consumer-owned gaps. G1/Q3 must still reconcile the other exec
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
 
-The EZ-23 commands include ignored tests and filter to their named sentinel; criterion 10's
-shorter filter deliberately runs both its TCP and default-factory failure-seam tests. CI separately
-guards the factory sentinel. Their inventory `.log` paths are future raw Cargo output artifacts,
+The EZ-23 ready legs share one full Axum suite command, including ignored tests:
+
+```sh
+scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
+```
+
+The existing guard asks the evidence checker for every ready sentinel in that environment and
+requires exact discovery of all twelve names before executing the suite once. Criterion 10's
+`additional_sentinels` binds its factory test alongside its primary TCP test; no separate CI list
+or invocation is needed. Missing tests or an empty ready selection fail before execution; test
+failures retain their exit status. Their inventory `.log` paths are future raw Cargo output artifacts,
 not JSON result exports. At the frozen candidate, capture stdout and stderr, retain the guarded
 exit status and bind the source/build identities through Q3's record assembly. Current local/CI
 runs are not a qualification record, and executable follow-ups are not automatically promoted or

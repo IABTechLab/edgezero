@@ -79,6 +79,29 @@ its inventory bindings rather than reporting a percentage from checkbox or test 
 parent task only after every applicable child and acceptance leg closes. Requirements/digest
 changes need explicit review; neither a dashboard edit nor a passing checker supplies approval.
 
+### G1/F9b Inventory-Driven Suite Consolidation (2026-10-25)
+
+Replace the binding checkpoint's eleven filtered commands and separate factory guard with one
+`--all-targets --features axum,test-utils` suite execution in the existing Axum CI job. The existing
+nonzero guard's `--inventory axum/native-tcp` mode obtains ready sentinel names from the existing
+evidence checker, validates every exact name in the listing, and executes once with
+`--include-ignored`. Criterion 10 records its factory test in `additional_sentinels`; there is no
+second CI whitelist or command runner. All host CI legs explicitly install the pinned Node
+version because their existing guards already use Node.
+
+Regression tests first failed on the missing inventory mode/schema, then passed after the minimal
+extension. Deleting any of the twelve required names rejects execution. Empty ready selections,
+malformed additional names and suite failures remain errors. The historical execution and
+verification record below is unchanged; the shared command is now the inventory's current binding.
+The 255 criteria / 511 legs, eleven ready / 500 planned, applicability, approvals and
+`qualified: false` remain unchanged. This consolidation changes tooling and tracking, not outbound
+runtime behavior or qualification status.
+
+Verification passes the consolidated 245-unit/17-contract Axum suite, all 44 guard/evidence
+regressions, and all five root Rust gates. Independent inventory review confirmed preserved
+bindings; portability review found no code defect. Its documentation cross-reference correction
+is applied. These are local checks, not new release or hosted evidence.
+
 ### G1/F9b Local Acceptance Binding Checkpoint
 
 - [x] Bind EZ-23 criteria 01-11 at `axum/native-tcp` to the existing guarded Cargo tests,

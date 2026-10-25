@@ -221,6 +221,19 @@ export function validateManifest(
       "artifact_path",
     ])
       requireFact(nonempty(c[field]), `${id}: missing ${field}`);
+    if (c.additional_sentinels !== undefined)
+      requireFact(
+        Array.isArray(c.additional_sentinels) &&
+          c.additional_sentinels.length > 0 &&
+          c.additional_sentinels.every(
+            (s) =>
+              typeof s === "string" &&
+              /^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(s),
+          ) &&
+          new Set([c.sentinel, ...c.additional_sentinels]).size ===
+            c.additional_sentinels.length + 1,
+        `${id}: invalid additional_sentinels`,
+      );
     requireFact(
       !isAbsolute(c.artifact_path) &&
         !c.artifact_path.split(/[\\/]/).includes(".."),
@@ -740,18 +753,42 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+export function readySentinels(manifest, environment) {
+  const names = manifest.cases
+    .filter(
+      (c) => c.environment === environment && c.implementation === "ready",
+    )
+    .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
+  requireFact(
+    names.length > 0,
+    "no ready test sentinels for selected environment",
+  );
+  requireFact(
+    names.every((s) => /^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(s)),
+    "ready test sentinels must be Rust test names",
+  );
+  return [...new Set(names)];
+}
+
 function run(args) {
   if (args.length === 1 && args[0] === "--help") {
     process.stdout.write(
-      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate SHA --input OBSERVATIONS.json --artifacts DIRECTORY --output NEW_DRAFT.json [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --report|--release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nAssembly preserves observations in an unqualified pre-freeze draft and exits nonzero for open release gates. It refuses overwrites.\nManifest validation permits planned/pending legs; release validation never does.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
+      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --sentinels ENVIRONMENT [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate SHA --input OBSERVATIONS.json --artifacts DIRECTORY --output NEW_DRAFT.json [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --report|--release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nAssembly preserves observations in an unqualified pre-freeze draft and exits nonzero for open release gates. It refuses overwrites.\nManifest validation and sentinel listing permit planned/pending legs; neither qualifies a release.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
     );
     return;
   }
   const mode = args.shift();
   requireFact(
-    ["--manifest", "--assemble", "--report", "--release"].includes(mode),
-    "choose --manifest, --assemble, --report or --release; see --help",
+    [
+      "--manifest",
+      "--sentinels",
+      "--assemble",
+      "--report",
+      "--release",
+    ].includes(mode),
+    "choose --manifest, --sentinels, --assemble, --report or --release; see --help",
   );
+  const environment = mode === "--sentinels" ? args.shift() : undefined;
   let inventory = resolve(ROOT, INVENTORY);
   const options = {};
   if (mode === "--manifest" && args.length === 1 && !args[0].startsWith("--"))
@@ -782,6 +819,17 @@ function run(args) {
     new Set(acceptanceCriteria(source).map((c) => c.section)).size === 26,
     "source must contain EZ-1 through EZ-25 and EZ-Q1",
   );
+  if (mode === "--sentinels") {
+    requireFact(
+      nonempty(environment) &&
+        Object.keys(options).every((k) => k === "--inventory"),
+      "sentinel listing needs an environment and optional inventory only",
+    );
+    process.stdout.write(
+      readySentinels(manifest, environment).join("\n") + "\n",
+    );
+    return;
+  }
   if (mode === "--manifest") {
     requireFact(
       Object.keys(options).every((k) => k === "--inventory"),

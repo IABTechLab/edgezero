@@ -36,7 +36,9 @@ G1's draft inventory and fail-closed checker are implemented: 255 source accepta
 including two consumer prose checks, plus supplemental template/demo checks produce 511
 reviewed split/environment legs. The subsequent
 [local acceptance binding checkpoint](2026-10-18-trusted-server-outbound-implementation.md#g1f9b-local-acceptance-binding-checkpoint)
-activates EZ-23 local criteria 01-11 with actual guarded tests and CI commands. The remaining
+activates EZ-23 local criteria 01-11 with actual guarded tests and CI commands. The subsequent
+consolidation runs one complete Axum suite and derives all required test names, including
+criterion 10's factory test, from the same inventory rather than another CI list. The remaining
 500 commands are planned, including EZ-23's begun-request and consumer gaps. No applicability,
 product or qualification approval is fabricated. Scope lock awaits those owner decisions.
 

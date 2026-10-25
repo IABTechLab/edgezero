@@ -140,6 +140,37 @@ test("manifest validation accepts pending work, not qualification", () => {
   assert.equal(validateManifest(manifest, source).legs, 2);
   assert.throws(() => release(manifest, evidence(manifest)), /planned/);
 });
+test("ready sentinel selection includes every required test, not planned legs", () => {
+  assert.equal(typeof checker.readySentinels, "function");
+  const manifest = inventory();
+  manifest.cases[0].additional_sentinels = ["tests::factory"];
+  assert.deepEqual(checker.readySentinels(manifest, "axum"), [
+    "forwards_bodiless_get",
+    "tests::factory",
+  ]);
+  manifest.cases[0].implementation = "planned";
+  assert.throws(
+    () => checker.readySentinels(manifest, "axum"),
+    /no ready test sentinels/,
+  );
+});
+test("additional test sentinels must be nonempty unique Rust test names", () => {
+  for (const value of [
+    null,
+    [],
+    [""],
+    ["a\nb"],
+    ["factory", "factory"],
+    ["forwards_bodiless_get"],
+  ]) {
+    const manifest = inventory();
+    manifest.cases[0].additional_sentinels = value;
+    assert.throws(
+      () => validateManifest(manifest, source),
+      /additional_sentinels/,
+    );
+  }
+});
 test("complete exact-revision evidence passes", () => {
   assert.equal(release(inventory(), evidence()).passed, 2);
 });
@@ -440,9 +471,8 @@ test("local assembled-app criteria bind guarded tests without closing pending le
     );
     assert.ok(c, criterion);
     const sentinel = `test_utils::tests::${name}`;
-    // Criterion 10 also exercises the separate default-factory failure seam.
-    const filter = criterion === "10" ? name : sentinel;
-    const command = `scripts/run_test_nonzero.sh --include-ignored ${sentinel} cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib ${filter}`;
+    const command =
+      "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets";
     assert.equal(c.implementation, "ready", criterion);
     assert.equal(c.environment, "axum/native-tcp", criterion);
     assert.equal(c.applicability, "follow-up", criterion);
@@ -453,10 +483,7 @@ test("local assembled-app criteria bind guarded tests without closing pending le
       c.artifact_path,
       `outbound/EZ-23/acceptance/${criterion}/axum/native-tcp.log`,
     );
-    assert.ok(
-      workflow.includes(`\n          ${command}\n`),
-      `${criterion} CI command`,
-    );
+    assert.ok(workflow.includes(command), `${criterion} CI command`);
   }
   for (const criterion of ["12", "13"]) {
     const c = cases.find(
@@ -467,10 +494,21 @@ test("local assembled-app criteria bind guarded tests without closing pending le
   }
   const factory =
     "service::tests::state_client_skips_real_transport_initialization_factory";
-  const factoryCommand = `scripts/run_test_nonzero.sh --include-ignored ${factory} cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib ${factory}`;
+  assert.deepEqual(
+    cases.find((c) => c.case_id === "EZ-23/acceptance/10").additional_sentinels,
+    [factory],
+  );
+  const axumStep = workflow
+    .split("- name: Run Axum host tests")[1]
+    .split("- name:")[0];
+  assert.equal(
+    axumStep.match(/cargo test/g)?.length,
+    1,
+    "one Axum suite execution",
+  );
   assert.ok(
-    workflow.includes(`\n          ${factoryCommand}\n`),
-    "factory CI guard",
+    !axumStep.includes("test_utils::tests::"),
+    "no duplicate CI sentinel list",
   );
 });
 test("rejects deletion of reviewed split cases or environment legs", () => {

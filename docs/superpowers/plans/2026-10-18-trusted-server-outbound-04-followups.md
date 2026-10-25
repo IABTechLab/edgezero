@@ -96,7 +96,7 @@ corresponding adapter-target checks. Expected: real named cases execute, then ze
 ### F2 Implementation Checkpoint (2026-10-21)
 
 - [x] Implement `PayloadTooLarge { origin }` and `RequestBodyOverflowOrigin::{Inbound,
-      OutboundUpload}` with fixed public text, typed access and sticky replay. Keep malformed
+  OutboundUpload}` with fixed public text, typed access and sticky replay. Keep malformed
       JSON/form at 400, admitted expiry at 408, and strict cached-cap rejection reusable.
 - [x] Refuse an oversized single normalized Content-Length without source polling or poisoning;
       match admission's whitespace normalization and let an already-expired admitted deadline win.
@@ -1246,11 +1246,11 @@ existing full Fastly smoke suite also passes after replacing its native initiali
 
 Local events (each with zero failed/unverified/unsupported records):
 
-| Adapter | Events Path | Events SHA-256 |
-| --- | --- | --- |
-| Fastly | `/private/tmp/edgezero-f9a-unified-fastly-final/events.jsonl` | `f6a9611381ca4269eb4d5d1139bc511b25977d021403c5ebf267e8241216e7aa` |
+| Adapter    | Events Path                                                   | Events SHA-256                                                     |
+| ---------- | ------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Fastly     | `/private/tmp/edgezero-f9a-unified-fastly-final/events.jsonl` | `f6a9611381ca4269eb4d5d1139bc511b25977d021403c5ebf267e8241216e7aa` |
 | Cloudflare | `/private/tmp/edgezero-f9a-unified-cloudflare-b/events.jsonl` | `04fa354bd903b9aa9579df7879a6b8bac9720677eda0d2d81eb67d660af68a99` |
-| Spin | `/private/tmp/edgezero-f9a-unified-spin-final/events.jsonl` | `22e8b2f6d195765314fbdbc1fa5e551cde89be7ae807c098d8299bf1942756a2` |
+| Spin       | `/private/tmp/edgezero-f9a-unified-spin-final/events.jsonl`   | `22e8b2f6d195765314fbdbc1fa5e551cde89be7ae807c098d8299bf1942756a2` |
 
 Earlier fixture/validator failures are retained locally, not counted as passing evidence:
 the HEAD capture test incorrectly assumed one TCP read contained the method, the boot validator
@@ -1381,7 +1381,9 @@ The acceptance inventory remains 255 criteria / 511 planned legs with `qualified
 The later [G1/F9b binding checkpoint](2026-10-18-trusted-server-outbound-implementation.md#g1f9b-local-acceptance-binding-checkpoint)
 activates criteria 01-11 using the actual tests in the map above, strengthens criterion 01's
 unconfigured success control, and runs the exact guarded commands in the existing Axum CI job.
-Criterion 10 selects both TCP and factory tests, with a separate CI guard for the factory sentinel.
+The original binding checkpoint selected both criterion 10 tests with a separate factory CI guard.
+The subsequent [inventory-driven consolidation](2026-10-18-trusted-server-outbound-implementation.md#g1f9b-inventory-driven-suite-consolidation-2026-10-25) replaces those invocations with one full
+Axum suite and requires both primary and additional factory sentinels before execution.
 Criteria 12/13 remain planned for their outstanding begun-request/consumer portions. The earlier
 511-planned count is historical; current bindings have eleven ready and 500 planned legs without
 changing source criteria, applicability or qualification. The local execution record above remains
