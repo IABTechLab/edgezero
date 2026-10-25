@@ -289,6 +289,12 @@ consume `response.into_body()` while its absolute request deadline is still acti
 `into_bytes_bounded`, `into_bytes_bounded_until`, or `json_bounded_until` when application code
 performs an additional collection step.
 
+Each adapter checks its selected absolute budget again before returning a successful response,
+including bodyless responses and streamed response heads. Equality is expired: setup and
+normalization cannot hand off a late success or restart the budget. This check does not read a
+lazy payload or replace an earlier header/source/limit error. It does not upgrade provider
+interruption guarantees; blocked host operations retain their documented capability limits.
+
 `max_chunk_bytes` opt-in rechunks guest-visible response items before they reach the application.
 It bounds emitted item shape, not allocation: split `Bytes` values can retain their original
 backing allocation, and a provider SDK may allocate the source chunk before EdgeZero receives it.

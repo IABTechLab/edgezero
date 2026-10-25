@@ -353,62 +353,49 @@ async fn process_response(
     )?;
     let disposition = normalization.body_disposition;
 
-    if disposition == ResponseBodyDisposition::FramingBodyless {
-        return Ok(OutboundResponse::new(
-            request_method,
-            status,
-            headers,
-            Body::empty(),
-            response_clock,
-            normalization.content_type_provenance,
-        ));
-    }
-
-    let declared_reset_body = matches!(
-        disposition,
-        ResponseBodyDisposition::ResetContent {
-            declared_body: true
-        }
-    );
-    let native = response_stream(response, budget, clock.clone());
-    if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
-        if !declared_reset_body {
-            let mut reset_stream = deadline_stream(native, budget, clock);
-            if let Some(item) = reset_stream.next().await {
-                item?;
+    let body = if disposition == ResponseBodyDisposition::FramingBodyless {
+        Body::empty()
+    } else {
+        let declared_reset_body = matches!(
+            disposition,
+            ResponseBodyDisposition::ResetContent {
+                declared_body: true
+            }
+        );
+        let native = response_stream(response, budget, clock.clone());
+        if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
+            if !declared_reset_body {
+                let mut reset_stream = deadline_stream(native, budget, clock);
+                if let Some(item) = reset_stream.next().await {
+                    item?;
+                }
+            }
+            Body::empty()
+        } else {
+            let shaped = apply_response_body_policy(
+                native,
+                &mut headers,
+                ResponseBodyPolicy {
+                    max_brotli_window_bits,
+                    max_chunk_bytes,
+                    max_decoded_response_bytes,
+                    max_decoder_bytes,
+                    max_encoded_response_bytes,
+                    response_decoding,
+                    response_mode,
+                    status,
+                },
+            )?;
+            let deadline_bound = deadline_stream(shaped, budget, clock);
+            match response_mode {
+                ResponseMode::Buffered { max_bytes } => {
+                    Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
+                }
+                ResponseMode::Streamed => Body::from_stream(deadline_bound),
             }
         }
-        return Ok(OutboundResponse::new(
-            request_method,
-            status,
-            headers,
-            Body::empty(),
-            response_clock,
-            normalization.content_type_provenance,
-        ));
-    }
-
-    let shaped = apply_response_body_policy(
-        native,
-        &mut headers,
-        ResponseBodyPolicy {
-            max_brotli_window_bits,
-            max_chunk_bytes,
-            max_decoded_response_bytes,
-            max_decoder_bytes,
-            max_encoded_response_bytes,
-            response_decoding,
-            response_mode,
-            status,
-        },
-    )?;
-    let deadline_bound = deadline_stream(shaped, budget, clock);
-    let body = match response_mode {
-        ResponseMode::Buffered { max_bytes } => {
-            Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
-        }
-        ResponseMode::Streamed => Body::from_stream(deadline_bound),
     };
+    budget_remaining(budget, &response_clock)?;
     Ok(OutboundResponse::new(
         request_method,
         status,
@@ -973,6 +960,84 @@ mod clock_tests {
                     assert!(
                         matches!(result, Err(EdgeError::ResponseTooLarge { reason: actual, .. }) if actual == reason)
                     );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn response_conversion_checks_deadline_before_handoff() {
+        for (method, status) in [
+            (Method::HEAD, StatusCode::OK),
+            (Method::GET, StatusCode::NOT_MODIFIED),
+            (Method::GET, StatusCode::NO_CONTENT),
+            (Method::GET, StatusCode::RESET_CONTENT),
+            (Method::GET, StatusCode::OK),
+        ] {
+            let modes: &[ResponseMode] = if method == Method::GET && status == StatusCode::OK {
+                &[ResponseMode::Streamed]
+            } else {
+                &[
+                    ResponseMode::Buffered { max_bytes: 1 },
+                    ResponseMode::Streamed,
+                ]
+            };
+            for &response_mode in modes {
+                for cause in [
+                    BudgetSource::PerCallTimeout,
+                    BudgetSource::RequestDeadline,
+                    BudgetSource::BatchCutoff,
+                    BudgetSource::Default,
+                ] {
+                    for offset in [9_u64, 10, 11] {
+                        let start = MonotonicInstant::now();
+                        let mut budget = test_budget(start, Duration::from_millis(10));
+                        budget.cause = cause;
+                        let observed = start
+                            .checked_add(Duration::from_millis(offset))
+                            .expect("handoff time");
+                        let polls = Arc::new(AtomicUsize::new(0));
+                        let native = response_builder()
+                            .status(status)
+                            .header("content-length", "1")
+                            .body(reqwest::Body::wrap(NeverReadyBody(Arc::clone(&polls))))
+                            .expect("native response");
+                        let result = process_response(
+                            reqwest::Response::from(native),
+                            method.clone(),
+                            OutboundProxyMarker::Inherit,
+                            ResponseDecoding::Decode,
+                            response_mode,
+                            budget,
+                            1024,
+                            24,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            scripted_clock(vec![start, observed]),
+                        )
+                        .await;
+                        assert_eq!(
+                            polls.load(Ordering::Relaxed),
+                            0,
+                            "handoff never reads payload"
+                        );
+                        if offset < 10 {
+                            drop(result.expect("on-time handoff"));
+                        } else {
+                            assert!(
+                                matches!(result, Err(EdgeError::GatewayTimeout {cause: actual, ..}) if actual == cause),
+                                "expired handoff must retain its selected budget"
+                            );
+                        }
+                        assert_eq!(
+                            Arc::strong_count(&polls),
+                            1,
+                            "source released on return or response drop"
+                        );
+                    }
                 }
             }
         }

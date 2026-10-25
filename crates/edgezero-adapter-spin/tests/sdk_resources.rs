@@ -11,9 +11,9 @@ mod tests {
     use std::time::Duration;
 
     use edgezero_adapter_spin::outbound::{
-        SpinOutboundClient, map_spin_host_error_for_test, map_spin_preparation_header_for_test,
-        provider_deadline_diagnostics_hold_for_test, request_fields_for_test,
-        request_target_errors_for_test, set_timeout_option_for_test,
+        SpinOutboundClient, deferred_clock_paths_hold_for_test, map_spin_host_error_for_test,
+        map_spin_preparation_header_for_test, provider_deadline_diagnostics_hold_for_test,
+        request_fields_for_test, request_target_errors_for_test, set_timeout_option_for_test,
     };
     use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
     use edgezero_core::error_detail::{
@@ -39,6 +39,14 @@ mod tests {
     #[test]
     fn spin_outbound_client_implements_portable_contract() {
         assert_outbound_client::<SpinOutboundClient>();
+    }
+
+    #[test]
+    fn response_conversion_checks_deadline_before_handoff() {
+        assert!(
+            block_on(deferred_clock_paths_hold_for_test()),
+            "response handoff must retain deadlines and release SDK body consumers"
+        );
     }
 
     #[test]

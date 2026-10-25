@@ -791,56 +791,35 @@ mod spin_impl {
         let disposition = normalization.body_disposition;
 
         let native = response_stream(response, budget, clock.clone());
-        if disposition == ResponseBodyDisposition::FramingBodyless {
-            return Ok(OutboundResponse::new(
-                request_method,
-                status,
-                headers,
-                Body::empty(),
-                response_clock,
-                normalization.content_type_provenance,
-            ));
-        }
-
-        let declared_reset_body = matches!(
-            disposition,
-            ResponseBodyDisposition::ResetContent {
-                declared_body: true
+        let body = if disposition == ResponseBodyDisposition::FramingBodyless {
+            Body::empty()
+        } else if let ResponseBodyDisposition::ResetContent { declared_body } = disposition {
+            settle_reset_content(native, declared_body).await?;
+            Body::empty()
+        } else {
+            let shaped = apply_response_body_policy(
+                native,
+                &mut headers,
+                ResponseBodyPolicy {
+                    max_brotli_window_bits,
+                    max_chunk_bytes,
+                    max_decoded_response_bytes,
+                    max_decoder_bytes,
+                    max_encoded_response_bytes,
+                    response_decoding,
+                    response_mode,
+                    status,
+                },
+            )?;
+            let deadline_bound = deadline_stream(super::cooperative_stream(shaped), budget, clock);
+            match response_mode {
+                ResponseMode::Buffered { max_bytes } => {
+                    Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
+                }
+                ResponseMode::Streamed => Body::from_stream(deadline_bound),
             }
-        );
-        if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
-            settle_reset_content(native, declared_reset_body).await?;
-            return Ok(OutboundResponse::new(
-                request_method,
-                status,
-                headers,
-                Body::empty(),
-                response_clock,
-                normalization.content_type_provenance,
-            ));
-        }
-
-        let shaped = apply_response_body_policy(
-            native,
-            &mut headers,
-            ResponseBodyPolicy {
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_decoder_bytes,
-                max_encoded_response_bytes,
-                response_decoding,
-                response_mode,
-                status,
-            },
-        )?;
-        let deadline_bound = deadline_stream(super::cooperative_stream(shaped), budget, clock);
-        let body = match response_mode {
-            ResponseMode::Buffered { max_bytes } => {
-                Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
-            }
-            ResponseMode::Streamed => Body::from_stream(deadline_bound),
         };
+        budget_remaining(budget, &response_clock)?;
         Ok(OutboundResponse::new(
             request_method,
             status,
@@ -1077,7 +1056,7 @@ mod spin_impl {
         matches!(
             body.next().await,
             Some(Err(EdgeError::GatewayTimeout { .. }))
-        )
+        ) && handoff_tests::check_response_handoff().await.is_ok()
     }
 
     /// Checks ready-error diagnostic retention through actual SDK deadline races.
@@ -1353,6 +1332,11 @@ mod spin_impl {
         }
 
         #[test]
+        fn response_conversion_checks_deadline_before_handoff() {
+            block_on(super::handoff_tests::check_response_handoff()).expect("handoff deadlines");
+        }
+
+        #[test]
         fn response_stream_retains_clock_for_post_ready_expiry() {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_millis(10));
@@ -1379,6 +1363,116 @@ mod spin_impl {
         fn converted_response_preserves_original_content_type_provenance() {
             block_on(super::content_type_tests::check_converted_response_content_type_provenance())
                 .expect("converted content-type provenance");
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    mod handoff_tests {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use edgezero_core::error::BudgetSource;
+
+        use super::*;
+
+        pub(super) async fn check_response_handoff() -> Result<(), EdgeError> {
+            for (method, status) in [
+                (Method::HEAD, StatusCode::OK),
+                (Method::GET, StatusCode::NOT_MODIFIED),
+                (Method::GET, StatusCode::NO_CONTENT),
+                (Method::GET, StatusCode::RESET_CONTENT),
+                (Method::GET, StatusCode::OK),
+            ] {
+                let modes: &[ResponseMode] = if method == Method::GET && status == StatusCode::OK {
+                    &[ResponseMode::Streamed]
+                } else {
+                    &[
+                        ResponseMode::Buffered { max_bytes: 1 },
+                        ResponseMode::Streamed,
+                    ]
+                };
+                for &response_mode in modes {
+                    for cause in [
+                        BudgetSource::PerCallTimeout,
+                        BudgetSource::RequestDeadline,
+                        BudgetSource::BatchCutoff,
+                        BudgetSource::Default,
+                    ] {
+                        for offset in [9_u64, 10, 11] {
+                            let start = MonotonicInstant::now();
+                            let duration = Duration::from_millis(10);
+                            let deadline = start.checked_add(duration).ok_or_else(|| {
+                                EdgeError::internal(anyhow::anyhow!("fixture deadline overflow"))
+                            })?;
+                            let observed = start
+                                .checked_add(Duration::from_millis(offset))
+                                .ok_or_else(|| {
+                                    EdgeError::internal(anyhow::anyhow!(
+                                        "fixture observation overflow"
+                                    ))
+                                })?;
+                            let budget = DispatchBudget {
+                                cause,
+                                deadline: Deadline::at_instant(deadline),
+                                duration,
+                            };
+                            let observed_samples = AtomicUsize::new(0);
+                            let clock = MonotonicClock::new(move || {
+                                if observed_samples.fetch_add(1, Ordering::SeqCst) == 0 {
+                                    start
+                                } else {
+                                    observed
+                                }
+                            });
+                            let fields = Fields::new();
+                            fields
+                                .append("content-length", b"1")
+                                .map_err(EdgeError::internal)?;
+                            let (mut writer, contents, trailers) = BodyWriter::new();
+                            let (native, _response_done) =
+                                Response::new(fields, Some(contents), trailers);
+                            native.set_status_code(status.as_u16()).map_err(|()| {
+                                EdgeError::internal(anyhow::anyhow!("fixture status rejected"))
+                            })?;
+                            let result = process_response(
+                                native,
+                                method.clone(),
+                                OutboundProxyMarker::Inherit,
+                                ResponseDecoding::Decode,
+                                response_mode,
+                                budget,
+                                1024,
+                                24,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                clock,
+                            )
+                            .await;
+                            let expected = if offset < 10 {
+                                drop(result?);
+                                true
+                            } else {
+                                matches!(result, Err(EdgeError::GatewayTimeout {cause: actual, ..}) if actual == cause)
+                            };
+                            if !expected {
+                                return Err(EdgeError::internal(anyhow::anyhow!(
+                                    "expired handoff lost its selected budget"
+                                )));
+                            }
+                            if writer.stream_writer.write_all(vec![1]).now_or_never()
+                                != Some(vec![1])
+                            {
+                                return Err(EdgeError::internal(anyhow::anyhow!(
+                                    "handoff retained its native body consumer"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
         }
     }
 

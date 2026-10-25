@@ -1230,63 +1230,47 @@ mod fastly_impl {
             proxy_marker,
         )?;
         let disposition = normalization.body_disposition;
-        if disposition == ResponseBodyDisposition::FramingBodyless {
-            budget_remaining(budget, &clock)?;
-            return Ok(OutboundResponse::new(
-                request_method,
-                status,
-                headers,
-                Body::empty(),
-                response_clock,
-                normalization.content_type_provenance,
-            ));
-        }
-
-        let declared_reset_body = matches!(
-            disposition,
-            ResponseBodyDisposition::ResetContent {
-                declared_body: true
-            }
-        );
-        let native = fastly_body_stream(response.take_body(), budget, clock.clone());
-        if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
-            if !declared_reset_body {
-                let mut reset_stream = native;
-                if let Some(item) = reset_stream.next().await {
-                    item?;
+        let body = if disposition == ResponseBodyDisposition::FramingBodyless {
+            Body::empty()
+        } else {
+            let declared_reset_body = matches!(
+                disposition,
+                ResponseBodyDisposition::ResetContent {
+                    declared_body: true
+                }
+            );
+            let native = fastly_body_stream(response.take_body(), budget, clock.clone());
+            if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
+                if !declared_reset_body {
+                    let mut reset_stream = native;
+                    if let Some(item) = reset_stream.next().await {
+                        item?;
+                    }
+                }
+                Body::empty()
+            } else {
+                let shaped = apply_response_body_policy(
+                    native,
+                    &mut headers,
+                    ResponseBodyPolicy {
+                        max_brotli_window_bits,
+                        max_chunk_bytes,
+                        max_decoded_response_bytes,
+                        max_decoder_bytes,
+                        max_encoded_response_bytes,
+                        response_decoding,
+                        response_mode,
+                        status,
+                    },
+                )?;
+                let deadline_bound = deadline_stream(shaped, budget, clock);
+                match response_mode {
+                    ResponseMode::Buffered { max_bytes } => {
+                        Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
+                    }
+                    ResponseMode::Streamed => Body::from_stream(deadline_bound),
                 }
             }
-            budget_remaining(budget, &clock)?;
-            return Ok(OutboundResponse::new(
-                request_method,
-                status,
-                headers,
-                Body::empty(),
-                response_clock,
-                normalization.content_type_provenance,
-            ));
-        }
-
-        let shaped = apply_response_body_policy(
-            native,
-            &mut headers,
-            ResponseBodyPolicy {
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_decoder_bytes,
-                max_encoded_response_bytes,
-                response_decoding,
-                response_mode,
-                status,
-            },
-        )?;
-        let deadline_bound = deadline_stream(shaped, budget, clock);
-        let body = match response_mode {
-            ResponseMode::Buffered { max_bytes } => {
-                Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
-            }
-            ResponseMode::Streamed => Body::from_stream(deadline_bound),
         };
         budget_remaining(budget, &response_clock)?;
         Ok(OutboundResponse::new(

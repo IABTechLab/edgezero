@@ -76,6 +76,16 @@ separately from the portable API and must be considered when declaring required 
   Image Optimizer remains unavailable in Begin/Batch. This does not implement eager dispatch
   or redirect following, change handler/demo/template APIs, or upgrade provider capabilities.
 
+### Outbound Response Handoff Deadlines
+
+- Check the selected absolute budget immediately before returning any successful outbound
+  response on all four adapters. Fix Axum, Cloudflare and Spin bodyless/streamed head handoffs
+  that could return late success after normalization; retain Fastly's existing enforcement.
+- Replace duplicated early-success constructors with one checked return per adapter. Keep
+  header/source/cap errors, body suppression, 205 handling, application clocks and lazy streams
+  unchanged. A rejected handoff releases its native source; Cloudflare's already-disarmed
+  known-empty 205 guard stays disarmed. No public API, capability or runtime pin changes.
+
 ### Axum Host-Known-Empty Ingress
 
 - Preserve transport-certified `is_end_stream()` bodies as buffered empty after admission on

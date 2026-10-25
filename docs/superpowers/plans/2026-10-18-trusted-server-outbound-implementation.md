@@ -155,6 +155,51 @@ That ordering repair changes no public signature, client constructor, timer, tra
 pin, cutoff rule or capability. The separately approved core helper change is recorded below;
 neither slice completes shared preparation, P1/F3c/D4, or qualification.
 
+### Response Handoff Deadline Checkpoint (2026-10-25)
+
+The current live Axum, Cloudflare and Spin converters checked the budget on entry, but could
+return a successful bodyless response or lazy payload head after normalization without a terminal
+sample. Fastly already checked those success branches. Direct converter regressions reproduced
+late success; the new checks reject equality and later observations with the original selected
+BudgetSource. This repairs the protected baseline rather than changing the approved public API.
+
+All four converters now build the disposition-selected body and use one successful epilogue with
+one final budget check and one response constructor. Remove their eight duplicated early-success
+constructors, not keep another finalization path. Source/header/cap errors retain their existing
+early error exits and diagnostic handling. Preserve each provider's native-body construction and
+ownership points, raw read timers, bodyless/205 suppression, lazy payloads and independent caps.
+Core header and payload policies remain shared; this is not full head-first finalizer integration.
+
+Native Axum and Cloudflare Node/WASM tests first failed on late Ok, then passed. Matrices cover
+HEAD/200, 204, 304, declared 205 and streamed payload heads, before/equal/after expiry and four
+budget causes. Bodyless cases run both buffered and streamed modes. Axum proves zero source polls
+and source release; Cloudflare tracks a high-water-mark-zero native stream for its status-200
+cases, plus abort ownership and unchanged known-empty 205 disarming at late handoff. Its 204/304
+controls use actual empty native responses, not tracked-source evidence. Preserve Fastly's existing
+late-handoff control unchanged.
+
+Spin's ordinary library test binary imports its KV service and cannot link under plain Wasmtime;
+that attempt is not a passing test. Reuse the existing SDK-resources binary and existing test-only
+clock seam to execute the private conversion matrix without another public API. The actual SDK
+case fails before the Spin repair and passes afterward. It checks native consumer release through
+peer write rejection while producer/completion handles are still held, not by dropping the fixture
+first. The same private matrix remains colocated with conversion for a full Spin test host.
+
+Two read-only investigations compared adding repeated checks or another public finalizer helper
+with this single-exit repair. The selected path removes duplicate success handling without adding
+an unapproved context constructor or bypassing the pending atomic migration. Demo/template APIs,
+batch eligibility/arrival/cutoff rules, SDK/runtime pins, capability levels, frozen Interfaces and
+requirements remain unchanged. Full P1/P4/P5/D1-D6 and resource/hosted qualification stay open;
+no inventory leg becomes ready or qualified from this checkpoint alone.
+
+Verification passes all five primary Rust gates, three WASM target lint scopes plus Spin's
+non-test-utils scope, the inventory-bound 246-unit/17-contract Axum suite, 193 Fastly SDK unit
+tests and 35 contracts, 48 Cloudflare Node/WASM tests, and 14 Spin SDK tests. The demo workspace
+all-target/all-feature check, forwarding doctest, docs format/lint/build, docs/legacy guards and
+approval-identity verification pass. Final spec and quality reviews found no remaining scoped
+blocker after correcting the Spin test-only import. No new browser or hosted qualification is
+claimed; the full Spin KV-hosted unit suite was not executed by the SDK-only runner.
+
 ### Shared Live-Validation Checkpoint (2026-10-25)
 
 The requester's scoped approval hard-cuts the public helper to
@@ -1142,7 +1187,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Partial ingress conversion:** Axum host-known-empty, Fastly SDK absence and Cloudflare native-null preservation; see the P2 checkpoints above.                | General streamed GET/HEAD settlement, paired deadlines and all-target forwarding. Ordinary Fastly bodiless forwarding is not established.                              |
 | EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial proof work:** [readiness repair/negative evidence](#g2-local-runtime-repair-checkpoint); existing transport retained.                                 | Reviewed preserving primitive, B/domain approval, multiplexer, stable backend identity and registration observations. F1 retirement/reuse is separate unfinished work. |
 | EZ-3        | D1/D5                | Blocking; remove slack only with verified bounded waits                   | **Not implemented:** current slack retained.                                                                                                                    | D1a bounded waits plus D1b approved backend policy before joint slack removal; M7 comparison.                                                                          |
-| EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Baseline deadlines retained; new connect option/mapping pending.**                                                                                            | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |
+| EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Baseline terminal handoff repaired:** [checked success return](#response-handoff-deadline-checkpoint-2026-10-25); connect option/mapping pending.             | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |
 | EZ-5        | P3; D1-D4            | Blocking; Spin conditional host result recorded                           | **Current-API slice implemented:** [original coding](#p1p3-original-coding-checkpoint) and [local relay](#p3-downstream-relay-checkpoint).                      | Head-first/new-mode integration, complete normalization/limit matrices and separately adopted optional metadata legs.                                                  |
 | EZ-6        | P4; D1-D6            | Blocking except EZ-6.31 reuse-only                                        | **Partial foundations:** [pending ownership](#p1p4-ownership-checkpoint) and local progress characterization.                                                   | Eager begin/batches on all adapters, arrival ledger/check, mixed collection/accumulator, callback/body scopes and lifetime/late-collection proof.                      |
 | EZ-7        | P3; D1-D4            | Blocking                                                                  | **Current-API slice implemented:** [marker policy](#p1p3-marker-checkpoint), [shared header accounting](#shared-header-policy-consolidation-checkpoint).        | Same policies through every new dispatch/follow path and full applicable adapter/normalization matrices.                                                               |

@@ -542,18 +542,9 @@ mod worker_impl {
         )?;
         let disposition = normalization.body_disposition;
 
-        if disposition == ResponseBodyDisposition::FramingBodyless {
-            return Ok(OutboundResponse::new(
-                request_method,
-                status,
-                headers,
-                Body::empty(),
-                response_clock,
-                normalization.content_type_provenance,
-            ));
-        }
-
-        if let ResponseBodyDisposition::ResetContent { declared_body } = disposition {
+        let body = if disposition == ResponseBodyDisposition::FramingBodyless {
+            Body::empty()
+        } else if let ResponseBodyDisposition::ResetContent { declared_body } = disposition {
             match reset_content_action(
                 declared_body,
                 matches!(response.body(), WorkerResponseBody::Empty),
@@ -584,38 +575,32 @@ mod worker_impl {
                     }
                 }
             }
-            return Ok(OutboundResponse::new(
-                request_method,
-                status,
-                headers,
-                Body::empty(),
-                response_clock,
-                normalization.content_type_provenance,
-            ));
-        }
-
-        let native = response_stream(&mut response)?;
-        let shaped = apply_response_body_policy(
-            native,
-            &mut headers,
-            ResponseBodyPolicy {
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_decoder_bytes,
-                max_encoded_response_bytes,
-                response_decoding,
-                response_mode,
-                status,
-            },
-        )?;
-        let deadline_bound = deadline_stream(shaped, budget, clock, abort_guard);
-        let body = match response_mode {
-            ResponseMode::Buffered { max_bytes } => {
-                Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
+            Body::empty()
+        } else {
+            let native = response_stream(&mut response)?;
+            let shaped = apply_response_body_policy(
+                native,
+                &mut headers,
+                ResponseBodyPolicy {
+                    max_brotli_window_bits,
+                    max_chunk_bytes,
+                    max_decoded_response_bytes,
+                    max_decoder_bytes,
+                    max_encoded_response_bytes,
+                    response_decoding,
+                    response_mode,
+                    status,
+                },
+            )?;
+            let deadline_bound = deadline_stream(shaped, budget, clock, abort_guard);
+            match response_mode {
+                ResponseMode::Buffered { max_bytes } => {
+                    Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
+                }
+                ResponseMode::Streamed => Body::from_stream(deadline_bound),
             }
-            ResponseMode::Streamed => Body::from_stream(deadline_bound),
         };
+        budget_remaining(budget, &response_clock)?;
         Ok(OutboundResponse::new(
             request_method,
             status,
@@ -2002,31 +1987,141 @@ mod worker_impl {
             for (content_length, expected_aborted) in
                 [(None, false), (Some("0"), false), (Some("7"), true)]
             {
-                let controller = web_sys::AbortController::new().expect("abort controller");
-                let signal = controller.signal();
-                let response = process_response(
-                    empty_worker_response(StatusCode::RESET_CONTENT, content_length),
-                    AbortGuard::new(controller),
-                    Method::GET,
-                    OutboundProxyMarker::Inherit,
-                    ResponseDecoding::Decode,
-                    ResponseMode::Buffered { max_bytes: 64 },
-                    budget,
-                    1024,
-                    24,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    constant_clock(start),
-                )
-                .await
-                .expect("empty reset response");
+                for observed in [
+                    start,
+                    budget.deadline.instant(),
+                    budget
+                        .deadline
+                        .instant()
+                        .checked_add(Duration::from_nanos(1))
+                        .expect("after deadline"),
+                ] {
+                    let controller = web_sys::AbortController::new().expect("abort controller");
+                    let signal = controller.signal();
+                    let result = process_response(
+                        empty_worker_response(StatusCode::RESET_CONTENT, content_length),
+                        AbortGuard::new(controller),
+                        Method::GET,
+                        OutboundProxyMarker::Inherit,
+                        ResponseDecoding::Decode,
+                        ResponseMode::Buffered { max_bytes: 64 },
+                        budget,
+                        1024,
+                        24,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        scripted_clock(vec![start, observed]),
+                    )
+                    .await;
 
-                assert_eq!(response.status(), StatusCode::RESET_CONTENT);
-                assert_eq!(response.body().as_bytes(), Some(&[][..]));
-                assert_eq!(signal.aborted(), expected_aborted);
+                    if observed < budget.deadline.instant() {
+                        let response = result.expect("empty reset response");
+                        assert_eq!(response.status(), StatusCode::RESET_CONTENT);
+                        assert_eq!(response.body().as_bytes(), Some(&[][..]));
+                    } else {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(EdgeError::GatewayTimeout {
+                                    cause: BudgetSource::PerCallTimeout,
+                                    ..
+                                })
+                            ),
+                            "empty reset handoff must retain its deadline"
+                        );
+                    }
+                    assert_eq!(signal.aborted(), expected_aborted);
+                }
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn response_conversion_checks_deadline_before_handoff() {
+            for (method, status) in [
+                (Method::HEAD, StatusCode::OK),
+                (Method::GET, StatusCode::NOT_MODIFIED),
+                (Method::GET, StatusCode::NO_CONTENT),
+                (Method::GET, StatusCode::RESET_CONTENT),
+                (Method::GET, StatusCode::OK),
+            ] {
+                let modes: &[ResponseMode] = if method == Method::GET && status == StatusCode::OK {
+                    &[ResponseMode::Streamed]
+                } else {
+                    &[
+                        ResponseMode::Buffered { max_bytes: 1 },
+                        ResponseMode::Streamed,
+                    ]
+                };
+                for &response_mode in modes {
+                    for cause in [
+                        BudgetSource::PerCallTimeout,
+                        BudgetSource::RequestDeadline,
+                        BudgetSource::BatchCutoff,
+                        BudgetSource::Default,
+                    ] {
+                        for offset in [9_u64, 10, 11] {
+                            let start = MonotonicInstant::now();
+                            let mut budget = test_budget(start, Duration::from_millis(10));
+                            budget.cause = cause;
+                            let observed = start
+                                .checked_add(Duration::from_millis(offset))
+                                .expect("handoff time");
+                            let controller = web_sys::AbortController::new().expect("controller");
+                            let signal = controller.signal();
+                            let probe = Function::new_no_args("const probe = {pulls: 0}; probe.response = new Response(new ReadableStream({pull() {probe.pulls++;}}, {highWaterMark: 0}), {headers: {'content-length': '1'}}); return probe;")
+                            .call0(&JsValue::UNDEFINED).expect("pending native source");
+                            let native = if status == StatusCode::OK {
+                                let native = Reflect::get(&probe, &JsValue::from_str("response"))
+                                    .expect("native response")
+                                    .dyn_into::<web_sys::Response>()
+                                    .expect("response type");
+                                WorkerResponse::from(native)
+                            } else {
+                                empty_worker_response(status, Some("1"))
+                            };
+                            let result = process_response(
+                                native,
+                                AbortGuard::new(controller),
+                                method.clone(),
+                                OutboundProxyMarker::Inherit,
+                                ResponseDecoding::Decode,
+                                response_mode,
+                                budget,
+                                1024,
+                                24,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                scripted_clock(vec![start, observed]),
+                            )
+                            .await;
+                            if offset < 10 {
+                                drop(result.expect("on-time handoff"));
+                            } else {
+                                assert!(
+                                    matches!(result, Err(EdgeError::GatewayTimeout {cause: actual, ..}) if actual == cause),
+                                    "expired handoff must retain its selected budget"
+                                );
+                            }
+                            assert!(
+                                signal.aborted(),
+                                "terminal handoff or response drop aborts the owned exchange"
+                            );
+                            assert_eq!(
+                                Reflect::get(&probe, &JsValue::from_str("pulls"))
+                                    .expect("source pulls")
+                                    .as_f64(),
+                                Some(0.0_f64),
+                                "handoff never reads payload"
+                            );
+                        }
+                    }
+                }
             }
         }
 
