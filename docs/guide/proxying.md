@@ -87,7 +87,7 @@ deadline, with no outbound body bytes, `Transfer-Encoding` or `Content-Length`.
 
 Unknown bodies remain lazy. Forwarded streamed GET/HEAD requests still fail with 400 before
 origin contact; local TCP controls include chunked-empty and nonempty GET bodies. General bounded
-empty-body settlement is not implemented, and Cloudflare/Spin conversion is unchanged. Do not
+empty-body settlement is not implemented, and Spin conversion is unchanged. Do not
 discard an inbound body to bypass that check. Methods that accept streamed bodies keep their
 existing behavior.
 
@@ -98,11 +98,17 @@ and is not an EOF signal. Normal Fastly `from_client()` requests carry a body ha
 bodiless, so this does not fix their GET/HEAD forwarding. Do not remove a present SDK body to
 force the absence path. See [Fastly ingress conversion](./adapters/fastly.md#ingress-body-conversion).
 
-The certified Axum empty body or absent Fastly SDK body remains Initial, not Cached. `take_body`
+Cloudflare preserves a native Fetch request's `body == null` as buffered empty without reading
+it. This applies to direct conversion and, after admission, normal dispatch. Every non-null body
+remains streamed, even an empty ArrayBuffer, a closed stream or a body with `Content-Length: 0`.
+There is no ArrayBuffer-only fallback or header-based inference. See
+[Cloudflare ingress conversion](./adapters/cloudflare.md#ingress-body-conversion).
+
+The certified Axum empty body or absent Fastly/Cloudflare body remains Initial, not Cached. `take_body`
 and `into_request` expose buffered empty, but core's first `body_bytes` call still checks the
 inbound read deadline and can return 408. Ingress framing remains `HostManaged`. Demo and generated
 proxy handlers automatically share their adapter's converter with unchanged APIs; the Axum
-forwarding result above does not establish raw Fastly GET proxy success. Neither checkpoint is
+forwarding result above does not establish raw Fastly GET proxy success. These checkpoints are not
 general body settlement or a capability promotion.
 
 ```rust

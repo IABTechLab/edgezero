@@ -142,6 +142,42 @@ positive control, not a duplicate command registry or execution framework. Subse
 quality reviews found no remaining scoped defect. Generated-project and hosted qualification
 were not executed or credited by this checkpoint.
 
+### P2 Cloudflare Native-Body-Absence Checkpoint (2026-10-25)
+
+Continue P2's existing known-empty ingress subtask without changing the frozen Interfaces,
+requirements, current public client protocol, SDK/runtime pins or provider capability claims.
+Both direct conversion and admitted dispatch preserve native Fetch `body == null` as
+`Body::empty()`. Remove the unsupported ArrayBuffer fallback and unused attachment helper.
+Every present source retains the existing lazy reader/deadline/error path, including empty
+ArrayBuffer/Uint8Array bodies. Generic source-test seams still represent present streams.
+
+The two source investigations confirmed that worker 0.8.5 keeps no alternative payload buffer:
+its native-null HTTP conversion already selects empty. A prior SDK read can change private
+bookkeeping without creating a source; it cannot justify reading a null body. Consumed present
+bodies keep their construction error. The smallest implementation preserves absence internally
+with `Option`, without another transport, public API, header inference or eager collection.
+
+Native Node/WASM regressions first demonstrated streamed null bodies on direct and admitted
+paths. They cover GET/HEAD/POST absence, present empty/nonempty buffers, expired first reads,
+sticky poisoning, unchanged Initial/HostManaged state and refusal/abort before source inspection.
+The test delivery seam inspects ingress envelopes; it is not a hosted egress proof. The existing
+workerd empty probe separately records the original native snapshot and pre-collection body
+storage through production dispatch. Its fixture/validator regressions reject contradictory,
+missing or mistyped source evidence. General settlement, support-first paired timing, full
+P1-P5/D1-D6 migration and Q3-Q5 qualification remain open. No acceptance leg is promoted here.
+
+Local Node/WASM verification passes 47 adapter tests; the fixture passes 21 core and 119 harness
+tests. Actual local workerd 1.20260910.1 with Wrangler 4.131.0 passes all five source-presence cases
+and the existing coding, marker, relay and progress/framing groups. The 223-event log is
+`/private/tmp/edgezero-cf-null-body-20261025-c/events.jsonl`, SHA-256
+`5b035c59b03f83c696f378629da8fe2a52c0bee20221c2395becd16142ec46cd`, recorded as working-tree
+characterization against base `a0d31519`, not frozen-candidate evidence. The preceding unavailable-
+CLI and asdf-shim failures remain in the `20261025` and `20261025-b` run directories. Version-matched
+isolated tools and an absolute installed Wrangler path repaired tooling without changing pins.
+All five root Rust gates, target/fixture strict clippy, docs formatting/lint/build, forwarding
+doctest, legacy/docs guards and approval-identity verification pass. Independent specification
+and implementation reviews found no remaining scoped issue.
+
 ### Scoped Timing and Send-First Override (2026-10-24)
 
 The requester's [scoped approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
@@ -1007,7 +1043,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 
 | Requirement | Implementation Tasks | Production Applicability                                                  | Current Implementation / Checkpoint                                                                                                                             | Next Unclosed Work                                                                                                                                                     |
 | ----------- | -------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Partial:** [Axum known-empty conversion](#p2-axum-host-known-empty-checkpoint) and [Fastly SDK absence](#p2-fastly-sdk-body-absence-checkpoint).              | General streamed GET/HEAD settlement, paired deadlines and all-target forwarding. Ordinary Fastly bodiless forwarding is not established.                              |
+| EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Partial ingress conversion:** Axum host-known-empty, Fastly SDK absence and Cloudflare native-null preservation; see the P2 checkpoints above.                | General streamed GET/HEAD settlement, paired deadlines and all-target forwarding. Ordinary Fastly bodiless forwarding is not established.                              |
 | EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial proof work:** [readiness repair/negative evidence](#g2-local-runtime-repair-checkpoint); existing transport retained.                                 | Reviewed preserving primitive, B/domain approval, multiplexer, stable backend identity and registration observations. F1 retirement/reuse is separate unfinished work. |
 | EZ-3        | D1/D5                | Blocking; remove slack only with verified bounded waits                   | **Not implemented:** current slack retained.                                                                                                                    | D1a bounded waits plus D1b approved backend policy before joint slack removal; M7 comparison.                                                                          |
 | EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Baseline deadlines retained; new connect option/mapping pending.**                                                                                            | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |

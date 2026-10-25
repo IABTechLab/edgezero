@@ -153,10 +153,13 @@ async fn progress(ctx: RequestContext) -> Result<Response, EdgeError> {
         .to_owned();
     if case == "empty" {
         let before = format!("{:?}", ctx.body_kind());
-        let body = ctx.body_bytes(64).await?;
+        let request = ctx.into_request()?;
+        let streamed = request.body().is_stream();
+        let method = request.method().as_str().to_owned();
+        let body = request.into_body().into_bytes_bounded(64).await?;
         return json_response(json!({"case":case, "adapter":state.runtime.adapter(),
-            "host_signal":state.host_signal, "body_kind_before":before,
-            "bytes_read":body.len(), "method":ctx.method().as_str(), "qualification":false}));
+            "host_signal":state.host_signal, "body_kind_before":before, "body_is_stream":streamed,
+            "bytes_read":body.len(), "method":method, "qualification":false}));
     }
     if case.starts_with("coding-") || case.starts_with("relay-") {
         return coding_probe(ctx, &case).await;
@@ -555,6 +558,31 @@ mod tests {
             .header("x-fixture-backend", target)
             .body(Body::empty())
             .unwrap()
+    }
+
+    #[test]
+    fn empty_probe_observes_storage_before_transferring_initial_body() {
+        for (body, streamed, expected) in [
+            (Body::empty(), false, 0),
+            (Body::from_stream(futures::stream::empty()), true, 0),
+            (
+                Body::from_stream(futures::stream::iter([Ok(Bytes::from_static(b"data"))])),
+                true,
+                4,
+            ),
+        ] {
+            let router = router(Arc::new(Fake::default()), Value::Null, None);
+            let mut input = request("empty", "http://127.0.0.1:1");
+            *input.body_mut() = body;
+            let response = block_on(router.oneshot(input)).unwrap();
+            let probe: Value = serde_json::from_slice(
+                &block_on(response.into_body().into_bytes_bounded(4096)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(probe["body_kind_before"], "Initial");
+            assert_eq!(probe["body_is_stream"], streamed);
+            assert_eq!(probe["bytes_read"], expected);
+        }
     }
 
     struct RelayClient {

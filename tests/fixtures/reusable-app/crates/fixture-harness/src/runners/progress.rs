@@ -577,6 +577,10 @@ fn validate_empty_signal(name: &str, framing: net::Framing, probe: &Value) -> Re
                 && probe["host_signal"]["body_absent"] == absent,
             "missing or contradictory original Workers body signal",
         )?;
+        require(
+            probe["body_kind_before"] == "Initial" && probe["body_is_stream"] == !absent,
+            "Workers body storage did not preserve the original source presence",
+        )?;
     }
     Ok(())
 }
@@ -953,7 +957,8 @@ mod tests {
             (net::Framing::ChunkedBody, 4, false),
         ] {
             let probe = json!({"adapter":"cloudflare","case":"empty","method":"GET",
-                "bytes_read":bytes,"host_signal":{"source":"workerd-before-conversion","body_absent":absent}});
+                "bytes_read":bytes,"body_is_stream":!absent,"body_kind_before":"Initial",
+                "host_signal":{"source":"workerd-before-conversion","body_absent":absent}});
             validate_empty_signal("cloudflare", framing, &probe).unwrap();
             for change in [
                 "missing",
@@ -966,6 +971,11 @@ mod tests {
                 "adapter",
                 "method",
                 "case",
+                "storage-missing",
+                "storage-null",
+                "storage-string",
+                "storage-inverted",
+                "cached-before-transfer",
             ] {
                 let mut invalid = probe.clone();
                 match change {
@@ -984,6 +994,15 @@ mod tests {
                     "adapter" => invalid["adapter"] = json!("spin"),
                     "method" => invalid["method"] = json!("HEAD"),
                     "case" => invalid["case"] = json!("other"),
+                    "storage-missing" => {
+                        invalid.as_object_mut().unwrap().remove("body_is_stream");
+                    }
+                    "storage-null" => invalid["body_is_stream"] = Value::Null,
+                    "storage-string" => invalid["body_is_stream"] = json!((!absent).to_string()),
+                    "storage-inverted" => invalid["body_is_stream"] = json!(absent),
+                    "cached-before-transfer" => {
+                        invalid["body_kind_before"] = json!("Cached { len: 0 }")
+                    }
                     _ => unreachable!(),
                 }
                 assert!(

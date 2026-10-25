@@ -88,6 +88,18 @@ separately from the portable API and must be considered when declaring required 
   raw Fastly GET proxy success. This is scope selection, not new user approval or a Native
   claim; no capability rows/promotions, B/backend policy, slack, timers or SDK/runtime pins change.
 
+### Cloudflare Native Body Absence
+
+- Preserve native Fetch `Request.body == null` as buffered empty in direct conversion and
+  admitted dispatch, without a read. Remove the unsupported ArrayBuffer-only fallback and unused
+  attachment helper. Every present body remains streamed, including an empty ArrayBuffer or
+  Uint8Array; headers and SDK bookkeeping do not imply absence. Admission refusal/abort still
+  precedes source inspection, and consumed present bodies keep their construction error.
+- Keep context state Initial, HostManaged framing and the first-read deadline/poisoning contract.
+  Demo/generated entrypoints inherit the converter unchanged. Add native WASM and actual local
+  workerd source-presence regressions; this does not complete general settlement, eager/head-first
+  migration, provider qualification or change SDK pins, capabilities or backend policy.
+
 ### Native Image Optimizer
 
 - Record the requester's scoped 2026-10-24 timing/native-integration approval: original logical

@@ -107,6 +107,21 @@ selectors, so prefer `run_app` unless you are mocking a backend.
 Use [application retention](#retaining-an-application) with that function when the
 caller owns a prebuilt app and wants fresh per-request store bindings.
 
+## Ingress Body Conversion
+
+The converter preserves a genuine native Fetch request's null `body` as buffered empty, without
+calling a reader. The standard dispatch path inspects this property only after admission, so
+refusal and abort do not acquire a source. A present body always stays on the lazy stream path,
+including zero-length ArrayBuffer/Uint8Array bodies and streams that will immediately end.
+Neither `Content-Length` nor SDK read-once bookkeeping is an absence signal; consumed present
+bodies retain their existing stream-construction error.
+
+This preserves a transport fact, not general GET/HEAD stream settlement. Request-context state
+remains Initial and framing remains `HostManaged`. `into_request()` transfers buffered empty
+without draining, while the first `body_bytes()` read still checks the admitted deadline and
+returns sticky 408 after expiry. No capability is promoted. Demo and generated handlers inherit
+the converter without an API change; local runtime checks do not qualify hosted behavior.
+
 ## Building
 
 Build for Cloudflare's Wasm target:

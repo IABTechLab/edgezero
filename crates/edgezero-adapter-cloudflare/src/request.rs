@@ -37,7 +37,7 @@ use futures_util::future::{Either, select};
 use futures_util::stream::Empty;
 #[cfg(feature = "test-utils")]
 use futures_util::stream::poll_fn;
-use futures_util::stream::{LocalBoxStream, once, unfold};
+use futures_util::stream::{LocalBoxStream, unfold};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use worker::{
     Context, Delay, Env, Error as WorkerError, Method, Request as CfRequest, Response as CfResponse,
@@ -314,8 +314,10 @@ pub async fn into_core_request(
     env: Env,
     ctx: Context,
 ) -> Result<Request, EdgeError> {
-    let request = into_core_request_head(&req, env, ctx, MonotonicClock::default())?;
-    attach_core_body(req, request, None)
+    let mut request = into_core_request_head(&req, env, ctx, MonotonicClock::default())?;
+    *request.body_mut() =
+        cloudflare_body_stream(req)?.map_or_else(Body::empty, Body::from_external_stream);
+    Ok(request)
 }
 
 fn into_core_request_head(
@@ -352,36 +354,18 @@ fn outbound_client(clock: MonotonicClock) -> HttpClient {
     HttpClient::with_client(CloudflareOutboundClient::with_clock(clock))
 }
 
-fn attach_core_body(
-    req: CfRequest,
-    mut request: Request,
-    read_lifetime: Option<(Deadline, MonotonicClock)>,
-) -> Result<Request, EdgeError> {
-    let stream = cloudflare_body_stream(req)?;
-    *request.body_mut() = match read_lifetime {
-        Some((deadline, monotonic_clock)) => {
-            cloudflare_deadline_body(stream, deadline, monotonic_clock)
-        }
-        None => Body::from_external_stream(stream),
-    };
-    Ok(request)
-}
-
 fn cloudflare_body_stream(
     mut req: CfRequest,
-) -> Result<LocalBoxStream<'static, Result<bytes::Bytes, WorkerError>>, EdgeError> {
-    if req.inner().body().is_some() {
-        return Ok(req
-            .stream()
+) -> Result<Option<LocalBoxStream<'static, Result<bytes::Bytes, WorkerError>>>, EdgeError> {
+    if req.inner().body().is_none() {
+        return Ok(None);
+    }
+    Ok(Some(
+        req.stream()
             .map_err(EdgeError::internal)?
             .map_ok(bytes::Bytes::from)
-            .boxed_local());
-    }
-
-    // The Workers test runtime and some host-created requests expose an
-    // ArrayBuffer but no ReadableStream. Keep the fallback read lazy so
-    // admission still runs before the first body byte is requested.
-    Ok(once(async move { req.bytes().await.map(bytes::Bytes::from) }).boxed_local())
+            .boxed_local(),
+    ))
 }
 
 fn cloudflare_deadline_body<Source, SourceError>(
@@ -501,7 +485,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        move || Ok(source),
+        move || Ok(Some(source)),
         Ok,
     )
     .await
@@ -535,7 +519,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        make_source,
+        move || make_source().map(Some),
         deliver,
     )
     .await
@@ -561,7 +545,7 @@ pub async fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
-        || -> Result<Empty<Result<Bytes, io::Error>>, EdgeError> {
+        || -> Result<Option<Empty<Result<Bytes, io::Error>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "cloudflare source construction failed"
             )))
@@ -608,7 +592,7 @@ async fn dispatch_ingress_stream_and<Source, SourceError, MakeSource, Output, De
 where
     Source: futures_util::Stream<Item = Result<bytes::Bytes, SourceError>> + 'static,
     SourceError: Into<anyhow::Error> + 'static,
-    MakeSource: FnOnce() -> Result<Source, EdgeError>,
+    MakeSource: FnOnce() -> Result<Option<Source>, EdgeError>,
     Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
 {
     let request_method = head_request.method().clone();
@@ -654,8 +638,9 @@ where
                 .map_err(|delivery_error| edge_error_to_worker(&delivery_error));
         }
     };
-    *head_request.body_mut() =
-        cloudflare_deadline_body(source, prepared.read_deadline(), prepared.monotonic_clock());
+    *head_request.body_mut() = source.map_or_else(Body::empty, |stream| {
+        cloudflare_deadline_body(stream, prepared.read_deadline(), prepared.monotonic_clock())
+    });
     dispatch_core_request(app, head_request, stores, prepared, deliver).await
 }
 
@@ -965,14 +950,221 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use edgezero_core::context::RequestContext;
+    use edgezero_core::context::{BodyKind, RequestContext};
     use edgezero_core::http::{Response, StatusCode, response_builder};
+    use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::outbound::OutboundRequest;
+    use edgezero_core::response_egress::ResponseEgressCompletion;
     use edgezero_core::router::RouterService;
     use wasm_bindgen_test::wasm_bindgen_test;
-    use worker::js_sys::Object;
+    use worker::js_sys::{Function, Object, Reflect, Uint8Array};
     use worker::wasm_bindgen::JsCast as _;
+    use worker::wasm_bindgen::JsValue;
     use worker::worker_sys::Context as WorkerSysContext;
+
+    fn native_request(method: Method, path: &str, body: Option<&[u8]>) -> CfRequest {
+        let mut init = worker::RequestInit::new();
+        init.with_method(method);
+        if let Some(bytes) = body {
+            init.with_body(Some(Uint8Array::from(bytes).into()));
+        }
+        CfRequest::new_with_init(&format!("https://example.com{path}"), &init)
+            .expect("native request")
+    }
+
+    fn env_context() -> (Env, Context) {
+        (
+            Object::new().unchecked_into::<Env>(),
+            Context::new(Object::new().unchecked_into::<WorkerSysContext>()),
+        )
+    }
+
+    async fn native_ingress(
+        app: &App,
+        req: CfRequest,
+    ) -> Result<ResponseEgressEnvelope, WorkerError> {
+        let (env, context) = env_context();
+        let head = into_core_request_head(&req, env, context, app.monotonic_clock())
+            .expect("request head");
+        dispatch_ingress_stream_and(
+            app,
+            head,
+            Stores::default(),
+            app.monotonic_now(),
+            move || cloudflare_body_stream(req),
+            Ok,
+        )
+        .await
+    }
+
+    #[wasm_bindgen_test]
+    async fn native_null_body_stays_buffered_without_reading() {
+        for method in [Method::Get, Method::Head, Method::Post] {
+            let req = native_request(method, "/", None);
+            assert!(req.inner().body().is_none());
+            let tripwire = Function::new_no_args("throw new Error('unexpected body read');");
+            assert!(
+                Reflect::set(req.inner(), &JsValue::from_str("arrayBuffer"), &tripwire)
+                    .expect("install read tripwire")
+            );
+            let (env, context) = env_context();
+            let request = into_core_request(req, env, context).await.expect("request");
+            assert_eq!(request.body().as_bytes(), Some(&[][..]));
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn native_present_body_remains_a_lazy_stream_even_when_empty() {
+        for bytes in [b"".as_slice(), b"data".as_slice()] {
+            for value in [
+                JsValue::from(Uint8Array::from(bytes)),
+                Uint8Array::from(bytes).buffer().into(),
+            ] {
+                let mut init = worker::RequestInit::new();
+                init.with_method(Method::Post).with_body(Some(value));
+                let mut req =
+                    CfRequest::new_with_init("https://example.com/", &init).expect("request");
+                req.headers_mut()
+                    .expect("mutable headers")
+                    .set("content-length", "0")
+                    .expect("header");
+                assert!(req.inner().body().is_some());
+                let (env, context) = env_context();
+                let request = into_core_request(req, env, context).await.expect("request");
+                assert!(request.body().is_stream());
+                assert_eq!(
+                    request
+                        .into_body()
+                        .into_bytes_bounded(4)
+                        .await
+                        .expect("body")
+                        .as_ref(),
+                    bytes
+                );
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn native_absence_does_not_depend_on_sdk_read_once_bookkeeping() {
+        for body in [None, Some(b"data".as_slice())] {
+            let mut req = native_request(Method::Post, "/", body);
+            assert_eq!(
+                req.bytes().await.expect("original read").as_slice(),
+                body.unwrap_or_default()
+            );
+            let (env, context) = env_context();
+            let outcome = into_core_request(req, env, context).await;
+            if body.is_none() {
+                assert_eq!(
+                    outcome.expect("absent body").body().as_bytes(),
+                    Some(&[][..])
+                );
+            } else {
+                assert!(matches!(outcome, Err(EdgeError::Internal { .. })));
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn admitted_null_body_transfers_but_first_read_keeps_expired_deadline() {
+        #[edgezero_core::action]
+        async fn transfer(ctx: RequestContext) -> Result<Response, EdgeError> {
+            assert_eq!(ctx.body_kind(), BodyKind::Initial);
+            let request = ctx.into_request()?;
+            response_builder()
+                .header(
+                    "x-body-buffered",
+                    if request.body().is_stream() {
+                        "no"
+                    } else {
+                        "yes"
+                    },
+                )
+                .body(Body::empty())
+                .map_err(EdgeError::internal)
+        }
+
+        #[edgezero_core::action]
+        async fn read(ctx: RequestContext) -> Result<Response, EdgeError> {
+            assert_eq!(ctx.body_kind(), BodyKind::Initial);
+            let error = ctx.body_bytes(4).await.expect_err("expired first read");
+            assert_eq!(error.status(), StatusCode::REQUEST_TIMEOUT);
+            assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+            assert_eq!(
+                ctx.take_body().expect_err("sticky timeout").status(),
+                error.status()
+            );
+            Err(error)
+        }
+
+        let start = MonotonicInstant::now();
+        let mut app = App::new(
+            RouterService::builder()
+                .post("/transfer", transfer)
+                .post("/read", read)
+                .build(),
+        );
+        app.set_monotonic_clock(MonotonicClock::new(move || start));
+        app.set_ingress_admission_policy(|head| {
+            assert_eq!(head.framing(), IngressFraming::HostManaged);
+            AdmissionDecision::Admit {
+                completion: ResponseEgressCompletion::empty(),
+                grant: IngressGrant::empty(),
+                read_deadline: Deadline::at_instant(head.request_start()),
+            }
+        });
+        for body in [None, Some(b"".as_slice()), Some(b"data".as_slice())] {
+            for path in ["/transfer", "/read"] {
+                let mut egress = native_ingress(&app, native_request(Method::Post, path, body))
+                    .await
+                    .expect("response");
+                let response = egress.response_mut();
+                if path == "/read" {
+                    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+                } else {
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(
+                        response.headers().get("x-body-buffered").expect("header"),
+                        if body.is_none() { "yes" } else { "no" }
+                    );
+                }
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn native_source_is_not_inspected_on_refusal_or_abort() {
+        for abort in [false, true] {
+            let mut app = App::new(RouterService::builder().build());
+            app.set_ingress_admission_policy(move |_head| {
+                if abort {
+                    AdmissionDecision::Abort
+                } else {
+                    AdmissionDecision::Refuse {
+                        completion: ResponseEgressCompletion::empty(),
+                        response: response_builder()
+                            .status(StatusCode::SERVICE_UNAVAILABLE)
+                            .body(Body::empty())
+                            .expect("refusal"),
+                    }
+                }
+            });
+            let req = native_request(Method::Post, "/", Some(b"data"));
+            Function::new_with_args("request",
+                "Object.defineProperty(request, 'body', {get() {throw new Error('unexpected source inspection');}});")
+                .call1(&JsValue::UNDEFINED, req.inner()).expect("install source tripwire");
+            let outcome = native_ingress(&app, req).await;
+            if abort {
+                assert!(outcome.is_err());
+            } else {
+                assert_eq!(
+                    outcome.expect("refusal").response_mut().status(),
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            }
+        }
+    }
 
     #[wasm_bindgen_test]
     fn into_http_method_defaults_unknown_to_get() {

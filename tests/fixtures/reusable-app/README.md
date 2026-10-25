@@ -357,6 +357,13 @@ nonempty fixed/chunked controls. Host snapshots do not consume or replace body d
 signals are unavailable at the existing entrypoint; Spin hints are explicitly not raw framing
 evidence. HTTP/2/3, hosted behavior and provider scheduler-context rejection remain unverified.
 
+The empty probe transfers the Initial context body with `into_request()` before bounded
+collection and reports `body_is_stream` separately from context state. Cloudflare must preserve
+the original pre-conversion null-body snapshot as buffered empty for absent/zero-length framing,
+and preserve every present source as streamed for chunked-empty and nonempty controls. The
+validator rejects missing, mistyped or contradictory storage evidence; byte counts alone cannot
+prove this property. First-`body_bytes` deadline precedence has separate adapter regressions.
+
 The initial local run passed on native/Viceroy but exposed a Spin response-owned egress defect.
 Separate ready/timer-only adapter streams and SDK-native controls isolated early successful
 host observation being mistaken for transport failure. After the internal fix, Spin passes
