@@ -537,6 +537,14 @@ mod spin_impl {
                 log::debug!("Spin host does not support the outbound {name} timeout option");
                 Ok(())
             }
+            Err(RequestOptionsError::Immutable | RequestOptionsError::Other(_))
+                if option == SpinTimeoutOption::Connect =>
+            {
+                log::debug!(
+                    "Spin host rejected the outbound connect timeout option; retaining the aggregate deadline race"
+                );
+                Ok(())
+            }
             Err(RequestOptionsError::Immutable) => Err(EdgeError::internal_with_detail(
                 anyhow::anyhow!("Spin outbound {name} timeout option is immutable"),
                 preparation_detail(SpinFailureCause::RequestOptionsImmutable(option)),
@@ -1001,6 +1009,85 @@ mod spin_impl {
             .remaining_at(clock.now())
             .map(|remaining| remaining.min(budget.duration))
             .ok_or_else(|| timeout_error(budget.cause))
+    }
+
+    /// Exercises real timer wakeups; requires an asynchronous WASI service export.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub async fn connect_timeout_fallback_holds_for_test() -> bool {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use futures_util::future::pending;
+
+        for outcome in [
+            Ok(()),
+            Err(RequestOptionsError::NotSupported),
+            Err(RequestOptionsError::Immutable),
+            Err(RequestOptionsError::Other(None)),
+            Err(RequestOptionsError::Other(Some(
+                "provider-secret-token".to_owned(),
+            ))),
+        ] {
+            if set_timeout_option(SpinTimeoutOption::Connect, &outcome).is_err() {
+                return false;
+            }
+            for cause in [
+                BudgetSource::PerCallTimeout,
+                BudgetSource::RequestDeadline,
+                BudgetSource::BatchCutoff,
+                BudgetSource::Default,
+            ] {
+                for expired in [false, true] {
+                    let start = MonotonicInstant::now();
+                    let duration = Duration::from_millis(2);
+                    let Some(end) = start.checked_add(duration) else {
+                        return false;
+                    };
+                    let budget = DispatchBudget {
+                        cause,
+                        deadline: Deadline::at_instant(end),
+                        duration,
+                    };
+                    let clock = MonotonicClock::new(move || if expired { end } else { start });
+                    let owner = Rc::new(());
+                    let released = Rc::downgrade(&owner);
+                    let polls = Rc::new(Cell::new(0_usize));
+                    let operation_polls = Rc::clone(&polls);
+                    let operation = async move {
+                        operation_polls.set(operation_polls.get().saturating_add(1));
+                        pending::<()>().await;
+                        drop(owner);
+                    };
+                    let result = race_deadline(operation, budget, &clock, |()| None).await;
+                    if !matches!(result, Err(EdgeError::GatewayTimeout { cause: actual, provider_detail: None, .. }) if actual == cause)
+                        || polls.get() != usize::from(!expired)
+                        || released.upgrade().is_some()
+                    {
+                        return false;
+                    }
+                }
+                let start = MonotonicInstant::now();
+                let duration = Duration::from_secs(1);
+                let Some(end) = start.checked_add(duration) else {
+                    return false;
+                };
+                let budget = DispatchBudget {
+                    cause,
+                    deadline: Deadline::at_instant(end),
+                    duration,
+                };
+                let clock = MonotonicClock::new(move || start);
+                if !matches!(
+                    race_deadline(async { 7_u8 }, budget, &clock, |_output| None).await,
+                    Ok(7)
+                ) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Runs request-option, response-clock, and fairness checks in the hosted contract binary.
@@ -1645,6 +1732,7 @@ mod spin_impl {
 pub use spin_impl::SpinOutboundClient;
 #[cfg(all(feature = "spin", target_arch = "wasm32", feature = "test-utils"))]
 pub use spin_impl::{
+    connect_timeout_fallback_holds_for_test,
     converted_response_content_type_provenance_holds_for_test,
     converted_response_retains_injected_clock_for_test, deferred_clock_paths_hold_for_test,
     map_spin_preparation_header_for_test, provider_deadline_diagnostics_hold_for_test,

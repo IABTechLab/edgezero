@@ -188,9 +188,13 @@ Cloudflare request construction and Spin header, timeout-option and target sette
 `RequestPreparation`. This phase describes the observed API boundary, not transport progress;
 an error returned by an SDK send operation still has the Send phase, including a reqwest builder
 error. Cloudflare's SDK erases constructor exception types, so those causes remain Unknown.
-Spin preserves all five header-error categories and the rejected timeout option, discarding
-`Other` messages. Unit-returning target setters record component rejection without fabricating
-an HTTP transport error code. Unsupported timeout options remain advisory successes.
+Spin preserves all five header-error categories and fatal first-byte/between-bytes setter
+rejections, discarding `Other` messages. A connect-setting refusal is advisory for every
+`RequestOptionsError`: it does not fail the request or become the cause of a later timeout.
+The unchanged outer race still bounds guest-visible pending work by the aggregate deadline;
+the host may retain an opaque phase default. Unit-returning target setters record component
+rejection without fabricating an HTTP transport error code. `NotSupported` remains advisory
+for all timeout options.
 Shared response-header conversion is not labeled as request preparation, and local validation
 does not invent provider evidence.
 

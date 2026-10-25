@@ -203,6 +203,22 @@ mod tests {
     }
 
     #[test]
+    fn connect_timeout_refusals_remain_advisory() {
+        for outcome in [
+            Ok(()),
+            Err(RequestOptionsError::NotSupported),
+            Err(RequestOptionsError::Immutable),
+            Err(RequestOptionsError::Other(None)),
+            Err(RequestOptionsError::Other(Some(
+                "provider-secret-token".to_owned(),
+            ))),
+        ] {
+            set_timeout_option_for_test(SpinTimeoutOption::Connect, &outcome)
+                .expect("connect settings retain aggregate deadline fallback");
+        }
+    }
+
+    #[test]
     fn provider_diagnostics_preserve_preparation_setter_causes_without_text() {
         for (source, cause) in [
             (HeaderError::Forbidden, SpinFailureCause::HeaderForbidden),
@@ -235,7 +251,6 @@ mod tests {
             );
         }
         for (option, name) in [
-            (SpinTimeoutOption::Connect, "connect"),
             (SpinTimeoutOption::FirstByte, "first-byte"),
             (SpinTimeoutOption::BetweenBytes, "between-bytes"),
         ] {

@@ -346,6 +346,13 @@ It awaits the production I/O helper inside the existing async HTTP export; the s
 test export cannot wait on SDK timers. The probe creates no downstream writer and does not qualify
 hosted delivery or change capability claims. Its test utilities are enabled only by `progress`.
 
+`/progress/sdk-connect-fallback` uses that same async export for five Connect setter outcomes
+and four aggregate budget sources. Its 60 checks cover ready success, a non-self-waking operation
+released by the real SDK timer, and expired-entry rejection without polling. The captured guest
+owner is released on timeout; no refusal detail becomes the later timeout's cause. The injected
+timestamp stays frozen during the positive-remaining test, so a clock jump cannot supply progress.
+This is guest-race evidence, not independently configured connect enforcement or host teardown.
+
 Each progress target also runs `/progress/framing-trailers` through its ordinary App/converter.
 The client must receive the unchanged 500 fallback with no sentinel leakage in headers or body.
 On Viceroy the harness additionally requires one `UnsupportedTrailers` terminal report and the

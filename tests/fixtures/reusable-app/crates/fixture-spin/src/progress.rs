@@ -1,4 +1,7 @@
-use edgezero_adapter_spin::response::response_source_diagnostics_hold_for_test;
+use edgezero_adapter_spin::{
+    outbound::connect_timeout_fallback_holds_for_test,
+    response::response_source_diagnostics_hold_for_test,
+};
 use edgezero_core::EdgeError;
 use fixture_core::qualification::progress::{self, Job, ProbeRuntime, ProgressHooks};
 use futures::{channel::oneshot, future::LocalBoxFuture};
@@ -80,7 +83,17 @@ pub async fn dispatch(
         .unwrap_or("");
     if case == "sdk-source-diagnostics" {
         response_source_diagnostics_hold_for_test().await?;
-        return sdk_source_diagnostics_response();
+        return sdk_probe_response(
+            json!({"source_diagnostics":"pass", "cases":8, "qualification":false}),
+        );
+    }
+    if case == "sdk-connect-fallback" {
+        if !connect_timeout_fallback_holds_for_test().await {
+            anyhow::bail!("connect refusal lost aggregate deadline enforcement");
+        }
+        return sdk_probe_response(
+            json!({"connect_fallback":"pass", "outcomes":5, "budget_sources":4, "checks":60, "qualification":false}),
+        );
     }
     if case == "sdk-marker-headers" {
         return sdk_marker_headers(&request).await;
@@ -107,13 +120,15 @@ pub async fn dispatch(
     response
 }
 
-fn sdk_source_diagnostics_response() -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
+fn sdk_probe_response(
+    probe: serde_json::Value,
+) -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
     use spin_sdk::http::IntoResponse as _;
     edgezero_core::http::response_builder()
         .header("content-type", "application/json")
-        .body(json!({"source_diagnostics":"pass", "cases":8, "qualification":false}).to_string())?
+        .body(probe.to_string())?
         .into_response()
-        .map_err(|_| anyhow::anyhow!("source diagnostic fixture conversion failed"))
+        .map_err(|_| anyhow::anyhow!("SDK probe fixture conversion failed"))
 }
 
 async fn sdk_marker_headers(

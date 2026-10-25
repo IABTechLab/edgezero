@@ -76,6 +76,15 @@ separately from the portable API and must be considered when declaring required 
   Image Optimizer remains unavailable in Begin/Batch. This does not implement eager dispatch
   or redirect following, change handler/demo/template APIs, or upgrade provider capabilities.
 
+### Spin Connect-Setting Fallback
+
+- Treat every host connect-timeout setter refusal as advisory under the existing aggregate
+  deadline race. Do not turn `Immutable` or `Other` into a request-fatal 500 or expose provider
+  text. Keep first-byte/between-bytes typed setup failures unchanged.
+- Add SDK outcome coverage and a local asynchronous Spin service probe for actual timer wakeup,
+  ready success, expired-entry zero polling, timeout provenance and guest-owner release. This
+  does not add independently configured connect timeouts or upgrade provider capabilities.
+
 ### Outbound Response Handoff Deadlines
 
 - Check the selected absolute budget immediately before returning any successful outbound

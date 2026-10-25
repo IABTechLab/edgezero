@@ -738,24 +738,31 @@ fn validate_framing_evidence(events: &[Value]) -> Result<()> {
 }
 
 fn source_diagnostic_checks(port: u16, records: &mut Records) -> Result<()> {
-    let reply = net::request(
-        port,
-        "/progress/sdk-source-diagnostics",
-        &token(),
-        None,
-        None,
-    )?;
-    let probe = guest(&reply)?;
-    let result = require(
-        reply["status"] == 200
-            && probe == json!({"source_diagnostics":"pass", "cases":8, "qualification":false}),
-        "Spin SDK source diagnostic race changed",
-    );
-    records.push(
-        json!({"event":"source-diagnostic-race", "adapter":"spin", "cases":8,
-        "status":if result.is_ok(){"pass"}else{"fail"}, "client":reply, "qualification":false}),
-    )?;
-    result
+    for (path, event, cases, expected) in [
+        (
+            "/progress/sdk-source-diagnostics",
+            "source-diagnostic-race",
+            8,
+            json!({"source_diagnostics":"pass", "cases":8, "qualification":false}),
+        ),
+        (
+            "/progress/sdk-connect-fallback",
+            "connect-timeout-fallback",
+            60,
+            json!({"connect_fallback":"pass", "outcomes":5, "budget_sources":4, "checks":60, "qualification":false}),
+        ),
+    ] {
+        let reply = net::request(port, path, &token(), None, None)?;
+        let probe = guest(&reply)?;
+        let result = require(
+            reply["status"] == 200 && probe == expected,
+            "Spin SDK policy probe changed",
+        );
+        records.push(json!({"event":event, "adapter":"spin", "cases":cases, "observation":probe,
+            "status":if result.is_ok(){"pass"}else{"fail"}, "client":reply, "qualification":false}))?;
+        result?;
+    }
+    Ok(())
 }
 
 fn response_controls(

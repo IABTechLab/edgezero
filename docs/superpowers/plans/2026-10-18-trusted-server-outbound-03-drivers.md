@@ -362,6 +362,14 @@ and fixture-harness `net.rs`/`runners.rs`.
 **Files:** Modify `crates/edgezero-adapter-spin/src/outbound.rs`, `request.rs`, `response.rs`;
 tests in `tests/contract.rs` and `tests/sdk_resources.rs`.
 
+**Existing-path checkpoint, 2026-10-25:** Connect setter refusals now remain advisory under the
+unchanged aggregate race. The SDK matrix covers every outcome; the async local Spin progress
+fixture proves ready success, actual pending timer wakeup, expired-entry zero polling and owner
+release across all existing budget sources. First-byte/between-bytes typed setup failures remain.
+This is only the refusal-handling part of the third checkbox below, not configured connect
+mapping, eager/head-first integration, hosted expiry proof or completion of D4. See the
+[master checkpoint](2026-10-18-trusted-server-outbound-implementation.md#spin-connect-refusal-checkpoint-2026-10-25).
+
 - [ ] Add real SDK-resource cases for unpolled begin/batch dispatch, pending header/body deadline,
       original coding, and response handoff. Run the pinned SDK-resource runner, not a compile-only
       `wasm32-wasip2` check or a native test-double substitute.

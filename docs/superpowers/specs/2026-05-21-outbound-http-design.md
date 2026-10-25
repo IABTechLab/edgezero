@@ -6190,35 +6190,41 @@ without a replacement send. The former
           "outbound deadline exceeds WASI duration range"
       )))?
       .max(1);
-  let mut unsupported_timer_option = false;
-  let mut apply_timer_option = |option_result| {
+  use edgezero_core::error_detail::SpinTimeoutOption;
+  let mut advisory_timer_refusal = false;
+  let mut apply_timer_option = |option, option_result| {
       match option_result {
           Ok(()) => Ok(()),
           // WASI explicitly permits a host not to implement an option. The outer
           // monotonic race still provides the guest-visible deadline, so this is the
           // documented BestEffort fallback rather than a request-fatal 500.
           Err(types::RequestOptionsError::NotSupported) => {
-              unsupported_timer_option = true;
+              advisory_timer_refusal = true;
               Ok(())
           }
+          Err(types::RequestOptionsError::Immutable | types::RequestOptionsError::Other(_))
+              if option == SpinTimeoutOption::Connect => {
+                  advisory_timer_refusal = true;
+                  Ok(())
+              }
           Err(types::RequestOptionsError::Immutable) => Err(EdgeError::internal(
               anyhow::anyhow!(
                   "WASI outbound request options unexpectedly immutable"
               ),
           )),
-          Err(types::RequestOptionsError::Other(detail)) => Err(EdgeError::internal(
+          Err(types::RequestOptionsError::Other(_)) => Err(EdgeError::internal(
               anyhow::anyhow!(
-                  "WASI outbound request option failed: {detail:?}"
+                  "WASI outbound request option failed"
               ),
           )),
       }
   };
-  apply_timer_option(opts.set_between_bytes_timeout(Some(transport_ns)))?;
-  apply_timer_option(opts.set_connect_timeout(Some(transport_ns)))?;
-  apply_timer_option(opts.set_first_byte_timeout(Some(transport_ns)))?;
-  if unsupported_timer_option {
-      log::warn!(
-          "Spin host does not support one or more WASI HTTP timeout options; \
+  apply_timer_option(SpinTimeoutOption::Connect, opts.set_connect_timeout(Some(transport_ns)))?;
+  apply_timer_option(SpinTimeoutOption::FirstByte, opts.set_first_byte_timeout(Some(transport_ns)))?;
+  apply_timer_option(SpinTimeoutOption::BetweenBytes, opts.set_between_bytes_timeout(Some(transport_ns)))?;
+  if advisory_timer_refusal {
+      log::debug!(
+          "Spin host refused one or more advisory WASI HTTP timeout settings; \
            retaining the outer EdgeZero deadline race"
       );
   }
@@ -6463,8 +6469,10 @@ without a replacement send. The former
   response-side only — the WIT states they are *"separate from any the user may use to
   bound an asynchronous call."* They are **not** a substitute for the race above. Attempt
   to set all three to the ceiled remaining effective budget and classify every
-  `RequestOptionsError`: `NotSupported` logs one degradation warning and proceeds under
-  the authoritative outer race; `Immutable` and `Other(..)` are internal setup failures.
+  `RequestOptionsError`: `NotSupported` is advisory for every setting. Every connect-setting
+  refusal, including `Immutable` and `Other(..)`, proceeds under the authoritative outer race;
+  it does not attach a provider cause to a later timeout. First-byte/between-bytes `Immutable`
+  and `Other(..)` remain typed internal setup failures. Advisory logs never include provider text.
   When all three are accepted, the host's connect, first-byte, and between-bytes phases use
   the configured budget. Other host timeout classes such as DNS and connection-write have
   no corresponding WASI setter and may still fire independently. When one is unsupported,
@@ -6752,7 +6760,7 @@ Each adapter crate tests its shipped conversion and classification seams.
 | Timeout provenance | Each adapter's actual timed-out result covers timeout-wins, deadline-wins, and synthetic-default input selection in single send, buffered fan-out, and streamed error chunks; no adapter emits a bare un-attributed timeout **for an EdgeZero-owned budget timer**. Spin separately proves that an early WASI provider timeout is 504 with `BudgetSource::Unspecified`, while an error observed at/after absolute expiry is attributed to the selected budget. Fastly proves configured connection/response phase timers retain the selected cause, an early unconfigured DNS timeout is `Unspecified`, and absolute expiry wins every simultaneous result. |
 | Fastly stages | Backend identity/canonical host/TLS/SNI inputs, true ceil-to-millisecond phase rounding, cold registration, dispatch-all-before-selection, selected-handle identity reassociation, bounded selection groups, and streamed-upload cooperative checks match §4.3. Heterogeneous-host/budget tests prove distinct backend identities; a scripted cold-registration test proves an over-slack later cache miss is rejected before another registration. Target-neutral tests prove selection metadata follows provider-returned handle identity, and the Fastly contract gate proves streamed-slot preflight failures do not poison eligible siblings. The feature-gated overhead seam proves the final arming guard. `SendFailure` distinguishes budgeted phase timeout from unconfigured provider timeout; both map to 504, with the exact provenance boundary above. Pre-response DNS/connect/TLS establishment -> 502 reason `Unreachable`, later transport -> 502 reason `Transport`, upstream protocol -> 502 reason `Protocol`, unknown/registration rejection -> 502 reason `Unspecified`, local invariants -> 500, and the separately named Fastly platform-internal class -> 500. SDK-gated in-crate tests construct every known `SendErrorCause` and assert both `cause_to_failure` and composed status/kind/reason, including before/at/after deadline provenance; the Fastly WASM `--lib` gate executes them. Only hypothetical future variants remain compile/review coverage. |
 | Fastly upload finalization | Empty-source EOF and multi-chunk success call `finish()` exactly once before response wait. Source/cap failure and pre-finish expiry drop both handles without finishing; a typed source error is preserved. Write/flush/finish errors within budget are 502; success or failure returning at expiry is attributed 504. A finish failure or post-finish expiry never waits on `PendingRequest`, and dropping the send future settles its owned handles without successful finalization. Tests use the production upload driver with a scripted writer/pending-handle seam; they do not claim a finite host-write bound. |
-| Spin request protocol | Exercise every `run_exchange` transition and ownership boundary: after full upload, `send` continues to be polled but a ready result is retained until `request_done` succeeds; a `request_done` error wins over that stored result and is mapped; reader-gone retains but never polls `request_done` until `send` resolves, then drops it before response conversion; send-first drops all request handles; clean EOF/reader-gone writes `Ok(None)` trailers; source/cap/deadline failure leaves the default `Err`. Biased simultaneous readiness makes an already-ready pump failure beat `send`, while send ready before a later source failure remains authoritative. An always-ready empty-chunk source yields between chunks so send/timer polling cannot starve, and no request-side handle enters a streamed response wrapper. The target-neutral injected RequestOptions suite covers all setters accepted, any setter NotSupported (warn once and retain the outer race), Immutable, and Other. The real SDK-resource suite invokes each setter and asserts only the pinned host's actual result. |
+| Spin request protocol | Exercise every `run_exchange` transition and ownership boundary: after full upload, `send` continues to be polled but a ready result is retained until `request_done` succeeds; a `request_done` error wins over that stored result and is mapped; reader-gone retains but never polls `request_done` until `send` resolves, then drops it before response conversion; send-first drops all request handles; clean EOF/reader-gone writes `Ok(None)` trailers; source/cap/deadline failure leaves the default `Err`. Biased simultaneous readiness makes an already-ready pump failure beat `send`, while send ready before a later source failure remains authoritative. An always-ready empty-chunk source yields between chunks so send/timer polling cannot starve, and no request-side handle enters a streamed response wrapper. The injected RequestOptions suite covers accepted settings, advisory NotSupported for every setter, advisory Immutable/Other for Connect, and typed Immutable/Other errors for FirstByte/BetweenBytes. The local async Spin service additionally proves pending aggregate timer wakeup, expired-entry zero polling and guest-owner release after each connect outcome; the synchronous SDK command runner does not supply that timer evidence. The SDK-resource suite separately invokes each real setter and records the pinned host's actual result. |
 | Spin response protocol | `consume_body` receives the caller-result reader; stream/trailer handles retain the writer; clean EOF/trailers writes `Ok`; body/decode/deadline failure writes or defaults to `Err`; no handle is dropped before its terminal branch. Ready-empty raw input and continuously ready decoded output hit finite input/output quotas, return `Pending`, poll the outer timer/siblings, and retain counters across calls. |
 | Spin error classifier | Enumerate every pinned `ErrorCode` with no wildcard. At/after absolute expiry every simultaneous SDK result -> attributed 504. Before expiry, the five provider timeout variants -> 504 with `BudgetSource::Unspecified`; caller-controlled request denied/body/URI/header-size variants -> 400; demonstrated length/method/URI/trailer/config invariants -> 500; pre-response DNS/connect/TLS establishment -> 502 reason `Unreachable`; later connection/read/write failure -> 502 reason `Transport`; upstream response framing/protocol -> 502 reason `Protocol`; host `InternalError`/forced future fallback -> 502 reason `Unspecified`. Shared decode failures separately assert the exact coding reason. Test the three actual `ErrorCode` sites: `client::send`, `request_done`, and the response trailers/completion future. Test component-stream termination and caller-result `FutureWriteError` through their distinct policies; synthetic setter outcomes stay in the injected suite because the real host controls them. |
 | Spin timer | Timer selection returns guest-visible 504 and drops owned guest handles. Tests do **not** claim bounded host teardown; that remains Tier 3 characterization and an upgrade criterion. |

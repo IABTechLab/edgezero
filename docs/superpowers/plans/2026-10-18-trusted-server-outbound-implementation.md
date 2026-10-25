@@ -12,11 +12,12 @@
 
 ## Status and Authority
 
-### Current Delivery Dashboard (2026-10-24)
+### Current Delivery Dashboard (2026-10-25)
 
-Reconciled against implementation commit `40ad2dc17a6102795ab248e040695652c50072eb`.
+Reconciled against implementation commit `622f996a405445221799765c21da4dbc74ffce69` and the
+scoped working-tree connect-refusal checkpoint below.
 This is the current task-level implementation summary, not qualification of that SHA. The
-subsequent [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
+recorded [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
 activates eleven existing criteria without changing the production implementation snapshot.
 The checkpoint sections below retain their historical commands, results and limitations. The
 [Requirement Coverage](#requirement-coverage) table maps every EZ requirement group to its owning
@@ -26,7 +27,7 @@ The six approved consolidation commitments are **not collectively complete**:
 
 | Commitment                                                            | Current Implementation                                                                                                                                              | Remaining Work                                                                                                                                                                                               |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1. Shared preparation, validation, normalization, decoding and limits | **Partial.** Core already owns codecs/body caps; `40ad2dc1` makes all four adapters use one header accounting/normalization operation. Time/head foundations exist. | Integrate invocation-time preparation, paired time, prepared contexts and one shared response finalizer into every live dispatch path (P1-P3, D1-D4).                                                        |
+| 1. Shared preparation, validation, normalization, decoding and limits | **Partial.** Core owns codecs/body caps, shared header accounting/normalization and mode validation. All four response handoffs recheck the original deadline; time/head foundations are not yet the live pipeline. | Integrate invocation-time preparation, paired time, prepared contexts and one shared response finalizer into every live dispatch path (P1-P3, D1-D4).                                                        |
 | 2. One pipeline for send, begin, batches and redirects                | **Partial foundations only.** Current sends/batches remain usable; pending ownership and head types are not the new live pipeline.                                  | Eager scheduling, arrival recording, nonblocking observation, mixed collection and explicit same-client Follow (P1/P4/P5, D1-D6).                                                                            |
 | 3. Remove superseded implementations and APIs without compatibility   | **Partial.** Separate public normalization/marker helpers were retired in `40ad2dc1`.                                                                               | Replace the current implementer send/batch protocol and migrate every implementation/caller atomically; no aliases, stubs or alternate transport (P1).                                                       |
 | 4. Preserve direct native Image Optimizer                             | **Single Send implemented** in `8b460dd6`, with direct typed SDK mapping and no extra fetch, buffering or serialization.                                            | Integrate with the full pipeline and Follow; qualify actual hosted transformation and performance. The synchronous blocking horizon remains UNKNOWN (D1d/Q4b).                                               |
@@ -154,6 +155,34 @@ body polls; the actual SDK test exercises both Send and Batch. See
 That ordering repair changes no public signature, client constructor, timer, transport, runtime
 pin, cutoff rule or capability. The separately approved core helper change is recorded below;
 neither slice completes shared preparation, P1/F3c/D4, or qualification.
+
+### Spin Connect-Refusal Checkpoint (2026-10-25)
+
+Complete the independent D4/EZ-4.8 refusal-handling subtask on the current live transport:
+Connect `NotSupported`, `Immutable` and `Other` are advisory, without provider text or fabricated
+timeout evidence. Keep the first-byte/between-bytes typed error policy, all configured timer values,
+the absolute budget, outer race and exchange ownership unchanged. This adds no request option,
+compatibility path, new transport or capability claim; configured connect mapping and full D4
+remain unfinished.
+
+The SDK refusal matrix failed red on Connect `Immutable`, then passes all five outcomes while
+retaining exact nonconnect diagnostics. A separate test-utils probe executes under the existing
+local Spin progress fixture's async service export: five outcomes by four budget sources by three
+cases (ready success, pending timer wakeup, expired entry), 60 cases with captured-owner release
+and no inherited refusal detail. Pending operations never self-wake; the SDK timer must make
+progress even with the injected timestamp frozen. The synchronous SDK command runner cannot block
+on an async import, confirmed with an isolated sleep control, so it is not credited with pending
+timer evidence and no executor workaround remains in its tests.
+
+`scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-progress --output /private/tmp/edgezero-spin-connect-fallback-20261025-r3`
+passes under Spin 4.1.0 with SDK 7.0.0. The retained events identify this as working-tree
+characterization based on `622f996a`, not frozen-candidate qualification. No worker panic occurred
+before shutdown; the existing post-shutdown runtime panic remains recorded, not relabeled as
+bounded host teardown. All 15 SDK-resource tests and 119 fixture-harness tests pass. All five
+primary Rust gates, both eight-feature Spin matrices, strict WASM Clippy with and without
+test-utils, the demo check, docs lint/build, docs/legacy guards and approval-identity verification
+pass. Independent spec and quality reviews found no remaining scoped blocker. No acceptance leg
+is promoted; the full atomic migration and Fastly/hosted gates remain open.
 
 ### Response Handoff Deadline Checkpoint (2026-10-25)
 
@@ -1187,7 +1216,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Partial ingress conversion:** Axum host-known-empty, Fastly SDK absence and Cloudflare native-null preservation; see the P2 checkpoints above.                | General streamed GET/HEAD settlement, paired deadlines and all-target forwarding. Ordinary Fastly bodiless forwarding is not established.                              |
 | EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial proof work:** [readiness repair/negative evidence](#g2-local-runtime-repair-checkpoint); existing transport retained.                                 | Reviewed preserving primitive, B/domain approval, multiplexer, stable backend identity and registration observations. F1 retirement/reuse is separate unfinished work. |
 | EZ-3        | D1/D5                | Blocking; remove slack only with verified bounded waits                   | **Not implemented:** current slack retained.                                                                                                                    | D1a bounded waits plus D1b approved backend policy before joint slack removal; M7 comparison.                                                                          |
-| EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Baseline terminal handoff repaired:** [checked success return](#response-handoff-deadline-checkpoint-2026-10-25); connect option/mapping pending.             | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |
+| EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Existing-path repairs:** [checked handoff](#response-handoff-deadline-checkpoint-2026-10-25) and [Spin refusal fallback](#spin-connect-refusal-checkpoint-2026-10-25); configured mapping pending. | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |
 | EZ-5        | P3; D1-D4            | Blocking; Spin conditional host result recorded                           | **Current-API slice implemented:** [original coding](#p1p3-original-coding-checkpoint) and [local relay](#p3-downstream-relay-checkpoint).                      | Head-first/new-mode integration, complete normalization/limit matrices and separately adopted optional metadata legs.                                                  |
 | EZ-6        | P4; D1-D6            | Blocking except EZ-6.31 reuse-only                                        | **Partial foundations:** [pending ownership](#p1p4-ownership-checkpoint) and local progress characterization.                                                   | Eager begin/batches on all adapters, arrival ledger/check, mixed collection/accumulator, callback/body scopes and lifetime/late-collection proof.                      |
 | EZ-7        | P3; D1-D4            | Blocking                                                                  | **Current-API slice implemented:** [marker policy](#p1p3-marker-checkpoint), [shared header accounting](#shared-header-policy-consolidation-checkpoint).        | Same policies through every new dispatch/follow path and full applicable adapter/normalization matrices.                                                               |

@@ -339,7 +339,10 @@ a later dispatch; a selected body drain can delay a sibling's terminal observati
 handle outside the active selection group can remain temporarily unobserved.
 
 ⁵ Fastly divides a total budget among provider phase timers. Spin's host may reject phase
-timer settings and retain opaque defaults. Neither can promise one fully elastic pool.
+timer settings and retain opaque defaults. Every connect-setting refusal falls back without
+an error under the unchanged aggregate deadline race. For first-byte/between-bytes settings,
+`NotSupported` is advisory; `Immutable` and `Other` remain typed setup errors. Neither adapter
+can promise one fully elastic pool or bounded host teardown.
 
 ⁶ Fastly uses an undecorated, send-owning entrypoint and the low-level `stream_to_client` response
 lifetime. Scripted pump tests and the raw ABI Viceroy test prove the pieces, but the production
