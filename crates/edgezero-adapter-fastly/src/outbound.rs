@@ -23,6 +23,9 @@
 #[cfg(feature = "fastly")]
 mod image_optimizer;
 
+#[cfg(any(feature = "fastly", test))]
+mod progress;
+
 #[cfg(test)]
 use std::time::Duration;
 
@@ -222,7 +225,7 @@ mod fastly_impl {
     #[cfg(feature = "test-utils")]
     use std::cell::Cell;
     use std::collections::HashMap;
-    use std::io::{Result as IoResult, Write};
+    use std::io::{Read as _, Result as IoResult, Write};
     use std::net::IpAddr;
     use std::num::NonZeroU64;
     use std::sync::{Mutex, OnceLock};
@@ -250,23 +253,156 @@ mod fastly_impl {
         BATCH_DISPATCH_SLACK_MAX, DEADLINE_FAR_FUTURE, Deadline, DispatchBudget, MonotonicClock,
         MonotonicInstant, dispatch_budget,
     };
+    #[cfg(test)]
+    use fastly::Body as FastlyBody;
     use fastly::backend::BackendCreationError;
-    use fastly::handle::{BodyHandle, PendingRequestHandle, ResponseHandle, select_handles};
+    use fastly::handle::{BodyHandle, PendingRequestHandle, PollHandleResult};
     use fastly::http::body::StreamingBody;
-    use fastly::http::request::{PendingRequest, SendError, SendErrorCause};
-    use fastly::{
-        Backend, Body as FastlyBody, Request as FastlyRequest, Response as FastlyResponse,
-    };
-    use futures_util::StreamExt as _;
+    use fastly::http::request::{PendingRequest, PollResult, SendError, SendErrorCause};
+    use fastly::{Backend, Request as FastlyRequest, Response as FastlyResponse};
+    use fastly_sys::fastly_async_io;
+    use futures_util::stream::FuturesUnordered;
+    use futures_util::{FutureExt as _, StreamExt as _};
     use sha2::{Digest as _, Sha256};
 
+    use super::progress::{HeadPoll, Progress, Transport};
     use super::{
         FastlyBatchObservation, driver_selection_failure, finish_fastly_batch_observation,
-        reassociate_selection, timeout_error, validate_batch_request,
+        timeout_error, validate_batch_request,
     };
 
+    type NativeProgress = Progress<NativeTransport>;
+
+    enum PendingHead {
+        Direct(PendingRequestHandle),
+        Sdk(Box<PendingRequest>),
+    }
+
+    struct NativeTransport;
+
+    impl Transport for NativeTransport {
+        type Body = BodyHandle;
+        type Head = FastlyResponse;
+        type Pending = PendingHead;
+
+        #[expect(
+            unsafe_code,
+            reason = "readiness borrows the live SDK-owned body handle without transferring ownership"
+        )]
+        #[cfg_attr(
+            not(target_arch = "wasm32"),
+            expect(
+                deprecated,
+                reason = "the pinned SDK exposes WASI handle identity only"
+            )
+        )]
+        fn body_handle(body: &BodyHandle) -> u32 {
+            // SAFETY: this observes identity only; the slot retains the owning SDK handle.
+            unsafe { body.as_u32() }
+        }
+
+        fn head_handle(pending: &PendingHead) -> Option<u32> {
+            match pending {
+                PendingHead::Direct(handle) => Some(pending_handle_id(handle)),
+                PendingHead::Sdk(_) => None,
+            }
+        }
+
+        fn poll_head(
+            &mut self,
+            pending: PendingHead,
+            budget: DispatchBudget,
+            clock: &MonotonicClock,
+        ) -> HeadPoll<PendingHead, FastlyResponse> {
+            match pending {
+                PendingHead::Direct(handle) => match handle.poll() {
+                    PollHandleResult::Pending(waiting) => {
+                        HeadPoll::Pending(PendingHead::Direct(waiting))
+                    }
+                    PollHandleResult::Done(result) => HeadPoll::Ready(
+                        result
+                            .map(|(head, body)| FastlyResponse::from_handles(head, body))
+                            .map_err(|cause| map_send_cause(&cause, budget, clock)),
+                    ),
+                },
+                PendingHead::Sdk(mut sdk) => match (*sdk).poll() {
+                    PollResult::Pending(waiting) => {
+                        *sdk = waiting;
+                        HeadPoll::Pending(PendingHead::Sdk(sdk))
+                    }
+                    PollResult::Done(result) => HeadPoll::Ready(
+                        result.map_err(|error| map_send_error(&error, budget, clock)),
+                    ),
+                },
+            }
+        }
+
+        fn read_body(
+            &mut self,
+            body: &mut BodyHandle,
+            maximum: usize,
+            budget: DispatchBudget,
+            clock: &MonotonicClock,
+        ) -> Result<Bytes, EdgeError> {
+            let mut bytes = vec![0; maximum];
+            let count = body.read(&mut bytes).map_err(|error| {
+                let classified = if budget.deadline.is_expired_at(clock.now()) {
+                    timeout_error(budget.cause)
+                } else {
+                    EdgeError::bad_gateway_with_reason(
+                        "Fastly upstream response body failed",
+                        BadGatewayReason::Transport,
+                    )
+                };
+                with_fastly_detail(
+                    classified,
+                    ProviderFailurePhase::ResponseBodyRead,
+                    FastlyFailureCause::IoError { kind: error.kind() },
+                )
+            })?;
+            if count > maximum {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "Fastly body read exceeded the supplied buffer"
+                )));
+            }
+            bytes.truncate(count);
+            Ok(Bytes::from(bytes))
+        }
+
+        #[expect(
+            unsafe_code,
+            reason = "the timed readiness ABI borrows stable IDs from owning SDK handles"
+        )]
+        fn select(&mut self, handles: &[u32], timeout_ms: u32) -> Result<Option<usize>, EdgeError> {
+            let mut selected = u32::MAX;
+            // SAFETY: the slice remains live through the call; zero means indefinite, so callers use a positive timeout.
+            let status = unsafe {
+                fastly_async_io::select(
+                    handles.as_ptr(),
+                    handles.len(),
+                    timeout_ms,
+                    &raw mut selected,
+                )
+            };
+            if !status.is_ok() {
+                return Err(with_fastly_detail(
+                    EdgeError::internal(anyhow::anyhow!("Fastly timed readiness failed")),
+                    ProviderFailurePhase::Send,
+                    FastlyFailureCause::InternalError {
+                        status: Some(status.code),
+                    },
+                ));
+            }
+            if selected == u32::MAX {
+                return Ok(None);
+            }
+            usize::try_from(selected).map(Some).map_err(|_error| {
+                EdgeError::internal(anyhow::anyhow!("invalid Fastly readiness index"))
+            })
+        }
+    }
+
     pub const DYNAMIC_BACKENDS_DISABLED_MESSAGE: &str = "Fastly dynamic backends are not enabled on this service; enable them in the service configuration";
-    const RESPONSE_READ_BYTES: usize = 16 * 1024;
     const DISPATCH_SLACK_MESSAGE: &str = "Fastly batch adapter overhead between batch_now and SDK arming (preflight + dynamic-backend lookup/creation + SDK setup) exceeded BATCH_DISPATCH_SLACK_MAX; refusing to arm SDK timers with stale duration";
 
     static BACKENDS: OnceLock<Mutex<HashMap<String, (BackendIdentity, Backend)>>> = OnceLock::new();
@@ -430,6 +566,18 @@ mod fastly_impl {
         }
 
         async fn execute(&self, prepared: PreparedRequest) -> Result<OutboundResponse, EdgeError> {
+            let progress =
+                NativeProgress::new(NativeTransport, self.clock.clone(), prepared.started_at);
+            progress
+                .drive(self.execute_with_progress(prepared, &progress))
+                .await?
+        }
+
+        async fn execute_with_progress(
+            &self,
+            prepared: PreparedRequest,
+            progress: &NativeProgress,
+        ) -> Result<OutboundResponse, EdgeError> {
             let PreparedRequest {
                 backend,
                 budget,
@@ -476,7 +624,10 @@ mod fastly_impl {
                         let pending = buffered_request
                             .send_async(backend)
                             .map_err(|error| map_send_error(&error, budget, &self.clock))?;
-                        wait_pending(pending, budget, &self.clock)?
+                        progress
+                            .head(PendingHead::Sdk(Box::new(pending)), budget)
+                            .receive()
+                            .await?
                     }
                 }
                 Body::Stream(source) => {
@@ -488,6 +639,7 @@ mod fastly_impl {
                         budget,
                         started_at,
                         self.clock.clone(),
+                        progress,
                     )
                     .await?
                 }
@@ -507,6 +659,7 @@ mod fastly_impl {
                 max_response_header_bytes,
                 max_response_header_count,
                 self.clock.clone(),
+                progress,
             )
             .await
         }
@@ -637,6 +790,27 @@ mod fastly_impl {
             }
 
             let clock = self.clock.clone();
+            let progress = NativeProgress::new(NativeTransport, clock.clone(), batch_started_at);
+            let mut exchanges = pending
+                .into_iter()
+                .map(|slot| {
+                    let PendingSlot {
+                        metadata,
+                        pending: handle,
+                    } = slot;
+                    let index = metadata.index;
+                    let lease = progress.head(PendingHead::Direct(handle), metadata.budget);
+                    let operation = progress.clone();
+                    let observed_clock = clock.clone();
+                    async move {
+                        let response = lease.receive().await;
+                        let outcome =
+                            finish_selected(response, metadata, &observed_clock, &operation).await;
+                        (index, observed_clock.now(), outcome)
+                    }
+                    .boxed_local()
+                })
+                .collect::<FuturesUnordered<_>>();
             let completions = stream! {
                 for item in completed {
                     yield OutboundBatchDriverEvent::Item(item);
@@ -647,17 +821,15 @@ mod fastly_impl {
                     return;
                 }
 
-                while !pending.is_empty() && !observation_cutoff.is_expired_at(clock.now()) {
-                    let (selection, metadata) = match select_pending_slot(&mut pending) {
+                while !exchanges.is_empty() && !observation_cutoff.is_expired_at(clock.now()) {
+                    let selected = match progress.drive(exchanges.next()).await {
                         Ok(selected) => selected,
                         Err(error) => {
                             yield driver_selection_failure(error);
                             return;
                         }
                     };
-                    let index = metadata.index;
-                    let outcome = finish_selected(selection, metadata, &clock).await;
-                    let completed_at = clock.now();
+                    let Some((index, completed_at, outcome)) = selected else { break; };
                     match finish_fastly_batch_observation(
                         index,
                         batch_started_at,
@@ -675,7 +847,7 @@ mod fastly_impl {
                     }
                 }
 
-                if !pending.is_empty() {
+                if !exchanges.is_empty() {
                     yield OutboundBatchDriverEvent::Cutoff;
                 }
             };
@@ -833,51 +1005,6 @@ mod fastly_impl {
         Ok(register())
     }
 
-    type SelectedResponse = Result<(ResponseHandle, BodyHandle), SendErrorCause>;
-
-    fn select_pending_slot(
-        slots: &mut Vec<PendingSlot>,
-    ) -> Result<(SelectedResponse, PendingSlotMetadata), EdgeError> {
-        let maximum = usize::try_from(fastly_shared::MAX_PENDING_REQS).unwrap_or(usize::MAX);
-        let selection_count = slots.len().min(maximum);
-        if selection_count == 0 {
-            return Err(EdgeError::internal(anyhow::anyhow!(
-                "Fastly batch selection requires a pending slot"
-            )));
-        }
-
-        let selected_group = slots.drain(..selection_count).collect::<Vec<_>>();
-        let mut handles = Vec::with_capacity(selection_count);
-        let mut records = Vec::with_capacity(selection_count);
-        for PendingSlot {
-            metadata,
-            pending: handle,
-        } in selected_group
-        {
-            records.push((pending_handle_id(&handle), Some(metadata)));
-            handles.push(handle);
-        }
-
-        let (selection, selected_position, remaining_handles) = select_handles(handles);
-        let remaining_ids = remaining_handles
-            .iter()
-            .map(pending_handle_id)
-            .collect::<Vec<_>>();
-        let (selected_metadata, remaining_metadata) =
-            reassociate_selection(records, selected_position, &remaining_ids)?;
-        let mut restored = remaining_handles
-            .into_iter()
-            .zip(remaining_metadata)
-            .map(|(handle, metadata)| PendingSlot {
-                metadata,
-                pending: handle,
-            })
-            .collect::<Vec<_>>();
-        restored.append(slots);
-        *slots = restored;
-        Ok((selection, selected_metadata))
-    }
-
     #[cfg_attr(
         not(target_env = "p1"),
         expect(
@@ -890,9 +1017,10 @@ mod fastly_impl {
     }
 
     async fn finish_selected(
-        selection: SelectedResponse,
+        response: Result<FastlyResponse, EdgeError>,
         metadata: PendingSlotMetadata,
         clock: &MonotonicClock,
+        progress: &NativeProgress,
     ) -> Result<OutboundResponse, EdgeError> {
         let PendingSlotMetadata {
             budget,
@@ -909,12 +1037,8 @@ mod fastly_impl {
             response_mode,
             ..
         } = metadata;
-        let response = match selection {
-            Ok((response, body)) => FastlyResponse::from_handles(response, body),
-            Err(cause) => return Err(map_send_cause(&cause, budget, clock)),
-        };
         process_response(
-            response,
+            response?,
             request_method,
             proxy_marker,
             response_decoding,
@@ -928,6 +1052,7 @@ mod fastly_impl {
             max_response_header_bytes,
             max_response_header_count,
             clock.clone(),
+            progress,
         )
         .await
     }
@@ -1179,6 +1304,7 @@ mod fastly_impl {
         max_response_header_bytes: Option<u64>,
         max_response_header_count: Option<u64>,
         clock: MonotonicClock,
+        progress: &NativeProgress,
     ) -> Result<OutboundResponse, EdgeError> {
         budget_remaining(budget, &clock)?;
         let response_clock = clock.clone();
@@ -1209,7 +1335,7 @@ mod fastly_impl {
                     declared_body: true
                 }
             );
-            let native = fastly_body_stream(response.take_body(), budget, clock.clone());
+            let native = progress.body(response.take_body().into_handle(), budget);
             if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
                 if !declared_reset_body {
                     let mut reset_stream = native;
@@ -1338,6 +1464,10 @@ mod fastly_impl {
         wait()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "upload ownership and original dispatch budget stay explicit at the provider boundary"
+    )]
     async fn send_streamed(
         request: FastlyRequest,
         backend: Backend,
@@ -1346,15 +1476,19 @@ mod fastly_impl {
         budget: DispatchBudget,
         started_at: MonotonicInstant,
         clock: MonotonicClock,
+        progress: &NativeProgress,
     ) -> Result<FastlyResponse, EdgeError> {
         dispatch_guard(started_at, budget, &clock)?;
         let (writer, pending) = request
             .send_async_streaming(backend)
             .map_err(|error| map_send_error(&error, budget, &clock))?;
-        complete_streamed_exchange(writer, source, maximum, budget, &clock, || {
-            wait_pending(pending, budget, &clock)
-        })
-        .await
+        let uploaded =
+            complete_streamed_exchange(writer, source, maximum, budget, &clock, || Ok(pending))
+                .await?;
+        progress
+            .head(PendingHead::Sdk(Box::new(uploaded)), budget)
+            .receive()
+            .await
     }
 
     fn resolve_stream_io_result(
@@ -1388,42 +1522,18 @@ mod fastly_impl {
         })
     }
 
+    #[cfg(test)]
     fn fastly_body_stream(
-        mut body: FastlyBody,
+        body: FastlyBody,
         budget: DispatchBudget,
         clock: MonotonicClock,
     ) -> BodyStream {
-        stream! {
-            loop {
-                budget_remaining(budget, &clock)?;
-                let mut chunks = body.read_chunks(RESPONSE_READ_BYTES);
-                let item = chunks.next();
-                drop(chunks);
-                match item {
-                    Some(Ok(chunk)) => {
-                        budget_remaining(budget, &clock)?;
-                        yield Ok(Bytes::from(chunk));
-                    }
-                    Some(Err(error)) => {
-                        let classified = if budget.deadline.is_expired_at(clock.now()) {
-                            timeout_error(budget.cause)
-                        } else {
-                            EdgeError::bad_gateway_with_reason(
-                                "Fastly upstream response body failed",
-                                BadGatewayReason::Transport,
-                            )
-                        };
-                        yield Err(with_fastly_detail(classified, ProviderFailurePhase::ResponseBodyRead, FastlyFailureCause::IoError { kind: error.kind() }));
-                        return;
-                    }
-                    None => {
-                        budget_remaining(budget, &clock)?;
-                        return;
-                    }
-                }
-            }
-        }
-        .boxed_local()
+        let entered = budget
+            .deadline
+            .instant()
+            .checked_sub(budget.duration)
+            .unwrap_or(budget.deadline.instant());
+        NativeProgress::new(NativeTransport, clock, entered).body(body.into_handle(), budget)
     }
 
     fn deadline_stream(
@@ -1434,17 +1544,25 @@ mod fastly_impl {
         stream! {
             loop {
                 if let Err(error) = budget_remaining(budget, &clock) {
+                    drop(source);
                     yield Err(error);
                     return;
                 }
                 let next_item = source.next().await;
-                if let Err(error) = budget_remaining(budget, &clock) {
+                if let Err(mut error) = budget_remaining(budget, &clock) {
+                    if let EdgeError::GatewayTimeout { provider_detail, .. } = &mut error {
+                        *provider_detail = next_item.as_ref().and_then(|item| item.as_ref().err())
+                            .and_then(EdgeError::provider_failure_detail).copied();
+                    }
+                    drop(next_item);
+                    drop(source);
                     yield Err(error);
                     return;
                 }
                 match next_item {
                     Some(Ok(bytes)) => yield Ok(bytes),
                     Some(Err(error)) => {
+                        drop(source);
                         yield Err(error);
                         return;
                     }
@@ -1463,38 +1581,6 @@ mod fastly_impl {
             ));
         }
         Ok(())
-    }
-
-    fn wait_pending(
-        pending: PendingRequest,
-        budget: DispatchBudget,
-        clock: &MonotonicClock,
-    ) -> Result<FastlyResponse, EdgeError> {
-        budget_remaining(budget, clock)?;
-        let outcome = pending
-            .wait()
-            .map_err(|error| map_send_error(&error, budget, clock));
-        finish_pending_outcome(outcome, budget_remaining(budget, clock))
-    }
-
-    fn finish_pending_outcome<Output>(
-        outcome: Result<Output, EdgeError>,
-        remaining: Result<Duration, EdgeError>,
-    ) -> Result<Output, EdgeError> {
-        if let Err(mut selected) = remaining {
-            if let EdgeError::GatewayTimeout {
-                provider_detail, ..
-            } = &mut selected
-            {
-                *provider_detail = outcome
-                    .as_ref()
-                    .err()
-                    .and_then(EdgeError::provider_failure_detail)
-                    .copied();
-            }
-            return Err(selected);
-        }
-        outcome
     }
 
     fn budget_remaining(
@@ -1634,7 +1720,8 @@ mod fastly_impl {
                     Some(16),
                     Some(1024),
                     Some(10),
-                    clock,
+                    clock.clone(),
+                    &NativeProgress::new(NativeTransport, clock, start),
                 ));
                 assert!(
                     matches!(
@@ -1695,7 +1782,8 @@ mod fastly_impl {
                     Some(encoded),
                     Some(1024),
                     Some(10),
-                    clock,
+                    clock.clone(),
+                    &NativeProgress::new(NativeTransport, clock, start),
                 ));
                 let outcome = match processed {
                     Ok(response) => {
@@ -2402,6 +2490,58 @@ mod fastly_impl {
         }
 
         #[test]
+        fn deadline_stream_preserves_source_detail_and_releases_before_terminal_yield() {
+            for expired_before_poll in [false, true] {
+                let start = MonotonicInstant::now();
+                let budget = clock_budget(start, Duration::from_millis(10));
+                let observed = Arc::new(Mutex::new(if expired_before_poll {
+                    budget.deadline.instant()
+                } else {
+                    start
+                }));
+                let source_now = Arc::clone(&observed);
+                let clock_now = Arc::clone(&observed);
+                let clock = MonotonicClock::new(move || *clock_now.lock().expect("clock"));
+                let retained = Arc::new(());
+                let source_resource = Arc::clone(&retained);
+                let detail = ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::ResponseBodyRead,
+                    cause: FastlyFailureCause::IoError {
+                        kind: ErrorKind::UnexpectedEof,
+                    },
+                };
+                let source = stream! {
+                    let owned_until_source_drop = source_resource;
+                    *source_now.lock().expect("clock") = budget.deadline.instant();
+                    yield Err(EdgeError::bad_gateway_with_detail("fixture source failed", BadGatewayReason::Transport, detail));
+                    drop(owned_until_source_drop);
+                }.boxed_local();
+                let mut guarded = deadline_stream(source, budget, clock);
+                let error = block_on(guarded.next())
+                    .expect("terminal item")
+                    .expect_err("deadline");
+                assert!(matches!(
+                    error,
+                    EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    error.provider_failure_detail(),
+                    (!expired_before_poll).then_some(&detail)
+                );
+                assert_eq!(
+                    Arc::strong_count(&retained),
+                    1,
+                    "terminal stream must not retain source ownership"
+                );
+                assert!(block_on(guarded.next()).is_none());
+                assert_eq!(Arc::strong_count(&retained), 1);
+            }
+        }
+
+        #[test]
         fn converted_response_retains_injected_clock() {
             let start = MonotonicInstant::now();
             let budget = clock_budget(start, Duration::from_secs(1));
@@ -2424,7 +2564,8 @@ mod fastly_impl {
                 None,
                 None,
                 None,
-                clock,
+                clock.clone(),
+                &NativeProgress::new(NativeTransport, clock, start),
             ))
             .expect("converted response");
             *observed.lock().expect("clock observation") = budget.deadline.instant();
@@ -2518,6 +2659,7 @@ mod fastly_impl {
                             None,
                             None,
                             constant_clock(start),
+                            &NativeProgress::new(NativeTransport, constant_clock(start), start),
                         ))
                         .expect("converted response");
 
@@ -2591,6 +2733,7 @@ mod fastly_impl {
                 None,
                 None,
                 MonotonicClock::default(),
+                &NativeProgress::new(NativeTransport, MonotonicClock::default(), started_at),
             ))
             .expect("response head");
             let mut body = response.into_body().into_stream().expect("streamed body");
@@ -2634,6 +2777,7 @@ mod fastly_impl {
                 None,
                 None,
                 constant_clock(start),
+                &NativeProgress::new(NativeTransport, constant_clock(start), start),
             ))
             .expect_err("content length exceeds final buffer cap");
 
@@ -2670,6 +2814,7 @@ mod fastly_impl {
                 None,
                 None,
                 constant_clock(start),
+                &NativeProgress::new(NativeTransport, constant_clock(start), start),
             ))
             .expect_err("content length exceeds decoded cap");
 
@@ -3072,36 +3217,6 @@ mod fastly_impl {
                 })
             );
             assert_eq!(error.message(), "Fastly outbound request body write failed");
-        }
-
-        #[test]
-        fn provider_diagnostics_survive_post_wait_expiry() {
-            let detail = ProviderFailureDetail::Fastly {
-                phase: ProviderFailurePhase::Send,
-                cause: FastlyFailureCause::ConnectionRefused,
-            };
-            let selected = super::super::timeout_error(BudgetSource::RequestDeadline);
-            let source = EdgeError::bad_gateway_with_detail(
-                "outbound destination could not be reached",
-                BadGatewayReason::Unreachable,
-                detail,
-            );
-            let error = finish_pending_outcome::<u8>(Err(source), Err(selected))
-                .expect_err("deadline wins");
-            assert_eq!(error.provider_failure_detail(), Some(&detail));
-            assert!(matches!(
-                error,
-                EdgeError::GatewayTimeout {
-                    cause: BudgetSource::RequestDeadline,
-                    ..
-                }
-            ));
-            let success = finish_pending_outcome(
-                Ok(7_u8),
-                Err(super::super::timeout_error(BudgetSource::RequestDeadline)),
-            )
-            .expect_err("late success");
-            assert!(success.provider_failure_detail().is_none());
         }
 
         #[test]
@@ -3523,42 +3638,6 @@ pub use fastly_impl::inject_dispatch_slack_for_test;
 #[cfg(feature = "fastly")]
 pub use fastly_impl::{DYNAMIC_BACKENDS_DISABLED_MESSAGE, FastlyOutboundClient};
 
-#[cfg(any(feature = "fastly", test))]
-fn reassociate_selection<Metadata>(
-    mut records: Vec<(u32, Option<Metadata>)>,
-    selected_position: usize,
-    remaining_ids: &[u32],
-) -> Result<(Metadata, Vec<Metadata>), EdgeError> {
-    let selected = records
-        .get_mut(selected_position)
-        .and_then(|(_id, metadata)| metadata.take())
-        .ok_or_else(|| {
-            EdgeError::internal(anyhow::anyhow!(
-                "Fastly returned an invalid selected handle index"
-            ))
-        })?;
-    let mut remaining = Vec::with_capacity(remaining_ids.len());
-    for id in remaining_ids {
-        let metadata = records
-            .iter_mut()
-            .find_map(|(candidate, metadata)| {
-                (*candidate == *id).then(|| metadata.take()).flatten()
-            })
-            .ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!(
-                    "Fastly returned an unknown or duplicate pending handle"
-                ))
-            })?;
-        remaining.push(metadata);
-    }
-    if records.iter().any(|(_id, metadata)| metadata.is_some()) {
-        return Err(EdgeError::internal(anyhow::anyhow!(
-            "Fastly omitted a pending handle from selection"
-        )));
-    }
-    Ok((selected, remaining))
-}
-
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
 fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
     if request.image_optimizer_options().is_some() {
@@ -3692,79 +3771,9 @@ mod send_failure_policy_tests {
     }
 
     #[test]
-    fn selection_metadata_follows_host_returned_handle_order() {
-        let (selected, remaining) = reassociate_selection(
-            vec![
-                (11_u32, Some("first")),
-                (22, Some("second")),
-                (33, Some("third")),
-            ],
-            1,
-            &[33, 11],
-        )
-        .expect("valid selection");
-
-        assert_eq!(selected, "second");
-        assert_eq!(remaining, ["third", "first"]);
-    }
-
-    #[test]
-    fn selection_rejects_an_invalid_selected_handle_index() {
-        let error = reassociate_selection(vec![(11_u32, Some("first"))], 1, &[])
-            .expect_err("selected index must identify an input handle");
-
-        assert_eq!(
-            error.to_string(),
-            "internal error: Fastly returned an invalid selected handle index"
-        );
-    }
-
-    #[test]
-    fn selection_rejects_an_unknown_or_duplicate_pending_handle() {
-        let unknown = reassociate_selection(
-            vec![(11_u32, Some("first")), (22, Some("second"))],
-            0,
-            &[99],
-        )
-        .expect_err("remaining handle must come from the input group");
-        let duplicate = reassociate_selection(
-            vec![(11_u32, Some("first")), (22, Some("second"))],
-            0,
-            &[22, 22],
-        )
-        .expect_err("remaining handle must not be duplicated");
-
-        for error in [unknown, duplicate] {
-            assert_eq!(
-                error.to_string(),
-                "internal error: Fastly returned an unknown or duplicate pending handle"
-            );
-        }
-    }
-
-    #[test]
-    fn selection_rejects_an_omitted_pending_handle() {
-        let error = reassociate_selection(
-            vec![
-                (11_u32, Some("first")),
-                (22, Some("second")),
-                (33, Some("third")),
-            ],
-            0,
-            &[22],
-        )
-        .expect_err("every unselected handle must be returned");
-
-        assert_eq!(
-            error.to_string(),
-            "internal error: Fastly omitted a pending handle from selection"
-        );
-    }
-
-    #[test]
     fn selection_failure_preserves_its_diagnostic_and_previously_collected_slots() {
         let event = driver_selection_failure(EdgeError::internal(anyhow::anyhow!(
-            "Fastly omitted a pending handle from selection"
+            "Fastly readiness returned an invalid handle index"
         )));
         let OutboundBatchDriverEvent::Failed(_) = &event else {
             panic!("selection failure must become a driver failure event");
@@ -3785,7 +3794,7 @@ mod send_failure_policy_tests {
 
         assert_eq!(
             failure.error.to_string(),
-            "internal error: Fastly omitted a pending handle from selection"
+            "internal error: Fastly readiness returned an invalid handle index"
         );
         assert!(matches!(failure.slots.first(), Some(Some(_))));
         assert!(matches!(failure.slots.get(1), Some(None)));

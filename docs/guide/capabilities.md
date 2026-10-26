@@ -343,10 +343,17 @@ payload frame at a time under Hyper demand. Unit and raw-socket tests prove firs
 before source EOF. Socket/client completion remains separately BestEffort under the response-egress
 capabilities above.
 
-⁴ Fastly dispatches slots sequentially, selects ready pending handles within provider-bounded
-groups, and drains each selected response body synchronously. Cold backend registration can delay
-a later dispatch; a selected body drain can delay a sibling's terminal observation, and a ready
-handle outside the active selection group can remain temporarily unobserved.
+⁴ Fastly dispatches slots sequentially, then cooperatively services pending heads and demanded
+bodies within that operation. Each raw body read requires fresh matching timed readiness and
+reads at most 16 KiB; rotating slot service prevents a continuously-ready body from monopolizing
+the driver. An occupied result slot backpressures only its own exchange. Cached SDK Send heads
+retain their opaque cache state and use nonblocking polling with one shared positive 1 ms pulse.
+Cold backend registration can still delay dispatch; synchronous provider work and SDK cleanup
+remain non-preemptible. This is not callback-wide scheduling or a hosted isolation guarantee.
+Local error-preserving readiness requires the explicitly selected
+[Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md);
+the stock runtime still loses source errors.
+Hosted runtime behavior and resource ownership remain unqualified, so support stays BestEffort.
 
 ⁵ Fastly uses coupled B31 provider timers, but blocking host operations cannot be preempted
 and those timers are not one fully elastic end-to-end pool. Spin's host may reject phase

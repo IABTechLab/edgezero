@@ -79,6 +79,152 @@ pub fn readiness_progress_legs() -> Vec<ReadinessLeg> {
     legs
 }
 
+pub fn readiness_client_legs() -> Vec<ReadinessLeg> {
+    let mut legs = Vec::new();
+    for repetition in 0..3 {
+        for (case, consumption) in [
+            ("mixed-head-body", "buffered"),
+            ("mixed-body-head", "buffered"),
+            ("full-body-error", "buffered"),
+            ("full-body-error", "streamed"),
+        ] {
+            legs.push(ReadinessLeg {
+                case,
+                mode: "client",
+                consumption,
+                read_limit: 16_384,
+                repetition,
+            });
+        }
+    }
+    legs
+}
+
+fn client_leg(probe: &Value) -> Result<ReadinessLeg> {
+    readiness_client_legs()
+        .into_iter()
+        .find(|leg| {
+            probe["case"] == leg.case
+                && probe["consumption"] == leg.consumption
+                && probe["repetition"] == leg.repetition
+        })
+        .ok_or_else(|| "unknown actual-client leg".into())
+}
+
+pub fn validate_outbound_readiness_client_probe(probe: &Value, revision: &str) -> Result<()> {
+    let leg = client_leg(probe)?;
+    let token = probe["token"]
+        .as_str()
+        .ok_or("missing actual-client token")?;
+    require(
+        revision.len() == 40
+            && revision.bytes().all(|b| b.is_ascii_hexdigit())
+            && probe["event"] == "fastly-client-progress"
+            && probe["revision"] == revision
+            && probe["qualification"] == false
+            && !token.is_empty()
+            && token.len() <= 128
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "invalid actual-client identity",
+    )?;
+    origin(probe, slot_count(leg.case))?;
+    let completed = probe["completed_us"]
+        .as_u64()
+        .ok_or("missing actual-client completion")?;
+    let envelope = probe["result"]
+        .as_object()
+        .ok_or("missing actual-client result")?;
+    require(envelope.len() == 1, "contradictory actual-client result")?;
+    let result = envelope
+        .get("Ok")
+        .filter(|result| result.is_object())
+        .ok_or("actual-client operation did not complete its evidence")?;
+    if leg.case == "full-body-error" {
+        require(
+            result["kind"] == "error"
+                && result["failure"]["category"] == "bad_gateway"
+                && result["failure"]["source_unexpected_eof"] == true,
+            "actual-client typed UnexpectedEof failure was lost",
+        )?;
+        let wanted = if leg.consumption == "streamed" {
+            payload(leg.case, 0)
+        } else {
+            b""
+        };
+        require(
+            result["bytes"] == wanted.len() && result["checksum"] == fingerprint(wanted),
+            "wrong actual-client error prefix bytes/checksum",
+        )?;
+    } else {
+        let slots = result["slots"]
+            .as_array()
+            .ok_or("missing actual-client slots")?;
+        require(
+            result["termination"] == "Cutoff" && slots.len() == 2,
+            "wrong actual-client mixed termination/slot count",
+        )?;
+        require(
+            slots[0] == serde_json::json!({"kind":"pending"}),
+            "actual-client pending slot was replaced",
+        )?;
+        let ready = &slots[1];
+        let wanted = payload(leg.case, 1);
+        require(
+            ready["kind"] == "ok"
+                && ready["failure"].is_null()
+                && ready["bytes"] == wanted.len()
+                && ready["checksum"] == fingerprint(wanted)
+                && ready["elapsed_us"]
+                    .as_u64()
+                    .is_some_and(|elapsed| elapsed < 500_000 && elapsed <= completed),
+            "actual-client ready sibling is missing, late or has wrong bytes/checksum",
+        )?;
+    }
+    Ok(())
+}
+
+pub fn validate_outbound_readiness_client(probes: &[Value], revision: &str) -> Result<()> {
+    require(
+        probes.len() == readiness_client_legs().len(),
+        "missing actual-client case inventory",
+    )?;
+    let mut identities = HashSet::new();
+    let mut tokens = HashSet::new();
+    let failures: Vec<_> = probes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, probe)| {
+            let validation = (|| -> Result<()> {
+                validate_outbound_readiness_client_probe(probe, revision)?;
+                require(
+                    identities.insert(client_leg(probe)?.key())
+                        && tokens.insert(
+                            probe["token"]
+                                .as_str()
+                                .ok_or("missing actual-client token")?,
+                        ),
+                    "duplicate actual-client identity/token",
+                )
+            })();
+            validation.err().map(|error| {
+                let key =
+                    client_leg(probe).map_or_else(|_| format!("row {index}"), |leg| leg.key());
+                format!("{key}: {error}")
+            })
+        })
+        .collect();
+    require(
+        failures.is_empty(),
+        format!(
+            "{} actual-client leg(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ),
+    )
+}
+
 fn slot_count(case: &str) -> usize {
     if matches!(case, "siblings" | "mixed-head-body" | "mixed-body-head") {
         2
@@ -794,6 +940,283 @@ mod tests {
 
     fn samples(probe: &mut Value) -> &mut Vec<Value> {
         probe["samples"].as_array_mut().unwrap()
+    }
+
+    fn client_matrix() -> Vec<Value> {
+        matrix_for(readiness_client_legs())
+            .into_iter()
+            .map(|source| {
+                let result = if source["case"] == "full-body-error" {
+                    let bytes = if source["consumption"] == "streamed" {
+                        payload("full-body-error", 0)
+                    } else {
+                        b""
+                    };
+                    json!({"kind":"error", "bytes":bytes.len(), "checksum":fingerprint(bytes),
+                        "failure":{"category":"bad_gateway", "source_unexpected_eof":true}})
+                } else {
+                    json!({"termination":"Cutoff", "slots":[{"kind":"pending"},
+                        {"kind":"ok", "bytes":32_769, "checksum":fingerprint(payload("full-body-error", 0)),
+                        "elapsed_us":60_000}]})
+                };
+                json!({"event":"fastly-client-progress", "token":source["token"],
+                    "case":source["case"], "consumption":source["consumption"],
+                    "revision":REVISION, "qualification":false, "repetition":source["repetition"],
+                    "completed_us":500_100, "origin":source["origin"], "result":{"Ok":result}})
+            })
+            .collect()
+    }
+
+    #[test]
+    fn readiness_client_inventory_is_twelve_unique_legs() {
+        let legs = readiness_client_legs();
+        assert_eq!(legs.len(), 12);
+        assert_eq!(
+            legs.iter()
+                .map(ReadinessLeg::key)
+                .collect::<HashSet<_>>()
+                .len(),
+            12
+        );
+        for repetition in 0..3 {
+            assert_eq!(
+                legs.iter()
+                    .filter(|leg| leg.repetition == repetition)
+                    .count(),
+                4
+            );
+        }
+        assert!(
+            legs.iter()
+                .all(|leg| leg.mode == "client" && leg.read_limit == 16_384)
+        );
+    }
+
+    #[test]
+    fn readiness_client_accepts_complete_correlated_typed_evidence() {
+        let mut probes = client_matrix();
+        for probe in &probes {
+            validate_outbound_readiness_client_probe(probe, REVISION).unwrap();
+        }
+        validate_outbound_readiness_client(&probes, REVISION).unwrap();
+        probes.reverse();
+        validate_outbound_readiness_client(&probes, REVISION).unwrap();
+    }
+
+    #[test]
+    fn readiness_client_rejects_missing_duplicate_and_foreign_evidence() {
+        let baseline = client_matrix();
+        let mut missing = baseline.clone();
+        missing.pop();
+        assert!(validate_outbound_readiness_client(&missing, REVISION).is_err());
+        let mut duplicate = baseline.clone();
+        duplicate[1] = duplicate[0].clone();
+        assert!(validate_outbound_readiness_client(&duplicate, REVISION).is_err());
+        let mut duplicate_token = baseline.clone();
+        duplicate_token[1]["token"] = duplicate_token[0]["token"].clone();
+        duplicate_token[1]["origin"]["token"] = duplicate_token[0]["token"].clone();
+        for request in duplicate_token[1]["origin"]["requests"]
+            .as_array_mut()
+            .unwrap()
+        {
+            request["token"] = baseline[0]["token"].clone();
+        }
+        assert!(validate_outbound_readiness_client(&duplicate_token, REVISION).is_err());
+        for (field, value) in [
+            ("event", json!("readiness-probe")),
+            ("case", json!("eof")),
+            ("consumption", json!("streamed")),
+            (
+                "revision",
+                json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ),
+            ("qualification", json!(true)),
+            ("repetition", json!(3)),
+            ("token", json!("foreign-token")),
+            ("token", json!("invalid token")),
+        ] {
+            let mut probes = baseline.clone();
+            probes[0][field] = value;
+            assert!(
+                validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                "{field}"
+            );
+        }
+        assert!(validate_outbound_readiness_client(&baseline, "not-a-revision").is_err());
+        for field in [
+            "event",
+            "token",
+            "case",
+            "consumption",
+            "revision",
+            "qualification",
+            "repetition",
+            "completed_us",
+            "origin",
+            "result",
+        ] {
+            let mut probes = baseline.clone();
+            probes[0].as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                "missing {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_client_rejects_collapsed_or_untyped_source_errors() {
+        for consumption in ["buffered", "streamed"] {
+            for mutation in ["eof", "category", "source", "outer-error"] {
+                let mut probes = client_matrix();
+                let probe = probes
+                    .iter_mut()
+                    .find(|p| p["case"] == "full-body-error" && p["consumption"] == consumption)
+                    .unwrap();
+                match mutation {
+                    "eof" => {
+                        probe["result"]["Ok"]["kind"] = json!("eof");
+                        probe["result"]["Ok"]["failure"] = Value::Null;
+                    }
+                    "category" => probe["result"]["Ok"]["failure"]["category"] = json!("internal"),
+                    "source" => {
+                        probe["result"]["Ok"]["failure"]["source_unexpected_eof"] = json!(false)
+                    }
+                    _ => {
+                        probe["result"] =
+                            json!({"Err":{"category":"bad_gateway", "source_unexpected_eof":true}})
+                    }
+                }
+                assert!(
+                    validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                    "{consumption}/{mutation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_client_rejects_wrong_bytes_checksums_and_error_prefixes() {
+        let baseline = client_matrix();
+        for index in 0..4 {
+            for field in ["bytes", "checksum"] {
+                let mut probes = baseline.clone();
+                let result = &mut probes[index]["result"]["Ok"];
+                let body = if index < 2 {
+                    &mut result["slots"][1]
+                } else {
+                    result
+                };
+                body[field] = if field == "bytes" {
+                    json!(123)
+                } else {
+                    json!("0000000000000000")
+                };
+                assert!(
+                    validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                    "{index}/{field}"
+                );
+            }
+        }
+        for (consumption, prefix) in [
+            ("buffered", payload("full-body-error", 0)),
+            ("streamed", b""),
+            ("streamed", b"x"),
+        ] {
+            let mut probes = baseline.clone();
+            let result = &mut probes
+                .iter_mut()
+                .find(|p| p["case"] == "full-body-error" && p["consumption"] == consumption)
+                .unwrap()["result"]["Ok"];
+            result["bytes"] = json!(prefix.len());
+            result["checksum"] = json!(fingerprint(prefix));
+            assert!(
+                validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                "{consumption}/{}",
+                prefix.len()
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_client_rejects_late_or_reassociated_mixed_results() {
+        let baseline = client_matrix();
+        for case in ["mixed-head-body", "mixed-body-head"] {
+            for mutation in [
+                "equal",
+                "after",
+                "missing-elapsed",
+                "termination",
+                "slot-order",
+                "slot-count",
+            ] {
+                let mut probes = baseline.clone();
+                let probe = probes.iter_mut().find(|p| p["case"] == case).unwrap();
+                let result = &mut probe["result"]["Ok"];
+                match mutation {
+                    "equal" => result["slots"][1]["elapsed_us"] = json!(500_000),
+                    "after" => result["slots"][1]["elapsed_us"] = json!(500_001),
+                    "missing-elapsed" => {
+                        result["slots"][1]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("elapsed_us");
+                    }
+                    "termination" => result["termination"] = json!("Complete"),
+                    "slot-order" => result["slots"].as_array_mut().unwrap().swap(0, 1),
+                    _ => {
+                        result["slots"].as_array_mut().unwrap().pop();
+                    }
+                }
+                assert!(
+                    validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                    "{case}/{mutation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_client_rejects_invalid_origin_receipts_and_aggregates_failures() {
+        let baseline = client_matrix();
+        for mutation in ["accepted", "body", "delay", "token"] {
+            let mut probes = baseline.clone();
+            let probe = probes
+                .iter_mut()
+                .find(|p| p["case"] == "mixed-body-head")
+                .unwrap();
+            match mutation {
+                "accepted" => probe["origin"]["accepted"] = json!(1),
+                "body" => probe["origin"]["writes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|w| w["kind"] != "body"),
+                "delay" => probe["origin"]["writes"][1]["at_us"] = json!(1),
+                _ => probe["origin"]["requests"][0]["token"] = json!("foreign-token"),
+            }
+            assert!(
+                validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                "{mutation}"
+            );
+        }
+        let mut probes = baseline;
+        probes[0]["result"]["Ok"]["slots"][1]["bytes"] = json!(0);
+        probes[1]["result"]["Ok"]["slots"][1]["bytes"] = json!(0);
+        let error = validate_outbound_readiness_client(&probes, REVISION)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("2 actual-client leg(s) failed:\n"),
+            "{error}"
+        );
+        assert!(
+            error.contains("mixed-head-body/client/buffered/16384/0"),
+            "{error}"
+        );
+        assert!(
+            error.contains("mixed-body-head/client/buffered/16384/0"),
+            "{error}"
+        );
     }
 
     fn operation<'a>(probe: &'a mut Value, name: &str) -> &'a mut Value {

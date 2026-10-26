@@ -205,18 +205,44 @@ directories and nonregular files. Artifacts are capped at 256 MiB and hashed wit
 JSON inputs/outputs are capped at 16 MiB. It is not a defense against concurrently mutating a
 filesystem, and neither verifies telemetry authenticity nor publishes artifacts.
 
+### Fastly Client Progress
+
+```sh
+VICEROY_BIN=/absolute/path/to/repaired/viceroy scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-client-progress
+```
+
+This functional CI suite exercises the actual `FastlyOutboundClient` through `HttpClient`, using
+the same guest, bounded origins and validators as the full diagnostic below. Four cases run
+three times: pending-head/ready-body, pending-body/delayed-head, and buffered/streamed multi-buffer
+truncation. Require twelve probes and eighteen correlated origin requests, exact payload bytes
+and checksums, preserved typed source errors, and the ready sibling observed before its cutoff.
+Preflight failures cannot count as exercised receive paths.
+
+Both receive suites require `--adapter fastly` and the pinned runtime version. Select the
+[tracked Viceroy repair](../../../patches/viceroy/README.md) explicitly; an installed stock binary
+is not silently replaced. CI requires exactly exit 2, one passing complete client inventory,
+an explicit unverified disposition and no failure records. Exit 0 or an unavailable runtime
+does not satisfy that gate. The suite deliberately excludes SDK timing probes and timer controls.
+It does not establish callback-wide progress, host cancellation, memory bounds or qualification.
+
 ### Fastly Readiness Diagnostic
 
 ```sh
 scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness
 ```
 
-This opt-in suite uses direct pinned SDK/ABI calls only in the diagnostic fixture. Eleven cases
+The SDK portion of this opt-in suite uses direct pinned SDK/ABI calls in the diagnostic fixture. Eleven cases
 cover silent heads, pending/trickled bodies, sibling readiness, exhausted bodies, ordinary/empty
 EOF, truncation, malformed heads/chunks and connection closure before a response. Each runs with
 buffered and pull-streamed consumption, read capacities 1 and 16384, and three repetitions.
 Three additional finite direct-read truncation controls produce 135 probes and 147 origin requests.
 Those capacities are diagnostic variations, not an approved production read maximum.
+
+The full command also runs the twelve actual-client cases above. In total, its HTTP inventory
+contains 165 probes and 195 origin requests; the SDK baseline and supplementary probes remain
+separately validated. Ordinary CI gates only the explicit functional suite. The full diagnostic
+retains its strict timing assertions and exit behavior; timing misses remain failures, not a
+passing SDK result. It remains required evidence for applicable qualification work.
 
 The same command appends 18 supplementary probes and 30 origin requests, separately validated
 from the unchanged historical matrix. `mixed-head-body` completes a ready body while a sibling

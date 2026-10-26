@@ -499,3 +499,38 @@ original exact Interfaces digest as covering a signature it did not declare.
 The frozen head-first Interfaces and their identities remain unchanged. This approval does not
 authorize alternative implementer traits, new transport paths, a Fastly backend policy/bound,
 runtime or SDK repins, weaker timer/slack/read-safety requirements, deployment or qualification.
+
+## Scoped Fastly Current-Operation Multiplexer Approval (2026-10-25)
+
+The requester approved the exact checkpoint question in this conversation with
+**"Approve scoped implementation"**: one cooperative Fastly multiplexer with fresh,
+error-preserving readiness, at most 16 KiB per raw read, and rotating slot service, preserving
+B31, original logical deadlines, observation cutoffs and limits. Local/CI validation explicitly
+uses the tracked Viceroy repair; deployment, hosted runtime promotion and resource qualification
+remain separately gated. No dependency or installed runtime pin changes.
+
+This implementation slice shares one private engine across the existing Send and Batch receive
+paths. It replaces blocking selected-body drains, not the frozen public implementer protocol.
+SDK-owned cached Send heads remain opaque and use documented nonblocking polling with one shared
+positive 1 ms pulse; raw batch heads and response bodies use borrowed-handle timed selection.
+Native Image Optimizer remains the direct synchronous SDK operation. Registration, upload writes,
+blocked inbound source pulls and SDK cleanup retain their disclosed limitations.
+
+Callback-wide scheduling/ownership, unpolled batch progress during unrelated operations, eager
+Begin, the atomic four-adapter public API migration, dispatch-slack retirement, and hosted
+qualification are not completed or waived by this scoped approval. The full Interfaces digest,
+requirements digest, historical policy proposal and negative evidence remain unchanged.
+
+## Functional CI Validation Decision (2026-10-26)
+
+After the recommendation to gate functional client cases separately from the strict SDK timing
+diagnostic, the requester directed **"continue"**. Implement that CI split only: the explicit
+`outbound-client-progress` harness suite reuses the actual client cases, artifact, origin bounds
+and validators. CI requires exactly exit 2, the complete passing twelve-probe/eighteen-request
+inventory, no failures and an explicit unverified disposition. It is not a qualification pass.
+
+Keep `outbound-readiness` and its full SDK matrix, strict timing assertions, exit semantics and
+historical failures intact. Excluding those broader diagnostic cases from ordinary CI is a
+coverage choice, not proof that every observed failure is environmental or permission to waive
+candidate-specific qualification. The original +5 ms target, logical deadlines, typed-error/read
+safety requirements, public protocol and frozen requirements/Interfaces remain unchanged.

@@ -43,6 +43,21 @@ internal slices do not authorize merging an incomplete public implementation or 
 
 ### Task D1a: Bounded Multiplexer and Callback Ownership
 
+#### Current-Operation Implementation Slice (2026-10-25)
+
+The requester's [scoped multiplexer approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-fastly-current-operation-multiplexer-approval-2026-10-25)
+authorizes the existing Send/Batch receive-path replacement, fresh matching readiness, a 16 KiB
+raw read maximum and rotating slot service under B31 and the original deadlines/cutoffs/caps.
+Local/CI explicitly selects the tracked Viceroy repair; installed pins and hosted promotion stay
+unchanged. Keep cached Send heads opaque rather than converting them to raw handles and changing
+cache policy. Poll them nonblockingly with one shared positive 1 ms pulse.
+
+Native deterministic scheduling tests and actual-client fixtures accompany this slice. D1a stays
+open: this per-operation engine does not yet supply callback-wide ownership, progress during
+unrelated operations or the eager public modes. Full P1/P4 and D1c/D1d integration, slack retirement,
+resource evidence and hosted qualification remain separately tracked. No public trait or frozen
+Interfaces/requirements change, acceptance-leg promotion or capability upgrade is implied.
+
 #### Mixed-Phase Prerequisite Checkpoint (2026-10-25)
 
 The existing SDK/ABI diagnostic now appends eighteen separately validated probes: a ready

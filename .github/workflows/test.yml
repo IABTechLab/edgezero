@@ -279,7 +279,7 @@ jobs:
             ~/.wasmtime/bin/
             target/
             tests/fixtures/reusable-app/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-${{ hashFiles('**/Cargo.lock', '.tool-versions') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-${{ hashFiles('**/Cargo.lock', '.tool-versions', 'patches/viceroy/0.21.0-body-readiness.patch') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-
 
@@ -337,6 +337,48 @@ jobs:
           VICEROY_VERSION: ${{ steps.viceroy-version.outputs.version }}
         run: cargo install viceroy --version "$VICEROY_VERSION" --locked --force
 
+      - name: Build isolated Viceroy readiness repair
+        if: matrix.adapter == 'fastly'
+        id: viceroy-repair
+        shell: bash
+        env:
+          VICEROY_VERSION: ${{ steps.viceroy-version.outputs.version }}
+          VICEROY_REVISION: a69d982d1d95e13c0fc9f92683b9118639bb4b04
+          VICEROY_LOCK_SHA256: d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a
+          VICEROY_PATCH_SHA256: 8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759
+          RUSTUP_TOOLCHAIN: 1.98.1
+          ASDF_RUST_VERSION: 1.98.1
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/viceroy-readiness
+          CARGO_PROFILE_DEV_DEBUG: 0
+          CARGO_INCREMENTAL: 0
+        run: |
+          test "$VICEROY_VERSION" = 0.21.0
+          stock_identity="$(sha256sum "$(command -v viceroy)")"
+          source="$RUNNER_TEMP/viceroy-readiness-source"
+          patch="$GITHUB_WORKSPACE/patches/viceroy/0.21.0-body-readiness.patch"
+          evidence="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/viceroy-repair"
+          test ! -e "$source"
+          git clone --depth 1 --branch "v$VICEROY_VERSION" https://github.com/fastly/Viceroy.git "$source"
+          test "$(git -C "$source" rev-parse --verify HEAD)" = "$VICEROY_REVISION"
+          printf '%s  %s\n' "$VICEROY_LOCK_SHA256" "$source/Cargo.lock" | sha256sum --check --strict
+          printf '%s  %s\n' "$VICEROY_PATCH_SHA256" "$patch" | sha256sum --check --strict
+          git -C "$source" apply --check "$patch"
+          git -C "$source" apply "$patch"
+          cargo fetch --locked --manifest-path "$source/Cargo.toml"
+          "$GITHUB_WORKSPACE/scripts/run_test_nonzero.sh" readiness_preserves_bytes_without_polling_the_source_again cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib body::tests::readiness_
+          "$GITHUB_WORKSPACE/scripts/run_test_nonzero.sh" readiness_preserves_between_bytes_timeout_without_repolling_source cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib body::tests::
+          cargo build --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy
+          executable="$CARGO_TARGET_DIR/debug/viceroy"
+          test -x "$executable"
+          printf '%s\n' "$stock_identity" | sha256sum --check --strict
+          mkdir -p "$evidence"
+          {
+            printf 'upstream=%s\nprofile=dev debug=0 incremental=0\n' "$VICEROY_REVISION"
+            rustc --version
+            sha256sum "$source/Cargo.lock" "$patch" "$source/src/body.rs" "$executable"
+          } | tee "$evidence/build-identity.txt"
+          echo "executable=$executable" >> "$GITHUB_OUTPUT"
+
       - name: Resolve Wasmtime version
         if: matrix.adapter == 'spin'
         id: wasmtime-version
@@ -386,13 +428,13 @@ jobs:
 
       - name: Run ${{ matrix.adapter }} wasm tests
         env:
-          ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
+          ${{ matrix.runner_env }}: ${{ matrix.adapter == 'fastly' && format('{0} run', steps.viceroy-repair.outputs.executable) || matrix.runner_value }}
         run: scripts/run_test_nonzero.sh ${{ matrix.sentinel }} cargo test --offline --locked -p edgezero-adapter-${{ matrix.adapter }} --no-default-features --features ${{ matrix.adapter }},test-utils --target ${{ matrix.target }} --test contract
 
       - name: Run Fastly closed lifecycle wasm sentinel
         if: matrix.adapter == 'fastly'
         env:
-          ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: ${{ steps.viceroy-repair.outputs.executable }} run
         run: scripts/run_test_nonzero.sh closed_lifecycle_orders_hooks_and_returns_state_after_delivery cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --test contract
 
       - name: Run Spin WASI HTTP SDK resource tests
@@ -414,7 +456,7 @@ jobs:
       - name: Run fastly wasm runtime unit tests
         if: matrix.adapter == 'fastly'
         env:
-          ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: ${{ steps.viceroy-repair.outputs.executable }} run
         working-directory: crates/edgezero-adapter-fastly
         run: ../../scripts/run_test_nonzero.sh backend_creation_error_table_is_exhaustive cargo test --offline --locked --no-default-features --features fastly,test-utils --lib
 
@@ -422,7 +464,29 @@ jobs:
         run: bash scripts/check_adapter_feature_matrix.sh ${{ matrix.adapter }} ${{ matrix.target }}
       - name: Fastly reusable HTTP smoke
         if: matrix.adapter == 'fastly'
+        env:
+          VICEROY_BIN: ${{ steps.viceroy-repair.outputs.executable }}
         run: ./scripts/smoke_test_reusable_app.sh --adapter fastly --suite smoke
+
+      - name: Fastly production client progress
+        if: matrix.adapter == 'fastly'
+        shell: bash
+        env:
+          VICEROY_BIN: ${{ steps.viceroy-repair.outputs.executable }}
+        run: |
+          run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/ci-outbound-client-progress"
+          status=0
+          ./scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-client-progress --output "$run" || status=$?
+          # Exit 2 retains the unqualified disposition; exit 1 and missing evidence fail CI.
+          test "$status" -eq 2
+          jq --slurp --exit-status '
+            ([.[] | select(.event == "fastly-client-progress-inventory")]
+              | length == 1 and .[0].status == "pass"
+              and .[0].probes == 12 and .[0].expected_probes == 12
+              and .[0].origin_requests == 18 and .[0].qualification == false)
+            and any(.[]; .status == "unverified" and .qualification == false)
+            and all(.[]; .status != "fail")
+          ' "$run/events.jsonl"
 
       - name: Preserve Fastly lifecycle evidence
         if: always() && matrix.adapter == 'fastly'

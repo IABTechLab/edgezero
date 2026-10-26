@@ -277,12 +277,12 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if args.suite == "outbound-progress" {
         return progress::run("fastly", run, records);
     }
-    if args.suite == "outbound-readiness" {
+    if let Some(suite) = readiness::ReadinessSuite::parse(&args.suite) {
         require(
             version.split_whitespace().nth(1) == Some(pin),
             "readiness proof requires the pinned runtime",
         )?;
-        return outbound_readiness(&exe, run, records);
+        return readiness::run(&exe, run, records, suite);
     }
     checked(
         cargo_build()
@@ -354,9 +354,6 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 
-fn outbound_readiness(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
-    readiness::run(exe, run, records)
-}
 fn fastly_variant(
     args: &Args,
     exe: &Path,

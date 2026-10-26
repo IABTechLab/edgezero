@@ -6,6 +6,117 @@ use std::time::{Duration, Instant};
 
 const DEADLINE_US: u64 = 500_000;
 
+fn client_failure(error: &edgezero_core::EdgeError) -> Value {
+    use edgezero_core::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
+    let source_eof = matches!(
+        error.provider_failure_detail(),
+        Some(ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::IoError {
+                kind: std::io::ErrorKind::UnexpectedEof
+            },
+        })
+    );
+    json!({"category":error.kind(),"source_unexpected_eof":source_eof})
+}
+
+fn client_probe(
+    request: &Request,
+    case: &str,
+    consumption: &str,
+    authority: &str,
+) -> Result<(), fastly::Error> {
+    use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
+    use edgezero_core::{Deadline, HttpClient, OutboundRequest};
+    let token = request_token(request)?;
+    let client = HttpClient::with_client(FastlyOutboundClient::new());
+    let make = |slot| {
+        OutboundRequest::get(format!("http://{authority}/readiness/{case}/{slot}"))
+            .and_then(|request| request.header("x-readiness-token", token))
+            .map(|request| {
+                request
+                    .timeout(Duration::from_secs(2))
+                    .max_response_bytes(65_536)
+            })
+    };
+    let start = Instant::now();
+    let result = futures::executor::block_on(async {
+        if case == "full-body-error" {
+            let mut outbound = make(0)?;
+            if consumption == "streamed" {
+                outbound = outbound.stream_response();
+            }
+            let mut bytes = 0usize;
+            let mut checksum = 0xcbf29ce484222325u64;
+            let result = match client.send(outbound).await {
+                Ok(response) if consumption == "streamed" => {
+                    use futures::StreamExt;
+                    let mut source = response.into_body().into_stream().ok_or_else(|| {
+                        edgezero_core::EdgeError::internal(std::io::Error::other(
+                            "expected streamed response",
+                        ))
+                    })?;
+                    let mut result = Ok(());
+                    while let Some(chunk) = source.next().await {
+                        match chunk {
+                            Ok(chunk) => {
+                                bytes += chunk.len();
+                                if bytes > 65_536 {
+                                    return Err(edgezero_core::EdgeError::internal(
+                                        std::io::Error::other("probe response limit exceeded"),
+                                    ));
+                                }
+                                for byte in chunk {
+                                    checksum =
+                                        (checksum ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+                                }
+                            }
+                            Err(error) => {
+                                result = Err(error);
+                                break;
+                            }
+                        }
+                    }
+                    result
+                }
+                Ok(response) => response.into_bytes_bounded(65_536).await.map(|_| ()),
+                Err(error) => Err(error),
+            };
+            return Ok::<_, edgezero_core::EdgeError>(
+                json!({"kind":if result.is_err(){"error"}else{"eof"},
+                "bytes":bytes,"checksum":format!("{checksum:016x}"),"failure":result.err().map(|e|client_failure(&e))}),
+            );
+        }
+        let results = client
+            .send_all_until(
+                vec![make(0)?, make(1)?],
+                Deadline::after(Duration::from_micros(DEADLINE_US)),
+            )
+            .await
+            .map_err(|failure| failure.error)?;
+        let mut slots = Vec::new();
+        for slot in results.slots {
+            slots.push(match slot {
+                None => json!({"kind":"pending"}),
+                Some(slot) => match slot.outcome {
+                    Ok(response) => {
+                        let bytes = response.into_bytes_bounded(65_536).await?;
+                        let checksum = bytes.iter().fold(0xcbf29ce484222325u64, |sum, byte| (sum ^ u64::from(*byte)).wrapping_mul(0x100000001b3));
+                        json!({"kind":"ok","bytes":bytes.len(),"checksum":format!("{checksum:016x}"),"elapsed_us":slot.elapsed.as_micros()})
+                    }
+                    Err(error) => json!({"kind":"error","failure":client_failure(&error)}),
+                },
+            });
+        }
+        Ok(json!({"termination":format!("{:?}",results.termination),"slots":slots}))
+    });
+    let probe = json!({"event":"fastly-client-progress","case":case,"consumption":consumption,
+        "token":token,"revision":env!("EDGEZERO_QUALIFICATION_REVISION"),"result":result.map_err(|e|client_failure(&e)),"completed_us":start.elapsed().as_micros(),"qualification":false});
+    println!("{probe}");
+    Response::from_body(serde_json::to_string(&probe)?).send_to_client();
+    Ok(())
+}
+
 struct Selection {
     status: String,
     index: Option<usize>,
@@ -372,7 +483,7 @@ fn main() -> Result<(), fastly::Error> {
     ]
     .contains(case)
         || !["buffered", "streamed"].contains(consumption)
-        || !["selected", "direct"].contains(mode)
+        || !["selected", "direct", "client"].contains(mode)
         || (*mode == "direct"
             && (*case != "truncated" || *consumption != "buffered" || *limit != "1"))
     {
@@ -408,6 +519,15 @@ fn main() -> Result<(), fastly::Error> {
         return Err(std::io::Error::other("origin must be controlled loopback endpoint").into());
     }
     let token = request_token(&request)?;
+    if *mode == "client" {
+        if !matches!(
+            *case,
+            "mixed-head-body" | "mixed-body-head" | "full-body-error"
+        ) {
+            return Err(std::io::Error::other("unsupported client probe").into());
+        }
+        return client_probe(&request, case, consumption, authority.as_str());
+    }
     let backend = Backend::builder("readiness-origin", authority.as_str())
         .connect_timeout(Duration::from_secs(2))
         .first_byte_timeout(Duration::from_secs(2))

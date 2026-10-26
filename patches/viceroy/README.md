@@ -60,7 +60,8 @@ profile, source, lockfile, patch and binary hashes rather than inferring identit
 
 ## Guest-Level Control
 
-Run the existing suite with an explicit runtime override and a new empty evidence directory:
+Run the opt-in full SDK readiness/timing diagnostic with an explicit runtime override and a new
+empty evidence directory:
 
 ```sh
 unset CARGO_TARGET_DIR
@@ -75,6 +76,24 @@ exits 1. Timer-only controls are separate observations: lateness remains recorde
 Even a passing
 matrix exits 2: production-path integration, exact-version review, backend policy and hosted
 evidence are still required. Do not turn either disposition into an overall gate pass.
+
+The current-operation multiplexer checkpoint extends this same suite with eighteen raw mixed/
+full-buffer probes and twelve actual Send/Batch client probes. The 135-probe baseline stays
+separately validated. Actual-client probes require exact payloads, typed source errors and
+request-correlated origin receipts; preflight failures do not count as exercised receive paths.
+CI selects the separate `outbound-client-progress` suite and requires exactly exit 2, exactly one
+passing functional inventory with twelve probes, twelve expected probes and eighteen origin
+requests, `qualification: false`, an explicit unverified/unqualified disposition and no failure
+records. This functional gate does not run the full SDK timing matrix. The opt-in
+`outbound-readiness` diagnostic above retains that complete matrix, its strict timing validators
+and exit-1 failures unchanged; timing misses are not waived or relabeled as passes.
+
+CI keeps its stock Viceroy installation, clones the exact upstream revision, checks lockfile
+and patch hashes, and builds/tests the repair in a separate cached target directory. Fastly
+runtime tests and the functional CI suite explicitly select that absolute executable through
+`CARGO_TARGET_WASM32_WASIP1_RUNNER` and `VICEROY_BIN`. Neither PATH nor the installed runtime pin
+is replaced. Callback-wide scheduling, hosted runtime promotion and resource qualification remain
+open; these local checks cannot establish hosted interruption or cleanup bounds.
 
 Keep the historical failed report and raw evidence unchanged. A separate repair record must
 include exact upstream/patch/host-binary/guest-binary identities, commands, counts and outcomes.

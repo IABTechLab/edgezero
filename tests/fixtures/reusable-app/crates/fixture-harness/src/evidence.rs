@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod readiness;
 pub use readiness::{
-    readiness_legs, readiness_progress_legs, validate_outbound_readiness,
+    readiness_client_legs, readiness_legs, readiness_progress_legs, validate_outbound_readiness,
+    validate_outbound_readiness_client, validate_outbound_readiness_client_probe,
     validate_outbound_readiness_progress,
 };
 mod timers;

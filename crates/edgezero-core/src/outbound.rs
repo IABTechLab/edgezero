@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use futures_util::future::{LocalBoxFuture, poll_fn};
-use futures_util::stream::{FuturesUnordered, LocalBoxStream, Stream, iter};
+use futures_util::stream::{FuturesUnordered, LocalBoxStream, Stream, empty, iter};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -584,6 +584,8 @@ impl OutboundBatch {
     /// Returns the next newly terminal slot or the typed batch termination reason.
     ///
     /// Cancelling the returned future does not consume a ready slot.
+    /// Terminal or invariant-failure observations drop the adapter driver before returning,
+    /// even if the caller retains the batch. This releases local ownership, not guaranteed host cancellation.
     ///
     /// # Errors
     /// Returns an internal error if the adapter driver fails, ends prematurely, or emits an
@@ -599,15 +601,21 @@ impl OutboundBatch {
             return Ok(OutboundBatchNext::Finished(termination));
         }
 
-        match self.stream.next().await {
+        let event = self.stream.next().await;
+        if !matches!(&event, Some(OutboundBatchDriverEvent::Item(_))) {
+            self.stream = empty().boxed_local();
+        }
+        match event {
             Some(OutboundBatchDriverEvent::Item(item)) => {
                 let Some(unresolved) = self.unresolved.get_mut(item.index) else {
+                    self.stream = empty().boxed_local();
                     self.poisoned = true;
                     return Err(batch_driver_error(
                         "outbound batch driver emitted an out-of-range slot index",
                     ));
                 };
                 if !*unresolved {
+                    self.stream = empty().boxed_local();
                     self.poisoned = true;
                     return Err(batch_driver_error(
                         "outbound batch driver emitted a duplicate slot index",
@@ -2906,6 +2914,48 @@ mod tests {
         );
         assert_eq!(batch.cancel(), vec![0, 1]);
         assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn batch_terminal_and_poisoned_states_release_the_driver_while_retained() {
+        for (count, events) in [
+            (1, vec![OutboundBatchDriverEvent::Cutoff]),
+            (
+                1,
+                vec![OutboundBatchDriverEvent::Failed(EdgeError::internal(
+                    anyhow::anyhow!("fixture failure"),
+                ))],
+            ),
+            (1, vec![OutboundBatchDriverEvent::Item(batch_item(1))]),
+            (
+                1,
+                vec![
+                    OutboundBatchDriverEvent::Item(batch_item(0)),
+                    OutboundBatchDriverEvent::Item(batch_item(0)),
+                ],
+            ),
+            (1, vec![]),
+            (0, vec![]),
+            (0, vec![OutboundBatchDriverEvent::Cutoff]),
+        ] {
+            let drops = Rc::new(Cell::new(0));
+            let signal = BodyDropSignal(Rc::clone(&drops));
+            let mut remaining = events.into_iter();
+            let driver = stream::poll_fn(move |_context| {
+                let _keep_driver_owned = &signal;
+                Poll::Ready(remaining.next())
+            });
+            let mut batch = OutboundBatch::from_driver(count, driver);
+            while matches!(block_on(batch.next()), Ok(OutboundBatchNext::Item(_))) {}
+            assert_eq!(
+                drops.get(),
+                1,
+                "a retained terminal batch must not retain its driver"
+            );
+            let _terminal_again = block_on(batch.next());
+            drop(batch);
+            assert_eq!(drops.get(), 1, "driver must release exactly once");
+        }
     }
 
     fn body_policy() -> ResponseBodyPolicy {

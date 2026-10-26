@@ -28,6 +28,13 @@ pub struct Args {
 }
 impl Args {
     fn parse() -> Result<Self> {
+        Self::parse_from(std::env::args().skip(1))
+    }
+
+    fn parse_from<I>(arguments: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = String>,
+    {
         let mut a = Self {
             adapter: "fastly".into(),
             suite: "smoke".into(),
@@ -38,11 +45,11 @@ impl Args {
             construction_rounds: 0,
             max_requests: 10,
         };
-        let mut args = std::env::args().skip(1);
+        let mut args = arguments.into_iter();
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-progress|outbound-overflow|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
+                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
                 );
                 std::process::exit(0);
             }
@@ -69,6 +76,7 @@ impl Args {
                 "benchmark",
                 "assembly",
                 "outbound-readiness",
+                "outbound-client-progress",
                 "outbound-progress",
                 "outbound-overflow",
                 "response-framing",
@@ -78,8 +86,11 @@ impl Args {
             "unknown suite",
         )?;
         require(
-            a.suite != "outbound-readiness" || a.adapter == "fastly",
-            "outbound-readiness requires --adapter fastly",
+            !matches!(
+                a.suite.as_str(),
+                "outbound-readiness" | "outbound-client-progress"
+            ) || a.adapter == "fastly",
+            "Fastly receive suites require --adapter fastly",
         )?;
         require(
             a.requests > 0 && a.repetitions > 0,
@@ -395,6 +406,31 @@ fn main() {
         Err(error) => {
             eprintln!("fixture-harness: {error}");
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::Args;
+
+    #[test]
+    fn client_progress_suite_is_explicit_and_fastly_only() {
+        for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
+            let result = Args::parse_from(
+                ["--adapter", adapter, "--suite", "outbound-client-progress"].map(str::to_owned),
+            );
+            assert_eq!(result.is_ok(), adapter == "fastly", "{adapter}");
+        }
+    }
+
+    #[test]
+    fn full_readiness_suite_remains_explicit_and_fastly_only() {
+        for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
+            let result = Args::parse_from(
+                ["--adapter", adapter, "--suite", "outbound-readiness"].map(str::to_owned),
+            );
+            assert_eq!(result.is_ok(), adapter == "fastly", "{adapter}");
         }
     }
 }

@@ -1,0 +1,305 @@
+{
+  "schema": 1,
+  "execution_date": "2026-10-26",
+  "qualification": false,
+  "edgezero_base_revision": "f5d74b4cdb9f08e9986e04c95aeb86a43bad7d0a",
+  "source_state": "working-tree checkpoint, not a frozen candidate",
+  "production_sources": [
+    {
+      "path": "crates/edgezero-adapter-fastly/src/outbound.rs",
+      "sha256": "45ef79f074cf6d37ba9bfc385726997b53c5357d38e6f3e53c79dd08064548e8"
+    },
+    {
+      "path": "crates/edgezero-adapter-fastly/src/outbound/progress.rs",
+      "sha256": "52b92e0d5a2e01afd6e4848f64001e9e447de45f6a223cef8eb944fbc59f0538"
+    },
+    {
+      "path": "crates/edgezero-core/src/outbound.rs",
+      "sha256": "ab89cc5559d97260189e0594a6d900b3ad74167e66599bc907e12d6d2e2e6541"
+    }
+  ],
+  "execution_environment": "Local macOS; not an isolated-load benchmark. Earlier integration runs overlapped source verification. Later exact-build repetitions retain all timing misses; no scheduling cause or hard latency bound is inferred.",
+  "command": "CARGO_NET_OFFLINE=true SSL_CERT_FILE=/etc/ssl/cert.pem VICEROY_BIN=<explicit repaired binary> scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output <new empty directory>",
+  "runtime_version": "0.21.0",
+  "runtime_upstream_revision": "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+  "runtime_binary_sha256": "98ea0536478ce2e641f093b2619b7ac7c6c237402f140e5792d854575abc7100",
+  "runtime_patch_sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759",
+  "fastly_sdk": "0.13.1",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "deployed": false,
+  "external_requests": false,
+  "runtime_pins_changed": false,
+  "public_protocol_changed": false,
+  "retained_client_evidence": "2026-10-26-fastly-cooperative-progress-clients.jsonl",
+  "retained_client_evidence_sha256": "aad260ee367d3eb08f62e7ddd53bc8d3e58d490bc6e9889ef9dab8fe63baf7eb",
+  "disposition": "Actual-client functional inventory passes twice (12 probes, 18 origin requests each). Complete SDK timing inventories still fail; failures are not waived or relabeled. No hosted, callback-wide ownership, resource, or total scheduler-bound qualification.",
+  "runs": [
+    {
+      "id": "serial-drain-red",
+      "directory": "/private/tmp/edgezero-fastly-multiplexer-red-20261025",
+      "exit_code": 1,
+      "guest_sha256": "fd35d77a1f13131e1c567451575b4f262205b67916b8fce4e355f6f54f19f429",
+      "guest_bytes": 1619478,
+      "events_sha256": "9682b8d9ff2a4bc86cee6b1ec2f9e8dfb9cdb98b099931f31705a9c14d10c807",
+      "log_sha256": "02a9c07b56d3886884e8be1a12c7179768c35a93779cbb798d282f1cc31d4b6d",
+      "actual_client_probes": 4,
+      "actual_client_origin_requests": 6,
+      "client_inventory": null,
+      "sdk_probes": 153,
+      "sdk_origin_requests": 177,
+      "failures": [
+        {
+          "event": null,
+          "case": "readiness-inventory",
+          "error": "mixed-body-head/buffered: actual outbound client did not preserve sibling/error result"
+        }
+      ],
+      "qualification": false
+    },
+    {
+      "id": "first-integration",
+      "directory": "/private/tmp/edgezero-fastly-multiplexer-green-20261025",
+      "exit_code": 1,
+      "guest_sha256": "3ee5f2ae8b0e9a22646b6760ce3a8b2e2713893937931688edf2a3a105bd6c3f",
+      "guest_bytes": 1654263,
+      "events_sha256": "71aeef1aa188bd22c85f87fb98a9e950cea4de2e228f49935a89e3ef65dee4e0",
+      "log_sha256": "862988d154664cebb80dc84cb79d2b58705f857d37d704d05b9c6e9a39504adc",
+      "actual_client_probes": 4,
+      "actual_client_origin_requests": 3,
+      "client_inventory": null,
+      "sdk_probes": 153,
+      "sdk_origin_requests": 176,
+      "failures": [
+        {
+          "event": null,
+          "case": "readiness-inventory",
+          "error": "readiness: 19 readiness leg(s) failed:\nsilent-head/selected/buffered/16384/0: reordered or late operation\npending-body/selected/buffered/1/0: reordered or late operation\npending-body/selected/streamed/1/1: reordered or late operation\ntrickle/selected/buffered/1/1: reordered or late operation\nsiblings/selected/buffered/1/1: reordered or late operation\nsiblings/selected/streamed/16384/1: reordered or late operation\nexhausted/selected/buffered/1/1: reordered or late operation\nexhausted/selected/streamed/16384/1: reordered or late operation\nsilent-head/selected/streamed/1/2: reordered or late operation\nsilent-head/selected/streamed/16384/2: reordered or late operation\ntrickle/selected/buffered/1/2: reordered or late operation\ntrickle/selected/streamed/1/2: reordered or late operation\ntrickle/selected/streamed/16384/2: reordered or late operation\nsiblings/selected/streamed/1/2: reordered or late operation\nsiblings/selected/streamed/16384/2: reordered or late operation\nexhausted/selected/buffered/1/2: reordered or late operation\nexhausted/selected/buffered/16384/2: reordered or late operation\nexhausted/selected/streamed/16384/2: reordered or late operation\neof/selected/buffered/1/2: origin workers, errors or containment invalid\nmixed/full-buffer progress: 5 readiness leg(s) failed:\nmixed-body-head/selected/streamed/16384/0: reordered or late operation\nmixed-head-body/selected/buffered/16384/1: reordered or late operation\nmixed-body-head/selected/streamed/16384/1: reordered or late operation\nmixed-head-body/selected/streamed/16384/2: reordered or late operation\nmixed-body-head/selected/buffered/16384/2: reordered or late operation\nmixed-head-body/buffered: actual outbound client did not preserve sibling/error result\nmixed-body-head/buffered: actual outbound client did not preserve sibling/error result"
+        }
+      ],
+      "qualification": false
+    },
+    {
+      "id": "typed-integration",
+      "directory": "/private/tmp/edgezero-fastly-multiplexer-typed-20261025",
+      "exit_code": 1,
+      "guest_sha256": "b275d9e47d911bd23bcb8ba522bf550e86d836d24efd1db1bec4b8b61f2f5d54",
+      "guest_bytes": 1648760,
+      "events_sha256": "662484721ee79ebf02bf9913f542f0a5cedca1f6b877970ba51091cb06444498",
+      "log_sha256": "3edf37c83820ef408e1e8b99d38656a0ee81cce6bb789fe0a1c1c9f65a89f0ec",
+      "actual_client_probes": 4,
+      "actual_client_origin_requests": 5,
+      "client_inventory": null,
+      "sdk_probes": 153,
+      "sdk_origin_requests": 177,
+      "failures": [
+        {
+          "event": null,
+          "case": "readiness-inventory",
+          "error": "readiness: 13 readiness leg(s) failed:\nsilent-head/selected/buffered/16384/0: reordered or late operation\nsilent-head/selected/streamed/1/0: reordered or late operation\npending-body/selected/streamed/1/0: reordered or late operation\nsiblings/selected/buffered/16384/0: missing/late probe completion\nsilent-head/selected/streamed/16384/1: reordered or late operation\npending-body/selected/buffered/16384/1: reordered or late operation\ntrickle/selected/buffered/1/1: reordered or late operation\ntrickle/selected/buffered/16384/1: reordered or late operation\nsiblings/selected/streamed/1/1: reordered or late operation\nsiblings/selected/streamed/16384/1: reordered or late operation\nsilent-head/selected/streamed/1/2: reordered or late operation\nsilent-head/selected/streamed/16384/2: reordered or late operation\ntrickle/selected/streamed/1/2: reordered or late operation\nmixed-head-body/buffered: actual outbound client did not preserve sibling/error result"
+        }
+      ],
+      "qualification": false
+    },
+    {
+      "id": "complete-client-inventory",
+      "directory": "/private/tmp/edgezero-fastly-multiplexer-final-20261026",
+      "exit_code": 1,
+      "guest_sha256": "263db1806a9ad2bf80e768c3b12ddb1ac82392014e7f06fdf7ee39b5690c100b",
+      "guest_bytes": 1650405,
+      "events_sha256": "6f731202d3fdbd93153f772e23838eab13d0d97daa7a8d8ef1a7e18a5acc1f34",
+      "log_sha256": "0aada96fd6c12a18a8976412e63bfa7f8a0ecde1fcbbafc5d63fe7aa497f1ac1",
+      "actual_client_probes": 12,
+      "actual_client_origin_requests": 18,
+      "client_inventory": {
+        "error": null,
+        "event": "fastly-client-progress-inventory",
+        "expected_probes": 12,
+        "origin_requests": 18,
+        "probes": 12,
+        "qualification": false,
+        "status": "pass"
+      },
+      "sdk_probes": 153,
+      "sdk_origin_requests": 177,
+      "failures": [
+        {
+          "event": null,
+          "case": "readiness-inventory",
+          "error": "readiness: 2 readiness leg(s) failed:\nsilent-head/selected/streamed/16384/1: reordered or late operation\npending-body/selected/buffered/16384/1: reordered or late operation"
+        }
+      ],
+      "qualification": false
+    },
+    {
+      "id": "unchanged-build-replication",
+      "directory": "/private/tmp/edgezero-fastly-multiplexer-replication-20261026",
+      "exit_code": 1,
+      "guest_sha256": "263db1806a9ad2bf80e768c3b12ddb1ac82392014e7f06fdf7ee39b5690c100b",
+      "guest_bytes": 1650405,
+      "events_sha256": "e0a9e85780616f386cc0eb910c2b9b3dae78a921e8022ac1725e336d34a799db",
+      "log_sha256": "4b8e24063fd0c8610e646e109d23afcc0f00bfba22648660d74a2d2231ffa4c9",
+      "actual_client_probes": 12,
+      "actual_client_origin_requests": 18,
+      "client_inventory": {
+        "error": null,
+        "event": "fastly-client-progress-inventory",
+        "expected_probes": 12,
+        "origin_requests": 18,
+        "probes": 12,
+        "qualification": false,
+        "status": "pass"
+      },
+      "sdk_probes": 153,
+      "sdk_origin_requests": 177,
+      "failures": [
+        {
+          "event": null,
+          "case": "readiness-inventory",
+          "error": "readiness: 10 readiness leg(s) failed:\ntrickle/selected/buffered/16384/0: reordered or late operation\ntrickle/selected/streamed/16384/1: missing/late probe completion\nsiblings/selected/buffered/16384/1: reordered or late operation\nsiblings/selected/streamed/1/1: reordered or late operation\nsilent-head/selected/streamed/16384/2: reordered or late operation\npending-body/selected/buffered/1/2: reordered or late operation\nsiblings/selected/buffered/1/2: reordered or late operation\nsiblings/selected/buffered/16384/2: reordered or late operation\nsiblings/selected/streamed/1/2: reordered or late operation\nexhausted/selected/buffered/1/2: reordered or late operation\nmixed/full-buffer progress: 2 readiness leg(s) failed:\nmixed-head-body/selected/streamed/16384/2: missing/late probe completion\nmixed-body-head/selected/streamed/16384/2: reordered or late operation"
+        }
+      ],
+      "qualification": false
+    }
+  ],
+  "functional_ci": {
+    "suite": "outbound-client-progress",
+    "command": "CARGO_NET_OFFLINE=true SSL_CERT_FILE=/etc/ssl/cert.pem VICEROY_BIN=<explicit binary> scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-client-progress --output <new empty directory>",
+    "full_sdk_timing_validator_changed": false,
+    "qualification": false,
+    "runtime_rebuild": {
+      "upstream_revision": "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+      "lock_sha256": "d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a",
+      "patch_sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759",
+      "body_source_sha256": "1c56533d85a5c26390f9224e102425cbecc0fe4a280513e00095e7117d6722f7",
+      "profile": "dev, upstream opt-level=1; debug=0; incremental=0; build jobs=2",
+      "readiness_tests": 10,
+      "body_and_collector_tests": 24,
+      "stock_installation_sha256_before_and_after": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30"
+    },
+    "harness_sources": [
+      {
+        "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/main.rs",
+        "sha256": "b4bce9ae9d29e58a80228eb96bdf300520db07857541f45a3e1e80623d03c079"
+      },
+      {
+        "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs",
+        "sha256": "5bbdd819a0c94eec7c9149568b337c3c578478161744d03c0eb1717c731a69dd"
+      },
+      {
+        "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/readiness.rs",
+        "sha256": "e38161a8076131df0357e6964200e4d413cc44894c48dcbc635ad97ee11649e1"
+      },
+      {
+        "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence/readiness.rs",
+        "sha256": "e94f385233f6b16b95470aa21136ce598c843d152e422e12439fb8614a178369"
+      },
+      {
+        "path": ".github/workflows/test.yml",
+        "sha256": "e5eecd04ea2dd778d513e9f8eafd3c13ad01196f89cd86c5c552d502d03297dd"
+      }
+    ],
+    "unit_tests": {
+      "harness": 139,
+      "workspace": 2257,
+      "workspace_ignored": 1,
+      "fastly_wasi": 210,
+      "fastly_contracts": 35
+    },
+    "gate_controls": {
+      "repaired_exit_2_accepted": true,
+      "unavailable_exit_2_rejected": true,
+      "stock_actual_exit_1_rejected": true,
+      "stock_forced_exit_2_rejected": true
+    },
+    "runs": [
+      {
+        "id": "ci-repaired-runtime",
+        "directory": "/private/tmp/edgezero-fastly-client-ci-repaired-20261026",
+        "exit_code": 2,
+        "guard_accepts": true,
+        "runtime_binary_sha256": "f61b16011483d2c46c812093b14f7d52f932ead27998430a28d79af960b0b634",
+        "guest_sha256": "263db1806a9ad2bf80e768c3b12ddb1ac82392014e7f06fdf7ee39b5690c100b",
+        "guest_bytes": 1650405,
+        "events_sha256": "5e327683022c065243fad63a30a422183dc477a1ea912fc54bc46cf49047b6f9",
+        "log_sha256": "d1116205715c1fe4476e75652ab8f9490822bd18a86331dc42b258c299646a12",
+        "inventory": {
+          "error": null,
+          "event": "fastly-client-progress-inventory",
+          "expected_probes": 12,
+          "origin_requests": 18,
+          "probes": 12,
+          "qualification": false,
+          "status": "pass"
+        },
+        "sdk_probe_records": 0,
+        "sdk_inventory_records": 0,
+        "timer_records": 0,
+        "source_error_failures": [],
+        "qualification": false
+      },
+      {
+        "id": "ci-stock-runtime",
+        "directory": "/private/tmp/edgezero-fastly-client-ci-stock-20261026",
+        "exit_code": 1,
+        "guard_accepts": false,
+        "runtime_binary_sha256": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30",
+        "guest_sha256": "263db1806a9ad2bf80e768c3b12ddb1ac82392014e7f06fdf7ee39b5690c100b",
+        "guest_bytes": 1650405,
+        "events_sha256": "b877764b5537411eb549e7227f578ace1cd915af863e6edcd37cd7c2682202cc",
+        "log_sha256": "05a7a56edef1ad3407e6af84c5fa6a4a526692f4e3572b4fbdd3d8b7f1ca581e",
+        "inventory": {
+          "error": "full-body-error/client/buffered/16384/0: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/streamed/16384/0: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/buffered/16384/1: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/streamed/16384/1: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/buffered/16384/2: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/streamed/16384/2: actual-client typed UnexpectedEof failure was lost\n6 actual-client leg(s) failed:\nfull-body-error/client/buffered/16384/0: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/streamed/16384/0: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/buffered/16384/1: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/streamed/16384/1: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/buffered/16384/2: actual-client typed UnexpectedEof failure was lost\nfull-body-error/client/streamed/16384/2: actual-client typed UnexpectedEof failure was lost",
+          "event": "fastly-client-progress-inventory",
+          "expected_probes": 12,
+          "origin_requests": 18,
+          "probes": 12,
+          "qualification": false,
+          "status": "fail"
+        },
+        "sdk_probe_records": 0,
+        "sdk_inventory_records": 0,
+        "timer_records": 0,
+        "source_error_failures": [
+          {
+            "case": "full-body-error",
+            "consumption": "buffered",
+            "repetition": 0,
+            "error": "actual-client typed UnexpectedEof failure was lost"
+          },
+          {
+            "case": "full-body-error",
+            "consumption": "streamed",
+            "repetition": 0,
+            "error": "actual-client typed UnexpectedEof failure was lost"
+          },
+          {
+            "case": "full-body-error",
+            "consumption": "buffered",
+            "repetition": 1,
+            "error": "actual-client typed UnexpectedEof failure was lost"
+          },
+          {
+            "case": "full-body-error",
+            "consumption": "streamed",
+            "repetition": 1,
+            "error": "actual-client typed UnexpectedEof failure was lost"
+          },
+          {
+            "case": "full-body-error",
+            "consumption": "buffered",
+            "repetition": 2,
+            "error": "actual-client typed UnexpectedEof failure was lost"
+          },
+          {
+            "case": "full-body-error",
+            "consumption": "streamed",
+            "repetition": 2,
+            "error": "actual-client typed UnexpectedEof failure was lost"
+          }
+        ],
+        "qualification": false
+      }
+    ],
+    "disposition": "The functional gate passes only the repaired runtime. Identical guest bytes on stock Viceroy lose all six typed truncation errors and fail. The unavailable-runtime exit 2 has no inventory and is rejected. No SDK timing, hosted, callback-wide or resource qualification is inferred."
+  }
+}

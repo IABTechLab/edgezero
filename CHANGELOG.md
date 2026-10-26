@@ -38,6 +38,29 @@ separately from the portable API and must be considered when declaring required 
 - Add real compiler regressions and workspace CI activation with pinned Node. This compile-only
   prerequisite does not replace runtime forwarding tests or provider qualification.
 
+### Fastly Cooperative Receive Progress
+
+- Replace blocking pending-request waits and selected-body drains with one private progress
+  engine shared by the existing Send and Batch receive paths. Select borrowed handle identities,
+  validate every result, rotate slot service, and perform at most one 16 KiB raw read per fresh
+  matching readiness observation. Remove the superseded ownership-reassociation implementation.
+- Preserve cached SDK Send behavior with nonblocking opaque-head polling and one shared positive
+  1 ms pulse. Keep B31, original deadlines/cutoffs, typed source errors and response policies;
+  leave direct native Image Optimizer dispatch unchanged. Ready results backpressure only their
+  own slot, with exactly-once local lease cleanup on cancellation/terminal paths.
+- Release batch drivers on terminal or poisoned observations even when callers retain the batch.
+  Preserve provider details through the outer Fastly deadline guard and release stream sources
+  before publishing terminal errors. Neither local cleanup nor a dropped pending request proves
+  provider-side cancellation.
+- Validate local/CI Fastly receive paths using the explicitly selected, hash-verified Viceroy
+  source repair without replacing the installed runtime. Do not upgrade capabilities or claim
+  hosted qualification. Callback-wide ownership, eager public modes, full pipeline migration
+  and dispatch-slack retirement remain open.
+- Gate the actual-client functional inventory through the existing harness's explicit
+  `outbound-client-progress` suite. Preserve the broader `outbound-readiness` SDK diagnostic,
+  strict timing assertions and failed observations separately. Functional CI requires complete
+  client evidence and exactly the unqualified exit-2 disposition, not a qualification pass.
+
 ### Fastly Mixed-Phase Readiness Diagnostic
 
 - Extend the existing local SDK/ABI suite with pending-head/ready-body and pending-body/delayed-head

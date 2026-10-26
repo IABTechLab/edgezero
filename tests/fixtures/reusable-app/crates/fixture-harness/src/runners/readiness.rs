@@ -1,6 +1,36 @@
 use super::*;
 use crate::net::ReadinessOrigin;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReadinessSuite {
+    ClientProgress,
+    FullDiagnostic,
+}
+
+impl ReadinessSuite {
+    pub(super) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "outbound-client-progress" => Some(Self::ClientProgress),
+            "outbound-readiness" => Some(Self::FullDiagnostic),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::ClientProgress => "outbound-client-progress",
+            Self::FullDiagnostic => "outbound-readiness",
+        }
+    }
+}
+
+fn client_outcome(validation: Result<()>, mut failures: Vec<String>) -> Result<()> {
+    if let Err(error) = validation {
+        failures.push(error.to_string());
+    }
+    require(failures.is_empty(), failures.join("\n"))
+}
+
 fn timer_control(port: u16, source: &str, budget_ms: u64, revision: &str) -> Result<Value> {
     let token = token();
     let result = if source == "native-sleep" {
@@ -51,7 +81,70 @@ fn timer_controls(port: u16, revision: &str, records: &mut Records) -> Result<Ve
     Ok(controls)
 }
 
-pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
+fn client_probes(
+    port: u16,
+    revision: &str,
+    records: &mut Records,
+) -> Result<(Vec<Value>, Vec<String>)> {
+    let mut probes = Vec::new();
+    let mut failures = Vec::new();
+    for leg in readiness_client_legs() {
+        let token = token();
+        let result = (|| -> Result<Value> {
+            let origin = ReadinessOrigin::start(leg.case, &token)?;
+            let reply = net::request(
+                port,
+                &format!(
+                    "/{}/client/{}/{}",
+                    leg.case, leg.consumption, leg.read_limit
+                ),
+                &token,
+                Some(&origin.url(0)),
+                None,
+            );
+            let snapshot = origin.finish();
+            records.push(
+                json!({"event":"readiness-client-origin", "leg":leg.key(), "origin":snapshot}),
+            )?;
+            let mut probe = guest(&reply?)?;
+            require(probe.is_object(), "actual-client reply is not an object")?;
+            probe["repetition"] = json!(leg.repetition);
+            probe["origin"] = snapshot;
+            records.push(probe.clone())?;
+            Ok(probe)
+        })();
+        let validation = match result {
+            Ok(probe) => {
+                let validation = require(
+                    probe["token"] == token
+                        && probe["case"] == leg.case
+                        && probe["consumption"] == leg.consumption,
+                    "foreign actual-client reply",
+                )
+                .and_then(|()| validate_outbound_readiness_client_probe(&probe, revision));
+                probes.push(probe);
+                validation
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = validation {
+            failures.push(format!("{}: {error}", leg.key()));
+            records.push(
+                json!({"event":"fastly-client-progress-failure", "status":"fail",
+                "leg":leg.key(), "token":token, "case":leg.case, "consumption":leg.consumption,
+                "repetition":leg.repetition, "error":error.to_string(), "qualification":false}),
+            )?;
+        }
+    }
+    Ok((probes, failures))
+}
+
+pub(super) fn run(
+    exe: &Path,
+    run: &Path,
+    records: &mut Records,
+    suite: ReadinessSuite,
+) -> Result<()> {
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root())
@@ -92,7 +185,26 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
             &log,
             port,
         )?;
-        let controls = timer_controls(port, &revision, records)?;
+        let controls = match suite {
+            ReadinessSuite::ClientProgress => Vec::new(),
+            ReadinessSuite::FullDiagnostic => timer_controls(port, &revision, records)?,
+        };
+        let (clients, client_failures) = client_probes(port, &revision, records)?;
+        let client_validation = client_outcome(
+            validate_outbound_readiness_client(&clients, &revision),
+            client_failures,
+        );
+        records.push(json!({"event":"fastly-client-progress-inventory",
+            "status":if client_validation.is_ok() {"pass"} else {"fail"},
+            "probes":clients.len(), "expected_probes":readiness_client_legs().len(),
+            "origin_requests":clients.iter().map(|p| p["origin"]["accepted"].as_u64().unwrap_or(0)).sum::<u64>(),
+            "error":client_validation.as_ref().err().map(ToString::to_string), "qualification":false}))?;
+        if suite == ReadinessSuite::ClientProgress {
+            client_validation?;
+            return records.push(json!({"status":"unverified", "suite":suite.name(),
+                "reason":"actual-client receive cases passed; SDK timing diagnostics, callback-wide progress, resource and hosted qualification remain open",
+                "qualification":false}));
+        }
         let mut probes = Vec::new();
         for leg in readiness_legs()
             .into_iter()
@@ -145,6 +257,7 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         }
         let (baseline, progress) = probes.split_at(readiness_legs().len());
         let failures: Vec<_> = [
+            ("actual outbound client", client_validation),
             (
                 "timer controls",
                 validate_timer_controls(&controls, &revision),
@@ -165,13 +278,57 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         records.push(json!({"event":"readiness-inventory", "status":"pass", "probes":probes.len(),
             "origin_requests":probes.iter().map(|probe| probe["origin"]["accepted"].as_u64().unwrap_or(0)).sum::<u64>(),
             "baseline_probes":baseline.len(), "progress_probes":progress.len(), "qualification":false}))?;
-        records.push(json!({"status":"unverified", "reason":"local SDK primitive cases passed; production buffered/streamed paths, backend policy and hosted qualification remain open", "qualification":false}))
+        records.push(json!({"status":"unverified", "reason":"local SDK and client cases passed; full dispatch-mode coverage, callback ownership, resource and hosted qualification remain open", "qualification":false}))
     })();
     settle(
         records,
         &log,
-        json!({"adapter":"fastly", "suite":"outbound-readiness"}),
+        json!({"adapter":"fastly", "suite":suite.name()}),
         json!({"case":"readiness-inventory"}),
         outcome,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReadinessSuite, client_outcome};
+
+    #[test]
+    fn functional_and_sdk_diagnostic_suites_have_distinct_explicit_names() {
+        for suite in [
+            ReadinessSuite::ClientProgress,
+            ReadinessSuite::FullDiagnostic,
+        ] {
+            assert_eq!(ReadinessSuite::parse(suite.name()), Some(suite));
+        }
+        assert_ne!(
+            ReadinessSuite::ClientProgress.name(),
+            ReadinessSuite::FullDiagnostic.name()
+        );
+        assert_eq!(ReadinessSuite::parse("outbound-progress"), None);
+        assert_eq!(ReadinessSuite::parse("smoke"), None);
+    }
+
+    #[test]
+    fn client_outcome_retains_inventory_and_transport_failures() {
+        let error = client_outcome(
+            Err("missing client inventory".into()),
+            vec![
+                "first request failed".into(),
+                "second reply malformed".into(),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        for diagnostic in [
+            "missing client inventory",
+            "first request failed",
+            "second reply malformed",
+        ] {
+            assert!(error.contains(diagnostic));
+        }
+        assert!(client_outcome(Ok(()), vec!["request failed".into()]).is_err());
+        assert!(client_outcome(Err("invalid inventory".into()), Vec::new()).is_err());
+        assert!(client_outcome(Ok(()), Vec::new()).is_ok());
+    }
 }
