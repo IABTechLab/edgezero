@@ -13,8 +13,10 @@ surfaces, maintenance requirements and verification procedure.
 - `crates/edgezero-core/src/router.rs`: optional `PreDispatchHook` before lookup,
   state, introspection, context and middleware. Register a value with
   `pre_dispatch_hook` or an Arc with `pre_dispatch_hook_arc`; duplicate
-  registration panics. Futures may be non-Send; hook values are Send + Sync.
-- `crates/edgezero-core/src/request.rs`: bounded target/origin metadata,
+  registration panics. Continued method/path changes return an internal error;
+  header, extension, body and query changes remain allowed. Futures may be
+  non-Send; hook values are Send + Sync.
+- `crates/edgezero-core/src/ingress.rs`: bounded target/origin metadata,
   infallible `RequestIngress::new`, fallible `with_header_overrides` with an
   internal error for duplicate names, redacted Debug, public authority/target
   limits and shared host/effective-port comparison. The four metadata enums are
@@ -22,7 +24,7 @@ surfaces, maintenance requirements and verification procedure.
   hosts, not operator approval; port spelling is retained.
 - Fastly `src/request.rs`: capture before native mutation, explicit snapshot
   conversion and `dispatch_with_registries_and_ingress(app, req, stores,
-ingress, extend)`. Capture reports target NotExposed before reading the SDK
+  ingress, extend)`. Capture reports target NotExposed before reading the SDK
   URL for origin. Ordinary runners use the same registry dispatcher.
 - Cloudflare `src/request.rs`: original runtime method token and one runtime URL
   read; parse the captured copy with `worker::Url`; preserve runtime UTF-8
@@ -60,9 +62,10 @@ Spin SDK 7.0.0. Its lockfile must be regenerated with these pins together.
 CI and the runner require worker-build 0.8.5 and Spin CLI 4.1.0. Rust, Node,
 Viceroy and Wasmtime versions come from `.tool-versions`. The shared Spin pin
 check includes this fixture. CI resolves fixture wasm-bindgen from its own lock,
-and worker-build uses the npm-integrity-locked esbuild executable. Its version
-is declared once beside Spin CLI in fixture metadata. SDK drift checks compare
-exact Fastly, Worker, wasm-bindgen and Spin SDK pins against both lockfiles.
+and worker-build uses the npm-integrity-locked esbuild executable. The
+worker-build version is declared once beside Spin CLI in
+`[package.metadata.request-fidelity]`. SDK drift checks compare exact Fastly,
+Worker, wasm-bindgen and Spin SDK pins against both lockfiles.
 CI caches the actual native-runner and WASM-fixture target directories with
 versioned cache keys; debug lint and release probe builds keep their profiles.
 
@@ -104,6 +107,6 @@ the PR description.
   native shortcut ordering and terminal finalization. Its integration requires
   an immutable reviewed toolkit revision and tests on its own dependency graph.
 - The worker-build binary uses a version-specific CI cache; cold installs build
-  from source while the pinned release has no Ubuntu prebuilt. Opt-in capture
-  remains separate work.
-  No production capability or performance claim follows from local fixtures.
+  from source while the pinned release has no Ubuntu prebuilt.
+- Opt-in capture remains separate work.
+- No production capability or performance claim follows from local fixtures.

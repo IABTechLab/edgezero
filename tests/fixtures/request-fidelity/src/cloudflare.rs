@@ -3,7 +3,7 @@ use edgezero_adapter_cloudflare::request::CloudflareService;
 use edgezero_core::action;
 use edgezero_core::app::{App, Hooks};
 use edgezero_core::context::RequestContext;
-use edgezero_core::request::{CapturedTarget, Preservation, RequestIngress, TargetSource};
+use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress, TargetSource};
 use edgezero_core::router::RouterService;
 use serde_json::json;
 use worker::{Context, Env, Request, Response, Result};

@@ -78,22 +78,29 @@ pub type BoxPreDispatchHook = Arc<dyn PreDispatchHook>;
 
 Builder methods `pre_dispatch_hook<H: PreDispatchHook>(hook: H)` and `pre_dispatch_hook_arc(hook: BoxPreDispatchHook)` install one optional hook. Default is None. Repeated registration panics during router construction, so another registration cannot silently remove an authentication gate. `RouterService` clones share the same Arc-backed instance.
 
-The first operation in `RouterInner::dispatch` becomes:
+Before route lookup, `RouterInner::dispatch` snapshots the routing inputs and invokes the hook:
 
 ```rust
+let method = request.method().clone();
+let path = request.uri().path().to_owned();
 if let Some(hook) = &self.pre_dispatch_hook {
     if let Some(response) = hook.handle(&mut request).await? {
         return Ok(response);
     }
+    if request.method() != method || request.uri().path() != path {
+        return Err(EdgeError::internal(IoError::other(
+            "pre-dispatch hook changed the request method or path",
+        )));
+    }
 }
 ```
 
-Only after continuation may the router clone the method/path, call `find_route`, insert introspection/state, build `RequestContext` or run middleware.
+The router snapshots the method/path before the hook and validates them after continuation. Only then may it call `find_route`, insert introspection/state, build `RequestContext` or run middleware.
 
 ### Result contract
 
 - `Ok(Some(response))`: terminal core response returned unchanged. No route matching, state/introspection injection, `RequestContext`, route middleware or handler follows.
-- `Ok(None)`: continue using the same mutated request, including method, URI, headers, extensions and remaining body.
+- `Ok(None)`: continue with modified headers, extensions, remaining body and URI query, preserving the method and URI path. Changing either routing input returns an internal error before lookup or lifecycle work. The consumer requires reserved requests to terminate locally and other paths to continue normally; it does not require method/path rewriting.
 - `Err(error)`: direct `Service::call` propagates the existing `EdgeError`; existing `RouterService::oneshot` renders it through `IntoResponse`. Neither dispatches fallback routes or silently continues. Return `Some(Response)` when exact consumer-specific error headers/body are required.
 - No hook: retain all current routing/status/middleware behavior.
 - Request cancellation: follow the existing future/drop behavior; introduce no tasks, timers or background work.
@@ -107,7 +114,7 @@ direct macro registration is tracked in [#434](https://github.com/IABTechLab/edg
 
 ## 6. Ingress metadata contract
 
-Create `crates/edgezero-core/src/request.rs` and export `pub mod request`. This module defines an adapter-populated `RequestIngress` request extension, not a second request implementation.
+Create `crates/edgezero-core/src/ingress.rs` and export `pub mod ingress`. This module defines an adapter-populated `RequestIngress` request extension, not a second request implementation.
 
 Use private fields, Clone, and borrowed accessors. Do not derive value-bearing Debug, Serialize or Display for target/origin/metadata. These values can contain credentials or query strings. Never log them, put them in error messages, serialize them into responses, or clone all header values into a second buffer.
 
@@ -146,7 +153,7 @@ Do not turn optional target-capture failure into an unrelated new ordinary-reque
 - Do not use consuming handle round trips, clone_without_body, raw pointers or a new unsafe fastly-sys wrapper to bypass the SDK gate.
 - After the accessor exists, parse scheme/authority without normalizing the captured path. Prove encoded separators/dot segments/repeated separators survive in metadata and that client IP/TLS accessors retain behavior.
 - Runtime header bytes and same-name order must be tested. `get_original_header_names()` and `get_original_header_count()` expose name order and total count, not original field/value association. Local Viceroy lowercases and deduplicates names. Report global order Unknown pending production verification; aggregate count equality cannot prove per-name multiplicity. Do not reconstruct fields from mismatched/FIFO guesses.
-- Add `into_core_request_with_ingress` and a public `dispatch_with_registries_and_ingress` overload that retains the existing App/StoresMetadata/extension-callback semantics. Add a metadata-aware conversion path for an already captured snapshot: retain that same snapshot through later native mutation/dispatch. Ordinary converters capture once and delegate. Insert adapter-captured ingress after generic scratch extension merging so it cannot be accidentally overwritten.
+- Keep snapshot conversion helpers crate-private and expose a public `dispatch_with_registries_and_ingress` overload that retains the existing App/StoresMetadata/extension-callback semantics. Add a metadata-aware conversion path for an already captured snapshot: retain that same snapshot through later native mutation/dispatch. Ordinary converters capture once and delegate. Insert adapter-captured ingress after generic scratch extension merging so it cannot be accidentally overwritten.
 - Existing request-extensions callbacks can carry native facts. They are not the new router policy hook and cannot return local responses.
 
 ### 7.2 Cloudflare
@@ -165,7 +172,7 @@ Keep existing body buffering and Env/Context/proxy wiring intact. Distinguish br
 
 ### 7.3 Axum
 
-Capture `parts.uri` before any added URL parsing and preserve `parts.headers` through `from_parts`. Source is runtime path/query or URI, not an original TCP request line. Validate inbound scheme/authority from trustworthy runtime binding; an origin-form URI without that information has unavailable origin rather than a guessed scheme.
+Capture `parts.uri` before any added URL parsing and preserve `parts.headers` through `from_parts`. Source is runtime path/query or URI, not an original TCP request line. Use the listener-established scheme (plain HTTP) plus one validated Host as `TransportBinding`; an origin-form URI without that binding has no origin rather than a guessed scheme.
 
 Audit Hyper parser changes and report per-field limitations. Identical repeated Content-Length may be folded; conflicting lengths may be rejected before hook invocation. Such rejection is transport evidence, not a hook-built local response.
 
@@ -200,13 +207,13 @@ Two completion claims are distinct:
 
 If a runtime irreversibly hides required path spellings or original duplicate control fields, record the exact limitation and a proposed consumer resolution. Do not silently weaken the approved consumer spec, advertise universal original-wire preservation, disable a consumer platform without approval or report consumer integration complete solely because a hook exists.
 
-Trusted Server owns early Fastly native shortcut exclusion, classification, authentication, lifecycle gates and terminal response finalization. The ingress helper must be callable before those shortcuts; changing Trusted Server's `main.rs` is outside this EdgeZero branch.
+Trusted Server owns early Fastly native shortcut exclusion, classification, authentication, lifecycle gates and terminal response finalization. The ingress helper must be callable before those shortcuts; changing Trusted Server's `main.rs` is outside EdgeZero's scope.
 
 ## 9. Tests and acceptance
 
 1. No-hook routing and existing 404/405/middleware/state behavior remain identical.
 2. Hook sees arbitrary methods/paths before any router lookup result; terminal success/error runs zero state/context/middleware/handler effects.
-3. Continued mutations are observed by actual route lookup and handler; consumed/replaced body behavior is explicit.
+3. Continued method/path changes fail before lookup, state or middleware; headers, extensions, body and query mutations reach the handler. Terminal responses remain allowed after mutation; consumed/replaced body behavior is explicit.
 4. Hook sharing across clones and a non-Send future compile/run without introducing Tokio.
 5. Metadata captures at/over target cap, omits partial values, rejects spoofed origin sources and exposes conservative missing capability.
 6. Cloudflare runtime extension methods and UTF-8 strings survive the real converter, not a synthetic core request.

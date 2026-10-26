@@ -1,5 +1,5 @@
 use edgezero_core::http::Uri;
-use edgezero_core::request::{
+use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
     TargetSource,
 };
@@ -25,7 +25,7 @@ pub(crate) fn capture_request_ingress(uri: &Uri) -> RequestIngress {
 mod ingress_tests {
     use super::capture_request_ingress;
     use edgezero_core::http::Uri;
-    use edgezero_core::request::{CapturedTarget, OriginSource, Preservation};
+    use edgezero_core::ingress::{CapturedTarget, OriginSource, Preservation};
 
     #[test]
     fn ingress_captures_runtime_uri_and_origin_only() {

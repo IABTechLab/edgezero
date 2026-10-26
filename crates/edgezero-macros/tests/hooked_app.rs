@@ -5,7 +5,6 @@ mod tests {
     mod manifest_app {
         edgezero_core::app!(
             "tests/fixtures/hooked_app.toml",
-            ManifestApp,
             owns_logging = true,
             state = 42_u32
         );
@@ -20,13 +19,13 @@ mod tests {
     use edgezero_core::extractor::State;
     use edgezero_core::http::{Request, Response, request_builder, response_builder};
     use edgezero_core::introspection::ManifestJson;
-    use edgezero_core::manifest::{ManifestLoader, ResolvedLoggingConfig};
+    use edgezero_core::manifest::{LogLevel, ManifestLoader, ResolvedLoggingConfig};
     use edgezero_core::middleware::{Middleware, Next};
     use edgezero_core::router::{PreDispatchHook, RouterService};
     use futures::executor::block_on;
     use std::sync::{Arc, LazyLock};
 
-    use manifest_app::ManifestApp;
+    use manifest_app::App as ManifestApp;
 
     static MANIFEST_JSON: LazyLock<Arc<str>> = LazyLock::new(|| {
         let manifest = ManifestLoader::load_from_str(include_str!("fixtures/hooked_app.toml"));
@@ -80,7 +79,9 @@ mod tests {
                 request.extensions().get::<ManifestJson>().is_none(),
                 "hook precedes introspection"
             );
-            if request.uri().path() == "/reserved" {
+            if request.uri().path() == "/reserved"
+                || request.headers().contains_key("x-example-stop")
+            {
                 return response_builder()
                     .status(204)
                     .body(Body::empty())
@@ -125,6 +126,8 @@ mod tests {
         assert_eq!(HookedApp::name(), "hooked-manifest-app");
         assert!(HookedApp::owns_logging());
         let actual = HookedApp::logging_for("fastly");
+        assert_eq!(actual.endpoint.as_deref(), Some("fixture_logs"));
+        assert_eq!(actual.level, LogLevel::Debug);
         let expected = ManifestApp::logging_for("fastly");
         assert_eq!(actual.endpoint, expected.endpoint);
         assert_eq!(actual.level, expected.level);
@@ -177,6 +180,18 @@ mod tests {
                 .expect("response");
             assert_eq!(terminal.status(), 204);
             assert!(terminal.headers().get("x-middleware").is_none());
+            let matched_terminal = router
+                .oneshot(
+                    request_builder()
+                        .uri("/ordinary")
+                        .header("x-example-stop", "true")
+                        .body(Body::empty())
+                        .expect("matched request"),
+                )
+                .await
+                .expect("matched_terminal response on matched route");
+            assert_eq!(matched_terminal.status(), 204);
+            assert!(matched_terminal.headers().get("x-middleware").is_none());
         });
     }
 }

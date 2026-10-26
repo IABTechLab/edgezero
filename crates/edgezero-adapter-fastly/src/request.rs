@@ -10,11 +10,11 @@ use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::header::HOST;
 use edgezero_core::http::{Extensions, HeaderValue, Request, Uri, request_builder};
-use edgezero_core::key_value_store::KvHandle;
-use edgezero_core::proxy::ProxyHandle;
-use edgezero_core::request::{
+use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, RequestIngress, TargetUnavailable,
 };
+use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::proxy::ProxyHandle;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
@@ -104,7 +104,6 @@ pub struct FastlyService<'app> {
     app: &'app App,
     config: ConfigSource,
     kv: Option<KvSource>,
-    request_ingress: Option<RequestIngress>,
     secrets: SecretSource,
 }
 
@@ -128,9 +127,7 @@ impl<'app> FastlyService<'app> {
     /// the underlying handler returns an error.
     #[inline]
     pub fn dispatch(self, req: FastlyRequest) -> Result<FastlyResponse, FastlyError> {
-        let ingress = self
-            .request_ingress
-            .unwrap_or_else(|| capture_request_ingress(&req));
+        let ingress = capture_request_ingress(&req);
         let config_store = match self.config {
             ConfigSource::Handle(handle) => Some(handle),
             ConfigSource::Name(name) => match FastlyConfigStore::try_open(&name) {
@@ -173,7 +170,6 @@ impl<'app> FastlyService<'app> {
             app,
             config: ConfigSource::None,
             kv: None,
-            request_ingress: None,
             secrets: SecretSource::Off,
         }
     }
@@ -248,16 +244,6 @@ impl<'app> FastlyService<'app> {
             name: name.into(),
             required: false,
         });
-        self
-    }
-
-    /// Retain metadata captured before native request mutations or shortcuts.
-    ///
-    /// The caller must establish the supplied snapshot's provenance and fidelity.
-    #[must_use]
-    #[inline]
-    pub fn with_request_ingress(mut self, ingress: RequestIngress) -> Self {
-        self.request_ingress = Some(ingress);
         self
     }
 
@@ -449,7 +435,7 @@ where
 /// Returns an error if a declared KV store cannot be opened or the request
 /// cannot be converted, including an inbound body read failure.
 #[inline]
-pub fn into_core_request_with_registries_and_ingress<F>(
+pub(crate) fn into_core_request_with_registries_and_ingress<F>(
     req: FastlyRequest,
     stores: StoresMetadata,
     ingress: RequestIngress,
@@ -660,7 +646,7 @@ pub fn into_core_request(req: FastlyRequest) -> Result<Request, EdgeError> {
 /// # Errors
 /// Returns an error if method, URI or body conversion fails.
 #[inline]
-pub fn into_core_request_with_ingress(
+pub(crate) fn into_core_request_with_ingress(
     req: FastlyRequest,
     ingress: RequestIngress,
 ) -> Result<Request, EdgeError> {
@@ -965,7 +951,7 @@ mod synthesis_tests {
 #[cfg(test)]
 mod ingress_tests {
     use super::{
-        FastlyService, capture_request_ingress, dispatch_with_registries_and_ingress,
+        capture_request_ingress, dispatch_with_registries_and_ingress,
         into_core_request_with_ingress, origin_from_runtime_uri,
     };
     use crate::context::FastlyRequestContext;
@@ -975,11 +961,11 @@ mod ingress_tests {
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::header::HOST;
     use edgezero_core::http::{HeaderValue, Request, Response, Uri, response_builder};
-    use edgezero_core::proxy::ProxyHandle;
-    use edgezero_core::request::{
+    use edgezero_core::ingress::{
         CapturedTarget, HeaderFidelity, OriginSource, Preservation, RequestIngress, TargetSource,
         TargetUnavailable,
     };
+    use edgezero_core::proxy::ProxyHandle;
     use edgezero_core::router::{PreDispatchHook, RouterService};
     use fastly::Request as FastlyRequest;
     use std::sync::Arc;
@@ -1170,17 +1156,5 @@ mod ingress_tests {
         )
         .expect("should dispatch with chosen snapshot");
         assert_eq!(response.get_status().as_u16(), 204);
-        let service_app = App::new(
-            RouterService::builder()
-                .pre_dispatch_hook_arc(Arc::new(VerifySnapshot {
-                    scratch_expected: false,
-                }))
-                .build(),
-        );
-        let service_response = FastlyService::new(&service_app)
-            .with_request_ingress(snapshot())
-            .dispatch(FastlyRequest::get("https://example.com/later"))
-            .expect("should dispatch service snapshot");
-        assert_eq!(service_response.get_status().as_u16(), 204);
     }
 }

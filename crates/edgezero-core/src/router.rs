@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Error as IoError;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -26,6 +27,8 @@ pub type BoxPreDispatchHook = Arc<dyn PreDispatchHook>;
 #[async_trait(?Send)]
 pub trait PreDispatchHook: Send + Sync + 'static {
     /// Return a terminal response, or continue with the mutated request.
+    /// Continuing hooks may change headers, extensions, the body and URI query,
+    /// but must preserve the method and URI path. A violation is an internal error.
     ///
     /// # Errors
     ///
@@ -288,13 +291,18 @@ struct RouterInner {
 
 impl RouterInner {
     async fn dispatch(&self, mut request: Request) -> Result<Response, EdgeError> {
-        if let Some(hook) = &self.pre_dispatch_hook
-            && let Some(response) = hook.handle(&mut request).await?
-        {
-            return Ok(response);
-        }
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
+        if let Some(hook) = &self.pre_dispatch_hook {
+            if let Some(response) = hook.handle(&mut request).await? {
+                return Ok(response);
+            }
+            if request.method() != method || request.uri().path() != path {
+                return Err(EdgeError::internal(IoError::other(
+                    "pre-dispatch hook changed the request method or path",
+                )));
+            }
+        }
 
         match self.find_route(&method, &path) {
             RouteMatch::Found(entry, params) => {
@@ -1229,14 +1237,39 @@ mod pre_dispatch_tests {
         }
     }
 
-    struct RewriteHook;
+    struct RoutingMutationHook {
+        method: bool,
+        terminal: bool,
+    }
 
     #[async_trait(?Send)]
-    impl PreDispatchHook for RewriteHook {
+    impl PreDispatchHook for RoutingMutationHook {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            if self.method {
+                *request.method_mut() = Method::POST;
+            } else {
+                *request.uri_mut() = "/after".parse().expect("fixed URI");
+            }
+            if self.terminal {
+                return response_builder()
+                    .status(204)
+                    .body(Body::empty())
+                    .map(Some)
+                    .map_err(EdgeError::internal);
+            }
+            Ok(None)
+        }
+    }
+
+    struct ContinueHook;
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for ContinueHook {
         async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
             assert!(request.extensions().get::<CountedState>().is_none());
-            *request.method_mut() = Method::POST;
-            *request.uri_mut() = "/after".parse().expect("should parse fixed URI");
+            *request.uri_mut() = "/after?hook=present"
+                .parse()
+                .expect("should parse fixed URI");
             request.headers_mut().insert(
                 "x-hook",
                 "present".parse().expect("should parse fixed header"),
@@ -1284,6 +1317,7 @@ mod pre_dispatch_tests {
                 .is_some()
         );
         assert_eq!(context.request().headers()["x-hook"], "present");
+        assert_eq!(context.request().uri().query(), Some("hook=present"));
         assert_eq!(
             context.request().body().as_bytes(),
             Some(b"changed".as_slice())
@@ -1313,13 +1347,75 @@ mod pre_dispatch_tests {
             .with_state(CountedState {
                 clones: Arc::clone(&clones),
             })
-            .pre_dispatch_hook(RewriteHook)
+            .pre_dispatch_hook(ContinueHook)
             .post("/after", after_handler)
             .build();
-        let response = block_on(router.oneshot(input(Method::GET, "/before", Body::empty())))
-            .expect("should dispatch rewritten request");
+        let response = block_on(router.oneshot(input(Method::POST, "/after", Body::empty())))
+            .expect("should dispatch continuing request");
         assert_eq!(response.body().as_bytes(), Some(b"continued".as_slice()));
         assert_eq!(clones.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn pre_dispatch_rejects_continued_method_or_path_changes() {
+        for method in [false, true] {
+            let clones = Arc::new(AtomicUsize::new(0));
+            let middleware_calls = Arc::new(AtomicUsize::new(0));
+            let router = RouterService::builder()
+                .with_state(CountedState {
+                    clones: Arc::clone(&clones),
+                })
+                .middleware(CountingMiddleware {
+                    calls: Arc::clone(&middleware_calls),
+                })
+                .pre_dispatch_hook(RoutingMutationHook {
+                    method,
+                    terminal: false,
+                })
+                .post("/before", unreachable_handler)
+                .get("/after", unreachable_handler)
+                .build();
+            let error = block_on(
+                router
+                    .clone()
+                    .call(input(Method::GET, "/before", Body::empty())),
+            )
+            .expect_err("routing mutation must fail before lookup");
+            assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(
+                error
+                    .to_string()
+                    .contains("pre-dispatch hook changed the request method or path")
+            );
+            let response = block_on(router.oneshot(input(Method::GET, "/before", Body::empty())))
+                .expect("oneshot renders routing mutation error");
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(clones.load(Ordering::SeqCst), 0);
+            assert_eq!(middleware_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn pre_dispatch_terminal_response_allows_method_or_path_changes() {
+        for method in [false, true] {
+            let router = RouterService::builder()
+                .pre_dispatch_hook(RoutingMutationHook {
+                    method,
+                    terminal: true,
+                })
+                .build();
+            let response = block_on(router.clone().call(input(
+                Method::GET,
+                "/before",
+                Body::empty(),
+            )))
+            .expect("terminal response precedes mutation guard");
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let oneshot_response =
+                block_on(router.oneshot(input(Method::GET, "/before", Body::empty())))
+                    .expect("terminal response through oneshot");
+            assert_eq!(oneshot_response.status(), StatusCode::NO_CONTENT);
+        }
     }
 
     #[test]
@@ -1384,7 +1480,7 @@ mod pre_dispatch_tests {
     fn pre_dispatch_registration_rejects_duplicate_hook() {
         let _builder = RouterService::builder()
             .pre_dispatch_hook_arc(Arc::new(InspectHook))
-            .pre_dispatch_hook(RewriteHook);
+            .pre_dispatch_hook(ContinueHook);
     }
 
     #[test]

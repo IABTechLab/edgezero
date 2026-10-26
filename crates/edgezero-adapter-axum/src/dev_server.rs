@@ -755,9 +755,9 @@ mod integration_tests {
 
     use async_trait::async_trait;
     use edgezero_core::body::Body;
-    use edgezero_core::http::{HeaderValue, Method, Request, Response, response_builder};
+    use edgezero_core::http::{HeaderValue, Request, Response, response_builder};
+    use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress};
     use edgezero_core::middleware::{Middleware, Next};
-    use edgezero_core::request::{CapturedTarget, Preservation, RequestIngress};
     use edgezero_core::router::PreDispatchHook;
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
@@ -838,8 +838,6 @@ mod integration_tests {
                 }
                 "te-cl" => assert!(!request.headers().contains_key("content-length")),
                 "continue" => {
-                    *request.method_mut() = Method::GET;
-                    *request.uri_mut() = "/ordinary".parse().expect("should parse fixed route");
                     return Ok(None);
                 }
                 "error" => return Err(EdgeError::bad_request("fixture rejection")),
@@ -901,7 +899,7 @@ mod integration_tests {
             (b"POST /missing HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: length\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n", b"HTTP/1.1 204", 1),
             (b"POST /missing HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: length\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n", b"HTTP/1.1 400", 0),
             (b"GET /reserved/%2e/../%2F// HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: dot\r\n\r\n", b"HTTP/1.1 204", 1),
-            (b"EXAMPLE-METHOD /missing HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: continue\r\n\r\n", b"HTTP/1.1 200", 1),
+            (b"GET /ordinary HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: continue\r\n\r\n", b"HTTP/1.1 200", 1),
             (b"GET /missing HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: error\r\n\r\n", b"HTTP/1.1 400", 1),
             (b"POST /missing HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: te-cl\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n0\r\n\r\n", b"HTTP/1.1 204", 1),
         ];

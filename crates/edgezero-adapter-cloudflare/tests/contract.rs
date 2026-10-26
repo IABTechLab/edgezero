@@ -30,7 +30,7 @@ mod tests {
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{Method, Request, Response, StatusCode, response_builder};
-    use edgezero_core::request::{
+    use edgezero_core::ingress::{
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };
@@ -63,10 +63,6 @@ mod tests {
             assert!(request.extensions().get::<RequestIngress>().is_some());
             assert_eq!(request.method().as_str(), "EXAMPLE-METHOD");
             if self.continue_routing {
-                *request.method_mut() = Method::GET;
-                *request.uri_mut() = "https://example.com/uri"
-                    .parse()
-                    .expect("should parse fixed URI");
                 Ok(None)
             } else {
                 Ok(Some(
@@ -212,12 +208,21 @@ mod tests {
             let app = App::new(
                 RouterService::builder()
                     .pre_dispatch_hook_arc(Arc::new(IngressHook { continue_routing }))
-                    .get("/uri", capture_uri_for_ingress)
+                    .route(
+                        "/uri",
+                        Method::from_bytes(b"EXAMPLE-METHOD").expect("method"),
+                        capture_uri_for_ingress,
+                    )
                     .build(),
             );
             let init = web_sys::RequestInit::new();
             init.set_method("EXAMPLE-METHOD");
-            let raw = web_sys::Request::new_with_str_and_init("https://example.com/missing", &init)
+            let url = if continue_routing {
+                "https://example.com/uri"
+            } else {
+                "https://example.com/missing"
+            };
+            let raw = web_sys::Request::new_with_str_and_init(url, &init)
                 .expect("should create extension request");
             let (env, ctx) = test_env_ctx();
             let response = CloudflareService::new(&app)

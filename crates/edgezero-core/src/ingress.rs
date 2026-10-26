@@ -50,7 +50,7 @@ impl CapturedTarget {
 /// Fields remain private so callers cannot bypass the capture bound.
 ///
 /// ```compile_fail
-/// use edgezero_core::request::{CompleteTarget, Preservation, TargetSource};
+/// use edgezero_core::ingress::{CompleteTarget, Preservation, TargetSource};
 /// let target = CompleteTarget {
 ///     value: std::sync::Arc::from("http://example.com/"),
 ///     source: TargetSource::RuntimeUrl,
@@ -446,7 +446,7 @@ pub enum TargetUnavailable {
 mod tests {
     use crate::http::StatusCode;
     use crate::http::header::{CONTENT_LENGTH, COOKIE};
-    use crate::request::{
+    use crate::ingress::{
         CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
         TargetSource, TargetUnavailable,
     };

@@ -7,11 +7,11 @@ use edgezero_core::body::Body;
 use edgezero_core::http::Request as CoreRequest;
 use edgezero_core::http::header::{CONTENT_TYPE, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Uri};
-use edgezero_core::proxy::ProxyHandle;
-use edgezero_core::request::{
+use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
     TargetSource,
 };
+use edgezero_core::proxy::ProxyHandle;
 
 use crate::context::AxumRequestContext;
 use crate::proxy::AxumProxyClient;
@@ -264,7 +264,7 @@ mod ingress_tests {
     use super::{HttpTransport, into_core_request};
     use axum::body::Body as AxumBody;
     use edgezero_core::http::{HeaderValue, Method, request_builder};
-    use edgezero_core::request::{
+    use edgezero_core::ingress::{
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };

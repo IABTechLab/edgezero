@@ -299,53 +299,62 @@ fn run_prepared_command(
         .map(|value| value.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
-    let describe =
-        |error: io::Error| io::Error::new(error.kind(), format!("{description}: {error}"));
+    let program_prefix = format!("{}: ", command.get_program().to_string_lossy());
+    let describe = |error: io::Error| {
+        let message = error.to_string();
+        let message = message.strip_prefix(&program_prefix).unwrap_or(&message);
+        io::Error::new(error.kind(), format!("{description}: {message}"))
+    };
     check_cancelled(cancelled).map_err(describe)?;
+    if !capture {
+        use std::os::fd::AsFd as _;
+        command.stdout(Stdio::from(
+            io::stderr()
+                .as_fd()
+                .try_clone_to_owned()
+                .map_err(describe)?,
+        ));
+        command.stderr(Stdio::inherit());
+        return OwnedProcess::spawn(command)
+            .map_err(describe)?
+            .wait(cancelled)
+            .map(|()| String::new())
+            .map_err(describe);
+    }
     // A file avoids pipe backpressure while waiting interruptibly for build tools.
     let mut output = tempfile::tempfile().map_err(describe)?;
     let mut stderr = tempfile::tempfile().map_err(describe)?;
     command.stdout(output.try_clone().map_err(describe)?);
-    command.stderr(if capture {
-        Stdio::from(stderr.try_clone().map_err(describe)?)
-    } else {
-        Stdio::inherit()
-    });
+    command.stderr(Stdio::from(stderr.try_clone().map_err(describe)?));
     let result = OwnedProcess::spawn(command)
         .map_err(describe)?
         .wait(cancelled);
     output.rewind().map_err(describe)?;
-    if capture {
-        let mut bytes = Vec::new();
-        output.read_to_end(&mut bytes).map_err(describe)?;
-        stderr.rewind().map_err(describe)?;
-        let mut diagnostics = Vec::new();
-        stderr.read_to_end(&mut diagnostics).map_err(describe)?;
-        result.map_err(|error| {
-            describe(io::Error::new(
-                error.kind(),
-                format!(
-                    "{error}; stdout: {}; stderr: {}",
-                    String::from_utf8_lossy(&bytes),
-                    String::from_utf8_lossy(&diagnostics)
-                ),
-            ))
-        })?;
-        io::stderr().write_all(&diagnostics).map_err(describe)?;
-        String::from_utf8(bytes).map_err(|error| {
-            describe(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{error}; output: {}",
-                    String::from_utf8_lossy(error.as_bytes())
-                ),
-            ))
-        })
-    } else {
-        io::copy(&mut output, &mut io::stderr()).map_err(describe)?;
-        result.map_err(describe)?;
-        Ok(String::new())
-    }
+    let mut bytes = Vec::new();
+    output.read_to_end(&mut bytes).map_err(describe)?;
+    stderr.rewind().map_err(describe)?;
+    let mut diagnostics = Vec::new();
+    stderr.read_to_end(&mut diagnostics).map_err(describe)?;
+    result.map_err(|error| {
+        describe(io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&bytes),
+                String::from_utf8_lossy(&diagnostics)
+            ),
+        ))
+    })?;
+    eprint!("{}", String::from_utf8_lossy(&diagnostics));
+    String::from_utf8(bytes).map_err(|error| {
+        describe(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{error}; output: {}",
+                String::from_utf8_lossy(error.as_bytes())
+            ),
+        ))
+    })
 }
 
 fn verify_version(
@@ -921,8 +930,8 @@ fn cases() -> Vec<Case> {
                 case.body = b"0\r\n\r\n";
             }
             "continue" => {
-                case.method = b"POST";
-                case.target = b"/missing";
+                case.method = b"GET";
+                case.target = b"/ordinary";
             }
             _ => return Vec::new(),
         }
@@ -1275,6 +1284,17 @@ mod tests {
             .expect("missing program must fail");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains(program));
+        let error = super::run_command(
+            Path::new("/tmp"),
+            program,
+            &["--version"],
+            &Arc::new(AtomicBool::new(false)),
+            true,
+        )
+        .expect_err("missing command must fail");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.to_string().matches(program).count(), 1);
+        assert!(error.to_string().contains("--version"));
     }
 
     #[test]
@@ -1283,9 +1303,9 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         for (script, kind, diagnostics) in [
             (
-                "printf 'probe stdout'; printf 'probe stderr' >&2; exit 3",
+                "printf '%s %s' probe out; printf '%s %s' probe err >&2; exit 3",
                 io::ErrorKind::Other,
-                "probe stdout",
+                "stdout: probe out",
             ),
             ("printf '\\377'", io::ErrorKind::InvalidData, "�"),
         ] {
@@ -1302,10 +1322,43 @@ mod tests {
             assert!(message.contains("/bin/sh -c"), "{message}");
             assert!(message.contains(diagnostics), "{message}");
             if kind == io::ErrorKind::Other {
-                assert!(message.contains("probe stderr"), "{message}");
-                assert!(message.contains('3'), "{message}");
+                assert!(message.contains("stderr: probe err"), "{message}");
+                assert!(message.contains("exit status: 3"), "{message}");
             }
         }
+    }
+
+    #[test]
+    fn noncaptured_command_streams_in_order_and_preserves_failure() {
+        const CHILD: &str = "EDGEZERO_TEST_NONCAPTURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let error = super::run_command(
+                Path::new("/tmp"),
+                "/bin/sh",
+                &["-c", "printf 'out-first\\n'; printf 'err-middle\\n' >&2; printf 'out-last\\n'; exit 7"],
+                &Arc::new(AtomicBool::new(false)),
+                false,
+            ).expect_err("noncapture must preserve command failure");
+            assert!(error.to_string().contains("exit status: 7"), "{error}");
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::noncaptured_command_streams_in_order_and_preserves_failure",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("child test");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "out-first\nerr-middle\nout-last\n"
+        );
     }
 
     #[test]

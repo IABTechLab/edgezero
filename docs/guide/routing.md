@@ -218,8 +218,9 @@ let router = RouterService::builder()
     .build();
 ```
 
-`Ok(None)` continues with the mutated request: method, URI, headers, extensions
-and remaining body all participate in normal dispatch. Consuming a stream does
+`Ok(None)` continues with modified headers, extensions, remaining body and URI
+query. The method and URI path must remain unchanged; changing either returns
+an internal error before route lookup or middleware. Consuming a stream does
 not restore it. `Ok(Some(response))` returns that response without normal router
 lifecycle work. Return a complete response when exact challenge or hardening
 headers matter. `Err(error)` stops dispatch; direct `Service::call` propagates it,
@@ -240,7 +241,7 @@ state, introspection and `RequestContext` have not been injected yet:
 
 ```rust
 let ingress = request.extensions()
-    .get::<edgezero_core::request::RequestIngress>();
+    .get::<edgezero_core::ingress::RequestIngress>();
 ```
 
 If the hook consumes the body and returns `Ok(None)`, the handler receives only
@@ -250,7 +251,13 @@ hand-written `Hooks` implementation does not inherit the generated metadata.
 Move your existing `app!` invocation **unchanged, including all arguments**
 (`owns_logging = …`, `state = …`), into a separate module. Delegate stores,
 logging, name and application configuration. For example, an application whose
-existing invocation uses `owns_logging = true, state = 42_u32` would keep them:
+existing invocation uses `owns_logging = true, state = 42_u32` would keep them.
+If the invocation has no app name, scaffolded projects use
+`app!("../../edgezero.toml")`, which defines `App`; import it as
+`use manifest_app::App as ManifestApp;` instead of the import below.
+
+When combining this with the hook example above, omit its illustrative
+`let router = …build();` statement and duplicate `RouterService` import:
 
 ```rust
 use edgezero_core::app::{App, Hooks, StoresMetadata};
@@ -305,17 +312,20 @@ dependencies: core does not re-export those crates. The `app!` path is relative
 to the crate root; the `include_str!` path is relative to the source file.
 Import any names used by the original arguments into the nested module (for
 example, `use super::app_state;` for `state = app_state()`).
-Use `HookedApp` as the adapter entry point. Its `routes()` must explicitly
+Point every adapter entry point (`run_app::<…>`, `serve_app::<…>` and
+`dispatch_app::<…>`) at `HookedApp`. Its `routes()` must explicitly
 re-register **all routes, manifest middleware and configured state**; delegating
 metadata alone does not preserve them. `with_manifest_json` above preserves
 manifest introspection. The lazy static parses and serializes the manifest once
-per runtime instance. Standard Fastly, Cloudflare and Spin runners construct the
-application on every request. Persistent instances (Cloudflare isolates, Axum,
-or Fastly `serve_app`) reuse this cached JSON. Classic Fastly Compute starts a
-fresh instance per request, so it still pays the initialization cost on each
-request. Spin's [instance reuse depends on the component and runtime](https://spinframework.dev/v4/http-trigger#controlling-instance-reuse):
-WASI P3 HTTP components can reuse the cache, while fresh instances always pay
-the initialization cost. Do not assume any minimum degree of reuse.
+per runtime instance. Cloudflare isolates and reused Spin P3 instances share
+this cached JSON. Axum and Fastly `serve_app` build the application once, so
+`routes()` already runs once there. Classic Fastly Compute starts a fresh
+instance per request and pays the initialization cost each time. EdgeZero's
+spin-sdk 7 `#[http_service]` entry points export WASI P3 HTTP components.
+[Spin 4.1 defaults](https://github.com/spinframework/spin/blob/v4.1.0/crates/trigger-http/src/lib.rs)
+allow up to 128 requests per instance and 16 concurrent requests, controlled by
+`--max-instance-reuse-count` and `--max-instance-concurrent-reuse-count`.
+Fresh instances still pay the initialization cost; reuse is not guaranteed.
 The macro embeds its JSON at compile time; exposing that literal
 or registering hooks directly through `app!` is tracked in
 [issue #434](https://github.com/IABTechLab/edgezero/issues/434).

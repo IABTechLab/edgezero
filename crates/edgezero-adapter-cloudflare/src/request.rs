@@ -8,12 +8,12 @@ use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{HeaderValue, Method as CoreMethod, Request, Uri, request_builder};
-use edgezero_core::key_value_store::KvHandle;
-use edgezero_core::proxy::ProxyHandle;
-use edgezero_core::request::{
+use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
     TargetSource,
 };
+use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::proxy::ProxyHandle;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,

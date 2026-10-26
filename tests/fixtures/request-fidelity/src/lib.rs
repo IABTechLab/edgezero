@@ -11,9 +11,9 @@ use edgezero_core::app::Hooks;
 use edgezero_core::body::Body;
 use edgezero_core::context::RequestContext;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::{Method, Request, Response, response_builder};
+use edgezero_core::http::{Request, Response, response_builder};
+use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress};
 use edgezero_core::middleware::{Middleware, Next};
-use edgezero_core::request::{CapturedTarget, Preservation, RequestIngress};
 use edgezero_core::router::{PreDispatchHook, RouterService};
 use serde_json::json;
 use std::sync::Arc;
@@ -70,8 +70,6 @@ impl PreDispatchHook for Probe {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("ready");
         if case == "continue" {
-            *request.method_mut() = Method::GET;
-            *request.uri_mut() = "/ordinary".parse().map_err(EdgeError::internal)?;
             return Ok(None);
         }
         let expected_target = match case {

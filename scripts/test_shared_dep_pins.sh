@@ -95,6 +95,15 @@ mutate_shared_pin() {
   awk -v package="$package" -v mode="$mode" '
     $0 ~ "^[[:space:]]*\"?" package "[[:space:]]*=" {
       if (mode == "missing") next
+      if (mode == "duplicate") print
+      if (mode == "numeric-feature" || mode == "valid-numeric-feature") {
+        match($0, /"[~^=]*[0-9]+(\.[0-9]+)*"/)
+        version=substr($0, RSTART, RLENGTH); gsub(/"/, "", version)
+        if (mode == "numeric-feature") version="99.0.0"
+        $0=package " = { features = [\"wasi7\"], version = \"" version "\" }"
+        print
+        next
+      }
       sub(/[0-9]+(\.[0-9]+)*/, "99.0.0")
     }
     { print }
@@ -130,6 +139,19 @@ for file in examples/app-demo/Cargo.toml tests/fixtures/reusable-app/crates/fixt
     if [[ "$mode" == drift ]]; then diagnostic="$file: violation: spin-sdk major 99"; fi
     check_case "spin-sdk $file $mode" 1 "$diagnostic"
   done
+done
+for package in validator spin-sdk; do
+  reset_fixture
+  mutate_shared_pin examples/app-demo/Cargo.toml "$package" duplicate
+  check_case "duplicate shared $package" 1 "violation: no $package pin found"
+  reset_fixture
+  mutate_shared_pin examples/app-demo/Cargo.toml "$package" numeric-feature
+  diagnostic="violation: validator 99.0.0"
+  if [[ "$package" == spin-sdk ]]; then diagnostic="violation: spin-sdk major 99"; fi
+  check_case "numeric feature cannot hide $package drift" 1 "$diagnostic"
+  reset_fixture
+  mutate_shared_pin examples/app-demo/Cargo.toml "$package" valid-numeric-feature
+  check_case "numeric feature before valid $package version" 0
 done
 for package in fastly worker wasm-bindgen spin-sdk; do
   version=$(awk -v package="$package" '

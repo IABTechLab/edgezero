@@ -20,7 +20,8 @@ from `PATH`, checks it against the fixture Cargo lock, and passes its absolute
 path to worker-build. An invalid override fails instead of falling back to a
 download. After `npm ci`, the runner requires the local esbuild binary, checks
 its npm-locked version, and passes it as `ESBUILD_BIN`.
-Wrangler 4.83.0 and its local workerd are installed by `npm ci`. Each runtime
+Wrangler (pinned in `package.json` / `package-lock.json`) and its local workerd
+are installed by `npm ci`. Each runtime
 uses its own target directory, an ephemeral loopback port, bounded readiness
 and an owned process group that is cleaned up on success, failure or interruption.
 No platform credentials or deployment are required.

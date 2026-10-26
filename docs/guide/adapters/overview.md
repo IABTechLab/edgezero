@@ -157,7 +157,7 @@ an unsupported error for those.
 
 ## Inbound request fidelity
 
-Adapters insert `edgezero_core::request::RequestIngress` into request extensions.
+Adapters insert `edgezero_core::ingress::RequestIngress` into request extensions.
 It records runtime-visible target and adapter-supplied origin facts separately from the
 primary URI and headers. Missing metadata means unknown capability.
 

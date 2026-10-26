@@ -31,12 +31,38 @@ cd "$REPO_ROOT"
 # crates/edgezero-cli/src/generator.rs -- the two parsers describe the
 # same grammar, and a difference between them shows up as this gate
 # reporting a missing pin for one that is merely reformatted.
-# Prints nothing when there is no match; callers treat empty as missing.
+# Require exactly one declaration and read its version value, independently
+# of numeric feature names. Missing or duplicate declarations print nothing.
+shared_version_in() {
+  awk -v package="$2" '
+    {
+      gsub(/\\/, "")
+      sub(/^[[:space:]]*"/, "")
+      sub(/[[:space:]]*#.*/, "")
+    }
+    $0 ~ "^[[:space:]]*" package "[[:space:]]*=" {
+      count++
+      sub(/^[^=]*=[[:space:]]*/, "")
+      if ($0 ~ /^\{/) {
+        if (!match($0, /[,{][[:space:]]*version[[:space:]]*=[[:space:]]*"[^"]+"/)) next
+        value=substr($0, RSTART, RLENGTH)
+        sub(/^[^"]*"/, "", value)
+      } else {
+        if ($0 !~ /^"/) next
+        value=substr($0, 2)
+      }
+      sub(/".*/, "", value)
+      if (match(value, /^[~^=[:space:]]*[0-9]+(\.[0-9]+)*/)) {
+        found=substr(value, RSTART, RLENGTH)
+        sub(/^[~^=[:space:]]*/, "", found)
+      }
+    }
+    END { if (count == 1) print found }
+  ' "$1"
+}
+
 pin_in() {
-  grep -hoE '^[[:space:]]*(\\?")?validator[[:space:]]*=[^#]*' "$1" 2>/dev/null |
-    head -1 |
-    grep -oE '[0-9]+(\.[0-9]+)*' |
-    head -1 || true
+  shared_version_in "$1" validator
 }
 
 WANT="$(pin_in Cargo.toml)"
@@ -81,10 +107,9 @@ fi
 # a different IncomingBody<Request>`, naming neither crate nor version.
 # Only the major is comparable -- the root spells it `~7.0`, the seeds `7`.
 spin_major_in() {
-  grep -hoE '^[[:space:]]*(\\?")?spin-sdk[[:space:]]*=[^#]*' "$1" 2>/dev/null |
-    head -1 |
-    grep -oE '[0-9]+' |
-    head -1 || true
+  local version
+  version="$(shared_version_in "$1" spin-sdk)"
+  printf '%s' "${version%%.*}"
 }
 
 SPIN_WANT="$(spin_major_in Cargo.toml)"
