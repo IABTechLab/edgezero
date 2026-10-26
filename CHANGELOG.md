@@ -38,6 +38,19 @@ separately from the portable API and must be considered when declaring required 
 - Add real compiler regressions and workspace CI activation with pinned Node. This compile-only
   prerequisite does not replace runtime forwarding tests or provider qualification.
 
+### Fastly Mixed-Phase Readiness Diagnostic
+
+- Extend the existing local SDK/ABI suite with pending-head/ready-body and pending-body/delayed-head
+  cases, plus a multi-buffer truncated response. Require full 16 KiB reads, exact payload evidence,
+  fresh per-read readiness and preserved terminal errors for buffered and streamed consumers.
+- Append separately validated observations without changing the original 135-probe inventory or
+  replaying earlier failures under a weaker rule. Retain stock and explicitly repaired runtime
+  outcomes, including timing failures. This does not migrate production dispatch, approve a read
+  maximum, change installed runtime pins, upgrade capabilities or qualify hosted behavior.
+- Remove the Axum partial-result contract test's wall-clock race: gate the slow origin response
+  and advance injected time only after collection stores the successful fast slot. Keep the
+  25 ms logical cutoff, exact result assertions and an independent finite containment watchdog.
+
 ### Shared Outbound Header Policy
 
 - Route all four adapter response paths and `OutboundHead::new` through

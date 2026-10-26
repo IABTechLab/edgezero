@@ -94,7 +94,10 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         )?;
         let controls = timer_controls(port, &revision, records)?;
         let mut probes = Vec::new();
-        for leg in readiness_legs() {
+        for leg in readiness_legs()
+            .into_iter()
+            .chain(readiness_progress_legs())
+        {
             let token = token();
             let origin = ReadinessOrigin::start(leg.case, &token)?;
             let reply = net::request(
@@ -140,12 +143,20 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                 "direct":direct, "selected":selected,
                 "status":if direct == "UnexpectedEof" && direct == selected {"pass"} else {"fail"}, "qualification":false}))?;
         }
+        let (baseline, progress) = probes.split_at(readiness_legs().len());
         let failures: Vec<_> = [
             (
                 "timer controls",
                 validate_timer_controls(&controls, &revision),
             ),
-            ("readiness", validate_outbound_readiness(&probes, &revision)),
+            (
+                "readiness",
+                validate_outbound_readiness(baseline, &revision),
+            ),
+            (
+                "mixed/full-buffer progress",
+                validate_outbound_readiness_progress(progress, &revision),
+            ),
         ]
         .into_iter()
         .filter_map(|(scope, result)| result.err().map(|error| format!("{scope}: {error}")))
@@ -153,7 +164,7 @@ pub(super) fn run(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         require(failures.is_empty(), failures.join("\n"))?;
         records.push(json!({"event":"readiness-inventory", "status":"pass", "probes":probes.len(),
             "origin_requests":probes.iter().map(|probe| probe["origin"]["accepted"].as_u64().unwrap_or(0)).sum::<u64>(),
-            "qualification":false}))?;
+            "baseline_probes":baseline.len(), "progress_probes":progress.len(), "qualification":false}))?;
         records.push(json!({"status":"unverified", "reason":"local SDK primitive cases passed; production buffered/streamed paths, backend policy and hosted qualification remain open", "qualification":false}))
     })();
     settle(

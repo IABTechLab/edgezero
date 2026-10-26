@@ -444,32 +444,92 @@ async fn batch_yields_complete_exchanges_in_completion_order() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_none() {
+    use std::future::Future as _;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    use edgezero_core::{
+        MonotonicClock, MonotonicInstant, OutboundBatch, OutboundBatchDriverEvent,
+    };
+    use futures_util::future::poll_fn;
+    use tokio::sync::Notify;
+
+    let slow_started = Arc::new(Notify::new());
+    let release_slow = Arc::new(Notify::new());
+    let started = Arc::clone(&slow_started);
+    let release = Arc::clone(&release_slow);
     let origin = start_origin(
         Router::new()
             .route("/fast", get(|| async { "fast" }))
             .route(
                 "/slow",
-                get(|| async {
-                    sleep(Duration::from_millis(100)).await;
-                    "slow"
+                get(move || {
+                    let request_started = Arc::clone(&started);
+                    let response_release = Arc::clone(&release);
+                    async move {
+                        request_started.notify_one();
+                        response_release.notified().await;
+                        "slow"
+                    }
                 }),
             ),
     )
     .await;
-    let client = AxumOutboundClient::try_new().expect("client");
-    let results = client
-        .start_batch_until(
-            vec![
-                OutboundRequest::get(format!("{origin}/fast")).expect("fast request"),
-                OutboundRequest::get(format!("{origin}/slow")).expect("slow request"),
-            ],
-            Deadline::after(Duration::from_millis(25)),
-        )
-        .collect()
-        .await
-        .expect("valid batch driver");
+    let now = Arc::new(Mutex::new(MonotonicInstant::now()));
+    let sampled = Arc::clone(&now);
+    let clock = MonotonicClock::new(move || *sampled.lock().expect("fake clock"));
+    let observation_cutoff = clock.deadline_after(Duration::from_millis(25));
+    let client = AxumOutboundClient::try_with_clock(clock).expect("client");
+    let mut batch = client.start_batch_until(
+        vec![
+            OutboundRequest::get(format!("{origin}/fast")).expect("fast request"),
+            OutboundRequest::get(format!("{origin}/slow")).expect("slow request"),
+        ],
+        observation_cutoff,
+    );
+    let observed = OutboundBatch::from_driver(
+        2,
+        async_body_stream! {
+            loop {
+                match batch.next().await.expect("valid adapter batch driver") {
+                    OutboundBatchNext::Item(item) => {
+                        assert_eq!(item.index, 0);
+                        assert_eq!(item.result.outcome.as_ref().expect("fast response").status(), StatusCode::OK);
+                        yield OutboundBatchDriverEvent::Item(item);
+                        // Collect retains the fast result before the pending response is released at cutoff.
+                        slow_started.notified().await;
+                        *now.lock().expect("fake clock") = observation_cutoff.instant();
+                        release_slow.notify_one();
+                    }
+                    OutboundBatchNext::Finished(OutboundBatchTermination::Cutoff) => {
+                        yield OutboundBatchDriverEvent::Cutoff;
+                        return;
+                    }
+                    OutboundBatchNext::Finished(OutboundBatchTermination::Completed) => return,
+                    OutboundBatchNext::Finished(_) | _ => panic!("unexpected batch outcome"),
+                }
+            }
+        },
+    );
+    let collected = observed.collect();
+    futures_util::pin_mut!(collected);
+    let containment_started = Instant::now();
+    let results = poll_fn(|context| {
+        assert!(
+            containment_started.elapsed() < Duration::from_secs(5),
+            "batch collection exceeded the real-clock containment watchdog"
+        );
+        let result = collected.as_mut().poll(context);
+        // Keep paused Tokio time from auto-advancing while loopback I/O is pending.
+        if result.is_pending() {
+            context.waker().wake_by_ref();
+        }
+        result
+    })
+    .await
+    .expect("valid batch driver");
 
     assert_eq!(results.termination, OutboundBatchTermination::Cutoff);
     assert!(results.slots[0].is_some());

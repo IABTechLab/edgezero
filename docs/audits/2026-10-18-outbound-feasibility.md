@@ -13,8 +13,9 @@ tests remain. The synchronous optimizer blocking horizon is explicitly **UNKNOWN
 evidence; no finite horizon or optimizer/performance qualification is established by these probes.
 
 G2's retained failures remain failures. Typed body-error preservation and fresh-readiness/read
-safety are still required; the stock runtime's lost errors are not waived. Backend B/domain/
-cardinality/resource approval, backend policy, timers and slack remain unchanged and gated.
+safety are still required; the stock runtime's lost errors are not waived. The later scoped B31
+approval below changes only the existing aggregate backend identity/timer policy; readiness,
+resource approval and slack retain their separate gates.
 Full EZ-1 settlement, Follow, engine and atomic head-first/full-trait migration remain open.
 Hosted/performance qualification and deployment remain blocked. The experiment accounts, exact
 measurements, commands, exits, source identities and linked evidence below are historical and
@@ -45,6 +46,43 @@ registration/memory ceiling, provider cancellation or hosted pooling. Long confi
 leave a large provider timer behind a much earlier logical deadline. Original method-entry capture,
 dispatch guards, selection/body-read behavior, runtime pins and capability classifications remain
 unchanged. G2's failed readiness evidence and the broader G4/hosted decisions remain open.
+
+### Mixed-Phase And Full-Buffer Diagnostic (2026-10-25)
+
+The [new local record](evidence/2026-10-25-fastly-mixed-readiness.json) appends eighteen probes to
+the existing suite, separately validated from the unchanged 135-probe baseline. Two-slot cases
+complete a ready 32769-byte body while another head remains silent, and a delayed head while
+another body remains pending. A third case closes after 32769 of 32770 declared bytes. Both
+consumers run three repetitions at capacity 16384; every new observation includes a full-capacity
+read. Mixed selection domains, per-read readiness, exact payload/checksum evidence, source errors,
+head order and the origin's 50 ms delay are checked rather than inferred from case names.
+
+Each run executes 153 body probes, 177 bounded loopback origin requests and 72 timer controls.
+The [retained canonical observations](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/docs/audits/evidence/2026-10-25-fastly-mixed-readiness-probes.jsonl)
+contain all three runs, including the first repaired failure. Replay tests verify both inventories
+and retain the exact failure counts; mutations reject head-only/body-only selection, missing
+readiness for later payload/error reads, consistently collapsed EOF, absent full-buffer evidence
+and missing/reordered origin writes.
+
+| Run                        | Exit | Baseline / Supplement Failures | Source Errors Lost | Maximum Completion |
+| -------------------------- | ---- | ------------------------------ | ------------------ | ------------------ |
+| Repaired before formatting | 1    | 0 / 2, timing                  | 0                  | 518.771 ms         |
+| Stock, formatted guest     | 1    | 25 / 7, errors and timing      | 30                 | 593.907 ms         |
+| Repaired, formatted guest  | 2    | 0 / 0                          | 0                  | 504.369 ms         |
+
+The formatted pair uses identical guest SHA-256
+`45f4f541a2338bd923ad33afcf4677a0619b5889778f602f8817cc7d2f97f392`;
+the earlier guest has its own identity, not a claimed identical-byte comparison. Stock loses the
+six new truncation errors as well as the 24 existing ones. Repaired preserves all of them, and
+the ready sibling completes before the unresolved sibling expires. The final local pass exits
+**2, unverified**. The earlier overrun is not overwritten or excused by that pass; +5 ms remains
+the measured target, not a hard scheduler guarantee.
+
+These experiments use the explicit isolated repair, not a changed installed runtime or production
+transport. Registration remains outside the observed interval with fixed two-second phase timers;
+this is not B31 timer enforcement. Full-sized candidate reads and two-slot mixed progress do not
+prove arbitrary continuously-ready fairness, approve a production read maximum, establish resource
+or hosted teardown bounds, or clear G2/G4 and the atomic migration. No hosted deployment occurs.
 
 ### Backend Policy Review Packet (2026-10-25)
 

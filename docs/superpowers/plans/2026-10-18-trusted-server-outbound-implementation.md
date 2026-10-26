@@ -14,8 +14,8 @@
 
 ### Current Delivery Dashboard (2026-10-25)
 
-Reconciled against implementation commit `c70e2b05e1049f854c24ad75ee2333dbd4f10804` plus the
-scoped B31 implementation checkpoint below.
+Reconciled against implementation commit `92daf00ab8bb76b2d4791e727e698e3304cc15ca` plus the
+mixed-readiness diagnostic checkpoint below.
 This is the current task-level implementation summary, not qualification of that SHA. The
 recorded [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
 activates eleven existing criteria without changing the production implementation snapshot.
@@ -80,6 +80,39 @@ same commit, naming its implemented scope, nonzero tests/evidence and next unclo
 its inventory bindings rather than reporting a percentage from checkbox or test counts. Close a
 parent task only after every applicable child and acceptance leg closes. Requirements/digest
 changes need explicit review; neither a dashboard edit nor a passing checker supplies approval.
+
+### Mixed-Readiness Diagnostic Checkpoint (2026-10-25)
+
+Extend the existing diagnostic, not production dispatch: eighteen supplementary probes cover
+pending-head/ready-body, pending-body/delayed-head and multi-buffer truncation. Both consumers run
+three repetitions at 16 KiB capacity, requiring a real full-sized return. Shared trace validation
+checks every live mixed handle, fresh matching readiness, exact payloads/errors and bounded joined
+origins with the recorded delayed-head control. Keep the original 135-probe matrix and historical
+negative replays unchanged. The [new record](../../audits/evidence/2026-10-25-fastly-mixed-readiness.json)
+retains all three runs, including the first repaired timing failure.
+
+The formatted stock/repaired pair has identical guest bytes. Stock loses thirty source errors
+(six new and twenty-four baseline); repaired preserves all and passes 153 probes/177 origin
+requests, but exits 2 unverified. Its earlier two timing failures remain failures. Every new probe
+records a full 16 KiB read; mixed cases complete the ready sibling before the pending slot expires.
+This closes narrow local proof gaps only: continuously-ready multi-source fairness, production read
+maximum/primitive approval, runtime promotion, resource accounting and hosted qualification remain
+open. No full D1a task, acceptance leg or capability is promoted. The public APIs, B31 production
+policy, original logical deadlines, all outbound guarantees and frozen requirements are unchanged.
+
+Verification also exposed the existing Axum partial-collection test's 25 ms wall-clock race.
+Replace sleep-based ordering with an explicitly gated slow origin and coordinated injected clock:
+the actual adapter's fast item reaches `collect()` before time advances to the same logical cutoff.
+Paused native timers avoid unrelated real-time expiry; an independent five-second real-clock
+watchdog bounds the test's self-waking I/O loop. Preserve the successful first slot and unresolved
+second slot assertions. This is a test-only repair, not a new timer API or production behavior.
+
+All five primary Rust gates pass on the stable source, including 2,248 workspace tests and one
+existing ignored test. The standalone fixtures pass 128 harness and six core tests; strict harness
+and actual Fastly WASI diagnostic Clippy pass. Docs format/lint/build, docs/legacy guards, 34
+cutover-evidence tests and frozen approval identity verification pass. The acceptance inventory
+remains 255 criteria/511 legs, eleven ready and 500 planned, with `qualified: false`. Independent
+reviews cover the trace/receipt changes and the real-adapter partial-collection test separately.
 
 ### Existing-Path B31 Implementation Checkpoint (2026-10-25)
 
@@ -1300,7 +1333,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | Requirement | Implementation Tasks | Production Applicability                                                  | Current Implementation / Checkpoint                                                                                                                             | Next Unclosed Work                                                                                                                                                     |
 | ----------- | -------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Partial ingress conversion:** Axum host-known-empty, Fastly SDK absence and Cloudflare native-null preservation; see the P2 checkpoints above.                | General streamed GET/HEAD settlement, paired deadlines and all-target forwarding. Ordinary Fastly bodiless forwarding is not established.                              |
-| EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial implementation:** [B31 existing-path identity/timers](#existing-path-b31-implementation-checkpoint-2026-10-25); readiness negative evidence retained. | Reviewed preserving primitive, multiplexer, remaining mode integration and registration observations. F1 retirement, hosted pooling and resource qualification remain separate. |
+| EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial implementation:** [B31 existing-path identity/timers](#existing-path-b31-implementation-checkpoint-2026-10-25); [mixed/full-buffer readiness evidence](#mixed-readiness-diagnostic-checkpoint-2026-10-25), including failures, retained. | Reviewed preserving primitive, multiplexer, remaining mode integration and registration observations. F1 retirement, hosted pooling and resource qualification remain separate. |
 | EZ-3        | D1/D5                | Blocking; remove slack only with verified bounded waits                   | **Not implemented:** current slack retained.                                                                                                                    | D1a bounded waits plus D1b approved backend policy before joint slack removal; M7 comparison.                                                                          |
 | EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Existing-path repairs:** [checked handoff](#response-handoff-deadline-checkpoint-2026-10-25) and [Spin refusal fallback](#spin-connect-refusal-checkpoint-2026-10-25); configured mapping pending. | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |
 | EZ-5        | P3; D1-D4            | Blocking; Spin conditional host result recorded                           | **Current-API slice implemented:** [original coding](#p1p3-original-coding-checkpoint) and [local relay](#p3-downstream-relay-checkpoint).                      | Head-first/new-mode integration, complete normalization/limit matrices and separately adopted optional metadata legs.                                                  |

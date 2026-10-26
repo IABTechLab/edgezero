@@ -61,8 +61,36 @@ pub fn readiness_legs() -> Vec<ReadinessLeg> {
     legs
 }
 
+pub fn readiness_progress_legs() -> Vec<ReadinessLeg> {
+    let mut legs = Vec::new();
+    for repetition in 0..3 {
+        for case in ["mixed-head-body", "mixed-body-head", "full-body-error"] {
+            for consumption in ["buffered", "streamed"] {
+                legs.push(ReadinessLeg {
+                    case,
+                    mode: "selected",
+                    consumption,
+                    read_limit: 16_384,
+                    repetition,
+                });
+            }
+        }
+    }
+    legs
+}
+
+fn slot_count(case: &str) -> usize {
+    if matches!(case, "siblings" | "mixed-head-body" | "mixed-body-head") {
+        2
+    } else {
+        1
+    }
+}
+
 fn payload(case: &str, slot: usize) -> &'static [u8] {
     match case {
+        "mixed-head-body" | "mixed-body-head" if slot == 1 => &[b'x'; 32_769],
+        "full-body-error" => &[b'x'; 32_769],
         "truncated" | "exhausted" | "malformed-body" => b"x",
         "trickle" => b"xy",
         "eof" => b"xyz",
@@ -83,6 +111,9 @@ fn fingerprint(bytes: &[u8]) -> String {
 
 fn expected(case: &str, slot: usize) -> (&'static str, &'static str) {
     match case {
+        "mixed-head-body" if slot == 0 => ("timeout", "head"),
+        "mixed-body-head" if slot == 0 => ("timeout", "body"),
+        "mixed-head-body" | "mixed-body-head" => ("eof", "body"),
         "silent-head" => ("timeout", "head"),
         "pending-body" | "trickle" | "exhausted" => ("timeout", "body"),
         "siblings" if slot == 0 => ("timeout", "body"),
@@ -161,16 +192,60 @@ fn origin(probe: &Value, slots: usize) -> Result<()> {
             "invalid origin write",
         )?;
         require(
-            !matches!(probe["case"].as_str(), Some("silent-head" | "head-error"))
+            !(matches!(probe["case"].as_str(), Some("silent-head" | "head-error"))
+                || (probe["case"] == "mixed-head-body" && write["slot"] == 0))
                 || write["kind"] != "head",
             "head written by silent/head-error origin",
         )?;
+    }
+    let case = probe["case"].as_str().ok_or("missing origin case")?;
+    if matches!(
+        case,
+        "mixed-head-body" | "mixed-body-head" | "full-body-error"
+    ) {
+        for slot in 0..slots {
+            let body_bytes: u64 = writes
+                .iter()
+                .filter(|w| w["slot"] == slot && w["kind"] == "body")
+                .try_fold(0u64, |sum, w| {
+                    sum.checked_add(w["bytes"].as_u64().unwrap())
+                        .ok_or("origin byte total overflow")
+                })?;
+            require(
+                body_bytes == payload(case, slot).len() as u64,
+                "wrong origin payload receipt",
+            )?;
+            let heads = writes
+                .iter()
+                .filter(|w| w["slot"] == slot && w["kind"] == "head")
+                .count();
+            require(
+                heads == usize::from(case != "mixed-head-body" || slot != 0),
+                "wrong origin head count",
+            )?;
+        }
+        if case == "mixed-body-head" {
+            let first = writes
+                .iter()
+                .position(|w| w["slot"] == 0 && w["kind"] == "head")
+                .ok_or("missing pending-body head")?;
+            let second = writes
+                .iter()
+                .position(|w| w["slot"] == 1 && w["kind"] == "head")
+                .ok_or("missing delayed head")?;
+            let first_at = writes[first]["at_us"].as_u64().unwrap();
+            let second_at = writes[second]["at_us"].as_u64().unwrap();
+            require(
+                first < second && second_at >= first_at + 50_000,
+                "delayed head control not observed",
+            )?;
+        }
     }
     Ok(())
 }
 
 fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
-    let count = if leg.case == "siblings" { 2 } else { 1 };
+    let count = slot_count(leg.case);
     origin(probe, count)?;
     let samples = probe["samples"]
         .as_array()
@@ -191,6 +266,8 @@ fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
     let mut handoffs = 0;
     let mut read_count = 0;
     let mut nonzero_selection = false;
+    let mut mixed_selection = false;
+    let mut full_buffer_reads = 0;
     let rows = probe["slots"]
         .as_array()
         .ok_or("missing readiness slot results")?;
@@ -254,6 +331,8 @@ fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
             let selected_phases = sample["phases"]
                 .as_array()
                 .ok_or("missing selection phases")?;
+            mixed_selection |= selected_phases.contains(&Value::from("head"))
+                && selected_phases.contains(&Value::from("body"));
             require(
                 !live.is_empty()
                     && selected_slots.len() == live.len()
@@ -381,6 +460,7 @@ fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
                     require(n <= leg.read_limit as u64, "oversized read")?;
                     if end < 500_000 {
                         bytes[slot] += n;
+                        full_buffer_reads += usize::from(n == leg.read_limit as u64);
                     }
                     if n == 0 {
                         terminal[slot] = Some(("eof", "body", None, end));
@@ -431,7 +511,7 @@ fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
                         && rows[slot]["at_us"] == end,
                     "slot summary differs from trace",
                 )?;
-                if leg.case == "truncated" {
+                if matches!(leg.case, "truncated" | "full-body-error") {
                     require(
                         sample["error"] == "UnexpectedEof",
                         "truncated source error was lost",
@@ -468,6 +548,18 @@ fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
         leg.case != "siblings" || nonzero_selection,
         "ready sibling at nonzero index was not observed",
     )?;
+    if matches!(leg.case, "mixed-head-body" | "mixed-body-head") {
+        require(
+            mixed_selection,
+            "mixed head/body selection was not observed",
+        )?;
+    }
+    if matches!(
+        leg.case,
+        "mixed-head-body" | "mixed-body-head" | "full-body-error"
+    ) {
+        require(full_buffer_reads > 0, "full-capacity read was not observed")?;
+    }
     for (slot, row) in rows.iter().enumerate() {
         let wanted = payload(leg.case, slot);
         require(
@@ -492,11 +584,18 @@ fn trace(probe: &Value, leg: &ReadinessLeg) -> Result<()> {
 }
 
 pub fn validate_outbound_readiness(probes: &[Value], revision: &str) -> Result<()> {
+    validate_readiness(probes, revision, readiness_legs())
+}
+
+pub fn validate_outbound_readiness_progress(probes: &[Value], revision: &str) -> Result<()> {
+    validate_readiness(probes, revision, readiness_progress_legs())
+}
+
+fn validate_readiness(probes: &[Value], revision: &str, legs: Vec<ReadinessLeg>) -> Result<()> {
     require(
         revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()),
         "invalid expected revision",
     )?;
-    let legs = readiness_legs();
     require(
         probes.len() == legs.len(),
         "missing readiness case inventory",
@@ -590,8 +689,12 @@ mod tests {
     }
 
     fn matrix() -> Vec<Value> {
-        readiness_legs().iter().enumerate().map(|(index, leg)| {
-            let count = if leg.case == "siblings" { 2 } else { 1 };
+        matrix_for(readiness_legs())
+    }
+
+    fn matrix_for(legs: Vec<ReadinessLeg>) -> Vec<Value> {
+        legs.iter().enumerate().map(|(index, leg)| {
+            let count = slot_count(leg.case);
             let token = format!("readiness-{index}");
             let mut trace = Trace { samples: Vec::new(), phases: vec![Some("head"); count], now: 0 };
             for slot in 0..count {
@@ -602,6 +705,7 @@ mod tests {
             }
             if leg.case != "silent-head" {
                 for slot in 0..count {
+                    if leg.case == "mixed-head-body" && slot == 0 { continue; }
                     trace.select(leg.case, Some(slot));
                     let mut poll = json!({"operation":"head-poll", "slot":slot, "outcome":"ready"});
                     if expected(leg.case, slot) == ("error", "head") {
@@ -624,7 +728,7 @@ mod tests {
                 let (outcome, phase) = expected(leg.case, slot);
                 let error = match (outcome, phase) {
                     ("error", "head") => Some("HttpProtocolError"),
-                    ("error", _) if leg.case == "truncated" => Some("UnexpectedEof"),
+                    ("error", _) if matches!(leg.case, "truncated" | "full-body-error") => Some("UnexpectedEof"),
                     ("error", _) => Some("Other"),
                     _ => None,
                 };
@@ -650,11 +754,21 @@ mod tests {
             let requests: Vec<_> = (0..count).map(|slot| json!({"slot":slot, "token":token,
                 "path":format!("/readiness/{}/{slot}", leg.case), "received_us":1})).collect();
             let terminations: Vec<_> = (0..count).map(|slot| json!({"slot":slot, "reason":"complete"})).collect();
-            let writes: Vec<_> = if matches!(leg.case, "silent-head" | "head-error") {
+            let mut writes: Vec<_> = if matches!(leg.case, "silent-head" | "head-error") {
                 Vec::new()
             } else {
-                (0..count).map(|slot| json!({"slot":slot, "kind":"head", "at_us":1, "bytes":1})).collect()
+                (0..count).filter(|slot| leg.case != "mixed-head-body" || *slot != 0)
+                    .map(|slot| json!({"slot":slot, "kind":"head", "at_us":1, "bytes":1})).collect()
             };
+            if leg.case == "mixed-body-head" {
+                writes[1]["at_us"] = json!(50_001);
+            }
+            if matches!(leg.case, "mixed-head-body" | "mixed-body-head" | "full-body-error") {
+                for slot in 0..count {
+                    let bytes = payload(leg.case, slot).len();
+                    if bytes > 0 { writes.push(json!({"slot":slot,"kind":"body","at_us":50_002,"bytes":bytes})); }
+                }
+            }
             json!({"schema":2, "case":leg.case, "mode":leg.mode, "consumption":leg.consumption,
                 "read_limit":leg.read_limit, "repetition":leg.repetition, "revision":REVISION,
                 "token":token, "deadline_us":500_000, "tolerance_us":5000, "qualification":false,
@@ -702,6 +816,200 @@ mod tests {
             147
         );
         validate_outbound_readiness(&probes, REVISION).unwrap();
+    }
+
+    #[test]
+    fn readiness_progress_inventory_requires_mixed_phases_and_full_buffers() {
+        for case in ["mixed-head-body", "mixed-body-head", "full-body-error"] {
+            let legs: Vec<_> = readiness_progress_legs()
+                .into_iter()
+                .filter(|leg| leg.case == case)
+                .collect();
+            assert_eq!(legs.len(), 6, "{case} must run both consumers three times");
+            assert!(
+                legs.iter()
+                    .all(|leg| leg.mode == "selected" && leg.read_limit == 16_384)
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_progress_accepts_complete_matrix_and_rejects_lost_evidence() {
+        let baseline = matrix_for(readiness_progress_legs());
+        assert_eq!(baseline.len(), 18);
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|p| p["slots"].as_array().unwrap().len())
+                .sum::<usize>(),
+            30
+        );
+        validate_outbound_readiness_progress(&baseline, REVISION).unwrap();
+        let mut missing = baseline.clone();
+        missing.pop();
+        assert!(validate_outbound_readiness_progress(&missing, REVISION).is_err());
+        let mut collapsed = baseline.clone();
+        let probe = collapsed
+            .iter_mut()
+            .find(|p| p["case"] == "full-body-error")
+            .unwrap();
+        let error = operation(probe, "finish");
+        error["outcome"] = json!("eof");
+        error.as_object_mut().unwrap().remove("error");
+        assert!(validate_outbound_readiness_progress(&collapsed, REVISION).is_err());
+        let mut filtered = baseline;
+        let probe = filtered
+            .iter_mut()
+            .find(|p| p["case"] == "mixed-head-body")
+            .unwrap();
+        let selection = samples(probe)
+            .iter_mut()
+            .find(|s| {
+                s["phases"]
+                    .as_array()
+                    .is_some_and(|p| p.contains(&json!("head")) && p.contains(&json!("body")))
+            })
+            .unwrap();
+        selection["slots"] = json!([1]);
+        selection["phases"] = json!(["body"]);
+        selection["selected"] = json!(0);
+        let error = validate_outbound_readiness_progress(&filtered, REVISION)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("wrong selection domain"), "{error}");
+    }
+
+    #[test]
+    fn readiness_progress_rejects_only_partial_buffer_reads_even_with_correct_payload() {
+        let mut probes = matrix_for(readiness_progress_legs());
+        let probe = probes
+            .iter_mut()
+            .find(|p| p["case"] == "full-body-error")
+            .unwrap();
+        let mut leg = readiness_progress_legs()
+            .into_iter()
+            .find(|leg| leg.case == "full-body-error")
+            .unwrap();
+        // Keep every actual byte/checksum/selection intact, but no read now fills the buffer.
+        leg.read_limit = 32_770;
+        for read in samples(probe)
+            .iter_mut()
+            .filter(|s| s["operation"] == "read")
+        {
+            read["capacity"] = json!(leg.read_limit);
+        }
+        assert_eq!(
+            trace(probe, &leg).unwrap_err().to_string(),
+            "full-capacity read was not observed"
+        );
+    }
+
+    #[test]
+    fn readiness_progress_rejects_missing_or_reordered_origin_writes() {
+        let baseline = matrix_for(readiness_progress_legs());
+        validate_outbound_readiness_progress(&baseline, REVISION).unwrap();
+        for mutation in ["delay", "head-order", "body-receipt", "pending-body"] {
+            let mut probes = baseline.clone();
+            let probe = probes
+                .iter_mut()
+                .find(|p| p["case"] == "mixed-body-head")
+                .unwrap();
+            let writes = probe["origin"]["writes"].as_array_mut().unwrap();
+            match mutation {
+                "delay" => {
+                    writes
+                        .iter_mut()
+                        .find(|w| w["slot"] == 1 && w["kind"] == "head")
+                        .unwrap()["at_us"] = json!(1)
+                }
+                "head-order" => writes.swap(0, 1),
+                "body-receipt" => writes.retain(|w| w["kind"] != "body"),
+                _ => writes.push(json!({"slot":0,"kind":"body","at_us":50_002,"bytes":1})),
+            }
+            assert!(
+                validate_outbound_readiness_progress(&probes, REVISION).is_err(),
+                "{mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_progress_rejects_consistent_eof_collapse_and_reused_readiness() {
+        let baseline = matrix_for(readiness_progress_legs());
+        for terminal in [false, true] {
+            let mut probes = baseline.clone();
+            let probe = probes
+                .iter_mut()
+                .find(|p| p["case"] == "full-body-error")
+                .unwrap();
+            let events = samples(probe);
+            let read = if terminal {
+                events
+                    .iter()
+                    .position(|s| s["operation"] == "read" && s["error"] == "UnexpectedEof")
+                    .unwrap()
+            } else {
+                events
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| {
+                        s["operation"] == "read" && s["bytes"].as_u64().is_some_and(|b| b > 0)
+                    })
+                    .nth(1)
+                    .unwrap()
+                    .0
+            };
+            assert_eq!(events[read - 1]["operation"], "select");
+            events.remove(read - 1);
+            let error = validate_outbound_readiness_progress(&probes, REVISION)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("read without fresh same-slot readiness"),
+                "{error}"
+            );
+        }
+        let mut collapsed = baseline.clone();
+        let probe = collapsed
+            .iter_mut()
+            .find(|p| p["case"] == "full-body-error")
+            .unwrap();
+        for event in samples(probe) {
+            if event["operation"] == "read" && event["error"] == "UnexpectedEof" {
+                event.as_object_mut().unwrap().remove("error");
+                event["bytes"] = json!(0);
+            } else if event["operation"] == "finish" {
+                event.as_object_mut().unwrap().remove("error");
+                event["outcome"] = json!("eof");
+            }
+        }
+        probe["slots"][0].as_object_mut().unwrap().remove("error");
+        probe["slots"][0]["outcome"] = json!("eof");
+        let error = validate_outbound_readiness_progress(&collapsed, REVISION)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("wrong case terminal"), "{error}");
+
+        let mut head_only = baseline;
+        let probe = head_only
+            .iter_mut()
+            .find(|p| p["case"] == "mixed-head-body")
+            .unwrap();
+        let selection = samples(probe)
+            .iter_mut()
+            .find(|s| {
+                s["phases"]
+                    .as_array()
+                    .is_some_and(|p| p.contains(&json!("head")) && p.contains(&json!("body")))
+            })
+            .unwrap();
+        selection["slots"] = json!([0]);
+        selection["phases"] = json!(["head"]);
+        selection["selected"] = json!(0);
+        let error = validate_outbound_readiness_progress(&head_only, REVISION)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("wrong selection domain"), "{error}");
     }
 
     #[test]
@@ -1004,6 +1312,100 @@ mod tests {
             assert!(finish["start_us"].as_u64().unwrap() <= bound);
             assert!(finish["end_us"].as_u64().unwrap() > bound);
             assert!(probe["completed_us"].as_u64().unwrap() > bound);
+        }
+    }
+
+    #[test]
+    fn readiness_replays_mixed_and_full_buffer_runtime_comparisons() {
+        use std::{
+            collections::BTreeMap,
+            fs::File,
+            io::{BufRead, BufReader},
+        };
+        let path = crate::root()
+            .join("../../../docs/audits/evidence/2026-10-25-fastly-mixed-readiness-probes.jsonl");
+        let rows: Vec<Value> = BufReader::new(File::open(path).unwrap())
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 675);
+        let revision = "92daf00ab8bb76b2d4791e727e698e3304cc15ca";
+        for (run, baseline_failures, progress_failures, losses) in [
+            ("repaired-before-formatting", 0, 2, 0),
+            ("stock-formatted", 25, 7, 30),
+            ("repaired-formatted", 0, 0, 0),
+        ] {
+            let probes: Vec<_> = rows
+                .iter()
+                .filter(|r| r["run"] == run && r["kind"] == "body-probe")
+                .map(|r| r["probe"].clone())
+                .collect();
+            let controls: Vec<_> = rows
+                .iter()
+                .filter(|r| r["run"] == run && r["kind"] == "timer-control")
+                .map(|r| r["probe"].clone())
+                .collect();
+            assert_eq!(probes.len(), 153);
+            assert_eq!(controls.len(), 72);
+            assert_eq!(
+                probes
+                    .iter()
+                    .map(|p| p["origin"]["accepted"].as_u64().unwrap())
+                    .sum::<u64>(),
+                177
+            );
+            crate::evidence::validate_timer_controls(&controls, revision).unwrap();
+            let (baseline, progress) = probes.split_at(135);
+            for (result, count) in [
+                (
+                    validate_outbound_readiness(baseline, revision),
+                    baseline_failures,
+                ),
+                (
+                    validate_outbound_readiness_progress(progress, revision),
+                    progress_failures,
+                ),
+            ] {
+                if count == 0 {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .starts_with(&format!("{count} readiness leg(s) failed:\n"))
+                    );
+                }
+            }
+            let actual_losses = probes
+                .iter()
+                .filter(|p| {
+                    (p["case"] == "truncated" && p["mode"] == "selected")
+                        || p["case"] == "malformed-body"
+                        || p["case"] == "full-body-error"
+                })
+                .filter(|p| p["slots"][0]["outcome"] != "error")
+                .count();
+            assert_eq!(actual_losses, losses, "{run}");
+            let groups: BTreeMap<_, Vec<_>> =
+                progress.iter().fold(BTreeMap::new(), |mut groups, p| {
+                    groups
+                        .entry(p["case"].as_str().unwrap())
+                        .or_default()
+                        .push(p);
+                    groups
+                });
+            assert_eq!(groups.len(), 3);
+            for (case, samples) in groups {
+                assert_eq!(samples.len(), 6, "{run}/{case}");
+                assert!(samples.iter().all(|p| {
+                    p["samples"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|s| s["operation"] == "read" && s["bytes"] == 16_384)
+                }));
+            }
         }
     }
 

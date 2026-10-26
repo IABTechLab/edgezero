@@ -29,7 +29,8 @@ timers or a Viceroy rejection. Hosted/performance qualification stays blocked.
 
 The checkpoint uses the current trait and existing `execute`/`process_response`, leaving the
 ordinary SDK send branch unchanged. Full EZ-1 settlement, Follow, engine and atomic trait migration
-remain open. B/backend policy, timers, slack and resource constraints are unchanged and unapproved;
+remain open. The later [scoped B31 approval](../../../docs/audits/2026-10-18-outbound-api-approval.md#scoped-b31-implementation-approval)
+implements only the existing aggregate backend identity/timer policy; slack, readiness and resource gates remain open;
 typed body-error preservation and fresh-readiness/subsequent-read safety remain requirements.
 This override governs older implementation-stop wording below without changing diagnostic
 acceptance tests, 255 criteria/511 legs, IDs, statuses, applicability or comparison requirements.
@@ -216,6 +217,16 @@ EOF, truncation, malformed heads/chunks and connection closure before a response
 buffered and pull-streamed consumption, read capacities 1 and 16384, and three repetitions.
 Three additional finite direct-read truncation controls produce 135 probes and 147 origin requests.
 Those capacities are diagnostic variations, not an approved production read maximum.
+
+The same command appends 18 supplementary probes and 30 origin requests, separately validated
+from the unchanged historical matrix. `mixed-head-body` completes a ready body while a sibling
+never returns a head; `mixed-body-head` observes a delayed head while another body is pending.
+`full-body-error` closes after 32769 of 32770 declared bytes. Both consumers run three repetitions
+at capacity 16384. Checks require actual mixed selection domains, at least one full-capacity read,
+exact payload checksums and a fresh matching selection for every read, including terminal errors.
+This tests the candidate capacity with a multi-buffer payload, not general fairness when several
+sources remain continuously ready or approval of a production maximum. Baseline and supplementary
+failures are both collected before the run's result; known stock errors cannot skip the new cases.
 
 Before the HTTP matrix, timer-only controls run eight repetitions at 1/100/500 ms using
 native thread sleep, guest WASI sleep and empty-handle timed ABI select: 72 observations.

@@ -23,6 +23,9 @@ const CASES: &[&str] = &[
     "malformed-head",
     "malformed-body",
     "head-error",
+    "mixed-head-body",
+    "mixed-body-head",
+    "full-body-error",
 ];
 
 struct State {
@@ -136,7 +139,11 @@ impl ReadinessOrigin {
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
         let started = Instant::now();
-        let max_workers = if case == "siblings" { 2 } else { 1 };
+        let max_workers = if matches!(case, "siblings" | "mixed-head-body" | "mixed-body-head") {
+            2
+        } else {
+            1
+        };
         let shared = Arc::new(Shared {
             case: case.to_owned(),
             token: token.to_owned(),
@@ -406,7 +413,7 @@ fn hold(socket: &TcpStream, shared: &Shared) -> io::Result<&'static str> {
 
 fn respond(socket: &TcpStream, shared: &Shared, slot: usize) -> io::Result<&'static str> {
     let case = shared.case.as_str();
-    if case == "silent-head" {
+    if case == "silent-head" || (case == "mixed-head-body" && slot == 0) {
         return hold(socket, shared);
     }
     if case == "head-error" {
@@ -416,10 +423,23 @@ fn respond(socket: &TcpStream, shared: &Shared, slot: usize) -> io::Result<&'sta
         send(socket, shared, slot, "head", b"NOT HTTP\r\n\r\n")?;
         return Ok("complete");
     }
+    if case == "mixed-body-head" && slot == 1 {
+        while !shared.lock().heads[0] {
+            if !shared.wait_until(Instant::now() + POLL) {
+                return Ok(shared.stopped_reason().unwrap_or("watchdog"));
+            }
+        }
+        if !shared.wait_until(Instant::now() + Duration::from_millis(50)) {
+            return Ok(shared.stopped_reason().unwrap_or("watchdog"));
+        }
+    }
     let length = match case {
         "empty-eof" => 0,
         "pending-body" => 1,
         "siblings" if slot == 0 => 1,
+        "mixed-body-head" if slot == 0 => 1,
+        "mixed-head-body" | "mixed-body-head" => 32_769,
+        "full-body-error" => 32_770,
         "exhausted" => 2,
         _ => 3,
     };
@@ -431,6 +451,15 @@ fn respond(socket: &TcpStream, shared: &Shared, slot: usize) -> io::Result<&'sta
     send(socket, shared, slot, "head", head.as_bytes())?;
     match case {
         "pending-body" => return hold(socket, shared),
+        "mixed-body-head" if slot == 0 => return hold(socket, shared),
+        "mixed-head-body" | "mixed-body-head" | "full-body-error" => {
+            send(socket, shared, slot, "body", &[b'x'; 32_769])?;
+            if case == "full-body-error"
+                && !shared.wait_until(Instant::now() + Duration::from_millis(50))
+            {
+                return Ok(shared.stopped_reason().unwrap_or("watchdog"));
+            }
+        }
         "exhausted" => {
             send(socket, shared, slot, "body", b"x")?;
             return hold(socket, shared);
@@ -676,6 +705,62 @@ mod tests {
         assert_eq!(writes[2]["slot"], 1);
         assert_eq!(writes[2]["kind"], "body");
         assert_eq!(pending.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn mixed_head_body_origin_finishes_body_without_waiting_for_silent_head() {
+        let origin = ReadinessOrigin::start("mixed-head-body", TOKEN).unwrap();
+        let pending = connect(&origin, 0, TOKEN);
+        let mut ready = head(connect(&origin, 1, TOKEN));
+        let mut bytes = Vec::new();
+        ready.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![b'x'; 32_769]);
+        let snapshot = origin.finish();
+        assert_eq!(snapshot["workers_joined"], 2);
+        assert_eq!(snapshot["errors"], json!([]));
+        assert!(
+            snapshot["writes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["slot"] == 1)
+        );
+        drop(pending);
+    }
+
+    #[test]
+    fn mixed_body_head_origin_delays_second_head_while_first_body_is_pending() {
+        let origin = ReadinessOrigin::start("mixed-body-head", TOKEN).unwrap();
+        let pending = head(connect(&origin, 0, TOKEN));
+        let mut ready = head(connect(&origin, 1, TOKEN));
+        let mut bytes = Vec::new();
+        ready.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![b'x'; 32_769]);
+        let snapshot = origin.finish();
+        assert_eq!(snapshot["workers_joined"], 2);
+        assert_eq!(snapshot["errors"], json!([]));
+        let writes = snapshot["writes"].as_array().unwrap();
+        assert_eq!(writes[0]["slot"], 0);
+        assert_eq!(writes[0]["kind"], "head");
+        assert_eq!(writes[1]["slot"], 1);
+        assert_eq!(writes[1]["kind"], "head");
+        assert!(
+            writes[1]["at_us"].as_u64().unwrap() >= writes[0]["at_us"].as_u64().unwrap() + 50_000
+        );
+        drop(pending);
+    }
+
+    #[test]
+    fn full_body_error_origin_closes_after_multiple_read_capacities() {
+        let origin = ReadinessOrigin::start("full-body-error", TOKEN).unwrap();
+        let mut ready = head(connect(&origin, 0, TOKEN));
+        let mut bytes = Vec::new();
+        ready.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![b'x'; 32_769]);
+        let snapshot = origin.finish();
+        assert_eq!(snapshot["workers_joined"], 1);
+        assert_eq!(snapshot["errors"], json!([]));
+        assert_eq!(snapshot["terminations"][0]["reason"], "complete");
     }
 
     #[test]

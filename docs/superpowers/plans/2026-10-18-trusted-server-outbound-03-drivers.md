@@ -43,6 +43,17 @@ internal slices do not authorize merging an incomplete public implementation or 
 
 ### Task D1a: Bounded Multiplexer and Callback Ownership
 
+#### Mixed-Phase Prerequisite Checkpoint (2026-10-25)
+
+The existing SDK/ABI diagnostic now appends eighteen separately validated probes: a ready
+multi-buffer body alongside a permanently pending head, a delayed head alongside a pending body,
+and a truncated multi-buffer body. Buffered and pull-streamed consumers run three repetitions at
+16 KiB capacity. Require actual mixed domains, full-capacity reads, original deadlines, exact
+payload checksums, fresh matching readiness and terminal source errors. Preserve the original
+135-probe matrix and its failed historical replays. No production multiplexer, read maximum,
+runtime-pin change or capability is approved by this experiment; continuously-ready multi-source
+fairness and full D1a integration remain open.
+
 **Files:** Modify `crates/edgezero-adapter-fastly/src/outbound.rs`; create
 `src/outbound/progress.rs` and `src/outbound/backend.rs` only for the progress engine and backend
 registry extracted by this change; update `src/lib.rs`, `src/request.rs`, `src/response.rs`,

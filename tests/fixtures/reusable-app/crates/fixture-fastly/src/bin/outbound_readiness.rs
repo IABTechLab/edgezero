@@ -73,7 +73,7 @@ struct Exchange {
     start: Instant,
     selected: bool,
     read_limit: usize,
-    siblings: bool,
+    heads_first: bool,
     samples: Vec<Value>,
     slots: Vec<Slot>,
 }
@@ -134,7 +134,7 @@ impl Exchange {
                 }
                 continue;
             }
-            let heads_only = self.siblings
+            let heads_only = self.heads_first
                 && self
                     .slots
                     .iter()
@@ -366,6 +366,9 @@ fn main() -> Result<(), fastly::Error> {
         "malformed-head",
         "malformed-body",
         "head-error",
+        "mixed-head-body",
+        "mixed-body-head",
+        "full-body-error",
     ]
     .contains(case)
         || !["buffered", "streamed"].contains(consumption)
@@ -378,6 +381,15 @@ fn main() -> Result<(), fastly::Error> {
     let read_limit: usize = limit.parse()?;
     if ![1, 16_384].contains(&read_limit) {
         return Err(std::io::Error::other("unsupported diagnostic read capacity").into());
+    }
+    if matches!(
+        *case,
+        "mixed-head-body" | "mixed-body-head" | "full-body-error"
+    ) && read_limit != 16_384
+    {
+        return Err(
+            std::io::Error::other("progress probe requires full diagnostic capacity").into(),
+        );
     }
     let target: edgezero_core::http::Uri = request
         .get_header_str("x-fixture-backend")
@@ -407,11 +419,16 @@ fn main() -> Result<(), fastly::Error> {
         start: Instant::now(),
         selected: *mode == "selected",
         read_limit,
-        siblings: *case == "siblings",
+        heads_first: *case == "siblings",
         samples: Vec::new(),
         slots: Vec::new(),
     };
-    for slot in 0..if exchange.siblings { 2 } else { 1 } {
+    let count = if matches!(*case, "siblings" | "mixed-head-body" | "mixed-body-head") {
+        2
+    } else {
+        1
+    };
+    for slot in 0..count {
         let (head, body) = Request::get(format!("http://{authority}/readiness/{case}/{slot}"))
             .with_header("x-readiness-token", token)
             .with_pass(true)
