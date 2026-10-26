@@ -758,8 +758,10 @@ fn source_diagnostic_checks(port: u16, records: &mut Records) -> Result<()> {
             reply["status"] == 200 && probe == expected,
             "Spin SDK policy probe changed",
         );
-        records.push(json!({"event":event, "adapter":"spin", "cases":cases, "observation":probe,
-            "status":if result.is_ok(){"pass"}else{"fail"}, "client":reply, "qualification":false}))?;
+        records.push(
+            json!({"event":event, "adapter":"spin", "cases":cases, "observation":probe,
+            "status":if result.is_ok(){"pass"}else{"fail"}, "client":reply, "qualification":false}),
+        )?;
         result?;
     }
     Ok(())
