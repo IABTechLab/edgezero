@@ -14,7 +14,8 @@
 
 ### Current Delivery Dashboard (2026-10-25)
 
-Reconciled against implementation commit `b33342d600765e5e17928f3f2164e11941a999b4`.
+Reconciled against implementation commit `c70e2b05e1049f854c24ad75ee2333dbd4f10804` plus the
+scoped B31 implementation checkpoint below.
 This is the current task-level implementation summary, not qualification of that SHA. The
 recorded [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
 activates eleven existing criteria without changing the production implementation snapshot.
@@ -64,11 +65,12 @@ remain authoritative over this summary. Pending follow-ups are not silently prom
 2. **P1-P5 and D2-D4 integration:** complete the approved portable policies and other-adapter work
    in buildable slices, then make the live trait/caller migration atomic across all four adapters.
    Do not add lazy compatibility implementations or more unused foundations instead of integration.
-3. **Fastly D1 prerequisites:** the stock readiness/error-preservation failure and separately
-   unapproved literal B/backend policy still gate their dependent engine work. The isolated runtime
+3. **Fastly D1 prerequisites:** the stock readiness/error-preservation failure still gates its
+   dependent engine work. The scoped B31 policy is now approved and implemented on the existing
+   aggregate path; that does not approve the readiness primitive or resource qualification. The isolated runtime
    repair is not a changed production pin. G2 does not globally prohibit approved portable or
    other-adapter work. The scoped timing amendment permits the recorded Send-first subset, not a
-   readiness waiver, backend-policy approval or qualification.
+   readiness waiver or qualification.
 4. **Q1/Q2 then Q3-Q5:** update examples/docs/checks with each implementation change. Finish source
    work before freezing and qualifying a candidate. Hosted deployment remains unauthorized;
    entitlement, operator acceptance, measurement definitions and provider evidence remain open.
@@ -79,7 +81,54 @@ its inventory bindings rather than reporting a percentage from checkbox or test 
 parent task only after every applicable child and acceptance leg closes. Requirements/digest
 changes need explicit review; neither a dashboard edit nor a passing checker supplies approval.
 
+### Existing-Path B31 Implementation Checkpoint (2026-10-25)
+
+The requester explicitly approved scoped B31 production implementation in the
+[approval record](../../audits/2026-10-18-outbound-api-approval.md#scoped-b31-implementation-approval).
+The existing Fastly Send/Batch path now selects coupled provider timers from the clamped
+configured timeout, or its original selected duration when no timeout is configured. True
+ceiling-to-millisecond rounding followed by the 31-member ladder never rounds the logical
+deadline. Method-entry capture, cutoff eligibility, typed errors and all payload/header limits
+remain unchanged. Facade-invocation capture is still part of the later atomic migration.
+
+Remove client namespaces, exact-budget configuration names, per-client caches and the rigid
+quarter/three-quarter split. A single verified guest-instance registry serializes registration,
+compares complete identities, rejects unknown name collisions and retains a successful late
+registration before returning the original timeout. Versioned names hash canonical transport
+fields and the chosen timer. The registry retains no request clock, body, callback or exchange.
+Request parts move once through preparation; no new public getter, reconstruction, body copy,
+transport or compatibility branch is introduced. Direct native optimizer dispatch is untouched.
+
+Behavioral regressions first fail against the old policy, then pass under the real pinned WASI
+runtime: equal-timeout/different-deadline identity, 93 boundary samples/31 configurations, coupled
+phases and cross-client SDK registration reuse. Controls cover observation cutoffs, maximum
+timeouts, preserved parts, collision/failure retry and late-success retention with expired cache
+access rejection. Actual SDK readbacks preserve target host/port, authority and TLS for DNS,
+IPv4 and IPv6; timing getters remain unavailable. All 202 Fastly WASI unit tests and 35 runtime
+contracts pass in the current checkpoint.
+
+Both investigations selected one shared authoritative registry over duplicate client caches.
+Separate reviews preserve the scope limits: no readiness, runtime-pin, public protocol, dispatch
+slack or capability change. Explicit Connect/idle settings, registration observation, F1 retirement,
+total resource accounting, hosted pooling and qualification remain open. No full D1b/EZ-2 task
+or acceptance leg is closed by this subset; the original proposal and negative evidence stay
+historical, unchanged records.
+
+Verification passes all five primary Rust gates (2,248 workspace tests; one existing ignored),
+strict Fastly WASI Clippy, and the Fastly demo target build. Native count is one lower because
+the obsolete namespace-isolation test was replaced by the WASI shared-registry proofs. The docs
+checker now rejects the two stale public exact-budget/phase-split descriptions; it failed against
+the stale footnote and passes after correction. No acceptance leg is promoted by these checks.
+The existing Fastly loopback serving smoke also passes at
+`/private/tmp/edgezero-fastly-b31-smoke-20261025`. This is serving/lifecycle regression coverage,
+not a hosted backend-pooling, interruption or finite-resource qualification result. Demo code
+builds unchanged and generator tests pass through the workspace suite; no public API migration
+or caller compatibility wrapper is needed for this private policy change.
+
 ### G2/G4 Policy Review Packet (2026-10-25)
+
+Historical proposal checkpoint; the scoped implementation status above supersedes only its
+implementation-approval gap, not its remaining primitive/resource/qualification decisions.
 
 The [review packet](../../audits/2026-10-25-fastly-backend-policy-proposal.md) proposes literal
 B31, selected by the requester for final review on 2026-10-25, with a B1 comparison, full positive
@@ -1251,7 +1300,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | Requirement | Implementation Tasks | Production Applicability                                                  | Current Implementation / Checkpoint                                                                                                                             | Next Unclosed Work                                                                                                                                                     |
 | ----------- | -------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Partial ingress conversion:** Axum host-known-empty, Fastly SDK absence and Cloudflare native-null preservation; see the P2 checkpoints above.                | General streamed GET/HEAD settlement, paired deadlines and all-target forwarding. Ordinary Fastly bodiless forwarding is not established.                              |
-| EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial proof work:** [readiness repair/negative evidence](#g2-local-runtime-repair-checkpoint); existing transport retained.                                 | Reviewed preserving primitive, B/domain approval, multiplexer, stable backend identity and registration observations. F1 retirement/reuse is separate unfinished work. |
+| EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial implementation:** [B31 existing-path identity/timers](#existing-path-b31-implementation-checkpoint-2026-10-25); readiness negative evidence retained. | Reviewed preserving primitive, multiplexer, remaining mode integration and registration observations. F1 retirement, hosted pooling and resource qualification remain separate. |
 | EZ-3        | D1/D5                | Blocking; remove slack only with verified bounded waits                   | **Not implemented:** current slack retained.                                                                                                                    | D1a bounded waits plus D1b approved backend policy before joint slack removal; M7 comparison.                                                                          |
 | EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Existing-path repairs:** [checked handoff](#response-handoff-deadline-checkpoint-2026-10-25) and [Spin refusal fallback](#spin-connect-refusal-checkpoint-2026-10-25); configured mapping pending. | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                                |
 | EZ-5        | P3; D1-D4            | Blocking; Spin conditional host result recorded                           | **Current-API slice implemented:** [original coding](#p1p3-original-coding-checkpoint) and [local relay](#p3-downstream-relay-checkpoint).                      | Head-first/new-mode integration, complete normalization/limit matrices and separately adopted optional metadata legs.                                                  |
@@ -1296,9 +1345,10 @@ delivery alone or a group heading never closes another leaf's requirement.
       The written normative defaults remain the proposed implementation; do not silently adjust
       thresholds or skip required legs.
 - [ ] Complete G4's remaining policy decisions. AG approved the exact Interfaces digest for API
-      implementation; separately approve G2's Fastly primitive and literal backend-policy bound before D1.
-      Image Optimizer integration additionally requires the revised horizon contract, numerical
-      H(K) rule/maximum and tolerance approved by both maintainers, not inferred from timer rounding.
+      implementation, and the requester separately approved the existing-path B31 subset above.
+      The Fastly readiness primitive and full engine/resource policy remain separately gated.
+      Numerical H(K) and its hosted evidence still gate qualification, not the permitted native
+      Send-first integration. Neither approval is inferred from timer rounding.
       A failed Fastly feasibility leg does not prohibit approved portable or other-adapter work.
       An absent or rejected API approval stops P1; it cannot be inferred from test success.
 - [ ] Do not start dependent Fastly engine work until G2 passes locally and the hosted leg is

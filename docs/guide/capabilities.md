@@ -322,8 +322,18 @@ cache-miss registration in `start_batch_until`, EdgeZero checks the absolute dea
 slack so an already-delayed later slot does not begin another synchronous registration. A first
 cold registration that passes that check can still block. Receive timers and absolute checks
 cover the documented warm, response-read portions, but they are not one end-to-end wall-clock
-guarantee. Exact ceiled-millisecond budgets are part of backend identity, so heterogeneous hosts
-or budgets may require multiple registrations.
+guarantee. Fastly's B31 aggregate policy anchors provider timers to the configured per-call timeout
+(clamped to seven days), or the original selected duration if no timeout is configured. It rounds
+up to milliseconds, then to the smallest of `2^0` through `2^29` milliseconds or the seven-day
+ceiling. Connect, first-byte and between-bytes use that same value; there is no rigid phase split.
+Logical absolute deadlines and late-result rejection are unchanged. Provider timers can outlive a
+shorter caller deadline/cutoff substantially, so this is not prompt interruption.
+
+Versioned backend names depend on origin, authority, TLS and the selected timer configuration,
+not client identity or the later remaining budget. A guest-instance-wide verified registry shares
+successful registrations across clients and refuses unknown name collisions. There are at most
+31 timer configurations per fixed transport tuple, not a bound on arbitrary origins, registrations,
+memory or abandoned host work. Hosted pooling, resource lifetime and cancellation remain unqualified.
 
 ² Fastly checks the absolute deadline between streamed upload chunks, but it cannot preempt a
 stalled source pull or host write.
@@ -338,7 +348,8 @@ groups, and drains each selected response body synchronously. Cold backend regis
 a later dispatch; a selected body drain can delay a sibling's terminal observation, and a ready
 handle outside the active selection group can remain temporarily unobserved.
 
-⁵ Fastly divides a total budget among provider phase timers. Spin's host may reject phase
+⁵ Fastly uses coupled B31 provider timers, but blocking host operations cannot be preempted
+and those timers are not one fully elastic end-to-end pool. Spin's host may reject phase
 timer settings and retain opaque defaults. Every connect-setting refusal falls back without
 an error under the unchanged aggregate deadline race. For first-byte/between-bytes settings,
 `NotSupported` is advisory; `Immutable` and `Other` remain typed setup errors. Neither adapter

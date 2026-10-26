@@ -24,6 +24,7 @@ There is no compatibility branch, alternate transport or lazy default proposed h
 | -------------------- | --------------------------------------- | ------------------------------------------ | ------------- | ------------------------------------------------------------------ |
 | G4-API               | Approved, API only                      | AG; scoped exact-digest conversation reply | 2026-10-19    | `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a` |
 | G4-FASTLY-POLICY     | Pending; local primitive failed         | Unset                                      | Unset         | Unset                                                              |
+| G4-FASTLY-B31        | Approved, scoped implementation only    | Requester; scoped conversation reply       | 2026-10-25    | Proposal referenced below; not new whole-contract digest approval  |
 | G4-OPTIMIZER-HORIZON | Pending; finite rule unproved           | Unset                                      | Unset         | Unset                                                              |
 | G4-APPLICABILITY     | Pending; G1 scope lock open             | Unset                                      | Unset         | Unset                                                              |
 | G4-MEASUREMENTS      | Pending; replay definitions unconfirmed | Unset                                      | Unset         | Unset                                                              |
@@ -32,15 +33,47 @@ The [2026-10-25 policy/readiness packet](2026-10-25-fastly-backend-policy-propos
 B31 and a B1 comparison with complete aggregate-budget arithmetic. On 2026-10-25 the requester
 selected `B = 31 bounded ladder (Recommended)` as the proposal to finalize for review. The question
 explicitly excluded production integration, runtime changes and hosted qualification.
-G4-FASTLY-POLICY resource/primitive approval remains pending; the table above stays unapproved.
+That selection alone did not authorize implementation. The subsequent scoped approval below
+authorizes B31 production policy changes; the full G4-FASTLY-POLICY resource/primitive decision
+remains pending.
 Review resource exposure, emitted settings, anchor rules, provider maxima and the repaired-versus-
 stock primitive disposition separately. Preparing or selecting a proposal does not authorize
-backend implementation, runtime promotion or hosted execution.
+runtime promotion or hosted execution beyond the separately approved scope.
 
 The scoped API response and its exact digest are attributed to the maintainer name supplied in
 the conversation, not inferred from Git. This does not close G4 as a whole. A completed
 decision must retain its maintainer, date, exact subject digest and scope. Proposal hashes do not
 approve the other subjects; missing, rejected or stale approval blocks their dependent work.
+
+## Scoped B31 Implementation Approval
+
+On 2026-10-25 the requester answered `Approve scoped B31 implementation` to this question:
+
+> May I implement the B31 aggregate-budget backend policy from the review packet in PR #275,
+> including stable backend identity and ceiling-rounded timers, while preserving original logical
+> deadlines? This would authorize those production policy changes only; runtime-pin changes, the
+> readiness engine, and hosted qualification would remain separate.
+
+The referenced [proposal](2026-10-25-fastly-backend-policy-proposal.md), SHA-256
+`011b090e21c7e8e6424b53303c55b1b2eacb7c896e51a81b6492c13fa65ce3e1`, remains the historical
+submission. This is an attributed scoped authorization, not a new exact-digest API approval or
+approval of every resource/primitive decision listed in that proposal. It supersedes the D1a/G2
+sequencing dependency only for the existing aggregate-policy Send/Batch backend identity and timer
+implementation. Keep current dispatch guards, pending selection, body reads and error handling;
+do not remove slack or change runtime pins/readiness as part of this authorization.
+
+Configured per-call timeouts select a stable, seven-day-clamped anchor even when a caller deadline
+or observation cutoff is earlier. Deadline-only/default work uses the originally selected duration,
+not the later remainder. Ceiling-millisecond rounding then selects one of 31 coupled provider
+timer vectors. Names are versioned, configuration-derived and client-independent. A shared verified
+registry must compare full identities, serialize registration, retain successful late registrations
+before reporting the original timeout, and reject unknown `NameInUse` rather than trusting it.
+
+The current transport still captures its budget at async method entry, as documented by the
+Send-first checkpoint; facade-invocation capture and the atomic trait migration are not claimed.
+Explicit Connect/idle options, retirement/total resource bounds, host enforcement, pooling,
+optimizer horizon and hosted qualification remain separate work. No public signature, application
+policy, portable cap, timeout cause or logical deadline changes under this scope.
 
 ## Original Exact API Subject
 
@@ -237,8 +270,10 @@ wording in this packet, the requirements, plans, feasibility index and fixture d
   Finite numerical H(K) is no longer a preimplementation prerequisite. Do not infer it from SDK
   timers, observed maxima, runtime termination or a fabricated policy. Horizon approval and hosted
   evidence still gate qualification; an unknown horizon cannot pass a finite-bound assertion.
-- Backend B/domain/cardinality and resource-policy approval remain pending. No backend identity,
-  policy, phase timer, dispatch slack, resource limit or SDK/runtime pin changes are authorized.
+- Under this 2026-10-24 amendment, backend B/domain/cardinality and resource-policy approval
+  remained pending. The subsequent scoped B31 approval above supersedes that implementation
+  restriction only for aggregate backend identity/timers. No dispatch slack, resource limit or
+  SDK/runtime pin changes are authorized.
   Typed body-error preservation and fresh-readiness/subsequent-read safety remain requirements;
   no blocking-body fallback or lost-error-to-EOF conversion is permitted.
 
@@ -256,7 +291,7 @@ call; this is not a new facade-invocation snapshot or completion of P1. Invocati
 remains pending with the later atomic head-first/full-trait migration. The full contract's
 invocation-time target is unchanged, not asserted as implemented by this subset.
 
-Full EZ-1 settlement, Follow, B/backend policy, the new engine and the head-first/full-trait
+Full EZ-1 settlement, Follow, new-mode backend integration, the new engine and the head-first/full-trait
 migration remain open; the latter still migrates all implementers/callers atomically. The
 checkpoint does not complete D1d or any full criterion. No deployment, Native capability promotion,
 hosted qualification or performance-parity claim is authorized. Existing failed evidence,
@@ -359,8 +394,10 @@ header-derived zero-length hints are not raw framing evidence; no known-empty fa
 
 Apply the [scoped amendment](#scoped-timing-and-native-integration-amendment) to the original
 task effects below: H(K) and timing-only G2 proof no longer block the Send-first checkpoint.
-G4-FASTLY-POLICY still blocks backend-policy implementation; G4-OPTIMIZER-HORIZON remains pending
-for numerical horizon approval and qualification, not for this scoped integration.
+G4-FASTLY-POLICY still gates the full backend/readiness engine and resource qualification; the
+separate scoped B31 approval authorizes the existing aggregate backend implementation only.
+G4-OPTIMIZER-HORIZON remains pending for numerical horizon approval and qualification, not for
+the permitted Send-first integration.
 
 | Decision             | Required Attributed Review                                                                                                                                                                                                                                            | Task Effect                                                                                                                                                          |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

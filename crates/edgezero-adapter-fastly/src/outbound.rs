@@ -23,8 +23,6 @@
 #[cfg(feature = "fastly")]
 mod image_optimizer;
 
-#[cfg(any(feature = "fastly", test))]
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -41,9 +39,6 @@ use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_di
 use edgezero_core::time::Deadline;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::time::{DispatchBudget, MonotonicInstant};
-
-#[cfg(any(feature = "fastly", test))]
-static NEXT_BACKEND_NAMESPACE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(any(feature = "fastly", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,16 +58,6 @@ enum SendFailure {
 enum FastlyBatchObservation {
     Continue(OutboundBatchItem),
     Cutoff,
-}
-
-#[cfg(any(feature = "fastly", test))]
-fn next_backend_namespace() -> u64 {
-    NEXT_BACKEND_NAMESPACE.fetch_add(1, Ordering::Relaxed)
-}
-
-#[cfg(any(feature = "fastly", test))]
-fn namespaced_backend_name(identity_name: &str, namespace: u64) -> String {
-    format!("{identity_name}_{namespace}")
 }
 
 #[cfg(any(feature = "fastly", test))]
@@ -238,12 +223,14 @@ mod fastly_impl {
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::io::{Result as IoResult, Write};
+    use std::net::IpAddr;
     use std::num::NonZeroU64;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use async_stream::stream;
     use async_trait::async_trait;
+    use base16ct::lower::encode_string;
     use bytes::Bytes;
     use edgezero_core::body::{Body, BodyStream};
     use edgezero_core::error::{BadGatewayReason, EdgeError};
@@ -260,8 +247,8 @@ mod fastly_impl {
         collect_response_stream, normalize_for_dispatch, validate_for_dispatch,
     };
     use edgezero_core::time::{
-        BATCH_DISPATCH_SLACK_MAX, Deadline, DispatchBudget, MonotonicClock, MonotonicInstant,
-        dispatch_budget,
+        BATCH_DISPATCH_SLACK_MAX, DEADLINE_FAR_FUTURE, Deadline, DispatchBudget, MonotonicClock,
+        MonotonicInstant, dispatch_budget,
     };
     use fastly::backend::BackendCreationError;
     use fastly::handle::{BodyHandle, PendingRequestHandle, ResponseHandle, select_handles};
@@ -275,13 +262,14 @@ mod fastly_impl {
 
     use super::{
         FastlyBatchObservation, driver_selection_failure, finish_fastly_batch_observation,
-        namespaced_backend_name, next_backend_namespace, reassociate_selection, timeout_error,
-        validate_batch_request,
+        reassociate_selection, timeout_error, validate_batch_request,
     };
 
     pub const DYNAMIC_BACKENDS_DISABLED_MESSAGE: &str = "Fastly dynamic backends are not enabled on this service; enable them in the service configuration";
     const RESPONSE_READ_BYTES: usize = 16 * 1024;
     const DISPATCH_SLACK_MESSAGE: &str = "Fastly batch adapter overhead between batch_now and SDK arming (preflight + dynamic-backend lookup/creation + SDK setup) exceeded BATCH_DISPATCH_SLACK_MAX; refusing to arm SDK timers with stale duration";
+
+    static BACKENDS: OnceLock<Mutex<HashMap<String, (BackendIdentity, Backend)>>> = OnceLock::new();
 
     #[cfg(feature = "test-utils")]
     std::thread_local! {
@@ -315,8 +303,8 @@ mod fastly_impl {
 
     #[derive(Clone, Debug, Eq, Hash, PartialEq)]
     struct BackendIdentity {
-        budget_ms: u64,
         host: String,
+        phase_ms: u64,
         port: u16,
         scheme: String,
         tls: bool,
@@ -353,8 +341,6 @@ mod fastly_impl {
 
     /// Native outbound HTTP implementation for Fastly Compute.
     pub struct FastlyOutboundClient {
-        backend_namespace: u64,
-        backends: Mutex<HashMap<String, (BackendIdentity, Backend)>>,
         clock: MonotonicClock,
     }
 
@@ -369,75 +355,38 @@ mod fastly_impl {
         #[must_use]
         #[inline]
         pub fn with_clock(clock: MonotonicClock) -> Self {
-            Self {
-                backend_namespace: next_backend_namespace(),
-                backends: Mutex::new(HashMap::new()),
-                clock,
-            }
-        }
-
-        fn backend_name(&self, identity: &BackendIdentity) -> String {
-            namespaced_backend_name(&backend_name(identity), self.backend_namespace)
+            Self { clock }
         }
 
         fn ensure_backend(
             &self,
-            request: &OutboundRequest,
+            request: OutboundRequest,
             budget: DispatchBudget,
             batch_started_at: Option<MonotonicInstant>,
-        ) -> Result<Backend, EdgeError> {
-            let identity = backend_identity(request, budget)?;
-            let name = self.backend_name(&identity);
-            {
-                let cache = self.backends.lock().map_err(|_poisoned| {
-                    EdgeError::internal(anyhow::anyhow!("Fastly backend cache was poisoned"))
-                })?;
-                if let Some((cached_identity, backend)) = cache.get(&name) {
-                    if cached_identity != &identity {
-                        return Err(EdgeError::internal(anyhow::anyhow!(
-                            "dynamic backend name collision; refusing to reuse"
-                        )));
+        ) -> Result<(Backend, OutboundRequestParts), EdgeError> {
+            let (identity, parts) = backend_identity(request, budget)?;
+            let registry = BACKENDS.get_or_init(|| Mutex::new(HashMap::new()));
+            let backend =
+                cached_backend(registry, identity, budget, &self.clock, |name, settings| {
+                    let target =
+                        format!("{}:{}", parts.uri.host().unwrap_or_default(), settings.port);
+                    let timers = backend_timers(settings.phase_ms);
+                    let mut builder = Backend::builder(name, target)
+                        .override_host(&settings.wire_authority)
+                        .connect_timeout(timers.connect)
+                        .first_byte_timeout(timers.first_byte)
+                        .between_bytes_timeout(timers.between_bytes);
+                    if settings.tls {
+                        builder = builder.enable_ssl().check_certificate(&settings.host);
+                        if settings.host.parse::<IpAddr>().is_err() {
+                            builder = builder.sni_hostname(&settings.host);
+                        }
                     }
-                    return Ok(backend.clone());
-                }
-            }
-
-            let target = request.backend_target();
-            let host_override = backend_host_override(request);
-            let timers = backend_timers(identity.budget_ms);
-            let mut builder = Backend::builder(&name, &target)
-                .override_host(host_override)
-                .connect_timeout(timers.connect)
-                .first_byte_timeout(timers.first_byte)
-                .between_bytes_timeout(timers.between_bytes);
-            if identity.tls {
-                builder = builder.enable_ssl();
-                if let Some(sni) = request.sni_hostname() {
-                    builder = builder.sni_hostname(sni);
-                }
-                if let Some(cert_host) = request.cert_host() {
-                    builder = builder.check_certificate(cert_host);
-                }
-            }
-            let creation =
-                register_backend_with_batch_guard(batch_started_at, budget, &self.clock, || {
-                    builder.finish()
+                    register_backend_with_batch_guard(batch_started_at, budget, &self.clock, || {
+                        builder.finish()
+                    })
                 })?;
-            finish_backend_creation(creation, budget, &self.clock, |backend| {
-                let mut cache = self.backends.lock().map_err(|_poisoned| {
-                    EdgeError::internal(anyhow::anyhow!("Fastly backend cache was poisoned"))
-                })?;
-                if let Some((cached_identity, cached_backend)) = cache.get(&name) {
-                    if cached_identity != &identity {
-                        return Err(EdgeError::internal(anyhow::anyhow!(
-                            "dynamic backend name collision; refusing to reuse"
-                        )));
-                    }
-                    return Ok(cached_backend.clone());
-                }
-                cache.insert(name, (identity, backend.clone()));
-                Ok(backend)
-            })
+            Ok((backend, parts))
         }
 
         fn prepare(
@@ -469,13 +418,13 @@ mod fastly_impl {
             let budget = dispatch_budget(&request, started_at, observation_cutoff)?;
             normalize_fastly_request(&mut request)?;
             budget_remaining(budget, &self.clock)?;
-            let backend =
-                self.ensure_backend(&request, budget, enforce_batch_slack.then_some(started_at))?;
+            let (backend, parts) =
+                self.ensure_backend(request, budget, enforce_batch_slack.then_some(started_at))?;
             budget_remaining(budget, &self.clock)?;
             Ok(PreparedRequest {
                 backend,
                 budget,
-                parts: request.into_parts(),
+                parts,
                 started_at,
             })
         }
@@ -638,10 +587,6 @@ mod fastly_impl {
         }
     }
 
-    fn backend_host_override(request: &OutboundRequest) -> String {
-        request.host_authority().to_owned()
-    }
-
     #[async_trait(?Send)]
     impl OutboundHttpClient for FastlyOutboundClient {
         #[inline]
@@ -746,74 +691,99 @@ mod fastly_impl {
     }
 
     fn backend_identity(
-        request: &OutboundRequest,
+        request: OutboundRequest,
         budget: DispatchBudget,
-    ) -> Result<BackendIdentity, EdgeError> {
-        let budget_ms = ceil_millis(budget.duration);
-        let scheme = request
+    ) -> Result<(BackendIdentity, OutboundRequestParts), EdgeError> {
+        let scheme_str = request
             .uri()
             .scheme_str()
             .ok_or_else(|| EdgeError::bad_request("outbound request URI has no scheme"))?;
         let port = request
             .uri()
             .port_u16()
-            .unwrap_or(if scheme == "https" { 443 } else { 80 });
-        Ok(BackendIdentity {
-            budget_ms,
-            host: request.host_name().to_owned(),
+            .unwrap_or(if scheme_str == "https" { 443 } else { 80 });
+        let host = request.host_name().to_owned();
+        let wire_authority = request.host_authority().to_owned();
+        let tls = scheme_str == "https";
+        let scheme = scheme_str.to_owned();
+        let parts = request.into_parts();
+        let identity = BackendIdentity {
+            host,
+            phase_ms: backend_timer_ms(parts.timeout.unwrap_or(budget.duration)),
             port,
-            scheme: scheme.to_owned(),
-            tls: scheme == "https",
-            wire_authority: request.host_authority().to_owned(),
-        })
-    }
-
-    fn backend_name(identity: &BackendIdentity) -> String {
-        let tls_mode = if identity.tls { "tls" } else { "plain" };
-        let canonical = format!(
-            "{}:{}:{}:{}:{}:{}",
-            identity.scheme,
-            identity.host,
-            identity.port,
-            tls_mode,
-            identity.budget_ms,
-            identity.wire_authority
-        );
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        let digest = hasher.finalize();
-        let mut name = String::from("ez_");
-        let Some(prefix) = digest.get(..16) else {
-            return name;
+            scheme,
+            tls,
+            wire_authority,
         };
-        for byte in prefix {
-            let high = u32::from(*byte >> 4_u8);
-            let low = u32::from(*byte & 0x0f);
-            if let Some(character) = char::from_digit(high, 16) {
-                name.push(character);
-            }
-            if let Some(character) = char::from_digit(low, 16) {
-                name.push(character);
-            }
-        }
-        name
+        Ok((identity, parts))
     }
 
-    fn backend_timers(total_ms: u64) -> BackendTimers {
-        let total = Duration::from_millis(total_ms.max(1));
-        if total_ms < 4 {
-            return BackendTimers {
-                between_bytes: total,
-                connect: total,
-                first_byte: total,
-            };
+    #[expect(
+        clippy::big_endian_bytes,
+        reason = "versioned backend identity uses a fixed byte order independent of the host architecture"
+    )]
+    fn backend_name(identity: &BackendIdentity) -> String {
+        let mut hasher = Sha256::new();
+        for field in [&identity.scheme, &identity.host, &identity.wire_authority] {
+            hasher.update(field.as_bytes());
+            hasher.update([0_u8]);
         }
-        let connect = total.checked_div(4).unwrap_or(total);
+        hasher.update(identity.port.to_be_bytes());
+        hasher.update([u8::from(identity.tls)]);
+        hasher.update(identity.phase_ms.to_be_bytes());
+        format!("ez_b31v1_{}", encode_string(&hasher.finalize()))
+    }
+
+    fn backend_timer_ms(anchor: Duration) -> u64 {
+        let maximum = ceil_millis(DEADLINE_FAR_FUTURE);
+        ceil_millis(anchor.min(DEADLINE_FAR_FUTURE))
+            .checked_next_power_of_two()
+            .unwrap_or(maximum)
+            .min(maximum)
+    }
+
+    fn backend_timers(phase_ms: u64) -> BackendTimers {
+        let phase = Duration::from_millis(phase_ms);
         BackendTimers {
-            between_bytes: total,
-            connect,
-            first_byte: total.saturating_sub(connect),
+            between_bytes: phase,
+            connect: phase,
+            first_byte: phase,
         }
+    }
+
+    fn cached_backend<Value, Register>(
+        registry: &Mutex<HashMap<String, (BackendIdentity, Value)>>,
+        identity: BackendIdentity,
+        budget: DispatchBudget,
+        clock: &MonotonicClock,
+        register: Register,
+    ) -> Result<Value, EdgeError>
+    where
+        Value: Clone,
+        Register: FnOnce(
+            &str,
+            &BackendIdentity,
+        ) -> Result<Result<Value, BackendCreationError>, EdgeError>,
+    {
+        let name = backend_name(&identity);
+        // Serialize registration and insertion; NameInUse alone cannot certify a configuration.
+        let mut cache = registry.lock().map_err(|_poisoned| {
+            EdgeError::internal(anyhow::anyhow!("Fastly backend cache was poisoned"))
+        })?;
+        budget_remaining(budget, clock)?;
+        if let Some((registered_identity, backend)) = cache.get(&name) {
+            if registered_identity != &identity {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "dynamic backend name collision; refusing to reuse"
+                )));
+            }
+            return Ok(backend.clone());
+        }
+        let result = register(&name, &identity)?;
+        finish_backend_creation(result, budget, clock, |backend| {
+            cache.insert(name, (identity, backend.clone()));
+            Ok(backend)
+        })
     }
 
     fn build_fastly_request(
@@ -1597,7 +1567,7 @@ mod fastly_impl {
     #[cfg(test)]
     mod tests {
         use std::cell::Cell;
-        use std::collections::VecDeque;
+        use std::collections::{BTreeSet, VecDeque};
         use std::io::{Error, ErrorKind};
         use std::mem::discriminant;
         use std::num::NonZeroU64;
@@ -1915,9 +1885,339 @@ mod fastly_impl {
             let budget = clock_budget(start, Duration::from_millis(10));
             let request = OutboundRequest::get("https://example.com/").expect("request");
 
-            let identity = backend_identity(&request, budget).expect("backend identity");
+            let (identity, _) = backend_identity(request, budget).expect("backend identity");
 
-            assert_eq!(identity.budget_ms, 10);
+            assert_eq!(identity.phase_ms, 16);
+        }
+
+        #[test]
+        fn b31_identity_ignores_shorter_deadlines_with_equal_timeouts() {
+            let start = MonotonicInstant::now();
+            let mut identities = Vec::new();
+            for milliseconds in [511_u64, 513, 640, 655] {
+                let request = OutboundRequest::get("https://example.com/path")
+                    .expect("request")
+                    .timeout(Duration::from_millis(800))
+                    .deadline(Deadline::at_instant(
+                        start
+                            .checked_add(Duration::from_millis(milliseconds))
+                            .expect("deadline"),
+                    ));
+                let budget = dispatch_budget(&request, start, None).expect("selected budget");
+                assert_eq!(budget.duration, Duration::from_millis(milliseconds));
+                assert_eq!(budget.cause, BudgetSource::RequestDeadline);
+                identities.push(backend_identity(request, budget).expect("identity").0);
+            }
+            let first = identities.first().expect("first identity");
+            for identity in &identities {
+                assert_eq!(identity, first);
+                assert_eq!(identity.phase_ms, 1024);
+            }
+        }
+
+        #[test]
+        fn b31_timeout_anchor_is_clamped_and_independent_of_cutoff() {
+            let start = MonotonicInstant::now();
+            for timeout in [
+                Duration::from_nanos(1),
+                Duration::from_millis(800),
+                Duration::from_secs(1),
+                Duration::from_secs(15),
+                DEADLINE_FAR_FUTURE,
+                Duration::MAX,
+            ] {
+                let anchor = timeout.min(DEADLINE_FAR_FUTURE);
+                let mut names = BTreeSet::new();
+                for selected in BTreeSet::from([
+                    Duration::from_nanos(1),
+                    anchor,
+                    anchor
+                        .checked_div(2)
+                        .unwrap_or(anchor)
+                        .max(Duration::from_nanos(1)),
+                ]) {
+                    let request = OutboundRequest::get("https://example.com/")
+                        .expect("request")
+                        .timeout(timeout);
+                    let observation_cutoff =
+                        Deadline::at_instant(start.checked_add(selected).expect("cutoff"));
+                    let budget =
+                        dispatch_budget(&request, start, Some(observation_cutoff)).expect("budget");
+                    assert_eq!(budget.duration, selected);
+                    assert_eq!(budget.deadline.instant(), observation_cutoff.instant());
+                    assert_eq!(budget.cause, BudgetSource::BatchCutoff);
+                    let (identity, parts) = backend_identity(request, budget).expect("identity");
+                    assert_eq!(parts.timeout, Some(timeout));
+                    assert!(Duration::from_millis(identity.phase_ms) >= anchor);
+                    assert!(Duration::from_millis(identity.phase_ms) <= DEADLINE_FAR_FUTURE);
+                    names.insert(backend_name(&identity));
+                }
+                assert_eq!(names.len(), 1);
+            }
+        }
+
+        #[test]
+        fn b31_identity_omits_nontransport_policies_and_preserves_owned_parts() {
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_millis(800));
+            let first_request = OutboundRequest::get("https://example.com/first?key=one")
+                .expect("request")
+                .timeout(Duration::from_millis(800));
+            let second_request = OutboundRequest::post("https://example.com/second?key=two")
+                .expect("request")
+                .timeout(Duration::from_millis(800))
+                .body("payload")
+                .max_response_bytes(64)
+                .proxy_marker(OutboundProxyMarker::Off)
+                .response_decoding(ResponseDecoding::Original)
+                .cache_policy(OutboundCachePolicy::Bypass);
+            let (first, _) = backend_identity(first_request, budget).expect("identity");
+            let (second, parts) = backend_identity(second_request, budget).expect("identity");
+            assert_eq!(first, second);
+            assert_eq!(backend_name(&first), backend_name(&second));
+            assert_eq!(parts.body.as_bytes(), Some(&b"payload"[..]));
+            assert_eq!(parts.method, Method::POST);
+            assert_eq!(parts.proxy_marker, OutboundProxyMarker::Off);
+            assert_eq!(parts.response_decoding, ResponseDecoding::Original);
+            assert_eq!(
+                parts.response_mode,
+                ResponseMode::Buffered { max_bytes: 64 }
+            );
+            assert_eq!(parts.cache_policy, OutboundCachePolicy::Bypass);
+        }
+
+        #[test]
+        fn b31_deadline_only_boundaries_have_thirty_one_configurations() {
+            let maximum = Duration::from_hours(168);
+            let ceilings = (0_u32..30)
+                .map(|shift| Duration::from_millis(1_u64 << shift))
+                .chain([maximum])
+                .collect::<Vec<_>>();
+            let mut samples = BTreeSet::from([Duration::from_nanos(1), maximum]);
+            for ceiling in &ceilings {
+                for sample in [
+                    ceiling.checked_sub(Duration::from_nanos(1)),
+                    Some(*ceiling),
+                    ceiling.checked_add(Duration::from_nanos(1)),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !sample.is_zero() && sample <= maximum {
+                        samples.insert(sample);
+                    }
+                }
+            }
+            assert_eq!(samples.len(), 93);
+            let start = MonotonicInstant::now();
+            let mut names = BTreeSet::new();
+            for sample in samples {
+                let request = OutboundRequest::get("https://example.com/").expect("request");
+                let budget = clock_budget(start, sample);
+                let (identity, _) = backend_identity(request, budget).expect("identity");
+                let expected = ceilings
+                    .iter()
+                    .find(|ceiling| **ceiling >= sample)
+                    .expect("ceiling");
+                assert_eq!(Duration::from_millis(identity.phase_ms), *expected);
+                names.insert(backend_name(&identity));
+            }
+            assert_eq!(names.len(), 31);
+        }
+
+        #[test]
+        fn b31_phase_timers_are_coupled_without_a_rigid_split() {
+            for milliseconds in [1_u64, 2, 4, 128, 1024, 604_800_000] {
+                let timers = backend_timers(milliseconds);
+                let expected = Duration::from_millis(milliseconds);
+                assert_eq!(timers.connect, expected);
+                assert_eq!(timers.first_byte, expected);
+                assert_eq!(timers.between_bytes, expected);
+            }
+        }
+
+        #[cfg(target_env = "p1")]
+        #[test]
+        fn b31_independent_clients_share_verified_backend() {
+            let start = MonotonicInstant::now();
+            let first = FastlyOutboundClient::with_clock(constant_clock(start));
+            let second = FastlyOutboundClient::with_clock(constant_clock(start));
+            let first_request = OutboundRequest::get("http://127.0.0.1:9/b31-client-reuse")
+                .expect("request")
+                .timeout(Duration::from_millis(800))
+                .deadline(Deadline::at_instant(
+                    start
+                        .checked_add(Duration::from_millis(511))
+                        .expect("deadline"),
+                ));
+            let second_request = OutboundRequest::get("http://127.0.0.1:9/another-path")
+                .expect("request")
+                .timeout(Duration::from_millis(800))
+                .deadline(Deadline::at_instant(
+                    start
+                        .checked_add(Duration::from_millis(513))
+                        .expect("deadline"),
+                ));
+            let first_prepared = first.prepare(first_request, start).expect("first backend");
+            let second_prepared = second
+                .prepare(second_request, start)
+                .expect("second backend");
+            assert_eq!(
+                first_prepared.backend.name(),
+                second_prepared.backend.name()
+            );
+            assert_eq!(first_prepared.budget.duration, Duration::from_millis(511));
+            assert_eq!(second_prepared.budget.duration, Duration::from_millis(513));
+            assert_eq!(first_prepared.budget.cause, BudgetSource::RequestDeadline);
+            assert_eq!(second_prepared.budget.cause, BudgetSource::RequestDeadline);
+        }
+
+        #[cfg(target_env = "p1")]
+        #[test]
+        fn b31_registered_transport_preserves_origin_and_wire_authority() {
+            let start = MonotonicInstant::now();
+            let client = FastlyOutboundClient::with_clock(constant_clock(start));
+            for (target, override_authority, host, authority, port, tls) in [
+                (
+                    "https://api.example:8443/",
+                    Some("tenant.example:9443"),
+                    "api.example",
+                    "tenant.example:9443",
+                    8443,
+                    true,
+                ),
+                (
+                    "http://[::1]:8443/",
+                    None,
+                    "[::1]",
+                    "[::1]:8443",
+                    8443,
+                    false,
+                ),
+                (
+                    "https://127.0.0.1:8443/",
+                    None,
+                    "127.0.0.1",
+                    "127.0.0.1:8443",
+                    8443,
+                    true,
+                ),
+            ] {
+                let mut request = OutboundRequest::get(target).expect("request");
+                if let Some(value) = override_authority {
+                    request = request.host_authority_override(value).expect("authority");
+                }
+                let prepared = client.prepare(request, start).expect("registered backend");
+                assert_eq!(prepared.backend.get_host(), host);
+                assert_eq!(
+                    prepared.backend.get_host_override(),
+                    Some(HeaderValue::from_str(authority).expect("header"))
+                );
+                assert_eq!(prepared.backend.get_port(), port);
+                assert_eq!(prepared.backend.is_ssl(), tls);
+            }
+        }
+
+        #[test]
+        fn b31_registry_reuses_matching_identity_and_refuses_a_collision() {
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_secs(1));
+            let clock = constant_clock(start);
+            let request = OutboundRequest::get("https://example.com/").expect("request");
+            let (identity, _) = backend_identity(request, budget).expect("identity");
+            let registry = Mutex::new(HashMap::new());
+            let registered = Cell::new(0_usize);
+            for _ in 0_u8..2 {
+                let backend = cached_backend(
+                    &registry,
+                    identity.clone(),
+                    budget,
+                    &clock,
+                    |name, settings| {
+                        assert_eq!(name, backend_name(settings));
+                        registered.set(registered.get() + 1);
+                        Ok(Ok(7_u8))
+                    },
+                )
+                .expect("verified backend");
+                assert_eq!(backend, 7);
+            }
+            assert_eq!(registered.get(), 1);
+            let mut collision = identity.clone();
+            collision.wire_authority = "other.example".to_owned();
+            registry
+                .lock()
+                .expect("registry")
+                .insert(backend_name(&identity), (collision, 9));
+            let error = cached_backend(&registry, identity, budget, &clock, |_, _| {
+                panic!("collision must not register or reuse")
+            })
+            .expect_err("identity collision");
+            assert!(matches!(error, EdgeError::Internal { .. }));
+        }
+
+        #[test]
+        fn b31_registry_does_not_trust_failed_registrations() {
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_secs(1));
+            let clock = constant_clock(start);
+            let request = OutboundRequest::get("https://example.com/").expect("request");
+            let (identity, _) = backend_identity(request, budget).expect("identity");
+            for failure in [
+                BackendCreationError::NameInUse,
+                BackendCreationError::Disallowed,
+            ] {
+                let registry = Mutex::new(HashMap::new());
+                cached_backend::<u8, _>(&registry, identity.clone(), budget, &clock, |_, _| {
+                    Ok(Err(failure))
+                })
+                .expect_err("unverified registration must fail");
+                assert!(registry.lock().expect("registry").is_empty());
+                let backend =
+                    cached_backend(&registry, identity.clone(), budget, &clock, |_, _| {
+                        Ok(Ok(7))
+                    })
+                    .expect("retry may register");
+                assert_eq!(backend, 7);
+            }
+        }
+
+        #[test]
+        fn b31_registry_retains_late_success_and_rechecks_cached_deadlines() {
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_secs(1));
+            let request = OutboundRequest::get("https://example.com/").expect("request");
+            let (identity, _) = backend_identity(request, budget).expect("identity");
+            let registry = Mutex::new(HashMap::new());
+            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
+            let error = cached_backend(&registry, identity.clone(), budget, &clock, |_, _| {
+                Ok(Ok(7_u8))
+            })
+            .expect_err("late registration");
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                }
+            ));
+            assert_eq!(registry.lock().expect("registry").len(), 1);
+            let expired_clock = constant_clock(budget.deadline.instant());
+            cached_backend(
+                &registry,
+                identity.clone(),
+                budget,
+                &expired_clock,
+                |_, _| panic!("expired cache hit must not register"),
+            )
+            .expect_err("cached backend does not renew an expired budget");
+            let next_budget = clock_budget(budget.deadline.instant(), Duration::from_secs(1));
+            let backend =
+                cached_backend(&registry, identity, next_budget, &expired_clock, |_, _| {
+                    panic!("successful late registration must already be retained")
+                })
+                .expect("reuse under a new operation's budget");
+            assert_eq!(backend, 7);
         }
 
         #[test]
@@ -1966,16 +2266,16 @@ mod fastly_impl {
             let budget = clock_budget(start, Duration::from_millis(100));
             let first = OutboundRequest::get("https://example.com/path").expect("first request");
             let second = OutboundRequest::get("https://example.com/other").expect("second request");
-            let first_identity = backend_identity(&first, budget).expect("first identity");
-            let second_identity = backend_identity(&second, budget).expect("second identity");
+            let (first_identity, _) = backend_identity(first, budget).expect("first identity");
+            let (second_identity, _) = backend_identity(second, budget).expect("second identity");
 
             assert_eq!(first_identity, second_identity);
             assert_eq!(
                 backend_name(&first_identity),
                 backend_name(&second_identity)
             );
-            let first_timers = backend_timers(first_identity.budget_ms);
-            let second_timers = backend_timers(second_identity.budget_ms);
+            let first_timers = backend_timers(first_identity.phase_ms);
+            let second_timers = backend_timers(second_identity.phase_ms);
             assert_eq!(first_timers.connect, second_timers.connect);
             assert_eq!(first_timers.first_byte, second_timers.first_byte);
             assert_eq!(first_timers.between_bytes, second_timers.between_bytes);
@@ -2034,8 +2334,8 @@ mod fastly_impl {
                 .host_authority_override("tenant.example:8443")
                 .expect("authority override");
 
-            let original_identity = backend_identity(&original, budget).expect("identity");
-            let overridden_identity = backend_identity(&overridden, budget).expect("identity");
+            let (original_identity, _) = backend_identity(original, budget).expect("identity");
+            let (overridden_identity, _) = backend_identity(overridden, budget).expect("identity");
 
             assert_eq!(overridden_identity.host, "origin.example");
             assert_eq!(overridden_identity.port, 443);
@@ -2058,7 +2358,7 @@ mod fastly_impl {
         }
 
         #[test]
-        fn heterogeneous_hosts_and_exact_budgets_have_distinct_backend_identities() {
+        fn heterogeneous_hosts_and_timer_buckets_have_distinct_backend_identities() {
             let started_at = MonotonicInstant::now();
             let first_budget = clock_budget(started_at, Duration::from_millis(1));
             let second_budget = clock_budget(started_at, Duration::from_nanos(1_000_001));
@@ -2067,11 +2367,12 @@ mod fastly_impl {
             let second_request =
                 OutboundRequest::get("https://second.example/path").expect("second request");
 
-            let first = backend_identity(&first_request, first_budget).expect("first identity");
-            let second = backend_identity(&second_request, second_budget).expect("second identity");
+            let (first, _) = backend_identity(first_request, first_budget).expect("first identity");
+            let (second, _) =
+                backend_identity(second_request, second_budget).expect("second identity");
 
-            assert_eq!(first.budget_ms, 1);
-            assert_eq!(second.budget_ms, 2);
+            assert_eq!(first.phase_ms, 1);
+            assert_eq!(second.phase_ms, 2);
             assert_ne!(first, second);
             assert_ne!(backend_name(&first), backend_name(&second));
         }
@@ -2927,16 +3228,19 @@ mod fastly_impl {
         #[test]
         fn backend_identity_uses_every_canonical_property() {
             let first = BackendIdentity {
-                budget_ms: 100,
+                phase_ms: 128,
                 host: "example.com".to_owned(),
                 port: 443,
                 scheme: "https".to_owned(),
                 tls: true,
                 wire_authority: "example.com".to_owned(),
             };
-            assert_eq!(backend_name(&first), "ez_1e145c6e3d9e9dd28342de004f8b6954");
+            assert_eq!(
+                backend_name(&first),
+                "ez_b31v1_a165932b532b7ff063ee219444cb3cb093847ee427d4f76b54a68909b2e279fc"
+            );
             let mut second = first.clone();
-            second.budget_ms = 101;
+            second.phase_ms = 256;
             assert_ne!(backend_name(&first), backend_name(&second));
             second = first.clone();
             second.port = 8443;
@@ -2944,35 +3248,42 @@ mod fastly_impl {
             second = first.clone();
             second.host = "other.example".to_owned();
             assert_ne!(backend_name(&first), backend_name(&second));
+            second = first.clone();
+            second.scheme = "http".to_owned();
+            assert_ne!(backend_name(&first), backend_name(&second));
+            second = first.clone();
+            second.tls = false;
+            assert_ne!(backend_name(&first), backend_name(&second));
+            second = first.clone();
+            second.wire_authority = "tenant.example:8443".to_owned();
+            assert_ne!(backend_name(&first), backend_name(&second));
         }
 
         #[test]
-        fn backend_host_override_preserves_explicit_port() {
+        fn backend_authority_preserves_explicit_port() {
             let mut request =
                 OutboundRequest::get("https://api.example.com:8443/resource").expect("request");
             normalize_for_dispatch(&mut request).expect("normalize");
 
-            assert_eq!(backend_host_override(&request), "api.example.com:8443");
+            let (identity, _) = backend_identity(
+                request,
+                clock_budget(MonotonicInstant::now(), Duration::from_secs(1)),
+            )
+            .expect("identity");
+            assert_eq!(identity.wire_authority, "api.example.com:8443");
         }
 
         #[test]
-        fn backend_host_override_preserves_bracketed_ipv6() {
+        fn backend_authority_preserves_bracketed_ipv6() {
             let mut request = OutboundRequest::get("http://[::1]:8443/resource").expect("request");
             normalize_for_dispatch(&mut request).expect("normalize");
 
-            assert_eq!(backend_host_override(&request), "[::1]:8443");
-        }
-
-        #[test]
-        fn backend_timer_partition_is_bounded() {
-            let timers = backend_timers(100);
-            assert_eq!(timers.connect, Duration::from_millis(25));
-            assert_eq!(timers.first_byte, Duration::from_millis(75));
-            assert_eq!(timers.between_bytes, Duration::from_millis(100));
-            let short = backend_timers(1);
-            assert_eq!(short.connect, Duration::from_millis(1));
-            assert_eq!(short.first_byte, Duration::from_millis(1));
-            assert_eq!(short.between_bytes, Duration::from_millis(1));
+            let (identity, _) = backend_identity(
+                request,
+                clock_budget(MonotonicInstant::now(), Duration::from_secs(1)),
+            )
+            .expect("identity");
+            assert_eq!(identity.wire_authority, "[::1]:8443");
         }
 
         #[test]
@@ -3280,6 +3591,8 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
 
 #[cfg(test)]
 mod send_failure_policy_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use edgezero_core::outbound::{
         OutboundBatch, OutboundBatchDriverEvent, OutboundBatchItem, OutboundBatchTermination,
         OutboundSlotResult,
@@ -3376,22 +3689,6 @@ mod send_failure_policy_tests {
             classify_send_failure(SendFailure::ImageOptimizerUnavailable, budget, start);
         assert_eq!(unavailable.message(), "Fastly outbound request failed");
         assert_eq!(unavailable.to_string(), "Fastly outbound request failed");
-    }
-
-    #[test]
-    fn independent_clients_use_distinct_backend_names() {
-        let first = next_backend_namespace();
-        let second = next_backend_namespace();
-        let identity_name = "ez_1e145c6e3d9e9dd28342de004f8b6954";
-
-        assert_eq!(
-            namespaced_backend_name(identity_name, first),
-            namespaced_backend_name(identity_name, first)
-        );
-        assert_ne!(
-            namespaced_backend_name(identity_name, first),
-            namespaced_backend_name(identity_name, second)
-        );
     }
 
     #[test]

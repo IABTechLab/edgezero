@@ -19,8 +19,10 @@ phase completion. The target checks below supplement, not replace, all five root
 permits the Send-first checkpoint below before full D1a-D1d sequencing. Missing finite H(K) and
 timing-only G2 failures do not block that subset. Original deadlines and late-result rejection,
 +5 ms measured targets/tests, typed body errors and fresh-readiness/subsequent-read safety remain.
-The optimizer blocking horizon is **UNKNOWN** until provider evidence. B/backend policy, timers,
-slack and resources are unchanged and unapproved; their dependent implementation stays gated.
+The optimizer blocking horizon is **UNKNOWN** until provider evidence. At that checkpoint,
+B/backend policy and timers were unapproved. The later scoped B31 approval permits the existing
+aggregate identity/timer subset described in D1b below; slack, resources and the readiness engine
+retain their separate gates.
 The current trait remains unchanged until the later atomic head-first/full-trait migration.
 
 Each D1-D4 migration implements plan 02's synchronous `validate_supported_options` and paired
@@ -100,6 +102,24 @@ backend identity and slack until D1b replaces them together; no new blocking-rea
 create `tests/outbound_public_api.rs` for the external observation compile contract.
 
 **Dependencies:** D1a's verified bounded waits and G4's literal B/domain approval.
+
+#### Existing-Path B31 Checkpoint (2026-10-25)
+
+The [scoped B31 approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-b31-implementation-approval)
+permits the aggregate-policy backend portion on the current Send/Batch transport before D1a.
+Configured timeout, not shortened remaining budget, selects the clamped B31 anchor. All three
+provider timers use the same ceiling-rounded value; the original logical budget stays unchanged.
+Replace per-client namespaces/caches with one verified guest-instance registry and versioned
+configuration names. Compare full identities, serialize lookup/registration/insertion, retain late
+successful registrations and fail closed on unknown `NameInUse`. No public API or body clone is
+needed; request parts carry the existing timeout through the same preparation path.
+
+The real WASI regressions cover all 93 boundary samples, equal timeouts under different deadlines
+and cutoffs, maximum clamps, native cross-client reuse, collisions, failed retries and late-cache
+retention. This implements only the current aggregate identity/timer subset, not all D1b modes or
+acceptance criteria. Registration observation, explicit Connect/idle mapping, retirement, the
+readiness engine, slack removal and hosted/resource qualification remain open. The existing two
+dispatch guards and their tests remain, not an alternate old backend policy.
 
 - [ ] Add `backend_identity_ignores_remaining_budget` for equal per-call timeouts under different
       absolute deadlines, with negative controls for connect/TLS/authority changes. Run

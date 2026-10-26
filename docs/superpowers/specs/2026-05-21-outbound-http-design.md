@@ -9,6 +9,35 @@
 
 ## 1. Overview
 
+### Fastly B31 Existing-Path Policy (2026-10-25)
+
+The [scoped implementation approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-b31-implementation-approval)
+supersedes every client-namespaced/exact-budget backend algorithm, quarter/three-quarter phase
+split and timing bound derived from that split in this document. Those older Fastly derivations
+remain historical design records, not a compatibility policy or current enforcement claim.
+
+At the existing method-entry snapshot, anchor provider timers to the configured per-call timeout
+clamped to seven days; without one, use the originally selected duration. Round upward to
+milliseconds, then choose the smallest member of `{2^k ms | k = 0..29} union {604800000 ms}`
+at least that large. Connect, first-byte and between-bytes share this value. The selected absolute
+deadline, source and observation cutoff stay unchanged. A shorter deadline/cutoff does not change
+the configured-timeout backend. Positive sub-millisecond inputs select a 1 ms provider timer,
+not a longer logical budget. Explicit Connect/idle options are still separate adoption work.
+
+Versioned `ez_b31v1_` names hash canonical scheme, host and wire authority (NUL-delimited validated
+text), then fixed big-endian port, TLS flag and selected timer milliseconds, using full SHA-256.
+A single verified guest-instance registry replaces per-client namespaces/caches. It compares full
+identities, serializes synchronous registration/insertion, rechecks expiry after acquiring the
+lock, retains successful late registrations before reporting their original timeout, and refuses
+unknown `NameInUse`. Only configuration metadata and SDK backend names are retained.
+
+There are at most 31 deadline-only configurations per fixed transport tuple, not a total memory,
+origin or registration bound. Existing 25 ms dispatch guards, blocking head/body operations and
+late-result rejection remain. Larger provider timers can substantially outlive a shorter logical
+deadline; neither the old phase-sum overshoot bound nor prompt interruption is claimed. Readiness,
+retirement, hosted pooling/resource/cancellation proof and the new head-first migration remain open.
+All portable caps, cutoff behavior, diagnostics and direct native optimizer dispatch are preserved.
+
 ### Native Image Optimizer Checkpoint (2026-10-24)
 
 `OutboundRequest::image_optimizer` attaches typed region, format, quality, resize, dimension,
@@ -2299,7 +2328,7 @@ completion.
 | Axum | `reqwest::RequestBuilder::timeout(effective)` — reqwest applies it through response-body read | Real, whole-operation |
 | Cloudflare | race the adapter-private `fetch_raw_with_signal` (+ body drain) against `worker::Delay::from(effective)`; final fetch options carry manual response encoding and the abort signal (§4.2); the guard aborts on expiry | Real, whole-operation with cancellation |
 | Spin | race the entire `send_one` future (send **and** body collect) against a WASI monotonic-clock timer; drop the guest future on expiry | Guest-visible 504 at the timer; host teardown is cooperative and therefore `BestEffort` (footnote 8) |
-| Fastly | host phase timers split per §4.3 (`connect = budget/4`, `first_byte = 3*budget/4`, `between_bytes = budget`); during body drain, `budget.deadline.is_expired()` is checked **after every blocking body read returns, including the EOF read** (the synthetic 30 s deadline applies when no caller deadline was set); the host between-bytes timeout bounds each gap | Warm-path connect/headers have a documented phase split and returned body reads have a cooperative bound; the end-to-end capability remains `BestEffort` because cold registration and request-write gaps are unbounded |
+| Fastly | the current B31 aggregate policy above configures coupled, ceiling-rounded provider timers from the original timeout/duration anchor; body drain checks the unchanged absolute deadline **after every blocking read, including EOF** | `BestEffort`: timers can outlive a shorter logical deadline, and registration, request writes, head waits and body reads are not guest-preemptible. No phase-sum overshoot bound is claimed |
 
 **Drop-cancellation guarantee, per adapter (what happens to a LOSING arm).** A fan-out
 consumer under deadline pressure needs to know whether a timed-out/deadline-lost send is
@@ -2322,7 +2351,11 @@ connection closure from HTTP/2 stream reset; optional deployed HTTP/2/HTTP/3
 characterization records what intervening proxies and origins observe without promoting
 that observation into a portable guarantee.
 
-**Fastly precision, stated honestly.** Fastly has no guest wall-clock primitive to
+**Historical pre-B31 timing derivation (superseded).** The exact-budget phase split and its
+derived overshoot bounds below are not the current B31 policy. Use the override in §1 for
+backend/timer behavior; unchanged body/cancellation limitations still apply.
+
+Fastly has no guest wall-clock primitive to
 preempt a chunk read in progress. At dispatch the adapter computes `let budget =
 dispatch_budget(req, now, observation_cutoff)?` (§3.3.2, where `observation_cutoff` is `None` for a
 single `send` and `Some(observation_cutoff)` for a batch; `now` is snapshotted inline for single `send`
@@ -5077,6 +5110,12 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
 
 ### 4.3 Fastly — `crates/edgezero-adapter-fastly`
 
+**Backend/timing override:** the B31 checkpoint in §1 supersedes this section's older
+client-namespaced/exact-budget cache, rigid phase split, and overshoot derivations. The old
+pseudocode is retained for history only on those subjects. Dispatch-before-harvest, typed errors,
+ownership, normalization/caps, and the closed custom lifecycle remain current; this checkpoint
+does not replace pending selection/body reads or remove dispatch guards.
+
 The Fastly outbound implementation uses **dispatch-all-then-select**. This replaced the
 historical `proxy.rs` flow, which called `send_async_streaming()` and then
 `pending_request.wait()` inside one `send()` and therefore serialized a `join_all` batch.
@@ -7196,8 +7235,8 @@ Adapter-specific work:
   Workers does not transform the payload. Replace the crate-local stale Preview-1 Cargo
   config with `wasm32-unknown-unknown` plus `wasm-bindgen-test-runner`, and execute one
   crate-local nonzero WASM gate without target/runner overrides in CI.
-- **Fastly:** derive client-namespaced dynamic-backend names; configure connect,
-  first-byte, and between-bytes host timers from the remaining budget; retain the
+- **Fastly:** derive stable versioned configuration names using the B31 checkpoint in §1;
+  configure coupled host timers from the original timeout/duration anchor, not the later remainder; retain the
   documented service-entitlement, cold-registration, upload-write, pending-handle selection, and
   selected-body-drain
   BestEffort gaps. `outbound-http` remains BestEffort until a reviewed deployment
@@ -7365,15 +7404,11 @@ Adapter-specific work:
    non-trivial without an async reactor and is **deferred**. The
    `outbound-batch-slot-isolation` capability (§3.5.1 footnote 4) lets apps declare the
    requirement explicitly and get a hard build failure on Fastly until this lands.
-9. **Fastly configurable phase split.** The fixed 1/4 connect + 3/4 first-byte
-   split (§4.3) produces premature connect failures for slow-connect upstreams
-   even when the total budget would have sufficed. Apps that hit this require
-   `outbound-flexible-phase-budget` (§3.5.1 footnote 5) and fall through to the
-   hard build failure on Fastly. The follow-up would either expose a per-request
-   `fastly_phase_split(connect_ratio: f32)` setter, a per-`OutboundRequest`
-   configuration field, or a per-adapter config knob on `FastlyOutboundClient`.
-   Each option has a memory-model and capability impact, so it's left **deferred**
-   pending a real use case.
+9. **Fastly independent Connect/idle policy.** The B31 aggregate checkpoint removes the
+   rigid phase split, but it does not implement independently configured Connect/idle limits
+   or prove host interruption. Those settings need complete identity/mode integration and
+   separately qualified provider behavior under the adoption plan; do not restore a ratio knob
+   or infer a capability promotion from coupled timers.
 10. **Spin target documentation drift.** Implementation verification uses
     `wasm32-wasip2` for Spin SDK 7. Any remaining comment that associates Spin with
     `wasm32-wasip1` should be corrected when the implementation touches that file, but

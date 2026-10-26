@@ -20,7 +20,36 @@ Hosted/performance qualification and deployment remain blocked. The experiment a
 measurements, commands, exits, source identities and linked evidence below are historical and
 unchanged; this additive disposition does not reclassify them as passing results.
 
+### B31 Existing-Path Implementation (2026-10-25)
+
+The [scoped approval](2026-10-18-outbound-api-approval.md#scoped-b31-implementation-approval)
+authorizes B31 timers and stable configuration-derived names on the existing aggregate-policy
+Send/Batch path. Current production code replaces client namespaces/exact-budget identity and the
+rigid phase split with a shared verified registry and the selected 31-member ladder. Configured
+timeouts anchor the timer independently of shorter deadlines/cutoffs; otherwise the originally
+selected duration anchors it. The original absolute logical budget is never rounded or restarted.
+
+Four behavioral controls failed against the old code and then pass through the real pinned SDK/
+Viceroy runner. Eleven scoped tests include the retained registration probe, full boundary/cardinality
+coverage, clamped timeout/cutoff controls, actual cross-client preparation, untouched request parts,
+and typed registry collision/retry/late-success behavior. Actual SDK readbacks also preserve
+origin host/port, authority and TLS for DNS, IPv4 and IPv6 targets. The complete 202-test Fastly WASI unit
+suite passes. The live shared helper serializes lookup/registration/insertion and checks expiry
+after lock acquisition; successful late registrations are trusted before returning their timeout.
+No unknown `NameInUse` is converted into a trusted backend.
+
+This is local working-tree implementation verification on base
+`c70e2b05e1049f854c24ad75ee2333dbd4f10804`, not a frozen-candidate qualification. The registry
+stores only configuration metadata and SDK backend names. It does not establish a total origin/
+registration/memory ceiling, provider cancellation or hosted pooling. Long configured timeouts can
+leave a large provider timer behind a much earlier logical deadline. Original method-entry capture,
+dispatch guards, selection/body-read behavior, runtime pins and capability classifications remain
+unchanged. G2's failed readiness evidence and the broader G4/hosted decisions remain open.
+
 ### Backend Policy Review Packet (2026-10-25)
+
+Historical proposal checkpoint. Its separate scoped implementation authorization is recorded above;
+the immutable packet is not rewritten as production or qualification evidence.
 
 The [new G2/G4 packet](2026-10-25-fastly-backend-policy-proposal.md) supplies a numerical candidate:
 B31 with upward-rounded coupled timers, compared with a B1 fixed-ceiling alternative. Its model

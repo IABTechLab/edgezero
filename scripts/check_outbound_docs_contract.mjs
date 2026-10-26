@@ -1122,10 +1122,12 @@ for (const [path, source] of hardCutSurfaces) {
 for (const staleFragment of [
   'harvests response bodies in input order',
   'harvests responses in input order',
+  'Fastly divides a total budget among provider phase timers',
+  'Exact ceiled-millisecond budgets are part of backend identity',
 ]) {
   if (capabilitySource.includes(staleFragment)) {
     fail(
-      `${capabilityPath} contains stale Fastly batch behavior: ${staleFragment}`
+      `${capabilityPath} contains stale Fastly backend or batch behavior: ${staleFragment}`
     )
   }
 }

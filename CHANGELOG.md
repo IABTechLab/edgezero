@@ -169,6 +169,13 @@ separately from the portable API and must be considered when declaring required 
 - Remove the redundant conditional source-error drop from Fastly's no-attempt constructor;
   retain original private source ownership and check the native `cli,test-utils` build too.
 
+### Fastly B31 Backend Policy
+
+- Adopt the approved Fastly B31 aggregate backend policy: stable versioned names, a shared
+  verified registration registry, ceiling-rounded coupled timers and unchanged logical deadlines.
+  Remove client namespaces and the exact-budget/quarter-split policy. Readiness, dispatch guards,
+  runtime pins and hosted/resource qualification remain separate and unchanged.
+
 ### Qualification Evidence Preparation
 
 - Exercise the B31 proposal's 62 timer vectors across coupled/explicit Connect scopes through
