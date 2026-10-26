@@ -10,16 +10,8 @@ ACTION_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/edgezero-rust-cache-test.XXXXXX")
 trap 'rm -rf -- "$WORK_DIR"' EXIT
 
-fail() {
-  printf 'setup-rust-build-cache test failed: %s\n' "$*" >&2
-  exit 1
-}
-
-assert_line() {
-  local file="$1" expected="$2"
-  grep -Fqx -- "$expected" "$file" ||
-    fail "expected '$expected' in $file"
-}
+# shellcheck source=common.sh
+source "$ACTION_DIR/tests/common.sh"
 
 workspace="$WORK_DIR/workspace"
 runner_temp="$WORK_DIR/runner"
@@ -30,10 +22,12 @@ printf '%s\n' '# generic lockfile fixture' >"$workspace/project/Cargo.lock"
 
 GITHUB_WORKSPACE="$workspace" \
   RUNNER_TEMP="$runner_temp" \
+  RUNNER_OS=Linux RUNNER_ARCH=X64 \
   GITHUB_OUTPUT="$WORK_DIR/output" \
   GITHUB_ENV="$WORK_DIR/env" \
   EDGEZERO__RUST_CACHE__APP_NAME=example-app \
   EDGEZERO__RUST_CACHE__CACHE_TARGET=true \
+  EDGEZERO__RUST_CACHE__TARGET_CACHE_REVISION=1111111111111111111111111111111111111111 \
   EDGEZERO__RUST_CACHE__WORKING_DIRECTORY=project \
   "$ACTION_DIR/scripts/prepare.sh"
 
@@ -42,8 +36,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   expected_sha=$(shasum -a 256 "$workspace/project/Cargo.lock" | awk '{ print $1 }')
 fi
-assert_line "$WORK_DIR/output" "cargo-lock-sha256=$expected_sha"
-assert_line "$WORK_DIR/output" 'cache-namespace=example-app'
+assert_line "$WORK_DIR/output" "source-cache-key=edgezero-app-example-app-rust-sources-Linux-X64-$expected_sha"
 expected_target=$(realpath "$runner_temp/edgezero-rust-cache/example-app/target")
 assert_line "$WORK_DIR/output" "cargo-target-dir=$expected_target"
 assert_line "$WORK_DIR/env" 'RUSTC_WRAPPER=sccache'
@@ -54,21 +47,20 @@ assert_line "$WORK_DIR/env" "EDGEZERO__RUST_CACHE__TARGET_DIR=$expected_target"
 
 : >"$WORK_DIR/output"
 : >"$WORK_DIR/env"
+mkdir -p "$runner_temp/disabled"
 GITHUB_WORKSPACE="$workspace" \
-  RUNNER_TEMP="$runner_temp" \
+  RUNNER_TEMP="$runner_temp/disabled" \
+  RUNNER_OS=Linux RUNNER_ARCH=X64 \
   GITHUB_OUTPUT="$WORK_DIR/output" \
   GITHUB_ENV="$WORK_DIR/env" \
   EDGEZERO__RUST_CACHE__APP_NAME=example-app \
   EDGEZERO__RUST_CACHE__CACHE_TARGET=false \
+  EDGEZERO__RUST_CACHE__TARGET_CACHE_REVISION=1111111111111111111111111111111111111111 \
   EDGEZERO__RUST_CACHE__WORKING_DIRECTORY=project \
   "$ACTION_DIR/scripts/prepare.sh"
-assert_line "$WORK_DIR/output" 'cache-namespace=example-app'
-if grep -Fq 'cargo-target-dir=' "$WORK_DIR/output"; then
-  fail "published a Cargo target directory while target caching was disabled"
-fi
-if grep -Eq '^(CARGO_TARGET_DIR|EDGEZERO__RUST_CACHE__TARGET_DIR)=' "$WORK_DIR/env"; then
-  fail "enabled Cargo target caching while target caching was disabled"
-fi
+expected_target=$(realpath "$runner_temp/disabled/edgezero-rust-cache/example-app/target")
+assert_line "$WORK_DIR/output" "cargo-target-dir=$expected_target"
+assert_line "$WORK_DIR/env" "CARGO_TARGET_DIR=$expected_target"
 
 for invalid in missing ../outside /; do
   : >"$WORK_DIR/output"
@@ -135,9 +127,9 @@ tilde='~'
 for path in "$tilde/.cargo/registry/index/" "$tilde/.cargo/registry/cache/" "$tilde/.cargo/git/db/"; do
   grep -Fq "$path" "$action" || fail "Cargo source cache omits $path"
 done
-grep -Fq "steps.prepare.outputs['cargo-lock-sha256']" "$action" ||
+grep -Fq "steps.prepare.outputs['source-cache-key']" "$action" ||
   fail "Cargo source cache key is not bound to the validated Cargo.lock"
-grep -Fq "steps.prepare.outputs['cache-namespace']" "$action" ||
+grep -Fq "steps.prepare.outputs['target-cache-key']" "$action" ||
   fail "cache keys are not scoped to the validated application name"
 grep -Fq "steps.prepare.outputs['cargo-target-dir']" "$action" ||
   fail "Cargo target cache does not use the validated target directory"
@@ -145,9 +137,9 @@ grep -Fq "inputs['cache-target'] == 'true'" "$action" ||
   fail "Cargo target cache is not gated by the cache-target input"
 github_sha_expression="\${{ github.sha }}"
 if grep -Fq "$github_sha_expression" "$action"; then
-  fail "Cargo target cache creates a new full cache for every source revision"
+  fail "cache action must use the explicit application revision, not infer github.sha"
 fi
-grep -Eq "^[[:space:]]+key: edgezero-app-.*-rust-target-.*cargo-lock-sha256.*\}\}[[:space:]]*$" "$action" ||
-  fail "Cargo target cache primary key must end at the validated Cargo.lock digest"
-
 printf 'setup-rust-build-cache action tests passed\n'
+bash "$ACTION_DIR/tests/revision.sh"
+bash "$ACTION_DIR/tests/review.sh"
+bash "$ACTION_DIR/tests/fixture.sh"
