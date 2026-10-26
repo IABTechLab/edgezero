@@ -54,6 +54,8 @@ pub use config::{
     DiffExit, effective_manifest_environment, run_config_diff_typed, run_config_gc,
     run_config_push, run_config_push_typed, run_config_validate, run_config_validate_typed,
 };
+#[cfg(all(feature = "cli", feature = "edgezero-adapter-spin"))]
+pub use edgezero_adapter_spin::cli::resolve_spin_component;
 #[cfg(feature = "cli")]
 pub use provision::run_provision;
 

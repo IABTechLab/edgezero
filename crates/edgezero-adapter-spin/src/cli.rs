@@ -945,7 +945,12 @@ fn read_sqlite_entry(db_path: &Path, store: &str, key: &str) -> Result<ReadConfi
 /// multi-component requires an explicit `component = "..."` in
 /// `[adapters.spin.adapter]`, and a selector that doesn't match
 /// any declared id is an error.
-fn resolve_spin_component(
+///
+/// # Errors
+/// Returns an error for unreadable/invalid manifests, missing components,
+/// ambiguous selection or an undeclared selector.
+#[inline]
+pub fn resolve_spin_component(
     spin_path: &Path,
     component_selector: Option<&str>,
 ) -> Result<String, String> {
