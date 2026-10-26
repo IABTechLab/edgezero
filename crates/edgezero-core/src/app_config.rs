@@ -13,6 +13,7 @@
 //!   push` flow) — [`load_app_config_raw`] /
 //!   [`load_app_config_raw_with_options`].
 
+use crate::env_config::EnvConfig;
 use std::any;
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -119,7 +120,9 @@ pub trait AppConfigMeta {
 
     /// Render the exact native identity used by the application's runtime bridge.
     /// Required when opting into implicit lookups. The CLI still applies adapter
-    /// native-name and collision checks. Do not return a generic raw-key fallback.
+    /// native-name and collision checks. `environment` merges the selected
+    /// adapter's manifest defaults with process overrides using deployment rules.
+    /// Do not re-read process environment or return a generic raw-key fallback.
     ///
     /// # Errors
     /// Returns a credential-free diagnostic for unsupported adapters or mappings.
@@ -128,6 +131,7 @@ pub trait AppConfigMeta {
         &self,
         _adapter: &str,
         _lookup: &ImplicitSecretLookup,
+        _environment: &EnvConfig,
     ) -> Result<String, String> {
         Err("implicit secret lookups require an application native renderer".to_owned())
     }
@@ -792,6 +796,10 @@ fn walk_and_overlay(
     reason = "test fixtures: `validator` range bounds default to the field's int type; \
               match arms in `expect_err` assertions intentionally collapse all unexpected \
               variants into a single panic"
+)]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "legacy app-config fixtures intentionally exercise the default-compatible implicit lookup hooks"
 )]
 mod tests {
     use super::*;

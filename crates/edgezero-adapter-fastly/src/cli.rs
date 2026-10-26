@@ -4,6 +4,7 @@
 )]
 
 /// Narrow host operations for reviewed secret provisioning.
+#[path = "secret_operations.rs"]
 pub mod secrets;
 
 use std::cell::{Cell, RefCell};

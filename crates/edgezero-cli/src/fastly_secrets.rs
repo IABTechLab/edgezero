@@ -52,3 +52,59 @@ pub fn context_from_manifest(
         ..Default::default()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn context_uses_selected_manifest_paths_stores_and_adapter_defaults() {
+        let dir = tempfile::tempdir().expect("directory");
+        let adapter = dir.path().join("selected-fastly.toml");
+        fs::write(&adapter, "name = \"fictional\"").expect("adapter manifest");
+        let manifest = dir.path().join("selected-edgezero.toml");
+        fs::write(
+            &manifest,
+            r#"
+[app]
+name = "fictional"
+[adapters.fastly.adapter]
+crate = "fictional-fastly"
+manifest = "selected-fastly.toml"
+[stores.config]
+ids = ["fictional_config"]
+[stores.kv]
+ids = ["fictional_kv"]
+[stores.secrets]
+ids = ["fictional_secrets"]
+[[environment.variables]]
+name = "SECRETS"
+env = "EDGEZERO__STORES__SECRETS__FICTIONAL_SECRETS__NAME"
+value = "physical-secrets"
+adapters = ["fastly"]
+"#,
+        )
+        .expect("application manifest");
+        let context = context_from_manifest(&manifest, Some("FictionalService")).expect("context");
+        assert_eq!(
+            context.adapter_manifest_path,
+            Some(adapter.canonicalize().expect("path"))
+        );
+        assert_eq!(
+            context.application_manifest_path,
+            Some(manifest.canonicalize().expect("path"))
+        );
+        assert_eq!(context.service_id.as_deref(), Some("FictionalService"));
+        assert_eq!(context.stores.secrets, ["fictional_secrets"]);
+        assert_eq!(context.stores.config, ["fictional_config"]);
+        assert_eq!(context.stores.kv, ["fictional_kv"]);
+        assert_eq!(
+            context
+                .variable_defaults
+                .get("EDGEZERO__STORES__SECRETS__FICTIONAL_SECRETS__NAME")
+                .map(String::as_str),
+            Some("physical-secrets")
+        );
+    }
+}

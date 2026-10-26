@@ -7,11 +7,14 @@ use super::{
     resolve_deploy_manifest_path, validate_service_id,
 };
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use edgezero_adapter::registry::AdapterDeployContext;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 /// Maximum raw secret bytes documented by Fastly, before Base64 encoding.
-pub const FASTLY_SECRET_MAX_BYTES: usize = 65_536;
+pub const FASTLY_SECRET_MAX_BYTES: usize = 0x0001_0000;
 
 /// Exact physical resources selected by deployment configuration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -94,25 +97,26 @@ impl FastlySecretTransport for CurlTransport {
             "request = {}\nheader = {header}\nurl = {url}\nwrite-out = \"\\n%{{http_code}}\"\n",
             curl_quote(method),
         );
-        if let Some(body) = body {
+        if let Some(payload) = body {
             config.push_str("header = \"Content-Type: application/json\"\n");
-            config.push_str(&format!("data-binary = {}\n", curl_quote(body)));
+            writeln!(config, "data-binary = {}", curl_quote(payload))
+                .map_err(|_error| "failed to encode Fastly secret request".to_owned())?;
         }
         // Existing transport keeps authentication and body off argv, disables
         // curlrc and does not follow redirects. Never expose stderr or body.
         let output = curl_config_capture(&config).map_err(|_error| {
             "Fastly secret API transport failed; mutation outcome may be unknown".to_owned()
         })?;
-        let (body, status) = output
+        let (response_body, status_line) = output
             .rsplit_once('\n')
             .ok_or_else(|| "Fastly secret API returned no HTTP status".to_owned())?;
-        let status = status
+        let status = status_line
             .trim()
             .parse::<u16>()
             .map_err(|_error| "Fastly secret API returned an invalid HTTP status".to_owned())?;
         Ok(FastlySecretResponse {
             status,
-            body: body.to_owned(),
+            body: response_body.to_owned(),
         })
     }
 }
@@ -137,12 +141,12 @@ pub fn resolve_resources_with_transport(
     context: &AdapterDeployContext,
     transport: &dyn FastlySecretTransport,
 ) -> Result<FastlySecretResources, String> {
-    let path = resolve_deploy_manifest_path(context)?;
+    let manifest_path = resolve_deploy_manifest_path(context)?;
     let service_id = if let Some(id) = &context.service_id {
         validate_service_id(id)?;
         id.clone()
     } else {
-        effective_fastly_service_id(&path)?
+        effective_fastly_service_id(&manifest_path)?
             .ok_or_else(|| "Fastly secret operations require a selected service".to_owned())?
             .id
     };
@@ -193,9 +197,14 @@ pub fn resolve_resources_with_transport(
             });
         }
     }
-    stores.sort_by(|a, b| (&a.kind, &a.logical_id).cmp(&(&b.kind, &b.logical_id)));
+    stores.sort_by(|left, right| {
+        (&left.kind, &left.logical_id).cmp(&(&right.kind, &right.logical_id))
+    });
     for pair in stores.windows(2) {
-        if pair[0].kind == pair[1].kind && pair[0].logical_id == pair[1].logical_id {
+        if let [left, right] = pair
+            && left.kind == right.kind
+            && left.logical_id == right.logical_id
+        {
             return Err("duplicate logical Fastly store declaration".to_owned());
         }
     }
@@ -206,7 +215,7 @@ fn validate_resource_id(id: &str) -> Result<(), String> {
     if id.is_empty()
         || !id
             .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
         return Err("invalid Fastly secret resource ID".to_owned());
     }
@@ -217,7 +226,7 @@ fn validate_key(key: &str) -> Result<(), String> {
     if key.is_empty()
         || !key
             .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err("invalid Fastly secret key representation".to_owned());
     }
@@ -270,7 +279,7 @@ pub fn secret_exists_with_transport(
     // Completeness and store visibility are required before returning false.
     let first = format!("/resources/stores/secret/{resource_id}/secrets?limit=100");
     let mut path = first.clone();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     let mut found = false;
     loop {
         let body = require_success(request(transport, "GET", &path, None)?)?;
@@ -344,7 +353,7 @@ pub fn write_secret_with_transport(
     }
     let body = serde_json::json!({
         "name": key,
-        "secret": base64::engine::general_purpose::STANDARD.encode(value),
+        "secret": STANDARD.encode(value),
     })
     .to_string();
     let method = match action {
@@ -352,14 +361,22 @@ pub fn write_secret_with_transport(
         SecretWriteAction::Replace => "PATCH",
     };
     let path = format!("/resources/stores/secret/{resource_id}/secrets");
-    require_success(request(transport, method, &path, Some(&body))?)?;
+    let response = request(transport, method, &path, Some(&body))?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "Fastly secret write not confirmed; outcome may be unknown (HTTP {})",
+            response.status
+        ));
+    }
     Ok(())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edgezero_adapter::registry::DeployStoreIds;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, VecDeque};
+    use std::fs;
 
     struct Fake {
         replies: RefCell<VecDeque<FastlySecretResponse>>,
@@ -429,7 +446,7 @@ mod tests {
         for request in requests.iter() {
             let body: serde_json::Value =
                 serde_json::from_str(request.2.as_deref().expect("body")).expect("json");
-            let decoded = base64::engine::general_purpose::STANDARD
+            let decoded = STANDARD
                 .decode(body["secret"].as_str().expect("encoded"))
                 .expect("base64");
             assert!(decoded == bytes, "credential byte preservation");
@@ -471,7 +488,7 @@ mod tests {
         .expect_err("conflict");
         assert!(error.contains("409"));
         assert!(!error.contains("fictional"));
-        let error = write_secret_with_transport(
+        let transport_error = write_secret_with_transport(
             "store-123",
             "ts1_fixture",
             b"value",
@@ -479,7 +496,7 @@ mod tests {
             &fake,
         )
         .expect_err("transport");
-        assert!(!error.contains("fictional"));
+        assert!(!transport_error.contains("fictional"));
     }
 
     #[test]
@@ -499,8 +516,10 @@ mod tests {
         ]);
         assert!(secret_exists_with_transport("store-123", "ts1_fixture", &fake).expect("present"));
         assert!(!secret_exists_with_transport("store-123", "ts1_fixture", &fake).expect("absent"));
-        assert!(secret_exists_with_transport("store-123", "ts1_fixture", &fake).is_err());
-        assert!(secret_exists_with_transport("store-123", "ts1_fixture", &fake).is_err());
+        secret_exists_with_transport("store-123", "ts1_fixture", &fake)
+            .expect_err("404 is not proof of absence");
+        secret_exists_with_transport("store-123", "ts1_fixture", &fake)
+            .expect_err("missing pagination is not proof of absence");
         let requests = fake.requests.borrow();
         assert!(requests.iter().all(|(method, path, body)| method == "GET"
             && path.contains("/secrets?")
@@ -512,11 +531,11 @@ mod tests {
     fn resource_resolution_reuses_checked_defaults_and_all_store_inventories() {
         let dir = tempfile::tempdir().expect("dir");
         let manifest = dir.path().join("fastly.toml");
-        std::fs::write(&manifest, "name = \"fictional\"\n").expect("manifest");
+        fs::write(&manifest, "name = \"fictional\"\n").expect("manifest");
         let context = AdapterDeployContext {
             adapter_manifest_path: Some(manifest),
             service_id: Some("FictionalService1".to_owned()),
-            stores: edgezero_adapter::registry::DeployStoreIds {
+            stores: DeployStoreIds {
                 config: vec!["fictional_config".to_owned()],
                 kv: vec!["fictional_kv".to_owned()],
                 secrets: vec!["fictional_secrets".to_owned()],
@@ -564,22 +583,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn production_transport_keeps_credentials_off_argv_and_sanitizes_stderr() {
-        use edgezero_core::test_env::{EnvOverride, PathPrepend};
+        use edgezero_core::test_env::{EnvOverride, PathPrepend, env_lock};
+        use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt as _;
-        let _lock = edgezero_core::test_env::env_lock()
-            .lock()
-            .expect("env lock");
+        let _lock = env_lock().lock().expect("env lock");
         let dir = tempfile::tempdir().expect("dir");
-        let args = dir.path().join("args");
+        let arguments_path = dir.path().join("args");
         let input = dir.path().join("input");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\nprintf '\\n201'\n",
-            args.display(),
+            arguments_path.display(),
             input.display()
         );
         let curl = dir.path().join("curl");
-        std::fs::write(&curl, script).expect("fake curl");
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        fs::write(&curl, script).expect("fake curl");
+        fs::set_permissions(&curl, Permissions::from_mode(0o755)).expect("mode");
         let _path = PathPrepend::new(dir.path());
         let _token = EnvOverride::set("FASTLY_API_TOKEN", "fictional-api-token");
         write_secret(
@@ -589,14 +607,14 @@ mod tests {
             SecretWriteAction::Create,
         )
         .expect("fake production transport");
-        let argv = std::fs::read_to_string(&args).expect("argv");
+        let argv = fs::read_to_string(&arguments_path).expect("argv");
         assert!(argv.starts_with("-q\n"));
         assert!(!argv.contains("fictional"));
-        let stdin = std::fs::read_to_string(&input).expect("stdin");
+        let stdin = fs::read_to_string(&input).expect("stdin");
         assert!(stdin.contains("fictional-api-token"));
         assert!(stdin.contains("data-binary"));
         assert!(!stdin.contains("location"));
-        std::fs::write(&curl, "#!/bin/sh\ncat >/dev/null\nprintf 'fictional-credential fictional-api-token' >&2\nexit 1\n").expect("failing curl");
+        fs::write(&curl, "#!/bin/sh\ncat >/dev/null\nprintf 'fictional-credential fictional-api-token' >&2\nexit 1\n").expect("failing curl");
         let error = write_secret(
             "store-123",
             "ts1_fixture",

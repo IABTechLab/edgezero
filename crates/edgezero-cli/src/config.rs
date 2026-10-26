@@ -37,7 +37,7 @@ use edgezero_core::manifest::{Manifest, ManifestAdapter, ManifestLoader, StoreDe
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use similar::TextDiff;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{Error as IoError, IsTerminal as _, Write, stdin};
 use std::iter;
@@ -1386,7 +1386,11 @@ fn load_push_context(args: &ConfigPushArgs) -> Result<PushContext, String> {
     })
 }
 
-pub(crate) fn effective_manifest_environment<I, K, V>(
+/// Merge adapter-scoped manifest variable defaults with parent environment
+/// overrides using the same rules as deployment and typed config commands.
+#[must_use]
+#[inline]
+pub fn effective_manifest_environment<I, K, V>(
     manifest: &Manifest,
     adapter: &str,
     parent: I,
@@ -1846,13 +1850,20 @@ fn run_adapter_typed_checks<C: AppConfigMeta>(
             AdapterValidationScope::All => {
                 for name in ctx.manifest().adapters.keys() {
                     if let Some(adapter) = adapter_registry::get_adapter(name) {
-                        check_implicit_adapter(typed, &lookups, adapter)?;
+                        let environment = effective_manifest_environment(
+                            ctx.manifest(),
+                            adapter.name(),
+                            env::vars(),
+                        );
+                        check_implicit_adapter(typed, &lookups, adapter, &environment)?;
                     }
                 }
                 Ok(())
             }
             AdapterValidationScope::Selected(adapter) => {
-                check_implicit_adapter(typed, &lookups, adapter)
+                let environment =
+                    effective_manifest_environment(ctx.manifest(), adapter.name(), env::vars());
+                check_implicit_adapter(typed, &lookups, adapter, &environment)
             }
         };
     }
@@ -1950,12 +1961,13 @@ fn check_implicit_adapter<C: AppConfigMeta>(
     typed: &C,
     lookups: &[ImplicitSecretLookup],
     adapter: &dyn adapter_registry::Adapter,
+    environment: &EnvConfig,
 ) -> Result<(), String> {
     let mut entries = Vec::new();
-    let mut seen_requests = std::collections::BTreeSet::new();
+    let mut seen_requests = BTreeSet::new();
     let mut native_owners = BTreeMap::new();
     for lookup in lookups {
-        let name = typed.render_implicit_secret_name(adapter.name(), lookup)?;
+        let name = typed.render_implicit_secret_name(adapter.name(), lookup, environment)?;
         if name.is_empty() {
             return Err(format!(
                 "empty native secret identity for `{}`",
@@ -2191,6 +2203,10 @@ fn format_app_config_error(err: &AppConfigError) -> String {
     clippy::arbitrary_source_item_ordering,
     clippy::default_numeric_fallback,
     reason = "test module groups items by subject (PathPrepend co-located with its fake-spin consumers, fixtures with their tests) rather than by item kind; `range(min = 100, max = 60_000)` bounds default to the field's int type"
+)]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "legacy app-config fixtures intentionally exercise the default-compatible implicit lookup hooks"
 )]
 mod tests {
     use super::*;
@@ -5557,6 +5573,7 @@ ids = ["default"]
             &self,
             adapter: &str,
             lookup: &ImplicitSecretLookup,
+            environment: &EnvConfig,
         ) -> Result<String, String> {
             if self.bad == "collision" {
                 return Ok("native_collision".to_owned());
@@ -5564,11 +5581,15 @@ ids = ["default"]
             if self.bad == "native" {
                 return Ok("native-hyphen".to_owned());
             }
+            let store = environment
+                .store_name_checked("secrets", &lookup.store_id)
+                .map_err(|_error| "invalid secret store selector".to_owned())?;
+            if self.bad == "manifest_store" && store != "fictional_manifest_store" {
+                return Err("renderer did not receive effective manifest defaults".to_owned());
+            }
             Ok(match adapter {
-                "spin" => format!("secret_{}_{}", lookup.store_id, lookup.key),
-                "axum" => {
-                    format!("TS_SECRET_{}_{}", lookup.store_id, lookup.key).to_ascii_uppercase()
-                }
+                "spin" => format!("secret_{}_{}", store, lookup.key),
+                "axum" => format!("TS_SECRET_{}_{}", store, lookup.key).to_ascii_uppercase(),
                 _ => lookup.key.clone(),
             })
         }
@@ -5615,6 +5636,22 @@ ids = ["default"]
     }
 
     #[test]
+    fn implicit_consumers_pass_effective_manifest_environment_to_native_renderer() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let source = format!(
+            "{PUSH_MANIFEST}\n[[environment.variables]]\nname = \"SECRET_STORE\"\nenv = \"EDGEZERO__STORES__SECRETS__DEFAULT__NAME\"\nvalue = \"fictional_manifest_store\"\nadapters = [\"axum\"]\n"
+        );
+        let (_dir, manifest, _) = setup_project(&source, "bad = \"manifest_store\"");
+        run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect("manifest environment in validate");
+        let mut push = push_args(&manifest, "axum");
+        push.yes = true;
+        run_config_push_typed::<ImplicitConfig>(&push).expect("manifest environment in push");
+        run_config_diff_typed::<ImplicitConfig>(&implicit_diff_args(&manifest))
+            .expect("manifest environment in diff");
+    }
+
+    #[test]
     fn implicit_preflight_metadata_and_collisions_reject_in_all_consumers() {
         let _lock = manifest_guard().lock().expect("manifest guard");
         for bad in ["metadata", "store", "collision"] {
@@ -5624,9 +5661,8 @@ ids = ["default"]
             assert!(
                 run_config_push_typed::<ImplicitConfig>(&push_args(&manifest, "axum")).is_err()
             );
-            assert!(
-                run_config_diff_typed::<ImplicitConfig>(&implicit_diff_args(&manifest)).is_err()
-            );
+            run_config_diff_typed::<ImplicitConfig>(&implicit_diff_args(&manifest))
+                .expect_err("invalid implicit plan rejected before remote reads");
             assert!(!dir.path().join(".edgezero").exists());
         }
     }
