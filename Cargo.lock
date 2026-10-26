@@ -732,6 +732,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "base64",
  "brotli",
  "bytes",
  "chrono",

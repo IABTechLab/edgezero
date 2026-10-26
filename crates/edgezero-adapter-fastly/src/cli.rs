@@ -3,6 +3,9 @@
     reason = "the managed deployment planning and execution state machine is kept as one cohesive block"
 )]
 
+/// Narrow host operations for reviewed secret provisioning.
+pub mod secrets;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;

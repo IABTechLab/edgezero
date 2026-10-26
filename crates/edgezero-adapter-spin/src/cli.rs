@@ -536,7 +536,10 @@ impl Adapter for SpinCliAdapter {
         // tells us which field already claimed it.
         let mut seen: HashMap<String, &str> = HashMap::with_capacity(entries.len());
         for entry in entries {
-            let spin_var = entry.key_value.to_ascii_lowercase();
+            let spin_var = entry
+                .native_name
+                .clone()
+                .unwrap_or_else(|| entry.key_value.to_ascii_lowercase());
             if !is_valid_spin_key(&spin_var) {
                 let reason = spin_key_rule_violation(&spin_var);
                 return Err(format!(

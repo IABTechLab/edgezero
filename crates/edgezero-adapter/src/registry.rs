@@ -238,6 +238,9 @@ pub struct TypedSecretEntry<'entry> {
     pub field_name: String,
     /// Blob value — i.e. the secret-store KEY NAME.
     pub key_value: &'entry str,
+    /// Exact native identity supplied by an opt-in application's runtime renderer.
+    /// `None` retains this adapter's generic key mapping.
+    pub native_name: Option<String>,
     /// Logical secret-store id this key targets.
     pub store_id: &'entry str,
 }
@@ -255,7 +258,16 @@ impl<'entry> TypedSecretEntry<'entry> {
             field_name: field_name.into(),
             key_value,
             store_id,
+            native_name: None,
         }
+    }
+
+    /// Supply the exact native identity used by an application's runtime bridge.
+    #[must_use]
+    #[inline]
+    pub fn with_native_name(mut self, native_name: String) -> Self {
+        self.native_name = Some(native_name);
+        self
     }
 }
 

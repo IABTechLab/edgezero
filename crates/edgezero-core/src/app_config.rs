@@ -83,13 +83,58 @@ impl SecretField {
     }
 }
 
+/// One active credential request compiled from effective application settings.
+///
+/// This is public lookup metadata, not a resolved credential or authorization.
+/// The owning field may be an object or an omitted defaulted field; it need not
+/// be a scalar secret-reference leaf. Applications own activation and descriptor
+/// coverage and must return all active requests together.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImplicitSecretLookup {
+    /// Fixed application-owned purpose identifier.
+    pub descriptor_id: String,
+    /// Concrete owning schema path, including array indexes where applicable.
+    pub field_path: String,
+    /// Derived physical key, never a credential value.
+    pub key: String,
+    /// Logical secret-store declaration ID.
+    pub store_id: String,
+}
+
 /// Per-field metadata emitted by `#[derive(AppConfig)]`. `config validate`
 /// / `config push` and the runtime secret walk reflect over this to gate
 /// secret-aware behaviour.
 pub trait AppConfigMeta {
+    /// Opt into compiled, active credential requests instead of raw secret leaves.
+    /// `None` preserves the existing annotation walk; `Some(vec![])` means no
+    /// credentials are active. Compile from effective defaults and reject invalid
+    /// or incomplete application metadata before returning a plan.
+    ///
+    /// # Errors
+    /// Returns a credential-free application compilation diagnostic.
+    #[inline]
+    fn implicit_secret_lookups(&self) -> Result<Option<Vec<ImplicitSecretLookup>>, String> {
+        Ok(None)
+    }
+
+    /// Render the exact native identity used by the application's runtime bridge.
+    /// Required when opting into implicit lookups. The CLI still applies adapter
+    /// native-name and collision checks. Do not return a generic raw-key fallback.
+    ///
+    /// # Errors
+    /// Returns a credential-free diagnostic for unsupported adapters or mappings.
+    #[inline]
+    fn render_implicit_secret_name(
+        &self,
+        _adapter: &str,
+        _lookup: &ImplicitSecretLookup,
+    ) -> Result<String, String> {
+        Err("implicit secret lookups require an application native renderer".to_owned())
+    }
+
     /// Every `#[secret]` / `#[secret(store_ref)]` leaf on the struct,
     /// including those reached through `#[app_config(nested)]` children,
-    /// each carrying its full path from this struct's root.
+    /// each carrying its full path from this struct\'s root.
     fn secret_fields() -> Vec<SecretField>;
 }
 

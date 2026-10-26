@@ -13,6 +13,7 @@ workspace = true
 [features]
 default = []
 cli = [
+    "dep:base64",
     "dep:edgezero-adapter",
     "edgezero-adapter/cli",
     "dep:ctor",
@@ -22,6 +23,7 @@ cli = [
 fastly = ["dep:fastly", "dep:log-fastly"]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
 anyhow = { workspace = true }
 edgezero-core = { path = "../edgezero-core" }
 edgezero-adapter = { path = "../edgezero-adapter", optional = true, features = [

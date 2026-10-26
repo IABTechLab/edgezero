@@ -29,6 +29,9 @@ mod config;
 mod demo_server;
 #[cfg(feature = "cli")]
 mod diff;
+/// Shared Fastly resource resolution and secure secret writes.
+#[cfg(all(feature = "cli", feature = "edgezero-adapter-fastly"))]
+pub mod fastly_secrets;
 #[cfg(feature = "cli")]
 mod generator;
 #[cfg(feature = "cli")]
