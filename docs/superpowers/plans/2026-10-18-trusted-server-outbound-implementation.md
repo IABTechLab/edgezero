@@ -96,6 +96,27 @@ dependency or runtime pin changes. G2's gate is not passed, no acceptance leg is
 no conditional follow-up is adopted. The next step is explicit candidate/resource/primitive
 review in G4, followed by its still-required evidence and the approved atomic migration.
 
+### G2/G4 SDK Registration Checkpoint (2026-10-25)
+
+Add the WASI-only `proposed_b31_timer_vectors_register` to the existing Fastly outbound unit
+module, not a production policy helper or alternate backend path. All 31 candidate vectors
+register with coupled Connect and with explicit 200 ms Connect (62 registrations); three
+independent oversized-duration controls preserve the exact SDK error and input. Removing each
+setter makes the corresponding assertion fail, then the restored guarded test passes. The
+existing Fastly WASI CI suite includes it without another filtered command or job.
+
+The [feasibility checkpoint](../../audits/2026-10-18-outbound-feasibility.md#b31-sdk-registration-checkpoint-2026-10-25)
+records the SDK/runtime/source/guest identities and exact command. This adds real pinned-SDK
+serialization/local-registration evidence to the arithmetic proposal, not hosted timer acceptance,
+Connect enforcement, pooling, resource certification, readiness/error-preservation or production
+policy approval. No production implementation, public API, deadline, source pin or capability
+changes; G2/G4, the atomic migration and all acceptance-leg statuses remain open as before.
+
+Verification passes all five primary Rust gates (2,249 workspace tests; one existing ignored),
+strict Fastly WASI Clippy, all 194 real Fastly WASI unit tests including the guarded proposal
+probe, docs format/lint/build and frozen API identity verification. The selected production-policy
+implementation decision remains separate; successful local registration does not authorize it.
+
 ### G1/F9b Inventory-Driven Suite Consolidation (2026-10-25)
 
 Replace the binding checkpoint's eleven filtered commands and separate factory guard with one

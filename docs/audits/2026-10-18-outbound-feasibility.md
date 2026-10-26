@@ -34,6 +34,46 @@ full-sized-copy/fairness domains, stock error loss, retained timing failures and
 getters. It does not approve the preserving primitive, a read cap, idle mapping or a runtime change.
 G2 remains failed and its dependent work remains gated; no new host run or capability claim is made.
 
+### B31 SDK Registration Checkpoint (2026-10-25)
+
+The existing Fastly WASI unit suite now includes `proposed_b31_timer_vectors_register`. It passes
+all 31 proposal vectors through the pinned SDK builder and unmodified Viceroy registration ABI,
+once with Connect coupled to the phase value and once with Connect fixed at 200 ms: 62 successful
+registrations across two fixed-setting scopes. Each registered name is checked for existence;
+no request is sent and no timing getter is called. The test uses no production backend-policy
+helper and does not implement quantization, identity, registration reuse or the proposed policy.
+
+The same test-local builder rejects `u32::MAX + 1` milliseconds independently for Connect,
+first-byte and between-bytes with the exact SDK error variant and original duration. Removing
+each setter separately makes its corresponding assertion fail under Viceroy (exit 134); all
+three setters are restored and the guarded test passes again. Before adding the test, the
+nonzero guard rejected the empty selection. The existing Fastly WASI unit-suite CI step runs
+the new test without another CI command, export or runner.
+
+Run from the worktree root:
+
+```sh
+SSL_CERT_FILE=/etc/ssl/cert.pem CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run' scripts/run_test_nonzero.sh proposed_b31_timer_vectors_register cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib proposed_b31_timer_vectors_register
+```
+
+This is working-tree characterization on base `0166998f8bfb7759e5d661e629d1849d9483e3a2`, not
+frozen-candidate qualification. The successful run used Rust 1.98.1 (`48a229cea`), SDK/sys 0.13.1,
+and stock Viceroy 0.21.0. Initial execution without `SSL_CERT_FILE` failed during local certificate
+initialization, not registration; the explicit system bundle above fixes that runner setup.
+
+| Input                                          | Successful-Run SHA-256                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------ |
+| Fastly outbound source, including the new test | `ad1097270a6c4c319e3d51f82ff73f9c9a700ed8a7908e1b69083e5a7b1e5dcc` |
+| WASI unit-test guest                           | `a3f52b51f101b3c1aed1986d1c084a4dbcd7407449a89307a11aa84d775e7c5c` |
+| Stock Viceroy executable                       | `751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30` |
+
+These identities describe the local run, not retained release binaries. The result establishes
+SDK serialization/local registration acceptance for the supplied vectors only. Viceroy does not
+enforce Connect and its timing getters remain unavailable. Stored-value readback, hosted acceptance,
+timer enforcement, pooling, resource accounting/retirement, cancellation and G2 readiness are not
+proved. The proposal's arithmetic, approval requirements and failed readiness evidence remain
+unchanged; no production backend/timer/slack policy, runtime pin, capability or acceptance leg changes.
+
 ### Historical Execution Status
 
 Executed locally on 2026-10-19. **G2: Failed.** The pinned Viceroy body-readiness

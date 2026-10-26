@@ -1981,6 +1981,49 @@ mod fastly_impl {
             assert_eq!(first_timers.between_bytes, second_timers.between_bytes);
         }
 
+        #[cfg(target_env = "p1")]
+        #[test]
+        fn proposed_b31_timer_vectors_register() {
+            let register = |name: &str, connect, first_byte, between_bytes| {
+                Backend::builder(name, "127.0.0.1:9")
+                    .connect_timeout(connect)
+                    .first_byte_timeout(first_byte)
+                    .between_bytes_timeout(between_bytes)
+                    .finish()
+            };
+            let ceilings = (0_u32..30).map(|shift| 1_u64 << shift).chain([604_800_000]);
+            let mut registered = 0_usize;
+            for milliseconds in ceilings {
+                let phase = Duration::from_millis(milliseconds);
+                for (scope, connect) in
+                    [("coupled", phase), ("explicit", Duration::from_millis(200))]
+                {
+                    let name = format!("ez-b31-probe-{scope}-{milliseconds}");
+                    let backend = register(&name, connect, phase, phase)
+                        .expect("proposed timer vector must register through the pinned SDK");
+                    assert_eq!(backend.name(), name);
+                    assert!(backend.exists(), "successful registration must be visible");
+                    registered += 1;
+                }
+            }
+            assert_eq!(registered, 62);
+
+            let valid = Duration::from_millis(200);
+            let oversized = Duration::from_millis(u64::from(u32::MAX) + 1);
+            assert!(matches!(
+                register("ez-b31-probe-overflow-connect", oversized, valid, valid),
+                Err(BackendCreationError::ConnectTimeoutTooLarge(value)) if value == oversized
+            ));
+            assert!(matches!(
+                register("ez-b31-probe-overflow-first", valid, oversized, valid),
+                Err(BackendCreationError::FirstByteTimeoutTooLarge(value)) if value == oversized
+            ));
+            assert!(matches!(
+                register("ez-b31-probe-overflow-between", valid, valid, oversized),
+                Err(BackendCreationError::BetweenBytesTimeoutTooLarge(value)) if value == oversized
+            ));
+        }
+
         #[test]
         fn authority_override_has_a_distinct_backend_identity() {
             let start = MonotonicInstant::now();

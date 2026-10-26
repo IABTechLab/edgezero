@@ -171,6 +171,9 @@ separately from the portable API and must be considered when declaring required 
 
 ### Qualification Evidence Preparation
 
+- Exercise the B31 proposal's 62 timer vectors across coupled/explicit Connect scopes through
+  the pinned SDK and stock local Viceroy, with typed overflow and setter-omission controls.
+  This is local registration evidence only; production policy and qualification remain open.
 - Prepare a pending Fastly G2/G4 backend-policy/readiness review packet. Compare literal B31/B1,
   execute full-domain boundary/timeout-anchor arithmetic, and retain separate SDK/provider,
   runtime, resource and qualification gates. No production policy or runtime changes.
