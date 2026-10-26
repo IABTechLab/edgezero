@@ -1978,9 +1978,11 @@ fn check_implicit_adapter<C: AppConfigMeta>(
         // bridges flatten their names. Never merge different requests merely
         // because their rendered names happen to match.
         let namespace = if adapter.name() == "fastly" {
-            lookup.store_id.as_str()
+            environment
+                .store_name_checked("secrets", &lookup.store_id)
+                .map_err(|_error| "invalid implicit Fastly secret store selector".to_owned())?
         } else {
-            ""
+            String::new()
         };
         let identity = (&lookup.descriptor_id, &lookup.store_id, &lookup.key);
         if let Some(previous) = native_owners.insert((namespace, name.clone()), identity)
@@ -5649,6 +5651,37 @@ ids = ["default"]
         run_config_push_typed::<ImplicitConfig>(&push).expect("manifest environment in push");
         run_config_diff_typed::<ImplicitConfig>(&implicit_diff_args(&manifest))
             .expect("manifest environment in diff");
+    }
+
+    #[test]
+    fn implicit_fastly_detects_physical_store_alias_collisions() {
+        let typed = ImplicitConfig {
+            inactive: false,
+            subjects: Vec::new(),
+            bad: String::new(),
+        };
+        let lookups = ["first", "second"].map(|store| ImplicitSecretLookup {
+            descriptor_id: format!("fictional.{store}"),
+            field_path: store.to_owned(),
+            store_id: store.to_owned(),
+            key: "ts1_identical".to_owned(),
+        });
+        let environment = EnvConfig::from_vars([
+            (
+                "EDGEZERO__STORES__SECRETS__FIRST__NAME",
+                "same-physical-store",
+            ),
+            (
+                "EDGEZERO__STORES__SECRETS__SECOND__NAME",
+                "same-physical-store",
+            ),
+        ]);
+        let adapter = adapter_registry::get_adapter("fastly").expect("Fastly registered");
+        let error = check_implicit_adapter(&typed, &lookups, adapter, &environment)
+            .expect_err("distinct logical stores share the physical namespace");
+        assert!(error.contains("collision"));
+        check_implicit_adapter(&typed, &lookups, adapter, &EnvConfig::default())
+            .expect("distinct physical stores have independent namespaces");
     }
 
     #[test]
