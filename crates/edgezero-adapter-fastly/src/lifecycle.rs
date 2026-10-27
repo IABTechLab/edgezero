@@ -4,7 +4,9 @@
 //! metadata, extensions, and pending work must remain local to each callback.
 
 #[cfg(any(feature = "fastly", test))]
-use crate::outbound::scope::Guard as OutboundScope;
+use crate::outbound::scope;
+#[cfg(any(feature = "fastly", test))]
+use edgezero_core::OutboundScopeOwner;
 #[cfg(feature = "fastly")]
 use fastly::http::serve::{HandlerResult, Serve, ServeSummary};
 
@@ -112,8 +114,17 @@ impl<T> Sandbox<T> {
         F: FnOnce(Q, &mut Self) -> R,
     {
         self.requests = self.requests.saturating_add(1);
-        let _scope = OutboundScope::callback();
-        handler(request, self)
+        let scope = OutboundScopeOwner::callback();
+        scope.with(|| handler(request, self))
+    }
+}
+
+#[cfg(any(feature = "fastly", test))]
+pub(crate) fn with_callback<R>(action: impl FnOnce() -> R) -> R {
+    if scope::capture().is_managed() {
+        action()
+    } else {
+        OutboundScopeOwner::callback().with(action)
     }
 }
 
@@ -163,8 +174,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::outbound::testing;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use edgezero_core::{EdgeError, OutboundBatch, OutboundBatchDriverEvent};
     use futures::executor::block_on;
@@ -182,6 +196,21 @@ mod tests {
 
     struct DriverOwner(Rc<Cell<usize>>);
 
+    struct RequestData(Arc<AtomicUsize>);
+
+    impl AsRef<[u8]> for RequestData {
+        fn as_ref(&self) -> &[u8] {
+            b"buffered"
+        }
+    }
+
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for RequestData {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
     impl Drop for DriverOwner {
         fn drop(&mut self) {
@@ -195,7 +224,9 @@ mod tests {
             let _keep_owner = &owner;
             Poll::<Option<OutboundBatchDriverEvent>>::Pending
         });
-        OutboundBatch::from_driver(1, bind_batch(source))
+        let context = testing::batch_context(1);
+        let driver = bind_batch(context.scope(), source);
+        OutboundBatch::from_driver(context, driver, testing::owner())
     }
 
     #[test]
@@ -220,7 +251,7 @@ mod tests {
             assert_eq!(released.get(), 1);
             let batch = saved.borrow_mut().take().expect("retained batch");
             assert!(matches!(
-                block_on(batch.collect()).unwrap_err().error,
+                block_on(batch.collect()).unwrap_err().error(),
                 EdgeError::Internal { .. }
             ));
             assert_eq!(released.get(), 1);
@@ -248,35 +279,121 @@ mod tests {
         assert_eq!(released.get(), 1);
         let batch = saved.borrow_mut().take().expect("retained batch");
         assert!(matches!(
-            block_on(batch.collect()).unwrap_err().error,
+            block_on(batch.collect()).unwrap_err().error(),
             EdgeError::Internal { .. }
         ));
         assert_eq!(released.get(), 1);
+    }
+
+    #[test]
+    fn callback_scope_exit_releases_unpolled_send_and_begin_before_cross_scope_polling() {
+        #[cfg(feature = "fastly")]
+        use crate::outbound::FastlyOutboundClient;
+        use bytes::Bytes;
+        #[cfg(feature = "fastly")]
+        use edgezero_core::HttpClient;
+        use edgezero_core::{
+            Body, MonotonicClock, OutboundFuture, OutboundRequest, OutboundScopeOwner, OutboundTime,
+        };
+
+        let time = OutboundTime::new(MonotonicClock::default(), |_, _| {
+            panic!("closed unpolled roots must not register timers")
+        });
+        #[cfg(feature = "fastly")]
+        let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
+        #[cfg(not(feature = "fastly"))]
+        let client = testing::client(time);
+        let mut sandbox = Sandbox::<()>::default();
+        for begun in [false, true] {
+            for failed in [false, true] {
+                let released = Arc::new(AtomicUsize::new(0));
+                let reads = Rc::new(Cell::new(0_usize));
+                let source_reads = Rc::clone(&reads);
+                let owner = RequestData(Arc::clone(&released));
+                let payload = if begun {
+                    Body::from(Bytes::from_owner(owner))
+                } else {
+                    Body::from_stream(poll_fn(move |_cx| {
+                        let _owner = &owner;
+                        source_reads.set(source_reads.get().saturating_add(1));
+                        Poll::Pending
+                    }))
+                };
+                let request = OutboundRequest::post("http://127.0.0.1:9/unpolled-root")
+                    .unwrap()
+                    .body(payload);
+                let mut retained = None;
+                let result = sandbox.handle((), |(), _| {
+                    let future: OutboundFuture<()> = if begun {
+                        let pending = client.begin(request);
+                        Box::pin(async move { pending.await.map(drop) })
+                    } else {
+                        let send = client.send(request);
+                        Box::pin(async move { send.await.map(drop) })
+                    };
+                    retained = Some(future);
+                    assert_eq!(
+                        released.load(Ordering::SeqCst),
+                        0,
+                        "valid invocation retains its data before callback exit"
+                    );
+                    if failed {
+                        Err("original callback error")
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(result.is_err(), failed);
+                assert_eq!(
+                    released.load(Ordering::SeqCst),
+                    1,
+                    "callback exit revokes unpolled request data"
+                );
+                assert_eq!(reads.get(), 0);
+                let later = OutboundScopeOwner::callback();
+                let body = later.with(OutboundScopeOwner::response_body);
+                let error = body
+                    .with(|| block_on(retained.take().unwrap()))
+                    .unwrap_err();
+                assert!(
+                    matches!(error, EdgeError::Internal { .. }),
+                    "original callback closure must stay typed Internal: {error:?}"
+                );
+                assert_eq!(released.load(Ordering::SeqCst), 1);
+                assert_eq!(reads.get(), 0);
+            }
+        }
+        assert_eq!(sandbox.requests(), 4);
     }
 
     #[cfg(feature = "fastly")]
     #[test]
     fn retained_client_resolves_fresh_callback_scope() {
         use crate::outbound::FastlyOutboundClient;
-        use edgezero_core::{
-            Deadline, OutboundBatchNext, OutboundHttpClient as _, OutboundRequest,
-        };
+        use edgezero_core::{Deadline, OutboundBatchNext, OutboundRequest};
         use std::time::Duration;
 
-        let client = FastlyOutboundClient::new();
+        let client = edgezero_core::HttpClient::with_client(FastlyOutboundClient::new());
         let mut sandbox = Sandbox::<()>::default();
         let mut previous = None;
         for _ in 0_u8..2 {
             let batch = sandbox.handle((), |(), _| {
                 if let Some(stale) = previous.take() {
                     let error = block_on(OutboundBatch::collect(stale)).unwrap_err();
-                    assert!(matches!(error.error, EdgeError::Internal { .. }));
+                    assert!(matches!(error.error(), EdgeError::Internal { .. }));
                 }
                 let request = OutboundRequest::get("https://example.com")
                     .unwrap()
                     .stream_response();
-                let mut batch = client
-                    .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)));
+                let mut batch = client.start_batch_until(
+                    vec![
+                        request,
+                        OutboundRequest::post("http://127.0.0.1:9/callback-scope")
+                            .unwrap()
+                            .body("pending"),
+                    ],
+                    Deadline::after(Duration::from_secs(1)),
+                );
                 let OutboundBatchNext::Item(_) = block_on(batch.next()).unwrap() else {
                     panic!("fresh scope");
                 };
@@ -285,7 +402,7 @@ mod tests {
             previous = Some(batch);
         }
         let failure = block_on(previous.unwrap().collect()).unwrap_err();
-        assert!(matches!(failure.error, EdgeError::Internal { .. }));
+        assert!(matches!(failure.error(), EdgeError::Internal { .. }));
         assert_eq!(sandbox.requests(), 2);
     }
 
@@ -294,7 +411,7 @@ mod tests {
     fn callback_scope_exit_releases_retained_batch_driver() {
         use crate::outbound::FastlyOutboundClient;
         use edgezero_core::OutboundRequest;
-        use edgezero_core::{Deadline, MonotonicClock, MonotonicInstant, OutboundHttpClient as _};
+        use edgezero_core::{Deadline, MonotonicClock, MonotonicInstant};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
@@ -317,21 +434,22 @@ mod tests {
         });
         let mut sandbox = Sandbox::<()>::default();
         let batch = sandbox.handle((), move |(), _| {
-            let client = FastlyOutboundClient::with_time(native_time(clock));
-            // A queued preflight result still retains the whole unpolled driver.
-            let request = OutboundRequest::get("https://example.com")
+            let client = edgezero_core::HttpClient::with_client(FastlyOutboundClient::with_time(
+                native_time(clock),
+            ));
+            let request = OutboundRequest::post("http://127.0.0.1:9/callback-release")
                 .unwrap()
-                .stream_response();
+                .body("pending");
             client.start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)))
         });
 
         assert_eq!(
             released.load(Ordering::SeqCst),
-            1,
-            "callback owns the driver"
+            0,
+            "the opaque batch context retains its clock metadata"
         );
         let failure = block_on(batch.collect()).expect_err("closed callback scope");
-        assert!(matches!(failure.error, EdgeError::Internal { .. }));
+        assert!(matches!(failure.error(), EdgeError::Internal { .. }));
         assert_eq!(released.load(Ordering::SeqCst), 1, "release exactly once");
     }
 

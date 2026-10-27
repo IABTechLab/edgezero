@@ -9,7 +9,7 @@ use crate::error::{
 use crate::error_detail::ProviderFailureDetail;
 use crate::http::{Extensions, HeaderMap, Method, Request, RequestParts, Uri, Version};
 use crate::ingress::{AdmittedIngress, IngressGrant};
-use crate::outbound::HttpClient;
+use crate::outbound::{ForwardedReadDeadline, HttpClient};
 use crate::params::PathParams;
 use crate::router::RouteMetadata;
 use crate::store_registry::{
@@ -436,7 +436,13 @@ impl RequestContext {
             BodyState::Poisoned(error) => return Err(error.to_edge_error()),
             BodyState::Taken => Body::empty(),
         };
-        Ok(Request::from_parts(self.parts, body))
+        let mut parts = self.parts;
+        if let Some(deadline) = self.read_deadline {
+            parts
+                .extensions
+                .insert(ForwardedReadDeadline::new(deadline));
+        }
+        Ok(Request::from_parts(parts, body))
     }
 
     /// Buffers at most `max` bytes and deserializes JSON.
@@ -712,12 +718,15 @@ pub(crate) async fn drain_body(
     monotonic_clock: &MonotonicClock,
 ) -> Result<bytes::Bytes, EdgeError> {
     check_read_deadline(deadline, monotonic_clock)?;
-    match body {
-        Body::Once(bytes) => {
+    match body.into_stream() {
+        Err(buffered_body) => {
+            let bytes = buffered_body.into_bytes().ok_or_else(|| {
+                EdgeError::internal(anyhow::anyhow!("body conversion lost buffered payload"))
+            })?;
             check_read_deadline(deadline, monotonic_clock)?;
             check_cached_body(&bytes, max)
         }
-        Body::Stream(mut stream) => {
+        Ok(mut stream) => {
             let mut buffered = Vec::new();
             loop {
                 check_read_deadline(deadline, monotonic_clock)?;
@@ -760,8 +769,11 @@ pub(crate) async fn drain_body_discard(
     if let Some(outcome) = fallback_deadline_outcome(deadline, monotonic_clock) {
         return Ok(outcome);
     }
-    match body {
-        Body::Once(bytes) => {
+    match body.into_stream() {
+        Err(buffered_body) => {
+            let bytes = buffered_body.into_bytes().ok_or_else(|| {
+                EdgeError::internal(anyhow::anyhow!("body conversion lost buffered payload"))
+            })?;
             if let Some(outcome) = fallback_deadline_outcome(deadline, monotonic_clock) {
                 return Ok(outcome);
             }
@@ -770,7 +782,7 @@ pub(crate) async fn drain_body_discard(
             }
             Ok(FallbackDrainOutcome::Complete)
         }
-        Body::Stream(mut stream) => {
+        Ok(mut stream) => {
             let mut consumed = 0_usize;
             loop {
                 if let Some(outcome) = fallback_deadline_outcome(deadline, monotonic_clock) {
@@ -809,13 +821,17 @@ mod tests {
     use crate::config_store::ready_config_store_bounded_read;
     use crate::http::{HeaderMap, HeaderValue, Method, StatusCode, request_builder};
     use crate::outbound::{
-        HttpClient, OutboundBatch, OutboundBatchDriverEvent, OutboundHttpClient, OutboundRequest,
-        OutboundResponse,
+        HttpClient, IndependentOutboundProgress, OutboundBatch, OutboundBatchDriverEvent,
+        OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
+        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundPending,
+        OutboundPreparedBatch, OutboundProgressRuntime, OutboundRequest, OutboundSendMode,
+        OutboundTime,
     };
     use crate::params::PathParams;
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::executor::block_on;
+    use futures::future::pending;
     use futures::stream;
     use futures::task::noop_waker_ref;
     use serde::{Deserialize, Serialize};
@@ -834,29 +850,68 @@ mod tests {
         id: String,
     }
 
-    #[async_trait(?Send)]
     impl OutboundHttpClient for DummyOutboundClient {
-        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            Ok(OutboundResponse::new(
-                request.method().clone(),
-                StatusCode::OK,
-                HeaderMap::new(),
-                Body::empty(),
-                crate::MonotonicClock::default(),
-                crate::ContentTypeProvenance::Unknown,
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            let head = block_on(self.dispatch_head(request))?;
+            let outcome = block_on(head.finish());
+            Ok(OutboundPending::new(
+                Box::pin(async move { outcome }),
+                OutboundExchangeOwner::new(|| {}),
             ))
         }
 
-        fn start_batch_until(
-            &self,
-            requests: Vec<OutboundRequest>,
-            _observation_cutoff: crate::Deadline,
-        ) -> OutboundBatch {
-            let slot_count = requests.len();
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            let (_, context) = request.into_parts();
+            Box::pin(async move {
+                OutboundHead::new(
+                    StatusCode::OK,
+                    OutboundHeaderInput::new(
+                        "dummy",
+                        HeaderMap::new(),
+                        OutboundHeaderFidelity::AdapterVisibleFields,
+                    ),
+                    Box::pin(stream::empty()),
+                    context,
+                    OutboundExchangeOwner::new(|| {}),
+                )
+            })
+        }
+
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, slots) = batch.into_slots();
+            let completed = slots
+                .into_iter()
+                .map(|(index, request)| {
+                    let outcome = block_on(self.dispatch_head(request))
+                        .and_then(|head| block_on(head.finish()));
+                    OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at: context.clock().now(),
+                        outcome,
+                    }
+                })
+                .collect::<Vec<_>>();
             OutboundBatch::from_driver(
-                slot_count,
-                stream::iter((slot_count != 0).then_some(OutboundBatchDriverEvent::Cutoff)),
+                context,
+                stream::iter(completed),
+                OutboundExchangeOwner::new(|| {}),
             )
+        }
+
+        fn time(&self) -> OutboundTime {
+            OutboundTime::new(MonotonicClock::default(), |_, _| Box::pin(pending()))
+        }
+
+        fn validate_supported_options(
+            &self,
+            _: &OutboundRequest,
+            _: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            Ok(())
         }
     }
 

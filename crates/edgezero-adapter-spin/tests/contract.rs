@@ -577,7 +577,9 @@ mod tests {
             AdmissionDecision, BufferedIngressResponse, IngressGrant, IngressHeadLimits,
         };
         use edgezero_core::middleware::{Middleware, Next};
-        use edgezero_core::outbound::{OutboundHttpClient as _, OutboundRequest, OutboundTime};
+        use edgezero_core::outbound::{
+            HttpClient, OutboundCollectedSlot, OutboundRequest, OutboundTime,
+        };
         use edgezero_core::response_egress::{
             DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
             ResponseEgressCompletion, ResponseEgressEnvelope, ResponseEgressObserver,
@@ -648,14 +650,22 @@ mod tests {
         }
 
         fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
+            let last = *script.last().expect("clock observations");
             let observations = Arc::new(Mutex::new(VecDeque::from(script)));
             MonotonicClock::new(move || {
                 observations
                     .lock()
                     .expect("clock observations")
                     .pop_front()
-                    .expect("clock observation")
+                    .unwrap_or(last)
             })
+        }
+
+        fn resolved(slot: &OutboundCollectedSlot) -> &edgezero_core::OutboundSlotResult {
+            let OutboundCollectedSlot::Resolved(result) = slot else {
+                panic!("resolved outbound slot");
+            };
+            result
         }
 
         #[test]
@@ -664,10 +674,9 @@ mod tests {
             let completed = start
                 .checked_add(Duration::from_millis(9))
                 .expect("completed instant");
-            let forward_client =
-                SpinOutboundClient::with_time(preflight_time(scripted_clock(vec![
-                    start, completed,
-                ])));
+            let forward_client = HttpClient::with_client(SpinOutboundClient::with_time(
+                preflight_time(scripted_clock(vec![start, completed])),
+            ));
             let forward_request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -683,13 +692,11 @@ mod tests {
             )
             .expect("valid batch driver");
             assert_eq!(
-                forward_results.termination,
+                forward_results.termination(),
                 edgezero_core::OutboundBatchTermination::Completed
             );
-            assert_eq!(forward_results.slots.len(), 1);
-            let forward_result = forward_results.slots[0]
-                .as_ref()
-                .expect("single forward result");
+            assert_eq!(forward_results.slots().len(), 1);
+            let forward_result = resolved(&forward_results.slots()[0]);
             assert_eq!(forward_result.elapsed, Duration::from_millis(9));
             assert!(matches!(
                 forward_result.outcome,
@@ -699,8 +706,9 @@ mod tests {
             let earlier = start
                 .checked_sub(Duration::from_millis(1))
                 .expect("earlier instant");
-            let backwards_client =
-                SpinOutboundClient::with_time(preflight_time(scripted_clock(vec![start, earlier])));
+            let backwards_client = HttpClient::with_client(SpinOutboundClient::with_time(
+                preflight_time(scripted_clock(vec![start, earlier])),
+            ));
             let backwards_request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -711,13 +719,11 @@ mod tests {
             )
             .expect("valid batch driver");
             assert_eq!(
-                backwards_results.termination,
+                backwards_results.termination(),
                 edgezero_core::OutboundBatchTermination::Completed
             );
-            assert_eq!(backwards_results.slots.len(), 1);
-            let backwards_result = backwards_results.slots[0]
-                .as_ref()
-                .expect("single backwards result");
+            assert_eq!(backwards_results.slots().len(), 1);
+            let backwards_result = resolved(&backwards_results.slots()[0]);
             assert_eq!(backwards_result.elapsed, Duration::ZERO);
             assert!(matches!(
                 backwards_result.outcome,
@@ -728,8 +734,9 @@ mod tests {
         #[test]
         fn expired_observation_cutoff_leaves_slot_unresolved() {
             let now = MonotonicInstant::now();
-            let client =
-                SpinOutboundClient::with_time(preflight_time(MonotonicClock::new(move || now)));
+            let client = HttpClient::with_client(SpinOutboundClient::with_time(preflight_time(
+                MonotonicClock::new(move || now),
+            )));
             let request = OutboundRequest::get("https://example.com/").expect("request");
 
             let results = block_on(
@@ -740,17 +747,21 @@ mod tests {
             .expect("valid batch driver");
 
             assert_eq!(
-                results.termination,
+                results.termination(),
                 edgezero_core::OutboundBatchTermination::Cutoff
             );
-            assert!(matches!(results.slots.first(), Some(None)));
+            assert!(matches!(
+                results.slots().first(),
+                Some(OutboundCollectedSlot::Unresolved)
+            ));
         }
 
         #[test]
         fn batch_preserves_three_preflight_slots_in_input_order() {
             let now = MonotonicInstant::now();
-            let client =
-                SpinOutboundClient::with_time(preflight_time(MonotonicClock::new(move || now)));
+            let client = HttpClient::with_client(SpinOutboundClient::with_time(preflight_time(
+                MonotonicClock::new(move || now),
+            )));
             let streamed_upload = OutboundRequest::post("https://example.com/upload")
                 .expect("upload request")
                 .body(Body::stream(stream::iter([Bytes::from_static(b"body")])));
@@ -774,18 +785,16 @@ mod tests {
             )
             .expect("valid batch driver");
             assert_eq!(
-                results.termination,
+                results.termination(),
                 edgezero_core::OutboundBatchTermination::Completed
             );
             let messages: Vec<_> = results
-                .slots
+                .slots()
                 .iter()
-                .map(
-                    |slot| match &slot.as_ref().expect("resolved preflight slot").outcome {
-                        Err(EdgeError::BadRequest { message, .. }) => message.as_str(),
-                        other => panic!("expected preflight rejection, got {other:?}"),
-                    },
-                )
+                .map(|slot| match &resolved(slot).outcome {
+                    Err(EdgeError::BadRequest { message, .. }) => message.as_str(),
+                    other => panic!("expected preflight rejection, got {other:?}"),
+                })
                 .collect();
 
             assert_eq!(
@@ -793,13 +802,15 @@ mod tests {
                 [
                     "outbound batches require buffered request bodies; use send for a streamed upload",
                     "outbound batches require buffered responses; use send for a streamed response",
-                    "GET/HEAD request must not carry a streamed body; emptiness cannot be determined without consuming the stream",
+                    "outbound batches require buffered request bodies",
                 ]
             );
-            assert!(results.slots.iter().all(|slot| {
-                slot.as_ref()
-                    .is_some_and(|result| result.elapsed == Duration::ZERO)
-            }));
+            assert!(
+                results
+                    .slots()
+                    .iter()
+                    .all(|slot| resolved(slot).elapsed == Duration::ZERO)
+            );
         }
 
         #[test]
@@ -830,14 +841,11 @@ mod tests {
                 let request = OutboundRequest::get("https://example.com/")?.stream_response();
                 let results = client
                     .send_all_until(vec![request], Deadline::after(Duration::from_secs(1)))
-                    .await?;
-                let result = results
-                    .slots
-                    .first()
-                    .and_then(Option::as_ref)
-                    .ok_or_else(|| {
-                        EdgeError::internal(anyhow::anyhow!("missing outbound result"))
-                    })?;
+                    .await
+                    .map_err(|failure| failure.into_parts().0)?;
+                let result = results.slots().first().map(resolved).ok_or_else(|| {
+                    EdgeError::internal(anyhow::anyhow!("missing outbound result"))
+                })?;
                 Ok(result.elapsed.as_millis().to_string())
             }
 

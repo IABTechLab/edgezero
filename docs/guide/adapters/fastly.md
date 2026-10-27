@@ -209,10 +209,11 @@ on that basis. An absent body remains Initial, not Cached, in the request contex
 `HostManaged`.
 
 Normal `from_client()` requests carry a body handle even with absent framing or `Content-Length: 0`.
-This absence-only checkpoint does not fix ordinary Fastly bodiless GET/HEAD forwarding or
-general settlement. Demo and generated proxy handlers automatically share the converter with
-unchanged APIs, but raw Fastly GET proxy success is not established. No capability row or cell
-is promoted; backend settings, dispatch slack, timers and SDK/runtime pins are unchanged.
+The shared facade now settles those present GET/HEAD sources to EOF or the first nonempty byte
+before backend setup. It preserves the original outbound budget and inbound 408 precedence.
+The synchronous inbound host read remains non-preemptible, so its read deadline is BestEffort;
+post-return checks are not prompt interruption. Demo and generated proxy handlers share this path.
+No capability cell or SDK/runtime pin is promoted.
 
 ## Backends
 

@@ -26,6 +26,13 @@ series; phase 3 supplies adapter integration, not a releasable default-stub peri
 
 ## Interfaces: Proposed Hard-Cut Contract
 
+> **Scope redesign authorized, 2026-10-27:** the requester explicitly reopened EdgeZero's
+> interface and required an ideal architecture without compatibility paths or duplicated
+> implementations. The [approval record](../../audits/2026-10-18-outbound-api-approval.md#reopened-invocation-scope-interface-2026-10-27)
+> records this separately from the original exact-digest approval. Core owns one typed scope
+> implementation; adapters implement progress, not separate lifetime protocols. The independently
+> approved dispatch-slack retirement preserves original deadlines, B31 and all limits.
+
 G4 owns approval of this single interface contract before P1 changes runtime code. The following
 are signature declarations, not claimed existing or completed implementations. Supporting types
 are owned by core `outbound`, except the explicitly Fastly-local observation types below;
@@ -46,6 +53,7 @@ pub enum OutboundSendMode {
 
 pub trait OutboundHttpClient: Send + Sync {
     fn time(&self) -> OutboundTime;
+    fn progress(&self) -> std::rc::Rc<dyn OutboundProgressRuntime>;
     fn validate_supported_options(&self, request: &OutboundRequest,
         mode: OutboundSendMode) -> Result<(), EdgeError>;
     fn dispatch_head(&self, request: OutboundDispatchRequest)
@@ -265,6 +273,7 @@ impl OutboundTime {
 }
 
 impl OutboundDispatchRequest {
+    pub fn scope(&self) -> &OutboundScope;
     pub fn entered_at(&self) -> MonotonicInstant;
     pub fn budget(&self) -> DispatchBudget;
     pub fn clock(&self) -> &MonotonicClock;
@@ -274,6 +283,7 @@ impl OutboundDispatchRequest {
 }
 
 impl OutboundResponseContext {
+    pub fn scope(&self) -> &OutboundScope;
     pub fn entered_at(&self) -> MonotonicInstant;
     pub fn budget(&self) -> DispatchBudget;
     pub fn clock(&self) -> &MonotonicClock;
@@ -285,6 +295,7 @@ impl OutboundResponseContext {
 }
 
 impl OutboundPreparedBatch {
+    pub fn scope(&self) -> &OutboundScope;
     pub fn slot_count(&self) -> usize;
     pub fn started_at(&self) -> MonotonicInstant;
     pub fn observation_cutoff(&self) -> Deadline;
@@ -295,6 +306,7 @@ impl OutboundPreparedBatch {
 }
 
 impl OutboundBatchContext {
+    pub fn scope(&self) -> &OutboundScope;
     pub fn slot_count(&self) -> usize;
     pub fn started_at(&self) -> MonotonicInstant;
     pub fn observation_cutoff(&self) -> Deadline;
@@ -430,6 +442,167 @@ Successful streamed collection transfers/disarms the pending cancellation owner 
 the live body; dropping the completed pending handle must not abort that body. The same SDK
 resource is never assigned two independent release callbacks. Add a collected-stream-stays-live
 regression in addition to cancellation and drop tests.
+
+### Structured Invocation and Body Ownership
+
+The lifetime implementation is shared in core, not supplied through separate provider
+`check/register/activate` callbacks. The client supplies one typed progress bridge; core captures
+the active logical scope synchronously at facade invocation, before returning an owned future or
+batch handle. This replaces the earlier unimplemented scope-token gap without another transport.
+The required `progress` hook has no compatibility default. Axum, Cloudflare, Spin and supplied
+noncooperative test clients explicitly use the same core `IndependentOutboundProgress` bridge.
+Fastly implements only its native progress boundary, reusing its existing multiplexer.
+
+```rust,ignore
+pub enum OutboundScopeKind { Callback, ResponseBody }
+pub struct OutboundScopeOwner; // unique, local closure authority; not Clone
+pub struct OutboundScope;      // Clone, local revocable capability; no closure authority
+pub struct IndependentOutboundProgress;
+pub struct OutboundTask;       // local Future<Output = ()>, provider-spawned
+
+impl OutboundTask {
+    pub fn new(work: futures_util::future::LocalBoxFuture<'static, ()>)
+        -> Result<(Self, OutboundExchangeOwner), EdgeError>;
+}
+
+pub trait OutboundProgressRuntime {
+    fn poll(
+        &self,
+        scope: &OutboundScope,
+        time: &OutboundTime,
+        entered_at: MonotonicInstant,
+        cx: &mut std::task::Context<'_>,
+        inner: &mut dyn FnMut(&mut std::task::Context<'_>) -> std::task::Poll<()>,
+    ) -> std::task::Poll<Result<(), EdgeError>>;
+}
+
+impl OutboundScopeOwner {
+    pub fn attach(self, response: Response) -> Result<Response, EdgeError>;
+    pub fn callback() -> Self;
+    pub fn callback_if_absent() -> Option<Self>;
+    pub fn response_body() -> Self;
+    pub fn scope(&self) -> OutboundScope;
+    pub fn close(&self);
+    pub fn with<T>(&self, action: impl FnOnce() -> T) -> T;
+    pub fn run<'future, F>(&self, future: F)
+        -> futures_util::future::LocalBoxFuture<'future, F::Output>
+    where F: std::future::Future + 'future, F::Output: 'future;
+}
+
+pub struct Body; // private payload and optional local egress owner
+pub enum BodyPayload { Once(Bytes), Stream(BodyStream) }
+impl Body {
+    pub fn from_bytes<B: Into<Bytes>>(bytes: B) -> Self;
+    pub fn from_stream<S>(stream: S) -> Self
+    where S: futures_util::Stream<Item = Result<Bytes, EdgeError>> + 'static;
+    pub fn into_parts(self) -> (BodyPayload, Option<OutboundScopeOwner>);
+}
+
+impl OutboundScope {
+    pub fn capture(progress: std::rc::Rc<dyn OutboundProgressRuntime>) -> Self;
+    pub fn is_managed(&self) -> bool;
+    pub fn check(&self) -> Result<(), EdgeError>;
+    pub fn with<T>(&self, action: impl FnOnce() -> T) -> Result<T, EdgeError>;
+    pub fn run<T: 'static>(&self, time: OutboundTime, entered_at: MonotonicInstant,
+        future: OutboundFuture<T>) -> OutboundFuture<T>;
+    pub fn provider_state<T: 'static>(&self, create: impl FnOnce() -> T)
+        -> Result<std::rc::Rc<T>, EdgeError>;
+}
+```
+
+Scope state, operation-root cells and cancellation registrations are core-private. They cannot
+be forged by constructing replacement prepared contexts. The owner is never stored in `App`, a
+shared client, shared service state or HTTP extensions. Retained clients capture the active request
+on every invocation, not the request where the client was constructed.
+
+Standard adapter entrypoints establish callback ownership outside App dispatch, covering assembly,
+preparation, admission, routing, error rendering and callback return. Nested canonical send helpers
+reuse that owner. A synchronous activation lasts only for a synchronous call; asynchronous work
+installs and restores the captured identity on every poll. No thread-local guard spans `.await`.
+Later polling in a different callback or response body cannot reparent an operation. Provider
+activation must precede settlement timer construction and polling. A progress bridge invokes its
+inner step at most once per call, preserves original time/entry inputs and performs only its bounded
+provider progress work; it is not another executor or timer source.
+Nonblocking `is_ready`/`check` activate ownership only and inspect already-scheduled completion
+receivers; they never turn the SDK, create timers or poll transport bodies. Awaited collection
+and callback progress use the same registered producer through the progress bridge, not a second
+scheduler hidden in the receiver.
+
+Outside request entrypoints, direct manual operations retain caller-owned lifetimes: dropping the
+operation/pending/batch is their cancellation boundary. Callers requiring a request-family boundary
+use the same explicit scope owner. This does not make canonical scope ownership optional and does
+not turn a closed captured scope into an unscoped operation. Reentrant starts during teardown must
+observe the closing scope and fail before body polling, timer registration or provider I/O.
+
+Core registers the entire owned Send/settling-Begin future immediately, including an unpolled
+request body, not merely a cancellation flag. Scope exit first revokes every live root, then
+releases futures, SDK cancellation owners, source streams and wakers outside registry borrows.
+If revocation occurs inside a poll, the active value and its output are released when that poll
+returns. Cleanup is exactly once; user destructors, cancellation callbacks, waker operations and
+provider polling never run under a registry borrow. Failure is typed Internal scope closure, not
+a fabricated timeout, observation cutoff or clean EOF.
+Normal disposal also activates the captured identity: source EOF/error, unpolled Drop and
+reentrant cleanup cannot start work under an unmanaged or foreign ambient scope. Supported
+unwinding during cleanup cannot suppress exactly-once terminal completion/observer notification.
+
+Axum, Cloudflare and Spin use the same core `OutboundTask`, backed by that revocation protocol,
+instead of separate task cancellation state machines. Dropping either the provider's runner or
+its cancellation owner releases producer futures and completion senders even when the other
+handle is retained. Registration failure is typed before spawning; adapters keep only provider
+spawn/setup and native abort operations. Cooperative Fastly driving uses the same root ownership,
+not a second executor. Portable response deadline and terminal classification policy stays in
+core; Workers retain host-event yielding and AbortController ownership, not a duplicate timer race.
+
+Begin transfers live ownership into its pending state before returning it; completing the outer
+Begin future does not unregister scheduled work. Successful streamed collection disarms pending
+cancellation and unregisters callback ownership before returning the independent transport body.
+Batch revocation releases its producer stream and cancellation owner while preserving the existing
+ledger, already recorded ready results, receipts and lossless failure/accumulator behavior. Closing
+does not poll SDK streams to recover results or invent arrival times.
+
+Each response-egress attempt owns an independent body scope through its actual terminal transition
+or Drop. For work that must start during the callback and continue in its response body, create a
+`response_body()` owner **before** starting that work, use its `with`/`run` boundary, then consume
+that exact owner with `attach(response)`. Merely polling callback-owned work in a body cannot
+transfer it. A body owner created inside a managed callback is provisional: attaching metadata
+does not accept the handoff. Callback exit revokes an unaccepted owner, including an attached
+response retained outside the callback. The core envelope accepts the exact owner before policy,
+framing, suppression, conversion or any body poll; successful streamed outbound collection also
+accepts its new body lifetime before returning it. Closed owners cannot be resurrected.
+
+Response-body metadata is local, not HTTP extensions, and does not change a buffered body into a
+stream, copy its bytes or change framing. The `Body` enum constructors/patterns are removed:
+construct through `Body::from_bytes`/`from_stream` and inspect the separate `BodyPayload` only at
+transport boundaries. Payload transformations preserve the optional owner. An outbound request
+cannot carry response-egress metadata; shared validation rejects it before provider work.
+Canonical egress extracts the owner before destructive body conversion or suppression. A manual
+`into_parts` caller explicitly assumes its lifetime obligation; manually consuming an attached
+body without a canonical egress attempt closes it at consumption termination/drop, not at an
+unobservable client-delivery event.
+
+Callback and body scopes share a provider-progress family cache, not closure authority or root
+registrations. A body group started before the callback's first origin exchange must retain that
+same provider progress engine while the callback awaits the origin and after callback return.
+Closing a callback revokes its own operations without clearing a still-live body family's engine.
+The last family lease releases the cache. This is one core implementation, not an adapter-specific
+handoff registry.
+
+Core wraps source polling with that body identity and makes
+the source itself revocable even if a converted handle is retained. Source EOF releases the source
+but does not close the body scope. Terminal egress closes body work before completion resources are
+released, without cancelling callback siblings or Fastly post-delivery callback work. The existing
+completion-report and provider delivery/cancellation capabilities are unchanged. Selecting a
+precommit fallback closes the failed application's body work; the bounded fallback receives its
+own body lifetime under the same exactly-once egress attempt.
+`ResponseEgressPreparationError` keeps closed ownership separate from the existing six HTTP
+framing reasons; ownership rejection must not populate framing-failure diagnostics.
+Core and every producer use `DispatchBudget::own_deadline_expired_before` for the earlier-own-
+deadline exception. It does not treat a `BatchCutoff`-attributed phase failure as batch abandonment.
+
+All original budgets, typed timeout provenance, indexed/partial batch outcomes, cutoff equality,
+paired clocks, coding/provenance, independent body/header/decoder caps and direct native Image
+Optimizer dispatch remain requirements. No SDK/runtime repinning, hosted qualification, lazy eager
+default, alternate transport, duplicated provider lifetime registry or legacy API alias is added.
 
 ### Batch Ownership and Mixed Collection
 

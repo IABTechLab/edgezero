@@ -6,6 +6,14 @@ editing this source after freeze. This document changes no outbound contract or 
 
 ## Authorities and Entry Gates
 
+**Dispatch-slack retirement, 2026-10-27:** the requester authorized removing the fixed 25 ms
+dispatch-slack guard and its test injection helper. This supersedes older statements below that
+slack remains unchanged. Original absolute deadlines, timeout causes, late-result rejection, B31
+backend/timer policy and resource limits remain unchanged. Synchronous SDK host calls are still
+non-preemptible; no finite blocking horizon, Native capability or hosted qualification follows.
+Keep historical hashes, measurements and failed probes intact. EZ-3 legs remain planned until
+real executable commands and sentinels are bound; this authorization is not acceptance evidence.
+
 **Current scoped override, 2026-10-24:** the requester's [timing and native integration approval](../../../docs/audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)
 permits a Send-first implementation checkpoint, not qualification/deployment. It supersedes the
 implementation-blocking interpretation of the earlier G2/H(K) statements below: +5 ms stays a

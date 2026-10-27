@@ -572,7 +572,7 @@ mod tests {
                     .get::<fixture_core::Finalize>()
                     .is_none()
             );
-            assert!(matches!(response.body(), Body::Stream(_)));
+            assert!(response.body().is_stream());
         }
     }
 }

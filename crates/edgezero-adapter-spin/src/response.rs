@@ -1,4 +1,11 @@
 #![cfg_attr(
+    test,
+    expect(
+        clippy::self_named_module_files,
+        reason = "retain the existing response module file while colocating coordinator tests"
+    )
+)]
+#![cfg_attr(
     target_arch = "wasm32",
     expect(
         clippy::arbitrary_source_item_ordering,
@@ -14,7 +21,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use edgezero_core::body::{Body, BodyStream};
+use edgezero_core::body::{Body, BodyPayload, BodyStream};
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{HeaderMap, Method, Response, StatusCode};
 use edgezero_core::response_egress::{
@@ -309,9 +316,10 @@ where
 }
 
 fn body_source(body: Body) -> BodyStream {
-    match body {
-        Body::Once(bytes) => stream::once(async move { Ok(bytes) }).boxed_local(),
-        Body::Stream(source) => source,
+    let (payload, _scope) = body.into_parts();
+    match payload {
+        BodyPayload::Once(bytes) => stream::once(async move { Ok(bytes) }).boxed_local(),
+        BodyPayload::Stream(source) => source,
     }
 }
 
@@ -1163,6 +1171,8 @@ mod race_tests {
 
 #[cfg(test)]
 mod tests {
+    mod handoff;
+
     use edgezero_core::response_egress_framing::prepare_response_egress;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
@@ -1178,7 +1188,7 @@ mod tests {
         ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressReport,
     };
     use futures::executor::block_on;
-    use futures_util::future::LocalBoxFuture;
+    use futures_util::future::{LocalBoxFuture, poll_fn};
     use futures_util::stream;
     use futures_util::task::noop_waker_ref;
 
@@ -1306,7 +1316,14 @@ mod tests {
                 state.pending == Some(PendingAt::Finish)
             };
             if should_wait {
-                pending::<()>().await;
+                poll_fn(|_cx| {
+                    if self.0.borrow().pending == Some(PendingAt::Finish) {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
             }
             self.0.borrow().finish.map_or(Ok(()), Err)
         }

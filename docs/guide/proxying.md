@@ -18,25 +18,23 @@ independent response limits. These contracts remain requirements of consolidatio
 with encoding policy, original-header provenance and ingress/egress ownership. Simplifying
 internals does not remove them or upgrade the published target capabilities.
 
-The atomic head-first dispatch migration is **not complete**. Eager origin overlap, nonblocking
-batch observation, general GET/HEAD settlement and shared policy-driven redirect following
-remain open. Applications needing those behaviors must gate their cutover on their delivered
-replacement and target evidence, not emulate them by discarding bodies, supplying lazy futures
-as eager work, or maintaining another SDK client. The eventual migration replaces old
-implementer APIs in the same change as adapters, supplied test clients, demo and generator;
-there is no compatibility mode. Existing single/batch transports remain until that replacement
-is ready, not as an optional parallel API afterward.
+The head-first client contract replaces the old implementer `send` and raw-vector batch APIs;
+there are no compatibility wrappers. Core captures invocation time, validates support before body
+polling, prepares requests and finalizes provider heads. Adapters retain I/O, scheduling and
+transport ownership. Eager work and nonblocking batch observation use that same pipeline.
+Explicit policy-driven redirect following and hosted qualification remain separate work;
+applications must gate adoption on the behavior and target evidence they require, not maintain
+another SDK client or supply lazy futures as eager work.
 
-Header-policy consolidation is already active: all four adapters and the head-first constructor
-use `OutboundHeaderInput::normalize`. Adapter authors migrate the retired separate header
+Header-policy consolidation is active: all four adapters pass `OutboundHeaderInput` to the shared
+`OutboundHead` constructor. Adapter authors migrate the retired separate header
 helpers as described in [response provenance](./capabilities.md#outbound-content-type-provenance).
 Ordinary handler, demo and template request APIs are unchanged by that consolidation.
 
-Adapter implementations now call `validate_for_dispatch(&request, OutboundSendMode::Send)` or
-`OutboundSendMode::Batch` after target-specific supported-option checks. Core owns the common
-method/body/policy validation and buffered Batch restrictions; delete duplicated adapter checks
-and migrate the retired one-argument call directly. The mode argument alone does not implement
-Begin or Follow. It does not change indexed results, partial failures, observation cutoff,
+The facade calls synchronous `validate_supported_options` before common method/body/policy
+validation, budget rejection, timer creation, source polling or provider I/O. Implementers receive
+opaque prepared contexts; delete local preparation and budget selection. Buffered Batch
+restrictions remain. This does not change indexed results, partial failures, observation cutoff,
 per-slot timing, independent caps, coding/provenance, application clocks or lifecycle ownership.
 
 ### Paired Clocks And Timers
@@ -56,27 +54,74 @@ Timers are checked before source polling, retained while pending and cancelled w
 exchange. Native transport total timeouts do not override the supplied pair. Fastly uses its
 existing progress multiplexer for timer-only waits as well as transport readiness. Provider
 phase timers, synchronous host calls and the published BestEffort limitations remain separate;
-this integration is not a hosted capability promotion or the head-first trait migration.
+this integration is not a hosted capability promotion.
 
-### Fastly Batch Ownership
+### Operation Ownership
 
-`run_custom` and each `serve_custom` callback own the batches started during that callback.
-Returning, failing or supported unwinding releases each complete driver, including queued
-results and processing state, even if the application retains a batch handle. Polling that
-handle afterward returns an internal driver failure, not a cutoff or timeout. Results already
-collected before failure remain available through `OutboundBatchFailure`.
+All four adapters use one core scope implementation. Canonical entrypoints establish a callback
+owner before application preparation and dispatch. Send futures, begun exchanges and batches
+capture that owner at invocation, including never-polled futures. Returning, failing or supported
+unwinding revokes complete live work even when an application retains its public handle. Later
+observation reports typed Internal scope closure, not a timeout, cutoff or clean EOF. Already
+recorded batch partials retain their existing failure and accumulation semantics.
 
 Canonical send helpers reuse an outer callback owner. Without one, they establish an owner
 through preparation and delivery and release it when the helper returns. Batches started while
 polling a response body have a separate owner released when that transmission ends, including
 source/write failure. Earlier callback work remains live, and post-delivery work uses the same
-still-active callback. Retained clients resolve ownership when starting each batch; they do not
+still-active callback. Retained clients resolve ownership on each invocation; they do not
 retain the previous request's scope. Polling a callback-created batch inside a body does not
 transfer its ownership.
 
-This applies to existing batch drivers, not general retained `send` futures or eager Begin.
-It does not add callback-wide progress, change deadlines or prove provider-side cancellation.
-Those remaining integration and hosted-evidence requirements stay open; capabilities are unchanged.
+Fastly's callback progress driver services scheduled Begin and Batch pipelines, including head
+processing and bounded collection, while a handler or response source awaits other work. Captured
+scope and runtime activation are installed and restored per poll, never held across `.await`.
+The old private Fastly lifetime registry is removed, not used alongside core ownership.
+
+Adapter implementers that spawn local work use the core `OutboundTask::new` runner/owner pair.
+Registration is fallible before spawning. Dropping either side releases the producer even if
+the other handle is retained; adapters supply only their provider spawn and abort operations.
+Completion receivers observe already-scheduled work. `is_ready` and batch `check` do not drive
+the SDK, create timers or read transport bodies.
+
+Successful streamed collection transfers transport ownership into the outbound body's lifetime;
+callback exit cannot abort that handed-off body. Downstream response egress has its own body scope
+through terminal transmission or Drop. EOF releases its source but does not end that scope. Its
+terminal transition releases response-owned SDK work before invoking completion callbacks, without
+cancelling work owned by a still-active serving callback.
+
+To start work during the handler that must continue after its response is returned, choose its
+body ownership **at creation**, then attach that exact owner to the returned response:
+
+```rust
+let body_owner = OutboundScopeOwner::response_body();
+let batch = body_owner.with(|| client.start_batch_until(requests, observation_cutoff));
+let origin = client.send(origin_request).await?;
+let response = response_with_batch_stream(origin, batch)?; // Application body production.
+body_owner.attach(response)
+```
+
+The owner is provisional until canonical egress accepts the response. Retaining an unattached
+owner or an attached-but-unaccepted response cannot bypass callback cleanup. Acceptance happens
+before response policy, framing, suppression or body polling. Callback and body lifetimes share
+provider progress, but not cancellation roots; a body batch started before the origin remains
+serviceable while the origin is awaited and after callback return. A failed application's body
+work closes before bounded fallback delivery. No deadlines are restarted during handoff.
+
+`Body` now has a private payload and optional local ownership metadata. Use `Body::from_bytes`
+or `Body::from_stream`, not the removed enum constructors. Transport code can destructure
+`BodyPayload` through `Body::into_parts`, retaining its returned owner until terminal egress.
+This changes neither buffered representation nor byte copies. Outbound requests cannot reuse a
+body with response ownership. Ordinary handlers need no manual owner; the explicit attachment
+above is for work deliberately started early on behalf of a later body.
+
+Manual clients outside request entrypoints remain caller-owned: dropping the operation, pending
+handle or batch cancels its work. A manual caller requiring a group lifetime can use
+an `OutboundScopeOwner::callback()` binding and keep it alive while awaiting `owner.run(...)`.
+Normal handlers and generated apps need no scope
+boilerplate. A closed canonical scope never falls back to caller-owned work. Existing deadlines,
+caps, source errors and provider-side cancellation guarantees are unchanged; hosted qualification
+remains separate.
 
 ## Native Image Optimization
 
@@ -131,18 +176,20 @@ empty after admission, for any method, without reading it. Actual HTTP/1 GET/HEA
 absent framing or `Content-Length: 0` succeed through this path even after the inbound read
 deadline, with no outbound body bytes, `Transfer-Encoding` or `Content-Length`.
 
-Unknown bodies remain lazy. Forwarded streamed GET/HEAD requests still fail with 400 before
-origin contact; local TCP controls include chunked-empty and nonempty GET bodies. General bounded
-empty-body settlement is not implemented, and Spin conversion is unchanged. Do not
-discard an inbound body to bypass that check. Methods that accept streamed bodies keep their
-existing behavior.
+Unknown bodies remain lazy until `send` or `begin` settles a GET/HEAD body. Empty chunks do not
+establish emptiness: only EOF does. The first nonempty byte returns 400 before origin contact.
+Settlement races the captured outbound deadline against the admitted inbound read deadline,
+retaining 408/504 provenance and original source errors without restarting the outbound budget.
+Batch still requires buffered uploads; buffer under an application cap before adding a slot.
+Do not discard an inbound body to bypass validation. Other methods retain streamed uploads.
 
 Fastly separately preserves actual SDK body absence: only `try_take_body() == None` becomes core
 `Body::empty()`, without creating an SDK body. Both direct conversion and admitted dispatch keep
 every present SDK body lazy, even when `known_length()` reports zero; that query omits SDK buffers
 and is not an EOF signal. Normal Fastly `from_client()` requests carry a body handle even when
-bodiless, so this does not fix their GET/HEAD forwarding. Do not remove a present SDK body to
-force the absence path. See [Fastly ingress conversion](./adapters/fastly.md#ingress-body-conversion).
+bodiless, so their emptiness is settled rather than guessed. Fastly's synchronous inbound host
+read is not preemptible; its read-deadline behavior remains BestEffort. Do not remove a present SDK
+body to force the absence path. See [Fastly ingress conversion](./adapters/fastly.md#ingress-body-conversion).
 
 Cloudflare preserves a native Fetch request's `body == null` as buffered empty without reading
 it. This applies to direct conversion and, after admission, normal dispatch. Every non-null body
@@ -153,9 +200,8 @@ There is no ArrayBuffer-only fallback or header-based inference. See
 The certified Axum empty body or absent Fastly/Cloudflare body remains Initial, not Cached. `take_body`
 and `into_request` expose buffered empty, but core's first `body_bytes` call still checks the
 inbound read deadline and can return 408. Ingress framing remains `HostManaged`. Demo and generated
-proxy handlers automatically share their adapter's converter with unchanged APIs; the Axum
-forwarding result above does not establish raw Fastly GET proxy success. These checkpoints are not
-general body settlement or a capability promotion.
+proxy handlers share their adapter's converter and the common settlement pipeline. Neither
+settlement nor normalized requests establish raw parser guarantees or promote target capabilities.
 
 ```rust
 use edgezero_core::action;
@@ -182,6 +228,7 @@ async fn forward_with_auth(
         .response_decoding(ResponseDecoding::Original)
         .cache_policy(OutboundCachePolicy::Bypass)
         .timeout(Duration::from_secs(2))
+        .connect_timeout(Duration::from_secs(1))
         .max_request_body_bytes(256 * 1024)
         .max_encoded_response_bytes(2 * 1024 * 1024)
         .max_decoded_response_bytes(4 * 1024 * 1024)
@@ -342,6 +389,45 @@ interruption guarantees; blocked host operations retain their documented capabil
 It bounds emitted item shape, not allocation: split `Bytes` values can retain their original
 backing allocation, and a provider SDK may allocate the source chunk before EdgeZero receives it.
 
+### Connect Timeout
+
+`connect_timeout` is independent of the aggregate timeout/deadline and defaults to unset. Zero is
+invalid; a longer connect setting cannot extend the aggregate budget. Keep it a configuration
+constant: Fastly includes connect settings in stable backend identity, so different settings can
+use different connection pools. First-byte time is not reduced by a fixed connect share.
+
+Fastly maps the setting to its SDK; hosted expiry and provider DNS/TLS phase coverage still need
+qualification. Spin passes it as an advisory WASI option and retains the aggregate race if the
+host refuses it. Axum and Cloudflare accept it at BestEffort, retaining aggregate enforcement;
+they do not create per-request clients to emulate an independent phase timer.
+
+## Begin An Exchange
+
+`begin` settles a permitted unknown GET/HEAD body, then schedules the complete exchange before
+returning `OutboundPending`. It does not wait for connection establishment or response headers.
+Other streamed uploads are rejected; use `send` for them. Buffered responses are collected under
+their caps even while the caller is not collecting the pending result.
+
+```rust
+use edgezero_core::OutboundRequest;
+use std::time::Duration;
+
+let pending = client
+    .begin(
+        OutboundRequest::get("https://api.example.com/data")?
+            .timeout(Duration::from_secs(2))
+            .max_response_bytes(64 * 1024),
+    )
+    .await?;
+let response = pending.collect().await?;
+```
+
+`is_ready()` is a nonblocking, non-consuming check; errors are ready too. Dropping or cancelling
+a pending handle stops its owned work. Successful collection transfers a streamed body's transport
+ownership, so dropping the completed pending handle cannot abort that body. The original deadline
+continues to govern it. Axum manual eager clients require an active Tokio `LocalSet`; standard
+server entrypoints already supply one. See target guides for scheduling and teardown limitations.
+
 ## Batch Requests
 
 `start_batch_until` accepts buffered request bodies and buffered response mode only. It yields
@@ -359,10 +445,13 @@ let observation_cutoff = ctx
 let mut batch = client.start_batch_until(requests, observation_cutoff);
 let termination = loop {
     match batch.next().await? {
-        OutboundBatchNext::Item(item) => match item.result.outcome {
-            Ok(response) => record_success(item.index, item.result.elapsed, response.status()),
-            Err(error) => record_failure(item.index, item.result.elapsed, error),
-        },
+        OutboundBatchNext::Item(item) => {
+            let (index, result) = item.into_parts();
+            match result.outcome {
+                Ok(response) => record_success(index, result.elapsed, response.status()),
+                Err(error) => record_failure(index, result.elapsed, error),
+            }
+        }
         OutboundBatchNext::Finished(termination) => break termination,
         _ => return Err(EdgeError::internal(anyhow::anyhow!("unsupported batch event"))),
     }
@@ -384,11 +473,12 @@ index, or out-of-range index still fails collection while retaining the previous
 slots. Custom drivers must finish after their last item; zero-slot drivers are validated too.
 
 `client.send_all_until(requests, observation_cutoff).await` collects the same driver into an
-index-aligned `Vec<Option<OutboundSlotResult>>` plus `results.termination`. `Completed` guarantees
-every slot is present. Only `Cutoff` permits `None` in a successful result, meaning that slot was
-unresolved when the observation cutoff won. A premature, malformed, or explicitly failed adapter
-driver returns `OutboundBatchFailure` instead. Its `error` is the precise batch-level failure, and
-its `slots` retains every terminal result collected before that failure:
+index-aligned `OutboundCollectedSlot` values. `Resolved` owns a newly collected result;
+`AlreadyDelivered` marks an item previously transferred by `check` or `next`; `Unresolved` marks
+a cutoff-abandoned slot. `Completed` forbids unresolved slots, while `Cutoff` requires one.
+A premature, malformed or failed driver returns `OutboundBatchFailure` with its exact error and
+partial position states. Collections and items have read-only accessors and consuming
+`into_parts`; their fields and batch identities cannot be reconstructed or mutated:
 
 ```rust
 let results = match client
@@ -397,20 +487,31 @@ let results = match client
 {
     Ok(results) => results,
     Err(failure) => {
-        for (index, slot) in failure.slots.into_iter().enumerate() {
-            if let Some(slot) = slot {
+        let (error, slots) = failure.into_parts();
+        for (index, slot) in slots.into_iter().enumerate() {
+            if let edgezero_core::OutboundCollectedSlot::Resolved(slot) = slot {
                 retain_terminal_slot(index, slot);
             }
         }
-        return Err(failure.error);
+        return Err(error);
     }
 };
 ```
 
-Driver failure never degrades into cutoff-like missing slots. Every terminal slot is timed from the
-batch method-entry snapshot through its own terminal observation, including preflight and body
-buffering. It is not pure network RTT. Bound the request count and every per-request body limit;
-EdgeZero intentionally has no global batch-concurrency or memory cap.
+Driver failure never degrades into cutoff-like missing slots. Ordinary terminal results are timed
+from the batch method-entry snapshot through their own terminal observation, including preflight
+and body buffering. If an earlier per-request deadline has already expired, the result is a timeout
+at that logical deadline even when its observation arrives later; its elapsed value ends at expiry.
+This exception preserves earlier own-timeout results across a later observation cutoff. Elapsed is
+not pure network RTT. Bound the request count and every per-request body limit; EdgeZero
+intentionally has no global batch-concurrency or memory cap.
+
+`check()` observes without waiting. An accumulator obtained from `batch.accumulator()` can retain
+intact checked items after inspection, then merge the final success or failure collection. Merging
+validates batch identity and fills only `AlreadyDelivered` positions. Insert/merge failures return
+the exact original owned inputs; consuming an item's or collection's `into_parts` relinquishes
+merge eligibility. `cancel()` returns every never-delivered index, including recorded results
+that the caller has not yet taken.
 
 On Axum, Cloudflare, and Spin, each child samples its terminal instant synchronously when it is
 observed ready. Those samples follow poll-observation order in the shared monotonic clock domain,

@@ -66,15 +66,19 @@ accessors. The pre-rewrite `Hooks::config_store()` hook is gone.
 Adapters implement `edgezero_core::outbound::OutboundHttpClient` and inject an `HttpClient` into
 each core request. Implementations must:
 
-- Implement `send` and the completion-driven `start_batch_until` driver; ordered collection is
-  provided once by core through `send_all_until`
-- Apply the shared request validation, hop-by-hop normalization, deadline, and response-body rules
+- Implement `time`, synchronous `validate_supported_options`, `dispatch_head`, eager `begin`,
+  and prepared `start_batch_until`. Core owns application-facing `send` and ordered collection.
+- Consume `OutboundDispatchRequest` without restarting its captured budget. Return an
+  `OutboundHead` with original adapter-visible headers, lazy encoded bytes and a teardown owner;
+  core owns normalization, provenance, decoding, body disposition and bounded finalization.
+- Schedule complete begin/batch exchanges before returning their receivers. Driver events report
+  original indices, actual terminal observations and outcomes, not consumer-created receipts.
 - Enforce independent request, encoded response, decoded response, final buffer, header, Brotli, and chunk-shape controls
 - Map typed cache-bypass and validated wire-authority policy without changing URI-owned routing,
   TLS SNI, or certificate identity
 - Preserve typed deadline, transport, protocol, codec, and resource failures without message matching
-- Construct every `OutboundResponse` with the same `MonotonicClock` retained by the outbound
-  client; the constructor has no process-default-clock fallback
+- Preserve the prepared context's paired clock/timer and exactly-once ownership through response
+  handoff. Successful streamed collection must not cancel its live payload.
 - Attach `x-edgezero-proxy: <adapter>` by default; configure relay handles with
   `HttpClient::with_proxy_marker(false)` or override an individual request with
   `OutboundProxyMarker::Off`. An omitted synthetic marker consumes no header budget and does not

@@ -116,7 +116,9 @@ including zero-length ArrayBuffer/Uint8Array bodies and streams that will immedi
 Neither `Content-Length` nor SDK read-once bookkeeping is an absence signal; consumed present
 bodies retain their existing stream-construction error.
 
-This preserves a transport fact, not general GET/HEAD stream settlement. Request-context state
+This preserves a transport fact before the shared facade settles unknown GET/HEAD streams.
+The facade accepts only EOF, rejects the first nonempty byte before fetch, and races the paired
+outbound/inbound limits without restarting either deadline. Request-context state
 remains Initial and framing remains `HostManaged`. `into_request()` transfers buffered empty
 without draining, while the first `body_bytes()` read still checks the admitted deadline and
 returns sticky 408 after expiry. No capability is promoted. Demo and generated handlers inherit

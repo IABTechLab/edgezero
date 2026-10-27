@@ -227,11 +227,11 @@ and generated proxy handlers benefit through this same converter and their uncha
 This does not change core's first `body_bytes` deadline check: that accessor can still return 408
 for an initial buffered-empty body after expiry.
 
-Unknown bodies retain their existing lazy stream and read-deadline handling. In particular,
-chunked-empty and nonempty streamed GET bodies still fail outbound preflight with 400 and no
-origin request; local TCP controls also preserve unread-body connection boundaries. General
-GET/HEAD settlement and the atomic outbound dispatch migration remain open. Other adapters are
-unchanged, and no capability row or support level is added or promoted by this checkpoint.
+Unknown GET/HEAD bodies are settled under the original outbound and admitted inbound deadlines.
+Chunked-empty EOF permits dispatch; the first nonempty byte returns 400 before origin contact.
+Unread rejected bytes cannot become the next HTTP/1 request. Other methods keep streamed uploads.
+Eager begin/batch work requires the existing Tokio local scheduling context; missing context
+returns a typed setup error before provider I/O. No capability level is promoted by this migration.
 
 Axum provides native total deadlines, completion-order batching, pending-future cancellation,
 batch slot isolation, cache bypass, wire-authority override, elastic phase budgeting, header

@@ -97,6 +97,34 @@ mod tests {
         assert!(status.success(), "{expectation}");
     }
 
+    fn verify_generated_core_tests(project: &Path, core_package: &str) {
+        let listed = Command::new(env!("CARGO"))
+            .args(["test", "-p", core_package, "--lib", "--", "--list"])
+            .current_dir(project)
+            .output()
+            .expect("list generated core tests");
+        assert!(
+            listed.status.success(),
+            "generated core test list should succeed"
+        );
+        let listed_stdout = String::from_utf8_lossy(&listed.stdout);
+        for sentinel in [
+            "generated_outbound_http_smoke",
+            "scripted_batch_preserves_receipts_through_mixed_collection",
+            "fanout_rejects_delivered_and_completed_unresolved_slots",
+            "scripted_batch_cutoff_retains_only_earlier_completions",
+            "scripted_batch_expired_cutoff_keeps_preflight_outcomes",
+        ] {
+            require_listed_test(&listed_stdout, sentinel)
+                .expect("generated core sentinel must be listed exactly once");
+        }
+        assert_cargo_success(
+            project,
+            &["test", "-p", core_package, "--lib"],
+            "generated core tests should pass",
+        );
+    }
+
     fn generated_axum_binary(project: &Path) -> PathBuf {
         let version_output = Command::new("rustc")
             .arg("-vV")
@@ -247,25 +275,7 @@ mod tests {
             "generated workspace should pass strict clippy",
         );
 
-        let listed = Command::new(env!("CARGO"))
-            .args(["test", "-p", "scaffold-probe-core", "--lib", "--", "--list"])
-            .current_dir(&project)
-            .output()
-            .expect("list generated core tests");
-        assert!(
-            listed.status.success(),
-            "generated core test list should succeed"
-        );
-        let listed_stdout = String::from_utf8_lossy(&listed.stdout);
-        require_listed_test(&listed_stdout, "generated_outbound_http_smoke")
-            .expect("generated outbound smoke test must be listed exactly once");
-
-        assert_cargo_success(
-            &project,
-            &["test", "-p", "scaffold-probe-core", "--lib"],
-            "generated core tests should pass",
-        );
-
+        verify_generated_core_tests(&project, "scaffold-probe-core");
         // Typed config validation via the generated `<name>-cli` binary.
         // The raw `edgezero config validate` above exercises the manifest
         // schema and capability matrix; the generated CLI additionally

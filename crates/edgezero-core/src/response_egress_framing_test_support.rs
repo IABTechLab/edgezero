@@ -7,7 +7,9 @@ use crate::app::App;
 use crate::body::Body;
 use crate::error::EdgeError;
 use crate::extractor::State;
-use crate::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use crate::http::{
+    HeaderMap, HeaderValue, Method, Request, Response, StatusCode, response_builder,
+};
 use crate::ingress::{
     AdmissionDecision, IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressGrant,
     IngressHeadAccounting, IngressHeadParts,
@@ -47,10 +49,17 @@ impl ResponseEgressObserver for Observer {
     }
 }
 
-#[must_use]
+/// Constructs a malformed framing fixture.
+///
+/// # Errors
+/// Reserved for fixture-construction errors.
 #[inline]
-pub fn framing_response(reason: ResponseEgressFramingError) -> (Method, Response) {
-    let mut response = Response::new(Body::from("x"));
+pub fn framing_response(
+    reason: ResponseEgressFramingError,
+) -> Result<(Method, Response), EdgeError> {
+    let mut response = response_builder()
+        .body(Body::from("x"))
+        .map_err(EdgeError::internal)?;
     let mut method = Method::GET;
     match reason {
         ResponseEgressFramingError::ContentLengthMismatch => {
@@ -79,14 +88,14 @@ pub fn framing_response(reason: ResponseEgressFramingError) -> (Method, Response
         }
         ResponseEgressFramingError::UnsupportedTunnel => method = Method::CONNECT,
     }
-    (method, response)
+    Ok((method, response))
 }
 
 #[action]
 async fn invalid_response(
     State(reason): State<ResponseEgressFramingError>,
 ) -> Result<Response, EdgeError> {
-    Ok(framing_response(reason).1)
+    Ok(framing_response(reason)?.1)
 }
 
 /// Dispatches the same invalid response through a routed handler or admission refusal.
@@ -99,7 +108,10 @@ pub async fn framing_fixture(
     detached: bool,
 ) -> Result<FramingFixture, EdgeError> {
     let now = MonotonicInstant::now();
-    let (method, _) = framing_response(reason);
+    let (method, fixture_response) = framing_response(reason)?;
+    let fixture_status = fixture_response.status();
+    let fixture_version = fixture_response.version();
+    let fixture_headers = fixture_response.headers().clone();
     let completed = Reports::default();
     let observed = Reports::default();
     let mut app = App::new(
@@ -145,9 +157,13 @@ pub async fn framing_fixture(
                 .push(report.clone());
         });
         if detached {
+            let mut response = Response::new(Body::from("x"));
+            *response.status_mut() = fixture_status;
+            *response.version_mut() = fixture_version;
+            *response.headers_mut() = fixture_headers.clone();
             AdmissionDecision::Refuse {
                 completion,
-                response: framing_response(reason).1,
+                response,
             }
         } else {
             AdmissionDecision::Admit {

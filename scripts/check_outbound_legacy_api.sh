@@ -567,10 +567,72 @@ function regexMatches(source, pattern, originalSource) {
   }))
 }
 
-function findLegacyForms(source, rustSource = false, originalSource = source) {
+function outboundLegacyMatches(source, originalSource) {
+  const matches = regexMatches(
+    source,
+    /\b(?:finish_batch_item|from_futures)\b|\bOutboundBatchItem\s*::\s*new\s*\(|\bBody\s*::\s*(?:Once|Stream)\b/gu,
+    originalSource,
+  )
+  matches.push(...regexMatches(
+    source,
+    /\b(?:BATCH_DISPATCH_SLACK_MAX|inject_dispatch_slack_for_test|DISPATCH_SLACK_INJECTION|DispatchSlackInjection|DISPATCH_SLACK_MESSAGE)\b/gu,
+    originalSource,
+  ))
+  const call = /\bOutboundBatch\s*::\s*(from_driver|cutoff)\s*\(/gu
+  for (const match of source.matchAll(call)) {
+    const open = match.index + match[0].lastIndexOf('(')
+    const close = closingDelimiter(source, open)
+    if (close === -1) continue
+    const args = topLevelArguments(source, open, close)
+    if (
+      (match[1] === 'from_driver' && args.length !== 3) ||
+      (match[1] === 'cutoff' && (args.length !== 1 || /^(?:[0-9]|slot_count\b|requests\s*\.\s*len\s*\()/u.test(args[0])))
+    ) {
+      matches.push({ index: match.index, text: originalSource.slice(match.index, close + 1) })
+    }
+  }
+  const protectedTypes = [
+    'OutboundDispatchRequest', 'OutboundResponseContext', 'OutboundPreparedBatch',
+    'OutboundBatchContext', 'OutboundBatchItem', 'OutboundBatchResults', 'OutboundBatchFailure',
+  ]
+  for (const name of protectedTypes) {
+    const structure = new RegExp('\\bpub\\s+struct\\s+' + name + '\\s*\\{', 'gu')
+    for (const match of source.matchAll(structure)) {
+      const open = match.index + match[0].lastIndexOf('{')
+      const close = closingDelimiter(source, open)
+      if (close !== -1 && /\bpub\s*(?:\([^)]*\))?\s*\w+\s*:/u.test(source.slice(open + 1, close))) {
+        matches.push({ index: match.index, text: originalSource.slice(match.index, close + 1) })
+      }
+    }
+    const implementation = new RegExp('\\bimpl\\s+' + name + '\\s*\\{', 'gu')
+    for (const match of source.matchAll(implementation)) {
+      const open = match.index + match[0].lastIndexOf('{')
+      const close = closingDelimiter(source, open)
+      if (close !== -1 && /\bpub\s+fn\s+(?:new|from_parts)\b/u.test(source.slice(open + 1, close))) {
+        matches.push({ index: match.index, text: originalSource.slice(match.index, close + 1) })
+      }
+    }
+  }
+  const implementation = /\bimpl(?:\s*<[^>]*>)?\s+(?:[A-Za-z_]\w*\s*::\s*)*OutboundHttpClient\s+for\b[^{]*\{/gu
+  for (const match of source.matchAll(implementation)) {
+    const open = match.index + match[0].lastIndexOf('{')
+    const close = closingDelimiter(source, open)
+    const body = source.slice(open + 1, close)
+    if (close !== -1 && (
+      /\bfn\s+send\s*\(/u.test(body) ||
+      /\bfn\s+start_batch_until\s*\([^)]*\bVec\s*<\s*(?:[A-Za-z_]\w*\s*::\s*)*OutboundRequest\s*>/u.test(body)
+    )) {
+      matches.push({ index: match.index, text: originalSource.slice(match.index, close + 1) })
+    }
+  }
+  return matches
+}
+
+function findLegacyForms(source, rustSource = false, originalSource = source, checkOutbound = true) {
   const searchable = rustSource ? maskRustCommentsAndLiterals(source) : source
   const memoryAccessor = ['memory_', 'ceiling'].join('')
   return [
+    ...(rustSource && checkOutbound ? outboundLegacyMatches(searchable, originalSource) : []),
     ...regexMatches(
       searchable,
       new RegExp(`\\b${retiredSource}\\b`, 'gu'),
@@ -694,17 +756,109 @@ function deduplicateMatches(matches) {
 }
 
 function findLegacyFormsForPath(path, source) {
-  if (isRustSource(path)) return findLegacyForms(source, true)
+  // Opaque producer contexts replace raw cutoff parameters. Facade example naming stays checked.
+  const preparedProducer =
+    /^crates\/edgezero-core\/src\/outbound(?:\.rs|\/)/u.test(path) ||
+    /^crates\/edgezero-core\/tests\//u.test(path) ||
+    /^crates\/edgezero-adapter-[^/]+\/src\/(?:outbound(?:\.rs|\/)|scheduling\.rs)/u.test(path)
+  const checkOutbound = !path.startsWith('docs/superpowers/')
+  if (isRustSource(path)) {
+    return findLegacyForms(source, true, source, checkOutbound).filter((match) =>
+      !preparedProducer ||
+      !/^(?:let\s+(?:mut\s+)?(?:cutoff|_cutoff|batch_cutoff)\b|(?:cutoff|_cutoff|batch_cutoff)\s*:|(?:start_batch_until|send_all_until)\s*\()/u.test(match.text),
+    )
+  }
   if (!isMarkdownSource(path)) return findLegacyForms(source)
   const views = markdownViews(source)
-  const proseMatches = findLegacyForms(views.prose, false, source)
-  const rustFenceMatches = findLegacyForms(views.rust, true, source)
+  const proseMatches = findLegacyForms(views.prose, false, source, checkOutbound)
+  const rustFenceMatches = findLegacyForms(views.rust, true, source, checkOutbound)
   return deduplicateMatches([...proseMatches, ...rustFenceMatches])
+}
+
+// Prepared-producer spelling exemptions must never exempt retired APIs or public receipts.
+for (const path of [
+  'crates/edgezero-core/src/outbound/batch.rs',
+  'crates/edgezero-core/tests/outbound_prepared_client.rs',
+]) {
+  const parameter = ['cut', 'off'].join('')
+  const current = 'fn issue(' + parameter + ': Deadline) { let ' + parameter + ' = context.observation_cutoff(); }'
+  if (findLegacyFormsForPath(path, current).length !== 0 ||
+      findLegacyFormsForPath(path, 'OutboundBatch::from_futures(work)').length === 0 ||
+      findLegacyFormsForPath(path, 'pub struct OutboundBatchItem { pub index: usize }').length === 0) {
+    process.stderr.write('prepared producer hard-cut checker self-test failed\n')
+    process.exit(2)
+  }
+}
+for (const path of [
+  'docs/superpowers/specs/historical-outbound.md',
+  'docs/superpowers/plans/historical-outbound.md',
+]) {
+  const history = '~~~rust\nOutboundBatch::from_futures(work)\n~~~'
+  if (findLegacyFormsForPath(path, history).length !== 0 ||
+      findLegacyFormsForPath('docs/guide/outbound.md', history).length === 0) {
+    process.stderr.write('historical outbound boundary checker self-test failed\n')
+    process.exit(2)
+  }
+}
+
+for (const symbol of [
+  'BATCH_DISPATCH_SLACK_MAX',
+  'inject_dispatch_slack_for_test',
+  'DISPATCH_SLACK_INJECTION',
+  'DispatchSlackInjection',
+  'DISPATCH_SLACK_MESSAGE',
+]) {
+  for (const path of [
+    'crates/edgezero-core/src/time.rs',
+    'crates/edgezero-core/src/outbound/batch.rs',
+    'crates/edgezero-adapter-fastly/src/outbound.rs',
+    'examples/app-demo/crates/app-demo-core/src/handlers.rs',
+    'tests/fixtures/reusable-app/crates/fixture-core/src/lib.rs',
+  ]) {
+    for (const fixture of [
+      `pub use retired::${symbol} as replacement;`,
+      `#[cfg(feature = "test-utils")] fn probe() { ${symbol}(); }`,
+      `#[cfg(test)] fn probe() { ${symbol}(); }`,
+    ]) {
+      if (findLegacyFormsForPath(path, fixture).length === 0) {
+        process.stderr.write(`dispatch-slack checker missed ${symbol} in ${path}\n`)
+        process.exit(2)
+      }
+    }
+    const nonCode = `// ${symbol}\nconst TEXT: &str = r#"${symbol}"#;`
+    if (findLegacyFormsForPath(path, nonCode).length !== 0 ||
+        findLegacyFormsForPath(path, `fn ${symbol}_unrelated() {}`).length !== 0) {
+      process.stderr.write(`dispatch-slack checker matched non-code or a longer name: ${symbol}\n`)
+      process.exit(2)
+    }
+  }
+  const fenced = `~~~rust\n${symbol}();\n~~~`
+  if (findLegacyFormsForPath('docs/guide/outbound.md', fenced).length === 0 ||
+      findLegacyFormsForPath('docs/guide/outbound.md', `Removed \`${symbol}\`.`).length !== 0 ||
+      findLegacyFormsForPath('docs/superpowers/specs/historical-outbound.md', fenced).length !== 0 ||
+      findLegacyFormsForPath('docs/audits/evidence/historical-outbound.json', JSON.stringify({ symbol })).length !== 0) {
+    process.stderr.write(`dispatch-slack checker lost the live/historical boundary: ${symbol}\n`)
+    process.exit(2)
+  }
 }
 
 const bareCutoff = ['cut', 'off'].join('')
 const batchCutoff = `batch_${bareCutoff}`
 const fixtures = [
+  'Body::Once(bytes)',
+  'Body /* carrier */ :: Stream(source)',
+  'let edgezero_core::Body::Once(bytes) = body;',
+  'match body { edgezero_core::body::Body::Stream(source) => source }',
+  'OutboundBatch::from_futures(slots, work)',
+  'OutboundBatch /* type */ :: from_futures (slots, work)',
+  'finish_batch_item(index, start, end, cutoff, result)',
+  'OutboundBatchItem::new(index, result)',
+  'OutboundBatch::from_driver(slot_count, events)',
+  'OutboundBatch::cutoff(3)',
+  'pub struct OutboundBatchItem { pub index: usize, result: Slot }',
+  'impl OutboundBatchItem { pub fn new(index: usize) -> Self {} }',
+  'impl OutboundHttpClient for Script { async fn send(&self, request: OutboundRequest) {} }',
+  'impl OutboundHttpClient for Script { fn start_batch_until(&self, requests: Vec<OutboundRequest>, observation_cutoff: Deadline) {} }',
   retiredSource,
   `pub type ${retiredSource} = PlatformResourceSource;`,
   `pub /* compatibility */ type /* name */ ${retiredSource} = PlatformResourceSource;`,
@@ -734,6 +888,18 @@ const fixtures = [
   `client.send_all_until(requests, ${bareCutoff})`,
 ]
 const supported = [
+  'Body::from(bytes)',
+  'Body::from_stream(source)',
+  'let (payload, owner) = body.into_parts(); match payload { BodyPayload::Once(bytes) => bytes, BodyPayload::Stream(source) => source }',
+  '// Body::Once(bytes)\nconst TEXT: &str = "Body::Stream(source)";',
+  'OutboundBatch::from_driver(context, events, owner)',
+  'OutboundBatch::cutoff(context)',
+  'OutboundBatchDriverEvent::Item { index, completed_at, outcome }',
+  'pub struct OutboundBatchItem { identity: Identity, index: usize, result: Slot }',
+  'impl OutboundBatchContext { pub(super) fn new() -> Self {} }',
+  'impl OutboundHttpClient for Script { fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {} }',
+  '// OutboundBatch::from_futures(requests, cutoff)',
+  'const TEXT: &str = "OutboundBatchItem::new(index, result)";',
   `${metadata}::new(memory, population, accounting)`,
   `${metadata}::new(memory, population /*, ignored */, accounting)`,
   `${metadata}::new(make::<A, B>(), population, |left, right| accounting(left, right))`,

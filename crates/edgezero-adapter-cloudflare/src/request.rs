@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
+use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 #[cfg(feature = "test-utils")]
@@ -11,6 +12,7 @@ use std::{
 
 #[cfg(feature = "test-utils")]
 use bytes::Bytes;
+use edgezero_core::OutboundScopeOwner;
 use edgezero_core::app::{App, StoreMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
@@ -127,6 +129,15 @@ impl<'app> CloudflareService<'app> {
     /// dispatch fails.
     #[inline]
     pub async fn dispatch(
+        self,
+        req: CfRequest,
+        env: Env,
+        ctx: Context,
+    ) -> Result<CfResponse, WorkerError> {
+        with_callback_scope(self.dispatch_scoped(req, env, ctx)).await
+    }
+
+    async fn dispatch_scoped(
         self,
         req: CfRequest,
         env: Env,
@@ -448,7 +459,7 @@ pub fn deadline_body_releases_source_for_test() -> bool {
     let start = MonotonicInstant::now();
     let clock = MonotonicClock::new(move || start);
     let body = cloudflare_deadline_body(source, Deadline::at_instant(start), clock);
-    let Some(mut body_stream) = body.into_stream() else {
+    let Ok(mut body_stream) = body.into_stream() else {
         return false;
     };
     let Some(Err(error)) = block_on(body_stream.next()) else {
@@ -480,14 +491,14 @@ where
     core_request
         .extensions_mut()
         .insert(outbound_client(app.monotonic_clock()));
-    dispatch_ingress_stream_and(
+    with_callback_scope(dispatch_ingress_stream_and(
         app,
         core_request,
         Stores::default(),
         request_start,
         move || Ok(Some(source)),
         Ok,
-    )
+    ))
     .await
 }
 
@@ -514,14 +525,14 @@ where
         .uri(uri)
         .body(Body::empty())
         .map_err(|error| edge_error_to_worker(&EdgeError::internal(error)))?;
-    dispatch_ingress_stream_and(
+    with_callback_scope(dispatch_ingress_stream_and(
         app,
         core_request,
         Stores::default(),
         request_start,
         move || make_source().map(Some),
         deliver,
-    )
+    ))
     .await
 }
 
@@ -540,7 +551,7 @@ pub async fn dispatch_ingress_source_error_for_test(
         .uri(uri)
         .body(Body::empty())
         .map_err(|error| edge_error_to_worker(&EdgeError::internal(error)))?;
-    dispatch_ingress_stream_and(
+    with_callback_scope(dispatch_ingress_stream_and(
         app,
         core_request,
         Stores::default(),
@@ -551,8 +562,18 @@ pub async fn dispatch_ingress_source_error_for_test(
             )))
         },
         Ok,
-    )
+    ))
     .await
+}
+
+pub(crate) async fn with_callback_scope<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    match OutboundScopeOwner::callback_if_absent() {
+        Some(callback) => callback.run(future).await,
+        None => future.await,
+    }
 }
 
 pub(crate) async fn dispatch_with_handles(
@@ -945,22 +966,529 @@ fn warn_missing_kv_binding_once(kv_binding: &str, error: &impl Display) {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use std::cell::RefCell;
+    use std::rc::{Rc, Weak};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
     use std::time::Duration;
 
     use super::*;
+    use crate::test_runtime::NumericTimeoutGuard;
+    use async_stream::stream;
+    use edgezero_core::app::Hooks;
     use edgezero_core::context::{BodyKind, RequestContext};
     use edgezero_core::http::{Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
-    use edgezero_core::outbound::OutboundRequest;
-    use edgezero_core::response_egress::ResponseEgressCompletion;
+    use edgezero_core::outbound::{
+        OutboundBatch, OutboundFuture, OutboundPending, OutboundRequest, OutboundResponse,
+    };
+    use edgezero_core::response_egress::{
+        ResponseEgressCompletion, ResponseEgressObserver, ResponseEgressReport,
+    };
     use edgezero_core::router::RouterService;
+    use futures::channel::oneshot;
+    use futures_util::future::join;
+    #[cfg(feature = "test-utils")]
+    use futures_util::stream::empty;
+    use futures_util::stream::poll_fn;
     use wasm_bindgen_test::wasm_bindgen_test;
     use worker::js_sys::{Function, Object, Reflect, Uint8Array};
     use worker::wasm_bindgen::JsCast as _;
     use worker::wasm_bindgen::JsValue;
     use worker::worker_sys::Context as WorkerSysContext;
+
+    thread_local! {
+        static RETAINED_SEND: RefCell<Option<OutboundFuture<OutboundResponse>>> = const { RefCell::new(None) };
+        static RETAINED_UPLOAD: RefCell<Weak<()>> = const { RefCell::new(Weak::new()) };
+        static RETAINED_PROGRESS: RefCell<Option<(OutboundPending, OutboundBatch)>> = const { RefCell::new(None) };
+    }
+
+    struct FailingScopeAssembly;
+
+    struct ScopeFetchProbe {
+        probe: JsValue,
+        restore: Function,
+    }
+
+    struct ScopeRoutes;
+
+    struct ScopeTerminalObserver(Mutex<Option<oneshot::Sender<ResponseEgressReport>>>);
+
+    impl ResponseEgressObserver for ScopeTerminalObserver {
+        fn complete(&self, report: &ResponseEgressReport) {
+            let sender = self
+                .0
+                .lock()
+                .expect("terminal sender")
+                .take()
+                .expect("one terminal report");
+            sender.send(report.clone()).expect("terminal receiver");
+        }
+    }
+
+    impl ScopeFetchProbe {
+        fn count(&self, field: &str) -> Option<f64> {
+            Reflect::get(&self.probe, &JsValue::from_str(field))
+                .expect("counter")
+                .as_f64()
+        }
+
+        fn install() -> Self {
+            let probe = Function::new_no_args("const original = globalThis.fetch; const probe = {calls: 0, aborts: 0}; globalThis.fetch = (request, init) => { probe.calls++; if (init.encodeResponseBody !== 'manual' || request.redirect !== 'manual') throw new Error('manual policy lost'); init.signal.addEventListener('abort', () => { probe.aborts++; }, {once: true}); return new Promise(() => {}); }; probe.restore = () => {globalThis.fetch = original;}; return probe;")
+                .call0(&JsValue::UNDEFINED).expect("pending fetch probe");
+            let restore = Reflect::get(&probe, &JsValue::from_str("restore"))
+                .expect("restore")
+                .dyn_into::<Function>()
+                .expect("restore function");
+            Self { probe, restore }
+        }
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "Drop::pin_drop is unstable and conflicts with drop"
+    )]
+    impl Drop for ScopeFetchProbe {
+        fn drop(&mut self) {
+            self.restore
+                .call0(&JsValue::UNDEFINED)
+                .expect("restore fetch");
+        }
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "exercise default application metadata through both native dispatch entrypoints"
+    )]
+    impl Hooks for ScopeRoutes {
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder()
+                .get("/", retain_progress_handler)
+                .build())
+        }
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "exercise defaults before typed route-assembly failure"
+    )]
+    impl Hooks for FailingScopeAssembly {
+        fn routes() -> Result<RouterService, EdgeError> {
+            let client = outbound_client(MonotonicClock::default());
+            let send = client.send(
+                OutboundRequest::post("https://fixture.invalid/")?.body(pending_scope_upload()),
+            );
+            RETAINED_SEND.with(|retained| *retained.borrow_mut() = Some(send));
+            Err(EdgeError::service_unavailable("assembly fixture"))
+        }
+    }
+
+    fn pending_scope_upload() -> Body {
+        let source = Rc::new(());
+        RETAINED_UPLOAD.with(|retained| *retained.borrow_mut() = Rc::downgrade(&source));
+        Body::from_stream(poll_fn(move |_| {
+            assert_eq!(Rc::strong_count(&source), 1);
+            Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+        }))
+    }
+
+    async fn retain_progress(client: &HttpClient) -> Result<(), EdgeError> {
+        let pending = client
+            .begin(OutboundRequest::get("https://fixture.invalid/begin")?)
+            .await?;
+        let batch = client.start_batch_until(
+            vec![
+                OutboundRequest::get("https://fixture.invalid/first")?,
+                OutboundRequest::get("https://fixture.invalid/second")?,
+            ],
+            Deadline::after(Duration::from_secs(10)),
+        );
+        RETAINED_PROGRESS.with(|retained| *retained.borrow_mut() = Some((pending, batch)));
+        Ok(())
+    }
+
+    async fn retain_progress_handler(ctx: RequestContext) -> Result<Response, EdgeError> {
+        retain_progress(&ctx.http_client().expect("request HTTP client")).await?;
+        Delay::from(Duration::from_millis(10)).await;
+        response_builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .map_err(EdgeError::internal)
+    }
+
+    #[wasm_bindgen_test]
+    async fn canonical_dispatch_handoff_aborts_retained_begin_and_batch_fetches() {
+        let _timers = NumericTimeoutGuard::install();
+        for manifest_dispatch in [false, true] {
+            let probe = ScopeFetchProbe::install();
+            let app = App::build::<ScopeRoutes>(crate::CLOUDFLARE_PLATFORM).expect("application");
+            let (env, context) = env_context();
+            let req = native_request(Method::Get, "/", None);
+            let response = if manifest_dispatch {
+                crate::dispatch_app::<ScopeRoutes>(&app, req, env, context).await
+            } else {
+                CloudflareService::new(&app)
+                    .dispatch(req, env, context)
+                    .await
+            }
+            .expect("native handoff");
+            let aborts_at_handoff = probe.count("aborts");
+            let retained = RETAINED_PROGRESS.with(|retained| retained.borrow_mut().take());
+            assert!(
+                retained.is_some(),
+                "both progress handles remain caller-retained"
+            );
+            drop(retained);
+            assert_eq!(response.status_code(), StatusCode::NO_CONTENT.as_u16());
+            assert_eq!(probe.count("calls"), Some(3.0_f64));
+            assert_eq!(
+                aborts_at_handoff,
+                Some(3.0_f64),
+                "scope closes before handoff returns"
+            );
+            assert_eq!(
+                probe.count("aborts"),
+                Some(3.0_f64),
+                "no duplicate abort on handle drop"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    #[cfg(feature = "test-utils")]
+    async fn nested_dispatch_return_keeps_outer_callback_work_live() {
+        let _timers = NumericTimeoutGuard::install();
+        for helper in [0_u8, 1, 2] {
+            let probe = ScopeFetchProbe::install();
+            let outer = OutboundScopeOwner::callback();
+            let app = App::build::<ScopeRoutes>(crate::CLOUDFLARE_PLATFORM).expect("application");
+            outer
+                .run(async {
+                    if helper == 2 {
+                        drop(
+                            dispatch_ingress_stream_for_test(
+                                &app,
+                                CoreMethod::GET,
+                                "/".parse().expect("URI"),
+                                empty::<Result<Bytes, EdgeError>>(),
+                            )
+                            .await
+                            .expect("test dispatch helper"),
+                        );
+                    } else {
+                        let (env, context) = env_context();
+                        let req = native_request(Method::Get, "/", None);
+                        let response = if helper == 1 {
+                            crate::dispatch_app::<ScopeRoutes>(&app, req, env, context).await
+                        } else {
+                            CloudflareService::new(&app)
+                                .dispatch(req, env, context)
+                                .await
+                        }
+                        .expect("nested dispatch helper");
+                        assert_eq!(response.status_code(), StatusCode::NO_CONTENT.as_u16());
+                    }
+                })
+                .await;
+            let aborts_at_helper_return = probe.count("aborts");
+            drop(outer);
+            let aborts_at_outer_exit = probe.count("aborts");
+            let retained = RETAINED_PROGRESS.with(|retained| retained.borrow_mut().take());
+            assert!(retained.is_some(), "outer caller retains both handles");
+            drop(retained);
+            assert_eq!(probe.count("calls"), Some(3.0_f64));
+            assert_eq!(
+                aborts_at_helper_return,
+                Some(0.0_f64),
+                "helper return is not callback return"
+            );
+            assert_eq!(
+                aborts_at_outer_exit,
+                Some(3.0_f64),
+                "only the outer callback closes work"
+            );
+            assert_eq!(probe.count("aborts"), Some(3.0_f64), "no duplicate cleanup");
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn closed_nested_dispatch_cannot_create_a_fresh_callback_scope() {
+        let _timers = NumericTimeoutGuard::install();
+        let probe = ScopeFetchProbe::install();
+        let outer = OutboundScopeOwner::callback();
+        let application_status = Arc::new(Mutex::new(None));
+        let observed = Arc::clone(&application_status);
+        let router = RouterService::builder()
+            .get("/", move |ctx: RequestContext| {
+                let recorded = Arc::clone(&observed);
+                async move {
+                    let client = ctx.http_client().expect("request HTTP client");
+                    let error = client
+                        .send(
+                            OutboundRequest::get("https://fixture.invalid/")?
+                                .timeout(Duration::ZERO),
+                        )
+                        .await
+                        .expect_err("closed scope refuses outbound dispatch");
+                    if !matches!(error, EdgeError::Internal { .. }) {
+                        return Err(error);
+                    }
+                    let response = response_builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .body(Body::empty())
+                        .map_err(EdgeError::internal)?;
+                    *recorded.lock().expect("application status") = Some(response.status());
+                    Ok(response)
+                }
+            })
+            .build();
+        let app = App::new(router);
+        let (env, context) = env_context();
+        outer.close();
+        let error = outer
+            .run(CloudflareService::new(&app).dispatch(
+                native_request(Method::Get, "/", None),
+                env,
+                context,
+            ))
+            .await
+            .expect_err("closed ambient scope cannot create a new egress lifetime");
+        assert_eq!(
+            *application_status.lock().expect("application status"),
+            Some(StatusCode::NO_CONTENT),
+            "helper must preserve the closed ambient scope"
+        );
+        assert!(
+            matches!(error, WorkerError::RustError(message) if message == "internal error: response conversion failed")
+        );
+        assert_eq!(
+            probe.count("calls"),
+            Some(0.0_f64),
+            "closed dispatch performs no SDK I/O"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn attached_body_owner_keeps_pre_head_fetches_live_without_changing_framing() {
+        let _timers = NumericTimeoutGuard::install();
+        for streamed in [false, true] {
+            let probe = ScopeFetchProbe::install();
+            let router = RouterService::builder()
+                .get("/", move |ctx: RequestContext| async move {
+                    let owner = OutboundScopeOwner::response_body();
+                    owner
+                        .run(retain_progress(&ctx.http_client().expect("HTTP client")))
+                        .await?;
+                    let body = if streamed {
+                        Body::from_stream(stream! {
+                            yield Ok(Bytes::from_static(b"live"));
+                        })
+                    } else {
+                        Body::from(Bytes::from_static(b"live"))
+                    };
+                    owner.attach(Response::new(body))
+                })
+                .build();
+            let mut app = App::new(router);
+            let (published, terminal) = oneshot::channel();
+            app.set_response_egress_observer(ScopeTerminalObserver(Mutex::new(Some(published))));
+            let (env, context) = env_context();
+            let mut response = CloudflareService::new(&app)
+                .dispatch(native_request(Method::Get, "/", None), env, context)
+                .await
+                .expect("native handoff before origin heads");
+            assert_eq!(response.status_code(), StatusCode::OK.as_u16());
+            let declared = response
+                .headers()
+                .get("content-length")
+                .expect("length header");
+            assert_eq!(declared.as_deref(), if streamed { None } else { Some("4") });
+            Delay::from(Duration::from_millis(10)).await;
+            assert_eq!(probe.count("calls"), Some(3.0_f64));
+            assert_eq!(
+                probe.count("aborts"),
+                Some(0.0_f64),
+                "attached jobs survive callback return"
+            );
+            assert_eq!(response.bytes().await.expect("body bytes"), b"live");
+            let _report = terminal.await.expect("canonical terminal report");
+            let aborts_at_terminal = probe.count("aborts");
+            let retained = RETAINED_PROGRESS.with(|retained| retained.borrow_mut().take());
+            assert!(
+                retained.is_some(),
+                "handles remain retained after body completion"
+            );
+            drop(retained);
+            assert_eq!(
+                aborts_at_terminal,
+                Some(3.0_f64),
+                "exact attached owner closes at terminal"
+            );
+            assert_eq!(
+                probe.count("aborts"),
+                Some(3.0_f64),
+                "each fetch aborts once"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn response_body_scope_keeps_fetches_live_until_eof_or_source_error() {
+        let _timers = NumericTimeoutGuard::install();
+        for source_error in [false, true] {
+            let probe = ScopeFetchProbe::install();
+            let (finish, completion_rx) = oneshot::channel::<()>();
+            let shared_receiver = Arc::new(Mutex::new(Some(completion_rx)));
+            let router = RouterService::builder()
+                .get("/", move |ctx: RequestContext| {
+                    let complete_body = shared_receiver
+                        .lock()
+                        .expect("finish receiver")
+                        .take()
+                        .expect("one body");
+                    async move {
+                        let client = ctx.http_client().expect("request HTTP client");
+                        let source = stream! {
+                            retain_progress(&client).await.expect("body progress");
+                            yield Ok(Bytes::from_static(b"live"));
+                            complete_body.await.expect("body release");
+                            if source_error {
+                                yield Err(EdgeError::bad_gateway("body fixture"));
+                            }
+                        };
+                        Ok::<_, EdgeError>(Response::new(Body::from_stream(source)))
+                    }
+                })
+                .build();
+            let mut app = App::new(router);
+            let (published, terminal) = oneshot::channel();
+            app.set_response_egress_observer(ScopeTerminalObserver(Mutex::new(Some(published))));
+            let (env, context) = env_context();
+            let mut response = CloudflareService::new(&app)
+                .dispatch(native_request(Method::Get, "/", None), env, context)
+                .await
+                .expect("streaming native handoff");
+            let release = async {
+                Delay::from(Duration::from_millis(10)).await;
+                assert_eq!(probe.count("calls"), Some(3.0_f64));
+                assert_eq!(
+                    probe.count("aborts"),
+                    Some(0.0_f64),
+                    "body work survives callback handoff"
+                );
+                finish.send(()).expect("release body");
+            };
+            let (received, ()) = join(response.bytes(), release).await;
+            if source_error {
+                assert!(received.is_err());
+            } else {
+                assert_eq!(received.expect("body bytes"), b"live");
+            }
+            let _report = terminal.await.expect("canonical egress terminal report");
+            let aborts_at_terminal = probe.count("aborts");
+            let retained = RETAINED_PROGRESS.with(|retained| retained.borrow_mut().take());
+            assert!(
+                retained.is_some(),
+                "body still retains both progress handles"
+            );
+            drop(retained);
+            assert_eq!(
+                aborts_at_terminal,
+                Some(3.0_f64),
+                "body terminal closes its scope"
+            );
+            assert_eq!(
+                probe.count("aborts"),
+                Some(3.0_f64),
+                "each native fetch aborts once"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn run_app_scope_covers_assembly_error_and_native_handoff() {
+        let _timers = NumericTimeoutGuard::install();
+        let (env, context) = env_context();
+        let mut response = crate::run_app::<FailingScopeAssembly>(
+            native_request(Method::Get, "/", None),
+            env,
+            context,
+        )
+        .await
+        .expect("assembly-error native handoff");
+        let released_at_handoff =
+            RETAINED_UPLOAD.with(|retained| retained.borrow().upgrade().is_none());
+        let retained = RETAINED_SEND.with(|slot| slot.borrow_mut().take());
+        assert!(
+            retained.is_some(),
+            "assembly hook retains its unpolled send"
+        );
+        drop(retained);
+        assert!(
+            released_at_handoff,
+            "assembly failure closes the outer callback"
+        );
+        assert_eq!(
+            response.status_code(),
+            StatusCode::SERVICE_UNAVAILABLE.as_u16()
+        );
+        assert!(
+            !response
+                .bytes()
+                .await
+                .expect("assembly-error body")
+                .is_empty()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn callback_handoff_releases_retained_unpolled_send_without_polling_upload() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let router = RouterService::builder()
+            .get("/", move |ctx: RequestContext| {
+                let observed = Arc::clone(&counted);
+                async move {
+                    let source = Rc::new(());
+                    RETAINED_UPLOAD
+                        .with(|retained| *retained.borrow_mut() = Rc::downgrade(&source));
+                    let body = Body::from_stream(poll_fn(move |_| {
+                        assert_eq!(Rc::strong_count(&source), 1);
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+                    }));
+                    let client = ctx.http_client().expect("request HTTP client");
+                    let send = client.send(
+                        OutboundRequest::post("https://fixture.invalid/")
+                            .expect("request")
+                            .body(body),
+                    );
+                    RETAINED_SEND.with(|retained| *retained.borrow_mut() = Some(send));
+                    response_builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .body(Body::empty())
+                        .map_err(EdgeError::internal)
+                }
+            })
+            .build();
+        let app = App::new(router);
+        let (env, context) = env_context();
+        let response = CloudflareService::new(&app)
+            .dispatch(native_request(Method::Get, "/", None), env, context)
+            .await
+            .expect("native handoff");
+        let released_at_handoff =
+            RETAINED_UPLOAD.with(|retained| retained.borrow().upgrade().is_none());
+        let retained = RETAINED_SEND.with(|slot| slot.borrow_mut().take());
+        assert!(retained.is_some(), "caller still retains the unpolled send");
+        drop(retained);
+        drop(response);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert!(released_at_handoff, "callback closes at native handoff");
+        assert!(RETAINED_UPLOAD.with(|upload_ref| upload_ref.borrow().upgrade().is_none()));
+    }
 
     fn native_request(method: Method, path: &str, body: Option<&[u8]>) -> CfRequest {
         let mut init = worker::RequestInit::new();
@@ -973,9 +1501,19 @@ mod tests {
     }
 
     fn env_context() -> (Env, Context) {
+        Function::new_no_args(include_str!("../tests/worker_runtime.js"))
+            .call0(&JsValue::UNDEFINED)
+            .expect("guest Workers stream fixture");
+        let context = Object::new();
+        Reflect::set(
+            &context,
+            &JsValue::from_str("waitUntil"),
+            Function::new_with_args("_promise", "return undefined;").as_ref(),
+        )
+        .expect("guest waitUntil");
         (
             Object::new().unchecked_into::<Env>(),
-            Context::new(Object::new().unchecked_into::<WorkerSysContext>()),
+            Context::new(context.unchecked_into::<WorkerSysContext>()),
         )
     }
 
@@ -1190,12 +1728,17 @@ mod tests {
                 OutboundRequest::get("https://example.com/")?.body(Body::from("invalid GET body"));
             let results = client
                 .send_all_until(vec![request], Deadline::after(Duration::from_secs(1)))
-                .await?;
-            let result = results
-                .slots
+                .await
+                .map_err(|failure| failure.into_parts().0)?;
+            let observed_slot = results
+                .slots()
                 .first()
-                .and_then(Option::as_ref)
                 .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("missing outbound result")))?;
+            let edgezero_core::OutboundCollectedSlot::Resolved(result) = observed_slot else {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "unresolved outbound result"
+                )));
+            };
             if !matches!(&result.outcome, Err(EdgeError::BadRequest { .. })) {
                 return Err(EdgeError::internal(anyhow::anyhow!(
                     "clock probe did not fail during batch preflight"

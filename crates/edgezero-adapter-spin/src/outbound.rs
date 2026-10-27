@@ -1,6 +1,13 @@
 #![cfg_attr(
     any(test, all(feature = "spin", target_arch = "wasm32")),
     expect(
+        clippy::self_named_module_files,
+        reason = "retain the repository module-file convention despite contradictory restriction lints"
+    )
+)]
+#![cfg_attr(
+    any(test, all(feature = "spin", target_arch = "wasm32")),
+    expect(
         clippy::arbitrary_source_item_ordering,
         reason = "target and test helper modules stay adjacent to the imports that define their boundaries"
     )
@@ -13,7 +20,13 @@
     )
 )]
 
+#[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
+use std::time::Duration;
+
 use edgezero_core::error::EdgeError;
+
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+mod scheduling;
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
 use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
 
@@ -70,11 +83,16 @@ mod exchange {
         }
     }
 
-    pub(super) fn request_timeouts(remaining: Duration) -> RequestTimeouts {
+    pub(super) fn request_timeouts(
+        remaining: Duration,
+        connect: Option<Duration>,
+    ) -> RequestTimeouts {
         let full_remaining = duration_nanos(remaining);
         RequestTimeouts {
             between_bytes: full_remaining,
-            connect: full_remaining,
+            connect: duration_nanos(
+                connect.map_or(remaining, |configured| configured.min(remaining)),
+            ),
             first_byte: full_remaining,
         }
     }
@@ -130,6 +148,7 @@ mod exchange {
         .boxed_local()
     }
 
+    #[cfg(test)]
     pub(super) async fn settle_reset_content(
         mut source: BodyStream,
         declared_body: bool,
@@ -140,7 +159,7 @@ mod exchange {
         Ok(())
     }
 
-    fn checked_now(
+    pub(super) fn checked_now(
         time: &OutboundTime,
         previous: &mut MonotonicInstant,
     ) -> Result<MonotonicInstant, EdgeError> {
@@ -196,6 +215,7 @@ mod exchange {
         Ok(output)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn deadline_stream(
         mut source: BodyStream,
         budget: DispatchBudget,
@@ -325,24 +345,36 @@ mod exchange {
     all(feature = "spin", target_arch = "wasm32", feature = "test-utils")
 ))]
 use exchange::READY_ITEM_YIELD_QUOTA;
-#[cfg(test)]
-use exchange::duration_nanos;
+#[cfg(any(
+    test,
+    all(feature = "spin", target_arch = "wasm32", feature = "test-utils")
+))]
+use exchange::deadline_stream;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 use exchange::{
     UploadCompletion, cooperate_after_response_read, cooperative_stream, cooperative_yield_once,
-    deadline_stream, race_deadline, request_timeouts, run_exchange, settle_reset_content,
-    should_emit_response_chunk,
+    race_deadline, request_timeouts, run_exchange, should_emit_response_chunk,
 };
+#[cfg(test)]
+use exchange::{duration_nanos, settle_reset_content};
 
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 mod spin_impl {
+    #[cfg(feature = "test-utils")]
+    mod scope_tests;
+
+    use core::ffi::c_void;
+    use core::ptr::null_mut;
+    #[cfg(any(test, feature = "test-utils"))]
+    use std::cell::RefCell;
+    #[cfg(any(test, feature = "test-utils"))]
     use std::num::NonZeroU64;
+    use std::rc::Rc;
     use std::time::Duration;
 
     use async_stream::stream;
-    use async_trait::async_trait;
     use bytes::Bytes;
-    use edgezero_core::body::{Body, BodyStream};
+    use edgezero_core::body::{Body, BodyPayload, BodyStream};
     #[cfg(feature = "test-utils")]
     use edgezero_core::error::BudgetSource;
     use edgezero_core::error::{BadGatewayReason, EdgeError};
@@ -352,17 +384,18 @@ mod spin_impl {
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
-        OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse, OutboundTime,
-        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
-        ResponseMode, apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
+        IndependentOutboundProgress, OutboundBatch, OutboundBatchDriverEvent,
+        OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
+        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundPending,
+        OutboundPreparedBatch, OutboundProgressRuntime, OutboundRequest, OutboundRequestParts,
+        OutboundResponseContext, OutboundSendMode, OutboundTime,
     };
-    use edgezero_core::time::{
-        Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
-    };
+    #[cfg(any(test, feature = "test-utils"))]
+    use edgezero_core::time::{Deadline, MonotonicInstant};
+    use edgezero_core::time::{DispatchBudget, MonotonicClock};
     use futures_util::StreamExt as _;
-    use futures_util::future::{FutureExt as _, LocalBoxFuture};
-    use futures_util::stream::once;
+    use futures_util::future::FutureExt as _;
+    use futures_util::stream::{iter, once};
     use spin_sdk::time::sleep;
     use spin_sdk::wasip3::http::client;
     use spin_sdk::wasip3::http::types::{
@@ -370,20 +403,51 @@ mod spin_impl {
         RequestOptionsError, Response, Scheme,
     };
     use spin_sdk::wasip3::http_compat::BodyWriter;
-    use spin_sdk::wasip3::wit_bindgen::{FutureWriter, StreamResult};
+    use spin_sdk::wasip3::spawn;
+    use spin_sdk::wasip3::wit_bindgen::{FutureReader, FutureWriter, StreamReader, StreamResult};
     use spin_sdk::wasip3::wit_future;
 
+    #[cfg(any(test, feature = "test-utils"))]
+    use super::deadline_stream;
     use super::{
-        UploadCompletion, cooperate_after_response_read, cooperative_yield_once, deadline_stream,
-        map_spin_host_error, race_deadline, run_exchange, settle_reset_content,
+        UploadCompletion, cooperate_after_response_read, cooperative_yield_once,
+        map_spin_dispatch_error, map_spin_host_error, race_deadline, run_exchange,
         should_emit_response_chunk, timeout_error,
     };
 
     const RESPONSE_READ_BYTES: usize = 16 * 1024;
 
+    #[expect(
+        unsafe_code,
+        reason = "query and immediately restore the pinned wit-bindgen task-pointer ABI without dereferencing it"
+    )]
+    fn ensure_p3_context() -> Result<(), EdgeError> {
+        unsafe extern "C" {
+            fn wasip3_task_set(task: *mut c_void) -> *mut c_void;
+        }
+        // SAFETY: the pinned ABI permits this getter sequence; no callback or suspension intervenes.
+        let prior = unsafe { wasip3_task_set(null_mut()) };
+        // SAFETY: restore the identical opaque pointer immediately, without dereferencing it.
+        let _restored = unsafe { wasip3_task_set(prior) };
+        let active = !prior.is_null();
+        if active {
+            Ok(())
+        } else {
+            Err(EdgeError::internal(anyhow::anyhow!(
+                "Spin outbound scheduling requires an active WASIp3 task"
+            )))
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    use edgezero_core::time::dispatch_budget;
+    #[cfg(any(test, feature = "test-utils"))]
+    use edgezero_core::{OutboundProxyMarker, OutboundResponse, ResponseDecoding, ResponseMode};
+
     pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
         OutboundTime::new(clock, |deadline, paired_clock| {
             Box::pin(async move {
+                ensure_p3_context()?;
                 if let Some(remaining) = deadline.remaining_at(paired_clock.now()) {
                     sleep(remaining).await;
                 }
@@ -398,17 +462,85 @@ mod spin_impl {
         time: OutboundTime,
     }
 
-    struct PreparedRequest {
-        budget: DispatchBudget,
-        parts: OutboundRequestParts,
-    }
-
     #[derive(Clone, Copy)]
     enum RequestTargetPart {
         Authority,
         Method,
         Path,
         Scheme,
+    }
+
+    struct PreparedRequestBody {
+        writer: Option<BodyWriter>,
+        contents: Option<StreamReader<u8>>,
+        trailers: FutureReader<Result<Option<Fields>, ErrorCode>>,
+    }
+
+    const EMPTY_REQUEST_TRAILERS: fn() -> Result<Option<Fields>, ErrorCode> = || Ok(None);
+
+    fn prepare_request_body(method: &Method, body: &Body) -> PreparedRequestBody {
+        if matches!(*method, Method::GET | Method::HEAD)
+            && body.as_bytes().is_some_and(<[u8]>::is_empty)
+        {
+            // Publish clean trailers, not BodyWriter's error-on-drop default.
+            let (complete, trailers) = wit_future::new(EMPTY_REQUEST_TRAILERS);
+            drop(complete);
+            return PreparedRequestBody {
+                writer: None,
+                contents: None,
+                trailers,
+            };
+        }
+        let (writer, contents, trailers) = BodyWriter::new();
+        PreparedRequestBody {
+            writer: Some(writer),
+            contents: Some(contents),
+            trailers,
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn bodyless_request_resources_hold() -> bool {
+        if !matches!(EMPTY_REQUEST_TRAILERS(), Ok(None)) {
+            return false;
+        }
+        for method in [Method::GET, Method::HEAD] {
+            let body = prepare_request_body(&method, &Body::empty());
+            if body.writer.is_some() || body.contents.is_some() {
+                drop((body.contents, body.trailers, body.writer));
+                return false;
+            }
+            let (request, request_done) =
+                Request::new(Fields::new(), body.contents, body.trailers, None);
+            let (complete, completed) = wit_future::new(|| Ok(()));
+            let (mut contents, trailers) = Request::consume_body(request, completed);
+            let closed_empty = matches!(
+                contents.read(Vec::with_capacity(1)).now_or_never(),
+                Some((StreamResult::Dropped, bytes)) if bytes.is_empty()
+            );
+            // The local wire fixture checks the non-numeric trailer/completion values
+            // across components; the pinned host cannot loop them back within one.
+            drop((contents, trailers, request_done, complete));
+            if !closed_empty {
+                return false;
+            }
+        }
+        for (method, source) in [
+            (Method::POST, Body::empty()),
+            (Method::GET, Body::from("payload")),
+        ] {
+            let PreparedRequestBody {
+                writer,
+                contents,
+                trailers,
+            } = prepare_request_body(&method, &source);
+            let upload_retained = writer.is_some() && contents.is_some();
+            drop((contents, trailers, writer));
+            if !upload_retained {
+                return false;
+            }
+        }
+        true
     }
 
     impl SpinOutboundClient {
@@ -426,53 +558,22 @@ mod spin_impl {
             Self { time }
         }
 
-        fn prepare(
-            request: OutboundRequest,
-            started_at: MonotonicInstant,
-        ) -> Result<PreparedRequest, EdgeError> {
-            super::validate_request(&request, super::OutboundSendMode::Send)?;
-            Self::prepare_validated(request, started_at, None)
-        }
-
-        fn prepare_batch(
-            request: OutboundRequest,
-            started_at: MonotonicInstant,
-            observation_cutoff: Deadline,
-        ) -> Result<PreparedRequest, EdgeError> {
-            super::validate_batch_request(&request)?;
-            Self::prepare_validated(request, started_at, Some(observation_cutoff))
-        }
-
-        fn prepare_validated(
-            mut request: OutboundRequest,
-            started_at: MonotonicInstant,
-            observation_cutoff: Option<Deadline>,
-        ) -> Result<PreparedRequest, EdgeError> {
-            let budget = dispatch_budget(&request, started_at, observation_cutoff)?;
-            normalize_for_dispatch(&mut request)?;
-            Ok(PreparedRequest {
-                budget,
-                parts: request.into_parts(),
-            })
-        }
-
-        async fn execute(&self, prepared: PreparedRequest) -> Result<OutboundResponse, EdgeError> {
-            let PreparedRequest { budget, parts } = prepared;
+        async fn execute(prepared: OutboundDispatchRequest) -> Result<OutboundHead, EdgeError> {
+            ensure_p3_context()?;
+            let (parts, context) = prepared.into_parts();
+            let time = context.time().clone();
+            let budget = context.budget();
+            let mut previous = context.entered_at();
+            let observed = super::exchange::checked_now(&time, &mut previous)?;
+            if budget.deadline.is_expired_at(observed) {
+                return Err(timeout_error(budget.cause));
+            }
             let OutboundRequestParts {
                 body,
+                connect_timeout,
                 mut headers,
-                max_decoder_bytes,
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_encoded_response_bytes,
                 max_request_body_bytes,
-                max_response_header_bytes,
-                max_response_header_count,
                 method,
-                proxy_marker,
-                response_decoding,
-                response_mode,
                 uri,
                 ..
             } = parts;
@@ -482,33 +583,45 @@ mod spin_impl {
             }
 
             let fields = request_fields(&headers)?;
-            let options = request_options(budget, &self.time)?;
-            let (writer, contents, trailers) = BodyWriter::new();
-            let (request, request_done) =
-                Request::new(fields, Some(contents), trailers, Some(options));
+            let options = request_options(budget, &time, connect_timeout)?;
+            let PreparedRequestBody {
+                writer,
+                contents,
+                trailers,
+            } = prepare_request_body(&method, &body);
+            let (request, request_done) = Request::new(fields, contents, trailers, Some(options));
             set_request_target(&request, &method, &uri)?;
+            let exchange_time = time.clone();
             let exchange = async move {
-                let upload = pump_request_body(
-                    body,
-                    max_request_body_bytes,
-                    writer,
-                    budget,
-                    self.time.clone(),
-                );
+                let upload = async {
+                    match writer {
+                        Some(upload_writer) => {
+                            pump_request_body(
+                                body,
+                                max_request_body_bytes,
+                                upload_writer,
+                                budget,
+                                exchange_time.clone(),
+                            )
+                            .await
+                        }
+                        None => Ok(UploadCompletion::Complete),
+                    }
+                };
                 let send = client::send(request);
                 run_exchange(send, upload, request_done, |error, phase| {
-                    map_spin_host_error(
+                    map_spin_dispatch_error(
                         error,
                         budget.deadline,
                         budget.cause,
-                        self.time.clock().now(),
+                        exchange_time.clock().now(),
                         phase,
+                        connect_timeout,
                     )
                 })
                 .await
             };
-            let mut previous = self.time.clock().now();
-            let response = race_deadline(exchange, budget, &self.time, &mut previous, |result| {
+            let response = race_deadline(exchange, budget, &time, &mut previous, |result| {
                 result
                     .as_ref()
                     .err()
@@ -517,23 +630,7 @@ mod spin_impl {
             })
             .await??;
 
-            process_response(
-                response,
-                method,
-                proxy_marker,
-                response_decoding,
-                response_mode,
-                budget,
-                max_decoder_bytes,
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_encoded_response_bytes,
-                max_response_header_bytes,
-                max_response_header_count,
-                self.time.clone(),
-            )
-            .await
+            response_head(response, context)
         }
     }
 
@@ -544,52 +641,97 @@ mod spin_impl {
         }
     }
 
-    #[async_trait(?Send)]
     impl OutboundHttpClient for SpinOutboundClient {
         #[inline]
-        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            let started_at = self.time.clock().now();
-            let prepared = Self::prepare(request, started_at)?;
-            self.execute(prepared).await
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
         }
 
         #[inline]
-        fn start_batch_until(
+        fn time(&self) -> OutboundTime {
+            self.time.clone()
+        }
+
+        #[inline]
+        fn validate_supported_options(
             &self,
-            requests: Vec<OutboundRequest>,
-            observation_cutoff: Deadline,
-        ) -> OutboundBatch {
-            let batch_started_at = self.time.clock().now();
-            let slot_count = requests.len();
-            if observation_cutoff.is_expired_at(batch_started_at) {
-                return OutboundBatch::cutoff(slot_count);
-            }
+            request: &OutboundRequest,
+            mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            super::validate_request(request, mode)
+        }
 
-            let mut completed = Vec::new();
-            let mut pending_slots = Vec::<LocalBoxFuture<'static, _>>::new();
-            for (index, request) in requests.into_iter().enumerate() {
-                match Self::prepare_batch(request, batch_started_at, observation_cutoff) {
-                    Ok(prepared) => {
-                        let client = self.clone();
-                        pending_slots.push(
-                            async move {
-                                let outcome = client.execute(prepared).await;
-                                (index, client.time.clock().now(), outcome)
-                            }
-                            .boxed_local(),
-                        );
-                    }
-                    Err(error) => completed.push((index, self.time.clock().now(), Err(error))),
-                }
-            }
+        #[inline]
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            let scope = request.scope().clone();
+            let time = request.time().clone();
+            let entered_at = request.entered_at();
+            scope.run(time, entered_at, Self::execute(request).boxed_local())
+        }
 
-            OutboundBatch::from_futures(
-                slot_count,
-                batch_started_at,
-                observation_cutoff,
-                completed,
-                pending_slots,
+        #[inline]
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            ensure_p3_context()?;
+            let future = self.dispatch_head(request);
+            super::scheduling::schedule_exchange(
+                async move { future.await?.finish().await }.boxed_local(),
+                spawn,
             )
+        }
+
+        #[inline]
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, slots) = batch.into_slots();
+            if slots.is_empty() {
+                return OutboundBatch::cutoff(context);
+            }
+            let completed_at = context.clock().now();
+            if context.observation_cutoff().is_expired_at(completed_at) {
+                let mut events = Vec::new();
+                let mut unresolved = false;
+                for (index, request) in slots {
+                    let budget = request.budget();
+                    if budget
+                        .own_deadline_expired_before(context.observation_cutoff(), completed_at)
+                    {
+                        events.push(OutboundBatchDriverEvent::Item {
+                            index,
+                            completed_at,
+                            outcome: Err(timeout_error(budget.cause)),
+                        });
+                    } else {
+                        unresolved = true;
+                    }
+                }
+                if unresolved {
+                    events.push(OutboundBatchDriverEvent::Cutoff);
+                }
+                return OutboundBatch::from_driver(
+                    context,
+                    iter(events),
+                    OutboundExchangeOwner::new(|| {}),
+                );
+            }
+            if let Err(error) = ensure_p3_context() {
+                return OutboundBatch::from_driver(
+                    context,
+                    once(async move { edgezero_core::OutboundBatchDriverEvent::Failed(error) }),
+                    OutboundExchangeOwner::new(|| {}),
+                );
+            }
+            let exchanges = slots
+                .into_iter()
+                .map(|(index, request)| {
+                    let budget = request.budget();
+                    let head = self.dispatch_head(request);
+                    (
+                        index,
+                        budget,
+                        async move { head.await?.finish().await }.boxed_local(),
+                    )
+                })
+                .collect();
+            super::scheduling::schedule_prepared_batch(context, exchanges, spawn)
         }
     }
 
@@ -606,23 +748,49 @@ mod spin_impl {
     fn request_options(
         budget: DispatchBudget,
         time: &OutboundTime,
+        connect_timeout: Option<Duration>,
     ) -> Result<RequestOptions, EdgeError> {
         let options = RequestOptions::new();
         let remaining = budget_remaining(budget, time)?;
-        let timeouts = super::request_timeouts(remaining);
-        set_timeout_option(
-            SpinTimeoutOption::Connect,
-            &options.set_connect_timeout(Some(timeouts.connect())),
-        )?;
-        set_timeout_option(
-            SpinTimeoutOption::FirstByte,
-            &options.set_first_byte_timeout(Some(timeouts.first_byte())),
-        )?;
-        set_timeout_option(
-            SpinTimeoutOption::BetweenBytes,
-            &options.set_between_bytes_timeout(Some(timeouts.between_bytes())),
-        )?;
+        let timeouts = super::request_timeouts(remaining, connect_timeout);
+        apply_timeout_settings(timeouts, |option, value| match option {
+            SpinTimeoutOption::Connect => options.set_connect_timeout(Some(value)),
+            SpinTimeoutOption::FirstByte => options.set_first_byte_timeout(Some(value)),
+            SpinTimeoutOption::BetweenBytes => options.set_between_bytes_timeout(Some(value)),
+            _ => Err(RequestOptionsError::Other(None)),
+        })?;
         Ok(options)
+    }
+
+    fn apply_timeout_settings(
+        timeouts: super::exchange::RequestTimeouts,
+        mut setter: impl FnMut(SpinTimeoutOption, u64) -> Result<(), RequestOptionsError>,
+    ) -> Result<(), EdgeError> {
+        for (option, value) in [
+            (SpinTimeoutOption::Connect, timeouts.connect()),
+            (SpinTimeoutOption::FirstByte, timeouts.first_byte()),
+            (SpinTimeoutOption::BetweenBytes, timeouts.between_bytes()),
+        ] {
+            set_timeout_option(option, &setter(option, value))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub fn request_timeout_settings_for_test<Setter>(
+        remaining: Duration,
+        configured_connect: Option<Duration>,
+        setter: Setter,
+    ) -> Result<(), EdgeError>
+    where
+        Setter: FnMut(SpinTimeoutOption, u64) -> Result<(), RequestOptionsError>,
+    {
+        apply_timeout_settings(
+            super::request_timeouts(remaining, configured_connect),
+            setter,
+        )
     }
 
     fn set_timeout_option(
@@ -798,9 +966,10 @@ mod spin_impl {
             ..
         } = writer;
         let mut total = 0_u64;
-        let mut source = match body {
-            Body::Once(bytes) => once(async move { Ok(bytes) }).boxed_local(),
-            Body::Stream(source) => source,
+        let (payload, _scope) = body.into_parts();
+        let mut source = match payload {
+            BodyPayload::Once(bytes) => once(async move { Ok(bytes) }).boxed_local(),
+            BodyPayload::Stream(source) => source,
         };
 
         // `BodyWriter` configures `result_writer` to publish a typed host error on drop.
@@ -861,9 +1030,107 @@ mod spin_impl {
         }
     }
 
+    fn response_head(
+        response: Response,
+        context: OutboundResponseContext,
+    ) -> Result<OutboundHead, EdgeError> {
+        let time = context.time().clone();
+        let budget = context.budget();
+        budget_remaining(budget, &time)?;
+        let status = StatusCode::from_u16(response.get_status_code()).map_err(|_error| {
+            EdgeError::bad_gateway_with_reason(
+                "Spin returned an invalid upstream status code",
+                BadGatewayReason::Protocol,
+            )
+        })?;
+        let headers = OutboundHeaderInput::new(
+            "spin",
+            response_headers(&response)?,
+            OutboundHeaderFidelity::AdapterVisibleFields,
+        );
+        // The encoded stream alone owns the WASI reader, trailers and completion writer.
+        OutboundHead::new(
+            status,
+            headers,
+            super::cooperative_stream(response_stream(response, budget, time)),
+            context,
+            OutboundExchangeOwner::new(|| {}),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    std::thread_local! {
+        static FIXTURE_RESPONSE: RefCell<Option<Response>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    struct FixtureClient(OutboundTime);
+
+    #[cfg(any(test, feature = "test-utils"))]
+    impl OutboundHttpClient for FixtureClient {
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn time(&self) -> OutboundTime {
+            self.0.clone()
+        }
+
+        fn validate_supported_options(
+            &self,
+            request: &OutboundRequest,
+            mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            super::validate_request(request, mode)
+        }
+
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            let optional_response = FIXTURE_RESPONSE.with(|slot| slot.borrow_mut().take());
+            Box::pin(async move {
+                let response = optional_response.ok_or_else(|| {
+                    EdgeError::internal(anyhow::anyhow!("missing Spin fixture response"))
+                })?;
+                response_head(response, request.into_parts().1)
+            })
+        }
+
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            let head = self.dispatch_head(request);
+            super::scheduling::schedule_exchange(
+                async move { head.await?.finish().await }.boxed_local(),
+                spawn,
+            )
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, requests) = batch.into_slots();
+            if requests.is_empty()
+                || context
+                    .observation_cutoff()
+                    .is_expired_at(context.clock().now())
+            {
+                return OutboundBatch::cutoff(context);
+            }
+            let slots = requests
+                .into_iter()
+                .map(|(index, request)| {
+                    let budget = request.budget();
+                    let head = self.dispatch_head(request);
+                    (
+                        index,
+                        budget,
+                        async move { head.await?.finish().await }.boxed_local(),
+                    )
+                })
+                .collect();
+            super::scheduling::schedule_prepared_batch(context, slots, spawn)
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     #[expect(
         clippy::too_many_arguments,
-        reason = "the adapter consumes independent response-policy fields"
+        reason = "existing response fixtures retain each independent policy assertion"
     )]
     async fn process_response(
         response: Response,
@@ -881,65 +1148,162 @@ mod spin_impl {
         max_response_header_count: Option<u64>,
         time: OutboundTime,
     ) -> Result<OutboundResponse, EdgeError> {
-        budget_remaining(budget, &time)?;
-        let response_time = time.clone();
-        let status = StatusCode::from_u16(response.get_status_code()).map_err(|_error| {
-            EdgeError::bad_gateway_with_reason(
-                "Spin returned an invalid upstream status code",
-                BadGatewayReason::Protocol,
-            )
-        })?;
-        let (mut headers, normalization, _) = OutboundHeaderInput::new(
-            "spin",
-            response_headers(&response)?,
-            OutboundHeaderFidelity::AdapterVisibleFields,
-        )
-        .normalize(
-            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count),
-            &request_method,
-            status,
-            proxy_marker,
-        )?;
-        let disposition = normalization.body_disposition;
+        use edgezero_core::{BudgetSource, HttpClient};
 
-        let native = response_stream(response, budget, time.clone());
-        let body = if disposition == ResponseBodyDisposition::FramingBodyless {
-            Body::empty()
-        } else if let ResponseBodyDisposition::ResetContent { declared_body } = disposition {
-            settle_reset_content(native, declared_body).await?;
-            Body::empty()
-        } else {
-            let shaped = apply_response_body_policy(
-                native,
-                &mut headers,
-                ResponseBodyPolicy {
-                    max_brotli_window_bits,
-                    max_chunk_bytes,
-                    max_decoded_response_bytes,
-                    max_decoder_bytes,
-                    max_encoded_response_bytes,
-                    response_decoding,
-                    response_mode,
-                    status,
-                },
-            )?;
-            let deadline_bound = deadline_stream(super::cooperative_stream(shaped), budget, time);
-            match response_mode {
-                ResponseMode::Buffered { max_bytes } => {
-                    Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
-                }
-                ResponseMode::Streamed => Body::from_stream(deadline_bound),
+        struct Reset;
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FIXTURE_RESPONSE.with(|slot| drop(slot.borrow_mut().take()));
             }
-        };
-        budget_remaining(budget, &response_time)?;
-        Ok(OutboundResponse::new(
-            request_method,
-            status,
-            headers,
-            body,
-            response_time.clock().clone(),
-            normalization.content_type_provenance,
-        ))
+        }
+
+        let mut parts = OutboundRequest::get("https://example.com/")?.into_parts();
+        parts.method = request_method;
+        parts.proxy_marker = proxy_marker;
+        parts.response_decoding = response_decoding;
+        parts.response_mode = response_mode;
+        parts.max_decoder_bytes = max_decoder_bytes;
+        parts.max_brotli_window_bits = max_brotli_window_bits;
+        parts.max_chunk_bytes = max_chunk_bytes;
+        parts.max_decoded_response_bytes = max_decoded_response_bytes;
+        parts.max_encoded_response_bytes = max_encoded_response_bytes;
+        parts.max_response_header_bytes = max_response_header_bytes;
+        parts.max_response_header_count = max_response_header_count;
+        match budget.cause {
+            BudgetSource::PerCallTimeout => parts.timeout = Some(budget.duration),
+            BudgetSource::RequestDeadline => parts.deadline = Some(budget.deadline),
+            BudgetSource::Default => {}
+            BudgetSource::BatchCutoff
+            | BudgetSource::ConnectTimeout
+            | BudgetSource::IdleTimeout
+            | BudgetSource::Unspecified
+            | _ => {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "fixture requires a genuine single-send budget"
+                )));
+            }
+        }
+        FIXTURE_RESPONSE.with(|slot| *slot.borrow_mut() = Some(response));
+        let _reset = Reset;
+        HttpClient::with_client(FixtureClient(time))
+            .send(OutboundRequest::from_parts(parts)?)
+            .await
+    }
+
+    #[cfg(feature = "test-utils")]
+    async fn check_eager_begin() -> Result<(), EdgeError> {
+        use edgezero_core::HttpClient;
+
+        ensure_p3_context()?;
+        let (mut writer, contents, trailers) = BodyWriter::new();
+        let (native, response_done) = Response::new(Fields::new(), Some(contents), trailers);
+        FIXTURE_RESPONSE.with(|slot| *slot.borrow_mut() = Some(native));
+        let client = HttpClient::with_client(FixtureClient(native_time(MonotonicClock::default())));
+        let mut pending = client
+            .begin(OutboundRequest::get("https://example.com/")?.stream_response())
+            .await?;
+        sleep(Duration::from_millis(1)).await;
+        if !pending.is_ready() {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "SDK begin did not progress during an unrelated wait"
+            )));
+        }
+        let response = pending.collect().await?;
+        if writer
+            .stream_writer
+            .write_all(vec![1])
+            .now_or_never()
+            .is_some()
+        {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "begun stream consumed or dropped its payload before application polling"
+            )));
+        }
+        drop(response);
+        if writer.stream_writer.write_all(vec![1]).now_or_never() != Some(vec![1]) {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "collected stream failed to release its SDK reader"
+            )));
+        }
+        drop((writer, response_done));
+        Ok(())
+    }
+
+    /// Exercises canonical dispatch and assembly scope cleanup under a Spin HTTP host.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub async fn canonical_scopes_hold_for_test() -> Result<(), EdgeError> {
+        scope_tests::canonical_entrypoints_release_retained_handles().await
+    }
+
+    /// Runs in a real asynchronous WASIp3 export, unlike the synchronous SDK-resource binary.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub async fn eager_outbound_paths_hold_for_test() -> Result<(), EdgeError> {
+        use std::sync::{Arc, Mutex};
+
+        use edgezero_core::{HttpClient, OutboundBatchTermination, OutboundCollectedSlot};
+
+        ensure_p3_context()?;
+        scope_tests::foreign_poll_cannot_reparent_prepared_dispatch().await?;
+        scope_tests::canonical_callback_releases_retained_handles().await?;
+        if !bodyless_request_resources_hold() {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "certified empty GET/HEAD must omit WASI contents and close cleanly; other methods retain upload resources"
+            )));
+        }
+        check_eager_begin().await?;
+
+        let start = MonotonicInstant::now();
+        let end = start
+            .checked_add(Duration::from_secs(1))
+            .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("fixture cutoff overflow")))?;
+        let observed = Arc::new(Mutex::new(start));
+        let clock_now = Arc::clone(&observed);
+        let time = native_time(MonotonicClock::new(move || {
+            clock_now.lock().map_or(start, |current| *current)
+        }));
+        let (mut writer, contents, trailers) = BodyWriter::new();
+        let (native, response_done) = Response::new(Fields::new(), Some(contents), trailers);
+        native
+            .set_status_code(StatusCode::NO_CONTENT.as_u16())
+            .map_err(|()| EdgeError::internal(anyhow::anyhow!("fixture status rejected")))?;
+        FIXTURE_RESPONSE.with(|slot| *slot.borrow_mut() = Some(native));
+        let client = HttpClient::with_client(FixtureClient(time));
+        let batch = client.start_batch_until(
+            vec![
+                OutboundRequest::get("https://example.com/rejected")?.stream_response(),
+                OutboundRequest::get("https://example.com/ready")?,
+            ],
+            Deadline::at_instant(end),
+        );
+        sleep(Duration::from_millis(1)).await;
+        *observed.lock().map_err(|_poisoned| {
+            EdgeError::internal(anyhow::anyhow!("fixture clock poisoned"))
+        })? = end;
+        let results = batch
+            .collect()
+            .await
+            .map_err(|failure| failure.into_parts().0)?;
+        if results.termination() != OutboundBatchTermination::Completed
+            || !matches!(results.slots(), [OutboundCollectedSlot::Resolved(rejected), OutboundCollectedSlot::Resolved(ready)]
+                if matches!(&rejected.outcome, Err(EdgeError::BadRequest { .. })) && ready.outcome.is_ok())
+        {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "eager batch lost an original index, preflight outcome or on-time arrival"
+            )));
+        }
+        drop(results);
+        if writer.stream_writer.write_all(vec![1]).now_or_never() != Some(vec![1]) {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "buffered batch retained its SDK consumer"
+            )));
+        }
+        drop((writer, response_done));
+        handoff_tests::check_batch_handoff().await
     }
 
     fn response_headers(response: &Response) -> Result<HeaderMap, EdgeError> {
@@ -1188,7 +1552,7 @@ mod spin_impl {
             observed_options.fetch_add(1, Ordering::SeqCst);
             observed
         });
-        if request_options(budget, &native_time(option_clock)).is_err()
+        if request_options(budget, &native_time(option_clock), None).is_err()
             || option_observations.load(Ordering::SeqCst) != 1
         {
             return false;
@@ -1405,13 +1769,14 @@ mod spin_impl {
         use super::*;
 
         fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
+            let last = *script.last().expect("clock observations");
             let observations = Arc::new(Mutex::new(VecDeque::from(script)));
             MonotonicClock::new(move || {
                 observations
                     .lock()
                     .expect("clock observations")
                     .pop_front()
-                    .expect("clock observation")
+                    .unwrap_or(last)
             })
         }
 
@@ -1444,8 +1809,9 @@ mod spin_impl {
             let completed = start
                 .checked_add(Duration::from_millis(9))
                 .expect("completed instant");
-            let client =
-                SpinOutboundClient::with_time(native_time(scripted_clock(vec![start, completed])));
+            let client = edgezero_core::HttpClient::with_client(SpinOutboundClient::with_time(
+                native_time(scripted_clock(vec![start, completed])),
+            ));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -1464,7 +1830,9 @@ mod spin_impl {
             )
             .expect("valid batch driver");
 
-            let slot = results.slots[0].as_ref().expect("resolved slot");
+            let edgezero_core::OutboundCollectedSlot::Resolved(slot) = &results.slots()[0] else {
+                panic!("resolved slot");
+            };
             assert_eq!(slot.elapsed, Duration::from_millis(9));
             assert!(matches!(slot.outcome, Err(EdgeError::BadRequest { .. })));
         }
@@ -1475,8 +1843,9 @@ mod spin_impl {
             let earlier = start
                 .checked_sub(Duration::from_millis(1))
                 .expect("earlier instant");
-            let client =
-                SpinOutboundClient::with_time(native_time(scripted_clock(vec![start, earlier])));
+            let client = edgezero_core::HttpClient::with_client(SpinOutboundClient::with_time(
+                native_time(scripted_clock(vec![start, earlier])),
+            ));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -1495,7 +1864,9 @@ mod spin_impl {
             )
             .expect("valid batch driver");
 
-            let slot = results.slots[0].as_ref().expect("resolved slot");
+            let edgezero_core::OutboundCollectedSlot::Resolved(slot) = &results.slots()[0] else {
+                panic!("resolved slot");
+            };
             assert_eq!(slot.elapsed, Duration::ZERO);
             assert!(matches!(slot.outcome, Err(EdgeError::Internal { .. })));
         }
@@ -1532,7 +1903,8 @@ mod spin_impl {
                     .expect("clock observation")
             });
 
-            let _options = request_options(budget, &native_time(clock)).expect("request options");
+            let _options =
+                request_options(budget, &native_time(clock), None).expect("request options");
 
             assert!(observations.lock().expect("clock observations").is_empty());
         }
@@ -1585,9 +1957,14 @@ mod spin_impl {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         use edgezero_core::error::BudgetSource;
+        use edgezero_core::time::DEFAULT_NO_DEADLINE_BUDGET;
 
         use super::*;
 
+        #[expect(
+            clippy::too_many_lines,
+            reason = "preserve the full method, status, response-mode and deadline boundary matrix"
+        )]
         pub(super) async fn check_response_handoff() -> Result<(), EdgeError> {
             for (method, status) in [
                 (Method::HEAD, StatusCode::OK),
@@ -1608,17 +1985,24 @@ mod spin_impl {
                     for cause in [
                         BudgetSource::PerCallTimeout,
                         BudgetSource::RequestDeadline,
-                        BudgetSource::BatchCutoff,
                         BudgetSource::Default,
                     ] {
                         for offset in [9_u64, 10, 11] {
                             let start = MonotonicInstant::now();
-                            let duration = Duration::from_millis(10);
+                            let duration = if cause == BudgetSource::Default {
+                                DEFAULT_NO_DEADLINE_BUDGET
+                            } else {
+                                Duration::from_millis(10)
+                            };
                             let deadline = start.checked_add(duration).ok_or_else(|| {
                                 EdgeError::internal(anyhow::anyhow!("fixture deadline overflow"))
                             })?;
                             let observed = start
-                                .checked_add(Duration::from_millis(offset))
+                                .checked_add(
+                                    duration
+                                        .saturating_sub(Duration::from_millis(10))
+                                        .saturating_add(Duration::from_millis(offset)),
+                                )
                                 .ok_or_else(|| {
                                     EdgeError::internal(anyhow::anyhow!(
                                         "fixture observation overflow"
@@ -1683,6 +2067,77 @@ mod spin_impl {
                                 )));
                             }
                         }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        pub(super) async fn check_batch_handoff() -> Result<(), EdgeError> {
+            use edgezero_core::{HttpClient, OutboundBatchTermination, OutboundCollectedSlot};
+
+            for (method, status) in [
+                (Method::HEAD, StatusCode::OK),
+                (Method::GET, StatusCode::NOT_MODIFIED),
+                (Method::GET, StatusCode::NO_CONTENT),
+                (Method::GET, StatusCode::RESET_CONTENT),
+            ] {
+                for offset in [9_u64, 10, 11] {
+                    let start = MonotonicInstant::now();
+                    let end = start
+                        .checked_add(Duration::from_millis(10))
+                        .ok_or_else(|| {
+                            EdgeError::internal(anyhow::anyhow!("fixture cutoff overflow"))
+                        })?;
+                    let observed = start
+                        .checked_add(Duration::from_millis(offset))
+                        .ok_or_else(|| {
+                            EdgeError::internal(anyhow::anyhow!("fixture observation overflow"))
+                        })?;
+                    let samples = AtomicUsize::new(0);
+                    let clock = MonotonicClock::new(move || {
+                        if samples.fetch_add(1, Ordering::SeqCst) == 0 {
+                            start
+                        } else {
+                            observed
+                        }
+                    });
+                    let fields = Fields::new();
+                    fields
+                        .append("content-length", b"1")
+                        .map_err(EdgeError::internal)?;
+                    let (mut writer, contents, trailers) = BodyWriter::new();
+                    let (native, response_done) = Response::new(fields, Some(contents), trailers);
+                    native.set_status_code(status.as_u16()).map_err(|()| {
+                        EdgeError::internal(anyhow::anyhow!("fixture status rejected"))
+                    })?;
+                    FIXTURE_RESPONSE.with(|slot| *slot.borrow_mut() = Some(native));
+                    let request = OutboundRequest::new(
+                        method.clone(),
+                        Uri::from_static("https://example.com/"),
+                    )?
+                    .max_response_bytes(1);
+                    let result = HttpClient::with_client(FixtureClient(native_time(clock)))
+                        .start_batch_until(vec![request], Deadline::at_instant(end))
+                        .collect()
+                        .await;
+                    FIXTURE_RESPONSE.with(|slot| drop(slot.borrow_mut().take()));
+                    let results = result.map_err(|failure| failure.into_parts().0)?;
+                    let correct = if offset < 10 {
+                        results.termination() == OutboundBatchTermination::Completed
+                            && matches!(results.slots(), [OutboundCollectedSlot::Resolved(slot)] if slot.outcome.is_ok())
+                    } else {
+                        results.termination() == OutboundBatchTermination::Cutoff
+                            && matches!(results.slots(), [OutboundCollectedSlot::Unresolved])
+                    };
+                    drop(results);
+                    drop(response_done);
+                    if !correct
+                        || writer.stream_writer.write_all(vec![1]).now_or_never() != Some(vec![1])
+                    {
+                        return Err(EdgeError::internal(anyhow::anyhow!(
+                            "batch handoff lost cutoff state or retained its SDK consumer"
+                        )));
                     }
                 }
             }
@@ -1861,12 +2316,32 @@ pub use spin_impl::SpinOutboundClient;
 pub(crate) use spin_impl::native_time;
 #[cfg(all(feature = "spin", target_arch = "wasm32", feature = "test-utils"))]
 pub use spin_impl::{
-    connect_timeout_fallback_holds_for_test,
+    canonical_scopes_hold_for_test, connect_timeout_fallback_holds_for_test,
     converted_response_content_type_provenance_holds_for_test,
     converted_response_retains_injected_clock_for_test, deferred_clock_paths_hold_for_test,
-    map_spin_preparation_header_for_test, provider_deadline_diagnostics_hold_for_test,
-    request_fields_for_test, request_target_errors_for_test, set_timeout_option_for_test,
+    eager_outbound_paths_hold_for_test, map_spin_preparation_header_for_test,
+    provider_deadline_diagnostics_hold_for_test, request_fields_for_test,
+    request_target_errors_for_test, request_timeout_settings_for_test, set_timeout_option_for_test,
 };
+
+#[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
+fn map_spin_dispatch_error(
+    error: &ErrorCode,
+    deadline: Deadline,
+    cause: BudgetSource,
+    observed_at: edgezero_core::MonotonicInstant,
+    phase: ProviderFailurePhase,
+    connect_timeout: Option<Duration>,
+) -> EdgeError {
+    if connect_timeout.is_some()
+        && phase == ProviderFailurePhase::Send
+        && matches!(error, ErrorCode::ConnectionTimeout)
+        && !deadline.is_expired_at(observed_at)
+    {
+        return with_spin_detail(timeout_error(BudgetSource::ConnectTimeout), error, phase);
+    }
+    map_spin_host_error(error, deadline, cause, observed_at, phase)
+}
 
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
 fn map_spin_host_error(
@@ -2047,7 +2522,7 @@ fn timeout_error(cause: edgezero_core::BudgetSource) -> EdgeError {
     EdgeError::gateway_timeout_caused("outbound request deadline expired", cause)
 }
 
-#[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
+#[cfg(feature = "test-utils")]
 fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
     validate_request(request, OutboundSendMode::Batch)
 }
@@ -2099,6 +2574,21 @@ pub fn map_spin_host_error_for_test(
     phase: ProviderFailurePhase,
 ) -> EdgeError {
     map_spin_host_error(error, deadline, cause, observed_at, phase)
+}
+
+/// Exercises the dispatch-boundary classifier with the retained per-request connect setting.
+#[cfg(all(feature = "spin", feature = "test-utils"))]
+#[must_use]
+#[inline]
+pub fn map_spin_dispatch_error_for_test(
+    error: &ErrorCode,
+    deadline: Deadline,
+    cause: BudgetSource,
+    observed_at: edgezero_core::MonotonicInstant,
+    phase: ProviderFailurePhase,
+    connect_timeout: Option<Duration>,
+) -> EdgeError {
+    map_spin_dispatch_error(error, deadline, cause, observed_at, phase, connect_timeout)
 }
 
 #[cfg(test)]
@@ -2533,10 +3023,23 @@ mod exchange_tests {
 
     #[test]
     fn request_timeouts_use_full_remaining_budget_for_every_phase() {
-        let timeouts = request_timeouts(Duration::from_millis(40));
+        let timeouts = request_timeouts(Duration::from_millis(40), None);
         assert_eq!(timeouts.connect(), 40_000_000);
         assert_eq!(timeouts.first_byte(), 40_000_000);
         assert_eq!(timeouts.between_bytes(), 40_000_000);
+    }
+
+    #[test]
+    fn configured_connect_timeout_is_independent_of_response_timeouts() {
+        for (configured, expected) in [(7, 7_000_000), (80, 40_000_000)] {
+            let timeouts = request_timeouts(
+                Duration::from_millis(40),
+                Some(Duration::from_millis(configured)),
+            );
+            assert_eq!(timeouts.connect(), expected);
+            assert_eq!(timeouts.first_byte(), 40_000_000);
+            assert_eq!(timeouts.between_bytes(), 40_000_000);
+        }
     }
 
     #[test]

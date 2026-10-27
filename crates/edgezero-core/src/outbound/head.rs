@@ -11,12 +11,13 @@ use futures_util::{Stream, StreamExt as _};
 use super::{
     ContentTypeProvenance, OutboundExchangeOwner, OutboundFuture, OutboundHead,
     OutboundHeaderFidelity, OutboundHeaderInput, OutboundLocationEvidence, OutboundProxyMarker,
-    OutboundResponse, OutboundResponseContext, OutboundSendMode, OutboundTime,
-    ResponseBodyDisposition, ResponseBodyPolicy, ResponseHeadNormalization, ResponseHeaderLimiter,
-    ResponseMode, apply_response_body_policy, collect_response_stream, insert_proxy_header,
+    OutboundResponse, OutboundResponseContext, OutboundScope, OutboundScopeKind,
+    OutboundScopeOwner, OutboundSendMode, OutboundTime, ResponseBodyDisposition,
+    ResponseBodyPolicy, ResponseHeadNormalization, ResponseHeaderLimiter, ResponseMode,
+    apply_response_body_policy, collect_response_stream, insert_proxy_header,
     normalize_response_headers,
 };
-use crate::body::{Body, BodyStream};
+use crate::body::{Body, BodyPayload, BodyStream};
 use crate::error::{BudgetSource, EdgeError};
 use crate::http::header::LOCATION;
 use crate::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -25,8 +26,10 @@ use crate::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
 struct OwnedPayload {
     cause: BudgetSource,
     deadline: Deadline,
+    entered_at: MonotonicInstant,
     owner: Option<OutboundExchangeOwner>,
     previous: MonotonicInstant,
+    scope: Option<OutboundScope>,
     source: Option<BodyStream>,
     time: Option<OutboundTime>,
     timer: Option<OutboundFuture<()>>,
@@ -73,6 +76,12 @@ impl OutboundResponseContext {
     #[inline]
     pub fn response_body_policy(&self) -> &ResponseBodyPolicy {
         &self.body_policy
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn scope(&self) -> &OutboundScope {
+        &self.scope
     }
 
     #[must_use]
@@ -215,65 +224,80 @@ impl OutboundHead {
     #[inline]
     #[must_use]
     pub fn finish(self) -> OutboundFuture<OutboundResponse> {
-        Box::pin(async move {
-            let Self {
-                owner,
-                context,
-                encoded,
-                mut headers,
-                normalization,
-                status,
-                ..
-            } = self;
-            let clock = context.clock().clone();
-            let (deadline, cause) = effective_deadline(&context);
-            let mut previous = context.entered_at;
-            checked_live(&clock, &mut previous, deadline, cause)?;
-            let mode = context.body_policy.response_mode;
-            let body = match normalization.body_disposition {
-                ResponseBodyDisposition::FramingBodyless
-                | ResponseBodyDisposition::ResetContent {
-                    declared_body: true,
-                } => {
-                    drop(owner);
-                    drop(encoded);
-                    Body::empty()
-                }
-                ResponseBodyDisposition::ResetContent {
-                    declared_body: false,
-                } => {
-                    let mut source = OwnedPayload::new(encoded, owner, &context, previous);
-                    if let Some(item) = source.next().await {
-                        item?;
+        let scope = self.context.scope.clone();
+        let time = self.context.time.clone();
+        let entered_at = self.context.entered_at;
+        super::scope::bind_future(
+            scope,
+            time,
+            entered_at,
+            Box::pin(async move {
+                let Self {
+                    owner,
+                    context,
+                    encoded,
+                    mut headers,
+                    normalization,
+                    status,
+                    ..
+                } = self;
+                let clock = context.clock().clone();
+                let (deadline, cause) = effective_deadline(&context);
+                let mut previous = context.entered_at;
+                checked_live(&clock, &mut previous, deadline, cause)?;
+                let mode = context.body_policy.response_mode;
+                let body = match normalization.body_disposition {
+                    ResponseBodyDisposition::FramingBodyless
+                    | ResponseBodyDisposition::ResetContent {
+                        declared_body: true,
+                    } => {
+                        drop(owner);
+                        drop(encoded);
+                        Body::empty()
                     }
-                    drop(source);
-                    Body::empty()
-                }
-                ResponseBodyDisposition::Payload => {
-                    let shaped = apply_response_body_policy(
-                        cooperative_encoded_stream(encoded),
-                        &mut headers,
-                        context.body_policy,
-                    )?;
-                    let source = OwnedPayload::new(shaped, owner, &context, previous).boxed_local();
-                    match mode {
-                        ResponseMode::Buffered { max_bytes } => {
-                            Body::from(collect_response_stream(source, max_bytes).await?)
+                    ResponseBodyDisposition::ResetContent {
+                        declared_body: false,
+                    } => {
+                        let mut source = OwnedPayload::new(encoded, owner, &context, previous);
+                        if let Some(item) = source.next().await {
+                            item?;
                         }
-                        ResponseMode::Streamed => Body::from_stream(source),
+                        drop(source);
+                        Body::empty()
                     }
-                }
-            };
-            checked_live(&clock, &mut previous, deadline, cause)?;
-            Ok(OutboundResponse::new(
-                context.request_method,
-                status,
-                headers,
-                body,
-                clock,
-                normalization.content_type_provenance,
-            ))
-        })
+                    ResponseBodyDisposition::Payload => {
+                        let shaped = apply_response_body_policy(
+                            cooperative_encoded_stream(encoded),
+                            &mut headers,
+                            context.body_policy,
+                        )?;
+                        let mut source = OwnedPayload::new(shaped, owner, &context, previous);
+                        match mode {
+                            ResponseMode::Buffered { max_bytes } => Body::from(
+                                collect_response_stream(source.boxed_local(), max_bytes).await?,
+                            ),
+                            ResponseMode::Streamed => {
+                                let (body_scope, body_owner) = source.bind_body_scope(&context)?;
+                                Body::from_parts(
+                                    BodyPayload::Stream(source.boxed_local()),
+                                    body_owner,
+                                )
+                                .bind_outbound_scope(&body_scope)?
+                            }
+                        }
+                    }
+                };
+                checked_live(&clock, &mut previous, deadline, cause)?;
+                Ok(OutboundResponse::new(
+                    context.request_method,
+                    status,
+                    headers,
+                    body,
+                    clock,
+                    normalization.content_type_provenance,
+                ))
+            }),
+        )
     }
 
     #[must_use]
@@ -338,6 +362,22 @@ impl fmt::Debug for OutboundHead {
 }
 
 impl OwnedPayload {
+    fn bind_body_scope(
+        &mut self,
+        context: &OutboundResponseContext,
+    ) -> Result<(OutboundScope, Option<OutboundScopeOwner>), EdgeError> {
+        if context.scope.kind() == Some(OutboundScopeKind::ResponseBody) {
+            context.scope.check()?;
+            self.scope = Some(context.scope.clone());
+            return Ok((context.scope.clone(), None));
+        }
+        let owner = OutboundScopeOwner::response_body();
+        owner.accept_body_handoff()?;
+        let scope = owner.with(|| OutboundScope::capture(context.scope.progress()));
+        self.scope = Some(scope.clone());
+        Ok((scope, Some(owner)))
+    }
+
     fn new(
         source: BodyStream,
         owner: OutboundExchangeOwner,
@@ -346,6 +386,7 @@ impl OwnedPayload {
     ) -> Self {
         let (deadline, cause) = effective_deadline(context);
         Self {
+            entered_at: context.entered_at,
             owner: Some(owner),
             source: Some(source),
             timer: None,
@@ -353,6 +394,7 @@ impl OwnedPayload {
             cause,
             deadline,
             previous,
+            scope: None,
         }
     }
 
@@ -388,10 +430,26 @@ impl OwnedPayload {
     }
 
     fn release(&mut self) {
+        if let Some(scope) = self.scope.take() {
+            scope.with_cleanup(|| self.release_transport());
+        } else {
+            self.release_transport();
+        }
+    }
+
+    fn release_transport(&mut self) {
         drop(self.owner.take());
         drop(self.source.take());
         drop(self.timer.take());
         drop(self.time.take());
+        drop(self.scope.take());
+    }
+}
+
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl Drop for OwnedPayload {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -400,7 +458,18 @@ impl Stream for OwnedPayload {
 
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let result = self.poll_active(cx);
+        let result = if let (Some(scope), Some(time)) = (self.scope.clone(), self.time.clone()) {
+            let entered_at = self.entered_at;
+            let mut read = poll_fn(|context| self.poll_active(context));
+            scope
+                .poll(&time, entered_at, cx, Pin::new(&mut read))
+                .map(|outcome| match outcome {
+                    Ok(item) => item,
+                    Err(error) => Some(Err(error)),
+                })
+        } else {
+            self.poll_active(cx)
+        };
         if matches!(result, Poll::Ready(None | Some(Err(_)))) {
             self.release();
         }
@@ -672,6 +741,7 @@ mod tests {
             max_response_header_count: None,
             proxy_marker: OutboundProxyMarker::On,
             original_chain_deadline: None,
+            scope: crate::OutboundScope::capture(Rc::new(crate::IndependentOutboundProgress)),
         }
     }
 

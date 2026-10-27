@@ -66,7 +66,8 @@ fn main() -> Result<(), fastly::Error> {
     if let Some(case) = request.get_path().strip_prefix("/progress/reference/") {
         let source = fixture_core::qualification::framing::source(case)?;
         let (parts, body) = source.into_parts();
-        let edgezero_core::Body::Once(bytes) = body else {
+        let (payload, body_owner) = body.into_parts();
+        let edgezero_core::BodyPayload::Once(bytes) = payload else {
             return Err(progress::probe_failure().into());
         };
         let mut response = fastly::Response::from_status(parts.status.as_u16())
@@ -76,6 +77,7 @@ fn main() -> Result<(), fastly::Error> {
         }
         response.set_body(bytes.as_ref());
         response.send_to_client();
+        drop(body_owner);
         return Ok(());
     }
     let signal = json!({"source":"fastly-sdk-before-conversion", "has_body":request.has_body(),

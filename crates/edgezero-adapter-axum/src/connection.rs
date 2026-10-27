@@ -571,23 +571,54 @@ mod tests {
             )
             .await
             .expect("bounded rejection and connection cleanup");
-            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            let empty = body == "0\r\n\r\n";
+            assert!(
+                response.starts_with(if empty {
+                    "HTTP/1.1 204"
+                } else {
+                    "HTTP/1.1 400"
+                }),
+                "{response}"
+            );
             assert_eq!(
                 exit.expect("closed or correctly reused"),
                 ConnectionExit::Completed
             );
-            assert!(
-                receipt.is_none(),
-                "a rejected body must never reach an origin"
-            );
-            assert!(
-                !accepted,
-                "rejection must not even open an origin connection"
-            );
-            assert!(
-                rejection_pipeline_is_safe(&response),
-                "unread body bytes must not become a new request: {response}"
-            );
+            if empty {
+                let (method, headers, forwarded_body) =
+                    receipt.expect("settled empty GET reaches origin");
+                assert_eq!(method, "GET");
+                assert!(forwarded_body.is_empty());
+                assert!(!headers.contains_key("transfer-encoding"));
+                assert!(accepted);
+                let mut responses = response.split("HTTP/1.1 ").skip(1);
+                assert!(
+                    responses
+                        .next()
+                        .expect("forwarded response")
+                        .starts_with("204 ")
+                );
+                let healthy = responses.next().expect("pipelined healthy response");
+                assert!(healthy.starts_with("200 "), "{response}");
+                assert!(healthy.ends_with("healthy"), "{response}");
+                assert!(
+                    responses.next().is_none(),
+                    "unexpected extra response: {response}"
+                );
+            } else {
+                assert!(
+                    receipt.is_none(),
+                    "a rejected body must never reach an origin"
+                );
+                assert!(
+                    !accepted,
+                    "rejection must not even open an origin connection"
+                );
+                assert!(
+                    rejection_pipeline_is_safe(&response),
+                    "unread body bytes must not become a new request: {response}"
+                );
+            }
         }
     }
 

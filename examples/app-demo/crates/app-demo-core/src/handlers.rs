@@ -14,9 +14,8 @@ use edgezero_core::extractor::{
 };
 use edgezero_core::http::{self, Method, Response, StatusCode, Uri};
 use edgezero_core::outbound::{
-    OutboundBatchTermination, OutboundCachePolicy, OutboundImageFormat,
-    OutboundImageOptimizerOptions, OutboundImageOptimizerRegion, OutboundRequest,
-    OutboundSlotResult, ResponseDecoding,
+    OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot, OutboundImageFormat,
+    OutboundImageOptimizerOptions, OutboundImageOptimizerRegion, OutboundRequest, ResponseDecoding,
 };
 use edgezero_core::response::Text;
 use futures::{StreamExt as _, stream};
@@ -217,13 +216,12 @@ pub async fn fanout(RequestContext(ctx): RequestContext) -> Result<Response, Edg
             Ok(outbound_policy(OutboundRequest::new(Method::GET, target)?).deadline(deadline))
         })
         .collect::<Result<Vec<_>, EdgeError>>()?;
-    let slots = client
+    let results = client
         .send_all_until(requests, deadline)
         .await
-        .map_err(|failure| failure.error)?;
-    let termination = slots.termination;
+        .map_err(|failure| failure.into_parts().0)?;
+    let (slots, termination) = results.into_parts();
     let output = slots
-        .slots
         .into_iter()
         .enumerate()
         .map(|(index, slot)| fanout_slot(index, slot, termination))
@@ -270,11 +268,11 @@ fn error_category(status: StatusCode) -> &'static str {
 
 fn fanout_slot(
     index: usize,
-    slot_result: Option<OutboundSlotResult>,
+    slot_result: OutboundCollectedSlot,
     termination: OutboundBatchTermination,
 ) -> Result<FanoutSlot, EdgeError> {
     match slot_result {
-        Some(slot) => {
+        OutboundCollectedSlot::Resolved(slot) => {
             let outcome = match slot.outcome {
                 Ok(response) => FanoutSlotOutcome::Response {
                     status: response.status().as_u16(),
@@ -290,15 +288,22 @@ fn fanout_slot(
                 outcome,
             })
         }
-        None if termination == OutboundBatchTermination::Cutoff => Ok(FanoutSlot {
-            elapsed_ms: None,
-            index,
-            outcome: FanoutSlotOutcome::Unresolved,
-        }),
-        None if termination == OutboundBatchTermination::Completed => Err(EdgeError::internal(
-            IoError::other("completed outbound batch contained an unresolved slot"),
-        )),
-        None => Err(EdgeError::internal(IoError::other(
+        OutboundCollectedSlot::Unresolved if termination == OutboundBatchTermination::Cutoff => {
+            Ok(FanoutSlot {
+                elapsed_ms: None,
+                index,
+                outcome: FanoutSlotOutcome::Unresolved,
+            })
+        }
+        OutboundCollectedSlot::Unresolved if termination == OutboundBatchTermination::Completed => {
+            Err(EdgeError::internal(IoError::other(
+                "completed outbound batch contained an unresolved slot",
+            )))
+        }
+        OutboundCollectedSlot::AlreadyDelivered => Err(EdgeError::internal(IoError::other(
+            "fanout collection unexpectedly contained an already-delivered slot",
+        ))),
+        OutboundCollectedSlot::Unresolved => Err(EdgeError::internal(IoError::other(
             "outbound batch contained an unresolved slot for an unsupported termination reason",
         ))),
     }
@@ -552,8 +557,11 @@ mod tests {
     use edgezero_core::http::{HeaderMap, Method, StatusCode, Uri, request_builder};
     use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
     use edgezero_core::outbound::{
-        HttpClient, OutboundBatch, OutboundBatchItem, OutboundHttpClient, OutboundProxyMarker,
-        OutboundRequestParts, OutboundResponse, OutboundSlotResult, ResponseMode,
+        HttpClient, OutboundBatch, OutboundBatchCheck, OutboundDispatchRequest,
+        OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
+        OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
+        OutboundProxyMarker, OutboundRequestParts, OutboundResponse, OutboundResponseContext,
+        OutboundSendMode, OutboundTime, ResponseMode,
     };
     use edgezero_core::params::PathParams;
     use edgezero_core::response::IntoResponse as _;
@@ -562,11 +570,18 @@ mod tests {
         ConfigRegistry, ConfigStoreBinding, KvRegistry, StoreRegistry,
     };
     use edgezero_core::{
-        BudgetSource, Deadline, MonotonicClock, MonotonicInstant, OutboundBatchDriverEvent,
+        BodyPayload, BudgetSource, Deadline, IndependentOutboundProgress, MonotonicClock,
+        MonotonicInstant, OutboundBatchDriverEvent, OutboundProgressRuntime,
     };
+    use futures::FutureExt as _;
     use futures::executor::block_on;
+    use futures::future::ready;
     use std::collections::{BTreeMap, HashMap};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     struct MapConfigStore(HashMap<String, String>);
@@ -575,9 +590,166 @@ mod tests {
         data: Mutex<BTreeMap<String, Bytes>>,
     }
 
-    #[derive(Clone, Default)]
-    struct TestOutboundClient {
+    #[derive(Clone)]
+    struct TestTime {
+        state: Arc<Mutex<TestTimeState>>,
+    }
+
+    struct TestTimeState {
+        next_timer: usize,
+        now: MonotonicInstant,
+        waiters: BTreeMap<usize, Waker>,
+    }
+
+    struct TestTimer {
         clock: MonotonicClock,
+        deadline: Deadline,
+        id: usize,
+        state: Arc<Mutex<TestTimeState>>,
+    }
+
+    impl Default for TestTime {
+        fn default() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(TestTimeState {
+                    next_timer: 0,
+                    now: MonotonicInstant::now(),
+                    waiters: BTreeMap::new(),
+                })),
+            }
+        }
+    }
+
+    impl TestTime {
+        fn advance_to(&self, now: MonotonicInstant) {
+            let wakers = {
+                let mut state = self.state.lock().expect("fake time");
+                state.now = now;
+                state.waiters.values().cloned().collect::<Vec<_>>()
+            };
+            for waker in wakers {
+                waker.wake();
+            }
+        }
+
+        fn clock(&self) -> MonotonicClock {
+            let state = Arc::clone(&self.state);
+            MonotonicClock::new(move || state.lock().expect("clock").now)
+        }
+
+        fn pair(&self) -> OutboundTime {
+            let state = Arc::clone(&self.state);
+            OutboundTime::new(self.clock(), move |deadline, clock| {
+                let id = {
+                    let mut registration = state.lock().expect("timer registration");
+                    let id = registration.next_timer;
+                    registration.next_timer =
+                        registration.next_timer.checked_add(1).expect("timer id");
+                    id
+                };
+                Box::pin(TestTimer {
+                    clock,
+                    deadline,
+                    id,
+                    state: Arc::clone(&state),
+                })
+            })
+        }
+    }
+
+    impl Future for TestTimer {
+        type Output = Result<(), EdgeError>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.deadline.is_expired_at(self.clock.now()) {
+                Poll::Ready(Ok(()))
+            } else {
+                self.state
+                    .lock()
+                    .expect("timer waiter")
+                    .waiters
+                    .insert(self.id, cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for TestTimer {
+        fn drop(&mut self) {
+            self.state
+                .lock()
+                .expect("timer cancellation")
+                .waiters
+                .remove(&self.id);
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestOutboundClient {
+        clock: TestTime,
+        time: OutboundTime,
+    }
+
+    impl Default for TestOutboundClient {
+        fn default() -> Self {
+            let clock = TestTime::default();
+            Self {
+                time: clock.pair(),
+                clock,
+            }
+        }
+    }
+
+    impl TestOutboundClient {
+        fn finish_ready(
+            request: OutboundDispatchRequest,
+            expected_deadline: Option<Deadline>,
+        ) -> Result<OutboundResponse, EdgeError> {
+            let mut future =
+                Box::pin(async move { Self::head(request, expected_deadline)?.finish().await });
+            // Fixed replies have at most one chunk; the finalizer yields once before EOF.
+            for _ in 0_u8..2 {
+                if let Some(outcome) = future.as_mut().now_or_never() {
+                    return outcome;
+                }
+            }
+            Err(EdgeError::internal(IoError::other(
+                "scripted response exceeded its fixed poll bound",
+            )))
+        }
+
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "scripted transport assertions preserve effective request checks"
+        )]
+        fn head(
+            request: OutboundDispatchRequest,
+            expected_deadline: Option<Deadline>,
+        ) -> Result<OutboundHead, EdgeError> {
+            let (parts, context) = request.into_parts();
+            assert_outbound_policy(&parts);
+            if context.mode() == OutboundSendMode::Batch {
+                assert_eq!(parts.response_decoding, ResponseDecoding::Decode);
+                assert_eq!(parts.proxy_marker, OutboundProxyMarker::On);
+                let deadline = parts.deadline.expect("batch deadline");
+                if let Some(expected) = expected_deadline {
+                    assert_eq!(deadline.instant(), expected.instant());
+                }
+            } else {
+                assert_eq!(parts.method, Method::POST);
+                assert!(
+                    parts
+                        .uri
+                        .path_and_query()
+                        .is_some_and(|value| value.as_str() == "/status/201?source=demo")
+                );
+                assert!(parts.deadline.is_none());
+                assert_eq!(parts.response_decoding, ResponseDecoding::Original);
+                assert_eq!(parts.proxy_marker, OutboundProxyMarker::Off);
+            }
+            response_for(&parts, context)
+        }
     }
 
     struct UnavailableConfigStore;
@@ -674,58 +846,69 @@ mod tests {
         }
     }
 
-    #[async_trait(?Send)]
     impl OutboundHttpClient for TestOutboundClient {
-        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            let parts = request.into_parts();
-            assert_eq!(parts.method, Method::POST);
-            assert!(
-                parts
-                    .uri
-                    .path_and_query()
-                    .is_some_and(|value| value.as_str() == "/status/201?source=demo")
-            );
-            assert!(parts.deadline.is_none());
-            assert_eq!(parts.response_decoding, ResponseDecoding::Original);
-            assert_eq!(parts.proxy_marker, OutboundProxyMarker::Off);
-            assert_outbound_policy(&parts);
-            response_for(parts, self.clock.clone())
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            let outcome = Self::finish_ready(request, None);
+            Ok(OutboundPending::new(
+                Box::pin(ready(outcome)),
+                OutboundExchangeOwner::new(|| {}),
+            ))
         }
 
-        fn start_batch_until(
-            &self,
-            requests: Vec<OutboundRequest>,
-            observation_cutoff: Deadline,
-        ) -> OutboundBatch {
-            let mut observed_deadline = None;
-            let slot_count = requests.len();
-            let mut results = Vec::with_capacity(slot_count);
-            for (index, request) in requests.into_iter().enumerate() {
-                let parts = request.into_parts();
-                assert_eq!(parts.response_decoding, ResponseDecoding::Decode);
-                assert_eq!(parts.proxy_marker, OutboundProxyMarker::On);
-                assert_outbound_policy(&parts);
-                let slot_deadline = parts.deadline.expect("batch deadline");
-                if let Some(expected) = observed_deadline {
-                    assert_eq!(slot_deadline.instant(), expected);
-                } else {
-                    observed_deadline = Some(slot_deadline.instant());
-                }
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            Box::pin(ready(Self::head(request, None)))
+        }
+
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let started_at = batch.started_at();
+            let observation_cutoff = batch.observation_cutoff();
+            let (context, requests) = batch.into_slots();
+            if observation_cutoff.is_expired_at(context.clock().now()) {
+                return OutboundBatch::cutoff(context);
+            }
+            let mut results = Vec::with_capacity(requests.len());
+            let mut cutoff_unresolved = false;
+            for (index, request) in requests {
+                let budget = request.budget();
                 let elapsed = Duration::from_millis(
                     u64::try_from(index).expect("slot index").saturating_add(1),
                 );
-                results.push(OutboundBatchItem::new(
+                self.clock
+                    .advance_to(started_at.checked_add(elapsed).expect("terminal instant"));
+                let outcome = Self::finish_ready(request, Some(observation_cutoff));
+                let completed_at = self.time.clock().now();
+                cutoff_unresolved |= observation_cutoff.is_expired_at(completed_at)
+                    && budget.deadline.instant() >= observation_cutoff.instant();
+                results.push(OutboundBatchDriverEvent::Item {
                     index,
-                    OutboundSlotResult::new(elapsed, response_for(parts, self.clock.clone())),
-                ));
+                    completed_at,
+                    outcome,
+                });
             }
-            if let Some(batch_deadline) = observed_deadline {
-                assert_eq!(batch_deadline, observation_cutoff.instant());
+            if cutoff_unresolved {
+                results.push(OutboundBatchDriverEvent::Cutoff);
             }
             OutboundBatch::from_driver(
-                slot_count,
-                stream::iter(results.into_iter().map(OutboundBatchDriverEvent::Item)),
+                context,
+                stream::iter(results),
+                OutboundExchangeOwner::new(|| {}),
             )
+        }
+
+        fn time(&self) -> OutboundTime {
+            self.time.clone()
+        }
+
+        fn validate_supported_options(
+            &self,
+            _request: &OutboundRequest,
+            _mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            Ok(())
         }
     }
 
@@ -829,16 +1012,15 @@ mod tests {
     }
 
     fn response_for(
-        parts: OutboundRequestParts,
-        clock: MonotonicClock,
-    ) -> Result<OutboundResponse, EdgeError> {
+        parts: &OutboundRequestParts,
+        context: OutboundResponseContext,
+    ) -> Result<OutboundHead, EdgeError> {
         if parts.uri.path() == "/fail" {
             return Err(EdgeError::gateway_timeout_caused(
                 "provider URL https://user:token@example.invalid",
                 BudgetSource::RequestDeadline,
             ));
         }
-
         let status = match parts.uri.path() {
             "/status/201" => StatusCode::CREATED,
             "/status/204" => StatusCode::NO_CONTENT,
@@ -846,19 +1028,22 @@ mod tests {
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-outbound-test", HeaderValue::from_static("preserved"));
-        let body = if status == StatusCode::NO_CONTENT {
-            Body::empty()
+        let encoded = if status == StatusCode::NO_CONTENT {
+            stream::empty().boxed_local()
         } else {
-            Body::text("outbound-response")
+            stream::iter([Ok(Bytes::from_static(b"outbound-response"))]).boxed_local()
         };
-        Ok(OutboundResponse::new(
-            parts.method,
+        OutboundHead::new(
             status,
-            headers,
-            body,
-            clock,
-            edgezero_core::ContentTypeProvenance::Unknown,
-        ))
+            OutboundHeaderInput::new(
+                "scripted",
+                headers,
+                OutboundHeaderFidelity::AdapterVisibleFields,
+            ),
+            encoded,
+            context,
+            OutboundExchangeOwner::new(|| {}),
+        )
     }
 
     #[test]
@@ -1352,25 +1537,154 @@ mod tests {
 
     #[test]
     fn app_demo_outbound_client_retains_its_clock_in_responses() {
-        let start = MonotonicInstant::now();
-        let observed = Arc::new(Mutex::new(start));
-        let clock_now = Arc::clone(&observed);
-        let client = HttpClient::with_client(TestOutboundClient {
-            clock: MonotonicClock::new(move || *clock_now.lock().expect("clock lock")),
-        })
-        .with_proxy_marker(false);
+        let scripted = TestOutboundClient::default();
+        let start = scripted.time.clock().now();
+        let clock = scripted.clock.clone();
+        let client = HttpClient::with_client(scripted).with_proxy_marker(false);
         let request = outbound_policy(
             OutboundRequest::post("https://example.com/status/201?source=demo").expect("request"),
         )
         .response_decoding(ResponseDecoding::Original);
         let response = block_on(client.send(request)).expect("response");
         let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
-        *observed.lock().expect("clock lock") = deadline;
+        clock.advance_to(deadline);
 
         let error = block_on(response.into_bytes_bounded_until(64, Deadline::at_instant(deadline)))
             .expect_err("retained clock reached deadline");
 
         assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+    }
+
+    #[test]
+    fn fanout_rejects_delivered_and_completed_unresolved_slots() {
+        for slot in [
+            OutboundCollectedSlot::AlreadyDelivered,
+            OutboundCollectedSlot::Unresolved,
+        ] {
+            let error = fanout_slot(0, slot, OutboundBatchTermination::Completed)
+                .err()
+                .expect("invalid collection state");
+            assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let slot = fanout_slot(
+            0,
+            OutboundCollectedSlot::Unresolved,
+            OutboundBatchTermination::Cutoff,
+        )
+        .expect("cutoff slot");
+        assert!(matches!(slot.outcome, FanoutSlotOutcome::Unresolved));
+    }
+
+    #[test]
+    fn scripted_batch_cutoff_retains_only_earlier_completions() {
+        let scripted = TestOutboundClient::default();
+        let time = scripted.time.clone();
+        let observation_cutoff = time.clock().deadline_after(Duration::from_millis(2));
+        let requests = ["status/200", "status/204"].map(|path| {
+            outbound_policy(
+                OutboundRequest::get(format!("https://example.com/{path}")).expect("request"),
+            )
+            .deadline(observation_cutoff)
+        });
+        let batch = HttpClient::with_client(scripted)
+            .start_batch_until(requests.into(), observation_cutoff);
+        let results = block_on(batch.collect()).expect("cutoff must not become a driver failure");
+        let (collected, termination) = results.into_parts();
+        assert_eq!(termination, OutboundBatchTermination::Cutoff);
+        assert_eq!(collected.len(), 2);
+        let mut slots = collected.into_iter();
+        let Some(OutboundCollectedSlot::Resolved(first)) = slots.next() else {
+            panic!("first response completed before cutoff");
+        };
+        assert_eq!(first.elapsed, Duration::from_millis(1));
+        assert_eq!(
+            first.outcome.as_ref().expect("first response").status(),
+            StatusCode::OK
+        );
+        assert!(matches!(
+            slots.next(),
+            Some(OutboundCollectedSlot::Unresolved)
+        ));
+        assert!(slots.next().is_none());
+        assert_eq!(time.clock().now(), observation_cutoff.instant());
+    }
+
+    #[test]
+    fn scripted_batch_expired_cutoff_keeps_preflight_outcomes() {
+        for invalid_sibling in [false, true] {
+            let scripted = TestOutboundClient::default();
+            let time = scripted.time.clone();
+            let entered_at = time.clock().now();
+            let observation_cutoff = Deadline::at_instant(entered_at);
+            let first = outbound_policy(
+                OutboundRequest::get("https://example.com/status/200").expect("request"),
+            );
+            let mut second = outbound_policy(
+                OutboundRequest::get("https://example.com/status/204").expect("request"),
+            );
+            if invalid_sibling {
+                second = second.stream_response();
+            }
+            let batch = HttpClient::with_client(scripted)
+                .start_batch_until(vec![first, second], observation_cutoff);
+            let results = block_on(batch.collect()).expect("expired entry preserves its context");
+            let (collected, termination) = results.into_parts();
+            assert_eq!(termination, OutboundBatchTermination::Cutoff);
+            assert_eq!(collected.len(), 2);
+            assert!(matches!(collected[0], OutboundCollectedSlot::Unresolved));
+            let last = collected.into_iter().nth(1).expect("second slot");
+            if invalid_sibling {
+                let OutboundCollectedSlot::Resolved(rejected) = last else {
+                    panic!("original preflight rejection must survive");
+                };
+                assert_eq!(
+                    rejected
+                        .outcome
+                        .as_ref()
+                        .expect_err("streamed batch response")
+                        .status(),
+                    StatusCode::BAD_REQUEST
+                );
+            } else {
+                assert!(matches!(last, OutboundCollectedSlot::Unresolved));
+            }
+            assert_eq!(time.clock().now(), entered_at, "no eligible scripted work");
+        }
+    }
+
+    #[test]
+    fn scripted_batch_preserves_receipts_through_mixed_collection() {
+        let scripted = TestOutboundClient::default();
+        let observation_cutoff = scripted.time.clock().deadline_after(OUTBOUND_BATCH_BUDGET);
+        let client = HttpClient::with_client(scripted);
+        let requests = ["status/200", "status/204", "fail"].map(|path| {
+            outbound_policy(
+                OutboundRequest::get(format!("https://example.com/{path}")).expect("request"),
+            )
+            .deadline(observation_cutoff)
+        });
+        let mut batch = client.start_batch_until(requests.into(), observation_cutoff);
+        let mut accumulator = batch.accumulator();
+        let OutboundBatchCheck::Item(item) = batch.check().expect("ready scripted item") else {
+            panic!("scripted work must already be complete");
+        };
+        assert_eq!(item.index(), 0);
+        accumulator.insert(item).expect("receipt belongs to batch");
+        let result = block_on(batch.collect()).expect("remaining collection");
+        assert!(matches!(
+            result.slots()[0],
+            OutboundCollectedSlot::AlreadyDelivered
+        ));
+        let merged = accumulator
+            .merge_success(result)
+            .expect("merge original receipt");
+        assert_eq!(merged.termination(), OutboundBatchTermination::Completed);
+        assert!(
+            merged
+                .slots()
+                .iter()
+                .all(|slot| matches!(slot, OutboundCollectedSlot::Resolved(_)))
+        );
     }
 
     #[test]
@@ -1409,9 +1723,21 @@ mod tests {
 
     #[test]
     fn outbound_fixture_settles_no_content_body_at_source() {
-        let request = OutboundRequest::get("https://example.com/status/204").expect("request");
-        let response =
-            response_for(request.into_parts(), MonotonicClock::default()).expect("response");
+        let scripted = TestOutboundClient::default();
+        let observation_cutoff = scripted.time.clock().deadline_after(OUTBOUND_BATCH_BUDGET);
+        let request = outbound_policy(
+            OutboundRequest::get("https://example.com/status/204").expect("request"),
+        )
+        .deadline(observation_cutoff);
+        let results = block_on(
+            HttpClient::with_client(scripted).send_all_until(vec![request], observation_cutoff),
+        )
+        .expect("collection");
+        let (slots, _) = results.into_parts();
+        let Some(OutboundCollectedSlot::Resolved(slot)) = slots.into_iter().next() else {
+            panic!("resolved no-content response");
+        };
+        let response = slot.outcome.expect("response");
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
@@ -1570,7 +1896,10 @@ mod tests {
         let response = block_on(stream(ctx)).expect("handler ok");
         assert_eq!(response.status(), StatusCode::OK);
 
-        let mut chunks = response.into_body().into_stream().expect("stream body");
+        let (payload, body_owner) = response.into_body().into_parts();
+        let BodyPayload::Stream(mut chunks) = payload else {
+            panic!("stream body");
+        };
         let collected = block_on(async {
             let mut buf = Vec::new();
             while let Some(item) = chunks.next().await {
@@ -1583,6 +1912,7 @@ mod tests {
             String::from_utf8(collected).expect("utf8"),
             "chunk 0\nchunk 1\nchunk 2\n"
         );
+        drop(body_owner);
     }
 
     #[test]

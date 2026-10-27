@@ -55,12 +55,6 @@ mod tests {
     use fastly::http::Method as FastlyMethod;
     use futures::{executor::block_on, stream};
 
-    fn preflight_time(clock: MonotonicClock) -> OutboundTime {
-        OutboundTime::new(clock, |_, _| {
-            panic!("preflight must not register an outbound timer")
-        })
-    }
-
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
         complete_envelope_with_report(envelope).0
     }
@@ -308,12 +302,15 @@ mod tests {
         assert!(core.body().is_stream());
         let target = "http://example.com/forward".parse().expect("target");
         let outbound = OutboundRequest::from_request(core, target).expect("forward");
-        assert_eq!(
-            validate_for_dispatch(&outbound, OutboundSendMode::Send)
-                .expect_err("streamed GET stays unresolved")
-                .status(),
-            StatusCode::BAD_REQUEST
+        validate_for_dispatch(&outbound, OutboundSendMode::Send)
+            .expect("ordinary preflight precedes shared GET settlement");
+        assert!(
+            outbound.is_stream_body(),
+            "preflight cannot certify absence"
         );
+        let bytes = block_on(outbound.into_parts().body.into_bytes_bounded(0))
+            .expect("the SDK stream still must reach EOF");
+        assert!(bytes.is_empty());
     }
 
     #[test]
@@ -451,14 +448,15 @@ mod tests {
     fn helper_batch_owner_is_local_or_reuses_custom_callback() {
         use edgezero_adapter_fastly::lifecycle::run_custom;
         use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
-        use edgezero_core::{OutboundBatch, OutboundHttpClient as _};
+        use edgezero_core::{HttpClient, OutboundBatch};
+        use futures_util::future::pending;
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        struct ClockOwner(Arc<AtomicUsize>);
+        struct TimerOwner(Arc<AtomicUsize>);
 
         #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
-        impl Drop for ClockOwner {
+        impl Drop for TimerOwner {
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
@@ -469,19 +467,23 @@ mod tests {
             let released = Arc::new(AtomicUsize::new(0));
             let saved: Rc<RefCell<Option<OutboundBatch>>> = Rc::new(RefCell::new(None));
             let invoke = |request| {
-                let owner = ClockOwner(Arc::clone(&released));
                 let now = MonotonicInstant::now();
-                let clock = MonotonicClock::new(move || {
-                    let _keep_owner = &owner;
-                    now
+                let clock = MonotonicClock::new(move || now);
+                let timer_released = Arc::clone(&released);
+                let time = OutboundTime::new(clock, move |_, _| {
+                    let owner = TimerOwner(Arc::clone(&timer_released));
+                    Box::pin(async move {
+                        let _owner = owner;
+                        pending().await
+                    })
                 });
                 let delivered = FastlyService::new(&app).run_request_with_hooks_for_test(
                     request,
                     |_raw, _extensions| {
-                        let client = FastlyOutboundClient::with_time(preflight_time(clock));
-                        let outbound = OutboundRequest::get("https://example.com")
+                        let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
+                        let outbound = OutboundRequest::post("http://127.0.0.1:9/helper-scope")
                             .unwrap()
-                            .stream_response();
+                            .body("pending");
                         *saved.borrow_mut() = Some(client.start_batch_until(
                             vec![outbound],
                             Deadline::after(Duration::from_secs(1)),
@@ -506,7 +508,7 @@ mod tests {
             assert_eq!(released.load(Ordering::SeqCst), 1);
             let batch = saved.borrow_mut().take().expect("prepared batch");
             assert!(matches!(
-                block_on(batch.collect()).unwrap_err().error,
+                block_on(batch.collect()).unwrap_err().error(),
                 EdgeError::Internal { .. }
             ));
             assert_eq!(released.load(Ordering::SeqCst), 1);
@@ -516,20 +518,35 @@ mod tests {
     #[test]
     #[cfg(feature = "test-utils")]
     fn dispatch_streaming_route_preserves_chunks() {
+        use futures_util::StreamExt as _;
+
         let app = build_test_app();
         let req = fastly_request(FastlyMethod::GET, "/stream", None);
-
-        let response = complete_envelope(
-            FastlyService::new(&app)
-                .capture_egress_for_test(req)
-                .expect("egress envelope"),
-        );
-
+        let envelope = FastlyService::new(&app)
+            .capture_egress_for_test(req)
+            .expect("egress envelope");
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+        else {
+            panic!("begin streamed response egress");
+        };
+        assert!(attempt.begin_writing());
+        let response = prepared.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+        let mut source = response
+            .into_body()
+            .into_stream()
+            .expect("streamed response");
         assert_eq!(
-            block_on(response.into_body().into_bytes_bounded(64)).expect("response body"),
-            Bytes::from_static(b"chunk-1chunk-2")
+            block_on(source.next()).unwrap().expect("first chunk"),
+            Bytes::from_static(b"chunk-1")
         );
+        assert_eq!(
+            block_on(source.next()).unwrap().expect("second chunk"),
+            Bytes::from_static(b"chunk-2")
+        );
+        assert!(block_on(source.next()).is_none());
+        assert!(attempt.complete(clock.now()));
     }
 
     #[test]
@@ -1717,11 +1734,9 @@ mod outbound_contract_tests {
     mod runtime_tests {
         use std::time::Duration;
 
-        use edgezero_adapter_fastly::outbound::{
-            FastlyOutboundClient, inject_dispatch_slack_for_test,
-        };
+        use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
+        use edgezero_core::HttpClient;
         use edgezero_core::error::EdgeError;
-        use edgezero_core::outbound::OutboundHttpClient as _;
         use edgezero_core::time::Deadline;
         use futures::executor::block_on;
 
@@ -1737,8 +1752,9 @@ mod outbound_contract_tests {
                 )
                 .stream_response()
                 .timeout(Duration::from_secs(5));
-            let error = block_on(FastlyOutboundClient::new().send(request))
-                .expect_err("Viceroy has no optimizer");
+            let error =
+                block_on(HttpClient::with_client(FastlyOutboundClient::new()).send(request))
+                    .expect_err("Viceroy has no optimizer");
             assert!(matches!(
                 error,
                 EdgeError::BadGateway {
@@ -1758,30 +1774,49 @@ mod outbound_contract_tests {
 
         #[test]
         fn request_preparation_consumes_entry_budget() {
-            let _injection = inject_dispatch_slack_for_test(Duration::from_millis(26));
-            let request = request()
-                .body(Bytes::from_static(b"body"))
-                .timeout(Duration::from_secs(1));
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::{Arc, Mutex};
+            use std::task::Poll;
 
-            let results = block_on(
-                FastlyOutboundClient::new()
-                    .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)))
-                    .collect(),
-            )
-            .expect("valid batch driver");
-            assert_eq!(
-                results.termination,
-                edgezero_core::OutboundBatchTermination::Completed
-            );
-            let slot = results.slots[0].as_ref().expect("resolved slot");
-
-            let Err(EdgeError::Internal { source, .. }) = &slot.outcome else {
-                panic!("expected dispatch-slack failure, got {:?}", slot.outcome);
-            };
-            assert_eq!(
-                source.to_string(),
-                "Fastly batch adapter overhead between batch_now and SDK arming (preflight + dynamic-backend lookup/creation + SDK setup) exceeded BATCH_DISPATCH_SLACK_MAX; refusing to arm SDK timers with stale duration"
-            );
+            for selected in [
+                edgezero_core::BudgetSource::PerCallTimeout,
+                edgezero_core::BudgetSource::RequestDeadline,
+            ] {
+                for streamed in [false, true] {
+                    let started_at = edgezero_core::MonotonicInstant::now();
+                    let observed = Arc::new(Mutex::new(started_at));
+                    let clock_now = Arc::clone(&observed);
+                    let time = edgezero_core::OutboundTime::new(
+                        edgezero_core::MonotonicClock::new(move || *clock_now.lock().unwrap()),
+                        |_, _| panic!("preexpired requests must not register timers"),
+                    );
+                    let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
+                    let polls = Arc::new(AtomicUsize::new(0));
+                    let source_polls = Arc::clone(&polls);
+                    let body = if streamed {
+                        Body::from_stream(stream::poll_fn(move |_cx| {
+                            source_polls.fetch_add(1, Ordering::SeqCst);
+                            Poll::Pending
+                        }))
+                    } else {
+                        Body::from(Bytes::from_static(b"body"))
+                    };
+                    let mut outbound = request().body(body).timeout(Duration::from_secs(1));
+                    if selected == edgezero_core::BudgetSource::RequestDeadline {
+                        outbound = outbound.deadline(Deadline::at_instant(
+                            started_at.checked_add(Duration::from_millis(500)).unwrap(),
+                        ));
+                    }
+                    let send = client.send(outbound);
+                    *observed.lock().unwrap() =
+                        started_at.checked_add(Duration::from_secs(2)).unwrap();
+                    assert!(matches!(
+                        block_on(send),
+                        Err(EdgeError::GatewayTimeout { cause, .. }) if cause == selected
+                    ));
+                    assert_eq!(polls.load(Ordering::SeqCst), 0);
+                }
+            }
         }
 
         #[test]
@@ -1791,7 +1826,7 @@ mod outbound_contract_tests {
                 edgezero_core::MonotonicClock::new(move || now),
                 |_, _| panic!("expired cutoff must not register an outbound timer"),
             );
-            let client = FastlyOutboundClient::with_time(time);
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
             let request = request().body(Bytes::from_static(b"body"));
 
             let results = block_on(
@@ -1802,10 +1837,13 @@ mod outbound_contract_tests {
             .expect("valid batch driver");
 
             assert_eq!(
-                results.termination,
+                results.termination(),
                 edgezero_core::OutboundBatchTermination::Cutoff
             );
-            assert!(matches!(results.slots.first(), Some(None)));
+            assert!(matches!(
+                results.slots().first(),
+                Some(edgezero_core::OutboundCollectedSlot::Unresolved)
+            ));
         }
     }
 }

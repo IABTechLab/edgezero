@@ -97,6 +97,7 @@ pub fn env_guard() -> &'static Mutex<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Error as IoError;
     use std::iter::repeat_n;
     use std::mem::take;
     use std::net::SocketAddr;
@@ -117,8 +118,10 @@ mod tests {
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant, IngressHeadLimits};
     use edgezero_core::middleware::{Middleware, Next};
     use edgezero_core::outbound::{
-        ContentTypeProvenance, HttpClient, OutboundBatch, OutboundHttpClient, OutboundRequest,
-        OutboundResponse,
+        HttpClient, OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest,
+        OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
+        OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
+        OutboundRequest, OutboundResponse, OutboundSendMode, OutboundTime,
     };
     use edgezero_core::response::IntoResponse as _;
     use edgezero_core::response_egress::{
@@ -126,8 +129,12 @@ mod tests {
         ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressReport,
     };
     use edgezero_core::router::RouterService;
-    use edgezero_core::{Deadline, MonotonicClock, MonotonicInstant};
-    use futures_util::stream::{poll_fn, unfold};
+    use edgezero_core::{
+        Deadline, IndependentOutboundProgress, MonotonicClock, MonotonicInstant,
+        OutboundProgressRuntime,
+    };
+    use futures_util::future::ready;
+    use futures_util::stream::{iter, poll_fn, unfold};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
     use tokio::net::TcpStream;
@@ -139,6 +146,7 @@ mod tests {
     use super::AxumTestServer;
     use crate::dev_server::{AxumDevServer, AxumDevServerConfig};
     use crate::ingress_config::AxumIngressConfig;
+    use crate::outbound::native_time;
 
     struct ParityState {
         configured: AtomicUsize,
@@ -237,7 +245,10 @@ mod tests {
 
     struct CountingMiddleware(Arc<AtomicUsize>);
 
-    struct RecordingClient(Arc<AtomicUsize>);
+    struct RecordingClient {
+        calls: Arc<AtomicUsize>,
+        time: OutboundTime,
+    }
 
     struct Reports(Arc<StdMutex<Vec<ResponseEgressReport>>>);
 
@@ -247,26 +258,81 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait(?Send)]
+    impl RecordingClient {
+        fn finish_ready(
+            &self,
+            request: OutboundDispatchRequest,
+        ) -> Result<OutboundResponse, EdgeError> {
+            use futures_util::{FutureExt as _, TryFutureExt as _};
+            let mut future = Box::pin(self.dispatch_head(request).and_then(OutboundHead::finish));
+            // Fixed one-chunk replies need one cooperative turn before EOF.
+            for _ in 0_u8..2 {
+                if let Some(outcome) = future.as_mut().now_or_never() {
+                    return outcome;
+                }
+            }
+            Err(EdgeError::internal(IoError::other(
+                "scripted response exceeded its fixed poll bound",
+            )))
+        }
+    }
+
     impl OutboundHttpClient for RecordingClient {
-        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(OutboundResponse::new(
-                request.method().clone(),
-                StatusCode::OK,
-                HeaderMap::new(),
-                Body::from("supplied"),
-                MonotonicClock::default(),
-                ContentTypeProvenance::Unknown,
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            let outcome = self.finish_ready(request);
+            Ok(OutboundPending::new(
+                Box::pin(ready(outcome)),
+                OutboundExchangeOwner::new(|| {}),
             ))
         }
 
-        fn start_batch_until(
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (_, context) = request.into_parts();
+            let head = OutboundHead::new(
+                StatusCode::OK,
+                OutboundHeaderInput::new(
+                    "supplied",
+                    HeaderMap::new(),
+                    OutboundHeaderFidelity::AdapterVisibleFields,
+                ),
+                Box::pin(iter([Ok(bytes::Bytes::from_static(b"supplied"))])),
+                context,
+                OutboundExchangeOwner::new(|| {}),
+            );
+            Box::pin(ready(head))
+        }
+
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, requests) = batch.into_slots();
+            let events = requests
+                .into_iter()
+                .map(|(index, request)| {
+                    let outcome = self.finish_ready(request);
+                    OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at: self.time.clock().now(),
+                        outcome,
+                    }
+                })
+                .collect::<Vec<_>>();
+            OutboundBatch::from_driver(context, iter(events), OutboundExchangeOwner::new(|| {}))
+        }
+
+        fn time(&self) -> OutboundTime {
+            self.time.clone()
+        }
+
+        fn validate_supported_options(
             &self,
-            requests: Vec<OutboundRequest>,
-            _observation_cutoff: Deadline,
-        ) -> OutboundBatch {
-            OutboundBatch::cutoff(requests.len())
+            _request: &OutboundRequest,
+            _mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            Ok(())
         }
     }
 
@@ -781,8 +847,11 @@ mod tests {
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_uri = format!("http://{}/should-not-connect", target.local_addr().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
-        let supplied_client =
-            HttpClient::with_client(RecordingClient(Arc::clone(&calls))).with_proxy_marker(false);
+        let supplied_client = HttpClient::with_client(RecordingClient {
+            calls: Arc::clone(&calls),
+            time: native_time(MonotonicClock::default()),
+        })
+        .with_proxy_marker(false);
         let router = RouterService::builder()
             .with_state(supplied_client)
             .get("/", move |ctx: RequestContext| {

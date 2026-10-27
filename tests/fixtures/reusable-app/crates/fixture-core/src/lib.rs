@@ -1,4 +1,6 @@
 pub mod assembly;
+#[cfg(test)]
+mod outbound_test_support;
 #[cfg(feature = "qualification")]
 pub mod qualification;
 
@@ -455,41 +457,294 @@ mod tests {
     use edgezero_core::body::Body;
     use edgezero_core::http::request_builder;
     use edgezero_core::outbound::{
-        HttpClient, OutboundBatch, OutboundBatchDriverEvent, OutboundBatchItem, OutboundHttpClient,
-        OutboundResponse, OutboundSlotResult,
+        HttpClient, OutboundBatch, OutboundBatchDriverEvent, OutboundBatchTermination,
+        OutboundCollectedSlot, OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture,
+        OutboundHead, OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundSendMode,
+        OutboundTime,
+    };
+    use edgezero_core::{
+        BodyPayload, BudgetSource, Deadline, IndependentOutboundProgress, OutboundProgressRuntime,
+        OutboundScopeOwner,
     };
     use futures::executor::block_on;
+    use std::rc::Rc;
     use std::sync::Mutex;
+    use std::task::Poll;
+    use std::time::Duration;
 
-    struct NamedClient(&'static str);
+    struct NamedClient {
+        name: &'static str,
+        time: OutboundTime,
+        calls: Arc<AtomicUsize>,
+    }
 
-    #[async_trait::async_trait(?Send)]
+    impl NamedClient {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                time: crate::outbound_test_support::TestTime::default().pair(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
     impl OutboundHttpClient for NamedClient {
-        async fn send(&self, _request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            Err(EdgeError::bad_request(self.0))
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
         }
 
-        fn start_batch_until(
+        fn time(&self) -> OutboundTime {
+            self.time.clone()
+        }
+
+        fn validate_supported_options(
             &self,
-            requests: Vec<OutboundRequest>,
-            _observation_cutoff: edgezero_core::Deadline,
-        ) -> OutboundBatch {
-            let name = self.0;
-            let count = requests.len();
+            _request: &OutboundRequest,
+            _mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            Ok(())
+        }
+
+        fn dispatch_head(&self, _request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(futures::future::ready(Err(EdgeError::bad_request(
+                self.name,
+            ))))
+        }
+
+        fn begin(&self, _request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(EdgeError::bad_request(self.name))
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, requests) = batch.into_slots();
+            if requests.is_empty()
+                && context
+                    .observation_cutoff()
+                    .is_expired_at(context.clock().now())
+            {
+                return OutboundBatch::cutoff(context);
+            }
+            let events = requests
+                .into_iter()
+                .map(|(index, _request)| {
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at: self.time.clock().now(),
+                        outcome: Err(EdgeError::bad_request(self.name)),
+                    }
+                })
+                .collect::<Vec<_>>();
             OutboundBatch::from_driver(
-                count,
-                futures::stream::iter(requests.into_iter().enumerate().map(
-                    move |(index, _request)| {
-                        OutboundBatchDriverEvent::Item(OutboundBatchItem::new(
-                            index,
-                            OutboundSlotResult::new(
-                                std::time::Duration::ZERO,
-                                Err(EdgeError::bad_request(name)),
-                            ),
-                        ))
-                    },
-                )),
+                context,
+                futures::stream::iter(events),
+                OutboundExchangeOwner::new(|| {}),
             )
+        }
+    }
+
+    #[test]
+    fn early_body_batch_attachment_survives_eof_and_closes_on_response_drop() {
+        for abandon_before_handoff in [false, true] {
+            let scripted = NamedClient::new("scripted terminal failure");
+            let calls = Arc::clone(&scripted.calls);
+            let observation_cutoff = scripted.time.clock().deadline_after(Duration::from_secs(1));
+            let client = HttpClient::with_client(scripted);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let (response, scope) = {
+                let owner = OutboundScopeOwner::response_body();
+                let scope = owner.scope();
+                let batch = owner.with(|| {
+                    client.start_batch_until(
+                        vec![OutboundRequest::get("https://example.com/early").unwrap()],
+                        observation_cutoff,
+                    )
+                });
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    1,
+                    "start before handler return"
+                );
+                let observed = Arc::clone(&polls);
+                let source = futures::stream::once(async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    let results = batch
+                        .collect()
+                        .await
+                        .map_err(|failure| failure.into_parts().0)?;
+                    assert_eq!(results.termination(), OutboundBatchTermination::Completed);
+                    let report = serde_json::json!({"slots":results.slots().len()});
+                    Ok(bytes::Bytes::from(report.to_string()))
+                });
+                let response = owner
+                    .attach(Response::new(Body::from_stream(source)))
+                    .expect("attach the exact early body owner");
+                (response, scope)
+            };
+            assert_eq!(
+                polls.load(Ordering::SeqCst),
+                0,
+                "handler has returned without polling"
+            );
+            scope
+                .check()
+                .expect("response owns the early batch lifetime");
+            if abandon_before_handoff {
+                drop(response);
+                assert!(matches!(scope.check(), Err(EdgeError::Internal { .. })));
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                continue;
+            }
+            let (payload, body_owner) = response.into_body().into_parts();
+            assert!(body_owner.is_some(), "handoff carries the early owner");
+            let BodyPayload::Stream(source) = payload else {
+                panic!("batch report is streamed");
+            };
+            let bytes = block_on(Body::from_stream(source).into_bytes_bounded(4096)).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"slots":1})
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+            scope
+                .check()
+                .expect("EOF alone is not transmission completion");
+            drop(body_owner);
+            assert!(matches!(scope.check(), Err(EdgeError::Internal { .. })));
+        }
+    }
+
+    #[test]
+    fn attached_body_metadata_is_rejected_before_outbound_dispatch() {
+        let scripted = NamedClient::new("must not dispatch attached request metadata");
+        let calls = Arc::clone(&scripted.calls);
+        let client = HttpClient::with_client(scripted);
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let response = owner
+            .attach(Response::new(Body::empty()))
+            .expect("response attachment");
+        let request = OutboundRequest::post("https://example.com/invalid-attachment")
+            .unwrap()
+            .body(response.into_body());
+        let error =
+            block_on(client.send(request)).expect_err("response metadata is not a request payload");
+        assert_eq!(error.status(), 400);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(scope.check(), Err(EdgeError::Internal { .. })));
+    }
+
+    #[test]
+    fn supplied_client_scope_reactivates_after_yield_and_releases_unpolled_send() {
+        let scripted = NamedClient::new("manual caller owns this exchange");
+        let calls = Arc::clone(&scripted.calls);
+        let client = HttpClient::with_client(scripted);
+        let error =
+            block_on(client.send(OutboundRequest::get("https://example.com/manual").unwrap()))
+                .expect_err("manual caller must still reach the supplied client");
+        assert_eq!(error.message(), "manual caller owns this exchange");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let lifetime = Arc::new(());
+        let released = Arc::downgrade(&lifetime);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&polls);
+        let source = futures::stream::poll_fn(move |_cx| {
+            let _held = &lifetime;
+            observed.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending
+        });
+        let request = OutboundRequest::post("https://example.com/unpolled")
+            .unwrap()
+            .body(Body::from_stream(source));
+        let callback = OutboundScopeOwner::callback();
+        let mut first_poll = true;
+        let mut retained = None;
+        block_on(callback.run(async {
+            futures::future::poll_fn(|cx| {
+                if first_poll {
+                    first_poll = false;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await;
+            retained = Some(client.send(request));
+        }));
+        let retained = retained.expect("send created after the second outer poll");
+        assert!(!first_poll);
+        assert!(released.upgrade().is_some());
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        drop(callback);
+        assert!(
+            released.upgrade().is_none(),
+            "scope exit releases an unpolled root"
+        );
+        let error = block_on(retained).expect_err("closed invocation cannot dispatch later");
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn named_batch_exact_cutoff_preserves_preflight_without_io() {
+        for sibling in ["cutoff", "invalid", "own-timeout"] {
+            let time = crate::outbound_test_support::TestTime::default();
+            let own_deadline = Deadline::at_instant(time.clock().now());
+            time.advance_to(
+                own_deadline
+                    .instant()
+                    .checked_add(Duration::from_millis(1))
+                    .expect("entry instant"),
+            );
+            let entered_at = time.clock().now();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let client = HttpClient::with_client(NamedClient {
+                name: "must not dispatch",
+                time: time.pair(),
+                calls: Arc::clone(&calls),
+            });
+            let first = OutboundRequest::get("https://example.com/first").unwrap();
+            let second = OutboundRequest::get("https://example.com/second").unwrap();
+            let second = match sibling {
+                "invalid" => second.stream_response(),
+                "own-timeout" => second.deadline(own_deadline),
+                _ => second,
+            };
+            let batch =
+                client.start_batch_until(vec![first, second], Deadline::at_instant(entered_at));
+            let results = block_on(batch.collect()).expect("exact cutoff is not driver EOF");
+            let (collected, termination) = results.into_parts();
+            assert_eq!(termination, OutboundBatchTermination::Cutoff);
+            assert_eq!(collected.len(), 2);
+            assert!(matches!(collected[0], OutboundCollectedSlot::Unresolved));
+            let last = collected.into_iter().nth(1).expect("second slot");
+            if sibling == "cutoff" {
+                assert!(matches!(last, OutboundCollectedSlot::Unresolved));
+            } else {
+                let OutboundCollectedSlot::Resolved(rejected) = last else {
+                    panic!("preflight outcome must be retained");
+                };
+                assert_eq!(rejected.elapsed, Duration::ZERO);
+                let error = rejected.outcome.expect_err("preflight failure");
+                if sibling == "invalid" {
+                    assert_eq!(error.status(), 400);
+                } else {
+                    assert!(matches!(
+                        error,
+                        EdgeError::GatewayTimeout {
+                            cause: BudgetSource::RequestDeadline,
+                            ..
+                        }
+                    ));
+                }
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(time.clock().now(), entered_at);
         }
     }
 
@@ -501,7 +756,8 @@ mod tests {
                 .get("/cookies", cookies)
                 .get("/error", rendered_error);
             if state_client {
-                router = router.with_state(HttpClient::with_client(NamedClient("state client")));
+                router =
+                    router.with_state(HttpClient::with_client(NamedClient::new("state client")));
             }
             let app = App::new(router.build());
             let mut captures = Vec::new();
@@ -510,7 +766,7 @@ mod tests {
                 let mut request = request_builder().uri(path).body(Body::empty()).unwrap();
                 request
                     .extensions_mut()
-                    .insert(HttpClient::with_client(NamedClient("request client")));
+                    .insert(HttpClient::with_client(NamedClient::new("request client")));
                 request.extensions_mut().insert(Arc::clone(&captured));
                 let response = block_on(app.router().oneshot(request)).unwrap();
                 assert_eq!(response.status().as_u16(), expected_status);
@@ -551,7 +807,7 @@ mod tests {
             if status == 404 {
                 request
                     .extensions_mut()
-                    .insert(HttpClient::with_client(NamedClient("not routed")));
+                    .insert(HttpClient::with_client(NamedClient::new("not routed")));
             }
             let response = block_on(app.router().oneshot(request)).unwrap();
             assert_eq!(response.status().as_u16(), status);

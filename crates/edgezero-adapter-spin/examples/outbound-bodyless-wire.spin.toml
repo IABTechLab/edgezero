@@ -1,0 +1,13 @@
+spin_manifest_version = 2
+
+[application]
+name = "outbound-bodyless-wire"
+version = "0.1.0"
+
+[[trigger.http]]
+route = "/..."
+component = "wire"
+
+[component.wire]
+source = "../../../target/wasm32-wasip2/debug/examples/outbound_bodyless_wire.wasm"
+allowed_outbound_hosts = ["http://127.0.0.1:*"]

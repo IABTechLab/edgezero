@@ -20,14 +20,16 @@ The [implementation index](https://github.com/IABTechLab/edgezero/blob/7cccaf107
 continues to require a buildable hard migration preserving the implemented outbound baseline.
 There is no compatibility branch, alternate transport or lazy default proposed here.
 
-| Decision ID          | Decision                                | Approver                                   | Decision Date | Approved Subject Digest                                            |
-| -------------------- | --------------------------------------- | ------------------------------------------ | ------------- | ------------------------------------------------------------------ |
-| G4-API               | Approved, API only                      | AG; scoped exact-digest conversation reply | 2026-10-19    | `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a` |
-| G4-FASTLY-POLICY     | Pending; local primitive failed         | Unset                                      | Unset         | Unset                                                              |
-| G4-FASTLY-B31        | Approved, scoped implementation only    | Requester; scoped conversation reply       | 2026-10-25    | Proposal referenced below; not new whole-contract digest approval  |
-| G4-OPTIMIZER-HORIZON | Pending; finite rule unproved           | Unset                                      | Unset         | Unset                                                              |
-| G4-APPLICABILITY     | Pending; G1 scope lock open             | Unset                                      | Unset         | Unset                                                              |
-| G4-MEASUREMENTS      | Pending; replay definitions unconfirmed | Unset                                      | Unset         | Unset                                                              |
+| Decision ID          | Decision                                 | Approver                                   | Decision Date | Approved Subject Digest                                             |
+| -------------------- | ---------------------------------------- | ------------------------------------------ | ------------- | ------------------------------------------------------------------- |
+| G4-API               | Approved, API only                       | AG; scoped exact-digest conversation reply | 2026-10-19    | `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a`  |
+| G4-SCOPE-CAPTURE     | Authorized scoped architectural redesign | Requester; explicit conversation reply     | 2026-10-27    | Structured ownership design below; not the earlier closure proposal |
+| G4-FASTLY-SLACK      | Approved, scoped retirement              | Requester; explicit conversation reply     | 2026-10-27    | Remove slack rejection; retain original deadlines, B31 and limits   |
+| G4-FASTLY-POLICY     | Pending; local primitive failed          | Unset                                      | Unset         | Unset                                                               |
+| G4-FASTLY-B31        | Approved, scoped implementation only     | Requester; scoped conversation reply       | 2026-10-25    | Proposal referenced below; not new whole-contract digest approval   |
+| G4-OPTIMIZER-HORIZON | Pending; finite rule unproved            | Unset                                      | Unset         | Unset                                                               |
+| G4-APPLICABILITY     | Pending; G1 scope lock open              | Unset                                      | Unset         | Unset                                                               |
+| G4-MEASUREMENTS      | Pending; replay definitions unconfirmed  | Unset                                      | Unset         | Unset                                                               |
 
 The [2026-10-25 policy/readiness packet](2026-10-25-fastly-backend-policy-proposal.md) now proposes
 B31 and a B1 comparison with complete aggregate-budget arithmetic. On 2026-10-25 the requester
@@ -69,13 +71,100 @@ timer vectors. Names are versioned, configuration-derived and client-independent
 registry must compare full identities, serialize registration, retain successful late registrations
 before reporting the original timeout, and reject unknown `NameInUse` rather than trusting it.
 
-The current transport still captures its budget at async method entry, as documented by the
-Send-first checkpoint; facade-invocation capture and the atomic trait migration are not claimed.
+At that checkpoint the transport still captured its budget at async method entry, as documented
+by the Send-first checkpoint; that approval did not claim facade-invocation capture or the atomic
+trait migration. The subsequent scope amendment and implementation dashboard track that migration.
 Explicit Connect/idle options, retirement/total resource bounds, host enforcement, pooling,
 optimizer horizon and hosted qualification remain separate work. No public signature, application
 policy, portable cap, timeout cause or logical deadline changes under this scope.
 
 ## Original Exact API Subject
+
+### Reopened Invocation-Scope Interface (2026-10-27)
+
+The atomic implementation review found that the approved response context requires an
+invocation-time local progress-scope token, but the frozen implementer surface provides no way
+to capture/install it across crate boundaries. Capturing at dispatch, timer polling or collection
+is too late for a retained, never-polled Send future; binding it at client construction would
+incorrectly retain a previous request's scope. This is an implementation-interface gap, not a
+provider impossibility or permission to weaken request-lifetime cleanup.
+
+The initial narrow proposal added a required `capture_scope` hook returning an opaque local
+`OutboundScope`, read-only scope access on prepared contexts, and provider-facing construction,
+activation and cancellation-registration operations. Activation restores the previous scope on
+drop and cannot create, close or reparent a captured lifetime. Check/register alone is insufficient:
+Begin or Batch work later polled inside another response must retain its original provider
+runtime/progress identity. Pending/group registrations survive completion of the outer Begin
+future; successful streamed handoff changes cleanup ownership without resetting deadlines.
+
+The requester answered that EdgeZero owns this interface, requested an ideal architecture with
+"No hacks!", and explicitly replied `ok to reopen the interface!`. The earlier closure-based
+proposal is not a constraint to preserve. Review shared typed scope ownership against a
+provider-owned protocol, record the chosen contract, and hard-migrate its implementation and
+callers. No compatibility default, clock/timer side channel or retained obsolete path is authorized.
+Reopening is explicit, not inferred from the current implementation or passing tests.
+Canonical callback/body owners, unpolled-root revocation and retained-handle lifetime coverage
+remain open in the current dashboard in
+`docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md` (2026-10-27).
+The original Interfaces and requirements digests below remain historical, not restrictions on
+this authorized redesign. Record new contract bytes and scope separately rather than silently
+refreshing the original approval subject. Runtime promotion and hosted qualification remain separate.
+
+The selected architecture uses one core `OutboundScopeOwner`/`OutboundScope` implementation and
+private revocable operation roots. The required client `progress` hook supplies provider polling,
+not cancellation registration or a second scope registry. Independent adapters share the core
+progress bridge; Fastly retains only cooperative SDK scheduling and the existing multiplexer.
+There is no `capture_scope` callback interface, compatibility default or alternate transport.
+
+For early body work, `response_body()` creates a provisional owner, `with`/`run` starts work in
+that owner, and consuming `attach(response)` carries it in local body metadata. Attachment alone
+cannot escape callback cleanup. Canonical egress accepts the exact owner before policy, framing
+or suppression; successful outbound streamed collection likewise accepts its body lifetime before
+handoff. Provider progress is shared through a request-family cache while callback and body roots
+remain independently revocable. EOF is not terminal egress. Failed application body work closes
+before bounded fallback delivery. Buffered representation and payload bytes are unchanged.
+
+`Body` becomes a private carrier with a separate `BodyPayload` transport representation; all four
+adapters, supplied clients, demo and templates hard-migrate together. Local ownership does not
+enter HTTP extensions, shared clients or App state. Original deadlines, timeout causes, partial
+batch/receipt semantics, coding/provenance, independent limits and native Image Optimizer behavior
+remain mandatory. This is the requester's scoped architecture authorization, not a claim of a new
+exact-digest approval or hosted evidence.
+
+The same core revocation protocol backs the fallible `OutboundTask` runner/owner pair consumed
+by Axum, Cloudflare and Spin. Executor drop cannot retain producer futures through another public
+handle, and failed registration returns before provider spawning. One Body source-binding path
+serves outbound and downstream egress; one core predicate handles earlier-own-deadline cutoff
+classification. Nonblocking completion observation does not drive SDK progress. These are
+consolidations of the selected architecture, not independent compatibility implementations.
+
+| Scope Amendment Identity (2026-10-27)    | Value                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| Interfaces SHA-256                       | `b69a75ba96b69c0979c05b8711f9cacbaad0abef6a6caa053ed77d21916bbba4` |
+| Complete plan SHA-256                    | `10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b` |
+| Interfaces size                          | 856 LF-terminated lines, 53,795 UTF-8 bytes                        |
+| Unchanged normative requirements SHA-256 | `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70` |
+
+These identify the implemented scope proposal; they do not overwrite the original AG approval
+subject or convert scoped conversation authorization into a new exact-digest review.
+
+### Approved Dispatch-Slack Retirement (2026-10-27)
+
+Code inspection found that Fastly's retained dispatch-slack guard measures from the invocation
+snapshot, including bounded GET/HEAD settlement. A body that settles after 25 ms can therefore
+encounter a dispatch Internal error even while its original logical deadline remains live.
+Resetting the budget or silently changing the guard's anchor would not satisfy the approved
+contract. The requester explicitly answered `Approve dispatch-slack retirement` to the scoped
+question authorizing removal while preserving original absolute deadlines, B31, typed timeout
+causes and resource limits.
+
+The implementation removes the elapsed-time rejection, its public constant and test-injection
+hook instead of retaining aliases. Absolute-expiry and backwards-clock checks remain at dispatch
+and registration boundaries. Regression and target verification are required before completing
+this checkpoint. This approval neither authorizes a runtime-pin change nor supplies hosted
+qualification, a hard interruption guarantee or a capability promotion.
+
+### Frozen Original Subject
 
 Review the complete [Interfaces: Proposed Hard-Cut Contract](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md#interfaces-proposed-hard-cut-contract),
 not just its opening trait declaration or the summaries in this packet. The subject includes every
@@ -93,7 +182,7 @@ the published documentation site. The identities below are historical, not the a
 | Complete source-file SHA-256   | `c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80`         |
 | Normative requirements SHA-256 | `5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec`         |
 
-Run from the repository/worktree root to verify the original subject and current amendment. The extraction includes
+Run from the repository/worktree root to verify the original subject and historical region amendment. The extraction includes
 the trailing blank lines before the next task; it does not normalize whitespace or line endings.
 Any changed Interfaces byte needs a new digest and review. Changes elsewhere in the plan or in
 the requirements also require reviewing their effect, not silently refreshing these identities.
@@ -121,14 +210,21 @@ assert.equal(digest(source), 'c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774
 const requirementsPath = 'docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md';
 const requirements = execFileSync('git', ['show', `${revision}:${requirementsPath}`]);
 assert.equal(digest(requirements), '5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec');
+const regional = execFileSync('git', ['show', `f4d660b1054a195ec923d78c1375358dc7b8b9fe:${path}`], { encoding: 'utf8' });
+const regionalStart = regional.indexOf('## Interfaces: Proposed Hard-Cut Contract\n');
+assert.notEqual(regionalStart, -1);
+const regionalEnd = regional.indexOf('## Task P1:', regionalStart);
+assert.ok(regionalEnd > regionalStart);
+assert.equal(digest(regional.slice(regionalStart, regionalEnd)), '0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404');
+assert.equal(digest(regional), '39c2ae866be8775b6b34879cbabff92a97f1c9f7010d76f275027690c0b6dd51');
 const current = readFileSync(path, 'utf8');
 const currentStart = current.indexOf('## Interfaces: Proposed Hard-Cut Contract\n');
-assert.notEqual(currentStart, -1);
 const currentEnd = current.indexOf('## Task P1:', currentStart);
-assert.ok(currentEnd > currentStart);
-assert.equal(digest(current.slice(currentStart, currentEnd)), '0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404');
-assert.equal(digest(current), '39c2ae866be8775b6b34879cbabff92a97f1c9f7010d76f275027690c0b6dd51');
-console.log('Original subject and amended API identities match; approval scope is recorded separately.');
+assert.ok(currentStart >= 0 && currentEnd > currentStart);
+assert.equal(digest(current.slice(currentStart, currentEnd)), 'b69a75ba96b69c0979c05b8711f9cacbaad0abef6a6caa053ed77d21916bbba4');
+assert.equal(digest(current), '10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b');
+assert.equal(digest(readFileSync(requirementsPath)), 'a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70');
+console.log('Historical and scope-amendment identities match; authorization remains separately scoped.');
 JS
 ```
 
@@ -139,18 +235,18 @@ public, core-owned seven-variant region enum, typed `parse`/`as_str` conversions
 spec/tests and no compatibility wrapper. This is approval of that described API change, not a
 claim that the requester reviewed the new whole-section digest computed afterward.
 
-The current [Interfaces contract](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md#interfaces-proposed-hard-cut-contract)
+The regional [Interfaces contract](https://github.com/IABTechLab/edgezero/blob/f4d660b1054a195ec923d78c1375358dc7b8b9fe/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md#interfaces-proposed-hard-cut-contract)
 differs from the original only by declaring `OutboundImageOptimizerRegion::{Asia, Australia,
 EuCentral, EuWest, UsCentral, UsEast, UsWest}` and specifying its Copy/Clone/Debug/PartialEq/Eq,
 direct construction and exhaustive matching semantics. Options alone retain private fields;
 existing getters and canonical token/error behavior are unchanged. No other interface or gate
 is amended.
 
-| Current Source Identity | Value                                                              |
-| ----------------------- | ------------------------------------------------------------------ |
-| Interfaces SHA-256      | `0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404` |
-| Complete plan SHA-256   | `39c2ae866be8775b6b34879cbabff92a97f1c9f7010d76f275027690c0b6dd51` |
-| Interfaces size         | 683 LF-terminated lines, 42,364 UTF-8 bytes                        |
+| Historical Regional Identity | Value                                                              |
+| ---------------------------- | ------------------------------------------------------------------ |
+| Interfaces SHA-256           | `0b1b2e132dc3e294e117a1a5d2bdb65c49693eab47b93e7926220612fd595404` |
+| Complete plan SHA-256        | `39c2ae866be8775b6b34879cbabff92a97f1c9f7010d76f275027690c0b6dd51` |
+| Interfaces size              | 683 LF-terminated lines, 42,364 UTF-8 bytes                        |
 
 These are verification identities, not fresh exact-digest approval evidence. The original
 AG approval remains attributed as recorded above; this amendment is attributed to the requester's

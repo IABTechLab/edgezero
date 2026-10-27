@@ -14,6 +14,19 @@ const fastlyGuidePath = 'docs/guide/adapters/fastly.md'
 const scaffoldReadmePath =
   'crates/edgezero-cli/src/templates/root/README.md.hbs'
 const outboundCorePath = 'crates/edgezero-core/src/outbound.rs'
+const outboundCoreProductionPaths = [
+  outboundCorePath,
+  ...[
+    'batch',
+    'dispatch',
+    'exchange',
+    'head',
+    'image_optimizer',
+    'progress',
+    'scope',
+  ].map((name) => `crates/edgezero-core/src/outbound/${name}.rs`),
+]
+const outboundCoreTestPath = 'crates/edgezero-core/src/outbound/tests.rs'
 const compressionCorePath = 'crates/edgezero-core/src/compression.rs'
 const outboundAdapterPaths = [
   'crates/edgezero-adapter-axum/src/outbound.rs',
@@ -25,18 +38,6 @@ const templateHandlersPath =
   'crates/edgezero-cli/src/templates/core/src/handlers.rs.hbs'
 const demoHandlersPath =
   'examples/app-demo/crates/app-demo-core/src/handlers.rs'
-const observationCutoffSourcePaths = [
-  outboundCorePath,
-  'crates/edgezero-core/src/context.rs',
-  'crates/edgezero-core/src/time.rs',
-  ...outboundAdapterPaths,
-  ...['axum', 'cloudflare', 'fastly', 'spin'].map(
-    (adapter) => `crates/edgezero-adapter-${adapter}/tests/contract.rs`
-  ),
-  templateHandlersPath,
-  demoHandlersPath,
-  proxyGuidePath,
-]
 const brotliAuditPath =
   'docs/audits/2026-09-27-brotli-decoder-memory-accounting.md'
 const outboundSpecPath =
@@ -144,7 +145,13 @@ const expectedOutboundRows = [
   ],
   ['outbound-header-fidelity', 'Native', 'BestEffort', 'Native', 'BestEffort'],
   ['outbound-deadlines', 'Native', 'BestEffort', 'BestEffort', 'BestEffort'],
-  ['outbound-failure-diagnostics', 'BestEffort', 'BestEffort', 'Native', 'Native'],
+  [
+    'outbound-failure-diagnostics',
+    'BestEffort',
+    'BestEffort',
+    'Native',
+    'Native',
+  ],
   [
     'outbound-image-optimizer',
     'Unsupported',
@@ -740,130 +747,248 @@ function runObservationCutoffContractSelfTests() {
   }
 }
 
-function observationCutoffContract(outboundCoreSource) {
-  const publicRustdoc = outboundCoreSource.match(
-    /(?<rustdoc>(?:\s*\/\/\/[^\n]*\n)+)\s*fn start_batch_until\(/u
-  )?.groups?.rustdoc
-  if (publicRustdoc === undefined) fail('missing start_batch_until Rustdoc')
-  const normalizedPublicRustdoc = publicRustdoc
-    .replaceAll(/\s*\/\/\/\s?/gu, ' ')
-    .replaceAll(/\s+/gu, ' ')
-    .trim()
-  for (const requiredFragment of [
-    'The observation cutoff stops batch observation regardless of any remaining per-request budget or later per-request deadline.',
-    'Passing an earlier observation cutoff intentionally leaves unresolved slots.',
-  ]) {
-    if (!normalizedPublicRustdoc.includes(requiredFragment)) {
-      fail(`public batch Rustdoc is missing: ${requiredFragment}`)
+function testOnlyCondition(condition) {
+  const expression = condition.trim()
+  if (expression === 'test') return true
+  const operation = /^(all|any)\s*\(/u.exec(expression)
+  if (operation === null) return false
+  const open = operation[0].lastIndexOf('(')
+  const close = closingDelimiter(expression, open)
+  if (close === -1 || expression.slice(close + 1).trim() !== '') return false
+  const inputs = topLevelArguments(expression, open, close)
+  return operation[1] === 'all'
+    ? inputs.some(testOnlyCondition)
+    : inputs.length > 0 && inputs.every(testOnlyCondition)
+}
+
+function productionCode(source) {
+  const code = maskObservationCutoffNonCode(source)
+  const view = code.split('')
+  for (const match of code.matchAll(/#\s*\[\s*cfg\s*\(/gu)) {
+    const open = match.index + match[0].lastIndexOf('(')
+    const close = closingDelimiter(code, open)
+    if (close === -1) fail('unclosed cfg condition')
+    if (!testOnlyCondition(code.slice(open + 1, close))) continue
+    let cursor = code.indexOf(']', close) + 1
+    let end = -1
+    for (; cursor < code.length; cursor += 1) {
+      if (code[cursor] === '(' || code[cursor] === '[') {
+        cursor = closingDelimiter(code, cursor)
+        if (cursor === -1) fail('unclosed test item')
+      } else if (code[cursor] === '{') {
+        end = closingDelimiter(code, cursor)
+        break
+      } else if (code[cursor] === ';') {
+        end = cursor
+        break
+      }
+    }
+    if (end === -1) fail('unclosed test item')
+    for (let index = match.index; index <= end; index += 1) {
+      if (code[index] !== '\n') view[index] = ' '
     }
   }
+  return view.join('')
+}
 
-  const signatureContracts = [
-    [outboundCorePath, 'start_batch_until', 4, 'plain', 2],
-    [outboundCorePath, 'send_all_until', 1, 'plain'],
-    [outboundCorePath, 'finish_batch_item', 1, 'plain'],
-    ['crates/edgezero-core/src/context.rs', 'start_batch_until', 1, 'plain', 1],
-    ['crates/edgezero-core/src/time.rs', 'dispatch_budget', 1, 'optional'],
-    ...outboundAdapterPaths.flatMap((path) => [
-      [path, 'prepare_batch', 1, 'plain'],
-      [path, 'prepare_validated', 1, 'optional'],
-      [path, 'start_batch_until', 1, 'plain'],
-    ]),
-    [outboundAdapterPaths[2], 'finish_fastly_batch_observation', 1, 'plain'],
-    [templateHandlersPath, 'start_batch_until', 1, 'plain'],
-    [demoHandlersPath, 'start_batch_until', 1, 'plain'],
+function declarationBody(source, declaration) {
+  const match = declaration.exec(source)
+  if (match === null) return null
+  const open = match.index + match[0].lastIndexOf('{')
+  const close = closingDelimiter(source, open)
+  return close === -1 ? null : source.slice(open + 1, close)
+}
+
+function liveOutboundContractError(core, batch, runtime, body) {
+  const trait = declarationBody(
+    core,
+    /\bpub\s+trait\s+OutboundHttpClient\s*:\s*Send\s*\+\s*Sync\s*\{/u
+  )
+  if (trait === null) return 'missing object-safe Send + Sync outbound trait'
+  const hooks = [
+    /\bfn\s+progress\s*\(\s*&self\s*\)\s*->\s*(?:std\s*::\s*rc\s*::\s*)?Rc\s*<\s*dyn\s+OutboundProgressRuntime\s*>\s*;/u,
+    /\bfn\s+time\s*\(\s*&self\s*\)\s*->\s*OutboundTime\s*;/u,
+    /\bfn\s+validate_supported_options\s*\(\s*&self\s*,\s*request\s*:\s*&OutboundRequest\s*,\s*mode\s*:\s*OutboundSendMode\s*,?\s*\)\s*->\s*Result\s*<\s*\(\s*\)\s*,\s*EdgeError\s*>\s*;/u,
+    /\bfn\s+dispatch_head\s*\(\s*&self\s*,\s*request\s*:\s*OutboundDispatchRequest\s*,?\s*\)\s*->\s*OutboundFuture\s*<\s*OutboundHead\s*>\s*;/u,
+    /\bfn\s+begin\s*\(\s*&self\s*,\s*request\s*:\s*OutboundDispatchRequest\s*,?\s*\)\s*->\s*Result\s*<\s*OutboundPending\s*,\s*EdgeError\s*>\s*;/u,
+    /\bfn\s+start_batch_until\s*\(\s*&self\s*,\s*batch\s*:\s*OutboundPreparedBatch\s*,?\s*\)\s*->\s*OutboundBatch\s*;/u,
   ]
-  for (const [
-    path,
-    name,
-    count,
-    typeShape,
-    unusedCount,
-  ] of signatureContracts) {
-    const source = readFileSync(path, 'utf8')
-    const error = signatureContractError(
-      source,
-      name,
-      count,
-      typeShape,
-      unusedCount
-    )
-    if (error !== null) fail(`${path}: ${error}`)
+  if (
+    !hooks.every((hook) => hook.test(trait)) ||
+    /\bfn\s+(?:send|capture_scope)\s*\(/u.test(trait)
+  ) {
+    return 'outbound trait must require all six hooks including explicit progress runtime, without defaults or retired hooks'
   }
-  for (const path of observationCutoffSourcePaths) {
-    const error = exampleContractError(path, readFileSync(path, 'utf8'))
-    if (error !== null) fail(`${path} contains ${error}`)
+  if (
+    !/\bpub\s+trait\s+OutboundProgressRuntime\b/u.test(runtime) ||
+    !/\bpub\s+struct\s+IndependentOutboundProgress\s*;/u.test(runtime) ||
+    !/\bimpl\s+OutboundProgressRuntime\s+for\s+IndependentOutboundProgress\b/u.test(
+      runtime
+    )
+  ) {
+    return 'outbound progress must expose its runtime trait and one concrete independent implementation, not aliases or test fixtures'
+  }
+  const scopeOwner = declarationBody(
+    runtime,
+    /\bpub\s+struct\s+OutboundScopeOwner\s*\{/u
+  )
+  if (
+    scopeOwner === null ||
+    /\bpub\s*(?:\([^)]*\))?\s*\w+\s*:/u.test(scopeOwner)
+  ) {
+    return 'core scope ownership must retain opaque fields'
+  }
+  const carrier = declarationBody(body, /\bpub\s+struct\s+Body\s*\{/u)
+  if (carrier === null || /\bpub\s*(?:\([^)]*\))?\s*\w+\s*:/u.test(carrier)) {
+    return 'Body must be an opaque carrier, not the retired public pattern enum'
+  }
+  const payload = declarationBody(body, /\bpub\s+enum\s+BodyPayload\s*\{/u)
+  if (
+    payload === null ||
+    !/\bOnce\s*\(\s*Bytes\s*\)/u.test(payload) ||
+    !/\bStream\s*\(\s*BodyStream\s*\)/u.test(payload) ||
+    !/\bpub\s+fn\s+into_parts\s*\(\s*(?:mut\s+)?self\s*\)\s*->\s*\(\s*BodyPayload\s*,\s*Option\s*<\s*OutboundScopeOwner\s*>\s*\)/u.test(
+      body
+    )
+  ) {
+    return 'owned Body inspection must expose canonical BodyPayload variants and transfer its optional owner through into_parts'
+  }
+  for (const name of [
+    'OutboundPreparedBatch',
+    'OutboundBatchContext',
+    'OutboundBatchItem',
+    'OutboundBatchResults',
+    'OutboundBatchFailure',
+  ]) {
+    const fields = declarationBody(
+      batch,
+      new RegExp(String.raw`\bpub\s+struct\s+${name}\s*\{`, 'u')
+    )
+    if (fields === null || /\bpub\s*(?:\([^)]*\))?\s*\w+\s*:/u.test(fields)) {
+      return `${name} must retain private context or identity fields`
+    }
+    const implementation = declarationBody(
+      batch,
+      new RegExp(String.raw`\bimpl\s+${name}\s*\{`, 'u')
+    )
+    if (
+      implementation !== null &&
+      /\bpub\s+fn\s+(?:new|from_parts)\b/u.test(implementation)
+    ) {
+      return `${name} must not have a public reconstruction constructor`
+    }
+  }
+  const driver = declarationBody(
+    batch,
+    /\bpub\s+enum\s+OutboundBatchDriverEvent\s*\{/u
+  )
+  if (
+    driver === null ||
+    !/\bItem\s*\{\s*index\s*:\s*usize\s*,\s*completed_at\s*:\s*MonotonicInstant\s*,\s*outcome\s*:\s*Result\s*<\s*OutboundResponse\s*,\s*EdgeError\s*>\s*,?\s*\}/u.test(
+      driver
+    )
+  ) {
+    return 'drivers must emit raw index, terminal timestamp and outcome, not consumer receipts'
+  }
+  if (
+    !/\bpub\s+fn\s+cutoff\s*\(\s*context\s*:\s*OutboundBatchContext\s*\)\s*->\s*Self/u.test(
+      batch
+    ) ||
+    !/\bpub\s+fn\s+from_driver\s*<\s*S\s*>\s*\(\s*context\s*:\s*OutboundBatchContext\s*,\s*events\s*:\s*S\s*,\s*owner\s*:\s*OutboundExchangeOwner\s*,?\s*\)/u.test(
+      batch
+    )
+  ) {
+    return 'batch constructors must consume opaque context and the driver cancellation owner'
+  }
+  for (const state of ['AlreadyDelivered', 'Resolved', 'Unresolved']) {
+    if (!new RegExp(String.raw`\b${state}\b`, 'u').test(batch))
+      return `missing collected ownership state ${state}`
+  }
+  if (/\b(?:from_futures|finish_batch_item)\b/u.test(core + '\n' + batch)) {
+    return 'removed future factories and receipt helpers must not remain in production'
+  }
+  return null
+}
+
+function observationCutoffContract(coreProduction) {
+  const facade = declarationBody(coreProduction, /\bimpl\s+HttpClient\s*\{/u)
+  if (
+    facade === null ||
+    !/\bpub\s+fn\s+start_batch_until\s*\(\s*&self\s*,\s*requests\s*:\s*Vec\s*<\s*OutboundRequest\s*>\s*,\s*(?:observation_cutoff|cutoff)\s*:\s*Deadline\s*,?\s*\)/u.test(
+      facade
+    )
+  ) {
+    fail(
+      'facade batch entry must retain request-vector and absolute observation cutoff'
+    )
+  }
+  const error = signatureContractError(
+    readFileSync('crates/edgezero-core/src/time.rs', 'utf8'),
+    'dispatch_budget',
+    1,
+    'optional'
+  )
+  if (error !== null) fail(error)
+  for (const path of [proxyGuidePath]) {
+    const exampleError = exampleContractError(path, readFileSync(path, 'utf8'))
+    if (exampleError !== null) fail(`${path} contains ${exampleError}`)
   }
 }
 
 function headerNormalizationContractError(source, fidelity) {
-  const code = maskObservationCutoffNonCode(source)
+  const code = productionCode(source)
   if (
     (code.match(/OutboundHeaderInput::new\(/gu)?.length ?? 0) !== 1 ||
-    (code.match(/\.normalize\(/gu)?.length ?? 0) !== 1 ||
+    (code.match(/OutboundHead::new\(/gu)?.length ?? 0) !== 1 ||
+    /\.normalize\s*\(/u.test(code) ||
+    /\bOutboundResponse\s*::\s*new\s*\(/u.test(code) ||
     !code.includes(`OutboundHeaderFidelity::${fidelity}`) ||
-    /\b(?:normalize_response_headers|insert_proxy_header)\s*\(/u.test(code)
-  ) {
-    return 'must use the shared header operation with its original provider fidelity'
-  }
-  const constructors = code.match(/OutboundResponse::new\(/gu)?.length ?? 0
-  const paired =
-    code.match(
-      /(?:response_clock|response_time\.clock\(\)\.clone\(\)),\s*normalization\.content_type_provenance,\s*\)\)/gu
-    )?.length ?? 0
-  if (
-    constructors === 0 ||
-    constructors !== paired ||
-    !(
-      code.includes('let response_clock = clock.clone();') ||
-      code.includes('let response_time = time.clone();')
+    /\b(?:normalize_response_headers|insert_proxy_header|apply_response_body_policy)\s*\(/u.test(
+      code
     )
   ) {
-    return 'must pass the paired clock and shared original provenance to every response'
+    return 'must pass original fields and provider fidelity to the single shared head finalizer without adapter normalization'
   }
   return null
 }
 
 function runHeaderNormalizationContractSelfTests() {
   const source = `
-    let response_clock = clock.clone();
-    let (headers, normalization, _) = OutboundHeaderInput::new(
+    let (parts, context) = request.into_parts();
+    let headers = OutboundHeaderInput::new(
       "cloudflare", response_headers(&response)?,
       OutboundHeaderFidelity::ProviderFieldBoundariesUnknown,
-    ).normalize(limiter, method, status, marker)?;
-    Ok(OutboundResponse::new(method, status, headers, body,
-      response_clock, normalization.content_type_provenance,))
+    );
+    OutboundHead::new(status, headers, encoded, context, owner)
   `
   const unknown = 'ProviderFieldBoundariesUnknown'
   const cases = [
     [source, unknown, true],
     [
-      source
-        .replace(
-          'let response_clock = clock.clone();',
-          'let response_time = time.clone();'
-        )
-        .replace('response_clock,', 'response_time.clock().clone(),'),
+      source +
+        '\n#[cfg(all(test, feature = "test-utils"))] mod tests { OutboundResponse::new(); }',
       unknown,
       true,
     ],
     [
-      source.replace('response_clock,', 'MonotonicClock::default(),'),
+      source + '\n#[cfg(test)] fn fixture() { OutboundResponse::new(); }',
       unknown,
-      false,
+      true,
     ],
     [source, 'AdapterVisibleFields', false],
-    [source.replace('.normalize(', '.bypass('), unknown, false],
-    [source.replace('OutboundHeaderInput::new(', 'raw_head('), unknown, false],
     [
-      source.replace(
-        'normalization.content_type_provenance',
-        'ContentTypeProvenance::Unknown'
-      ),
+      source.replace('OutboundHead::new(', 'OutboundResponse::new('),
       unknown,
       false,
     ],
-    [source.replace('let response_clock = clock.clone();', ''), unknown, false],
+    [source.replace('OutboundHeaderInput::new(', 'raw_head('), unknown, false],
+    [`${source}\nheaders.normalize(limiter);`, unknown, false],
+    [`${source}\ninsert_proxy_header(headers);`, unknown, false],
+    [
+      `${source}\nOutboundResponse::new(method, status, headers, body, clock, provenance);`,
+      unknown,
+      false,
+    ],
     [
       source
         .split('\n')
@@ -873,20 +998,265 @@ function runHeaderNormalizationContractSelfTests() {
       false,
     ],
     [`/* ${source} */`, unknown, false],
-    [`${source}\ninsert_proxy_header(headers);`, unknown, false],
+    [`const TEXT: &str = r#"${source}"#;`, unknown, false],
   ]
   for (const [index, [fixture, fidelity, valid]] of cases.entries()) {
     if (
       (headerNormalizationContractError(fixture, fidelity) === null) !==
       valid
     ) {
-      fail(`shared header-operation checker self-test ${index} failed`)
+      fail(`head-first header checker self-test ${index} failed`)
     }
+  }
+}
+
+function runLiveOutboundContractSelfTests() {
+  const core = `
+    pub trait OutboundHttpClient: Send + Sync {
+      fn progress(&self) -> Rc<dyn OutboundProgressRuntime>;
+      fn time(&self) -> OutboundTime;
+      fn validate_supported_options(&self, request: &OutboundRequest, mode: OutboundSendMode) -> Result<(), EdgeError>;
+      fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead>;
+      fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError>;
+      fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch;
+    }
+  `
+  const batch = `
+    pub struct OutboundPreparedBatch { context: OutboundBatchContext }
+    pub struct OutboundBatchContext { original: usize }
+    pub struct OutboundBatchItem { identity: Token, index: usize, result: Result }
+    pub struct OutboundBatchResults { identity: Token, slots: Slots, termination: State }
+    pub struct OutboundBatchFailure { identity: Token, error: EdgeError, slots: Slots }
+    pub enum OutboundBatchDriverEvent {
+      Item { index: usize, completed_at: MonotonicInstant, outcome: Result<OutboundResponse, EdgeError> },
+    }
+    pub enum OutboundCollectedSlot { AlreadyDelivered, Resolved(OutboundSlotResult), Unresolved }
+    impl OutboundBatch {
+      pub fn cutoff(context: OutboundBatchContext) -> Self {}
+      pub fn from_driver<S>(context: OutboundBatchContext, events: S, owner: OutboundExchangeOwner) -> Self {}
+    }
+  `
+  const runtime = `
+    pub trait OutboundProgressRuntime {}
+    pub struct IndependentOutboundProgress;
+    impl OutboundProgressRuntime for IndependentOutboundProgress {}
+    pub struct OutboundScopeOwner { scope: OutboundScope }
+  `
+  const body = `
+    pub struct Body { payload: BodyPayload, owner: Option<OutboundScopeOwner> }
+    pub enum BodyPayload { Once(Bytes), Stream(BodyStream) }
+    impl Body {
+      pub fn into_parts(self) -> (BodyPayload, Option<OutboundScopeOwner>) {}
+    }
+  `
+  const cases = [
+    [core, batch, true],
+    [core.replace('Rc<dyn', 'std::rc::Rc<dyn'), batch, true],
+    [
+      core.replace(
+        'fn progress(&self) -> Rc<dyn OutboundProgressRuntime>;',
+        ''
+      ),
+      batch,
+      false,
+    ],
+    [core.replace('fn progress', 'fn capture_scope'), batch, false],
+    [
+      core.replace(
+        '-> Rc<dyn OutboundProgressRuntime>;',
+        '-> Rc<dyn OutboundProgressRuntime> { fallback() }'
+      ),
+      batch,
+      false,
+    ],
+    [
+      core.replace(
+        '-> Rc<dyn OutboundProgressRuntime>;',
+        '-> Option<Rc<dyn OutboundProgressRuntime>>;'
+      ),
+      batch,
+      false,
+    ],
+    [core.replace('Rc<dyn', 'Arc<dyn'), batch, false],
+    [
+      core.replace('Rc<dyn OutboundProgressRuntime>', 'ProgressAlias'),
+      batch,
+      false,
+    ],
+    [
+      core.replace('fn time', 'fn capture_scope(&self) -> Scope; fn time'),
+      batch,
+      false,
+    ],
+    [core.replace('fn time(&self) -> OutboundTime;', ''), batch, false],
+    [
+      core.replace(
+        '-> OutboundFuture<OutboundHead>;',
+        '-> OutboundFuture<OutboundHead> { lazy() }'
+      ),
+      batch,
+      false,
+    ],
+    [core.replace('pub trait', 'pub unsafe trait'), batch, false],
+    [
+      core.replace('OutboundPreparedBatch', 'Vec<OutboundRequest>'),
+      batch,
+      false,
+    ],
+    [
+      core.replace(
+        'fn time',
+        'async fn send(&self, request: OutboundRequest); fn time'
+      ),
+      batch,
+      false,
+    ],
+    [
+      core,
+      batch.replace('index: usize, result:', 'pub index: usize, result:'),
+      false,
+    ],
+    [
+      core,
+      batch +
+        '\nimpl OutboundBatchItem { pub fn new(index: usize) -> Self {} }',
+      false,
+    ],
+    [core, batch.replace('completed_at: MonotonicInstant,', ''), false],
+    [
+      core,
+      batch.replace(
+        'Item { index: usize, completed_at: MonotonicInstant, outcome: Result<OutboundResponse, EdgeError> }',
+        'Item(OutboundBatchItem)'
+      ),
+      false,
+    ],
+    [
+      core,
+      batch.replace(
+        'context: OutboundBatchContext) -> Self',
+        'slot_count: usize) -> Self'
+      ),
+      false,
+    ],
+    [core, batch.replace('owner: OutboundExchangeOwner', 'owner: ()'), false],
+    [core, batch.replace('AlreadyDelivered,', ''), false],
+    [core + '\nfn from_futures() {}', batch, false],
+    [core + '\nfn finish_batch_item() {}', batch, false],
+  ]
+  for (const [
+    index,
+    [candidateCore, candidateBatch, valid],
+  ] of cases.entries()) {
+    if (
+      (liveOutboundContractError(
+        productionCode(candidateCore),
+        productionCode(candidateBatch),
+        productionCode(runtime),
+        productionCode(body)
+      ) ===
+        null) !==
+      valid
+    ) {
+      fail(`live outbound checker self-test ${index} failed`)
+    }
+  }
+  for (const [index, [candidate, valid]] of [
+    [runtime, true],
+    [runtime.replace('pub trait OutboundProgressRuntime {}', ''), false],
+    [
+      runtime.replace(
+        'pub struct IndependentOutboundProgress;',
+        'pub type IndependentOutboundProgress = OtherRuntime;'
+      ),
+      false,
+    ],
+    [
+      runtime.replace(
+        'impl OutboundProgressRuntime for IndependentOutboundProgress {}',
+        ''
+      ),
+      false,
+    ],
+    [
+      runtime.replace(
+        'pub struct OutboundScopeOwner { scope: OutboundScope }',
+        ''
+      ),
+      false,
+    ],
+    [
+      runtime.replace('scope: OutboundScope', 'pub scope: OutboundScope'),
+      false,
+    ],
+    [`#[cfg(test)] mod tests { ${runtime} }`, false],
+  ].entries()) {
+    if (
+      (liveOutboundContractError(
+        productionCode(core),
+        productionCode(batch),
+        productionCode(candidate),
+        productionCode(body)
+      ) ===
+        null) !==
+      valid
+    ) {
+      fail(`outbound runtime checker self-test ${index} failed`)
+    }
+  }
+  for (const [index, [candidate, valid]] of [
+    [body, true],
+    [body.replace('into_parts(self)', 'into_parts(mut self)'), true],
+    [body.replace('pub struct Body', 'pub enum Body'), false],
+    [body.replace('payload: BodyPayload', 'pub payload: BodyPayload'), false],
+    [body.replace('owner: Option', 'pub owner: Option'), false],
+    [
+      body.replace(
+        'pub enum BodyPayload { Once(Bytes), Stream(BodyStream) }',
+        'pub type BodyPayload = OtherBody;'
+      ),
+      false,
+    ],
+    [body.replace('Stream(BodyStream)', 'Stream(OtherStream)'), false],
+    [body.replace('Once(Bytes),', ''), false],
+    [
+      body.replace(
+        '-> (BodyPayload, Option<OutboundScopeOwner>)',
+        '-> BodyPayload'
+      ),
+      false,
+    ],
+    [`#[cfg(test)] mod tests { ${body} }`, false],
+  ].entries()) {
+    if (
+      (liveOutboundContractError(
+        productionCode(core),
+        productionCode(batch),
+        productionCode(runtime),
+        productionCode(candidate)
+      ) ===
+        null) !==
+      valid
+    ) {
+      fail(`body carrier checker self-test ${index} failed`)
+    }
+  }
+  const onlyTest = '#[cfg(test)] mod tests { OutboundResponse::new(); }'
+  if (/OutboundResponse::new/u.test(productionCode(onlyTest)))
+    fail('test fixtures must not satisfy production checks')
+  const unknown = 'ProviderFieldBoundariesUnknown'
+  const testConstructor = `#[cfg(test)] mod tests {
+    OutboundHeaderInput::new("cloudflare", headers, OutboundHeaderFidelity::${unknown});
+    OutboundHead::new(status, headers, encoded, context, owner);
+  }`
+  if (headerNormalizationContractError(testConstructor, unknown) === null) {
+    fail('adapter test constructors must not satisfy production head checks')
   }
 }
 
 runObservationCutoffContractSelfTests()
 runHeaderNormalizationContractSelfTests()
+runLiveOutboundContractSelfTests()
 if (process.argv.includes('--observation-cutoff-self-test')) {
   process.exit(0)
 }
@@ -1207,11 +1577,15 @@ for (const fragment of [
   'not a Cloudflare or Spin provider request context',
 ]) {
   if (!axumGuideSource.includes(fragment)) {
-    fail(`${axumGuidePath} is missing assembled-app serving contract: ${fragment}`)
+    fail(
+      `${axumGuidePath} is missing assembled-app serving contract: ${fragment}`
+    )
   }
 }
 if (axumGuideSource.includes('let router = app.router()')) {
-  fail(`${axumGuidePath} must test policies through bounded TCP ingress, not router.oneshot`)
+  fail(
+    `${axumGuidePath} must test policies through bounded TCP ingress, not router.oneshot`
+  )
 }
 if (
   !axumGuideSource.includes(
@@ -1235,7 +1609,9 @@ for (const requiredFragment of [
   'No successful app configuration exists on failure',
 ]) {
   if (!handlersGuideSource.includes(requiredFragment)) {
-    fail(`handlers guide is missing application assembly contract: ${requiredFragment}`)
+    fail(
+      `handlers guide is missing application assembly contract: ${requiredFragment}`
+    )
   }
 }
 if (
@@ -1298,7 +1674,9 @@ for (const requiredFragment of [
   'outside EdgeZero accounting',
 ]) {
   if (!hardCutSurfaces[3][1].includes(requiredFragment)) {
-    fail(`Fastly guide is missing delivery-report contract: ${requiredFragment}`)
+    fail(
+      `Fastly guide is missing delivery-report contract: ${requiredFragment}`
+    )
   }
 }
 if (/Result<Option<State>,\s*fastly::Error>/.test(hardCutSurfaces[3][1])) {
@@ -1315,14 +1693,18 @@ if (
   !outboundSpecSource.includes(') -> FastlyRequestDelivery<PostSend>') ||
   outboundSpecSource.includes(') -> Result<Option<PostSend>, fastly::Error>')
 ) {
-  fail('outbound specification must use the owned Fastly custom delivery report')
+  fail(
+    'outbound specification must use the owned Fastly custom delivery report'
+  )
 }
 if (
   !outboundSpecSource.includes(
     '| `outbound-failure-diagnostics` | BestEffort | BestEffort | Native | Native |'
   )
 ) {
-  fail('outbound specification is missing the SDK-projection diagnostic matrix row')
+  fail(
+    'outbound specification is missing the SDK-projection diagnostic matrix row'
+  )
 }
 
 if (!outboundSpecSource.includes('## 2. Historical implementation baseline')) {
@@ -1402,6 +1784,7 @@ for (const requiredFragment of [
   'pub enum OutboundBatchTermination',
   'pub enum OutboundBatchNext',
   'pub struct OutboundBatchFailure',
+  // Historical baseline signatures remain checked here, never as live production APIs.
   'pub fn cutoff(slot_count: usize) -> Self',
   'pub fn finish_batch_item(',
   'pub fn from_driver<StreamValue>',
@@ -1878,7 +2261,9 @@ for (const requiredFragment of [
 
 let outboundCoreSource
 try {
-  outboundCoreSource = readFileSync(outboundCorePath, 'utf8')
+  outboundCoreSource = [...outboundCoreProductionPaths, outboundCoreTestPath]
+    .map((path) => readFileSync(path, 'utf8'))
+    .join('\n')
 } catch (error) {
   fail(`cannot read ${outboundCorePath}: ${error.message}`)
 }
@@ -1916,7 +2301,26 @@ for (const requiredFragment of [
     )
   }
 }
-observationCutoffContract(outboundCoreSource)
+const coreProduction = outboundCoreProductionPaths
+  .map((path) => productionCode(readFileSync(path, 'utf8')))
+  .join('\n')
+const batchProduction = productionCode(
+  readFileSync('crates/edgezero-core/src/outbound/batch.rs', 'utf8')
+)
+const runtimeProduction = productionCode(
+  readFileSync('crates/edgezero-core/src/outbound/scope.rs', 'utf8')
+)
+const bodyProduction = productionCode(
+  readFileSync('crates/edgezero-core/src/body.rs', 'utf8')
+)
+const liveError = liveOutboundContractError(
+  coreProduction,
+  batchProduction,
+  runtimeProduction,
+  bodyProduction
+)
+if (liveError !== null) fail(liveError)
+observationCutoffContract(coreProduction)
 for (const fragment of [
   'pub enum OutboundProxyMarker',
   'pub fn proxy_marker(',
@@ -1927,7 +2331,9 @@ for (const fragment of [
   'proxy_marker_off_preserves_upstream_and_consumes_no_header_budget',
 ]) {
   if (!outboundCoreSource.includes(fragment)) {
-    fail(`${outboundCorePath} is missing the proxy-marker contract: ${fragment}`)
+    fail(
+      `${outboundCorePath} is missing the proxy-marker contract: ${fragment}`
+    )
   }
 }
 for (const fragment of [
@@ -1967,20 +2373,13 @@ for (const path of [demoHandlersPath, templateHandlersPath]) {
     fail(`${path} must select original coding for its relay request`)
   }
 }
-if (
-  !/#\[non_exhaustive\]\s*pub enum OutboundBatchDriverEvent\s*\{/u.test(
-    outboundCoreSource
-  )
-) {
-  fail('OutboundBatchDriverEvent must remain non-exhaustive')
-}
 const retiredClockConstructor = ['new_with_', 'monotonic_clock'].join('')
 if (outboundCoreSource.includes(retiredClockConstructor)) {
   fail('OutboundResponse must not retain the hidden clock-paired constructor')
 }
 const outboundResponseConstructor =
   /impl OutboundResponse \{[\s\S]*?pub fn new\(\s*request_method: Method,\s*status: StatusCode,\s*headers: HeaderMap,\s*body: Body,\s*monotonic_clock: MonotonicClock,\s*content_type_provenance: ContentTypeProvenance,\s*\) -> Self \{/u
-if (!outboundResponseConstructor.test(outboundCoreSource)) {
+if (!outboundResponseConstructor.test(coreProduction)) {
   fail(
     'OutboundResponse::new must require the application clock and original Content-Type provenance'
   )
@@ -1989,6 +2388,18 @@ const outboundHeadSource = readFileSync(
   'crates/edgezero-core/src/outbound/head.rs',
   'utf8'
 )
+const headProduction = productionCode(outboundHeadSource)
+if (
+  (coreProduction.match(/OutboundResponse::new\s*\(/gu)?.length ?? 0) !== 1 ||
+  (headProduction.match(/OutboundResponse::new\s*\(/gu)?.length ?? 0) !== 1 ||
+  !/dispatch_head\s*\([^)]*\)\s*\.await\s*\?\s*\.finish\s*\(/u.test(
+    coreProduction
+  )
+) {
+  fail(
+    'production must construct responses through the single shared head finalizer'
+  )
+}
 if (
   !/if fidelity == OutboundHeaderFidelity::ProviderFieldBoundariesUnknown\s*\{\s*normalized\.content_type_provenance = ContentTypeProvenance::Unknown;/u.test(
     outboundHeadSource
@@ -2000,7 +2411,7 @@ if (
 }
 for (const adapterPath of outboundAdapterPaths) {
   const adapterSource = readFileSync(adapterPath, 'utf8')
-  const adapterCode = maskObservationCutoffNonCode(adapterSource)
+  const adapterCode = productionCode(adapterSource)
   const pairedConstructor = adapterPath.includes('axum')
     ? /pub fn try_with_time\(time: OutboundTime\)/u
     : /pub fn with_time\(time: OutboundTime\)/u

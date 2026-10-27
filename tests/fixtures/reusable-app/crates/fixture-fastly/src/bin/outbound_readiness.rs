@@ -27,7 +27,7 @@ fn client_probe(
     authority: &str,
 ) -> Result<(), fastly::Error> {
     use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
-    use edgezero_core::{Deadline, HttpClient, OutboundRequest};
+    use edgezero_core::{BodyPayload, Deadline, HttpClient, OutboundRequest};
     let token = request_token(request)?;
     let client = HttpClient::with_client(FastlyOutboundClient::new());
     let make = |slot| {
@@ -40,6 +40,7 @@ fn client_probe(
             })
     };
     let start = Instant::now();
+    let mut body_owner = None;
     let result = futures::executor::block_on(async {
         if case == "full-body-error" {
             let mut outbound = make(0)?;
@@ -51,11 +52,13 @@ fn client_probe(
             let result = match client.send(outbound).await {
                 Ok(response) if consumption == "streamed" => {
                     use futures::StreamExt;
-                    let mut source = response.into_body().into_stream().ok_or_else(|| {
-                        edgezero_core::EdgeError::internal(std::io::Error::other(
+                    let (payload, attached_owner) = response.into_body().into_parts();
+                    body_owner = attached_owner;
+                    let BodyPayload::Stream(mut source) = payload else {
+                        return Err(edgezero_core::EdgeError::internal(std::io::Error::other(
                             "expected streamed response",
-                        ))
-                    })?;
+                        )));
+                    };
                     let mut result = Ok(());
                     while let Some(chunk) = source.next().await {
                         match chunk {
@@ -93,12 +96,13 @@ fn client_probe(
                 Deadline::after(Duration::from_micros(DEADLINE_US)),
             )
             .await
-            .map_err(|failure| failure.error)?;
+            .map_err(|failure| failure.into_parts().0)?;
+        let (collected, termination) = results.into_parts();
         let mut slots = Vec::new();
-        for slot in results.slots {
+        for slot in collected {
             slots.push(match slot {
-                None => json!({"kind":"pending"}),
-                Some(slot) => match slot.outcome {
+                edgezero_core::OutboundCollectedSlot::Unresolved => json!({"kind":"pending"}),
+                edgezero_core::OutboundCollectedSlot::Resolved(slot) => match slot.outcome {
                     Ok(response) => {
                         let bytes = response.into_bytes_bounded(65_536).await?;
                         let checksum = bytes.iter().fold(0xcbf29ce484222325u64, |sum, byte| (sum ^ u64::from(*byte)).wrapping_mul(0x100000001b3));
@@ -106,14 +110,16 @@ fn client_probe(
                     }
                     Err(error) => json!({"kind":"error","failure":client_failure(&error)}),
                 },
+                edgezero_core::OutboundCollectedSlot::AlreadyDelivered => return Err(edgezero_core::EdgeError::internal(std::io::Error::other("unexpected delivered readiness slot"))),
             });
         }
-        Ok(json!({"termination":format!("{:?}",results.termination),"slots":slots}))
+        Ok(json!({"termination":format!("{termination:?}"),"slots":slots}))
     });
     let probe = json!({"event":"fastly-client-progress","case":case,"consumption":consumption,
         "token":token,"revision":env!("EDGEZERO_QUALIFICATION_REVISION"),"result":result.map_err(|e|client_failure(&e)),"completed_us":start.elapsed().as_micros(),"qualification":false});
     println!("{probe}");
     Response::from_body(serde_json::to_string(&probe)?).send_to_client();
+    drop(body_owner);
     Ok(())
 }
 

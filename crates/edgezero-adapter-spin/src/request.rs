@@ -251,7 +251,7 @@ pub fn deadline_body_releases_source_for_test() -> bool {
     let body = deadline_body_with_timer(source, Deadline::at_instant(start), clock, |_| {
         pending::<()>()
     });
-    let Some(mut body_stream) = body.into_stream() else {
+    let Ok(mut body_stream) = body.into_stream() else {
         return false;
     };
     let Some(Err(error)) = block_on(body_stream.next()) else {
@@ -462,13 +462,16 @@ async fn dispatch_with_kv_label_at(
     kv_label: &str,
     request_start: MonotonicInstant,
 ) -> anyhow::Result<SpinResponse> {
-    let stores = Stores {
-        config_store: Some(config_handle(kv_label.to_owned())),
-        kv: resolve_kv_handle(kv_label, false).await?,
-        secrets: resolve_secret_handle(true),
-        ..Default::default()
-    };
-    dispatch_with_handles(app, req, stores, request_start).await
+    crate::in_outbound_callback(async move {
+        let stores = Stores {
+            config_store: Some(config_handle(kv_label.to_owned())),
+            kv: resolve_kv_handle(kv_label, false).await?,
+            secrets: resolve_secret_handle(true),
+            ..Default::default()
+        };
+        dispatch_with_handles(app, req, stores, request_start).await
+    })
+    .await
 }
 
 pub(crate) async fn dispatch_with_handles(
@@ -490,16 +493,19 @@ async fn dispatch_with_handles_and<Output, Deliver>(
 where
     Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
 {
-    let (parts, native_body) = req.into_parts();
-    let core_request = into_core_request_head_for_app(parts, app);
-    dispatch_ingress_stream_and(
-        app,
-        core_request,
-        stores,
-        request_start,
-        move || Ok(native_body.stream()),
-        deliver,
-    )
+    crate::in_outbound_callback(async move {
+        let (parts, native_body) = req.into_parts();
+        let core_request = into_core_request_head_for_app(parts, app);
+        dispatch_ingress_stream_and(
+            app,
+            core_request,
+            stores,
+            request_start,
+            move || Ok(native_body.stream()),
+            deliver,
+        )
+        .await
+    })
     .await
 }
 
@@ -554,54 +560,59 @@ where
     MakeTimer: Fn(Duration) -> Timer + Clone + 'static,
     Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
 {
-    head_request
-        .extensions_mut()
-        .insert(outbound_client(app.monotonic_clock()));
-    let request_method = head_request.method().clone();
-    let head_parts = IngressHeadParts::from_request(
-        &head_request,
-        IngressHeadAccounting::HostManaged,
-        IngressFraming::HostManaged,
-    );
-    if let Err(error) = head_parts.validate_normalized(app.ingress_head_limits()) {
-        let egress = detached_error_envelope(app, error, request_method, request_start)?;
-        return Ok(deliver(egress)?);
-    }
-    let prepared = match app.begin_ingress(head_parts, request_start) {
-        Ok(outcome) => match outcome {
-            IngressBeginOutcome::Admitted(prepared) => prepared,
-            IngressBeginOutcome::Refused(response) => {
-                return Ok(deliver(response)?);
-            }
-            IngressBeginOutcome::Aborted => {
-                return Err(anyhow::anyhow!("ingress admission aborted"));
-            }
-            _ => {
-                let egress = detached_error_envelope(
-                    app,
-                    EdgeError::internal(anyhow::anyhow!("unsupported ingress admission outcome")),
-                    request_method,
-                    request_start,
-                )?;
-                return Ok(deliver(egress)?);
-            }
-        },
-        Err(error) => {
+    crate::in_outbound_callback(async move {
+        head_request
+            .extensions_mut()
+            .insert(outbound_client(app.monotonic_clock()));
+        let request_method = head_request.method().clone();
+        let head_parts = IngressHeadParts::from_request(
+            &head_request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        if let Err(error) = head_parts.validate_normalized(app.ingress_head_limits()) {
             let egress = detached_error_envelope(app, error, request_method, request_start)?;
             return Ok(deliver(egress)?);
         }
-    };
-    let source = match make_source() {
-        Ok(source) => source,
-        Err(error) => return Ok(deliver(app.admitted_error_egress(prepared, error))?),
-    };
-    *head_request.body_mut() = deadline_body_with_timer(
-        source,
-        prepared.read_deadline(),
-        prepared.monotonic_clock(),
-        make_timer,
-    );
-    dispatch_core_request(app, head_request, stores, prepared, deliver).await
+        let prepared = match app.begin_ingress(head_parts, request_start) {
+            Ok(outcome) => match outcome {
+                IngressBeginOutcome::Admitted(prepared) => prepared,
+                IngressBeginOutcome::Refused(response) => {
+                    return Ok(deliver(response)?);
+                }
+                IngressBeginOutcome::Aborted => {
+                    return Err(anyhow::anyhow!("ingress admission aborted"));
+                }
+                _ => {
+                    let egress = detached_error_envelope(
+                        app,
+                        EdgeError::internal(anyhow::anyhow!(
+                            "unsupported ingress admission outcome"
+                        )),
+                        request_method,
+                        request_start,
+                    )?;
+                    return Ok(deliver(egress)?);
+                }
+            },
+            Err(error) => {
+                let egress = detached_error_envelope(app, error, request_method, request_start)?;
+                return Ok(deliver(egress)?);
+            }
+        };
+        let source = match make_source() {
+            Ok(source) => source,
+            Err(error) => return Ok(deliver(app.admitted_error_egress(prepared, error))?),
+        };
+        *head_request.body_mut() = deadline_body_with_timer(
+            source,
+            prepared.read_deadline(),
+            prepared.monotonic_clock(),
+            make_timer,
+        );
+        dispatch_core_request(app, head_request, stores, prepared, deliver).await
+    })
+    .await
 }
 
 async fn dispatch_core_request<Output, Deliver>(
@@ -920,10 +931,12 @@ mod synthesis_tests {
         .expect("valid batch driver");
 
         assert_eq!(
-            results.slots[0]
-                .as_ref()
-                .expect("resolved outbound slot")
-                .elapsed,
+            match &results.slots()[0] {
+                edgezero_core::OutboundCollectedSlot::Resolved(result) => result.elapsed,
+                edgezero_core::OutboundCollectedSlot::AlreadyDelivered
+                | edgezero_core::OutboundCollectedSlot::Unresolved =>
+                    panic!("expected resolved outbound slot"),
+            },
             Duration::from_millis(7)
         );
     }

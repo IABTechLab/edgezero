@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use axum::body::Body as AxumBody;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, Response};
+use edgezero_core::OutboundScopeOwner;
 use edgezero_core::app::App;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::error::EdgeError;
@@ -225,6 +226,18 @@ impl AxumServiceState {
 
     async fn dispatch_request(
         &self,
+        request: Request<AxumBody>,
+        connection: &EgressConnection,
+        remote_addr: Option<SocketAddr>,
+    ) -> Result<Response<AxumEgressBody>, AxumIngressAbort> {
+        let callback = OutboundScopeOwner::callback();
+        callback
+            .run(self.dispatch_scoped_request(request, connection, remote_addr))
+            .await
+    }
+
+    async fn dispatch_scoped_request(
+        &self,
         mut request: Request<AxumBody>,
         connection: &EgressConnection,
         remote_addr: Option<SocketAddr>,
@@ -382,6 +395,7 @@ mod tests {
     )]
 
     use super::*;
+    use async_stream::stream;
     use bytes::{Bytes, BytesMut};
     use edgezero_core::body::Body;
     use edgezero_core::config_store::{
@@ -398,7 +412,10 @@ mod tests {
     };
     use edgezero_core::key_value_store::KvStore;
     use edgezero_core::middleware::{Middleware, Next};
-    use edgezero_core::outbound::{HttpClient, OutboundRequest};
+    use edgezero_core::outbound::{
+        HttpClient, OutboundBatch, OutboundFuture, OutboundPending, OutboundRequest,
+        OutboundResponse,
+    };
     use edgezero_core::response_egress::{
         DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision, ResponseEgressCompletion,
         ResponseEgressFallbackDisposition, ResponseEgressObserver, ResponseEgressOutcome,
@@ -406,8 +423,10 @@ mod tests {
     };
     use edgezero_core::router::{RouteMetadata, RouteResolution};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+    use futures_util::future::pending;
     use futures_util::stream::poll_fn;
     use http_body::Body as _;
+    use std::cell::RefCell;
     use std::future::poll_fn as poll_future;
     use std::io;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -416,8 +435,259 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::task::{JoinHandle, JoinSet, LocalSet, yield_now};
     use tokio::time::{sleep, timeout};
     use tower::ServiceExt as _;
+
+    thread_local! {
+        static RETAINED_SEND: RefCell<Option<OutboundFuture<OutboundResponse>>> = const { RefCell::new(None) };
+        static RETAINED_PROGRESS: RefCell<Option<(OutboundPending, OutboundBatch)>> = const { RefCell::new(None) };
+    }
+
+    async fn waiting_outbound_origin() -> (String, Arc<AtomicUsize>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+        let target = format!("http://{}/", listener.local_addr().expect("address"));
+        let received = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&received);
+        let server = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            for _ in 0_u8..3 {
+                let (mut socket, _) = listener.accept().await.expect("connection");
+                let ready = Arc::clone(&observed);
+                connections.spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        assert!(head.len() < 8192, "bounded request head");
+                        head.push(socket.read_u8().await.expect("request head"));
+                    }
+                    ready.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        socket.read(&mut [0_u8]).await.expect("cancelled transport"),
+                        0
+                    );
+                });
+            }
+            while let Some(result) = connections.join_next().await {
+                result.expect("origin connection");
+            }
+        });
+        (target, received, server)
+    }
+
+    async fn start_retained_progress(client: &HttpClient, target: &str) -> Result<(), EdgeError> {
+        let pending = client.begin(OutboundRequest::get(target)?).await?;
+        let batch = client.start_batch_until(
+            vec![OutboundRequest::get(target)?, OutboundRequest::get(target)?],
+            Deadline::after(Duration::from_secs(10)),
+        );
+        RETAINED_PROGRESS.with(|retained| *retained.borrow_mut() = Some((pending, batch)));
+        Ok(())
+    }
+
+    async fn await_outbound_requests(received: &AtomicUsize) {
+        timeout(Duration::from_secs(2), async {
+            while received.load(Ordering::SeqCst) != 3 {
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("all begin/batch exchanges enter native I/O");
+    }
+
+    async fn assert_retained_progress_cancelled(mut server: JoinHandle<()>) {
+        let result = timeout(Duration::from_secs(2), &mut server).await;
+        let retained = RETAINED_PROGRESS.with(|retained| retained.borrow_mut().take());
+        assert!(retained.is_some(), "caller retains both progress handles");
+        drop(retained);
+        if result.is_err() {
+            server.abort();
+            let _cancelled = server.await;
+        }
+        result
+            .expect("scope exit closes every native exchange")
+            .expect("origin task");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn callback_handoff_cancels_native_begin_and_batch_while_handles_are_retained() {
+        LocalSet::new()
+            .run_until(async {
+                let (target, received, server) = waiting_outbound_origin().await;
+                let router = RouterService::builder()
+                    .get("/", move |ctx: RequestContext| {
+                        let destination = target.clone();
+                        let ready = Arc::clone(&received);
+                        async move {
+                            start_retained_progress(
+                                &ctx.http_client().expect("HTTP client"),
+                                &destination,
+                            )
+                            .await?;
+                            await_outbound_requests(&ready).await;
+                            Ok::<_, EdgeError>(CoreResponse::new(Body::empty()))
+                        }
+                    })
+                    .build();
+                let response = AxumServiceState::new(router)
+                    .oneshot(Request::new(AxumBody::empty()))
+                    .await
+                    .expect("native handoff");
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_retained_progress_cancelled(server).await;
+                drop(response);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn attached_body_owner_keeps_pre_head_jobs_live_without_changing_framing() {
+        LocalSet::new()
+            .run_until(async {
+                for streamed in [false, true] {
+                    let (target, received, server) = waiting_outbound_origin().await;
+                    let bytes = Bytes::from_static(b"live");
+                    let payload = bytes.clone();
+                    let router = RouterService::builder()
+                        .get("/", move |ctx: RequestContext| {
+                            let destination = target.clone();
+                            let data = payload.clone();
+                            async move {
+                                let owner = OutboundScopeOwner::response_body();
+                                owner
+                                    .run(start_retained_progress(
+                                        &ctx.http_client().expect("HTTP client"),
+                                        &destination,
+                                    ))
+                                    .await?;
+                                let body = if streamed {
+                                    Body::from_stream(stream! {
+                                        yield Ok(data);
+                                    })
+                                } else {
+                                    Body::from(data)
+                                };
+                                owner.attach(CoreResponse::new(body))
+                            }
+                        })
+                        .build();
+                    let response = AxumServiceState::new(router)
+                        .oneshot(Request::new(AxumBody::empty()))
+                        .await
+                        .expect("native handoff before origin heads");
+                    assert_eq!(response.status(), StatusCode::OK);
+                    if streamed {
+                        assert!(response.headers().get("content-length").is_none());
+                    } else {
+                        assert_eq!(response.headers()["content-length"], "4");
+                    }
+                    await_outbound_requests(&received).await;
+                    assert!(
+                        !server.is_finished(),
+                        "attached jobs survive callback return"
+                    );
+                    let mut body = response.into_body();
+                    let first = poll_future(|cx| Pin::new(&mut body).poll_frame(cx))
+                        .await
+                        .expect("first frame")
+                        .expect("live body")
+                        .into_data()
+                        .expect("data");
+                    assert_eq!(first, bytes);
+                    assert_eq!(first.as_ptr(), bytes.as_ptr(), "buffer is not copied");
+                    assert!(
+                        poll_future(|cx| Pin::new(&mut body).poll_frame(cx))
+                            .await
+                            .is_none()
+                    );
+                    assert_retained_progress_cancelled(server).await;
+                    drop(body);
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_body_scope_keeps_native_work_live_until_eof_or_drop() {
+        LocalSet::new()
+            .run_until(async {
+                for clean_eof in [false, true] {
+                    let (target, received, server) = waiting_outbound_origin().await;
+                    let router = RouterService::builder()
+                        .get("/", move |ctx: RequestContext| {
+                            let destination = target.clone();
+                            async move {
+                                let client = ctx.http_client().expect("HTTP client");
+                                let source = stream! {
+                                    start_retained_progress(&client, &destination).await.expect("body progress");
+                                    yield Ok(Bytes::from_static(b"live"));
+                                    if !clean_eof {
+                                        pending::<()>().await;
+                                    }
+                                };
+                                Ok::<_, EdgeError>(CoreResponse::new(Body::from_stream(source)))
+                            }
+                        })
+                        .build();
+                    let response = AxumServiceState::new(router)
+                        .oneshot(Request::new(AxumBody::empty()))
+                        .await
+                        .expect("native streaming handoff");
+                    let mut body = response.into_body();
+                    let first = poll_future(|cx| Pin::new(&mut body).poll_frame(cx))
+                        .await.expect("first frame").expect("live body");
+                    assert_eq!(first.into_data().expect("data"), "live");
+                    await_outbound_requests(&received).await;
+                    assert!(!server.is_finished(), "body work survives callback handoff");
+                    if clean_eof {
+                        assert!(poll_future(|cx| Pin::new(&mut body).poll_frame(cx)).await.is_none());
+                    }
+                    drop(body);
+                    assert_retained_progress_cancelled(server).await;
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn callback_handoff_releases_retained_unpolled_send_without_polling_upload() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed_drops = Arc::clone(&drops);
+        let observed_polls = Arc::clone(&polls);
+        let router = RouterService::builder()
+            .get("/", move |ctx: RequestContext| {
+                let source = DropSignal(Arc::clone(&observed_drops));
+                let counted = Arc::clone(&observed_polls);
+                async move {
+                    let body = Body::from_stream(poll_fn(move |_| {
+                        let _keep_source_alive = &source;
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+                    }));
+                    let client = ctx.http_client().expect("request HTTP client");
+                    let send = client.send(
+                        OutboundRequest::post("http://127.0.0.1:9/")
+                            .expect("request")
+                            .body(body),
+                    );
+                    RETAINED_SEND.with(|retained| *retained.borrow_mut() = Some(send));
+                    Ok::<_, EdgeError>(CoreResponse::new(Body::empty()))
+                }
+            })
+            .build();
+        let response = AxumServiceState::new(router)
+            .oneshot(Request::new(AxumBody::empty()))
+            .await
+            .expect("native handoff");
+        let released_at_handoff = drops.load(Ordering::SeqCst);
+        let retained = RETAINED_SEND.with(|slot| slot.borrow_mut().take());
+        assert!(retained.is_some(), "caller still retains the unpolled send");
+        drop(retained);
+        drop(response);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(released_at_handoff, 1, "callback closes at native handoff");
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "source releases once");
+    }
 
     async fn to_bytes(mut body: AxumEgressBody, limit: usize) -> Result<Bytes, anyhow::Error> {
         let mut buffered = BytesMut::new();
@@ -633,13 +903,12 @@ mod tests {
             let request = OutboundRequest::get("https://example.com/")?.stream_response();
             let results = client
                 .send_all_until(vec![request], Deadline::after(Duration::from_secs(1)))
-                .await?;
-            Ok(results.slots[0]
-                .as_ref()
-                .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("unresolved HTTP slot")))?
-                .elapsed
-                .as_millis()
-                .to_string())
+                .await
+                .map_err(|failure| failure.into_parts().0)?;
+            let edgezero_core::OutboundCollectedSlot::Resolved(slot) = &results.slots()[0] else {
+                return Err(EdgeError::internal(anyhow::anyhow!("unresolved HTTP slot")));
+            };
+            Ok(slot.elapsed.as_millis().to_string())
         }
 
         let start = MonotonicInstant::now();

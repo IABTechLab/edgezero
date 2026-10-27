@@ -1,10 +1,35 @@
 use std::fmt;
+use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 use futures_util::future::poll_fn;
 
-use super::{OutboundExchangeOwner, OutboundFuture, OutboundPending, OutboundResponse};
+use super::{
+    OutboundExchangeOwner, OutboundFuture, OutboundPending, OutboundResponse, OutboundScope,
+    OutboundTime, Revocable,
+};
 use crate::error::EdgeError;
+use crate::time::MonotonicInstant;
+
+type PendingObservation = fn(&mut PendingState, &mut Context<'_>) -> Poll<Result<(), EdgeError>>;
+
+pub(super) enum PendingStorage {
+    Owned(Box<PendingState>),
+    Scoped(Revocable<PendingState>),
+}
+
+struct PendingBinding {
+    entered_at: MonotonicInstant,
+    scope: OutboundScope,
+    time: OutboundTime,
+}
+
+pub(super) struct PendingState {
+    binding: Option<PendingBinding>,
+    completion: Option<OutboundFuture<OutboundResponse>>,
+    outcome: Option<Result<OutboundResponse, EdgeError>>,
+    owner: Option<OutboundExchangeOwner>,
+}
 
 impl OutboundExchangeOwner {
     fn disarm(mut self) {
@@ -46,6 +71,26 @@ impl Drop for OutboundExchangeOwner {
 }
 
 impl OutboundPending {
+    pub(super) fn bind(
+        mut self,
+        scope: &OutboundScope,
+        time: OutboundTime,
+        entered_at: MonotonicInstant,
+    ) -> Result<Self, EdgeError> {
+        let PendingStorage::Owned(mut state) = self.state else {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "outbound pending was scoped twice"
+            )));
+        };
+        state.binding = Some(PendingBinding {
+            scope: scope.clone(),
+            time,
+            entered_at,
+        });
+        self.state = PendingStorage::Scoped(Revocable::new(scope, *state)?);
+        Ok(self)
+    }
+
     /// Cancels scheduled work and drops any cached response without polling its body.
     #[inline]
     pub fn cancel(self) {
@@ -60,17 +105,22 @@ impl OutboundPending {
     #[inline]
     pub fn collect(mut self) -> OutboundFuture<OutboundResponse> {
         Box::pin(async move {
-            poll_fn(|context| self.observe(context)).await;
-            let outcome = self.outcome.take().ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!("outbound completion missing its result"))
-            })?;
-            if outcome.is_ok()
-                && let Some(owner) = self.owner.take()
-            {
-                owner.disarm();
+            poll_fn(|context| self.observe(context, PendingState::drive)).await;
+            match &mut self.state {
+                PendingStorage::Owned(state) => state.disarm_success(),
+                PendingStorage::Scoped(state) => {
+                    state.with(&mut Context::from_waker(Waker::noop()), |value, _cx| {
+                        value.disarm_success();
+                    })?;
+                }
             }
-            drop(self);
-            outcome
+            let mut state = match self.state {
+                PendingStorage::Owned(value) => *value,
+                PendingStorage::Scoped(mut value) => value.take()?,
+            };
+            state.outcome.take().ok_or_else(|| {
+                EdgeError::internal(anyhow::anyhow!("outbound completion missing its result"))
+            })?
         })
     }
 
@@ -79,8 +129,11 @@ impl OutboundPending {
     #[must_use]
     #[inline]
     pub fn is_ready(&mut self) -> bool {
-        self.observe(&mut Context::from_waker(Waker::noop()))
-            .is_ready()
+        self.observe(
+            &mut Context::from_waker(Waker::noop()),
+            PendingState::observe_scoped,
+        )
+        .is_ready()
     }
 
     /// Wraps a receiver for already-issued work, not a lazy transport future.
@@ -93,10 +146,62 @@ impl OutboundPending {
         owner: OutboundExchangeOwner,
     ) -> Self {
         Self {
-            completion: Some(already_scheduled),
-            outcome: None,
-            owner: Some(owner),
+            ready: false,
+            state: PendingStorage::Owned(Box::new(PendingState {
+                binding: None,
+                completion: Some(already_scheduled),
+                outcome: None,
+                owner: Some(owner),
+            })),
         }
+    }
+
+    fn observe(&mut self, context: &mut Context<'_>, receiver: PendingObservation) -> Poll<()> {
+        let observation = match &mut self.state {
+            PendingStorage::Owned(state) => receiver(state, context),
+            PendingStorage::Scoped(state) => state
+                .with(context, receiver)
+                .unwrap_or_else(|error| Poll::Ready(Err(error))),
+        };
+        match observation {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.ready = true;
+                if let Err(error) = result {
+                    self.state = PendingStorage::Owned(Box::new(PendingState {
+                        binding: None,
+                        completion: None,
+                        outcome: Some(Err(error)),
+                        owner: None,
+                    }));
+                }
+                Poll::Ready(())
+            }
+        }
+    }
+}
+
+impl PendingState {
+    fn disarm_success(&mut self) {
+        if self.outcome.as_ref().is_some_and(Result::is_ok)
+            && let Some(owner) = self.owner.take()
+        {
+            owner.disarm();
+        }
+    }
+
+    fn drive(&mut self, context: &mut Context<'_>) -> Poll<Result<(), EdgeError>> {
+        if self.outcome.is_some() {
+            return self.observe_scoped(context);
+        }
+        let Some(binding) = &self.binding else {
+            return self.observe(context).map(Ok);
+        };
+        let scope = binding.scope.clone();
+        let time = binding.time.clone();
+        let entered_at = binding.entered_at;
+        let mut receiver = poll_fn(|cx| self.observe(cx));
+        scope.poll(&time, entered_at, context, Pin::new(&mut receiver))
     }
 
     fn observe(&mut self, context: &mut Context<'_>) -> Poll<()> {
@@ -121,13 +226,23 @@ impl OutboundPending {
         }
         Poll::Ready(())
     }
+
+    fn observe_scoped(&mut self, context: &mut Context<'_>) -> Poll<Result<(), EdgeError>> {
+        let Some(binding) = &self.binding else {
+            return self.observe(context).map(Ok);
+        };
+        let scope = binding.scope.clone();
+        scope
+            .with(|| self.observe(context).map(Ok))
+            .unwrap_or_else(|error| Poll::Ready(Err(error)))
+    }
 }
 
 impl fmt::Debug for OutboundPending {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OutboundPending")
-            .field("ready", &self.outcome.is_some())
+            .field("ready", &self.ready)
             .finish_non_exhaustive()
     }
 }
@@ -136,8 +251,7 @@ impl fmt::Debug for OutboundPending {
     clippy::missing_trait_methods,
     reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
 )]
-impl Drop for OutboundPending {
-    #[inline]
+impl Drop for PendingState {
     fn drop(&mut self) {
         // Stop scheduled work before releasing its receiver or an uncollected response.
         drop(self.owner.take());
@@ -589,5 +703,78 @@ mod tests {
         };
         assert_eq!(response.body().as_bytes(), Some(b"scheduled".as_slice()));
         assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn scoped_ready_pending_releases_cached_body_and_sdk_owner_at_scope_exit() {
+        use crate::{IndependentOutboundProgress, OutboundScope, OutboundScopeOwner, OutboundTime};
+
+        let callback = OutboundScopeOwner::callback();
+        let scope = callback.with(|| OutboundScope::capture(Rc::new(IndependentOutboundProgress)));
+        let time = OutboundTime::new(MonotonicClock::default(), |_, _| {
+            panic!("no timer for cached completion")
+        });
+        let entered_at = time.clock().now();
+        let body_drops = Rc::new(Cell::new(0));
+        let cancelled = Rc::new(Cell::new(0));
+        let release = DropCount(Rc::clone(&body_drops));
+        let body = Body::from_stream(stream::poll_fn(move |_cx| {
+            let _keep_alive = &release;
+            panic!("scope cancellation must not read a cached response body");
+        }));
+        let mut retained = OutboundPending::new(
+            Box::pin(async move { Ok(response(body)) }),
+            owner(&cancelled),
+        )
+        .bind(&scope, time, entered_at)
+        .expect("scope registration");
+        assert!(retained.is_ready());
+        assert_eq!(body_drops.get(), 0);
+        callback.close();
+        assert_eq!(body_drops.get(), 1);
+        assert_eq!(cancelled.get(), 1);
+        let error = block_on(retained.collect()).expect_err("closed scope is not success");
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert_eq!(body_drops.get(), 1);
+        assert_eq!(cancelled.get(), 1);
+    }
+
+    #[test]
+    fn scoped_pending_successful_stream_handoff_has_no_late_callback_abort() {
+        use crate::{IndependentOutboundProgress, OutboundScope, OutboundScopeOwner, OutboundTime};
+
+        let callback = OutboundScopeOwner::callback();
+        let scope = callback.with(|| OutboundScope::capture(Rc::new(IndependentOutboundProgress)));
+        let time = OutboundTime::new(MonotonicClock::default(), |_, _| {
+            panic!("no timer for ready completion")
+        });
+        let entered_at = time.clock().now();
+        let aborted = Rc::new(Cell::new(false));
+        let body_aborted = Rc::clone(&aborted);
+        let body_drops = Rc::new(Cell::new(0));
+        let release = DropCount(Rc::clone(&body_drops));
+        let mut chunk = Some(Bytes::from_static(b"live"));
+        let body = Body::from_stream(stream::poll_fn(move |_cx| {
+            let _keep_alive = &release;
+            assert!(!body_aborted.get());
+            Poll::Ready(chunk.take().map(Ok))
+        }));
+        let cancel_body = Rc::clone(&aborted);
+        let pending = OutboundPending::new(
+            Box::pin(async move { Ok(response(body)) }),
+            OutboundExchangeOwner::new(move || cancel_body.set(true)),
+        )
+        .bind(&scope, time, entered_at)
+        .expect("scope registration");
+        let collected = block_on(pending.collect()).expect("stream handoff");
+        callback.close();
+        assert!(!aborted.get());
+        assert_eq!(body_drops.get(), 0);
+        assert_eq!(
+            block_on(collected.into_bytes_bounded(4)).expect("live body"),
+            Bytes::from_static(b"live")
+        );
+        assert_eq!(body_drops.get(), 1);
+        assert!(!aborted.get());
     }
 }

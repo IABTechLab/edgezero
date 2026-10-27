@@ -239,11 +239,11 @@ async fn progress(ctx: RequestContext) -> Result<Response, EdgeError> {
             let batch = client.start_batch_until(requests, Deadline::after(Duration::from_secs(3)));
             Box::pin(async move {
                 let results = batch.collect().await.map_err(|_| probe_failure())?;
-                if results.slots.len() != slots
+                if results.slots().len() != slots
                     || results
-                        .slots
+                        .slots()
                         .iter()
-                        .any(|s| s.as_ref().is_none_or(|r| r.outcome.is_err()))
+                        .any(|s| !matches!(s, edgezero_core::OutboundCollectedSlot::Resolved(r) if r.outcome.is_ok()))
                 {
                     return Err(probe_failure());
                 }
@@ -356,10 +356,13 @@ async fn marker_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
                 ctx.monotonic_clock().deadline_after(Duration::from_secs(2)),
             )
             .await
-            .map_err(|failure| failure.error)?;
+            .map_err(|failure| failure.into_parts().0)?;
         let mut markers = Vec::new();
-        for slot in results.slots {
-            let response = slot.ok_or_else(probe_failure)?.outcome?;
+        for slot in results.into_parts().0 {
+            let edgezero_core::OutboundCollectedSlot::Resolved(slot) = slot else {
+                return Err(probe_failure());
+            };
+            let response = slot.outcome?;
             markers.push(
                 response
                     .headers()
@@ -516,7 +519,12 @@ fn response_control(state: Arc<State>, case: String, token: String) -> Result<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edgezero_core::{
+        BodyPayload, BudgetSource, HttpClient, IndependentOutboundProgress,
+        OutboundBatchTermination, OutboundCollectedSlot, OutboundProgressRuntime,
+    };
     use futures::executor::block_on;
+    use std::rc::Rc;
     use std::sync::Mutex;
 
     #[derive(Clone, Default)]
@@ -586,17 +594,33 @@ mod tests {
     }
 
     struct RelayClient {
+        time: edgezero_core::OutboundTime,
         polls: Arc<AtomicUsize>,
         calls: Arc<Mutex<Vec<Value>>>,
     }
 
-    #[async_trait::async_trait(?Send)]
     impl edgezero_core::OutboundHttpClient for RelayClient {
-        async fn send(
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn time(&self) -> edgezero_core::OutboundTime {
+            self.time.clone()
+        }
+
+        fn validate_supported_options(
             &self,
-            request: OutboundRequest,
-        ) -> Result<edgezero_core::OutboundResponse, EdgeError> {
-            let parts = request.into_parts();
+            _request: &OutboundRequest,
+            _mode: edgezero_core::OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            Ok(())
+        }
+
+        fn dispatch_head(
+            &self,
+            request: edgezero_core::OutboundDispatchRequest,
+        ) -> edgezero_core::OutboundFuture<edgezero_core::OutboundHead> {
+            let (parts, context) = request.into_parts();
             self.calls.lock().unwrap().push(json!({
                 "marker":format!("{:?}",parts.proxy_marker),"mode":format!("{:?}",parts.response_mode),
                 "decoding":format!("{:?}",parts.response_decoding),"encoded":parts.max_encoded_response_bytes,
@@ -613,12 +637,13 @@ mod tests {
             };
             let body = if matches!(parts.response_mode, edgezero_core::ResponseMode::Streamed) {
                 let polls = Arc::clone(&self.polls);
-                Body::from_stream(futures::stream::once(async move {
+                futures::stream::once(async move {
                     polls.fetch_add(1, Ordering::SeqCst);
                     Ok(bytes)
-                }))
+                })
+                .boxed_local()
             } else {
-                Body::from_bytes(bytes)
+                futures::stream::iter([Ok(bytes)]).boxed_local()
             };
             let mut headers = edgezero_core::http::HeaderMap::new();
             headers.insert("content-type", "application/octet-stream".parse().unwrap());
@@ -627,26 +652,144 @@ mod tests {
                 headers.insert("content-encoding", "gzip".parse().unwrap());
                 headers.insert("content-length", "3".parse().unwrap());
             }
-            Ok(edgezero_core::OutboundResponse::new(
-                parts.method,
+            let head = edgezero_core::OutboundHead::new(
                 if parts.uri.path().ends_with("206") {
                     edgezero_core::http::StatusCode::PARTIAL_CONTENT
                 } else {
                     edgezero_core::http::StatusCode::OK
                 },
-                headers,
+                edgezero_core::OutboundHeaderInput::new(
+                    "scripted",
+                    headers,
+                    edgezero_core::OutboundHeaderFidelity::AdapterVisibleFields,
+                ),
                 body,
-                edgezero_core::MonotonicClock::default(),
-                edgezero_core::ContentTypeProvenance::SingleTextUnchanged,
+                context,
+                edgezero_core::OutboundExchangeOwner::new(|| {}),
+            );
+            Box::pin(futures::future::ready(head))
+        }
+
+        fn begin(
+            &self,
+            request: edgezero_core::OutboundDispatchRequest,
+        ) -> Result<edgezero_core::OutboundPending, EdgeError> {
+            let outcome = self.finish_ready(request);
+            Ok(edgezero_core::OutboundPending::new(
+                Box::pin(futures::future::ready(outcome)),
+                edgezero_core::OutboundExchangeOwner::new(|| {}),
             ))
         }
 
         fn start_batch_until(
             &self,
-            requests: Vec<OutboundRequest>,
-            _observation_cutoff: Deadline,
+            batch: edgezero_core::OutboundPreparedBatch,
         ) -> edgezero_core::OutboundBatch {
-            edgezero_core::OutboundBatch::cutoff(requests.len())
+            let (context, requests) = batch.into_slots();
+            if requests.is_empty()
+                && context
+                    .observation_cutoff()
+                    .is_expired_at(context.clock().now())
+            {
+                return edgezero_core::OutboundBatch::cutoff(context);
+            }
+            let events = requests
+                .into_iter()
+                .map(|(index, request)| {
+                    let outcome = self.finish_ready(request);
+                    edgezero_core::OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at: self.time.clock().now(),
+                        outcome,
+                    }
+                })
+                .collect::<Vec<_>>();
+            edgezero_core::OutboundBatch::from_driver(
+                context,
+                futures::stream::iter(events),
+                edgezero_core::OutboundExchangeOwner::new(|| {}),
+            )
+        }
+    }
+
+    impl RelayClient {
+        fn finish_ready(
+            &self,
+            request: edgezero_core::OutboundDispatchRequest,
+        ) -> Result<edgezero_core::OutboundResponse, EdgeError> {
+            use edgezero_core::OutboundHttpClient as _;
+            use futures::{FutureExt as _, TryFutureExt as _};
+            let mut future = Box::pin(
+                self.dispatch_head(request)
+                    .and_then(edgezero_core::OutboundHead::finish),
+            );
+            // Fixed one-chunk replies need one cooperative turn before EOF.
+            for _ in 0..2 {
+                if let Some(outcome) = future.as_mut().now_or_never() {
+                    return outcome;
+                }
+            }
+            panic!("scripted response did not complete within its fixed poll bound");
+        }
+    }
+
+    #[test]
+    fn relay_batch_exact_cutoff_preserves_preflight_without_io() {
+        for sibling in ["cutoff", "invalid", "own-timeout"] {
+            let time = crate::outbound_test_support::TestTime::default();
+            let own_deadline = Deadline::at_instant(time.clock().now());
+            time.advance_to(
+                own_deadline
+                    .instant()
+                    .checked_add(Duration::from_millis(1))
+                    .expect("entry instant"),
+            );
+            let entered_at = time.clock().now();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let client = HttpClient::with_client(RelayClient {
+                time: time.pair(),
+                polls: Arc::clone(&polls),
+                calls: Arc::clone(&calls),
+            });
+            let first = OutboundRequest::get("http://127.0.0.1:1234/coding/gzip/200").unwrap();
+            let second = OutboundRequest::get("http://127.0.0.1:1234/coding/gzip/200").unwrap();
+            let second = match sibling {
+                "invalid" => second.stream_response(),
+                "own-timeout" => second.deadline(own_deadline),
+                _ => second,
+            };
+            let batch =
+                client.start_batch_until(vec![first, second], Deadline::at_instant(entered_at));
+            let results = block_on(batch.collect()).expect("exact cutoff is not driver EOF");
+            let (collected, termination) = results.into_parts();
+            assert_eq!(termination, OutboundBatchTermination::Cutoff);
+            assert_eq!(collected.len(), 2);
+            assert!(matches!(collected[0], OutboundCollectedSlot::Unresolved));
+            let last = collected.into_iter().nth(1).expect("second slot");
+            if sibling == "cutoff" {
+                assert!(matches!(last, OutboundCollectedSlot::Unresolved));
+            } else {
+                let OutboundCollectedSlot::Resolved(rejected) = last else {
+                    panic!("preflight outcome must be retained");
+                };
+                assert_eq!(rejected.elapsed, Duration::ZERO);
+                let error = rejected.outcome.expect_err("preflight failure");
+                if sibling == "invalid" {
+                    assert_eq!(error.status(), 400);
+                } else {
+                    assert!(matches!(
+                        error,
+                        EdgeError::GatewayTimeout {
+                            cause: BudgetSource::RequestDeadline,
+                            ..
+                        }
+                    ));
+                }
+            }
+            assert!(calls.lock().unwrap().is_empty());
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(time.clock().now(), entered_at);
         }
     }
 
@@ -662,6 +805,7 @@ mod tests {
                 let polls = Arc::new(AtomicUsize::new(0));
                 let calls = Arc::new(Mutex::new(Vec::new()));
                 let client = edgezero_core::HttpClient::with_client(RelayClient {
+                    time: crate::outbound_test_support::TestTime::default().pair(),
                     polls: Arc::clone(&polls),
                     calls: Arc::clone(&calls),
                 });
@@ -677,10 +821,7 @@ mod tests {
                         assert_eq!(response.status().as_str(), status);
                         assert_eq!(response.headers()["etag"], "\"fixture\"");
                         assert_eq!(polls.load(Ordering::SeqCst), before);
-                        assert_eq!(
-                            matches!(response.body(), Body::Stream(_)),
-                            mode == "streamed"
-                        );
+                        assert_eq!(response.body().is_stream(), mode == "streamed");
                     }
                     let raw = choice == "original" || status == "206";
                     let expected = if raw {
@@ -868,7 +1009,8 @@ mod tests {
             assert_eq!(response.status(), 200);
             assert!(runtime.0.lock().unwrap().is_empty());
             dispatched.store(true, Ordering::SeqCst);
-            let Body::Stream(mut stream) = response.into_body() else {
+            let (payload, body_owner) = response.into_body().into_parts();
+            let BodyPayload::Stream(mut stream) = payload else {
                 panic!("control must stream")
             };
             let mut bytes = block_on(stream.next()).unwrap().unwrap().to_vec();
@@ -887,6 +1029,7 @@ mod tests {
                 vec![]
             };
             assert_eq!(*runtime.0.lock().unwrap(), expected);
+            drop(body_owner);
         }
     }
 

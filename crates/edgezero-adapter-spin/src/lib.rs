@@ -24,7 +24,7 @@ pub mod request;
 pub mod response;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 pub mod secret_store;
-#[cfg(all(feature = "spin", target_arch = "wasm32"))]
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 use core::future::Future;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 use core::pin::Pin;
@@ -35,8 +35,12 @@ use edgezero_core::app::{App, Hooks};
 use edgezero_core::env_config::EnvConfig;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 use edgezero_core::error::EdgeError;
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+use edgezero_core::outbound::OutboundScopeOwner;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 use edgezero_core::time::MonotonicClock;
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+use futures_util::future::LocalBoxFuture;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 use spin_sdk::http::Request as SpinRequest;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
@@ -106,6 +110,21 @@ where
     App::build::<A>(platform)
 }
 
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+fn in_outbound_callback<'future, F>(future: F) -> LocalBoxFuture<'future, F::Output>
+where
+    F: Future + 'future,
+    F::Output: 'future,
+{
+    // Bound composed dispatch frames without retaining ambient activation between polls.
+    Box::pin(async move {
+        match OutboundScopeOwner::callback_if_absent() {
+            Some(owner) => owner.run(future).await,
+            None => future.await,
+        }
+    })
+}
+
 /// Initialize the logger for Spin.
 ///
 /// This is a no-op. Host stdout/stderr capture does not install a Rust `log`
@@ -173,23 +192,26 @@ pub async fn run_app_with_platform<A>(
 where
     A: Hooks,
 {
-    if !A::owns_logging() {
-        drop(init_logger());
-    }
-    let clock = MonotonicClock::default();
-    let request_start = clock.now();
-    let app = match build_target_app::<A>(platform) {
-        Ok(app) => app,
-        Err(error) => {
-            return Ok(request::send_assembly_error(
-                req,
-                error,
-                request_start,
-                clock,
-            )?);
+    in_outbound_callback(async move {
+        if !A::owns_logging() {
+            drop(init_logger());
         }
-    };
-    dispatch_app::<A>(&app, req).await
+        let clock = MonotonicClock::default();
+        let request_start = clock.now();
+        let app = match build_target_app::<A>(platform) {
+            Ok(app) => app,
+            Err(error) => {
+                return Ok(request::send_assembly_error(
+                    req,
+                    error,
+                    request_start,
+                    clock,
+                )?);
+            }
+        };
+        dispatch_app::<A>(&app, req).await
+    })
+    .await
 }
 
 /// Dispatch a caller-owned app through canonical admission and response egress.
@@ -208,10 +230,96 @@ pub async fn dispatch_app<A>(app: &App, req: SpinRequest) -> anyhow::Result<Spin
 where
     A: Hooks,
 {
-    let stores = A::stores();
-    let env = EnvConfig::from_env();
-    request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)
-        .await
+    in_outbound_callback(async move {
+        let stores = A::stores();
+        let env = EnvConfig::from_env();
+        request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)
+            .await
+    })
+    .await
+}
+
+#[cfg(test)]
+mod callback_scope_tests {
+    use std::rc::Rc;
+    use std::task::Poll;
+
+    use edgezero_core::outbound::{
+        IndependentOutboundProgress, OutboundScope, OutboundScopeKind, OutboundScopeOwner,
+    };
+    use futures::executor::block_on;
+    use futures_util::future::{FutureExt as _, poll_fn};
+
+    fn capture() -> OutboundScope {
+        OutboundScope::capture(Rc::new(IndependentOutboundProgress))
+    }
+
+    #[test]
+    fn callback_return_closes_captured_scope_without_leaking_ambient_state() {
+        assert!(!capture().is_managed());
+        let captured = block_on(super::in_outbound_callback(async {
+            let captured = capture();
+            assert!(captured.is_managed());
+            assert_eq!(captured.kind(), Some(OutboundScopeKind::Callback));
+            captured.check().expect("active callback");
+            captured
+        }));
+        assert!(captured.check().is_err());
+        assert!(!capture().is_managed());
+    }
+
+    #[test]
+    fn nested_dispatch_reuses_callback_without_closing_outer_work() {
+        let outer = OutboundScopeOwner::callback();
+        let outer_state = outer.scope().provider_state(|| 7_u8).expect("outer state");
+        let captured = block_on(outer.run(super::in_outbound_callback(async {
+            super::in_outbound_callback(async { capture() }).await
+        })));
+        let state = captured
+            .provider_state(|| 9_u8)
+            .expect("same callback state");
+        assert!(Rc::ptr_eq(&state, &outer_state));
+        captured.check().expect("outer callback remains live");
+        drop(outer);
+        assert!(captured.check().is_err());
+    }
+
+    #[test]
+    fn nested_dispatch_reuses_response_body_owner_without_reparenting() {
+        let body = OutboundScopeOwner::response_body();
+        let captured = block_on(body.run(super::in_outbound_callback(async { capture() })));
+        assert_eq!(captured.kind(), Some(OutboundScopeKind::ResponseBody));
+        captured.check().expect("body remains live");
+        drop(body);
+        assert!(captured.check().is_err());
+    }
+
+    #[test]
+    fn pending_callback_restores_ambient_and_drop_closes_retained_work() {
+        let mut captured = None;
+        let callback = super::in_outbound_callback(poll_fn(|_cx| {
+            captured = Some(capture());
+            Poll::<()>::Pending
+        }));
+        let mut pending = Box::pin(callback);
+        assert!(pending.as_mut().now_or_never().is_none());
+        assert!(!capture().is_managed());
+        drop(pending);
+        assert!(captured.expect("polled callback").check().is_err());
+    }
+
+    #[test]
+    fn callback_error_closes_scope_and_accepts_borrowed_future() {
+        let mut captured = None;
+        let failure = "caller-owned error";
+        let result = block_on(super::in_outbound_callback(async {
+            captured = Some(capture());
+            Err::<(), _>(&failure)
+        }));
+        assert_eq!(result, Err(&failure));
+        assert!(captured.expect("callback error").check().is_err());
+        assert!(!capture().is_managed());
+    }
 }
 
 #[cfg(test)]

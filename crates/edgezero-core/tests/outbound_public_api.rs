@@ -155,3 +155,39 @@ fn public_dispatch_validation_modes_compile_contract() {
         Err(EdgeError::BadRequest { .. })
     ));
 }
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "external head-first API contract"
+)]
+fn owned_head_first_facade_compile_contract() {
+    use edgezero_core::{HttpClient, OutboundDispatchRequest, OutboundFuture, OutboundPending};
+    use std::time::Duration;
+
+    fn owned_send(
+        client: &HttpClient,
+        request: OutboundRequest,
+    ) -> OutboundFuture<edgezero_core::OutboundResponse> {
+        client.send(request)
+    }
+    fn owned_begin(
+        client: &HttpClient,
+        request: OutboundRequest,
+    ) -> OutboundFuture<OutboundPending> {
+        client.begin(request)
+    }
+    fn inspect(request: &OutboundDispatchRequest) {
+        assert!(request.entered_at() <= request.budget().deadline.instant());
+        assert!(request.request().uri().scheme().is_some());
+        assert!(request.clock().now() <= request.time().clock().now());
+    }
+    let _ = (owned_send, owned_begin, inspect);
+    let request = OutboundRequest::get("https://example.com/")
+        .expect("request")
+        .connect_timeout(Duration::from_millis(10));
+    assert_eq!(
+        request.connect_timeout_setting(),
+        Some(Duration::from_millis(10))
+    );
+}

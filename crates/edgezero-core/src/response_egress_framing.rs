@@ -3,9 +3,10 @@
 #[path = "response_egress_framing_test_support.rs"]
 pub mod test_support;
 
+use bytes::Bytes;
 use std::mem;
 
-use crate::body::{Body, BodyStream};
+use crate::body::{Body, BodyPayload, BodyStream};
 use crate::error::suppress_overflow_retry_after;
 use crate::error::{BadGatewayDecodeReason, BadGatewayReason, EdgeError, ResponseLimitReason};
 use crate::http::header::{
@@ -117,8 +118,10 @@ pub fn prepare_response_egress(
     };
 
     if suppress_body {
-        let original_body = mem::take(response.body_mut());
+        let mut original_body = mem::take(response.body_mut());
+        let owner = original_body.take_egress_owner();
         drop(original_body);
+        *response.body_mut() = Body::from_parts(BodyPayload::Once(Bytes::new()), owner);
     }
 
     if response.headers().contains_key(TRAILER) {
@@ -133,7 +136,7 @@ pub fn prepare_response_egress(
     if framing == ResponseEgressFramingMode::ExplicitBufferedLength
         && !suppress_body
         && declared_length.is_none()
-        && let Body::Once(bytes) = response.body()
+        && let Some(bytes) = response.body().as_bytes()
     {
         declared_length = Some(
             u64::try_from(bytes.len())
@@ -147,21 +150,22 @@ pub fn prepare_response_egress(
             .map_err(|_error| ResponseEgressFramingError::InvalidContentLength)?;
         response.headers_mut().insert(CONTENT_LENGTH, canonical);
         if !suppress_body {
-            match response.body() {
-                Body::Once(bytes) => {
-                    let actual = u64::try_from(bytes.len())
-                        .map_err(|_error| ResponseEgressFramingError::ContentLengthMismatch)?;
-                    if actual != length {
-                        return Err(ResponseEgressFramingError::ContentLengthMismatch);
-                    }
+            if let Some(bytes) = response.body().as_bytes() {
+                let actual = u64::try_from(bytes.len())
+                    .map_err(|_error| ResponseEgressFramingError::ContentLengthMismatch)?;
+                if actual != length {
+                    return Err(ResponseEgressFramingError::ContentLengthMismatch);
                 }
-                Body::Stream(_) => {
-                    let body = mem::take(response.body_mut());
-                    if let Body::Stream(stream) = body {
-                        *response.body_mut() =
-                            Body::from_stream(limit_declared_stream(stream, length));
+            } else {
+                let body = mem::take(response.body_mut());
+                let (payload, owner) = body.into_parts();
+                let limited_payload = match payload {
+                    BodyPayload::Stream(stream) => {
+                        BodyPayload::Stream(limit_declared_stream(stream, length))
                     }
-                }
+                    buffered @ BodyPayload::Once(_) => buffered,
+                };
+                *response.body_mut() = Body::from_parts(limited_payload, owner);
             }
         }
     }
@@ -355,10 +359,11 @@ mod tests {
     use futures_util::StreamExt as _;
     use futures_util::stream::{self, poll_fn};
 
-    use crate::body::Body;
+    use crate::body::{Body, BodyPayload};
     use crate::error::{BadGatewayDecodeReason, BadGatewayReason, EdgeError};
     use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
     use crate::http::{HeaderValue, Method, Response, StatusCode, response_builder};
+    use crate::outbound::OutboundScopeOwner;
     use crate::response::IntoResponse as _;
 
     use super::{
@@ -376,6 +381,75 @@ mod tests {
     impl Drop for DropSignal {
         fn drop(&mut self) {
             self.0.set(self.0.get().saturating_add(1));
+        }
+    }
+
+    #[test]
+    fn framing_transforms_preserve_exact_egress_owner() {
+        for (streamed, suppressed) in [(false, false), (true, false), (true, true)] {
+            let owner = OutboundScopeOwner::response_body();
+            let scope = owner.scope();
+            let bytes = Bytes::from(vec![b'x'; 4]);
+            let original_pointer = bytes.as_ptr();
+            let body = if streamed {
+                Body::from_stream(stream::iter([Ok(bytes)]))
+            } else {
+                Body::from(bytes)
+            };
+            let mut response = owner.attach(Response::new(body)).expect("attach");
+            response
+                .headers_mut()
+                .insert(CONTENT_LENGTH, HeaderValue::from_static("4"));
+            let method = if suppressed {
+                Method::HEAD
+            } else {
+                Method::GET
+            };
+            let normalized_response = prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &method,
+                response,
+            )
+            .expect("normalize")
+            .into_response();
+            assert_eq!(
+                normalized_response
+                    .headers()
+                    .get(CONTENT_LENGTH)
+                    .expect("exact length"),
+                "4"
+            );
+            scope
+                .check()
+                .expect("framing never closes response ownership");
+            let (payload, retained_owner) = normalized_response.into_body().into_parts();
+            assert!(retained_owner.is_some());
+            match payload {
+                BodyPayload::Once(retained_bytes) => {
+                    assert!(!streamed || suppressed);
+                    if suppressed {
+                        assert!(retained_bytes.is_empty());
+                    } else {
+                        assert_eq!(retained_bytes.as_ptr(), original_pointer);
+                    }
+                }
+                BodyPayload::Stream(mut source) => {
+                    assert!(streamed && !suppressed);
+                    assert_eq!(
+                        block_on(source.next())
+                            .expect("chunk")
+                            .expect("bytes")
+                            .len(),
+                        4
+                    );
+                    assert!(block_on(source.next()).is_none());
+                }
+            }
+            scope
+                .check()
+                .expect("stream EOF does not drop the separate owner");
+            drop(retained_owner);
+            assert!(scope.check().is_err());
         }
     }
 

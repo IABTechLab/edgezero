@@ -1,4 +1,15 @@
 #![cfg_attr(
+    all(
+        feature = "cloudflare",
+        target_arch = "wasm32",
+        any(test, feature = "test-utils")
+    ),
+    expect(
+        clippy::self_named_module_files,
+        reason = "the established outbound module keeps private Workers response fixtures in a submodule"
+    )
+)]
+#![cfg_attr(
     any(test, all(feature = "cloudflare", target_arch = "wasm32")),
     expect(
         clippy::arbitrary_source_item_ordering,
@@ -23,7 +34,9 @@ use edgezero_core::error::{BadGatewayReason, BudgetSource};
     all(feature = "cloudflare", target_arch = "wasm32"),
     feature = "test-utils"
 ))]
-use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
+use edgezero_core::outbound::OutboundRequest;
+#[cfg(feature = "test-utils")]
+use edgezero_core::outbound::{OutboundSendMode, validate_for_dispatch};
 
 #[cfg(any(all(feature = "cloudflare", target_arch = "wasm32"), test))]
 mod header_bridge {
@@ -31,13 +44,6 @@ mod header_bridge {
 
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{HeaderMap, HeaderName};
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum ResetContentAction {
-        Abort,
-        Disarm,
-        InspectStream,
-    }
 
     pub(crate) trait HeaderSink {
         fn append(&mut self, name: &str, value: &str) -> Result<(), EdgeError>;
@@ -59,25 +65,12 @@ mod header_bridge {
         }
         Ok(())
     }
-
-    pub(super) fn reset_content_action(
-        declared_body: bool,
-        native_body_is_empty: bool,
-    ) -> ResetContentAction {
-        if declared_body {
-            ResetContentAction::Abort
-        } else if native_body_is_empty {
-            ResetContentAction::Disarm
-        } else {
-            ResetContentAction::InspectStream
-        }
-    }
 }
 
 #[cfg(any(all(feature = "cloudflare", target_arch = "wasm32"), test))]
-pub(crate) use header_bridge::copy_header_values;
+use header_bridge::HeaderSink;
 #[cfg(any(all(feature = "cloudflare", target_arch = "wasm32"), test))]
-use header_bridge::{HeaderSink, ResetContentAction, reset_content_action};
+pub(crate) use header_bridge::copy_header_values;
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 impl HeaderSink for worker::Headers {
@@ -88,19 +81,25 @@ impl HeaderSink for worker::Headers {
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 mod worker_impl {
+    #[cfg(any(test, feature = "test-utils"))]
+    mod testing;
+    #[cfg(any(test, feature = "test-utils"))]
+    use edgezero_core::outbound::{
+        OutboundProxyMarker, OutboundRequest, ResponseDecoding, ResponseMode,
+    };
     use std::cell::{Cell, RefCell};
     use std::future::Future;
-    use std::num::NonZeroU64;
     use std::pin::Pin;
     use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
+    #[cfg(any(test, feature = "test-utils"))]
+    use testing::{finish_fixture_response, finish_fixture_stream};
 
     use async_stream::stream;
-    use async_trait::async_trait;
     use bytes::Bytes;
-    use edgezero_core::body::{Body, BodyStream};
-    #[cfg(feature = "test-utils")]
+    use edgezero_core::body::{Body, BodyPayload, BodyStream};
+    #[cfg(any(test, feature = "test-utils"))]
     use edgezero_core::error::BudgetSource;
     use edgezero_core::error::{BadGatewayReason, EdgeError};
     use edgezero_core::error_detail::{
@@ -109,28 +108,31 @@ mod worker_impl {
     use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundCachePolicy, OutboundFuture, OutboundHeaderFidelity,
-        OutboundHeaderInput, OutboundHttpClient, OutboundProxyMarker, OutboundRequest,
-        OutboundRequestParts, OutboundResponse, OutboundTime, ResponseBodyDisposition,
-        ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter, ResponseMode,
-        apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
+        OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundDispatchRequest,
+        OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
+        OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
+        OutboundRequestParts, OutboundResponse, OutboundResponseContext, OutboundSendMode,
+        OutboundTask, OutboundTime,
     };
-    use edgezero_core::time::{
-        Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
-    };
+    #[cfg(feature = "test-utils")]
+    use edgezero_core::time::{Deadline, dispatch_budget};
+    use edgezero_core::time::{DispatchBudget, MonotonicClock, MonotonicInstant};
+    use edgezero_core::{IndependentOutboundProgress, OutboundProgressRuntime};
+    use futures::channel::{mpsc, oneshot};
     use futures_util::StreamExt as _;
     use futures_util::future::{FutureExt as _, LocalBoxFuture, poll_fn};
+    use futures_util::stream::{FuturesUnordered, once};
     use worker::js_sys::{Function, Reflect, Uint8Array, global};
     use worker::wasm_bindgen::closure::Closure;
     use worker::wasm_bindgen::{JsCast as _, JsValue};
-    use worker::wasm_bindgen_futures::JsFuture;
+    use worker::wasm_bindgen_futures::{JsFuture, spawn_local};
     use worker::web_sys;
     use worker::{
         CacheMode, Headers, Method as WorkerMethod, Request as WorkerRequest, RequestInit,
         RequestRedirect, Response as WorkerResponse, ResponseBody as WorkerResponseBody,
     };
 
-    use super::{ResetContentAction, reset_content_action, timeout_error};
+    use super::timeout_error;
 
     const READY_ITEM_YIELD_QUOTA: u32 = 64;
 
@@ -252,11 +254,6 @@ mod worker_impl {
         controller: Option<web_sys::AbortController>,
     }
 
-    struct PreparedRequest {
-        budget: DispatchBudget,
-        parts: OutboundRequestParts,
-    }
-
     impl AbortGuard {
         fn disarm(&mut self) {
             self.controller = None;
@@ -270,25 +267,20 @@ mod worker_impl {
     }
 
     impl CloudflareOutboundClient {
-        async fn execute(&self, prepared: PreparedRequest) -> Result<OutboundResponse, EdgeError> {
-            let PreparedRequest { budget, parts } = prepared;
+        async fn execute(
+            &self,
+            prepared: OutboundDispatchRequest,
+        ) -> Result<OutboundHead, EdgeError> {
+            let (parts, context) = prepared.into_parts();
+            let budget = context.budget();
+            let time = context.time().clone();
             let OutboundRequestParts {
                 body,
                 cache_policy,
                 mut headers,
                 host_authority_override,
-                max_decoder_bytes,
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_encoded_response_bytes,
                 max_request_body_bytes,
-                max_response_header_bytes,
-                max_response_header_count,
                 method,
-                proxy_marker,
-                response_decoding,
-                response_mode,
                 uri,
                 ..
             } = parts;
@@ -302,59 +294,11 @@ mod worker_impl {
                 headers.insert(HOST, value);
             }
             let worker_body =
-                request_body(body, max_request_body_bytes, budget, self.time.clone()).await?;
+                request_body(body, max_request_body_bytes, budget, time.clone()).await?;
             let url = uri.to_string();
             let request = build_worker_request(&method, &url, &headers, worker_body, cache_policy)?;
-            let (response, abort_guard) = raw_fetch(request, budget, &self.time).await?;
-
-            process_response(
-                response,
-                abort_guard,
-                method,
-                proxy_marker,
-                response_decoding,
-                response_mode,
-                budget,
-                max_decoder_bytes,
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_encoded_response_bytes,
-                max_response_header_bytes,
-                max_response_header_count,
-                self.time.clone(),
-            )
-            .await
-        }
-
-        fn prepare(
-            request: OutboundRequest,
-            started_at: MonotonicInstant,
-        ) -> Result<PreparedRequest, EdgeError> {
-            super::validate_request(&request, super::OutboundSendMode::Send)?;
-            Self::prepare_validated(request, started_at, None)
-        }
-
-        fn prepare_batch(
-            request: OutboundRequest,
-            started_at: MonotonicInstant,
-            observation_cutoff: Deadline,
-        ) -> Result<PreparedRequest, EdgeError> {
-            super::validate_batch_request(&request)?;
-            Self::prepare_validated(request, started_at, Some(observation_cutoff))
-        }
-
-        fn prepare_validated(
-            mut request: OutboundRequest,
-            started_at: MonotonicInstant,
-            observation_cutoff: Option<Deadline>,
-        ) -> Result<PreparedRequest, EdgeError> {
-            let budget = dispatch_budget(&request, started_at, observation_cutoff)?;
-            normalize_for_dispatch(&mut request)?;
-            Ok(PreparedRequest {
-                budget,
-                parts: request.into_parts(),
-            })
+            let (response, abort_guard) = raw_fetch(request, budget, &time).await?;
+            response_head(response, abort_guard, context)
         }
 
         /// Builds a client using the process-default monotonic clock.
@@ -391,53 +335,138 @@ mod worker_impl {
         }
     }
 
-    #[async_trait(?Send)]
     impl OutboundHttpClient for CloudflareOutboundClient {
         #[inline]
-        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            let started_at = self.time.clock().now();
-            let prepared = Self::prepare(request, started_at)?;
-            self.execute(prepared).await
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
         }
 
         #[inline]
-        fn start_batch_until(
+        fn time(&self) -> OutboundTime {
+            self.time.clone()
+        }
+
+        #[inline]
+        fn validate_supported_options(
             &self,
-            requests: Vec<OutboundRequest>,
-            observation_cutoff: Deadline,
-        ) -> OutboundBatch {
-            let batch_started_at = self.time.clock().now();
-            let slot_count = requests.len();
-            if observation_cutoff.is_expired_at(batch_started_at) {
-                return OutboundBatch::cutoff(slot_count);
-            }
+            request: &super::OutboundRequest,
+            _mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            super::validate_supported_options(request)
+        }
 
-            let mut completed = Vec::new();
-            let mut pending_slots = Vec::<LocalBoxFuture<'static, _>>::new();
-            for (index, request) in requests.into_iter().enumerate() {
-                match Self::prepare_batch(request, batch_started_at, observation_cutoff) {
-                    Ok(prepared) => {
-                        let client = self.clone();
-                        pending_slots.push(
-                            async move {
-                                let outcome = client.execute(prepared).await;
-                                (index, client.time.clock().now(), outcome)
-                            }
-                            .boxed_local(),
-                        );
-                    }
-                    Err(error) => completed.push((index, self.time.clock().now(), Err(error))),
-                }
-            }
-
-            OutboundBatch::from_futures(
-                slot_count,
-                batch_started_at,
-                observation_cutoff,
-                completed,
-                pending_slots,
+        #[inline]
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            let client = self.clone();
+            let scope = request.scope().clone();
+            scope.run(
+                request.time().clone(),
+                request.entered_at(),
+                Box::pin(async move { client.execute(request).await }),
             )
         }
+
+        #[inline]
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            let scope = request.scope().clone();
+            let time = request.time().clone();
+            let entered_at = request.entered_at();
+            let head = self.dispatch_head(request);
+            schedule_response(scope.run(
+                time,
+                entered_at,
+                Box::pin(async move { head.await?.finish().await }),
+            ))
+        }
+
+        #[inline]
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            schedule_batch(self, batch)
+        }
+    }
+
+    fn schedule_batch(
+        client: &dyn OutboundHttpClient,
+        batch: OutboundPreparedBatch,
+    ) -> OutboundBatch {
+        let (context, slots) = batch.into_slots();
+        if slots.is_empty() {
+            return OutboundBatch::cutoff(context);
+        }
+        let cutoff = context.observation_cutoff();
+        let (mut sender, receiver) = mpsc::channel(slots.len().saturating_add(1));
+        let mut work = FuturesUnordered::new();
+        for (index, request) in slots {
+            let budget = request.budget();
+            let clock = request.clock().clone();
+            let scope = request.scope().clone();
+            let time = request.time().clone();
+            let entered_at = request.entered_at();
+            let head = client.dispatch_head(request);
+            let pipeline = scope.run(
+                time,
+                entered_at,
+                Box::pin(async move { head.await?.finish().await }),
+            );
+            work.push(
+                async move {
+                    let outcome = pipeline.await;
+                    (index, clock.now(), budget, outcome)
+                }
+                .boxed_local(),
+            );
+        }
+        let task = Box::pin(async move {
+            let mut cutoff_unresolved = false;
+            while let Some((index, completed_at, budget, outcome)) = work.next().await {
+                cutoff_unresolved |= cutoff.is_expired_at(completed_at)
+                    && !budget.own_deadline_expired_before(cutoff, completed_at);
+                if sender
+                    .try_send(OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            if cutoff_unresolved {
+                let _closed = sender.try_send(OutboundBatchDriverEvent::Cutoff);
+            }
+        });
+        match spawn_owned(task) {
+            Ok(owner) => OutboundBatch::from_driver(context, receiver, owner),
+            Err(error) => OutboundBatch::from_driver(
+                context,
+                once(async move { OutboundBatchDriverEvent::Failed(error) }),
+                OutboundExchangeOwner::new(|| {}),
+            ),
+        }
+    }
+
+    fn spawn_owned(work: LocalBoxFuture<'static, ()>) -> Result<OutboundExchangeOwner, EdgeError> {
+        let (runner, owner) = OutboundTask::new(work)?;
+        spawn_local(runner);
+        Ok(owner)
+    }
+
+    fn schedule_response(
+        work: OutboundFuture<OutboundResponse>,
+    ) -> Result<OutboundPending, EdgeError> {
+        let (sender, receiver) = oneshot::channel();
+        let owner = spawn_owned(Box::pin(async move {
+            let _closed = sender.send(work.await);
+        }))?;
+        Ok(OutboundPending::new(
+            Box::pin(async move {
+                receiver.await.map_err(|_closed| {
+                    EdgeError::internal(anyhow::anyhow!("outbound completion task stopped"))
+                })?
+            }),
+            owner,
+        ))
     }
 
     fn build_headers(headers: &HeaderMap) -> Result<Headers, EdgeError> {
@@ -470,63 +499,36 @@ mod worker_impl {
             .map_err(|error| diagnose_worker_preparation_error(EdgeError::internal(error)))
     }
 
-    fn deadline_stream(
-        input: BodyStream,
-        budget: DispatchBudget,
-        time: OutboundTime,
-        guard: AbortGuard,
-    ) -> BodyStream {
+    fn guarded_response_stream(input: BodyStream, guard: AbortGuard) -> BodyStream {
         stream! {
             let mut source = Some(input);
             let mut abort_guard = Some(guard);
-            let mut previous = time.clock().now();
-            let mut timer = time.wait_until(budget.deadline);
             let mut ready_items = 0_u32;
             loop {
-                let next_item = match race_with_timer(source.as_mut().ok_or_else(|| EdgeError::internal(anyhow::anyhow!("response source already released")))?.next(), budget, &time, &mut timer, &mut previous, None, |item| stream_error_detail(item.as_ref())).await {
-                    Ok(item) => item,
-                    Err(error) => {
-                        drop(source.take());
-                        drop(abort_guard.take());
-                        drop(timer);
-                        drop(time);
-                        yield Err(error);
-                        return;
-                    }
-                };
+                let next_item = source.as_mut().ok_or_else(|| EdgeError::internal(anyhow::anyhow!("response source already released")))?.next().await;
                 match next_item {
                     Some(Ok(bytes)) => yield Ok(bytes),
                     Some(Err(error)) => {
-                        let selected = terminal_error_after_host_event(error, budget, &time, &mut previous).await;
                         drop(source.take());
                         drop(abort_guard.take());
-                        drop(timer);
-                        drop(time);
-                        yield Err(selected);
+                        yield Err(error);
                         return;
                     }
                     None => {
-                        if let Err(error) = yield_host_event(budget, &time, &mut previous, None).await {
-                            drop(source.take());
-                            drop(abort_guard.take());
-                            drop(timer);
-                            drop(time);
-                            yield Err(error);
-                            return;
-                        }
                         if let Some(completed) = &mut abort_guard { completed.disarm(); }
+                        drop(source.take());
+                        drop(abort_guard.take());
+                        if let Err(error) = HostEventYield::new().await { yield Err(error); }
                         return;
                     }
                 }
                 ready_items = ready_items.saturating_add(1);
                 if ready_items >= READY_ITEM_YIELD_QUOTA {
-                    let checkpoint = yield_host_event(budget, &time, &mut previous, None).await;
+                    let checkpoint = HostEventYield::new().await;
                     ready_items = 0;
                     if let Err(error) = checkpoint {
                         drop(source.take());
                         drop(abort_guard.take());
-                        drop(timer);
-                        drop(time);
                         yield Err(error);
                         return;
                     }
@@ -536,114 +538,34 @@ mod worker_impl {
         .boxed_local()
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the adapter consumes the independent request policy fields without hiding them"
-    )]
-    async fn process_response(
+    fn response_head(
         mut response: WorkerResponse,
-        mut abort_guard: AbortGuard,
-        request_method: Method,
-        proxy_marker: OutboundProxyMarker,
-        response_decoding: ResponseDecoding,
-        response_mode: ResponseMode,
-        budget: DispatchBudget,
-        max_decoder_bytes: u64,
-        max_brotli_window_bits: u8,
-        max_chunk_bytes: Option<NonZeroU64>,
-        max_decoded_response_bytes: Option<u64>,
-        max_encoded_response_bytes: Option<u64>,
-        max_response_header_bytes: Option<u64>,
-        max_response_header_count: Option<u64>,
-        time: OutboundTime,
-    ) -> Result<OutboundResponse, EdgeError> {
-        let clock = time.clock().clone();
+        abort_guard: AbortGuard,
+        context: OutboundResponseContext,
+    ) -> Result<OutboundHead, EdgeError> {
+        let budget = context.budget();
+        let clock = context.clock().clone();
         budget_remaining(budget, &clock)?;
-        let response_clock = clock.clone();
         let status = StatusCode::from_u16(response.status_code()).map_err(EdgeError::internal)?;
-        let (mut headers, normalization, _) = OutboundHeaderInput::new(
+        let headers = OutboundHeaderInput::new(
             "cloudflare",
             response_headers(&response)?,
             OutboundHeaderFidelity::ProviderFieldBoundariesUnknown,
-        )
-        .normalize(
-            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count),
-            &request_method,
-            status,
-            proxy_marker,
-        )?;
-        let disposition = normalization.body_disposition;
-
-        let body = if disposition == ResponseBodyDisposition::FramingBodyless {
-            Body::empty()
-        } else if let ResponseBodyDisposition::ResetContent { declared_body } = disposition {
-            match reset_content_action(
-                declared_body,
-                matches!(response.body(), WorkerResponseBody::Empty),
-            ) {
-                ResetContentAction::Abort => {}
-                ResetContentAction::Disarm => abort_guard.disarm(),
-                ResetContentAction::InspectStream => {
-                    let native = response_stream(&mut response)?;
-                    let next = native.into_future();
-                    let mut previous = time.clock().now();
-                    let mut timer = time.wait_until(budget.deadline);
-                    let ready = race_with_timer(
-                        next,
-                        budget,
-                        &time,
-                        &mut timer,
-                        &mut previous,
-                        None,
-                        |ready| stream_error_detail(ready.0.as_ref()),
-                    )
-                    .await?;
-                    let detail = stream_error_detail(ready.0.as_ref());
-                    budget_remaining(budget, &clock)
-                        .map_err(|selected| preserve_timeout_detail(selected, detail))?;
-                    yield_host_event(budget, &time, &mut previous, detail).await?;
-                    match ready {
-                        (Some(item), _rest) => {
-                            item?;
-                        }
-                        (None, _rest) => abort_guard.disarm(),
-                    }
-                }
-            }
-            Body::empty()
-        } else {
-            let native = response_stream(&mut response)?;
-            let shaped = apply_response_body_policy(
-                native,
-                &mut headers,
-                ResponseBodyPolicy {
-                    max_brotli_window_bits,
-                    max_chunk_bytes,
-                    max_decoded_response_bytes,
-                    max_decoder_bytes,
-                    max_encoded_response_bytes,
-                    response_decoding,
-                    response_mode,
-                    status,
-                },
-            )?;
-            let deadline_bound = deadline_stream(shaped, budget, time, abort_guard);
-            match response_mode {
-                ResponseMode::Buffered { max_bytes } => {
-                    Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
-                }
-                ResponseMode::Streamed => Body::from_stream(deadline_bound),
-            }
-        };
-        budget_remaining(budget, &response_clock)?;
-        Ok(OutboundResponse::new(
-            request_method,
+        );
+        let native = stream! {
+            if matches!(response.body(), WorkerResponseBody::Empty) { return; }
+            let mut source = response_stream(&mut response)?;
+            while let Some(item) = source.next().await { yield item; }
+        }
+        .boxed_local();
+        let encoded = guarded_response_stream(native, abort_guard);
+        OutboundHead::new(
             status,
             headers,
-            body,
-            response_clock,
-            normalization.content_type_provenance,
-        ))
+            encoded,
+            context,
+            OutboundExchangeOwner::new(|| {}),
+        )
     }
 
     async fn raw_fetch(
@@ -725,8 +647,9 @@ mod worker_impl {
         time: OutboundTime,
     ) -> Result<Option<JsValue>, EdgeError> {
         let clock = time.clock();
-        match body {
-            Body::Once(bytes) => {
+        let (payload, _scope) = body.into_parts();
+        match payload {
+            BodyPayload::Once(bytes) => {
                 let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 if length > maximum {
                     return Err(EdgeError::payload_too_large(
@@ -740,7 +663,7 @@ mod worker_impl {
                     Ok(Some(Uint8Array::from(bytes.as_ref()).into()))
                 }
             }
-            Body::Stream(source) => {
+            BodyPayload::Stream(source) => {
                 let mut bounded = upload_stream(source, maximum, budget, time);
                 let mut collected = Vec::new();
                 while let Some(item) = bounded.next().await {
@@ -776,7 +699,7 @@ mod worker_impl {
             let signal = controller.signal();
             let deadline = start.checked_add(Duration::from_secs(1))?;
             let clock = MonotonicClock::new(move || start);
-            process_response(
+            finish_fixture_response(
                 response,
                 AbortGuard::new(controller),
                 Method::GET,
@@ -1214,12 +1137,16 @@ mod worker_impl {
             Ok(Bytes::from_static(b"body"))
         })
         .boxed_local();
-        let mut response = deadline_stream(
+        let Ok(mut response) = finish_fixture_stream(
             response_source,
+            AbortGuard::new(controller),
             budget,
             native_time(clock),
-            AbortGuard::new(controller),
-        );
+        )
+        .await
+        else {
+            return false;
+        };
         let response_holds = matches!(
             response.next().await,
             Some(Err(EdgeError::GatewayTimeout { .. }))
@@ -1230,25 +1157,429 @@ mod worker_impl {
 
     #[cfg(test)]
     mod clock_tests {
+        use edgezero_core::outbound::{
+            HttpClient, OutboundBatchTermination, OutboundCollectedSlot,
+        };
+        fn resolved_slot(slot: &OutboundCollectedSlot) -> &edgezero_core::OutboundSlotResult {
+            match slot {
+                OutboundCollectedSlot::Resolved(result) => result,
+                other @ (OutboundCollectedSlot::AlreadyDelivered
+                | OutboundCollectedSlot::Unresolved) => {
+                    panic!("expected resolved slot, got {other:?}")
+                }
+            }
+        }
         use std::collections::VecDeque;
+        use std::iter::repeat_with;
         use std::ptr;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
         use std::task::{Poll, Wake};
 
         use crate::test_runtime::NumericTimeoutGuard;
-        use edgezero_core::error::BudgetSource;
+        use edgezero_core::error::{BadGatewayDecodeReason, BudgetSource, ResponseLimitReason};
         use edgezero_core::http::header::CONTENT_TYPE;
         use edgezero_core::outbound::ContentTypeProvenance;
         use edgezero_core::response::IntoResponse as _;
+        use edgezero_core::time::DEFAULT_NO_DEADLINE_BUDGET;
         use edgezero_core::time::Deadline;
-        use edgezero_core::{CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase};
+        use edgezero_core::{
+            CloudflareFailureCause, OutboundScopeOwner, ProviderFailureDetail, ProviderFailurePhase,
+        };
+        use futures_util::future::pending;
         use futures_util::stream;
         use wasm_bindgen_test::wasm_bindgen_test;
 
         use super::*;
 
         struct RestoreGlobal(Function);
+
+        #[wasm_bindgen_test]
+        async fn streamed_send_keeps_original_scope_under_foreign_request_polling() {
+            let _timers = NumericTimeoutGuard::install();
+            let original = OutboundScopeOwner::callback();
+            let foreign = OutboundScopeOwner::callback();
+            let client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let nested_client = client.clone();
+            let nested = Rc::new(RefCell::new(None::<OutboundFuture<OutboundResponse>>));
+            let retained = Rc::clone(&nested);
+            let upload = Rc::new(());
+            let released_upload = Rc::downgrade(&upload);
+            let child = Rc::new(());
+            let released_child = Rc::downgrade(&child);
+            let mut pending_child = Some(child);
+            let body = Body::from_stream(stream::poll_fn(move |_| {
+                assert_eq!(Rc::strong_count(&upload), 1);
+                if let Some(owner) = pending_child.take() {
+                    let source = Body::from_stream(stream::poll_fn(move |_| {
+                        assert_eq!(Rc::strong_count(&owner), 1);
+                        Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+                    }));
+                    let send = nested_client.send(
+                        OutboundRequest::post("https://fixture.invalid/")
+                            .expect("child request")
+                            .body(source),
+                    );
+                    *retained.borrow_mut() = Some(send);
+                }
+                Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+            }));
+            let mut send = original.with(|| {
+                client.send(
+                    OutboundRequest::post("https://fixture.invalid/")
+                        .expect("request")
+                        .body(body),
+                )
+            });
+            foreign
+                .run(poll_fn(|cx| {
+                    assert!(send.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                }))
+                .await;
+            assert!(nested.borrow().is_some(), "upload poll creates child send");
+            drop(foreign);
+            assert!(
+                released_child.upgrade().is_some(),
+                "foreign scope cannot cancel child"
+            );
+            drop(original);
+            assert!(
+                released_upload.upgrade().is_none(),
+                "send upload is revoked"
+            );
+            assert!(
+                released_child.upgrade().is_none(),
+                "child belongs to original scope"
+            );
+            assert!(nested.borrow().is_some(), "child future is still retained");
+            drop(send);
+            drop(nested.borrow_mut().take());
+        }
+
+        #[wasm_bindgen_test]
+        async fn scope_exit_aborts_retained_begin_and_batch_fetches_exactly_once() {
+            let _timers = NumericTimeoutGuard::install();
+            let (probe, _restore) = fetch_probe(true);
+            let callback = OutboundScopeOwner::callback();
+            let client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let (pending, batch) = callback
+                .run(async {
+                    let pending = client
+                        .begin(
+                            OutboundRequest::get("https://fixture.invalid/begin").expect("request"),
+                        )
+                        .await
+                        .expect("begin");
+                    let batch = client.start_batch_until(
+                        vec![
+                            OutboundRequest::get("https://fixture.invalid/first").expect("first"),
+                            OutboundRequest::get("https://fixture.invalid/second").expect("second"),
+                        ],
+                        Deadline::after(Duration::from_secs(10)),
+                    );
+                    HostEventYield::after(Duration::from_millis(10))
+                        .await
+                        .expect("scheduled fetches");
+                    (pending, batch)
+                })
+                .await;
+            assert_eq!(
+                Reflect::get(&probe, &JsValue::from_str("calls"))
+                    .expect("calls")
+                    .as_f64(),
+                Some(3.0_f64)
+            );
+            assert_eq!(
+                Reflect::get(&probe, &JsValue::from_str("aborts"))
+                    .expect("aborts")
+                    .as_f64(),
+                Some(0.0_f64)
+            );
+            drop(callback);
+            assert_eq!(
+                Reflect::get(&probe, &JsValue::from_str("aborts"))
+                    .expect("aborts")
+                    .as_f64(),
+                Some(3.0_f64)
+            );
+            HostEventYield::after(Duration::from_millis(10))
+                .await
+                .expect("cancelled tasks retire");
+            assert!(matches!(
+                pending.collect().await,
+                Err(EdgeError::Internal { .. })
+            ));
+            batch.collect().await.expect_err("scope revoked driver");
+            assert_eq!(
+                Reflect::get(&probe, &JsValue::from_str("aborts"))
+                    .expect("aborts")
+                    .as_f64(),
+                Some(3.0_f64)
+            );
+        }
+
+        #[wasm_bindgen_test]
+        async fn closed_scope_rejects_scheduling_before_work_is_polled() {
+            let callback = OutboundScopeOwner::callback();
+            callback.close();
+            let polls = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&polls);
+            let resource = Rc::new(());
+            let released = Rc::downgrade(&resource);
+            let refused = callback.with(|| {
+                schedule_response(Box::pin(poll_fn(move |_| {
+                    assert_eq!(Rc::strong_count(&resource), 1);
+                    observed.set(observed.get().saturating_add(1));
+                    Poll::Pending
+                })))
+            });
+            assert!(matches!(refused, Err(EdgeError::Internal { .. })));
+            assert_eq!(polls.get(), 0);
+            assert!(released.upgrade().is_none(), "refused work is released");
+        }
+
+        #[wasm_bindgen_test]
+        async fn scheduled_work_allows_reentrant_cancellation_while_polling() {
+            let _timers = NumericTimeoutGuard::install();
+            let owner = Rc::new(RefCell::new(None::<OutboundExchangeOwner>));
+            let cancelled = Rc::clone(&owner);
+            let polls = Rc::new(Cell::new(0_usize));
+            let counted = Rc::clone(&polls);
+            let work = poll_fn(move |_| {
+                counted.set(counted.get().saturating_add(1));
+                let cancel_owner = cancelled.borrow_mut().take();
+                drop(cancel_owner);
+                Poll::Pending
+            })
+            .boxed_local();
+            *owner.borrow_mut() = Some(spawn_owned(work).expect("local scheduler"));
+            HostEventYield::after(Duration::from_millis(10))
+                .await
+                .expect("unrelated host wait");
+            assert_eq!(polls.get(), 1, "cancelled work must not be polled again");
+        }
+
+        #[wasm_bindgen_test]
+        async fn cancelling_idle_work_retires_the_wasm_task_and_source() {
+            let _timers = NumericTimeoutGuard::install();
+            let source = Rc::new(());
+            let released = Rc::downgrade(&source);
+            let entered = Rc::new(Cell::new(false));
+            let observed = Rc::clone(&entered);
+            let (runner, owner) = OutboundTask::new(Box::pin(async move {
+                observed.set(true);
+                pending::<()>().await;
+                drop(source);
+            }))
+            .expect("task setup");
+            let running = Rc::new(());
+            let retired = Rc::downgrade(&running);
+            spawn_local(async move {
+                runner.await;
+                drop(running);
+            });
+            HostEventYield::after(Duration::from_millis(10))
+                .await
+                .expect("work enters pending");
+            assert!(entered.get(), "work entered pending");
+            drop(owner);
+            assert!(
+                released.upgrade().is_none(),
+                "cancellation immediately releases the source"
+            );
+            HostEventYield::after(Duration::from_millis(10))
+                .await
+                .expect("cancelled task retires");
+            assert!(
+                retired.upgrade().is_none(),
+                "no retained task/waker/state cycle"
+            );
+        }
+
+        fn fetch_probe(pending: bool) -> (JsValue, RestoreGlobal) {
+            let probe = Function::new_with_args("pending", "const original = globalThis.fetch; const probe = {calls:0, signal:null, aborts:0}; globalThis.fetch = (request, init) => { probe.calls++; probe.signal = init.signal; init.signal.addEventListener('abort', () => {probe.aborts++;}, {once:true}); if (init.encodeResponseBody !== 'manual' || request.redirect !== 'manual') throw new Error('manual fetch policy lost'); return pending ? new Promise(() => {}) : Promise.resolve(new Response('ready')); }; probe.restore = () => {globalThis.fetch = original;}; return probe;")
+                .call1(&JsValue::UNDEFINED, &JsValue::from_bool(pending)).expect("fetch probe");
+            let restore = Reflect::get(&probe, &JsValue::from_str("restore"))
+                .expect("restore")
+                .dyn_into::<Function>()
+                .expect("restore function");
+            (probe, RestoreGlobal(restore))
+        }
+
+        #[wasm_bindgen_test]
+        async fn clamped_batch_cutoff_uses_actual_observation_cutoff() {
+            for (elapsed_hours, unresolved) in [(168_u64, false), (192, true)] {
+                let start = MonotonicInstant::now();
+                let now = Arc::new(Mutex::new(start));
+                let clock = controlled_clock(Arc::clone(&now));
+                let client = HttpClient::with_client(CloudflareOutboundClient::with_time(
+                    native_time(clock),
+                ));
+                let cutoff = Deadline::at_instant(
+                    start
+                        .checked_add(Duration::from_hours(192))
+                        .expect("eight-day cutoff"),
+                );
+                let requests = repeat_with(|| {
+                    OutboundRequest::get("https://fixture.invalid/")
+                        .expect("request")
+                        .timeout(Duration::from_hours(192))
+                })
+                .take(2)
+                .collect();
+                let batch = client.start_batch_until(requests, cutoff);
+                *now.lock().expect("clock") = start
+                    .checked_add(Duration::from_hours(elapsed_hours))
+                    .expect("terminal observation");
+                let results = batch
+                    .collect()
+                    .await
+                    .expect("clamped observation remains a valid driver");
+                let expected = if unresolved {
+                    OutboundBatchTermination::Cutoff
+                } else {
+                    OutboundBatchTermination::Completed
+                };
+                assert_eq!(results.termination(), expected);
+                assert_eq!(results.slots().len(), 2);
+                for slot in results.slots() {
+                    if unresolved {
+                        assert!(matches!(slot, OutboundCollectedSlot::Unresolved));
+                    } else {
+                        assert!(
+                            matches!(slot, OutboundCollectedSlot::Resolved(result) if matches!(result.outcome, Err(EdgeError::GatewayTimeout { cause: BudgetSource::BatchCutoff, .. })))
+                        );
+                    }
+                }
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn unpolled_batch_dispatches_all_slots() {
+            let _timers = NumericTimeoutGuard::install();
+            let (probe, _restore) = fetch_probe(false);
+            let client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let batch = client.start_batch_until(
+                vec![
+                    OutboundRequest::get("https://fixture.invalid/first").expect("first"),
+                    OutboundRequest::get("https://fixture.invalid/second").expect("second"),
+                ],
+                Deadline::after(Duration::from_secs(1)),
+            );
+            HostEventYield::after(Duration::from_millis(10))
+                .await
+                .expect("unrelated host wait");
+            assert_eq!(
+                Reflect::get(&probe, &JsValue::from_str("calls"))
+                    .expect("calls")
+                    .as_f64(),
+                Some(2.0_f64)
+            );
+            let results = batch.collect().await.expect("batch");
+            assert!(results.slots().iter().all(|slot| matches!(slot, OutboundCollectedSlot::Resolved(result) if result.outcome.is_ok())));
+        }
+
+        #[wasm_bindgen_test]
+        async fn begin_dispatches_without_collection_and_drop_aborts() {
+            let _timers = NumericTimeoutGuard::install();
+            let (probe, _restore) = fetch_probe(true);
+            let client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let pending = client
+                .begin(OutboundRequest::get("https://fixture.invalid/").expect("request"))
+                .await
+                .expect("begin");
+            HostEventYield::after(Duration::from_millis(10))
+                .await
+                .expect("unrelated host wait");
+            assert_eq!(
+                Reflect::get(&probe, &JsValue::from_str("calls"))
+                    .expect("calls")
+                    .as_f64(),
+                Some(1.0_f64)
+            );
+            let signal = Reflect::get(&probe, &JsValue::from_str("signal"))
+                .expect("signal")
+                .dyn_into::<web_sys::AbortSignal>()
+                .expect("abort signal");
+            assert!(!signal.aborted());
+            drop(pending);
+            assert!(
+                signal.aborted(),
+                "cancellation releases fetch without another guest poll"
+            );
+        }
+
+        #[wasm_bindgen_test]
+        async fn collected_begin_stream_stays_live_and_disarms_clean_eof() {
+            let _timers = NumericTimeoutGuard::install();
+            let (probe, _restore) = fetch_probe(false);
+            let client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let pending = client
+                .begin(
+                    OutboundRequest::get("https://fixture.invalid/")
+                        .expect("request")
+                        .stream_response(),
+                )
+                .await
+                .expect("begin");
+            let response = pending.collect().await.expect("live response");
+            let signal = Reflect::get(&probe, &JsValue::from_str("signal"))
+                .expect("signal")
+                .dyn_into::<web_sys::AbortSignal>()
+                .expect("abort signal");
+            assert!(
+                !signal.aborted(),
+                "collect disarms pending cancellation without aborting the body"
+            );
+            assert_eq!(
+                response
+                    .into_bytes_bounded(5)
+                    .await
+                    .expect("complete live stream"),
+                "ready"
+            );
+            assert!(
+                !signal.aborted(),
+                "clean EOF disarms the one transport guard"
+            );
+        }
+
+        #[wasm_bindgen_test]
+        async fn settlement_timer_wakes_without_body_data() {
+            let _timers = NumericTimeoutGuard::install();
+            let (probe, _restore) = fetch_probe(false);
+            let reads = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&reads);
+            let body = Body::from_stream(stream::poll_fn(move |_| {
+                observed.set(observed.get().saturating_add(1));
+                Poll::Pending
+            }));
+            let client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let error = client
+                .send(
+                    OutboundRequest::get("https://fixture.invalid/")
+                        .expect("request")
+                        .body(body)
+                        .timeout(Duration::from_millis(20)),
+                )
+                .await
+                .expect_err("settlement timeout");
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                }
+            ));
+            assert!(reads.get() > 0);
+            assert_eq!(
+                Reflect::get(&probe, &JsValue::from_str("calls"))
+                    .expect("calls")
+                    .as_f64(),
+                Some(0.0_f64)
+            );
+        }
 
         #[wasm_bindgen_test]
         async fn review_cross_chunk_regression_releases_retained_source() {
@@ -1274,7 +1605,10 @@ mod worker_impl {
             .boxed_local();
             let controller = web_sys::AbortController::new().unwrap();
             let signal = controller.signal();
-            let mut guarded = deadline_stream(source, budget, pair, AbortGuard::new(controller));
+            let mut guarded =
+                finish_fixture_stream(source, AbortGuard::new(controller), budget, pair)
+                    .await
+                    .expect("shared response stream");
             assert_eq!(
                 guarded.next().await.unwrap().unwrap(),
                 Bytes::from_static(b"first")
@@ -1677,22 +2011,16 @@ mod worker_impl {
                 let start = MonotonicInstant::now();
                 let budget = test_budget(start, Duration::from_secs(1));
                 let observed = Arc::new(Mutex::new(start));
-                let pair = if during_yield {
-                    expire_at_host_yield(budget, Arc::clone(&observed))
-                } else {
-                    native_time(controlled_clock(Arc::clone(&observed)))
-                };
+                let pair = native_time(controlled_clock(Arc::clone(&observed)));
                 let late = Arc::clone(&observed);
                 let classify = Closure::<dyn FnMut()>::new(move || {
-                    if !during_yield {
-                        *late.lock().expect("clock") = budget.deadline.instant();
-                    }
+                    *late.lock().expect("clock") = budget.deadline.instant();
                 });
-                let raw = Function::new_with_args("classify", "const error = new Error('provider-secret-token'); Object.defineProperty(error, 'name', {get() {classify(); return 'TypeError';}}); return new Response(new ReadableStream({start(c) {c.error(error);}}));")
-                    .call1(&JsValue::UNDEFINED, classify.as_ref()).expect("error response")
+                let raw = Function::new_with_args("classify, delayed", "const error = new Error('provider-secret-token'); Object.defineProperty(error, 'name', {get() {classify(); return 'TypeError';}}); return new Response(new ReadableStream({start(c) {if (delayed) setTimeout(() => c.error(error), 0); else c.error(error);}}));")
+                    .call2(&JsValue::UNDEFINED, classify.as_ref(), &JsValue::from_bool(during_yield)).expect("error response")
                     .dyn_into::<web_sys::Response>().expect("native response");
                 let native = WorkerResponse::from(raw).with_status(205);
-                let result = process_response(
+                let result = finish_fixture_response(
                     native,
                     AbortGuard::new(web_sys::AbortController::new().expect("controller")),
                     Method::GET,
@@ -1752,12 +2080,14 @@ mod worker_impl {
                 let mut wrapped = if upload {
                     upload_stream(source, 32, budget, native_time(clock))
                 } else {
-                    deadline_stream(
+                    finish_fixture_stream(
                         source,
+                        AbortGuard::new(web_sys::AbortController::new().expect("controller")),
                         budget,
                         native_time(clock),
-                        AbortGuard::new(web_sys::AbortController::new().expect("controller")),
                     )
+                    .await
+                    .expect("shared response stream")
                 };
                 let error = wrapped.next().await.expect("terminal").expect_err("expiry");
                 assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
@@ -1909,11 +2239,12 @@ mod worker_impl {
         fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
             let observations = Arc::new(Mutex::new(VecDeque::from(script)));
             MonotonicClock::new(move || {
-                observations
-                    .lock()
-                    .expect("clock observations")
-                    .pop_front()
-                    .expect("clock observation")
+                let mut samples = observations.lock().expect("clock observations");
+                let now = *samples.front().expect("clock observation");
+                if samples.len() > 1 {
+                    samples.pop_front();
+                }
+                now
             })
         }
 
@@ -2045,9 +2376,9 @@ mod worker_impl {
             let completed = start
                 .checked_add(Duration::from_millis(9))
                 .expect("completed instant");
-            let client = CloudflareOutboundClient::with_time(native_time(scripted_clock(vec![
-                start, completed,
-            ])));
+            let client = HttpClient::with_client(CloudflareOutboundClient::with_time(native_time(
+                scripted_clock(vec![start, completed]),
+            )));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -2065,7 +2396,7 @@ mod worker_impl {
                 .await
                 .expect("valid batch driver");
 
-            let slot = results.slots[0].as_ref().expect("resolved slot");
+            let slot = resolved_slot(&results.slots()[0]);
             assert_eq!(slot.elapsed, Duration::from_millis(9));
             assert!(matches!(slot.outcome, Err(EdgeError::BadRequest { .. })));
         }
@@ -2076,9 +2407,9 @@ mod worker_impl {
             let earlier = start
                 .checked_sub(Duration::from_millis(1))
                 .expect("earlier instant");
-            let client = CloudflareOutboundClient::with_time(native_time(scripted_clock(vec![
-                start, earlier,
-            ])));
+            let client = HttpClient::with_client(CloudflareOutboundClient::with_time(native_time(
+                scripted_clock(vec![start, earlier]),
+            )));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -2096,7 +2427,7 @@ mod worker_impl {
                 .await
                 .expect("valid batch driver");
 
-            let slot = results.slots[0].as_ref().expect("resolved slot");
+            let slot = resolved_slot(&results.slots()[0]);
             assert_eq!(slot.elapsed, Duration::ZERO);
             assert!(matches!(slot.outcome, Err(EdgeError::Internal { .. })));
         }
@@ -2243,6 +2574,275 @@ mod worker_impl {
         }
 
         #[wasm_bindgen_test]
+        async fn native_response_terminal_paths_preserve_core_errors_and_abort_ownership() {
+            let _timers = NumericTimeoutGuard::install();
+            for (script, mode, decoded_cap, encoded_cap, reason, limit, aborted) in [
+                (
+                    "return new Response('ok');",
+                    ResponseMode::Buffered { max_bytes: 8 },
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
+                (
+                    "return new Response('ok');",
+                    ResponseMode::Streamed,
+                    None,
+                    None,
+                    None,
+                    None,
+                    true,
+                ),
+                (
+                    "return new Response(new ReadableStream({pull(c) {c.error(new TypeError('provider-secret-token'));}}));",
+                    ResponseMode::Buffered { max_bytes: 8 },
+                    None,
+                    None,
+                    Some(BadGatewayReason::Transport),
+                    None,
+                    true,
+                ),
+                (
+                    "return new Response(new Uint8Array([31, 139]), {headers: {'content-encoding': 'gzip'}});",
+                    ResponseMode::Buffered { max_bytes: 8 },
+                    None,
+                    None,
+                    Some(BadGatewayReason::Decode(BadGatewayDecodeReason::Gzip)),
+                    None,
+                    false,
+                ),
+                (
+                    "return new Response('ok');",
+                    ResponseMode::Buffered { max_bytes: 8 },
+                    None,
+                    Some(1),
+                    None,
+                    Some(ResponseLimitReason::EncodedBody),
+                    true,
+                ),
+                (
+                    "return new Response('ok');",
+                    ResponseMode::Buffered { max_bytes: 8 },
+                    Some(1),
+                    None,
+                    None,
+                    Some(ResponseLimitReason::DecodedBody),
+                    true,
+                ),
+                (
+                    "return new Response('ok');",
+                    ResponseMode::Buffered { max_bytes: 1 },
+                    None,
+                    None,
+                    None,
+                    Some(ResponseLimitReason::BufferedBody),
+                    true,
+                ),
+            ] {
+                assert_native_response_terminal_path(
+                    script,
+                    mode,
+                    decoded_cap,
+                    encoded_cap,
+                    reason,
+                    limit,
+                    aborted,
+                )
+                .await;
+            }
+        }
+
+        async fn assert_native_response_terminal_path(
+            script: &str,
+            mode: ResponseMode,
+            decoded_cap: Option<u64>,
+            encoded_cap: Option<u64>,
+            reason: Option<BadGatewayReason>,
+            limit: Option<ResponseLimitReason>,
+            aborted: bool,
+        ) {
+            let start = MonotonicInstant::now();
+            let raw = Function::new_no_args(script)
+                .call0(&JsValue::UNDEFINED)
+                .expect("native response")
+                .dyn_into::<web_sys::Response>()
+                .expect("response type");
+            let controller = web_sys::AbortController::new().expect("controller");
+            let signal = controller.signal();
+            let aborts = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&aborts);
+            let listener = Closure::<dyn FnMut()>::new(move || {
+                observed.set(observed.get().saturating_add(1));
+            });
+            signal
+                .add_event_listener_with_callback("abort", listener.as_ref().unchecked_ref())
+                .expect("abort listener");
+            let result = finish_fixture_response(
+                WorkerResponse::from(raw),
+                AbortGuard::new(controller),
+                Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
+                mode,
+                test_budget(start, Duration::from_secs(1)),
+                32 * 1024 * 1024,
+                24,
+                None,
+                decoded_cap,
+                encoded_cap,
+                None,
+                None,
+                native_time(constant_clock(start)),
+            )
+            .await;
+            if let Some(expected) = reason {
+                let error = result.expect_err("shared finalizer rejects native body");
+                assert!(
+                    matches!(error, EdgeError::BadGateway {reason: actual, ..} if actual == expected),
+                    "{error:?}"
+                );
+                if expected == BadGatewayReason::Transport {
+                    assert_eq!(
+                        error.provider_failure_detail(),
+                        Some(&ProviderFailureDetail::Cloudflare {
+                            phase: ProviderFailurePhase::ResponseBodyRead,
+                            cause: CloudflareFailureCause::TypeError,
+                        })
+                    );
+                } else {
+                    assert!(error.provider_failure_detail().is_none());
+                }
+            } else if let Some(expected) = limit {
+                let error = result.expect_err("shared finalizer bounds native body");
+                assert!(
+                    matches!(error, EdgeError::ResponseTooLarge { reason: actual, .. } if actual == expected),
+                    "{error:?}"
+                );
+                assert!(error.provider_failure_detail().is_none());
+            } else {
+                let response = result.expect("response");
+                if mode == ResponseMode::Streamed {
+                    assert!(
+                        !signal.aborted(),
+                        "live body is not cancelled at head handoff"
+                    );
+                } else {
+                    assert_eq!(response.body().as_bytes(), Some(b"ok".as_slice()));
+                }
+                drop(response);
+            }
+            assert_eq!(signal.aborted(), aborted);
+            assert_eq!(aborts.get(), usize::from(aborted));
+            signal
+                .remove_event_listener_with_callback("abort", listener.as_ref().unchecked_ref())
+                .expect("remove listener");
+        }
+
+        #[wasm_bindgen_test]
+        async fn reset_content_inspects_only_undeclared_native_streams() {
+            let _timers = NumericTimeoutGuard::install();
+            for declared_body in [false, true] {
+                for native_body_is_empty in [false, true] {
+                    let start = MonotonicInstant::now();
+                    let probe = Function::new_no_args("const probe = {pulls: 0}; probe.response = new Response(new ReadableStream({pull(c) {probe.pulls++; c.close();}}, {highWaterMark: 0})); return probe;")
+                        .call0(&JsValue::UNDEFINED).expect("source probe");
+                    let native = if native_body_is_empty {
+                        empty_worker_response(StatusCode::RESET_CONTENT, None)
+                    } else {
+                        let raw = Reflect::get(&probe, &JsValue::from_str("response"))
+                            .expect("response")
+                            .dyn_into::<web_sys::Response>()
+                            .expect("response type");
+                        WorkerResponse::from(raw).with_status(205)
+                    };
+                    let headers = Headers::new();
+                    if declared_body {
+                        headers.set("content-length", "7").expect("declared body");
+                    }
+                    let controller = web_sys::AbortController::new().expect("controller");
+                    let signal = controller.signal();
+                    let response = finish_fixture_response(
+                        native.with_headers(headers),
+                        AbortGuard::new(controller),
+                        Method::GET,
+                        OutboundProxyMarker::Inherit,
+                        ResponseDecoding::Decode,
+                        ResponseMode::Buffered { max_bytes: 8 },
+                        test_budget(start, Duration::from_secs(1)),
+                        1024,
+                        24,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        native_time(constant_clock(start)),
+                    )
+                    .await
+                    .expect("reset response");
+                    assert_eq!(response.status(), StatusCode::RESET_CONTENT);
+                    assert_eq!(response.body().as_bytes(), Some(b"".as_slice()));
+                    assert_eq!(signal.aborted(), declared_body);
+                    assert_eq!(
+                        Reflect::get(&probe, &JsValue::from_str("pulls"))
+                            .expect("pulls")
+                            .as_f64(),
+                        Some(f64::from(!declared_body && !native_body_is_empty))
+                    );
+                }
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn response_stream_uses_only_the_shared_core_deadline_timer() {
+            let _timers = NumericTimeoutGuard::install();
+            let start = MonotonicInstant::now();
+            let budget = test_budget(start, Duration::from_secs(1));
+            let timers = Arc::new(AtomicUsize::new(0));
+            let registered = Arc::clone(&timers);
+            let pair = OutboundTime::new(constant_clock(start), move |_, _| {
+                registered.fetch_add(1, Ordering::SeqCst);
+                Box::pin(pending())
+            });
+            let controller = web_sys::AbortController::new().expect("abort controller");
+            let signal = controller.signal();
+            let raw = Function::new_no_args("return new Response('live');")
+                .call0(&JsValue::UNDEFINED)
+                .expect("native response")
+                .dyn_into::<web_sys::Response>()
+                .expect("response type");
+            let native = WorkerResponse::from(raw);
+            let response = finish_fixture_response(
+                native,
+                AbortGuard::new(controller),
+                Method::GET,
+                OutboundProxyMarker::Inherit,
+                ResponseDecoding::Decode,
+                ResponseMode::Streamed,
+                budget,
+                1024,
+                24,
+                None,
+                None,
+                None,
+                None,
+                None,
+                pair,
+            )
+            .await
+            .expect("streamed response");
+            assert_eq!(response.into_bytes_bounded(4).await.expect("body"), "live");
+            assert_eq!(
+                timers.load(Ordering::SeqCst),
+                1,
+                "only core owns the response deadline wait"
+            );
+            assert!(!signal.aborted(), "clean EOF disarms the SDK resource");
+        }
+
+        #[wasm_bindgen_test]
         async fn response_stream_retains_clock_for_post_ready_expiry() {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_millis(10));
@@ -2254,12 +2854,14 @@ mod worker_impl {
             })
             .boxed_local();
             let controller = web_sys::AbortController::new().expect("abort controller");
-            let mut body = deadline_stream(
+            let mut body = finish_fixture_stream(
                 source,
+                AbortGuard::new(controller),
                 budget,
                 native_time(clock),
-                AbortGuard::new(controller),
-            );
+            )
+            .await
+            .expect("shared response stream");
 
             let error = body
                 .next()
@@ -2279,7 +2881,7 @@ mod worker_impl {
             let clock =
                 MonotonicClock::new(move || *clock_observed.lock().expect("clock observation"));
             let controller = web_sys::AbortController::new().expect("abort controller");
-            let response = process_response(
+            let response = finish_fixture_response(
                 empty_worker_response(StatusCode::NO_CONTENT, None),
                 AbortGuard::new(controller),
                 Method::GET,
@@ -2353,7 +2955,7 @@ mod worker_impl {
                             );
                         }
                         let controller = web_sys::AbortController::new().expect("abort controller");
-                        let mut response = process_response(
+                        let mut response = finish_fixture_response(
                             native,
                             AbortGuard::new(controller),
                             Method::GET,
@@ -2407,7 +3009,7 @@ mod worker_impl {
                 ] {
                     let controller = web_sys::AbortController::new().expect("abort controller");
                     let signal = controller.signal();
-                    let result = process_response(
+                    let result = finish_fixture_response(
                         empty_worker_response(StatusCode::RESET_CONTENT, content_length),
                         AbortGuard::new(controller),
                         Method::GET,
@@ -2442,8 +3044,80 @@ mod worker_impl {
                             "empty reset handoff must retain its deadline"
                         );
                     }
-                    assert_eq!(signal.aborted(), expected_aborted);
+                    let expired_before_head = observed >= budget.deadline.instant();
+                    assert_eq!(
+                        signal.aborted(),
+                        expected_aborted || expired_before_head,
+                        "preparation expiry releases an unhanded native response; length={content_length:?}, observed={observed:?}"
+                    );
                 }
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn null_reset_content_keeps_clean_disarm_when_final_handoff_expires() {
+            struct ExpireOnDrop {
+                observed: Arc<Mutex<MonotonicInstant>>,
+                deadline: MonotonicInstant,
+            }
+            impl Future for ExpireOnDrop {
+                type Output = Result<(), EdgeError>;
+                fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                    Poll::Pending
+                }
+            }
+            #[expect(
+                clippy::missing_trait_methods,
+                reason = "Drop::pin_drop is unstable and conflicts with drop"
+            )]
+            impl Drop for ExpireOnDrop {
+                fn drop(&mut self) {
+                    *self.observed.lock().expect("clock") = self.deadline;
+                }
+            }
+            let _timers = NumericTimeoutGuard::install();
+            for content_length in [None, Some("0")] {
+                let start = MonotonicInstant::now();
+                let budget = test_budget(start, Duration::from_secs(1));
+                let observed = Arc::new(Mutex::new(start));
+                let expiry = Arc::clone(&observed);
+                let pair = OutboundTime::new(controlled_clock(observed), move |_, _| {
+                    Box::pin(ExpireOnDrop {
+                        observed: Arc::clone(&expiry),
+                        deadline: budget.deadline.instant(),
+                    })
+                });
+                let controller = web_sys::AbortController::new().expect("controller");
+                let signal = controller.signal();
+                let result = finish_fixture_response(
+                    empty_worker_response(StatusCode::RESET_CONTENT, content_length),
+                    AbortGuard::new(controller),
+                    Method::GET,
+                    OutboundProxyMarker::Inherit,
+                    ResponseDecoding::Decode,
+                    ResponseMode::Buffered { max_bytes: 64 },
+                    budget,
+                    1024,
+                    24,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    pair,
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    })
+                ));
+                assert!(
+                    !signal.aborted(),
+                    "clean transport stays disarmed through a later handoff timeout"
+                );
             }
         }
 
@@ -2473,11 +3147,19 @@ mod worker_impl {
                     ] {
                         for offset in [9_u64, 10, 11] {
                             let start = MonotonicInstant::now();
-                            let mut budget = test_budget(start, Duration::from_millis(10));
+                            let duration = if cause == BudgetSource::Default {
+                                DEFAULT_NO_DEADLINE_BUDGET
+                            } else {
+                                Duration::from_millis(10)
+                            };
+                            let mut budget = test_budget(start, duration);
                             budget.cause = cause;
-                            let observed = start
-                                .checked_add(Duration::from_millis(offset))
-                                .expect("handoff time");
+                            let offset_duration = duration
+                                .checked_sub(Duration::from_millis(10))
+                                .and_then(|lead| lead.checked_add(Duration::from_millis(offset)))
+                                .expect("fixture duration bound");
+                            let observed =
+                                start.checked_add(offset_duration).expect("handoff time");
                             let controller = web_sys::AbortController::new().expect("controller");
                             let signal = controller.signal();
                             let probe = Function::new_no_args("const probe = {pulls: 0}; probe.response = new Response(new ReadableStream({pull() {probe.pulls++;}}, {highWaterMark: 0}), {headers: {'content-length': '1'}}); return probe;")
@@ -2491,7 +3173,7 @@ mod worker_impl {
                             } else {
                                 empty_worker_response(status, Some("1"))
                             };
-                            let result = process_response(
+                            let result = finish_fixture_response(
                                 native,
                                 AbortGuard::new(controller),
                                 method.clone(),
@@ -2509,7 +3191,14 @@ mod worker_impl {
                                 native_time(scripted_clock(vec![start, observed])),
                             )
                             .await;
-                            if offset < 10 {
+                            if cause == BudgetSource::BatchCutoff
+                                && response_mode == ResponseMode::Streamed
+                            {
+                                assert!(
+                                    matches!(result, Err(EdgeError::BadRequest { .. })),
+                                    "streamed batches reject before response processing"
+                                );
+                            } else if offset < 10 {
                                 drop(result.expect("on-time handoff"));
                             } else {
                                 assert!(
@@ -2541,7 +3230,7 @@ mod worker_impl {
             let controller = web_sys::AbortController::new().expect("abort controller");
             let signal = controller.signal();
 
-            let response = process_response(
+            let response = finish_fixture_response(
                 empty_worker_response(StatusCode::NO_CONTENT, None),
                 AbortGuard::new(controller),
                 Method::GET,
@@ -2599,21 +3288,13 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
     all(feature = "cloudflare", target_arch = "wasm32"),
     feature = "test-utils"
 ))]
-fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
-    validate_request(request, OutboundSendMode::Batch)
-}
-
-#[cfg(any(
-    all(feature = "cloudflare", target_arch = "wasm32"),
-    feature = "test-utils"
-))]
-fn validate_request(request: &OutboundRequest, mode: OutboundSendMode) -> Result<(), EdgeError> {
+fn validate_supported_options(request: &OutboundRequest) -> Result<(), EdgeError> {
     if request.image_optimizer_options().is_some() {
         return Err(EdgeError::bad_request(
             "image_optimizer is not supported by cloudflare",
         ));
     }
-    validate_for_dispatch(request, mode)
+    Ok(())
 }
 
 /// Runs the target-neutral Cloudflare batch preflight contract in native tests.
@@ -2623,7 +3304,8 @@ fn validate_request(request: &OutboundRequest, mode: OutboundSendMode) -> Result
 #[cfg(feature = "test-utils")]
 #[inline]
 pub fn validate_batch_request_for_test(request: &OutboundRequest) -> Result<(), EdgeError> {
-    validate_batch_request(request)
+    validate_supported_options(request)?;
+    validate_for_dispatch(request, OutboundSendMode::Batch)
 }
 
 /// Returns the target-neutral classification for an opaque Workers fetch rejection.
@@ -2696,19 +3378,5 @@ mod header_bridge_tests {
         .expect("copy UTF-8 response header");
 
         assert_eq!(sink.0.get("x-label"), Some(&vec!["caf\u{e9}".to_owned()]));
-    }
-
-    #[test]
-    fn reset_content_null_body_selects_abort_or_disarm_without_streaming() {
-        assert_eq!(
-            reset_content_action(false, true),
-            ResetContentAction::Disarm
-        );
-        assert_eq!(reset_content_action(true, true), ResetContentAction::Abort);
-        assert_eq!(
-            reset_content_action(false, false),
-            ResetContentAction::InspectStream
-        );
-        assert_eq!(reset_content_action(true, false), ResetContentAction::Abort);
     }
 }

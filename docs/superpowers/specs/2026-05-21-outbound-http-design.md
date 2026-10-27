@@ -1,6 +1,6 @@
 # EdgeZero Outbound HTTP — Design Spec
 
-> **Status:** Normative design extended with the completion-driven batch, cache-bypass, authority-override, and closed Fastly lifecycle contracts. The earlier Phases 1a-7, review hardening, and owned response-egress integration are implemented on PR 275; the 2026-09-15 hard cut is tracked by the consumer-alignment implementation plan. Response-egress capabilities remain `BestEffort` pending deployed proof of end-client completion and finite provider teardown. · **Date:** 2026-09-15
+> **Status:** Normative baseline for non-superseded contracts. The head-first API supersession below replaces historical implementer and batch-construction sketches without compatibility wrappers. Earlier Phases 1a-7 and owned response-egress integration are implemented on PR 275; the current adoption tracker distinguishes implementation, remaining scope/redirect work and qualification. Response-egress capabilities remain `BestEffort` pending deployed proof. · **Baseline Date:** 2026-09-15
 > **Branch:** `docs/outbound-http-spec` · **Audience:** EdgeZero maintainers
 > **Driving pattern:** fan-out HTTP workloads — N outbound requests under a shared wall-clock deadline, terminal results observed in completion order while preserving input indices. The spec is written against this pattern as a portable substrate; it deliberately does not name a specific consumer.
 > **Historical target baseline:** [`stackpop/edgezero` PR #269](https://github.com/stackpop/edgezero/pull/269) (`feature/extensible-cli`, rev `b4c80e9`) — **now merged into `main`** (squash-merged as `e483723`). Relevant baseline changes were the `edgezero_cli::adapter::execute(..)` shell-or-registry dispatcher, expanded runtime `AdapterAction` variants, the then-current Spin SDK 6 / wasip2 integration, the contributor-only `demo` command replacing `dev`, and the app-demo integration crate. The current implementation pins Spin SDK 7.0.0. Non-outbound store/config lifecycle changes remain outside this design.
@@ -8,6 +8,37 @@
 > **Where rebase claims live (authoritative surfaces):** §3.5.3 build-enforcement, §3.5.2 `Adapter` trait shape, §5.4 capability tests, and the §7 `edgezero-cli` migration bullet. The §3.5.3 + §7 active text is authoritative.
 
 ## 1. Overview
+
+### Dispatch-Slack Retirement (2026-10-27)
+
+The requester authorized retirement of the fixed 25 ms dispatch-slack refusal. The
+`BATCH_DISPATCH_SLACK_MAX` constant, `inject_dispatch_slack_for_test` helper and injection machinery
+are removed without compatibility aliases. All descriptions below of that guard, its injection
+test, slack-derived timing bounds and live-budget Internal failures are historical and superseded,
+including the older B31 checkpoint's statement that the guard remains.
+
+Preparation or backend registration consuming more than 25 ms does not itself reject a request
+whose original absolute deadline remains live. Absolute expiry checks, attributed timeout causes,
+strict observation-cutoff equality, late-result rejection, B31 backend identities/provider timers
+and resource limits remain unchanged. Budgets are neither restarted nor backdated. Synchronous SDK
+host calls remain non-preemptible; retirement establishes no finite blocking horizon, prompt
+cancellation, Native capability promotion or hosted qualification. Historical probe hashes,
+measurements and failures remain unchanged. EZ-3 acceptance legs stay planned until their real
+commands and sentinels are bound and verified.
+
+### Head-First Contract Supersession (2026-10-27)
+
+The approved [head-first hard-cut contract](../plans/2026-10-18-trusted-server-outbound-02-policies.md#interfaces-proposed-hard-cut-contract)
+supersedes older implementer `send`/raw-vector batching, public receipt construction, mutable
+collection fields, Option slots and adapter-owned response finalization in this original design.
+It also adds the independent connect setting and typed ConnectTimeout/IdleTimeout budget causes;
+older enum sketches do not narrow the current error taxonomy.
+Those API sketches are historical, not compatibility entrypoints. The shared facade captures
+invocation time and prepared contexts; adapters return raw heads and observations of eagerly
+scheduled work. Original caps, codecs, provenance, typed errors, cutoff semantics and ownership
+remain requirements. See the [implementation tracker](../plans/2026-10-18-trusted-server-outbound-implementation.md)
+for incomplete lifecycle, redirect, provider and qualification work rather than inferring
+completion from these interfaces or from local test results.
 
 ### Fastly B31 Existing-Path Policy (2026-10-25)
 

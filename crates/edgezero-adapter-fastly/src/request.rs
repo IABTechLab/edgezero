@@ -39,7 +39,8 @@ use crate::delivery::{
 };
 use crate::init_fastly_abi;
 use crate::key_value_store::FastlyKvStore;
-use crate::outbound::scope::Guard as OutboundScope;
+use crate::lifecycle::with_callback;
+use crate::outbound::drive_callback;
 use crate::outbound::{FastlyOutboundClient, native_time};
 use crate::response::{parse_uri, send_egress_response};
 use crate::secret_store::FastlySecretStore;
@@ -245,10 +246,11 @@ impl<'app> FastlyService<'app> {
         Finalize: FnOnce(&mut Response) -> State,
         Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
     {
-        let _scope = OutboundScope::fallback();
-        init_fastly_abi();
-        let outcome = self.dispatch_with(req, prepare);
-        finish_request(outcome, finalize, deliver)
+        with_callback(|| {
+            init_fastly_abi();
+            let outcome = self.dispatch_with(req, prepare);
+            finish_request(outcome, finalize, deliver)
+        })
     }
 
     /// Exercises the closed request/response lifecycle with an injected delivery boundary.
@@ -277,12 +279,13 @@ impl<'app> FastlyService<'app> {
     /// the underlying handler returns an error.
     #[inline]
     pub fn send(self) -> Result<(), FastlyError> {
-        let _scope = OutboundScope::fallback();
-        init_fastly_abi();
-        let req = FastlyRequest::from_client();
-        self.send_request_with_hooks(req, |_req, _extensions| {}, |_response| ())
-            .into_standard_result()
-            .map(|_state| ())
+        with_callback(|| {
+            init_fastly_abi();
+            let req = FastlyRequest::from_client();
+            self.send_request_with_hooks(req, |_req, _extensions| {}, |_response| ())
+                .into_standard_result()
+                .map(|_state| ())
+        })
     }
 
     /// Runs an already-received request through the closed `EdgeZero` lifecycle.
@@ -415,8 +418,17 @@ fn dispatch_core_request(
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = executor::block_on(app.dispatch_admitted(prepared, core_request));
-    DispatchOutcome::Routed(response)
+    let clock = prepared.monotonic_clock();
+    let entered = prepared.request_start();
+    let method = prepared.request_method().clone();
+    match executor::block_on(drive_callback(
+        Box::pin(app.dispatch_admitted(prepared, core_request)),
+        clock,
+        entered,
+    )) {
+        Ok(response) => DispatchOutcome::Routed(response),
+        Err(error) => detached_error_outcome(app, error, method, entered),
+    }
 }
 
 /// Run an app-provided closure against the borrowed raw request and a scratch extension bag before
@@ -551,10 +563,11 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
 {
-    let _scope = OutboundScope::fallback();
-    init_fastly_abi();
-    let req = FastlyRequest::from_client();
-    send_request_with_registries_and_hooks(app, stores, req, prepare, finalize)
+    with_callback(|| {
+        init_fastly_abi();
+        let req = FastlyRequest::from_client();
+        send_request_with_registries_and_hooks(app, stores, req, prepare, finalize)
+    })
 }
 
 /// Deliver an already-received request through canonical admission and owned egress.
@@ -576,25 +589,26 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
 {
-    let _scope = OutboundScope::fallback();
-    init_fastly_abi();
-    let request_start = app.monotonic_now();
-    let kv_registry = build_kv_registry(stores.kv);
-    let config_registry = build_config_registry(stores.config);
-    let secret_registry = build_secret_registry(stores.secrets);
-    let outcome = dispatch_with_handles(
-        app,
-        req,
-        Stores {
-            config_registry,
-            kv_registry,
-            secret_registry,
-            ..Default::default()
-        },
-        request_start,
-        prepare,
-    );
-    finish_request(outcome, finalize, send_egress_response)
+    with_callback(|| {
+        init_fastly_abi();
+        let request_start = app.monotonic_now();
+        let kv_registry = build_kv_registry(stores.kv);
+        let config_registry = build_config_registry(stores.config);
+        let secret_registry = build_secret_registry(stores.secrets);
+        let outcome = dispatch_with_handles(
+            app,
+            req,
+            Stores {
+                config_registry,
+                kv_registry,
+                secret_registry,
+                ..Default::default()
+            },
+            request_start,
+            prepare,
+        );
+        finish_request(outcome, finalize, send_egress_response)
+    })
 }
 
 /// Delivers an assembly failure for an already-received request without an application.
@@ -1197,12 +1211,16 @@ mod synthesis_tests {
                 edgezero_core::OutboundRequest::get("https://example.com/")?.stream_response();
             let results = client
                 .send_all_until(vec![request], Deadline::after(Duration::from_secs(1)))
-                .await?;
+                .await
+                .map_err(|failure| failure.into_parts().0)?;
             let elapsed = results
-                .slots
-                .into_iter()
-                .next()
-                .flatten()
+                .slots()
+                .first()
+                .and_then(|slot| match slot {
+                    edgezero_core::OutboundCollectedSlot::Resolved(result) => Some(result),
+                    edgezero_core::OutboundCollectedSlot::AlreadyDelivered
+                    | edgezero_core::OutboundCollectedSlot::Unresolved => None,
+                })
                 .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("missing batch slot")))?
                 .elapsed;
             Ok(elapsed.as_millis().to_string())

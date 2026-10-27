@@ -5,8 +5,6 @@ use std::time::Duration;
 use crate::error::{BudgetSource, EdgeError};
 use crate::outbound::OutboundRequest;
 
-/// Max adapter overhead tolerated before a fan-out slot fails closed.
-pub const BATCH_DISPATCH_SLACK_MAX: Duration = Duration::from_millis(25);
 /// Hard clamp on any caller-supplied duration, so construction cannot panic.
 pub const DEADLINE_FAR_FUTURE: Duration = Duration::from_hours(168);
 /// Budget applied when a request sets neither a timeout nor a deadline.
@@ -130,6 +128,22 @@ impl Deadline {
     }
 }
 
+impl DispatchBudget {
+    /// Whether a terminal observation retains an earlier request-owned expiry across cutoff.
+    /// A cutoff-attributed phase timeout never triggers this exception; equal deadlines lose.
+    #[must_use]
+    #[inline]
+    pub fn own_deadline_expired_before(
+        self,
+        observation_cutoff: Deadline,
+        observed_at: MonotonicInstant,
+    ) -> bool {
+        self.cause != BudgetSource::BatchCutoff
+            && self.deadline.instant() < observation_cutoff.instant()
+            && self.deadline.is_expired_at(observed_at)
+    }
+}
+
 /// Computes one effective outbound deadline from a shared monotonic snapshot.
 ///
 /// # Errors
@@ -193,6 +207,38 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
+    fn earlier_own_deadline_cutoff_rule_is_shared() {
+        let start = MonotonicInstant::now();
+        let at = |millis| {
+            start
+                .checked_add(Duration::from_millis(millis))
+                .expect("fixture time")
+        };
+        let observation_cutoff = Deadline::at_instant(at(100));
+        for (cause, expiry_ms, observed_ms, expected) in [
+            (BudgetSource::BatchCutoff, 90, 120, false),
+            (BudgetSource::PerCallTimeout, 90, 89, false),
+            (BudgetSource::PerCallTimeout, 90, 90, true),
+            (BudgetSource::RequestDeadline, 90, 100, true),
+            (BudgetSource::Default, 90, 200, true),
+            (BudgetSource::RequestDeadline, 100, 100, false),
+            (BudgetSource::RequestDeadline, 110, 120, false),
+            (BudgetSource::RequestDeadline, 90, 99, true),
+        ] {
+            let budget = DispatchBudget {
+                cause,
+                deadline: Deadline::at_instant(at(expiry_ms)),
+                duration: Duration::from_millis(expiry_ms),
+            };
+            assert_eq!(
+                budget.own_deadline_expired_before(observation_cutoff, at(observed_ms)),
+                expected,
+                "{cause:?}, expiry={expiry_ms}, observation={observed_ms}",
+            );
+        }
+    }
+
+    #[test]
     fn monotonic_clock_uses_the_injected_source() {
         let start = MonotonicInstant::now();
         let now = Arc::new(Mutex::new(start));
@@ -253,7 +299,6 @@ mod tests {
     fn constants_have_exact_values() {
         assert_eq!(DEFAULT_NO_DEADLINE_BUDGET, Duration::from_secs(30));
         assert_eq!(DEADLINE_FAR_FUTURE, Duration::from_hours(168));
-        assert_eq!(BATCH_DISPATCH_SLACK_MAX, Duration::from_millis(25));
     }
 
     #[test]

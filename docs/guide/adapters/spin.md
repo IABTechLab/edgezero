@@ -97,8 +97,10 @@ override is rejected during preflight: WASI HTTP uses the same authority for con
 so Spin cannot preserve URI-owned routing and TLS identity while changing only the HTTP authority.
 Unsupported Image Optimizer settings are rejected first, then an unsupported authority override,
 before portable method/body validation and budget selection. A pending GET/HEAD source or invalid
-response policy cannot mask the authority diagnostic or trigger a body read. The existing batch
-observation-cutoff short circuit remains unchanged; this does not add eager dispatch support.
+response policy cannot mask the authority diagnostic or trigger a body read. The shared facade
+prepares contexts and settles unknown GET/HEAD sources before dispatch. Begin and batches schedule
+complete exchanges with the WASIp3 executor before returning their completion receivers; later
+collection does not start transport work or resample the batch start.
 Deadline, batch cancellation, and streamed-upload cancellation remain BestEffort until host
 teardown has a documented observed bound, and provider phase-timer defaults may prevent a fully
 elastic budget. Downstream response

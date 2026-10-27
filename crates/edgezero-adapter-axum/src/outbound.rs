@@ -1,9 +1,15 @@
+#![cfg_attr(
+    test,
+    expect(
+        clippy::self_named_module_files,
+        reason = "the established outbound module keeps private response fixtures in a submodule"
+    )
+)]
+
 use async_stream::stream;
-use async_trait::async_trait;
 use bytes::Bytes;
-use core::num::NonZeroU64;
 use core::time::Duration;
-use edgezero_core::body::{Body, BodyStream};
+use edgezero_core::body::{Body, BodyPayload, BodyStream};
 use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
 use edgezero_core::error_detail::{
     AxumFailureCause, AxumFailureKind, ProviderFailureDetail, ProviderFailurePhase,
@@ -11,29 +17,34 @@ use edgezero_core::error_detail::{
 use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use edgezero_core::outbound::{
-    OutboundBatch, OutboundFuture, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
-    OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse, OutboundSendMode,
-    OutboundTime, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
-    ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
-    normalize_for_dispatch, validate_for_dispatch,
+    OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest, OutboundExchangeOwner,
+    OutboundFuture, OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
+    OutboundPending, OutboundPreparedBatch, OutboundRequest, OutboundRequestParts,
+    OutboundResponse, OutboundResponseContext, OutboundSendMode, OutboundTask, OutboundTime,
 };
-use edgezero_core::time::{
-    Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
-};
+use edgezero_core::time::{DispatchBudget, MonotonicClock, MonotonicInstant};
+use edgezero_core::{IndependentOutboundProgress, OutboundProgressRuntime};
+use futures::channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 use futures_util::future::{FutureExt as _, LocalBoxFuture, poll_fn};
+use futures_util::stream::{FuturesUnordered, once};
 use reqwest::header::HeaderMap as ReqwestHeaderMap;
 use reqwest::redirect::Policy;
 use std::error::Error as _;
 use std::future::Future;
 use std::io::Error as IoError;
-use std::panic::AssertUnwindSafe;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
 use tokio::runtime::Handle;
+use tokio::task::spawn_local;
 use tokio::time::sleep;
 #[cfg(test)]
 use tokio::time::timeout;
+
+#[cfg(test)]
+mod testing;
 
 /// Native outbound HTTP implementation used by the Axum adapter.
 #[derive(Clone)]
@@ -42,30 +53,18 @@ pub struct AxumOutboundClient {
     time: OutboundTime,
 }
 
-struct PreparedRequest {
-    budget: DispatchBudget,
-    parts: OutboundRequestParts,
-}
-
 impl AxumOutboundClient {
-    async fn execute(&self, prepared: PreparedRequest) -> Result<OutboundResponse, EdgeError> {
-        let PreparedRequest { budget, parts } = prepared;
+    async fn execute(&self, prepared: OutboundDispatchRequest) -> Result<OutboundHead, EdgeError> {
+        let (parts, context) = prepared.into_parts();
+        let budget = context.budget();
+        let time = context.time().clone();
         let OutboundRequestParts {
             body,
+            connect_timeout,
             mut headers,
             host_authority_override,
-            max_decoder_bytes,
-            max_brotli_window_bits,
-            max_chunk_bytes,
-            max_decoded_response_bytes,
-            max_encoded_response_bytes,
             max_request_body_bytes,
-            max_response_header_bytes,
-            max_response_header_count,
             method,
-            proxy_marker,
-            response_decoding,
-            response_mode,
             uri,
             ..
         } = parts;
@@ -78,18 +77,18 @@ impl AxumOutboundClient {
             headers.insert(HOST, value);
         }
         let request_body =
-            collect_request_body(body, max_request_body_bytes, budget, &self.time).await?;
+            collect_request_body(body, max_request_body_bytes, budget, &time).await?;
         let request_builder = self
             .client
             .request(reqwest_method(&method)?, uri.to_string())
             .headers(headers)
             .body(request_body);
-        let mut previous = self.time.clock().now();
-        let mut timer = self.time.wait_until(budget.deadline);
+        let mut previous = time.clock().now();
+        let mut timer = time.wait_until(budget.deadline);
         let response = race_with_timer(
             request_builder.send(),
             budget,
-            &self.time,
+            &time,
             &mut timer,
             &mut previous,
             None,
@@ -101,57 +100,11 @@ impl AxumOutboundClient {
             },
         )
         .await?
-        .map_err(|error| classify_send_error(&error, budget, self.time.clock()))?;
+        .map_err(|error| {
+            classify_send_error(&error, budget, time.clock(), connect_timeout.is_some())
+        })?;
 
-        process_response(
-            response,
-            method,
-            proxy_marker,
-            response_decoding,
-            response_mode,
-            budget,
-            max_decoder_bytes,
-            max_brotli_window_bits,
-            max_chunk_bytes,
-            max_decoded_response_bytes,
-            max_encoded_response_bytes,
-            max_response_header_bytes,
-            max_response_header_count,
-            self.time.clone(),
-        )
-        .await
-    }
-
-    fn prepare(
-        request: OutboundRequest,
-        started_at: MonotonicInstant,
-    ) -> Result<PreparedRequest, EdgeError> {
-        Self::validate_options(&request)?;
-        validate_for_dispatch(&request, OutboundSendMode::Send)?;
-        Self::prepare_validated(request, started_at, None)
-    }
-
-    fn prepare_batch(
-        request: OutboundRequest,
-        started_at: MonotonicInstant,
-        observation_cutoff: Deadline,
-    ) -> Result<PreparedRequest, EdgeError> {
-        Self::validate_options(&request)?;
-        validate_for_dispatch(&request, OutboundSendMode::Batch)?;
-        Self::prepare_validated(request, started_at, Some(observation_cutoff))
-    }
-
-    fn prepare_validated(
-        mut request: OutboundRequest,
-        started_at: MonotonicInstant,
-        observation_cutoff: Option<Deadline>,
-    ) -> Result<PreparedRequest, EdgeError> {
-        let budget = dispatch_budget(&request, started_at, observation_cutoff)?;
-        normalize_for_dispatch(&mut request)?;
-        Ok(PreparedRequest {
-            budget,
-            parts: request.into_parts(),
-        })
+        response_head(response, context)
     }
 
     /// Builds a client with redirects and automatic content decoding disabled.
@@ -164,14 +117,14 @@ impl AxumOutboundClient {
     }
 
     pub(crate) fn try_transport() -> Result<Arc<reqwest::Client>, reqwest::Error> {
-        let client = reqwest::Client::builder()
+        reqwest::Client::builder()
             .redirect(Policy::none())
             .no_brotli()
             .no_deflate()
             .no_gzip()
             .no_zstd()
-            .build()?;
-        Ok(Arc::new(client))
+            .build()
+            .map(Arc::new)
     }
 
     /// Builds a client using the supplied monotonic clock and cancellable timer factory.
@@ -200,53 +153,144 @@ impl AxumOutboundClient {
     }
 }
 
-#[async_trait(?Send)]
 impl OutboundHttpClient for AxumOutboundClient {
     #[inline]
-    async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-        let started_at = self.time.clock().now();
-        let prepared = Self::prepare(request, started_at)?;
-        self.execute(prepared).await
+    fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+        let scope = request.scope().clone();
+        let time = request.time().clone();
+        let entered_at = request.entered_at();
+        let head = self.dispatch_head(request);
+        schedule_response(scope.run(
+            time,
+            entered_at,
+            Box::pin(async move { head.await?.finish().await }),
+        ))
     }
 
     #[inline]
-    fn start_batch_until(
-        &self,
-        requests: Vec<OutboundRequest>,
-        observation_cutoff: Deadline,
-    ) -> OutboundBatch {
-        let batch_started_at = self.time.clock().now();
-        let slot_count = requests.len();
-        if observation_cutoff.is_expired_at(batch_started_at) {
-            return OutboundBatch::cutoff(slot_count);
-        }
-
-        let mut completed = Vec::new();
-        let mut pending_slots = Vec::<LocalBoxFuture<'static, _>>::new();
-        for (index, request) in requests.into_iter().enumerate() {
-            match Self::prepare_batch(request, batch_started_at, observation_cutoff) {
-                Ok(prepared) => {
-                    let client = self.clone();
-                    pending_slots.push(
-                        async move {
-                            let outcome = client.execute(prepared).await;
-                            (index, client.time.clock().now(), outcome)
-                        }
-                        .boxed_local(),
-                    );
-                }
-                Err(error) => completed.push((index, self.time.clock().now(), Err(error))),
-            }
-        }
-
-        OutboundBatch::from_futures(
-            slot_count,
-            batch_started_at,
-            observation_cutoff,
-            completed,
-            pending_slots,
+    fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+        let client = self.clone();
+        let scope = request.scope().clone();
+        scope.run(
+            request.time().clone(),
+            request.entered_at(),
+            Box::pin(async move { client.execute(request).await }),
         )
     }
+
+    #[inline]
+    fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+        Rc::new(IndependentOutboundProgress)
+    }
+
+    #[inline]
+    fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+        schedule_batch(self, batch)
+    }
+
+    #[inline]
+    fn time(&self) -> OutboundTime {
+        self.time.clone()
+    }
+
+    #[inline]
+    fn validate_supported_options(
+        &self,
+        request: &OutboundRequest,
+        _mode: OutboundSendMode,
+    ) -> Result<(), EdgeError> {
+        Self::validate_options(request)
+    }
+}
+
+fn schedule_batch(client: &dyn OutboundHttpClient, batch: OutboundPreparedBatch) -> OutboundBatch {
+    let (context, slots) = batch.into_slots();
+    if slots.is_empty() {
+        return OutboundBatch::cutoff(context);
+    }
+    let cutoff = context.observation_cutoff();
+    let (mut sender, receiver) = mpsc::channel(slots.len().saturating_add(1));
+    let mut work = FuturesUnordered::new();
+    for (index, request) in slots {
+        let budget = request.budget();
+        let clock = request.clock().clone();
+        let scope = request.scope().clone();
+        let time = request.time().clone();
+        let entered_at = request.entered_at();
+        let head = client.dispatch_head(request);
+        let pipeline = scope.run(
+            time,
+            entered_at,
+            Box::pin(async move { head.await?.finish().await }),
+        );
+        work.push(
+            async move {
+                let outcome = pipeline.await;
+                (index, clock.now(), budget, outcome)
+            }
+            .boxed_local(),
+        );
+    }
+    let task = Box::pin(async move {
+        let mut cutoff_unresolved = false;
+        while let Some((index, completed_at, budget, outcome)) = work.next().await {
+            cutoff_unresolved |= cutoff.is_expired_at(completed_at)
+                && !budget.own_deadline_expired_before(cutoff, completed_at);
+            if sender
+                .try_send(OutboundBatchDriverEvent::Item {
+                    index,
+                    completed_at,
+                    outcome,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+        if cutoff_unresolved {
+            let _closed = sender.try_send(OutboundBatchDriverEvent::Cutoff);
+        }
+    });
+    match spawn_owned(task) {
+        Ok(owner) => OutboundBatch::from_driver(context, receiver, owner),
+        Err(error) => OutboundBatch::from_driver(
+            context,
+            once(async move { OutboundBatchDriverEvent::Failed(error) }),
+            OutboundExchangeOwner::new(|| {}),
+        ),
+    }
+}
+
+fn spawn_owned(work: LocalBoxFuture<'static, ()>) -> Result<OutboundExchangeOwner, EdgeError> {
+    Handle::try_current().map_err(|_missing| {
+        EdgeError::internal(anyhow::anyhow!(
+            "outbound work requires a Tokio local scheduler"
+        ))
+    })?;
+    let (runner, owner) = OutboundTask::new(work)?;
+    let task = catch_unwind(AssertUnwindSafe(|| spawn_local(runner))).map_err(|_missing| {
+        EdgeError::internal(anyhow::anyhow!("outbound work requires a Tokio LocalSet"))
+    })?;
+    let abort = task.abort_handle();
+    Ok(OutboundExchangeOwner::new(move || {
+        drop(owner);
+        abort.abort();
+    }))
+}
+
+fn schedule_response(work: OutboundFuture<OutboundResponse>) -> Result<OutboundPending, EdgeError> {
+    let (sender, receiver) = oneshot::channel();
+    let owner = spawn_owned(Box::pin(async move {
+        let _closed = sender.send(work.await);
+    }))?;
+    Ok(OutboundPending::new(
+        Box::pin(async move {
+            receiver.await.map_err(|_closed| {
+                EdgeError::internal(anyhow::anyhow!("outbound completion task stopped"))
+            })?
+        }),
+        owner,
+    ))
 }
 
 async fn collect_request_body(
@@ -256,8 +300,9 @@ async fn collect_request_body(
     time: &OutboundTime,
 ) -> Result<Bytes, EdgeError> {
     let clock = time.clock();
-    match body {
-        Body::Once(bytes) => {
+    let (payload, _scope) = body.into_parts();
+    match payload {
+        BodyPayload::Once(bytes) => {
             let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             if length > maximum {
                 return Err(EdgeError::payload_too_large(
@@ -267,7 +312,7 @@ async fn collect_request_body(
             budget_remaining(budget, clock)?;
             Ok(bytes)
         }
-        Body::Stream(mut source) => {
+        BodyPayload::Stream(mut source) => {
             let mut collected = Vec::new();
             let mut total = 0_u64;
             let mut previous = clock.now();
@@ -318,128 +363,27 @@ async fn collect_request_body(
     }
 }
 
-fn deadline_stream(input: BodyStream, budget: DispatchBudget, time: OutboundTime) -> BodyStream {
-    stream! {
-        let mut source = Some(input);
-        let mut previous = time.clock().now();
-        let mut timer = time.wait_until(budget.deadline);
-        loop {
-            let next_item = match race_with_timer(source.as_mut().ok_or_else(|| EdgeError::internal(anyhow::anyhow!("response source already released")))?.next(), budget, &time, &mut timer, &mut previous, None, |item| {
-                item.as_ref().and_then(|outcome| outcome.as_ref().err()).and_then(EdgeError::provider_failure_detail).copied()
-            }).await {
-                Ok(item) => item,
-                Err(error) => {
-                    drop(source.take());
-                    drop(timer);
-                    drop(time);
-                    yield Err(error);
-                    return;
-                }
-            };
-            match next_item {
-                Some(Ok(bytes)) => yield Ok(bytes),
-                Some(Err(error)) => {
-                    drop(source.take());
-                    drop(timer);
-                    drop(time);
-                    yield Err(error);
-                    return;
-                }
-                None => return,
-            }
-        }
-    }
-    .boxed_local()
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the adapter consumes the independent request policy fields without hiding them"
-)]
-async fn process_response(
+fn response_head(
     response: reqwest::Response,
-    request_method: Method,
-    proxy_marker: OutboundProxyMarker,
-    response_decoding: ResponseDecoding,
-    response_mode: ResponseMode,
-    budget: DispatchBudget,
-    max_decoder_bytes: u64,
-    max_brotli_window_bits: u8,
-    max_chunk_bytes: Option<NonZeroU64>,
-    max_decoded_response_bytes: Option<u64>,
-    max_encoded_response_bytes: Option<u64>,
-    max_response_header_bytes: Option<u64>,
-    max_response_header_count: Option<u64>,
-    time: OutboundTime,
-) -> Result<OutboundResponse, EdgeError> {
-    let clock = time.clock();
-    budget_remaining(budget, clock)?;
-    let response_clock = clock.clone();
+    context: OutboundResponseContext,
+) -> Result<OutboundHead, EdgeError> {
+    let budget = context.budget();
+    let clock = context.clock().clone();
+    budget_remaining(budget, &clock)?;
     let status = StatusCode::from_u16(response.status().as_u16()).map_err(EdgeError::internal)?;
-    let (mut headers, normalization, _) = OutboundHeaderInput::new(
+    let headers = OutboundHeaderInput::new(
         "axum",
         copy_headers(response.headers()),
         OutboundHeaderFidelity::AdapterVisibleFields,
-    )
-    .normalize(
-        ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count),
-        &request_method,
-        status,
-        proxy_marker,
-    )?;
-    let disposition = normalization.body_disposition;
-
-    let body = if disposition == ResponseBodyDisposition::FramingBodyless {
-        Body::empty()
-    } else {
-        let declared_reset_body = matches!(
-            disposition,
-            ResponseBodyDisposition::ResetContent {
-                declared_body: true
-            }
-        );
-        let native = response_stream(response, budget, clock.clone());
-        if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
-            if !declared_reset_body {
-                let mut reset_stream = deadline_stream(native, budget, time.clone());
-                if let Some(item) = reset_stream.next().await {
-                    item?;
-                }
-            }
-            Body::empty()
-        } else {
-            let shaped = apply_response_body_policy(
-                native,
-                &mut headers,
-                ResponseBodyPolicy {
-                    max_brotli_window_bits,
-                    max_chunk_bytes,
-                    max_decoded_response_bytes,
-                    max_decoder_bytes,
-                    max_encoded_response_bytes,
-                    response_decoding,
-                    response_mode,
-                    status,
-                },
-            )?;
-            let deadline_bound = deadline_stream(shaped, budget, time.clone());
-            match response_mode {
-                ResponseMode::Buffered { max_bytes } => {
-                    Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
-                }
-                ResponseMode::Streamed => Body::from_stream(deadline_bound),
-            }
-        }
-    };
-    budget_remaining(budget, &response_clock)?;
-    Ok(OutboundResponse::new(
-        request_method,
+    );
+    let encoded = response_stream(response, budget, clock);
+    OutboundHead::new(
         status,
         headers,
-        body,
-        response_clock,
-        normalization.content_type_provenance,
-    ))
+        encoded,
+        context,
+        OutboundExchangeOwner::new(|| {}),
+    )
 }
 
 fn budget_remaining(budget: DispatchBudget, clock: &MonotonicClock) -> Result<Duration, EdgeError> {
@@ -454,9 +398,14 @@ fn classify_send_error(
     error: &reqwest::Error,
     budget: DispatchBudget,
     clock: &MonotonicClock,
+    connect_timeout_configured: bool,
 ) -> EdgeError {
-    let classified = if budget.deadline.is_expired_at(clock.now()) || error.is_timeout() {
+    let classified = if budget.deadline.is_expired_at(clock.now()) {
         timeout_error(budget.cause)
+    } else if error.is_timeout() && error.is_connect() && connect_timeout_configured {
+        timeout_error(BudgetSource::ConnectTimeout)
+    } else if error.is_timeout() {
+        timeout_error(BudgetSource::Unspecified)
     } else {
         let reason = if error.is_connect() {
             BadGatewayReason::Unreachable
@@ -669,8 +618,16 @@ async fn race_with_timer<Output>(
 
 #[cfg(test)]
 mod clock_tests {
+
+    use super::testing::{finish_fixture_response, finish_fixture_stream};
+    use edgezero_core::outbound::{
+        HttpClient, OutboundBatchTermination, OutboundCollectedSlot, OutboundProxyMarker,
+        ResponseDecoding, ResponseMode,
+    };
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::io::{Error as IoError, ErrorKind};
+    use std::iter::repeat_with;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -678,14 +635,18 @@ mod clock_tests {
 
     use edgezero_core::http::response_builder;
     use edgezero_core::response::IntoResponse as _;
+    use edgezero_core::time::DEFAULT_NO_DEADLINE_BUDGET;
     use edgezero_core::time::Deadline;
     use edgezero_core::{
-        AxumFailureCause, AxumFailureKind, ProviderFailureDetail, ProviderFailurePhase,
+        AxumFailureCause, AxumFailureKind, OutboundScopeOwner, ProviderFailureDetail,
+        ProviderFailurePhase,
     };
     use futures::executor::block_on;
+    use futures_util::future::pending;
     use futures_util::stream;
     use http_body::Frame;
     use tokio::net::TcpListener;
+    use tokio::task::{LocalSet, yield_now};
 
     use super::*;
 
@@ -726,6 +687,94 @@ mod clock_tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn streamed_send_keeps_original_scope_under_foreign_request_polling() {
+        LocalSet::new()
+            .run_until(async {
+                let original = OutboundScopeOwner::callback();
+                let foreign = OutboundScopeOwner::callback();
+                let client =
+                    HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+                let nested_client = client.clone();
+                let nested = Rc::new(RefCell::new(None::<OutboundFuture<OutboundResponse>>));
+                let retained = Rc::clone(&nested);
+                let upload = Rc::new(());
+                let released_upload = Rc::downgrade(&upload);
+                let child = Rc::new(());
+                let released_child = Rc::downgrade(&child);
+                let mut pending_child = Some(child);
+                let body = Body::from_stream(stream::poll_fn(move |_| {
+                    assert_eq!(Rc::strong_count(&upload), 1);
+                    if let Some(owner) = pending_child.take() {
+                        let source = Body::from_stream(stream::poll_fn(move |_| {
+                            assert_eq!(Rc::strong_count(&owner), 1);
+                            Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+                        }));
+                        let send = nested_client.send(
+                            OutboundRequest::post("http://127.0.0.1:9/")
+                                .expect("child request")
+                                .body(source),
+                        );
+                        *retained.borrow_mut() = Some(send);
+                    }
+                    Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+                }));
+                let mut send = original.with(|| {
+                    client.send(
+                        OutboundRequest::post("http://127.0.0.1:9/")
+                            .expect("request")
+                            .body(body),
+                    )
+                });
+                foreign
+                    .run(poll_fn(|cx| {
+                        assert!(send.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    }))
+                    .await;
+                assert!(nested.borrow().is_some(), "upload poll creates child send");
+                drop(foreign);
+                assert!(
+                    released_child.upgrade().is_some(),
+                    "foreign scope cannot cancel child"
+                );
+                drop(original);
+                assert!(
+                    released_upload.upgrade().is_none(),
+                    "send upload is revoked"
+                );
+                assert!(
+                    released_child.upgrade().is_none(),
+                    "child belongs to original scope"
+                );
+                assert!(nested.borrow().is_some(), "child future is still retained");
+                drop(send);
+                drop(nested.borrow_mut().take());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn missing_local_scheduler_never_polls_owned_upload() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&polls);
+        let source = stream::poll_fn(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending
+        })
+        .boxed_local();
+        let pair = native_time(MonotonicClock::default());
+        let budget = test_budget(pair.clock().now(), Duration::from_secs(1));
+        let pending = schedule_response(Box::pin(async move {
+            collect_request_body(Body::from_stream(source), 8, budget, &pair).await?;
+            Err(EdgeError::internal(anyhow::anyhow!(
+                "fixture upload unexpectedly completed"
+            )))
+        }));
+        assert!(matches!(pending, Err(EdgeError::Internal { .. })));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn supplied_timer_setup_error_precedes_upload_polling() {
         let reads = Arc::new(AtomicUsize::new(0));
@@ -741,13 +790,112 @@ mod clock_tests {
                 )))
             })
         });
-        let client = AxumOutboundClient::try_with_time(pair).unwrap();
+        let client = HttpClient::with_client(AxumOutboundClient::try_with_time(pair).unwrap());
         let request = OutboundRequest::post("http://127.0.0.1:9/upload")
             .unwrap()
             .body(Body::from_stream(source));
         let error = block_on(client.send(request)).expect_err("timer setup");
         assert!(matches!(error, EdgeError::Internal { .. }));
         assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_scope_rejects_scheduling_before_work_is_polled() {
+        LocalSet::new()
+            .run_until(async {
+                let callback = OutboundScopeOwner::callback();
+                callback.close();
+                let polls = Rc::new(Cell::new(0_usize));
+                let observed = Rc::clone(&polls);
+                let resource = Rc::new(());
+                let released = Rc::downgrade(&resource);
+                let refused = callback.with(|| {
+                    schedule_response(Box::pin(poll_fn(move |_| {
+                        assert_eq!(Rc::strong_count(&resource), 1);
+                        observed.set(observed.get().saturating_add(1));
+                        Poll::Pending
+                    })))
+                });
+                assert!(matches!(refused, Err(EdgeError::Internal { .. })));
+                assert_eq!(polls.get(), 0);
+                assert!(released.upgrade().is_none(), "refused work is released");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_set_drop_releases_work_and_fails_retained_manual_pending() {
+        let local = LocalSet::new();
+        let resource = Rc::new(());
+        let released = Rc::downgrade(&resource);
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&polls);
+        let mut pending = local
+            .run_until(async move {
+                let work = poll_fn(move |_| {
+                    assert_eq!(Rc::strong_count(&resource), 1);
+                    observed.set(observed.get().saturating_add(1));
+                    Poll::Pending
+                });
+                let retained = schedule_response(Box::pin(work)).expect("manual pending");
+                yield_now().await;
+                retained
+            })
+            .await;
+        assert_eq!(polls.get(), 1, "scheduled work entered pending");
+        assert!(released.upgrade().is_some());
+        drop(local);
+        assert!(
+            released.upgrade().is_none(),
+            "executor drop releases owned work"
+        );
+        assert!(pending.is_ready(), "destroyed producer closes its receiver");
+        let error = timeout(Duration::from_secs(1), pending.collect())
+            .await
+            .expect("completion failure is bounded")
+            .expect_err("stopped task cannot complete successfully");
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("outbound completion task stopped")
+        );
+        assert_eq!(polls.get(), 1, "executor destruction does not repoll work");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scheduled_work_allows_reentrant_cancellation_while_polling() {
+        LocalSet::new()
+            .run_until(async {
+                let owner = Rc::new(RefCell::new(None::<OutboundExchangeOwner>));
+                let cancelled = Rc::clone(&owner);
+                let panicked = Rc::new(Cell::new(false));
+                let observed = Rc::clone(&panicked);
+                let polls = Rc::new(Cell::new(0_usize));
+                let counted = Rc::clone(&polls);
+                let resource = Rc::new(());
+                let released = Rc::downgrade(&resource);
+                let work = poll_fn(move |_| {
+                    assert_eq!(Rc::strong_count(&resource), 1);
+                    counted.set(counted.get().saturating_add(1));
+                    let cancel_owner = cancelled.borrow_mut().take();
+                    observed.set(catch_unwind(AssertUnwindSafe(|| drop(cancel_owner))).is_err());
+                    Poll::Pending
+                })
+                .boxed_local();
+                *owner.borrow_mut() = Some(spawn_owned(work).expect("local scheduler"));
+                yield_now().await;
+                assert_eq!(polls.get(), 1, "cancelled work must not be polled again");
+                assert!(
+                    !panicked.get(),
+                    "cancellation must not borrow the future being polled"
+                );
+                assert!(
+                    released.upgrade().is_none(),
+                    "cancelled pipeline releases its source"
+                );
+            })
+            .await;
     }
 
     #[test]
@@ -795,7 +943,9 @@ mod clock_tests {
             drop(owner);
         }
         .boxed_local();
-        let mut guarded = deadline_stream(source, budget, pair);
+        let mut guarded = finish_fixture_stream(source, budget, pair)
+            .await
+            .expect("shared response stream");
         assert_eq!(
             guarded.next().await.unwrap().unwrap(),
             Bytes::from_static(b"first")
@@ -831,7 +981,7 @@ mod clock_tests {
             .image_optimizer(OutboundImageOptimizerOptions::new())
             .body(body)
             .timeout(Duration::ZERO);
-        let client = AxumOutboundClient::try_new().unwrap();
+        let client = HttpClient::with_client(AxumOutboundClient::try_new().unwrap());
         let error = block_on(client.send(request)).expect_err("unsupported");
         assert!(matches!(error, EdgeError::BadRequest { .. }));
         assert!(error.message().contains("image_optimizer"));
@@ -841,6 +991,7 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn image_optimizer_batch_rejection_keeps_live_plain_sibling() {
+        LocalSet::new().run_until(async {
         use edgezero_core::OutboundImageOptimizerOptions;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -862,7 +1013,7 @@ mod clock_tests {
                 .await
                 .unwrap();
         });
-        let client = AxumOutboundClient::try_new().unwrap();
+        let client = HttpClient::with_client(AxumOutboundClient::try_new().unwrap());
         let image = OutboundRequest::get(&target)
             .unwrap()
             .image_optimizer(OutboundImageOptimizerOptions::new())
@@ -875,32 +1026,35 @@ mod clock_tests {
             .await
             .unwrap();
         assert_eq!(
-            results.termination,
+            results.termination(),
             edgezero_core::OutboundBatchTermination::Completed
         );
         assert!(matches!(
-            results.slots.first(),
-            Some(Some(edgezero_core::OutboundSlotResult {
+            results.slots().first(),
+            Some(OutboundCollectedSlot::Resolved(edgezero_core::OutboundSlotResult {
                 outcome: Err(EdgeError::BadRequest { .. }),
                 ..
             }))
         ));
         assert!(
-            matches!(results.slots.get(1), Some(Some(edgezero_core::OutboundSlotResult {
+            matches!(results.slots().get(1), Some(OutboundCollectedSlot::Resolved(edgezero_core::OutboundSlotResult {
             outcome: Ok(response), ..
         })) if response.status() == StatusCode::NO_CONTENT)
         );
         server.await.unwrap();
+
+        }).await;
     }
 
     fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
         let observations = Arc::new(Mutex::new(VecDeque::from(script)));
         MonotonicClock::new(move || {
-            observations
-                .lock()
-                .expect("clock observations")
-                .pop_front()
-                .expect("clock observation")
+            let mut samples = observations.lock().expect("clock observations");
+            let now = *samples.front().expect("clock observation");
+            if samples.len() > 1 {
+                samples.pop_front();
+            }
+            now
         })
     }
 
@@ -943,7 +1097,9 @@ mod clock_tests {
                     .await
                     .expect_err("late upload error")
             } else {
-                deadline_stream(source, budget, native_time(clock))
+                finish_fixture_stream(source, budget, native_time(clock))
+                    .await
+                    .expect("shared response stream")
                     .next()
                     .await
                     .expect("terminal")
@@ -958,6 +1114,113 @@ mod clock_tests {
             ));
             assert_eq!(error.provider_failure_detail(), Some(&detail));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reported_connect_timeout_requires_setting_and_preserves_governing_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+        let target = format!("https://{}/", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("connection");
+            pending::<()>().await;
+        });
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(20))
+            .build()
+            .expect("native client")
+            .get(target)
+            .send()
+            .await
+            .expect_err("stalled TLS");
+        server.abort();
+        let _cancelled = server.await;
+        assert!(error.is_timeout() && error.is_connect());
+        let start = MonotonicInstant::now();
+        for configured in [false, true] {
+            for cause in [
+                BudgetSource::PerCallTimeout,
+                BudgetSource::RequestDeadline,
+                BudgetSource::BatchCutoff,
+                BudgetSource::Default,
+            ] {
+                let mut budget = test_budget(start, Duration::from_secs(1));
+                budget.cause = cause;
+                for offset in [999_u64, 1000, 1001] {
+                    let observed = start
+                        .checked_add(Duration::from_millis(offset))
+                        .expect("observation");
+                    let clock = MonotonicClock::new(move || observed);
+                    let mapped = classify_send_error(&error, budget, &clock, configured);
+                    let expected = if offset >= 1000 {
+                        cause
+                    } else if configured {
+                        BudgetSource::ConnectTimeout
+                    } else {
+                        BudgetSource::Unspecified
+                    };
+                    assert!(
+                        matches!(mapped, EdgeError::GatewayTimeout { cause: actual, .. } if actual == expected),
+                        "configured={configured}, offset={offset}, {mapped:?}"
+                    );
+                    assert_eq!(
+                        mapped.provider_failure_detail(),
+                        Some(&reqwest_failure_detail(&error, ProviderFailurePhase::Send))
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clamped_batch_cutoff_uses_actual_observation_cutoff() {
+        LocalSet::new()
+            .run_until(async {
+                for (elapsed_hours, unresolved) in [(168_u64, false), (192, true)] {
+                    let start = MonotonicInstant::now();
+                    let now = Arc::new(Mutex::new(start));
+                    let sampled = Arc::clone(&now);
+                    let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+                    let client = HttpClient::with_client(
+                        AxumOutboundClient::try_with_time(native_time(clock)).expect("client"),
+                    );
+                    let cutoff = Deadline::at_instant(
+                        start
+                            .checked_add(Duration::from_hours(192))
+                            .expect("eight-day cutoff"),
+                    );
+                    let requests = repeat_with(|| {
+                        OutboundRequest::get("http://127.0.0.1:9/")
+                            .expect("request")
+                            .timeout(Duration::from_hours(192))
+                    })
+                    .take(2)
+                    .collect();
+                    let batch = client.start_batch_until(requests, cutoff);
+                    *now.lock().expect("clock") = start
+                        .checked_add(Duration::from_hours(elapsed_hours))
+                        .expect("terminal observation");
+                    let results = batch
+                        .collect()
+                        .await
+                        .expect("clamped observation remains a valid driver");
+                    let expected = if unresolved {
+                        OutboundBatchTermination::Cutoff
+                    } else {
+                        OutboundBatchTermination::Completed
+                    };
+                    assert_eq!(results.termination(), expected);
+                    assert_eq!(results.slots().len(), 2);
+                    for slot in results.slots() {
+                        if unresolved {
+                            assert!(matches!(slot, OutboundCollectedSlot::Unresolved));
+                        } else {
+                            assert!(matches!(slot, OutboundCollectedSlot::Resolved(result) if matches!(result.outcome, Err(EdgeError::GatewayTimeout { cause: BudgetSource::BatchCutoff, .. }))));
+                        }
+                    }
+                }
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -983,7 +1246,7 @@ mod clock_tests {
             if expired {
                 budget.deadline = Deadline::at_instant(start);
             }
-            let mapped = classify_send_error(&error, budget, &clock);
+            let mapped = classify_send_error(&error, budget, &clock, false);
             assert_eq!(
                 mapped.provider_failure_detail(),
                 Some(&ProviderFailureDetail::Axum {
@@ -1131,7 +1394,7 @@ mod clock_tests {
                     .body(reqwest::Body::from(Bytes::new()))
                     .expect("native response");
                 let start = MonotonicInstant::now();
-                let result = process_response(
+                let result = finish_fixture_response(
                     reqwest::Response::from(native),
                     Method::GET,
                     setting,
@@ -1192,18 +1455,25 @@ mod clock_tests {
                 ] {
                     for offset in [9_u64, 10, 11] {
                         let start = MonotonicInstant::now();
-                        let mut budget = test_budget(start, Duration::from_millis(10));
+                        let duration = if cause == BudgetSource::Default {
+                            DEFAULT_NO_DEADLINE_BUDGET
+                        } else {
+                            Duration::from_millis(10)
+                        };
+                        let mut budget = test_budget(start, duration);
                         budget.cause = cause;
-                        let observed = start
-                            .checked_add(Duration::from_millis(offset))
-                            .expect("handoff time");
+                        let offset_duration = duration
+                            .checked_sub(Duration::from_millis(10))
+                            .and_then(|lead| lead.checked_add(Duration::from_millis(offset)))
+                            .expect("fixture duration bound");
+                        let observed = start.checked_add(offset_duration).expect("handoff time");
                         let polls = Arc::new(AtomicUsize::new(0));
                         let native = response_builder()
                             .status(status)
                             .header("content-length", "1")
                             .body(reqwest::Body::wrap(NeverReadyBody(Arc::clone(&polls))))
                             .expect("native response");
-                        let result = process_response(
+                        let result = finish_fixture_response(
                             reqwest::Response::from(native),
                             method.clone(),
                             OutboundProxyMarker::Inherit,
@@ -1225,7 +1495,14 @@ mod clock_tests {
                             0,
                             "handoff never reads payload"
                         );
-                        if offset < 10 {
+                        if cause == BudgetSource::BatchCutoff
+                            && response_mode == ResponseMode::Streamed
+                        {
+                            assert!(
+                                matches!(result, Err(EdgeError::BadRequest { .. })),
+                                "streamed batches reject before response processing"
+                            );
+                        } else if offset < 10 {
                             drop(result.expect("on-time handoff"));
                         } else {
                             assert!(
@@ -1265,7 +1542,7 @@ mod clock_tests {
                         .body(reqwest::Body::wrap(NeverReadyBody(Arc::clone(&polls))))
                         .expect("native response");
                     let start = MonotonicInstant::now();
-                    let response = process_response(
+                    let response = finish_fixture_response(
                         reqwest::Response::from(native),
                         method.clone(),
                         OutboundProxyMarker::Inherit,
@@ -1318,50 +1595,64 @@ mod clock_tests {
 
     #[tokio::test]
     async fn method_entry_and_preflight_elapsed_use_the_injected_clock() {
-        let start = MonotonicInstant::now();
-        let completed = start
-            .checked_add(Duration::from_millis(9))
-            .expect("completed instant");
-        let client =
-            AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![start, completed])))
-                .expect("client");
-        let request = OutboundRequest::get("https://example.com/")
-            .expect("request")
-            .stream_response();
+        LocalSet::new()
+            .run_until(async {
+                let start = MonotonicInstant::now();
+                let completed = start
+                    .checked_add(Duration::from_millis(9))
+                    .expect("completed instant");
+                let client = HttpClient::with_client(
+                    AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![
+                        start, completed,
+                    ])))
+                    .expect("client"),
+                );
+                let request = OutboundRequest::get("https://example.com/")
+                    .expect("request")
+                    .stream_response();
 
-        let results = client
-            .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)))
-            .collect()
-            .await
-            .expect("valid batch driver");
+                let results = client
+                    .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)))
+                    .collect()
+                    .await
+                    .expect("valid batch driver");
 
-        let slot = results.slots[0].as_ref().expect("resolved slot");
-        assert_eq!(slot.elapsed, Duration::from_millis(9));
-        assert!(matches!(slot.outcome, Err(EdgeError::BadRequest { .. })));
+                let slot = resolved_slot(&results.slots()[0]);
+                assert_eq!(slot.elapsed, Duration::from_millis(9));
+                assert!(matches!(slot.outcome, Err(EdgeError::BadRequest { .. })));
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn backwards_clock_fails_slot_without_invalid_elapsed() {
-        let start = MonotonicInstant::now();
-        let earlier = start
-            .checked_sub(Duration::from_millis(1))
-            .expect("earlier instant");
-        let client =
-            AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![start, earlier])))
-                .expect("client");
-        let request = OutboundRequest::get("https://example.com/")
-            .expect("request")
-            .stream_response();
+        LocalSet::new()
+            .run_until(async {
+                let start = MonotonicInstant::now();
+                let earlier = start
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("earlier instant");
+                let client = HttpClient::with_client(
+                    AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![
+                        start, earlier,
+                    ])))
+                    .expect("client"),
+                );
+                let request = OutboundRequest::get("https://example.com/")
+                    .expect("request")
+                    .stream_response();
 
-        let results = client
-            .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)))
-            .collect()
-            .await
-            .expect("valid batch driver");
+                let results = client
+                    .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)))
+                    .collect()
+                    .await
+                    .expect("valid batch driver");
 
-        let slot = results.slots[0].as_ref().expect("resolved slot");
-        assert_eq!(slot.elapsed, Duration::ZERO);
-        assert!(matches!(slot.outcome, Err(EdgeError::Internal { .. })));
+                let slot = resolved_slot(&results.slots()[0]);
+                assert_eq!(slot.elapsed, Duration::ZERO);
+                assert!(matches!(slot.outcome, Err(EdgeError::Internal { .. })));
+            })
+            .await;
     }
 
     #[test]
@@ -1452,7 +1743,7 @@ mod clock_tests {
                 .body(reqwest::Body::from(Bytes::new()))
                 .expect("native response"),
         );
-        let response = process_response(
+        let response = finish_fixture_response(
             native,
             Method::GET,
             OutboundProxyMarker::Inherit,
@@ -1509,7 +1800,8 @@ mod clock_tests {
                 head.extend_from_slice(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
                 socket.write_all(&head).await.expect("upstream response");
             });
-            let client = AxumOutboundClient::try_new().expect("outbound client");
+            let client =
+                HttpClient::with_client(AxumOutboundClient::try_new().expect("outbound client"));
             let request = OutboundRequest::get(format!("http://{address}/"))
                 .expect("request")
                 .timeout(Duration::from_secs(5));
@@ -1586,7 +1878,7 @@ mod clock_tests {
                     .expect("native response");
                 *native.headers_mut() = native_headers;
                 let start = MonotonicInstant::now();
-                let response = process_response(
+                let response = finish_fixture_response(
                     reqwest::Response::from(native),
                     method.clone(),
                     OutboundProxyMarker::Inherit,
@@ -1626,7 +1918,9 @@ mod clock_tests {
             Ok(Bytes::from_static(b"body"))
         })
         .boxed_local();
-        let mut body = deadline_stream(source, budget, native_time(clock));
+        let mut body = finish_fixture_stream(source, budget, native_time(clock))
+            .await
+            .expect("shared response stream");
 
         let error = body
             .next()
@@ -1635,5 +1929,13 @@ mod clock_tests {
             .expect_err("post-ready expiry");
 
         assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+    }
+
+    fn resolved_slot(slot: &OutboundCollectedSlot) -> &edgezero_core::OutboundSlotResult {
+        match slot {
+            OutboundCollectedSlot::Resolved(result) => result,
+            other @ (OutboundCollectedSlot::AlreadyDelivered
+            | OutboundCollectedSlot::Unresolved) => panic!("expected resolved slot, got {other:?}"),
+        }
     }
 }

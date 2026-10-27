@@ -1,6 +1,7 @@
 //! Portable response-egress policy and exactly-once lifecycle reporting.
 
 use std::fmt;
+use std::mem::take;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use crate::error::{EdgeError, suppress_overflow_retry_after};
 use crate::error_detail::ProviderFailureDetail;
 use crate::http::{HeaderMap, Method, Response, StatusCode, Version};
+use crate::outbound::OutboundScopeOwner;
 use crate::response_egress_framing::{
     PreparedResponseEgress, ResponseEgressFramingError, ResponseEgressFramingMode,
     prepare_response_egress, response_egress_source_error_category,
@@ -633,6 +635,16 @@ pub struct ResponseEgressBeginFailure {
     clock: MonotonicClock,
 }
 
+/// Distinct precommit failures without conflating lifecycle ownership with HTTP framing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ResponseEgressPreparationError {
+    #[error("outbound response-body scope closed before handoff")]
+    ClosedOutboundScope,
+    #[error(transparent)]
+    Framing(#[from] ResponseEgressFramingError),
+}
+
 impl ResponseEgressBeginFailure {
     /// Consumes the failure into the sole live attempt, its clock, and original cause.
     #[must_use]
@@ -672,6 +684,7 @@ impl ResponseEgressEnvelope {
             .extensions_mut()
             .remove::<ResponseEgressDeadline>()
             .map(|deadline| deadline.resolve_at(egress_started_at));
+        let body_owner = self.response.body_mut().take_egress_owner();
         let head = ResponseEgressHead::new(
             self.response.status(),
             self.response.version(),
@@ -688,6 +701,13 @@ impl ResponseEgressEnvelope {
             self.clock.clone(),
         );
         attempt.synthesized_headers = self.synthesized_headers;
+        if attempt.adopt_outbound_scope(body_owner).is_err() {
+            return Err(Box::new(ResponseEgressBeginFailure {
+                attempt,
+                cause: ResponseEgressOutcome::ConversionError,
+                clock: self.clock,
+            }));
+        }
         let Ok(selected_policy) =
             catch_unwind(AssertUnwindSafe(|| (self.policy)(&head, egress_started_at)))
         else {
@@ -849,6 +869,7 @@ pub struct ResponseEgressAttempt {
     fallback_disposition: Option<ResponseEgressFallbackDisposition>,
     framing_failures: ResponseEgressFramingFailures,
     observer: ResponseEgressObserverHandle,
+    outbound_scope: Option<OutboundScopeOwner>,
     request_start: MonotonicInstant,
     route: Option<RouteMetadata>,
     source_failure: Option<ResponseEgressSourceFailure>,
@@ -874,6 +895,22 @@ impl ResponseEgressAttempt {
         true
     }
 
+    fn adopt_outbound_scope(
+        &mut self,
+        attached: Option<OutboundScopeOwner>,
+    ) -> Result<(), EdgeError> {
+        if let Some(owner) = attached {
+            owner.accept_body_handoff()?;
+            drop(self.outbound_scope.replace(owner));
+        }
+        if self.outbound_scope.is_none() {
+            let owner = OutboundScopeOwner::response_body();
+            owner.accept_body_handoff()?;
+            self.outbound_scope = Some(owner);
+        }
+        Ok(())
+    }
+
     /// Selects the bounded adapter fallback while retaining the original precommit cause.
     #[inline]
     pub fn begin_fallback(&mut self, cause: ResponseEgressOutcome) -> bool {
@@ -888,6 +925,7 @@ impl ResponseEgressAttempt {
         }
         self.body_kind = ResponseEgressBodyKind::Fallback;
         self.fallback_cause = Some(cause);
+        drop(self.outbound_scope.take());
         true
     }
 
@@ -999,6 +1037,7 @@ impl ResponseEgressAttempt {
             fallback_cause: None,
             fallback_disposition: None,
             observer,
+            outbound_scope: None,
             request_start: head.request_start(),
             route: head.route().cloned(),
             source_failure: None,
@@ -1019,26 +1058,46 @@ impl ResponseEgressAttempt {
         framing: ResponseEgressFramingMode,
         request_method: &Method,
         mut response: Response,
-    ) -> Result<PreparedResponseEgress, ResponseEgressFramingError> {
+    ) -> Result<PreparedResponseEgress, ResponseEgressPreparationError> {
         if self.body_kind == ResponseEgressBodyKind::Fallback
             && matches!(self.state, AttemptState::Initial)
         {
             self.synthesized_headers.apply(response.headers_mut());
         }
-        prepare_response_egress(framing, request_method, response).inspect_err(|reason| {
-            if !matches!(self.state, AttemptState::Initial) {
-                return;
-            }
-            let slot = match self.body_kind {
-                ResponseEgressBodyKind::Application => &mut self.framing_failures.application,
-                ResponseEgressBodyKind::Fallback => &mut self.framing_failures.fallback,
-            };
-            slot.get_or_insert(*reason);
-            log::error!(
-                "response-egress {:?} framing validation failed before commit: {reason}",
-                self.body_kind
-            );
-        })
+        let preparation = if matches!(self.state, AttemptState::Terminal(_)) {
+            Ok(())
+        } else {
+            self.adopt_outbound_scope(response.body_mut().take_egress_owner())
+                .map_err(|_error| ResponseEgressPreparationError::ClosedOutboundScope)
+        };
+        preparation
+            .and_then(|()| {
+                if let Some(owner) = &self.outbound_scope {
+                    let body = take(response.body_mut());
+                    *response.body_mut() = body
+                        .bind_outbound_scope(&owner.scope())
+                        .map_err(|_error| ResponseEgressPreparationError::ClosedOutboundScope)?;
+                }
+                prepare_response_egress(framing, request_method, response)
+                    .map_err(ResponseEgressPreparationError::from)
+            })
+            .inspect_err(|reason| {
+                let ResponseEgressPreparationError::Framing(framing_error) = reason else {
+                    return;
+                };
+                if !matches!(self.state, AttemptState::Initial) {
+                    return;
+                }
+                let slot = match self.body_kind {
+                    ResponseEgressBodyKind::Application => &mut self.framing_failures.application,
+                    ResponseEgressBodyKind::Fallback => &mut self.framing_failures.fallback,
+                };
+                slot.get_or_insert(*framing_error);
+                log::error!(
+                    "response-egress {:?} framing validation failed before commit: {reason}",
+                    self.body_kind
+                );
+            })
     }
 
     fn publish_report(
@@ -1066,6 +1125,10 @@ impl ResponseEgressAttempt {
             source_failure: self.source_failure,
         };
         self.state = AttemptState::Terminal(report.clone());
+        let cleanup = catch_unwind(AssertUnwindSafe(|| drop(self.outbound_scope.take())));
+        if cleanup.is_err() {
+            log::error!("response-egress outbound cleanup panicked after terminal transition");
+        }
         self.completion.complete(&report);
         self.observer.complete(&report);
         report
@@ -1179,10 +1242,11 @@ pub fn default_response_egress_policy(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::error::Error;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::from_ref;
+    use std::rc::Rc;
     use std::slice::from_ref as slice_from_ref;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
@@ -1194,6 +1258,7 @@ mod tests {
     use crate::error::{BadGatewayReason, EdgeError};
     use crate::error_detail::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
     use crate::http::{HeaderMap, HeaderValue, Method, StatusCode, Version, response_builder};
+    use crate::outbound::{IndependentOutboundProgress, OutboundScope};
     use crate::router::RouteMetadata;
     use crate::time::{DEADLINE_FAR_FUTURE, Deadline, MonotonicClock, MonotonicInstant};
 
@@ -1249,6 +1314,29 @@ mod tests {
 
     struct ResourceDropProbe(Arc<AtomicUsize>);
 
+    #[cfg(panic = "unwind")]
+    struct PanickingProvider(Arc<AtomicUsize>);
+
+    struct SourceScopeProbe(Rc<RefCell<Option<OutboundScope>>>);
+
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for SourceScopeProbe {
+        fn drop(&mut self) {
+            self.0
+                .borrow_mut()
+                .replace(OutboundScope::capture(Rc::new(IndependentOutboundProgress)));
+        }
+    }
+
+    #[cfg(panic = "unwind")]
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for PanickingProvider {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("fixture provider cleanup failure");
+        }
+    }
+
     #[expect(
         clippy::missing_trait_methods,
         reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
@@ -1272,6 +1360,419 @@ mod tests {
             request_start,
             route,
         )
+    }
+
+    #[test]
+    fn egress_body_scope_ends_at_terminal_not_source_eof() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use bytes::Bytes;
+        use futures::executor::block_on;
+        use futures_util::stream;
+
+        use crate::{IndependentOutboundProgress, OutboundScope, OutboundScopeOwner};
+
+        let callback = OutboundScopeOwner::callback();
+        let callback_scope = callback.scope();
+        let captured = Rc::new(RefCell::new(None));
+        let source_capture = Rc::clone(&captured);
+        let source = Body::from_stream(stream::once(async move {
+            source_capture
+                .borrow_mut()
+                .replace(OutboundScope::capture(Rc::new(IndependentOutboundProgress)));
+            Ok::<_, EdgeError>(Bytes::from_static(b"payload"))
+        }));
+        let now = MonotonicInstant::now();
+        let headers = HeaderMap::new();
+        let mut attempt = callback.with(|| {
+            ResponseEgressAttempt::new(
+                &head(&headers, now, None),
+                now,
+                ResponseEgressCompletion::empty(),
+                ResponseEgressObserverHandle::default(),
+                MonotonicClock::new(move || now),
+            )
+        });
+        let prepared = attempt
+            .prepare_response(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::GET,
+                Response::new(source),
+            )
+            .expect("valid response");
+        assert!(attempt.begin_writing());
+        let bytes = block_on(prepared.into_response().into_body().into_bytes_bounded(64))
+            .expect("body bytes");
+        assert_eq!(bytes.as_ref(), b"payload");
+        let body_scope = captured.borrow_mut().take().expect("source was polled");
+        assert!(body_scope.is_managed(), "body polling has an egress owner");
+        assert!(
+            body_scope.check().is_ok(),
+            "EOF is not transmission completion"
+        );
+        assert!(attempt.complete(now));
+        assert!(
+            body_scope.check().is_err(),
+            "terminal egress closes body work"
+        );
+        assert!(callback_scope.check().is_ok(), "callback work remains live");
+    }
+
+    #[test]
+    fn egress_terminal_revokes_retained_body_before_completion() {
+        use std::task::Poll;
+
+        use futures_util::stream;
+
+        for explicit in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let probe = ResourceDropProbe(Arc::clone(&drops));
+            let source = Body::from_stream(stream::poll_fn(move |_cx| {
+                let _retained = &probe;
+                Poll::Pending
+            }));
+            let completed_drops = Arc::clone(&drops);
+            let completion = ResponseEgressCompletion::new(move |_report| {
+                assert_eq!(completed_drops.load(Ordering::SeqCst), 1);
+            });
+            let now = MonotonicInstant::now();
+            let headers = HeaderMap::new();
+            let mut attempt = ResponseEgressAttempt::new(
+                &head(&headers, now, None),
+                now,
+                completion,
+                ResponseEgressObserverHandle::default(),
+                MonotonicClock::new(move || now),
+            );
+            let retained = attempt
+                .prepare_response(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    &Method::GET,
+                    Response::new(source),
+                )
+                .expect("valid response");
+            assert!(attempt.begin_writing());
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            if explicit {
+                assert!(attempt.complete(now));
+            }
+            drop(attempt);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "retained handles do not retain sources"
+            );
+            drop(retained);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn source_disposal_keeps_body_scope_until_terminal() {
+        use std::task::Poll;
+
+        use futures::executor::block_on;
+        use futures_util::stream;
+
+        for consume in [false, true] {
+            let captured = Rc::new(RefCell::new(None));
+            let source_probe = SourceScopeProbe(Rc::clone(&captured));
+            let source = Body::from_stream(stream::poll_fn(move |_| {
+                let _held = &source_probe;
+                Poll::Ready(None)
+            }));
+            let now = MonotonicInstant::now();
+            let envelope = ResponseEgressEnvelope::detached(
+                Response::new(source),
+                now,
+                Method::GET,
+                ResponseEgressCompletion::empty(),
+                MonotonicClock::new(move || now),
+            );
+            let Ok((prepared, _, mut attempt, _)) =
+                envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            else {
+                panic!("valid body");
+            };
+            assert!(attempt.begin_writing());
+            if consume {
+                block_on(prepared.into_response().into_body().into_bytes_bounded(0))
+                    .expect("source EOF");
+            } else {
+                drop(prepared);
+            }
+            let cleanup_scope = captured.borrow_mut().take().expect("source dropped");
+            assert!(
+                cleanup_scope.is_managed(),
+                "cleanup retains the body identity"
+            );
+            cleanup_scope
+                .check()
+                .expect("EOF/drop is not terminal egress");
+            assert!(attempt.complete(now));
+            assert!(
+                cleanup_scope.check().is_err(),
+                "destructor work cannot escape egress"
+            );
+        }
+    }
+
+    #[test]
+    fn attached_work_survives_callback_and_eof_until_actual_egress_terminal() {
+        use futures::executor::block_on;
+
+        use crate::outbound::{OutboundScopeOwner, Revocable};
+
+        let callback = OutboundScopeOwner::callback();
+        let owner = callback.with(OutboundScopeOwner::response_body);
+        let scope = owner.scope();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let retained_work = Revocable::new(&scope, ResourceDropProbe(Arc::clone(&drops)))
+            .expect("body-owned work starts before response creation");
+        let response = owner
+            .attach(Response::new(Body::from("payload")))
+            .expect("attach body ownership without changing payload");
+        assert_eq!(response.body().as_bytes(), Some(b"payload".as_slice()));
+        let now = MonotonicInstant::now();
+        let envelope = ResponseEgressEnvelope::detached(
+            response,
+            now,
+            Method::GET,
+            ResponseEgressCompletion::empty(),
+            MonotonicClock::new(move || now),
+        );
+        let Ok((prepared, _, mut attempt, _)) =
+            callback.with(|| envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength))
+        else {
+            panic!("attached egress begins");
+        };
+        drop(callback);
+        assert!(
+            scope.check().is_ok(),
+            "the accepted body outlives callback return"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(attempt.begin_writing());
+        let bytes = block_on(prepared.into_response().into_body().into_bytes_bounded(64))
+            .expect("body is consumed");
+        assert_eq!(bytes.as_ref(), b"payload");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "EOF does not release live body work"
+        );
+        assert!(attempt.complete(now));
+        assert!(scope.check().is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(retained_work);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retained_unaccepted_response_cannot_escape_callback_cleanup() {
+        use crate::outbound::{OutboundScopeOwner, Revocable};
+
+        let callback = OutboundScopeOwner::callback();
+        let owner = callback.with(OutboundScopeOwner::response_body);
+        let scope = owner.scope();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let retained_work =
+            Revocable::new(&scope, ResourceDropProbe(Arc::clone(&drops))).expect("body work");
+        let response = owner
+            .attach(Response::new(Body::from("not handed off")))
+            .expect("attach is not acceptance");
+        drop(callback);
+        assert!(
+            scope.check().is_err(),
+            "unaccepted work remains callback-bound"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop((response, retained_work));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn suppressed_response_retains_attached_work_until_egress_terminal() {
+        use crate::outbound::{OutboundScopeOwner, Revocable};
+
+        for method in [Method::HEAD, Method::GET] {
+            let callback = OutboundScopeOwner::callback();
+            let owner = callback.with(OutboundScopeOwner::response_body);
+            let scope = owner.scope();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let retained = Revocable::new(&scope, ResourceDropProbe(Arc::clone(&drops)))
+                .expect("body-owned work");
+            let mut response = Response::new(Body::from("suppressed"));
+            if method == Method::GET {
+                *response.status_mut() = StatusCode::NOT_MODIFIED;
+            }
+            let attached_response = owner.attach(response).expect("attached response");
+            let now = MonotonicInstant::now();
+            let envelope = ResponseEgressEnvelope::detached(
+                attached_response,
+                now,
+                method,
+                ResponseEgressCompletion::empty(),
+                MonotonicClock::new(move || now),
+            );
+            let Ok((prepared, _, mut attempt, _)) =
+                callback.with(|| envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength))
+            else {
+                panic!("bodyless egress begins");
+            };
+            assert!(!prepared.transmits_body());
+            drop(callback);
+            scope.check().expect("accepted body scope remains live");
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert!(attempt.begin_writing());
+            assert!(attempt.complete(now));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            drop((prepared, retained));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn closed_attachment_is_rejected_before_policy_callback() {
+        use crate::outbound::OutboundScopeOwner;
+
+        let callback = OutboundScopeOwner::callback();
+        let owner = callback.with(OutboundScopeOwner::response_body);
+        let response = owner
+            .attach(Response::new(Body::from("payload")))
+            .expect("attach before close");
+        drop(callback);
+        let now = MonotonicInstant::now();
+        let mut envelope = ResponseEgressEnvelope::detached(
+            response,
+            now,
+            Method::GET,
+            ResponseEgressCompletion::empty(),
+            MonotonicClock::new(move || now),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let policy_calls = Arc::clone(&calls);
+        envelope.policy = Arc::new(move |_head, start| {
+            policy_calls.fetch_add(1, Ordering::SeqCst);
+            ResponseEgressPolicy {
+                write_deadline: Deadline::at_instant(start),
+            }
+        });
+        let Err(failure) = envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength) else {
+            panic!("closed response ownership must not be revived");
+        };
+        let (_attempt, _, cause) = failure.into_parts();
+        assert_eq!(cause, ResponseEgressOutcome::ConversionError);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn scope_rejection_is_not_reported_as_a_framing_failure() {
+        use crate::outbound::OutboundScopeOwner;
+
+        let callback = OutboundScopeOwner::callback();
+        let owner = callback.with(OutboundScopeOwner::response_body);
+        let response = owner
+            .attach(Response::new(Body::empty()))
+            .expect("attached response");
+        callback.close();
+        let now = MonotonicInstant::now();
+        let observer = RecordingObserver::default();
+        let mut attempt = attempt(&observer, now);
+        attempt
+            .prepare_response(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::GET,
+                response,
+            )
+            .err()
+            .expect("closed ownership is rejected");
+        let report = attempt.into_terminal_report();
+        assert_eq!(report.framing_failures.application(), None);
+    }
+
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn cleanup_panic_cannot_suppress_exactly_once_terminal_notifications() {
+        use crate::outbound::OutboundScopeOwner;
+
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let drops = Arc::new(AtomicUsize::new(0));
+        drop(
+            scope
+                .provider_state(|| PanickingProvider(Arc::clone(&drops)))
+                .expect("provider state"),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let completion_calls = Arc::clone(&calls);
+        let observer = RecordingObserver::default();
+        let now = MonotonicInstant::now();
+        let mut envelope = ResponseEgressEnvelope::detached(
+            owner
+                .attach(Response::new(Body::empty()))
+                .expect("attached response"),
+            now,
+            Method::GET,
+            ResponseEgressCompletion::new(move |_| {
+                completion_calls.fetch_add(1, Ordering::SeqCst);
+            }),
+            MonotonicClock::new(move || now),
+        );
+        envelope.observer = ResponseEgressObserverHandle::new(observer.clone());
+        let Ok((_prepared, _, mut attempt, _)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
+            panic!("valid egress");
+        };
+        assert!(attempt.begin_writing());
+        let completion = catch_unwind(AssertUnwindSafe(|| attempt.complete(now)));
+        assert!(matches!(completion, Ok(true)), "cleanup panic is contained");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.reports().len(), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(!attempt.complete(now));
+        drop(attempt);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.reports().len(), 1);
+    }
+
+    #[test]
+    fn fallback_selection_revokes_failed_application_body_work() {
+        use crate::outbound::{OutboundScopeOwner, Revocable};
+
+        let callback = OutboundScopeOwner::callback();
+        let owner = callback.with(OutboundScopeOwner::response_body);
+        let scope = owner.scope();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let retained =
+            Revocable::new(&scope, ResourceDropProbe(Arc::clone(&drops))).expect("body work");
+        let mut response = Response::new(Body::from("payload"));
+        response
+            .headers_mut()
+            .insert("content-length", HeaderValue::from_static("1"));
+        let now = MonotonicInstant::now();
+        let envelope = ResponseEgressEnvelope::detached(
+            owner.attach(response).expect("attached response"),
+            now,
+            Method::GET,
+            ResponseEgressCompletion::empty(),
+            MonotonicClock::new(move || now),
+        );
+        let Err(failure) =
+            callback.with(|| envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength))
+        else {
+            panic!("invalid body framing");
+        };
+        let (mut attempt, _, cause) = failure.into_parts();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(attempt.begin_fallback(cause));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(scope.check().is_err());
+        drop(retained);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        callback.scope().check().expect("callback remains live");
     }
 
     fn completed_report(request_start: MonotonicInstant) -> ResponseEgressReport {
@@ -1626,7 +2127,7 @@ mod tests {
             ResponseEgressFramingError::InvalidContentLength,
             ResponseEgressFramingError::UnsupportedStatus,
         ] {
-            let (method, response) = framing_response(reason);
+            let (method, response) = framing_response(reason).expect("framing fixture");
             assert_eq!(
                 attempt
                     .prepare_response(
@@ -1635,12 +2136,12 @@ mod tests {
                         response
                     )
                     .err(),
-                Some(reason)
+                Some(ResponseEgressPreparationError::Framing(reason))
             );
         }
         assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
         let reason = ResponseEgressFramingError::UnsupportedTrailers;
-        let (method, response) = framing_response(reason);
+        let (method, response) = framing_response(reason).expect("framing fixture");
         assert_eq!(
             attempt
                 .prepare_response(
@@ -1649,10 +2150,11 @@ mod tests {
                     response
                 )
                 .err(),
-            Some(reason)
+            Some(ResponseEgressPreparationError::Framing(reason))
         );
         let (later_method, later_response) =
-            framing_response(ResponseEgressFramingError::UnsupportedStatus);
+            framing_response(ResponseEgressFramingError::UnsupportedStatus)
+                .expect("framing fixture");
         assert_eq!(
             attempt
                 .prepare_response(
@@ -1661,14 +2163,17 @@ mod tests {
                     later_response
                 )
                 .err(),
-            Some(ResponseEgressFramingError::UnsupportedStatus)
+            Some(ResponseEgressPreparationError::Framing(
+                ResponseEgressFramingError::UnsupportedStatus
+            ))
         );
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert!(observer.reports().is_empty());
         assert!(attempt.begin_writing());
         assert!(attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, now));
         let (terminal_method, terminal_response) =
-            framing_response(ResponseEgressFramingError::UnsupportedTunnel);
+            framing_response(ResponseEgressFramingError::UnsupportedTunnel)
+                .expect("framing fixture");
         assert_eq!(
             attempt
                 .prepare_response(
@@ -1677,7 +2182,9 @@ mod tests {
                     terminal_response
                 )
                 .err(),
-            Some(ResponseEgressFramingError::UnsupportedTunnel)
+            Some(ResponseEgressPreparationError::Framing(
+                ResponseEgressFramingError::UnsupportedTunnel
+            ))
         );
         drop(attempt);
         let reports = observer.reports();
@@ -1705,7 +2212,7 @@ mod tests {
             let observer = RecordingObserver::default();
             let mut attempt = attempt(&observer, now);
             assert!(attempt.begin_fallback(ResponseEgressOutcome::ConversionError));
-            let (method, response) = framing_response(reason);
+            let (method, response) = framing_response(reason).expect("framing fixture");
             assert_eq!(
                 attempt
                     .prepare_response(
@@ -1714,7 +2221,7 @@ mod tests {
                         response
                     )
                     .err(),
-                Some(reason)
+                Some(ResponseEgressPreparationError::Framing(reason))
             );
             assert!(attempt.finish_fallback(ResponseEgressFallbackDisposition::Aborted, now));
             let report = observer.reports().remove(0);
@@ -1763,7 +2270,8 @@ mod tests {
         let mut attempt = attempt(&observer, now);
         assert!(attempt.begin_writing());
         assert!(attempt.complete(now));
-        let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers);
+        let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers)
+            .expect("framing fixture");
         assert_eq!(
             attempt
                 .prepare_response(
@@ -1772,7 +2280,9 @@ mod tests {
                     response
                 )
                 .err(),
-            Some(ResponseEgressFramingError::UnsupportedTrailers)
+            Some(ResponseEgressPreparationError::Framing(
+                ResponseEgressFramingError::UnsupportedTrailers
+            ))
         );
         assert_eq!(
             attempt.framing_failures,
@@ -1806,7 +2316,8 @@ mod tests {
             clock,
         );
         assert!(attempt.begin_writing());
-        let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers);
+        let (method, response) = framing_response(ResponseEgressFramingError::UnsupportedTrailers)
+            .expect("framing fixture");
         assert_eq!(
             attempt
                 .prepare_response(
@@ -1815,7 +2326,9 @@ mod tests {
                     response
                 )
                 .err(),
-            Some(ResponseEgressFramingError::UnsupportedTrailers)
+            Some(ResponseEgressPreparationError::Framing(
+                ResponseEgressFramingError::UnsupportedTrailers
+            ))
         );
         assert!(observer.reports().is_empty());
         assert_eq!(reads.load(Ordering::SeqCst), 0);

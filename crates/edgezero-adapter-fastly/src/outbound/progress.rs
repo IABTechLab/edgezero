@@ -105,8 +105,10 @@ enum Phase<T: Transport> {
 
 struct Slot<T: Transport> {
     budget: DispatchBudget,
+    clock: MonotonicClock,
     expired: bool,
     phase: Phase<T>,
+    previous: MonotonicInstant,
     waker: Option<Waker>,
 }
 
@@ -124,7 +126,9 @@ struct State<T: Transport> {
 }
 
 pub(super) struct Progress<T: Transport> {
+    clock: MonotonicClock,
     driving: Rc<Cell<bool>>,
+    entered: MonotonicInstant,
     state: Rc<RefCell<State<T>>>,
 }
 
@@ -155,13 +159,17 @@ impl Drop for Driving {
 impl<T: Transport> Clone for Progress<T> {
     fn clone(&self) -> Self {
         Self {
+            clock: self.clock.clone(),
             driving: Rc::clone(&self.driving),
+            entered: self.entered,
             state: Rc::clone(&self.state),
         }
     }
 
     fn clone_from(&mut self, source: &Self) {
+        self.clock.clone_from(&source.clock);
         self.driving.clone_from(&source.driving);
+        self.entered = source.entered;
         self.state.clone_from(&source.state);
     }
 }
@@ -187,60 +195,16 @@ impl<T: Transport + 'static> Progress<T> {
         }.boxed_local()
     }
 
+    pub(super) fn clock(&self) -> MonotonicClock {
+        self.clock.clone()
+    }
+
     pub(super) async fn drive<F>(&self, future: F) -> Result<F::Output, EdgeError>
     where
         F: Future,
     {
         futures_util::pin_mut!(future);
-        let progress = self.clone();
-        let wait: WaitFactory = Rc::new(move |deadline, clock| progress.waiter(deadline, clock));
-        poll_fn(|cx| {
-            let nested = self.driving.get();
-            let parent = CURRENT_DRIVER.with(|active| active.borrow().clone());
-            let repoll = parent.as_ref().map_or_else(
-                || Rc::new(Cell::new(false)),
-                |ancestor| Rc::clone(&ancestor.repoll),
-            );
-            let state = Rc::clone(&self.state);
-            let current = Rc::new(DriverContext {
-                limit: Rc::new(move || state.borrow_mut().wait_limit()),
-                parent,
-                repoll,
-                waker: cx.waker().clone(),
-            });
-            let guard = Driving {
-                previous: self.driving.replace(true),
-                active: Rc::clone(&self.driving),
-                previous_wait: CURRENT_WAIT.with(|active| active.replace(Some(Rc::clone(&wait)))),
-                previous_driver: CURRENT_DRIVER
-                    .with(|active| active.replace(Some(Rc::clone(&current)))),
-            };
-            let result = future.as_mut().poll(cx);
-            drop(guard);
-            if let Poll::Ready(output) = result {
-                current.repoll_parent();
-                return Poll::Ready(Ok(output));
-            }
-            if nested {
-                return Poll::Pending;
-            }
-            let (turned, wakes) = {
-                let mut shared = self.state.borrow_mut();
-                let turned = shared.turn(!current.repoll.get(), || current.ancestor_limit());
-                (turned, take(&mut shared.wakes))
-            };
-            if turned.as_ref().is_ok_and(|made_progress| *made_progress) || turned.is_err() {
-                current.repoll.set(true);
-                current.repoll_parent();
-                cx.waker().wake_by_ref();
-            }
-            for waiting in wakes {
-                waiting.wake();
-            }
-            turned?;
-            Poll::Pending
-        })
-        .await
+        poll_fn(|cx| self.poll_once(cx, &mut |inner_cx| future.as_mut().poll(inner_cx))).await
     }
 
     pub(super) fn head(&self, pending: T::Pending, budget: DispatchBudget) -> Lease<T> {
@@ -254,7 +218,9 @@ impl<T: Transport + 'static> Progress<T> {
         boundary: Option<Deadline>,
     ) -> Self {
         Self {
+            clock: clock.clone(),
             driving: Rc::new(Cell::new(false)),
+            entered: previous,
             state: Rc::new(RefCell::new(State {
                 boundary,
                 clock,
@@ -270,14 +236,70 @@ impl<T: Transport + 'static> Progress<T> {
         }
     }
 
+    pub(super) fn poll_once<Output>(
+        &self,
+        cx: &mut Context<'_>,
+        step: &mut dyn FnMut(&mut Context<'_>) -> Poll<Output>,
+    ) -> Poll<Result<Output, EdgeError>> {
+        let progress = self.clone();
+        let wait: WaitFactory = Rc::new(move |deadline, clock| progress.waiter(deadline, clock));
+        let nested = self.driving.get();
+        let parent = CURRENT_DRIVER.with(|active| active.borrow().clone());
+        let repoll = parent.as_ref().map_or_else(
+            || Rc::new(Cell::new(false)),
+            |ancestor| Rc::clone(&ancestor.repoll),
+        );
+        let state = Rc::clone(&self.state);
+        let current = Rc::new(DriverContext {
+            limit: Rc::new(move || state.borrow_mut().wait_limit()),
+            parent,
+            repoll,
+            waker: cx.waker().clone(),
+        });
+        let guard = Driving {
+            previous: self.driving.replace(true),
+            active: Rc::clone(&self.driving),
+            previous_wait: CURRENT_WAIT.with(|active| active.replace(Some(Rc::clone(&wait)))),
+            previous_driver: CURRENT_DRIVER
+                .with(|active| active.replace(Some(Rc::clone(&current)))),
+        };
+        super::scope::poll_current(cx);
+        let result = step(cx);
+        drop(guard);
+        if let Poll::Ready(output) = result {
+            current.repoll_parent();
+            return Poll::Ready(Ok(output));
+        }
+        if nested {
+            return Poll::Pending;
+        }
+        let (turned, wakes) = {
+            let mut shared = self.state.borrow_mut();
+            let turned = shared.turn(!current.repoll.get(), || current.ancestor_limit());
+            (turned, take(&mut shared.wakes))
+        };
+        if turned.as_ref().is_ok_and(|made_progress| *made_progress) || turned.is_err() {
+            current.repoll.set(true);
+            current.repoll_parent();
+            cx.waker().wake_by_ref();
+        }
+        for waiting in wakes {
+            waiting.wake();
+        }
+        turned?;
+        Poll::Pending
+    }
+
     fn register(&self, budget: DispatchBudget, phase: Phase<T>) -> Lease<T> {
         let mut state = self.state.borrow_mut();
         let index = state.slots.len();
         // An operation registers each head/body once. Never reuse an index while a lease can live.
         state.slots.push(Some(Slot {
             budget,
+            clock: self.clock.clone(),
             expired: false,
             phase,
+            previous: self.entered,
             waker: None,
         }));
         Lease {
@@ -328,6 +350,15 @@ impl<T: Transport + 'static> Progress<T> {
             })
             .await
         })
+    }
+
+    pub(super) fn with_clock(&self, clock: MonotonicClock, entered: MonotonicInstant) -> Self {
+        Self {
+            clock,
+            driving: Rc::clone(&self.driving),
+            entered,
+            state: Rc::clone(&self.state),
+        }
     }
 
     pub(super) fn with_current<Output>(&self, operation: impl FnOnce() -> Output) -> Output {
@@ -436,7 +467,7 @@ impl<T: Transport> State<T> {
             return Err(missing_slot());
         };
         let pending = owned.take().ok_or_else(missing_slot)?;
-        match self.transport.poll_head(pending, slot.budget, &self.clock) {
+        match self.transport.poll_head(pending, slot.budget, &slot.clock) {
             HeadPoll::Pending(waiting) => slot.phase = Phase::Head(Some(waiting)),
             HeadPoll::Ready(result) => {
                 slot.phase = Phase::HeadReady(Some(result));
@@ -445,12 +476,12 @@ impl<T: Transport> State<T> {
                 }
             }
         }
-        let now = self.sample()?;
         let polled = self
             .slots
             .get_mut(index)
             .and_then(Option::as_mut)
             .ok_or_else(missing_slot)?;
+        let now = polled.sample()?;
         if polled.budget.deadline.is_expired_at(now) {
             expire(polled, &mut self.wakes);
         }
@@ -478,7 +509,6 @@ impl<T: Transport> State<T> {
             .max(1);
         let handles = active.iter().map(|(_, handle)| *handle).collect::<Vec<_>>();
         let selection = self.transport.select(&handles, milliseconds)?;
-        self.sample()?;
         let Some(selected) = selection else {
             return Ok(true);
         };
@@ -498,7 +528,8 @@ impl<T: Transport> State<T> {
             .get_mut(index)
             .and_then(Option::as_mut)
             .ok_or_else(missing_slot)?;
-        if slot.budget.deadline.is_expired_at(self.previous) {
+        let now = slot.sample()?;
+        if slot.budget.deadline.is_expired_at(now) {
             expire(slot, &mut self.wakes);
             return Ok(());
         }
@@ -516,7 +547,7 @@ impl<T: Transport> State<T> {
                 let body = handle.as_mut().ok_or_else(missing_slot)?;
                 let result = self
                     .transport
-                    .read_body(body, READ_BYTES, slot.budget, &self.clock);
+                    .read_body(body, READ_BYTES, slot.budget, &slot.clock);
                 *requested = false;
                 if result.as_ref().map_or(true, Bytes::is_empty) {
                     *handle = None;
@@ -528,13 +559,13 @@ impl<T: Transport> State<T> {
             }
             Phase::HeadReady(_) => return Err(missing_slot()),
         }
-        let now = self.sample()?;
         let serviced = self
             .slots
             .get_mut(index)
             .and_then(Option::as_mut)
             .ok_or_else(missing_slot)?;
-        if serviced.budget.deadline.is_expired_at(now) {
+        let observed_at = serviced.sample()?;
+        if serviced.budget.deadline.is_expired_at(observed_at) {
             expire(serviced, &mut self.wakes);
         }
         Ok(())
@@ -577,9 +608,9 @@ impl<T: Transport> State<T> {
         allow_wait: bool,
         mut ancestor_limit: impl FnMut() -> Result<Option<Duration>, EdgeError>,
     ) -> Result<bool, EdgeError> {
-        let now = self.sample()?;
         let (mut newly_expired, timer_remaining) = self.timers();
         for slot in self.slots.iter_mut().flatten() {
+            let now = slot.sample()?;
             if slot.budget.deadline.is_expired_at(now) {
                 newly_expired |= expire(slot, &mut self.wakes);
             }
@@ -594,9 +625,11 @@ impl<T: Transport> State<T> {
             return Ok(false);
         }
 
-        let boundary_remaining = self
-            .boundary
-            .map(|deadline| deadline.remaining_at(self.previous).unwrap_or_default());
+        let boundary_remaining = if let Some(deadline) = self.boundary {
+            Some(deadline.remaining_at(self.sample()?).unwrap_or_default())
+        } else {
+            None
+        };
         if boundary_remaining.is_some_and(|remaining| remaining.is_zero()) {
             return Ok(true);
         }
@@ -633,7 +666,7 @@ impl<T: Transport> State<T> {
             let Some(slot) = entry else {
                 continue;
             };
-            if let Some(duration) = slot.budget.deadline.remaining_at(self.previous) {
+            if let Some(duration) = slot.budget.deadline.remaining_at(slot.previous) {
                 earliest = Some(earliest.map_or(duration, |prior: Duration| prior.min(duration)));
             }
             let handle = match &slot.phase {
@@ -680,29 +713,27 @@ impl<T: Transport> State<T> {
     }
 
     fn wait_limit(&mut self) -> Result<Option<Duration>, EdgeError> {
-        let now = self.sample()?;
-        let mut remaining = self
-            .slots
-            .iter()
-            .flatten()
-            .filter(|slot| {
-                !slot.expired
-                    && matches!(
-                        &slot.phase,
-                        Phase::Head(Some(_))
-                            | Phase::Body {
-                                handle: Some(_),
-                                next: None,
-                                requested: true
-                            }
-                    )
-            })
-            .map(|slot| slot.budget.deadline.remaining_at(now).unwrap_or_default())
-            .chain(
-                self.boundary
-                    .map(|deadline| deadline.remaining_at(now).unwrap_or_default()),
-            )
-            .min();
+        let mut remaining = if let Some(deadline) = self.boundary {
+            Some(deadline.remaining_at(self.sample()?).unwrap_or_default())
+        } else {
+            None
+        };
+        for slot in self.slots.iter_mut().flatten().filter(|slot| {
+            !slot.expired
+                && matches!(
+                    &slot.phase,
+                    Phase::Head(Some(_))
+                        | Phase::Body {
+                            handle: Some(_),
+                            next: None,
+                            requested: true
+                        }
+                )
+        }) {
+            let now = slot.sample()?;
+            let limit = slot.budget.deadline.remaining_at(now).unwrap_or_default();
+            remaining = Some(remaining.map_or(limit, |prior| prior.min(limit)));
+        }
         for timer in self
             .timers
             .values_mut()
@@ -719,6 +750,19 @@ impl<T: Transport> State<T> {
             remaining = Some(remaining.map_or(limit, |prior| prior.min(limit)));
         }
         Ok(remaining)
+    }
+}
+
+impl<T: Transport> Slot<T> {
+    fn sample(&mut self) -> Result<MonotonicInstant, EdgeError> {
+        let now = self.clock.now();
+        if now < self.previous {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "outbound clock moved backwards during Fastly progress"
+            )));
+        }
+        self.previous = now;
+        Ok(now)
     }
 }
 
@@ -823,6 +867,7 @@ mod tests {
 
     #[derive(Default)]
     struct Observations {
+        clock_samples: Vec<MonotonicInstant>,
         complete_at: Option<MonotonicInstant>,
         domains: Vec<Vec<u32>>,
         invalid_index: bool,
@@ -880,9 +925,10 @@ mod tests {
             &mut self,
             pending: Handle,
             _budget: DispatchBudget,
-            _clock: &MonotonicClock,
+            clock: &MonotonicClock,
         ) -> HeadPoll<Handle, u32> {
             let mut observed = self.observations.borrow_mut();
+            observed.clock_samples.push(clock.now());
             observed.polls.push(pending.id);
             if pending.id == 0 || observed.spurious_heads > 0 {
                 observed.spurious_heads = observed.spurious_heads.saturating_sub(1);
@@ -903,9 +949,10 @@ mod tests {
             body: &mut Handle,
             maximum: usize,
             _budget: DispatchBudget,
-            _clock: &MonotonicClock,
+            clock: &MonotonicClock,
         ) -> Result<Bytes, EdgeError> {
             let mut observed = self.observations.borrow_mut();
+            observed.clock_samples.push(clock.now());
             assert_eq!(
                 observed.permission.take(),
                 Some(body.id),
@@ -1019,6 +1066,222 @@ mod tests {
             bytes += chunk?.len();
         }
         Ok(bytes)
+    }
+
+    #[test]
+    fn shared_mux_slots_keep_request_clock_and_original_deadline() {
+        for head in [false, true] {
+            for expired in [false, true] {
+                let (first, observed, first_now) = fixture();
+                let second_entered = first_now
+                    .lock()
+                    .unwrap()
+                    .checked_add(Duration::from_secs(3600))
+                    .unwrap();
+                let second_now = Arc::new(Mutex::new(second_entered));
+                let sampled = Arc::clone(&second_now);
+                let second = first.with_clock(
+                    MonotonicClock::new(move || *sampled.lock().unwrap()),
+                    second_entered,
+                );
+                let selected = budget(&second_now, 50, BudgetSource::RequestDeadline);
+                let released = Rc::new(Cell::new(0));
+                let first_head = first.head(
+                    handle(1, 0, false, &released),
+                    budget(&first_now, 50, BudgetSource::PerCallTimeout),
+                );
+                let operation: OutboundFuture<()> = if head {
+                    let lease = second.head(handle(2, 0, false, &released), selected);
+                    Box::pin(async move { lease.receive().await.map(|_| ()) })
+                } else {
+                    let body = second.body(handle(2, 1, false, &released), selected);
+                    Box::pin(async move { collect(body).await.map(|_| ()) })
+                };
+                if expired {
+                    *second_now.lock().unwrap() = selected.deadline.instant();
+                }
+                let (first_result, second_result) =
+                    block_on(first.drive(join(first_head.receive(), operation))).unwrap();
+                assert_eq!(
+                    first_result.unwrap(),
+                    1,
+                    "another client's domain cannot expire this slot"
+                );
+                if expired {
+                    assert!(matches!(
+                        second_result,
+                        Err(EdgeError::GatewayTimeout {
+                            cause: BudgetSource::RequestDeadline,
+                            ..
+                        })
+                    ));
+                    assert!(!observed.borrow().clock_samples.contains(&second_entered));
+                } else {
+                    second_result.unwrap();
+                    assert!(
+                        observed.borrow().clock_samples.contains(&second_entered),
+                        "provider classification receives this slot's paired clock"
+                    );
+                }
+                assert_eq!(released.get(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn callback_idle_consumer_observes_complete_pipeline_at_terminal_time() {
+        use super::super::scope::schedule_batch;
+        use edgezero_core::{OutboundBatchDriverEvent, OutboundScopeOwner, OutboundTime};
+
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        let started = *now.lock().unwrap();
+        let released = Rc::new(Cell::new(0));
+        let body = progress.body(
+            handle(3, 32_768, false, &released),
+            budget(&now, 100, BudgetSource::PerCallTimeout),
+        );
+        let finished = Rc::new(Cell::new(false));
+        let terminal = Rc::clone(&finished);
+        let clock = progress.clock();
+        let source = stream! {
+            assert_eq!(collect(body).await.unwrap(), 32_768);
+            terminal.set(true);
+            yield OutboundBatchDriverEvent::Item { index: 4, completed_at: clock.now(), outcome: Err(EdgeError::bad_gateway("terminal fixture")) };
+        };
+        let time = OutboundTime::new(progress.clock(), super::wait_current);
+        let mut receiver =
+            callback.with(|| schedule_batch(&callback.scope(), source, &progress, &time, started));
+        assert!(
+            observed.borrow().waits.is_empty(),
+            "scheduling never waits for the host"
+        );
+        assert!(
+            receiver
+                .as_mut()
+                .poll_next(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert!(
+            observed.borrow().waits.is_empty(),
+            "readiness checks never wait for the host"
+        );
+        let response_scope = callback.with(OutboundScopeOwner::response_body);
+        let deadline = budget(&now, 20, BudgetSource::Default).deadline;
+        block_on(
+            response_scope.run(
+                progress.drive(async { super::wait_current(deadline, progress.clock()).await }),
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            finished.get(),
+            "buffered completion runs during an unrelated wait"
+        );
+        assert_eq!(released.get(), 1);
+        let Some(OutboundBatchDriverEvent::Item {
+            index: 4,
+            completed_at,
+            ..
+        }) = block_on(receiver.next())
+        else {
+            panic!("original indexed outcome");
+        };
+        assert_eq!(
+            completed_at, started,
+            "collection time must not replace terminal time"
+        );
+        drop(response_scope);
+        drop(callback);
+    }
+
+    #[test]
+    fn begin_runs_without_collection_and_readiness_never_waits() {
+        use super::super::scope::begin;
+        use edgezero_core::{OutboundScopeOwner, OutboundTime};
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        let released = Rc::new(Cell::new(0));
+        let body = progress.body(
+            handle(7, 16_385, false, &released),
+            budget(&now, 100, BudgetSource::PerCallTimeout),
+        );
+        let mut pending = begin(
+            &callback.scope(),
+            Box::pin(async move {
+                assert_eq!(collect(body).await?, 16_385);
+                Err(EdgeError::bad_gateway("complete pipeline failure"))
+            }),
+            &progress,
+            &OutboundTime::new(progress.clock(), super::wait_current),
+            *now.lock().unwrap(),
+        )
+        .unwrap();
+        assert!(!pending.is_ready());
+        assert!(observed.borrow().waits.is_empty());
+        let deadline = budget(&now, 20, BudgetSource::Default).deadline;
+        block_on(
+            callback.run(
+                progress.drive(async { super::wait_current(deadline, progress.clock()).await }),
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(released.get(), 1);
+        assert!(pending.is_ready());
+        assert!(pending.is_ready(), "readiness does not consume the error");
+        assert_eq!(
+            block_on(pending.collect()).unwrap_err().message(),
+            "complete pipeline failure"
+        );
+        drop(callback);
+    }
+
+    #[test]
+    fn collected_begin_stream_outlives_callback_and_pending_cancellation() {
+        use super::super::scope::begin;
+        use edgezero_core::http::{HeaderMap, Method, StatusCode};
+        use edgezero_core::{
+            Body, ContentTypeProvenance, OutboundResponse, OutboundScopeOwner, OutboundTime,
+        };
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        let released = Rc::new(Cell::new(0));
+        let body = progress.body(
+            handle(9, 42, false, &released),
+            budget(&now, 100, BudgetSource::PerCallTimeout),
+        );
+        let response = OutboundResponse::new(
+            Method::GET,
+            StatusCode::OK,
+            HeaderMap::new(),
+            Body::from_stream(body),
+            progress.clock(),
+            ContentTypeProvenance::Unknown,
+        );
+        let entered = *now.lock().unwrap();
+        let pending = begin(
+            &callback.scope(),
+            Box::pin(async move { Ok(response) }),
+            &progress,
+            &OutboundTime::new(progress.clock(), super::wait_current),
+            entered,
+        )
+        .unwrap();
+        let collected = block_on(pending.collect()).unwrap();
+        drop(callback);
+        assert_eq!(
+            released.get(),
+            0,
+            "stream owns its transport after successful collection"
+        );
+        assert!(observed.borrow().reads.is_empty());
+        assert_eq!(
+            block_on(collected.into_bytes_bounded(42)).unwrap().len(),
+            42
+        );
+        assert_eq!(released.get(), 1);
     }
 
     #[test]
@@ -1271,6 +1534,37 @@ mod tests {
             ));
             assert_eq!(released.get(), 2);
         }
+    }
+
+    #[test]
+    fn single_poll_progress_installs_and_restores_timer_context() {
+        let (progress, observed, now) = fixture();
+        let deadline = budget(&now, 10, BudgetSource::RequestDeadline).deadline;
+        let clock = progress.clock();
+        let polls = Cell::new(0_usize);
+        let mut timer = None;
+        let mut step = |cx: &mut Context<'_>| {
+            polls.set(polls.get().saturating_add(1));
+            timer
+                .get_or_insert_with(|| super::wait_current(deadline, clock.clone()))
+                .as_mut()
+                .poll(cx)
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(progress.poll_once(&mut cx, &mut step).is_pending());
+        assert_eq!(polls.get(), 1);
+        assert_eq!(observed.borrow().waits, [10]);
+        assert!(progress.poll_once(&mut cx, &mut step).is_pending());
+        assert_eq!(polls.get(), 2);
+        assert!(matches!(
+            progress.poll_once(&mut cx, &mut step),
+            Poll::Ready(Ok(Ok(())))
+        ));
+        assert_eq!(polls.get(), 3);
+        drop(timer);
+        assert!(progress.state.borrow().timers.is_empty());
+        let error = block_on(super::wait_current(deadline, clock)).unwrap_err();
+        assert!(matches!(error, EdgeError::Internal { .. }));
     }
 
     #[test]

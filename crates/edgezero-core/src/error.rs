@@ -42,7 +42,9 @@ pub enum BadGatewayReason {
 #[non_exhaustive]
 pub enum BudgetSource {
     BatchCutoff,
+    ConnectTimeout,
     Default,
+    IdleTimeout,
     PerCallTimeout,
     RequestDeadline,
     Unspecified,
@@ -935,9 +937,10 @@ mod tests {
                 .expect("ordinary response");
             assert_eq!(response.status(), ordinary.status());
             assert_eq!(response.headers(), ordinary.headers());
-            let (Body::Once(actual), Body::Once(expected)) =
-                (response.into_body(), ordinary.into_body())
-            else {
+            let (Some(actual), Some(expected)) = (
+                response.into_body().into_bytes(),
+                ordinary.into_body().into_bytes(),
+            ) else {
                 panic!("buffered wire error")
             };
             assert_eq!(actual, expected);

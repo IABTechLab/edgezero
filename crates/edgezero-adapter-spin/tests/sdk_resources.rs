@@ -7,21 +7,29 @@
 )]
 mod tests {
     use std::collections::VecDeque;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use edgezero_adapter_spin::outbound::{
-        SpinOutboundClient, deferred_clock_paths_hold_for_test, map_spin_host_error_for_test,
-        map_spin_preparation_header_for_test, provider_deadline_diagnostics_hold_for_test,
-        request_fields_for_test, request_target_errors_for_test, set_timeout_option_for_test,
+        SpinOutboundClient, deferred_clock_paths_hold_for_test, map_spin_dispatch_error_for_test,
+        map_spin_host_error_for_test, map_spin_preparation_header_for_test,
+        provider_deadline_diagnostics_hold_for_test, request_fields_for_test,
+        request_target_errors_for_test, request_timeout_settings_for_test,
+        set_timeout_option_for_test,
     };
     use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
     use edgezero_core::error_detail::{
         ProviderFailureAdapter, ProviderFailureDetail, ProviderFailurePhase, SpinDnsRcode,
         SpinFailureCause, SpinFieldSize, SpinTimeoutOption,
     };
-    use edgezero_core::http::{HeaderMap, HeaderValue};
-    use edgezero_core::outbound::{OutboundHttpClient, OutboundRequest, OutboundTime};
+    use edgezero_core::http::{HeaderMap, HeaderValue, Method, Uri};
+    use edgezero_core::outbound::{
+        HttpClient, IndependentOutboundProgress, OutboundBatch, OutboundBatchTermination,
+        OutboundCollectedSlot, OutboundDispatchRequest, OutboundFuture, OutboundHead,
+        OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
+        OutboundRequest, OutboundSendMode, OutboundTime,
+    };
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::executor::block_on;
     use spin_sdk::wasip3::http::types::{
@@ -42,9 +50,272 @@ mod tests {
     {
     }
 
+    struct HandoffClient {
+        inner: SpinOutboundClient,
+        observed: Arc<Mutex<MonotonicInstant>>,
+        handoff_at: MonotonicInstant,
+    }
+
+    impl OutboundHttpClient for HandoffClient {
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn time(&self) -> OutboundTime {
+            self.inner.time()
+        }
+
+        fn validate_supported_options(
+            &self,
+            request: &OutboundRequest,
+            mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            self.inner.validate_supported_options(request, mode)
+        }
+
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            self.inner.dispatch_head(request)
+        }
+
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            self.inner.begin(request)
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            *self.observed.lock().expect("paired clock") = self.handoff_at;
+            self.inner.start_batch_until(batch)
+        }
+    }
+
+    fn handoff_client(start: MonotonicInstant, handoff_at: MonotonicInstant) -> HttpClient {
+        let observed = Arc::new(Mutex::new(start));
+        let clock_now = Arc::clone(&observed);
+        HttpClient::with_client(HandoffClient {
+            inner: SpinOutboundClient::with_time(preflight_time(MonotonicClock::new(move || {
+                *clock_now.lock().expect("paired clock")
+            }))),
+            observed,
+            handoff_at,
+        })
+    }
+
+    #[test]
+    fn expired_batch_handoff_completes_an_earlier_own_timeout_without_runtime() {
+        let start = MonotonicInstant::now();
+        let observation_cutoff = Deadline::at_instant(
+            start
+                .checked_add(Duration::from_millis(100))
+                .expect("cutoff"),
+        );
+        let handoff_at = start
+            .checked_add(Duration::from_millis(150))
+            .expect("handoff");
+        let request = OutboundRequest::get("https://example.com/")
+            .expect("request")
+            .timeout(Duration::from_millis(50));
+        let result = block_on(
+            handoff_client(start, handoff_at)
+                .start_batch_until(vec![request], observation_cutoff)
+                .collect(),
+        )
+        .expect("an earlier own timeout must not be omitted at the expired handoff");
+        assert_eq!(result.termination(), OutboundBatchTermination::Completed);
+        let [OutboundCollectedSlot::Resolved(slot)] = result.slots() else {
+            panic!("resolved own timeout");
+        };
+        assert_eq!(slot.elapsed, Duration::from_millis(50));
+        assert!(matches!(
+            slot.outcome,
+            Err(EdgeError::GatewayTimeout {
+                cause: BudgetSource::PerCallTimeout,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn expired_batch_handoff_keeps_preflight_indices_and_cutoff_slots_without_runtime() {
+        use bytes::Bytes;
+
+        let start = MonotonicInstant::now();
+        let observation_cutoff = Deadline::at_instant(
+            start
+                .checked_add(Duration::from_millis(100))
+                .expect("cutoff"),
+        );
+        let handoff_at = start
+            .checked_add(Duration::from_millis(150))
+            .expect("handoff");
+        let upload = Arc::<[u8]>::from(&b"buffered upload"[..]);
+        let released = Arc::downgrade(&upload);
+        let requests = vec![
+            OutboundRequest::post("https://example.com/upload")
+                .expect("request")
+                .body(Bytes::from_owner(upload))
+                .timeout(Duration::from_millis(50)),
+            OutboundRequest::get("https://example.com/rejected")
+                .expect("request")
+                .stream_response(),
+            OutboundRequest::get("https://example.com/equal")
+                .expect("request")
+                .timeout(Duration::from_millis(100)),
+            OutboundRequest::get("https://example.com/later")
+                .expect("request")
+                .timeout(Duration::from_millis(200)),
+            OutboundRequest::get("https://example.com/earlier")
+                .expect("request")
+                .deadline(Deadline::at_instant(
+                    start
+                        .checked_add(Duration::from_millis(30))
+                        .expect("deadline"),
+                )),
+        ];
+        let batch =
+            handoff_client(start, handoff_at).start_batch_until(requests, observation_cutoff);
+        assert!(
+            released.upgrade().is_none(),
+            "upload released before observation"
+        );
+        let result = block_on(batch.collect()).expect("expired mixed handoff");
+        assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
+        let [
+            OutboundCollectedSlot::Resolved(own_timeout),
+            OutboundCollectedSlot::Resolved(preflight),
+            OutboundCollectedSlot::Unresolved,
+            OutboundCollectedSlot::Unresolved,
+            OutboundCollectedSlot::Resolved(earlier),
+        ] = result.slots()
+        else {
+            panic!("input indices and unresolved cutoff slots retained");
+        };
+        assert_eq!(own_timeout.elapsed, Duration::from_millis(50));
+        assert!(matches!(
+            own_timeout.outcome,
+            Err(EdgeError::GatewayTimeout {
+                cause: BudgetSource::PerCallTimeout,
+                ..
+            })
+        ));
+        assert_eq!(preflight.elapsed, Duration::ZERO);
+        assert!(matches!(
+            preflight.outcome,
+            Err(EdgeError::BadRequest { .. })
+        ));
+        assert_eq!(earlier.elapsed, Duration::from_millis(30));
+        assert!(matches!(
+            earlier.outcome,
+            Err(EdgeError::GatewayTimeout {
+                cause: BudgetSource::RequestDeadline,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn spin_outbound_client_implements_portable_contract() {
         assert_outbound_client::<SpinOutboundClient>();
+    }
+
+    #[test]
+    fn eager_spawn_outside_p3_context_is_a_typed_setup_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        use edgezero_core::Body;
+        use futures_util::stream::poll_fn;
+
+        let client = HttpClient::with_client(SpinOutboundClient::new());
+        for begin in [false, true] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&polls);
+            let owner = Arc::new(());
+            let released = Arc::downgrade(&owner);
+            let source = poll_fn(move |_cx| {
+                let _keep_alive = Arc::clone(&owner);
+                observed.fetch_add(1, Ordering::SeqCst);
+                Poll::<Option<Result<bytes::Bytes, EdgeError>>>::Pending
+            });
+            let request = OutboundRequest::new(
+                if begin { Method::GET } else { Method::POST },
+                Uri::from_static("https://example.com/"),
+            )
+            .expect("request")
+            .body(Body::from_stream(source));
+            let error = if begin {
+                block_on(client.begin(request)).expect_err("missing P3 scheduler")
+            } else {
+                block_on(client.send(request)).expect_err("missing P3 scheduler")
+            };
+            assert!(matches!(error, EdgeError::Internal { .. }));
+            assert_eq!(
+                error.inner().expect("setup error").to_string(),
+                "Spin outbound scheduling requires an active WASIp3 task"
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert!(released.upgrade().is_none(), "unpolled upload released");
+        }
+        let failure = block_on(
+            client
+                .start_batch_until(
+                    vec![OutboundRequest::get("https://example.com/").expect("request")],
+                    Deadline::after(Duration::from_secs(1)),
+                )
+                .collect(),
+        )
+        .expect_err("missing P3 batch scheduler");
+        assert!(matches!(failure.error(), EdgeError::Internal { .. }));
+        assert_eq!(
+            failure.error().inner().expect("setup error").to_string(),
+            "Spin outbound scheduling requires an active WASIp3 task"
+        );
+        assert!(matches!(
+            failure.slots(),
+            [OutboundCollectedSlot::Unresolved]
+        ));
+    }
+
+    #[test]
+    fn connect_timeout_reaches_provider_settings() {
+        use std::mem::replace;
+        for (configured, expected) in [
+            (None, 40_000_000),
+            (Some(Duration::from_millis(7)), 7_000_000),
+            (Some(Duration::from_millis(80)), 40_000_000),
+        ] {
+            for refusal in [
+                Ok(()),
+                Err(RequestOptionsError::NotSupported),
+                Err(RequestOptionsError::Immutable),
+                Err(RequestOptionsError::Other(None)),
+                Err(RequestOptionsError::Other(Some(
+                    "provider-private".to_owned(),
+                ))),
+            ] {
+                let mut retained = refusal;
+                let mut settings = Vec::new();
+                request_timeout_settings_for_test(
+                    Duration::from_millis(40),
+                    configured,
+                    |option, value| {
+                        settings.push((option, value));
+                        if option == SpinTimeoutOption::Connect {
+                            replace(&mut retained, Ok(()))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect("connect refusals retain aggregate enforcement");
+                assert_eq!(
+                    settings,
+                    [
+                        (SpinTimeoutOption::Connect, expected),
+                        (SpinTimeoutOption::FirstByte, 40_000_000),
+                        (SpinTimeoutOption::BetweenBytes, 40_000_000),
+                    ]
+                );
+            }
+        }
     }
 
     #[test]
@@ -63,14 +334,15 @@ mod tests {
             .expect("completed instant");
         let observations = Arc::new(Mutex::new(VecDeque::from([start, completed])));
         let clock_observations = Arc::clone(&observations);
-        let client =
-            SpinOutboundClient::with_time(preflight_time(MonotonicClock::new(move || {
+        let client = HttpClient::with_client(SpinOutboundClient::with_time(preflight_time(
+            MonotonicClock::new(move || {
                 clock_observations
                     .lock()
                     .expect("clock observations")
                     .pop_front()
-                    .expect("clock observation")
-            })));
+                    .unwrap_or(completed)
+            }),
+        )));
         let request = OutboundRequest::get("https://example.com/")
             .expect("request")
             .stream_response();
@@ -82,7 +354,9 @@ mod tests {
         )
         .expect("valid batch driver");
 
-        let slot = results.slots[0].as_ref().expect("resolved slot");
+        let OutboundCollectedSlot::Resolved(slot) = &results.slots()[0] else {
+            panic!("resolved slot");
+        };
         assert_eq!(slot.elapsed, Duration::from_millis(7));
         assert!(matches!(slot.outcome, Err(EdgeError::BadRequest { .. })));
     }
@@ -92,13 +366,14 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::task::Poll;
 
+        use edgezero_core::Body;
         use edgezero_core::http::{Method, Uri};
-        use edgezero_core::{Body, OutboundBatchTermination};
         use futures_util::stream::poll_fn;
 
         let start = MonotonicInstant::now();
-        let client =
-            SpinOutboundClient::with_time(preflight_time(MonotonicClock::new(move || start)));
+        let client = HttpClient::with_client(SpinOutboundClient::with_time(preflight_time(
+            MonotonicClock::new(move || start),
+        )));
         let observation_cutoff = Deadline::at_instant(
             start
                 .checked_add(Duration::from_secs(1))
@@ -131,15 +406,14 @@ mod tests {
                             .collect(),
                     )
                     .expect("batch");
-                    assert_eq!(results.termination, OutboundBatchTermination::Completed);
-                    results
-                        .slots
-                        .into_iter()
-                        .next()
-                        .flatten()
-                        .expect("slot")
-                        .outcome
-                        .expect_err("unsupported authority")
+                    assert_eq!(results.termination(), OutboundBatchTermination::Completed);
+                    let (slots, _) = results.into_parts();
+                    let OutboundCollectedSlot::Resolved(slot) =
+                        slots.into_iter().next().expect("slot")
+                    else {
+                        panic!("resolved unsupported authority");
+                    };
+                    slot.outcome.expect_err("unsupported authority")
                 } else {
                     block_on(client.send(request)).expect_err("unsupported authority")
                 };
@@ -550,6 +824,32 @@ mod tests {
             assert_eq!(detail.adapter(), ProviderFailureAdapter::Spin);
             assert_eq!(detail.phase(), ProviderFailurePhase::Send);
 
+            for connect in [None, Some(Duration::from_millis(7))] {
+                let dispatched = map_spin_dispatch_error_for_test(
+                    &code,
+                    live,
+                    BudgetSource::Default,
+                    now,
+                    ProviderFailurePhase::Send,
+                    connect,
+                );
+                if connect.is_some() && matches!(&code, ErrorCode::ConnectionTimeout) {
+                    assert!(matches!(
+                        dispatched,
+                        EdgeError::GatewayTimeout {
+                            cause: BudgetSource::ConnectTimeout,
+                            ..
+                        }
+                    ));
+                } else {
+                    assert_expected_error(&dispatched, expected);
+                }
+                assert_eq!(
+                    dispatched.provider_failure_detail(),
+                    mapped.provider_failure_detail()
+                );
+            }
+
             let expired = map_spin_host_error_for_test(
                 &code,
                 Deadline::at_instant(now),
@@ -695,5 +995,96 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn connect_expiry_preserves_governing_budget_precedence() {
+        let start = MonotonicInstant::now();
+        let end = start.checked_add(Duration::from_secs(1)).expect("deadline");
+        for (observed, expected) in [
+            (start, BudgetSource::Unspecified),
+            (end, BudgetSource::RequestDeadline),
+            (
+                end.checked_add(Duration::from_nanos(1))
+                    .expect("late observation"),
+                BudgetSource::RequestDeadline,
+            ),
+        ] {
+            let error = map_spin_host_error_for_test(
+                &ErrorCode::ConnectionTimeout,
+                Deadline::at_instant(end),
+                BudgetSource::RequestDeadline,
+                observed,
+                ProviderFailurePhase::Send,
+            );
+            assert!(
+                matches!(&error, EdgeError::GatewayTimeout { cause, .. } if *cause == expected)
+            );
+            assert_eq!(
+                error.provider_failure_detail(),
+                Some(&ProviderFailureDetail::Spin {
+                    phase: ProviderFailurePhase::Send,
+                    cause: SpinFailureCause::ConnectionTimeout,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn connect_expiry_uses_each_request_setting_and_retains_provider_details() {
+        let start = MonotonicInstant::now();
+        let end = start.checked_add(Duration::from_secs(1)).expect("deadline");
+        let late = end
+            .checked_add(Duration::from_nanos(1))
+            .expect("late observation");
+        for selected in [
+            BudgetSource::Default,
+            BudgetSource::PerCallTimeout,
+            BudgetSource::RequestDeadline,
+            BudgetSource::BatchCutoff,
+        ] {
+            for phase in [
+                ProviderFailurePhase::Send,
+                ProviderFailurePhase::RequestBodyUpload,
+                ProviderFailurePhase::ResponseBodyRead,
+            ] {
+                for configured in [None, Some(Duration::from_millis(7)), None] {
+                    let mut request =
+                        OutboundRequest::get("https://example.com/").expect("request");
+                    if let Some(timeout) = configured {
+                        request = request.connect_timeout(timeout);
+                    }
+                    let parts = request.into_parts();
+                    assert_eq!(parts.connect_timeout, configured);
+                    for observed in [start, end, late] {
+                        let expected = if observed >= end {
+                            selected
+                        } else if configured.is_some() && phase == ProviderFailurePhase::Send {
+                            BudgetSource::ConnectTimeout
+                        } else {
+                            BudgetSource::Unspecified
+                        };
+                        let error = map_spin_dispatch_error_for_test(
+                            &ErrorCode::ConnectionTimeout,
+                            Deadline::at_instant(end),
+                            selected,
+                            observed,
+                            phase,
+                            parts.connect_timeout,
+                        );
+                        assert!(
+                            matches!(&error, EdgeError::GatewayTimeout { cause, .. } if *cause == expected)
+                        );
+                        assert_eq!(
+                            error.provider_failure_detail(),
+                            Some(&ProviderFailureDetail::Spin {
+                                phase,
+                                cause: SpinFailureCause::ConnectionTimeout,
+                            })
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -318,11 +318,13 @@ not included. These limitations block whole-response-lifetime certification.
     preserve the required routing/TLS separation.
 
 ¹ Fastly cannot preempt cold dynamic-backend registration or guest-to-origin writes. Before a
-cache-miss registration in `start_batch_until`, EdgeZero checks the absolute deadline and 25 ms dispatch
-slack so an already-delayed later slot does not begin another synchronous registration. A first
-cold registration that passes that check can still block. Receive timers and absolute checks
-cover the documented warm, response-read portions, but they are not one end-to-end wall-clock
-guarantee. Fastly's B31 aggregate policy anchors provider timers to the configured per-call timeout
+cache-miss registration in `start_batch_until`, EdgeZero checks the original absolute deadline.
+Preparation that takes more than 25 ms while that deadline remains live no longer causes an
+internal dispatch-slack error. Expiry is rechecked after synchronous preparation and registration;
+a late return retains the original timeout cause without restarting the budget. A cold registration
+that passes the entry check can still block. Removing the fixed slack refusal does not make SDK
+host calls preemptible or provide one end-to-end wall-clock guarantee. Fastly's B31 aggregate policy
+anchors provider timers to the configured per-call timeout
 (clamped to seven days), or the original selected duration if no timeout is configured. It rounds
 up to milliseconds, then to the smallest of `2^0` through `2^29` milliseconds or the seven-day
 ceiling. Connect, first-byte and between-bytes use that same value; there is no rigid phase split.
@@ -411,8 +413,8 @@ does not change framework wire responses or existing error classification. Frame
 not log provider detail; any future framework logging must be debug or lower. Application logging
 and correlation remain application-owned. Fixed framing-rule error logs are separate.
 
-This row publishes the implemented SDK projection, not full EZ-16 acceptance, the remaining
-head-first/eager/follow migration, hosted cause provenance, cancellation or client delivery.
+This row publishes the implemented SDK projection, not full EZ-16 acceptance, invocation-bound
+scope ownership, explicit redirect following, hosted cause provenance, cancellation or client delivery.
 Local SDK/Node/WASI fixtures are not hosted qualification; the failed Fastly readiness gate
 remains open. Existing deadline, delivery and resource-accounting capability levels are unchanged.
 Applications that tolerate reduced detail can declare this capability optional; requiring it
@@ -593,8 +595,10 @@ qualify hosted behavior, exact deadlines, cancellation or universal wire framing
 with its original input index, followed by `Finished(Completed)` or `Finished(Cutoff)`. Callers can
 therefore retain completed results and cancel unresolved work at an application deadline.
 `HttpClient::send_all_until` is the fallible ordered collector over that same driver; on success it
-returns one `Option<OutboundSlotResult>` per input plus the typed termination reason. `Completed`
-guarantees all slots are present. Only `Cutoff` permits `None` in a successful result. Explicit
+returns one `OutboundCollectedSlot` per input plus the typed termination reason. `Resolved`
+owns a newly collected outcome, `AlreadyDelivered` records an item already taken by `check` or
+`next`, and `Unresolved` records cutoff abandonment. `Completed` forbids `Unresolved`; `Cutoff`
+requires at least one. Explicit
 adapter failure, premature EOF, duplicate indices, and out-of-range indices return
 `OutboundBatchFailure`: its precise batch-level error remains separate from cutoff, and its
 index-aligned slots preserve sibling outcomes observed before the failure.
@@ -606,7 +610,8 @@ buffered body drain, and any delayed guest observation. It is not pure transport
 Preflight failures are timed from the same batch start, and a same-tick result may be zero.
 A successful outcome is contractually terminal and on time. `elapsed` is metadata, not a second
 lateness check; callers must not sample their clock after the whole batch returns to reinterpret an
-earlier `Ok`, and the API intentionally exposes no absolute terminal or batch-start instant.
+earlier `Ok`. Producer contexts expose the captured start and clock; consumer receipts do not
+expose an absolute terminal instant and cannot be reconstructed or mutated.
 On Axum, Cloudflare, and Spin, terminal instants are sampled synchronously as child futures are
 observed ready, so their samples follow poll-observation order in the shared monotonic clock
 domain. Once an observation reaches the cutoff, a later observation cannot carry an earlier

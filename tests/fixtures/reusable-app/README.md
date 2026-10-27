@@ -17,6 +17,16 @@ applications. The shell script only launches it through Cargo.
 
 ## Outbound Cutover Gates
 
+### Dispatch-Slack Retirement (2026-10-27)
+
+The requester authorized removing the fixed 25 ms dispatch-slack guard and its test injection
+helper. This supersedes the older slack-unchanged and slack-pending statements below, not their
+historical measurements or failed observations. Original absolute deadlines, timeout attribution,
+late-result rejection, B31 backend/timer policy and resource limits remain in force. Synchronous
+SDK host calls remain non-preemptible; no capability level, blocking horizon or qualification is
+promoted. EZ-3 inventory legs remain planned until real commands and sentinels exercise their full
+assertions. Criterion text, source digests and historical evidence are unchanged.
+
 ### Scoped Timing and Integration Override (2026-10-24)
 
 The requester's [scoped approval](../../../docs/audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)

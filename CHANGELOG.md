@@ -8,6 +8,60 @@ The changes below cover [PR #275](https://github.com/IABTechLab/edgezero/pull/27
 implementation and review follow-ups. This is a hard API migration: retired APIs and enum variants
 are removed rather than retained as compatibility aliases. Provider limitations are published
 separately from the portable API and must be considered when declaring required capabilities.
+The current outbound migration is summarized first. Earlier checkpoint entries below describe
+their scope when introduced; the current summary supersedes their then-pending API work.
+
+### Head-First Outbound Hard Cut
+
+- Replace implementer `send` and raw-request batch hooks with paired `time`, explicit `progress`, synchronous
+  support validation, prepared `dispatch_head`, eager `begin` and prepared batching. Core
+  captures invocation time, performs validation/settlement once and finalizes provider heads.
+  Remove duplicate adapter preparation, header normalization, decoding and response collection.
+- Return owned local futures from facade `send`, `begin` and `send_all_until`; no caller stack
+  frame is borrowed. Preserve original budgets, typed failures, independent caps, coding and
+  provenance, direct native Image Optimizer dispatch and provider capability limitations.
+- Settle unknown GET/HEAD bodies to EOF or the first nonempty byte before provider dispatch,
+  racing paired timers with outbound and admitted inbound deadlines. Preserve certified empty
+  bodies without reading, source errors and the inbound 408/outbound 504 distinction.
+- Replace public batch receipt/collection fields and Option slots with identity-bound receipts,
+  accessors, consuming decomposition and explicit AlreadyDelivered/Resolved/Unresolved states.
+  Add nonblocking observation and lossless accumulator recovery. Producers emit raw indexed
+  terminal observations from eagerly scheduled work; remove `from_futures`, `finish_batch_item`
+  and public receipt construction rather than retaining compatibility helpers.
+- Preserve malformed/trailing driver validation, partial results, logical own-deadline timing,
+  strict cutoff equality and exactly-once local teardown. Migrate supplied clients, fixtures,
+  demo, generator and documentation together. Redirect following and hosted qualification remain
+  separate work; this migration does not promote provider guarantees.
+- Use one core scope implementation for callback/body ownership and revocable operation roots.
+  Capture retained Send futures, begun exchanges and batches at invocation, before first polling.
+  Retained clients resolve fresh request ownership, and later polling cannot reparent the work.
+  Require the typed provider-progress hook; Axum, Cloudflare and Spin share the same independent
+  implementation, while Fastly reuses its cooperative native multiplexer. Remove its private
+  lifetime registry rather than maintaining an alternate ownership path.
+- Retain response-owned work through terminal egress, not source EOF; revoke retained source
+  handles before releasing completion resources. Transfer successful streamed outbound responses
+  independently of their original callback. Keep recorded batch partials and typed scope failures.
+- Start early response-owned work with `OutboundScopeOwner::response_body()` and attach the exact
+  owner to its response. An unaccepted owner remains callback-bound; canonical egress accepts it
+  before policy, framing or suppression. Share provider progress across the handoff without
+  sharing callback cancellation. Failed application bodies close before bounded fallback delivery.
+  Run source disposal under its captured identity, preserve terminal notifications after supported
+  cleanup unwinding, and keep lifecycle rejection distinct from HTTP framing diagnostics.
+- Replace public `Body::Once`/`Stream` construction and patterns with a private body carrier,
+  `Body::from_bytes`/`from_stream` and `BodyPayload` at transport boundaries. Carry local body
+  ownership without HTTP extensions, streamifying buffered bytes or extra payload copies.
+- Share the revocable local task runner across Axum, Cloudflare and Spin. Fail scope registration
+  before spawning and release work on executor drop even while its cancellation owner is retained.
+  Use one source-binding implementation for outbound and downstream bodies, one core earlier-own-
+  deadline cutoff predicate, and observation-only nonblocking readiness. Remove copied task states
+  and the second Workers response-deadline wrapper without removing host yielding or abort ownership.
+- Remove Fastly's elapsed-preparation slack rejection, its public constant and test-injection hook.
+  Dispatch and cold registration still reject expired budgets and backwards clocks. Preserve B31
+  backend identity/timers and original absolute deadlines instead of restarting time after settlement.
+- Preserve earlier own-deadline timeout results when Fastly or Spin preparation crosses the
+  observation cutoff, without starting expired provider work. Make supplied fixtures return
+  cutoff rather than premature EOF for exact-cutoff requests. Race Fastly's pending response
+  source against its write deadline without cancelling callback-owned siblings.
 
 ### Main Integration
 

@@ -26,30 +26,42 @@ mod image_optimizer;
 #[cfg(any(feature = "fastly", test))]
 mod progress;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 #[cfg(any(feature = "fastly", test))]
 pub(crate) mod scope;
 
 #[cfg(test)]
+use edgezero_core::Deadline;
+#[cfg(any(feature = "fastly", test))]
 use std::time::Duration;
 
 use edgezero_core::error::EdgeError;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::error::{BadGatewayReason, BudgetSource};
-#[cfg(any(feature = "fastly", test))]
-use edgezero_core::outbound::{
-    OutboundBatchDriverEvent, OutboundBatchItem, OutboundResponse, finish_batch_item,
-};
+#[cfg(test)]
+use edgezero_core::outbound::OutboundBatchDriverEvent;
+#[cfg(feature = "test-utils")]
+use edgezero_core::outbound::validate_for_dispatch;
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
-use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
-#[cfg(any(feature = "fastly", test))]
-use edgezero_core::time::Deadline;
+use edgezero_core::outbound::{OutboundRequest, OutboundSendMode};
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::time::{DispatchBudget, MonotonicInstant};
+
+#[cfg(any(feature = "fastly", test))]
+#[derive(Clone, Copy)]
+struct BackendTimers {
+    between_bytes: Duration,
+    connect: Duration,
+    first_byte: Duration,
+}
 
 #[cfg(any(feature = "fastly", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SendFailure {
     BudgetedTimeout,
+    ConnectTimeout,
     ImageOptimizerUnavailable,
     LocalInvariant,
     PlatformInternal,
@@ -58,12 +70,6 @@ enum SendFailure {
     Unknown,
     Unreachable,
     UpstreamProtocol,
-}
-
-#[cfg(any(feature = "fastly", test))]
-enum FastlyBatchObservation {
-    Continue(OutboundBatchItem),
-    Cutoff,
 }
 
 #[cfg(any(feature = "fastly", test))]
@@ -77,6 +83,7 @@ fn classify_send_failure(
     }
     match failure {
         SendFailure::BudgetedTimeout => timeout_error(budget.cause),
+        SendFailure::ConnectTimeout => timeout_error(BudgetSource::ConnectTimeout),
         SendFailure::ImageOptimizerUnavailable => EdgeError::bad_gateway_with_reason(
             "Fastly outbound request failed",
             BadGatewayReason::ImageOptimizerUnavailable,
@@ -161,6 +168,13 @@ fn assert_send_failure_error(failure: SendFailure, error: &EdgeError, selected: 
                 panic!("expected selected timeout");
             }
         }
+        SendFailure::ConnectTimeout => assert!(matches!(
+            error,
+            EdgeError::GatewayTimeout {
+                cause: BudgetSource::ConnectTimeout,
+                ..
+            }
+        )),
         SendFailure::ProviderTimeout => assert!(matches!(
             error,
             EdgeError::GatewayTimeout {
@@ -210,87 +224,126 @@ fn assert_send_failure_error(failure: SendFailure, error: &EdgeError, selected: 
 }
 
 #[cfg(any(feature = "fastly", test))]
-fn finish_fastly_batch_observation(
-    index: usize,
-    started_at: MonotonicInstant,
-    completed_at: MonotonicInstant,
-    observation_cutoff: Deadline,
-    outcome: Result<OutboundResponse, EdgeError>,
-) -> FastlyBatchObservation {
-    match finish_batch_item(index, started_at, completed_at, observation_cutoff, outcome) {
-        Some(item) => FastlyBatchObservation::Continue(item),
-        None => FastlyBatchObservation::Cutoff,
-    }
+fn with_backend_timers<Output>(
+    phase_ms: u64,
+    connect_ms: Option<u64>,
+    configure: impl FnOnce(BackendTimers) -> Output,
+) -> Output {
+    let phase = Duration::from_millis(phase_ms);
+    configure(BackendTimers {
+        connect: connect_ms.map_or(phase, Duration::from_millis),
+        first_byte: phase,
+        between_bytes: phase,
+    })
+}
+
+#[cfg(any(feature = "fastly", test))]
+fn effective_connect_ms(configured: Option<Duration>, governing: Duration) -> Option<u64> {
+    configured
+        .filter(|duration| *duration <= governing)
+        .map(|duration| {
+            u64::try_from(duration.as_nanos().div_ceil(1_000_000))
+                .unwrap_or(u64::MAX)
+                .max(1)
+        })
 }
 
 #[cfg(feature = "fastly")]
 mod fastly_impl {
-    use core::convert::identity;
     use core::future::Future;
-    use core::task::{Context, Poll, Waker};
-    #[cfg(feature = "test-utils")]
+    use core::task::{Context, Poll};
+    #[cfg(test)]
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::io::{Read as _, Result as IoResult, Write};
     use std::net::IpAddr;
-    use std::num::NonZeroU64;
+    use std::rc::Rc;
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use async_stream::stream;
-    use async_trait::async_trait;
     use base16ct::lower::encode_string;
     use bytes::Bytes;
-    use edgezero_core::body::{Body, BodyStream};
+    #[cfg(test)]
+    use edgezero_core::body::Body;
+    use edgezero_core::body::{BodyPayload, BodyStream};
     use edgezero_core::error::{BadGatewayReason, EdgeError};
     use edgezero_core::error_detail::{
         FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
     };
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+    #[cfg(test)]
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundFuture,
-        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundProxyMarker,
-        OutboundRequest, OutboundRequestParts, OutboundResponse, OutboundTime,
-        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
-        ResponseMode, apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
-        validate_for_dispatch,
+        HttpClient, OutboundProxyMarker, ResponseDecoding, ResponseMode, normalize_for_dispatch,
+    };
+    use edgezero_core::outbound::{
+        OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundDispatchRequest,
+        OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
+        OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
+        OutboundProgressRuntime, OutboundRequest, OutboundRequestParts, OutboundResponse,
+        OutboundResponseContext, OutboundScope, OutboundSendMode, OutboundTime,
     };
     use edgezero_core::time::{
-        BATCH_DISPATCH_SLACK_MAX, DEADLINE_FAR_FUTURE, Deadline, DispatchBudget, MonotonicClock,
-        MonotonicInstant, dispatch_budget,
+        DEADLINE_FAR_FUTURE, DispatchBudget, MonotonicClock, MonotonicInstant,
     };
     #[cfg(test)]
     use fastly::Body as FastlyBody;
     use fastly::backend::BackendCreationError;
     use fastly::handle::{BodyHandle, PendingRequestHandle, PollHandleResult};
     use fastly::http::body::StreamingBody;
-    use fastly::http::request::{PendingRequest, PollResult, SendError, SendErrorCause};
+    use fastly::http::request::{PendingRequest, PollResult, SendErrorCause};
     use fastly::{Backend, Request as FastlyRequest, Response as FastlyResponse};
     use fastly_sys::fastly_async_io;
     use futures_util::future::poll_fn;
-    use futures_util::stream::FuturesUnordered;
+    use futures_util::stream::{FuturesUnordered, iter, once};
     use futures_util::{FutureExt as _, StreamExt as _};
     use sha2::{Digest as _, Sha256};
 
     use super::progress::{HeadPoll, Progress, Transport};
-    use super::{
-        FastlyBatchObservation, driver_selection_failure, finish_fastly_batch_observation,
-        timeout_error, validate_batch_request,
-    };
+    use super::{timeout_error, validate_supported_options};
 
-    type NativeProgress = Progress<NativeTransport>;
+    pub(crate) type NativeProgress = Progress<NativeTransport>;
+
+    pub(crate) async fn drive_callback<F>(
+        future: F,
+        clock: MonotonicClock,
+        entered: MonotonicInstant,
+    ) -> Result<F::Output, EdgeError>
+    where
+        F: Future,
+    {
+        let scope = super::scope::capture();
+        let progress = super::scope::native_progress(&scope, &native_time(clock), entered)?;
+        progress.drive(future).await
+    }
 
     pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
         OutboundTime::new(clock, super::progress::wait_current)
     }
 
-    enum PendingHead {
-        Direct(PendingRequestHandle),
-        Sdk(Box<PendingRequest>),
+    pub(crate) enum PendingHead {
+        Direct(PendingRequestHandle, bool),
+        Sdk(Box<PendingRequest>, bool),
     }
 
-    struct NativeTransport;
+    pub(crate) struct NativeTransport;
+
+    pub(crate) struct NativeRuntime;
+
+    impl OutboundProgressRuntime for NativeRuntime {
+        fn poll(
+            &self,
+            scope: &OutboundScope,
+            time: &OutboundTime,
+            entered_at: MonotonicInstant,
+            cx: &mut Context<'_>,
+            inner: &mut dyn FnMut(&mut Context<'_>) -> Poll<()>,
+        ) -> Poll<Result<(), EdgeError>> {
+            let progress = super::scope::native_progress(scope, time, entered_at)?;
+            progress.poll_once(cx, inner)
+        }
+    }
 
     impl Transport for NativeTransport {
         type Body = BodyHandle;
@@ -315,8 +368,8 @@ mod fastly_impl {
 
         fn head_handle(pending: &PendingHead) -> Option<u32> {
             match pending {
-                PendingHead::Direct(handle) => Some(pending_handle_id(handle)),
-                PendingHead::Sdk(_) => None,
+                PendingHead::Direct(handle, _) => Some(pending_handle_id(handle)),
+                PendingHead::Sdk(_, _) => None,
             }
         }
 
@@ -326,25 +379,29 @@ mod fastly_impl {
             budget: DispatchBudget,
             clock: &MonotonicClock,
         ) -> HeadPoll<PendingHead, FastlyResponse> {
+            #[cfg(test)]
+            NATIVE_HEAD_POLLS.set(NATIVE_HEAD_POLLS.get().saturating_add(1));
             match pending {
-                PendingHead::Direct(handle) => match handle.poll() {
+                PendingHead::Direct(handle, configured) => match handle.poll() {
                     PollHandleResult::Pending(waiting) => {
-                        HeadPoll::Pending(PendingHead::Direct(waiting))
+                        HeadPoll::Pending(PendingHead::Direct(waiting, configured))
                     }
                     PollHandleResult::Done(result) => HeadPoll::Ready(
                         result
                             .map(|(head, body)| FastlyResponse::from_handles(head, body))
-                            .map_err(|cause| map_send_cause(&cause, budget, clock)),
+                            .map_err(|cause| {
+                                map_configured_send_cause(&cause, budget, clock, configured)
+                            }),
                     ),
                 },
-                PendingHead::Sdk(mut sdk) => match (*sdk).poll() {
+                PendingHead::Sdk(mut sdk, configured) => match (*sdk).poll() {
                     PollResult::Pending(waiting) => {
                         *sdk = waiting;
-                        HeadPoll::Pending(PendingHead::Sdk(sdk))
+                        HeadPoll::Pending(PendingHead::Sdk(sdk, configured))
                     }
-                    PollResult::Done(result) => HeadPoll::Ready(
-                        result.map_err(|error| map_send_error(&error, budget, clock)),
-                    ),
+                    PollResult::Done(result) => HeadPoll::Ready(result.map_err(|error| {
+                        map_configured_send_cause(error.root_cause(), budget, clock, configured)
+                    })),
                 },
             }
         }
@@ -386,6 +443,8 @@ mod fastly_impl {
             reason = "the timed readiness ABI borrows stable IDs from owning SDK handles"
         )]
         fn select(&mut self, handles: &[u32], timeout_ms: u32) -> Result<Option<usize>, EdgeError> {
+            #[cfg(test)]
+            NATIVE_SELECTIONS.set(NATIVE_SELECTIONS.get().saturating_add(1));
             let mut selected = u32::MAX;
             // SAFETY: the slice remains live through the call; zero means indefinite, so callers use a positive timeout.
             let status = unsafe {
@@ -415,44 +474,20 @@ mod fastly_impl {
     }
 
     pub const DYNAMIC_BACKENDS_DISABLED_MESSAGE: &str = "Fastly dynamic backends are not enabled on this service; enable them in the service configuration";
-    const DISPATCH_SLACK_MESSAGE: &str = "Fastly batch adapter overhead between batch_now and SDK arming (preflight + dynamic-backend lookup/creation + SDK setup) exceeded BATCH_DISPATCH_SLACK_MAX; refusing to arm SDK timers with stale duration";
 
     static BACKENDS: OnceLock<Mutex<HashMap<String, (BackendIdentity, Backend)>>> = OnceLock::new();
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(test)]
     std::thread_local! {
-        static DISPATCH_SLACK_INJECTION: Cell<Option<Duration>> = const { Cell::new(None) };
-    }
-
-    #[cfg(feature = "test-utils")]
-    struct DispatchSlackInjection {
-        previous: Option<Duration>,
-    }
-
-    #[cfg(feature = "test-utils")]
-    #[expect(
-        clippy::missing_trait_methods,
-        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
-    )]
-    impl Drop for DispatchSlackInjection {
-        fn drop(&mut self) {
-            DISPATCH_SLACK_INJECTION.set(self.previous);
-        }
-    }
-
-    /// Overrides the dispatch-guard clock offset for one target-runtime contract test.
-    #[cfg(feature = "test-utils")]
-    #[inline]
-    #[must_use]
-    pub fn inject_dispatch_slack_for_test(delay: Duration) -> impl Drop {
-        let previous = DISPATCH_SLACK_INJECTION.replace(Some(delay));
-        DispatchSlackInjection { previous }
+        static NATIVE_HEAD_POLLS: Cell<usize> = const { Cell::new(0) };
+        static NATIVE_SELECTIONS: Cell<usize> = const { Cell::new(0) };
     }
 
     #[derive(Clone, Debug, Eq, Hash, PartialEq)]
     struct BackendIdentity {
         host: String,
         phase_ms: u64,
+        connect_ms: Option<u64>,
         port: u16,
         scheme: String,
         tls: bool,
@@ -461,30 +496,8 @@ mod fastly_impl {
 
     struct PreparedRequest {
         backend: Backend,
-        budget: DispatchBudget,
+        context: OutboundResponseContext,
         parts: OutboundRequestParts,
-        started_at: MonotonicInstant,
-    }
-
-    struct PendingSlot {
-        metadata: PendingSlotMetadata,
-        pending: PendingRequestHandle,
-    }
-
-    struct PendingSlotMetadata {
-        index: usize,
-        budget: DispatchBudget,
-        max_decoder_bytes: u64,
-        max_brotli_window_bits: u8,
-        max_chunk_bytes: Option<NonZeroU64>,
-        max_decoded_response_bytes: Option<u64>,
-        max_encoded_response_bytes: Option<u64>,
-        max_response_header_bytes: Option<u64>,
-        max_response_header_count: Option<u64>,
-        request_method: Method,
-        proxy_marker: OutboundProxyMarker,
-        response_decoding: ResponseDecoding,
-        response_mode: ResponseMode,
     }
 
     /// Native outbound HTTP implementation for Fastly Compute.
@@ -508,11 +521,11 @@ mod fastly_impl {
 
         fn ensure_backend(
             &self,
-            request: OutboundRequest,
+            identity: BackendIdentity,
+            parts: &OutboundRequestParts,
             budget: DispatchBudget,
             batch_started_at: Option<MonotonicInstant>,
-        ) -> Result<(Backend, OutboundRequestParts), EdgeError> {
-            let (identity, parts) = backend_identity(request, budget)?;
+        ) -> Result<Backend, EdgeError> {
             let registry = BACKENDS.get_or_init(|| Mutex::new(HashMap::new()));
             let backend = cached_backend(
                 registry,
@@ -522,145 +535,142 @@ mod fastly_impl {
                 |name, settings| {
                     let target =
                         format!("{}:{}", parts.uri.host().unwrap_or_default(), settings.port);
-                    let timers = backend_timers(settings.phase_ms);
-                    let mut builder = Backend::builder(name, target)
-                        .override_host(&settings.wire_authority)
-                        .connect_timeout(timers.connect)
-                        .first_byte_timeout(timers.first_byte)
-                        .between_bytes_timeout(timers.between_bytes);
+                    let mut builder = super::with_backend_timers(
+                        settings.phase_ms,
+                        settings.connect_ms,
+                        |timers| {
+                            Backend::builder(name, target)
+                                .override_host(&settings.wire_authority)
+                                .connect_timeout(timers.connect)
+                                .first_byte_timeout(timers.first_byte)
+                                .between_bytes_timeout(timers.between_bytes)
+                        },
+                    );
                     if settings.tls {
                         builder = builder.enable_ssl().check_certificate(&settings.host);
                         if settings.host.parse::<IpAddr>().is_err() {
                             builder = builder.sni_hostname(&settings.host);
                         }
                     }
-                    register_backend_with_batch_guard(
-                        batch_started_at,
-                        budget,
-                        self.time.clock(),
-                        || builder.finish(),
-                    )
+                    register_backend_while_live(batch_started_at, budget, self.time.clock(), || {
+                        builder.finish()
+                    })
                 },
             )?;
-            Ok((backend, parts))
+            Ok(backend)
         }
 
-        fn prepare(
+        fn configure(
             &self,
-            request: OutboundRequest,
-            started_at: MonotonicInstant,
+            request: OutboundDispatchRequest,
         ) -> Result<PreparedRequest, EdgeError> {
-            validate_for_dispatch(&request, super::OutboundSendMode::Send)?;
-            self.prepare_validated(request, started_at, None, false)
-        }
-
-        fn prepare_batch(
-            &self,
-            request: OutboundRequest,
-            started_at: MonotonicInstant,
-            observation_cutoff: Deadline,
-        ) -> Result<PreparedRequest, EdgeError> {
-            validate_batch_request(&request)?;
-            self.prepare_validated(request, started_at, Some(observation_cutoff), true)
-        }
-
-        fn prepare_validated(
-            &self,
-            mut request: OutboundRequest,
-            started_at: MonotonicInstant,
-            observation_cutoff: Option<Deadline>,
-            enforce_batch_slack: bool,
-        ) -> Result<PreparedRequest, EdgeError> {
-            let budget = dispatch_budget(&request, started_at, observation_cutoff)?;
-            normalize_fastly_request(&mut request)?;
-            budget_remaining(budget, self.time.clock())?;
-            let (backend, parts) =
-                self.ensure_backend(request, budget, enforce_batch_slack.then_some(started_at))?;
-            budget_remaining(budget, self.time.clock())?;
+            request.scope().check()?;
+            let budget = request.budget();
+            let (mut identity, ()) = backend_identity_view(request.request(), budget)?;
+            let (mut parts, context) = request.into_parts();
+            identity.phase_ms = backend_timer_ms(parts.timeout.unwrap_or(budget.duration));
+            if !parts.headers.contains_key(ACCEPT_ENCODING) {
+                parts
+                    .headers
+                    .insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+            }
+            budget_remaining(budget, context.clock())?;
+            let batch_start =
+                (context.mode() == OutboundSendMode::Batch).then_some(context.entered_at());
+            let backend = self.ensure_backend(identity, &parts, budget, batch_start)?;
+            budget_remaining(budget, context.clock())?;
             Ok(PreparedRequest {
                 backend,
-                budget,
+                context,
                 parts,
-                started_at,
             })
         }
 
-        async fn execute(&self, prepared: PreparedRequest) -> Result<OutboundResponse, EdgeError> {
-            let budget = prepared.budget;
-            let progress = NativeProgress::new(
-                NativeTransport,
-                self.time.clock().clone(),
-                prepared.started_at,
-                Some(budget.deadline),
-            );
-            progress
-                .drive(race_deadline(
-                    self.execute_with_progress(prepared, &progress)
-                        .boxed_local(),
-                    budget,
-                    &self.time,
-                ))
-                .await?
-        }
-
-        async fn execute_with_progress(
+        async fn execute_head(
             &self,
             prepared: PreparedRequest,
             progress: &NativeProgress,
-        ) -> Result<OutboundResponse, EdgeError> {
+        ) -> Result<OutboundHead, EdgeError> {
             let PreparedRequest {
                 backend,
-                budget,
+                context,
                 parts,
-                started_at,
             } = prepared;
+            let budget = context.budget();
+            let started_at = context.entered_at();
+            let time = context.time().clone();
             let OutboundRequestParts {
                 body,
                 cache_policy,
                 headers,
                 image_optimizer,
-                max_decoder_bytes,
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_encoded_response_bytes,
                 max_request_body_bytes,
-                max_response_header_bytes,
-                max_response_header_count,
                 method,
-                proxy_marker,
-                response_decoding,
-                response_mode,
                 uri,
                 ..
             } = parts;
+            let configured =
+                super::effective_connect_ms(parts.connect_timeout, budget.duration).is_some();
             let fastly_request = build_fastly_request(&method, &uri, &headers, cache_policy);
-            let response = match body {
-                Body::Once(bytes) => {
+            let (payload, _scope) = body.into_parts();
+            let response = match payload {
+                BodyPayload::Once(bytes) => {
                     validate_request_body_length(&bytes, max_request_body_bytes)?;
-                    let mut buffered_request = fastly_request;
+                    let mut request = fastly_request;
                     if let Some(options) = image_optimizer {
-                        buffered_request
+                        request
                             .set_image_optimizer(super::image_optimizer::native_options(&options)?);
-                        dispatch_guard(started_at, budget, self.time.clock())?;
-                        super::synchronous_send_until(budget, self.time.clock(), || {
-                            buffered_request
-                                .send(backend)
-                                .map_err(|error| map_send_error(&error, budget, self.time.clock()))
+                        ensure_dispatch_budget(started_at, budget, time.clock())?;
+                        super::synchronous_send_until(budget, time.clock(), || {
+                            request.send(backend).map_err(|error| {
+                                map_configured_send_cause(
+                                    error.root_cause(),
+                                    budget,
+                                    time.clock(),
+                                    configured,
+                                )
+                            })
                         })?
                     } else {
-                        buffered_request.set_body(bytes.to_vec());
-                        dispatch_guard(started_at, budget, self.time.clock())?;
-                        let pending = buffered_request
-                            .send_async(backend)
-                            .map_err(|error| map_send_error(&error, budget, self.time.clock()))?;
-                        progress
-                            .head(PendingHead::Sdk(Box::new(pending)), budget)
-                            .receive()
-                            .await?
+                        request.set_body(bytes.to_vec());
+                        ensure_dispatch_budget(started_at, budget, time.clock())?;
+                        let pending = if context.mode() == OutboundSendMode::Batch {
+                            let (handle, optional_body) = request.into_handles();
+                            let native_body = optional_body.ok_or_else(|| {
+                                EdgeError::internal(anyhow::anyhow!(
+                                    "Fastly buffered request did not produce a body handle"
+                                ))
+                            })?;
+                            PendingHead::Direct(
+                                handle
+                                    .send_async_to_backend(native_body, &backend)
+                                    .map_err(|cause| {
+                                        map_configured_send_cause(
+                                            &cause,
+                                            budget,
+                                            time.clock(),
+                                            configured,
+                                        )
+                                    })?,
+                                configured,
+                            )
+                        } else {
+                            PendingHead::Sdk(
+                                Box::new(request.send_async(backend).map_err(|error| {
+                                    map_configured_send_cause(
+                                        error.root_cause(),
+                                        budget,
+                                        time.clock(),
+                                        configured,
+                                    )
+                                })?),
+                                configured,
+                            )
+                        };
+                        progress.head(pending, budget).receive().await?
                     }
                 }
-                Body::Stream(source) => {
+                BodyPayload::Stream(source) => {
                     send_streamed(
                         fastly_request,
                         backend,
@@ -668,97 +678,38 @@ mod fastly_impl {
                         max_request_body_bytes,
                         budget,
                         started_at,
-                        self.time.clock().clone(),
+                        time.clock().clone(),
                         progress,
+                        configured,
                     )
                     .await?
                 }
             };
-            process_response(
-                response,
-                method,
-                proxy_marker,
-                response_decoding,
-                response_mode,
-                budget,
-                max_decoder_bytes,
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_encoded_response_bytes,
-                max_response_header_bytes,
-                max_response_header_count,
-                self.time.clone(),
-                progress,
-            )
-            .await
+            process_head(response, context, progress)
         }
 
-        fn dispatch_batch_slot(
-            &self,
-            index: usize,
-            prepared: PreparedRequest,
-        ) -> Result<PendingSlot, EdgeError> {
-            let PreparedRequest {
-                backend,
-                budget,
-                parts,
-                started_at,
-            } = prepared;
-            let OutboundRequestParts {
-                body,
-                cache_policy,
-                headers,
-                max_decoder_bytes,
-                max_brotli_window_bits,
-                max_chunk_bytes,
-                max_decoded_response_bytes,
-                max_encoded_response_bytes,
-                max_request_body_bytes,
-                max_response_header_bytes,
-                max_response_header_count,
-                method,
-                proxy_marker,
-                response_decoding,
-                response_mode,
-                uri,
-                ..
-            } = parts;
-            let Body::Once(bytes) = body else {
-                return Err(EdgeError::internal(anyhow::anyhow!(
-                    "Fastly batch preflight admitted a streamed upload"
-                )));
-            };
-            validate_request_body_length(&bytes, max_request_body_bytes)?;
-            let mut request = build_fastly_request(&method, &uri, &headers, cache_policy);
-            request.set_body(bytes.to_vec());
-            dispatch_guard(started_at, budget, self.time.clock())?;
-            let (request_handle, optional_body_handle) = request.into_handles();
-            let body_handle = optional_body_handle.ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!(
-                    "Fastly buffered batch request did not produce a body handle"
-                ))
-            })?;
-            let pending = request_handle
-                .send_async_to_backend(body_handle, &backend)
-                .map_err(|cause| map_send_cause(&cause, budget, self.time.clock()))?;
-            Ok(PendingSlot {
-                metadata: PendingSlotMetadata {
-                    index,
+        fn pipeline(
+            request: OutboundDispatchRequest,
+            progress: NativeProgress,
+        ) -> OutboundFuture<OutboundResponse> {
+            let client = Self::with_time(request.time().clone());
+            Box::pin(async move {
+                let budget = request.budget();
+                let time = request.time().clone();
+                race_deadline(
+                    async {
+                        let prepared = client.configure(request)?;
+                        client
+                            .execute_head(prepared, &progress)
+                            .boxed_local()
+                            .await?
+                            .finish()
+                            .await
+                    },
                     budget,
-                    max_decoder_bytes,
-                    max_brotli_window_bits,
-                    max_chunk_bytes,
-                    max_decoded_response_bytes,
-                    max_encoded_response_bytes,
-                    max_response_header_bytes,
-                    max_response_header_count,
-                    request_method: method,
-                    proxy_marker,
-                    response_decoding,
-                    response_mode,
-                },
-                pending,
+                    &time,
+                )
+                .await
             })
         }
     }
@@ -770,164 +721,201 @@ mod fastly_impl {
         }
     }
 
-    #[async_trait(?Send)]
     impl OutboundHttpClient for FastlyOutboundClient {
         #[inline]
-        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            super::scope::ensure_open()?;
-            let started_at = self.time.clock().now();
-            let prepared = self.prepare(request, started_at)?;
-            self.execute(prepared).await
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            super::scope::runtime()
         }
 
         #[inline]
-        fn start_batch_until(
+        fn time(&self) -> OutboundTime {
+            self.time.clone()
+        }
+
+        #[inline]
+        fn validate_supported_options(
             &self,
-            requests: Vec<OutboundRequest>,
-            observation_cutoff: Deadline,
-        ) -> OutboundBatch {
-            if let Err(error) = super::scope::ensure_open() {
-                let failed = stream! { yield OutboundBatchDriverEvent::Failed(error); };
-                return OutboundBatch::from_driver(requests.len(), failed);
-            }
-            let batch_started_at = self.time.clock().now();
-            let slot_count = requests.len();
-            if observation_cutoff.is_expired_at(batch_started_at) {
-                return OutboundBatch::cutoff(slot_count);
-            }
+            request: &OutboundRequest,
+            mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            validate_supported_options(request, mode)
+        }
 
-            let progress = NativeProgress::new(
-                NativeTransport,
-                self.time.clock().clone(),
-                batch_started_at,
-                Some(observation_cutoff),
+        #[inline]
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            let client = Self::with_time(request.time().clone());
+            let selected_progress = super::scope::native_progress(
+                request.scope(),
+                request.time(),
+                request.entered_at(),
             );
+            Box::pin(async move {
+                let progress = selected_progress?;
+                let budget = request.budget();
+                let time = request.time().clone();
+                progress
+                    .drive(race_deadline(
+                        async {
+                            let prepared = client.configure(request)?;
+                            client.execute_head(prepared, &progress).boxed_local().await
+                        },
+                        budget,
+                        &time,
+                    ))
+                    .await?
+            })
+        }
 
-            let mut completed = Vec::new();
-            let mut pending = Vec::new();
-            let mut observation_cutoff_reached = false;
-            for (index, request) in requests.into_iter().enumerate() {
-                let prepared = self
-                    .prepare_batch(request, batch_started_at, observation_cutoff)
-                    .and_then(|prepared| {
-                        let mut timer = self.time.wait_until(prepared.budget.deadline);
-                        let ready = progress.with_current(|| {
-                            timer.as_mut().poll(&mut Context::from_waker(Waker::noop()))
-                        });
-                        if let Poll::Ready(result) = ready {
-                            return Err(result
-                                .err()
-                                .unwrap_or_else(|| timeout_error(prepared.budget.cause)));
-                        }
-                        self.dispatch_batch_slot(index, prepared)
-                            .map(|slot| (slot, timer))
-                    });
-                match prepared {
-                    Ok(slot) => pending.push(slot),
-                    Err(error) => {
-                        let completed_at = self.time.clock().now();
-                        match finish_fastly_batch_observation(
+        #[inline]
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            let scope = request.scope().clone();
+            scope.check()?;
+            let time = request.time().clone();
+            let entered = request.entered_at();
+            let progress = super::scope::native_progress(&scope, &time, entered)?;
+            super::scope::begin(
+                &scope,
+                Self::pipeline(request, progress.clone()),
+                &progress,
+                &time,
+                entered,
+            )
+        }
+
+        #[inline]
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, requests) = batch.into_slots();
+            let cutoff = context.observation_cutoff();
+            let observed_at = context.clock().now();
+            if cutoff.is_expired_at(observed_at) {
+                if requests.is_empty() {
+                    return OutboundBatch::cutoff(context);
+                }
+                // Handoff after cutoff must still publish expired earlier-own-deadline slots.
+                let mut events = Vec::new();
+                let mut unresolved = false;
+                for (index, request) in requests {
+                    let budget = request.budget();
+                    if budget.own_deadline_expired_before(cutoff, observed_at) {
+                        events.push(OutboundBatchDriverEvent::Item {
                             index,
-                            batch_started_at,
-                            completed_at,
-                            observation_cutoff,
-                            Err(error),
-                        ) {
-                            FastlyBatchObservation::Continue(item) => completed.push(item),
-                            FastlyBatchObservation::Cutoff => {
-                                observation_cutoff_reached = true;
-                                break;
-                            }
-                        }
+                            completed_at: observed_at,
+                            outcome: Err(timeout_error(budget.cause)),
+                        });
+                    } else {
+                        unresolved = true;
                     }
                 }
+                if unresolved {
+                    events.push(OutboundBatchDriverEvent::Cutoff);
+                }
+                return OutboundBatch::from_driver(
+                    context,
+                    iter(events),
+                    OutboundExchangeOwner::new(|| {}),
+                );
             }
-
-            let clock = self.time.clock().clone();
-            let mut exchanges = pending
-                .into_iter()
-                .map(|(slot, timer)| {
-                    finish_timed_slot(slot, timer, self.time.clone(), progress.clone())
-                        .boxed_local()
-                })
-                .collect::<FuturesUnordered<_>>();
-            let completions = stream! {
-                for item in completed {
-                    yield OutboundBatchDriverEvent::Item(item);
-                }
-
-                if observation_cutoff_reached {
-                    yield OutboundBatchDriverEvent::Cutoff;
-                    return;
-                }
-
-                while !exchanges.is_empty() && !observation_cutoff.is_expired_at(clock.now()) {
-                    let selected = match progress.drive(exchanges.next()).await {
-                        Ok(selected) => selected,
-                        Err(error) => {
-                            yield driver_selection_failure(error);
-                            return;
-                        }
-                    };
-                    let Some((index, completed_at, outcome)) = selected else { break; };
-                    match finish_fastly_batch_observation(
-                        index,
-                        batch_started_at,
-                        completed_at,
-                        observation_cutoff,
-                        outcome,
-                    ) {
-                        FastlyBatchObservation::Continue(item) => {
-                            yield OutboundBatchDriverEvent::Item(item);
-                        }
-                        FastlyBatchObservation::Cutoff => {
-                            yield OutboundBatchDriverEvent::Cutoff;
-                            return;
-                        }
-                    }
-                }
-
-                if !exchanges.is_empty() {
-                    yield OutboundBatchDriverEvent::Cutoff;
+            let scope = context.scope().clone();
+            let selected_progress =
+                super::scope::native_progress(&scope, context.time(), context.started_at());
+            let progress = match selected_progress {
+                Ok(available) => available,
+                Err(error) => {
+                    return OutboundBatch::from_driver(
+                        context,
+                        once(async move { OutboundBatchDriverEvent::Failed(error) }),
+                        OutboundExchangeOwner::new(|| {}),
+                    );
                 }
             };
-            OutboundBatch::from_driver(slot_count, super::scope::bind_batch(completions))
+            let time = context.time().clone();
+            let exchanges = requests
+                .into_iter()
+                .map(|(index, request)| {
+                    let budget = request.budget();
+                    let future = Self::pipeline(request, progress.clone());
+                    let clock = time.clock().clone();
+                    async move {
+                        let outcome = future.await;
+                        let completed_at = clock.now();
+                        let beyond_cutoff = cutoff.is_expired_at(completed_at)
+                            && !budget.own_deadline_expired_before(cutoff, completed_at);
+                        (
+                            OutboundBatchDriverEvent::Item {
+                                index,
+                                completed_at,
+                                outcome,
+                            },
+                            beyond_cutoff,
+                        )
+                    }
+                    .boxed_local()
+                })
+                .collect::<FuturesUnordered<_>>();
+            let driver = progress.clone();
+            let completions = stream! {
+                let mut active = exchanges;
+                let mut cutoff_reached = false;
+                while !active.is_empty() {
+                    match driver.drive(active.next()).await {
+                        Ok(Some((event, beyond_cutoff))) => { cutoff_reached |= beyond_cutoff; yield event; },
+                        Ok(None) => break,
+                        Err(error) => {
+                            yield OutboundBatchDriverEvent::Failed(error);
+                            return;
+                        }
+                    }
+                }
+                if cutoff_reached { yield OutboundBatchDriverEvent::Cutoff; }
+            };
+            let receiver = super::scope::schedule_batch(
+                &scope,
+                completions,
+                &progress,
+                context.time(),
+                context.started_at(),
+            );
+            OutboundBatch::from_driver(context, receiver, OutboundExchangeOwner::new(|| {}))
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct BackendTimers {
-        between_bytes: Duration,
-        connect: Duration,
-        first_byte: Duration,
-    }
-
+    #[cfg(test)]
     fn backend_identity(
         request: OutboundRequest,
         budget: DispatchBudget,
     ) -> Result<(BackendIdentity, OutboundRequestParts), EdgeError> {
-        let scheme_str = request
+        let (mut identity, ()) = backend_identity_view(&request, budget)?;
+        let parts = request.into_parts();
+        identity.phase_ms = backend_timer_ms(parts.timeout.unwrap_or(budget.duration));
+        Ok((identity, parts))
+    }
+
+    fn backend_identity_view(
+        request: &OutboundRequest,
+        budget: DispatchBudget,
+    ) -> Result<(BackendIdentity, ()), EdgeError> {
+        let scheme = request
             .uri()
             .scheme_str()
             .ok_or_else(|| EdgeError::bad_request("outbound request URI has no scheme"))?;
-        let port = request
-            .uri()
-            .port_u16()
-            .unwrap_or(if scheme_str == "https" { 443 } else { 80 });
-        let host = request.host_name().to_owned();
-        let wire_authority = request.host_authority().to_owned();
-        let tls = scheme_str == "https";
-        let scheme = scheme_str.to_owned();
-        let parts = request.into_parts();
-        let identity = BackendIdentity {
-            host,
-            phase_ms: backend_timer_ms(parts.timeout.unwrap_or(budget.duration)),
-            port,
-            scheme,
-            tls,
-            wire_authority,
-        };
-        Ok((identity, parts))
+        Ok((
+            BackendIdentity {
+                host: request.host_name().to_owned(),
+                phase_ms: backend_timer_ms(budget.duration),
+                // Keep the configured tuple stable across aggregate-budget ladder rungs.
+                connect_ms: request
+                    .connect_timeout_setting()
+                    .map(|configured| ceil_millis(configured.min(DEADLINE_FAR_FUTURE))),
+                port: request
+                    .uri()
+                    .port_u16()
+                    .unwrap_or(if scheme == "https" { 443 } else { 80 }),
+                scheme: scheme.to_owned(),
+                tls: scheme == "https",
+                wire_authority: request.host_authority().to_owned(),
+            },
+            (),
+        ))
     }
 
     #[expect(
@@ -943,6 +931,10 @@ mod fastly_impl {
         hasher.update(identity.port.to_be_bytes());
         hasher.update([u8::from(identity.tls)]);
         hasher.update(identity.phase_ms.to_be_bytes());
+        if let Some(connect_ms) = identity.connect_ms {
+            hasher.update(b"connect-ms-v1");
+            hasher.update(connect_ms.to_be_bytes());
+        }
         format!("ez_b31v1_{}", encode_string(&hasher.finalize()))
     }
 
@@ -954,13 +946,9 @@ mod fastly_impl {
             .min(maximum)
     }
 
-    fn backend_timers(phase_ms: u64) -> BackendTimers {
-        let phase = Duration::from_millis(phase_ms);
-        BackendTimers {
-            between_bytes: phase,
-            connect: phase,
-            first_byte: phase,
-        }
+    #[cfg(test)]
+    fn backend_timers(phase_ms: u64) -> super::BackendTimers {
+        super::with_backend_timers(phase_ms, None, |timers| timers)
     }
 
     fn cached_backend<Value, Register>(
@@ -1015,22 +1003,12 @@ mod fastly_impl {
         request
     }
 
-    fn normalize_fastly_request(request: &mut OutboundRequest) -> Result<(), EdgeError> {
-        normalize_for_dispatch(request)?;
-        if !request.headers().contains_key(ACCEPT_ENCODING) {
-            request
-                .headers_mut()
-                .insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
-        }
-        Ok(())
-    }
-
     fn ceil_millis(duration: Duration) -> u64 {
         let rounded = duration.as_nanos().div_ceil(1_000_000);
         u64::try_from(rounded).unwrap_or(u64::MAX).max(1)
     }
 
-    fn register_backend_with_batch_guard<BackendValue, CreationError, Register>(
+    fn register_backend_while_live<BackendValue, CreationError, Register>(
         batch_started_at: Option<MonotonicInstant>,
         budget: DispatchBudget,
         clock: &MonotonicClock,
@@ -1040,7 +1018,7 @@ mod fastly_impl {
         Register: FnOnce() -> Result<BackendValue, CreationError>,
     {
         if let Some(started_at) = batch_started_at {
-            dispatch_guard(started_at, budget, clock)?;
+            ensure_dispatch_budget(started_at, budget, clock)?;
         }
         Ok(register())
     }
@@ -1054,47 +1032,6 @@ mod fastly_impl {
     )]
     fn pending_handle_id(handle: &PendingRequestHandle) -> u32 {
         handle.as_u32()
-    }
-
-    async fn finish_selected(
-        response: Result<FastlyResponse, EdgeError>,
-        metadata: PendingSlotMetadata,
-        time: &OutboundTime,
-        progress: &NativeProgress,
-    ) -> Result<OutboundResponse, EdgeError> {
-        let PendingSlotMetadata {
-            budget,
-            max_decoder_bytes,
-            max_brotli_window_bits,
-            max_chunk_bytes,
-            max_decoded_response_bytes,
-            max_encoded_response_bytes,
-            max_response_header_bytes,
-            max_response_header_count,
-            request_method,
-            proxy_marker,
-            response_decoding,
-            response_mode,
-            ..
-        } = metadata;
-        process_response(
-            response?,
-            request_method,
-            proxy_marker,
-            response_decoding,
-            response_mode,
-            budget,
-            max_decoder_bytes,
-            max_brotli_window_bits,
-            max_chunk_bytes,
-            max_decoded_response_bytes,
-            max_encoded_response_bytes,
-            max_response_header_bytes,
-            max_response_header_count,
-            time.clone(),
-            progress,
-        )
-        .await
     }
 
     fn map_backend_creation_error(error: &BackendCreationError) -> EdgeError {
@@ -1266,10 +1203,10 @@ mod fastly_impl {
 
     fn cause_to_failure(cause: &SendErrorCause) -> super::SendFailure {
         match cause {
-            SendErrorCause::ConnectionTimeout | SendErrorCause::HttpResponseTimeout => {
-                super::SendFailure::BudgetedTimeout
+            SendErrorCause::HttpResponseTimeout => super::SendFailure::BudgetedTimeout,
+            SendErrorCause::ConnectionTimeout | SendErrorCause::DnsTimeout => {
+                super::SendFailure::ProviderTimeout
             }
-            SendErrorCause::DnsTimeout => super::SendFailure::ProviderTimeout,
             SendErrorCause::ConnectionLimitReached
             | SendErrorCause::ConnectionRefused
             | SendErrorCause::DestinationIpUnroutable
@@ -1305,14 +1242,7 @@ mod fastly_impl {
         }
     }
 
-    fn map_send_error(
-        error: &SendError,
-        budget: DispatchBudget,
-        clock: &MonotonicClock,
-    ) -> EdgeError {
-        map_send_cause(error.root_cause(), budget, clock)
-    }
-
+    #[cfg(test)]
     fn map_send_cause(
         cause: &SendErrorCause,
         budget: DispatchBudget,
@@ -1325,100 +1255,49 @@ mod fastly_impl {
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the adapter consumes independent response-policy fields"
-    )]
-    async fn process_response(
-        mut response: FastlyResponse,
-        request_method: Method,
-        proxy_marker: OutboundProxyMarker,
-        response_decoding: ResponseDecoding,
-        response_mode: ResponseMode,
+    fn map_configured_send_cause(
+        cause: &SendErrorCause,
         budget: DispatchBudget,
-        max_decoder_bytes: u64,
-        max_brotli_window_bits: u8,
-        max_chunk_bytes: Option<NonZeroU64>,
-        max_decoded_response_bytes: Option<u64>,
-        max_encoded_response_bytes: Option<u64>,
-        max_response_header_bytes: Option<u64>,
-        max_response_header_count: Option<u64>,
-        time: OutboundTime,
+        clock: &MonotonicClock,
+        configured: bool,
+    ) -> EdgeError {
+        let failure = if configured && matches!(cause, SendErrorCause::ConnectionTimeout) {
+            super::SendFailure::ConnectTimeout
+        } else {
+            cause_to_failure(cause)
+        };
+        with_fastly_detail(
+            super::classify_send_failure(failure, budget, clock.now()),
+            ProviderFailurePhase::Send,
+            send_failure_cause(cause),
+        )
+    }
+
+    fn process_head(
+        mut response: FastlyResponse,
+        context: OutboundResponseContext,
         progress: &NativeProgress,
-    ) -> Result<OutboundResponse, EdgeError> {
-        let clock = time.clock().clone();
-        budget_remaining(budget, &clock)?;
-        let response_clock = clock.clone();
+    ) -> Result<OutboundHead, EdgeError> {
+        budget_remaining(context.budget(), context.clock())?;
         let status = StatusCode::from_u16(response.get_status().as_u16()).map_err(|_error| {
             EdgeError::bad_gateway_with_reason(
                 "Fastly returned an invalid upstream status code",
                 BadGatewayReason::Protocol,
             )
         })?;
-        let (mut headers, normalization, _) = OutboundHeaderInput::new(
+        let headers = OutboundHeaderInput::new(
             "fastly",
             response_headers(&response),
             OutboundHeaderFidelity::AdapterVisibleFields,
-        )
-        .normalize(
-            ResponseHeaderLimiter::new(max_response_header_bytes, max_response_header_count),
-            &request_method,
-            status,
-            proxy_marker,
-        )?;
-        let disposition = normalization.body_disposition;
-        let body = if disposition == ResponseBodyDisposition::FramingBodyless {
-            Body::empty()
-        } else {
-            let declared_reset_body = matches!(
-                disposition,
-                ResponseBodyDisposition::ResetContent {
-                    declared_body: true
-                }
-            );
-            let native = progress.body(response.take_body().into_handle(), budget);
-            if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
-                if !declared_reset_body {
-                    let mut reset_stream = native;
-                    if let Some(item) = reset_stream.next().await {
-                        item?;
-                    }
-                }
-                Body::empty()
-            } else {
-                let shaped = apply_response_body_policy(
-                    native,
-                    &mut headers,
-                    ResponseBodyPolicy {
-                        max_brotli_window_bits,
-                        max_chunk_bytes,
-                        max_decoded_response_bytes,
-                        max_decoder_bytes,
-                        max_encoded_response_bytes,
-                        response_decoding,
-                        response_mode,
-                        status,
-                    },
-                )?;
-                match response_mode {
-                    ResponseMode::Buffered { max_bytes } => {
-                        Body::from(collect_response_stream(shaped, max_bytes).await?)
-                    }
-                    ResponseMode::Streamed => {
-                        Body::from_stream(deadline_stream(shaped, budget, time, progress.clone()))
-                    }
-                }
-            }
-        };
-        budget_remaining(budget, &response_clock)?;
-        Ok(OutboundResponse::new(
-            request_method,
+        );
+        let encoded = progress.body(response.take_body().into_handle(), context.budget());
+        OutboundHead::new(
             status,
             headers,
-            body,
-            response_clock,
-            normalization.content_type_provenance,
-        ))
+            encoded,
+            context,
+            OutboundExchangeOwner::new(|| {}),
+        )
     }
 
     fn response_headers(response: &FastlyResponse) -> HeaderMap {
@@ -1519,16 +1398,17 @@ mod fastly_impl {
         started_at: MonotonicInstant,
         clock: MonotonicClock,
         progress: &NativeProgress,
+        configured: bool,
     ) -> Result<FastlyResponse, EdgeError> {
-        dispatch_guard(started_at, budget, &clock)?;
-        let (writer, pending) = request
-            .send_async_streaming(backend)
-            .map_err(|error| map_send_error(&error, budget, &clock))?;
+        ensure_dispatch_budget(started_at, budget, &clock)?;
+        let (writer, pending) = request.send_async_streaming(backend).map_err(|error| {
+            map_configured_send_cause(error.root_cause(), budget, &clock, configured)
+        })?;
         let uploaded =
             complete_streamed_exchange(writer, source, maximum, budget, &clock, || Ok(pending))
                 .await?;
         progress
-            .head(PendingHead::Sdk(Box::new(uploaded)), budget)
+            .head(PendingHead::Sdk(Box::new(uploaded), configured), budget)
             .receive()
             .await
     }
@@ -1577,78 +1457,6 @@ mod fastly_impl {
             .unwrap_or(budget.deadline.instant());
         NativeProgress::new(NativeTransport, clock, entered, Some(budget.deadline))
             .body(body.into_handle(), budget)
-    }
-
-    fn deadline_stream(
-        mut source: BodyStream,
-        budget: DispatchBudget,
-        time: OutboundTime,
-        progress: NativeProgress,
-    ) -> BodyStream {
-        stream! {
-            let mut timer = time.wait_until(budget.deadline);
-            let mut previous = time.clock().now();
-            loop {
-                let read = race_with_timer(source.next(), budget, &time, &mut timer, &mut previous, |item| {
-                    item.as_ref().and_then(|outcome| outcome.as_ref().err()).and_then(EdgeError::provider_failure_detail).copied()
-                });
-                let next_item = match progress.drive(read).await.and_then(identity) {
-                    Ok(item) => item,
-                    Err(error) => {
-                        drop(source); drop(timer); drop(time); drop(progress);
-                        yield Err(error);
-                        return;
-                    }
-                };
-                match next_item {
-                    Some(Ok(bytes)) => yield Ok(bytes),
-                    Some(Err(error)) => {
-                        drop(source); drop(timer); drop(time); drop(progress);
-                        yield Err(error);
-                        return;
-                    }
-                    None => return,
-                }
-            }
-        }
-        .boxed_local()
-    }
-
-    async fn finish_timed_slot(
-        slot: PendingSlot,
-        mut timer: OutboundFuture<()>,
-        time: OutboundTime,
-        progress: NativeProgress,
-    ) -> (usize, MonotonicInstant, Result<OutboundResponse, EdgeError>) {
-        let PendingSlot {
-            metadata,
-            pending: handle,
-        } = slot;
-        let index = metadata.index;
-        let budget = metadata.budget;
-        let lease = progress.head(PendingHead::Direct(handle), budget);
-        let exchange = async {
-            let response = lease.receive().await;
-            finish_selected(response, metadata, &time, &progress).await
-        };
-        let mut previous = time.clock().now();
-        let outcome = race_with_timer(
-            exchange,
-            budget,
-            &time,
-            &mut timer,
-            &mut previous,
-            |result| {
-                result
-                    .as_ref()
-                    .err()
-                    .and_then(EdgeError::provider_failure_detail)
-                    .copied()
-            },
-        )
-        .await
-        .and_then(identity);
-        (index, time.clock().now(), outcome)
     }
 
     async fn race_deadline<Output>(
@@ -1740,42 +1548,15 @@ mod fastly_impl {
             .ok_or_else(|| timeout_error(budget.cause))
     }
 
-    fn dispatch_guard(
+    fn ensure_dispatch_budget(
         started_at: MonotonicInstant,
         budget: DispatchBudget,
         clock: &MonotonicClock,
     ) -> Result<(), EdgeError> {
-        dispatch_guard_at(started_at, budget, dispatch_observed_at(started_at, clock)?)
+        check_dispatch_budget_at(started_at, budget, clock.now())
     }
 
-    #[cfg(feature = "test-utils")]
-    fn dispatch_observed_at(
-        started_at: MonotonicInstant,
-        clock: &MonotonicClock,
-    ) -> Result<MonotonicInstant, EdgeError> {
-        if let Some(delay) = DISPATCH_SLACK_INJECTION.get() {
-            return started_at.checked_add(delay).ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!(
-                    "Fastly dispatch test clock exceeded the monotonic instant range"
-                ))
-            });
-        }
-        Ok(clock.now())
-    }
-
-    #[cfg(not(feature = "test-utils"))]
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the test-utils build can reject an injected monotonic overflow"
-    )]
-    fn dispatch_observed_at(
-        _started_at: MonotonicInstant,
-        clock: &MonotonicClock,
-    ) -> Result<MonotonicInstant, EdgeError> {
-        Ok(clock.now())
-    }
-
-    fn dispatch_guard_at(
+    fn check_dispatch_budget_at(
         started_at: MonotonicInstant,
         budget: DispatchBudget,
         observed_at: MonotonicInstant,
@@ -1783,15 +1564,10 @@ mod fastly_impl {
         if budget.deadline.is_expired_at(observed_at) {
             return Err(timeout_error(budget.cause));
         }
-        let elapsed = observed_at
-            .checked_duration_since(started_at)
-            .ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!(
-                    "monotonic clock moved backwards before Fastly SDK dispatch"
-                ))
-            })?;
-        if elapsed > BATCH_DISPATCH_SLACK_MAX {
-            return Err(EdgeError::internal(anyhow::anyhow!(DISPATCH_SLACK_MESSAGE)));
+        if observed_at.checked_duration_since(started_at).is_none() {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "monotonic clock moved backwards before Fastly SDK dispatch"
+            )));
         }
         Ok(())
     }
@@ -1806,26 +1582,122 @@ mod fastly_impl {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
+        use super::super::testing;
         use edgezero_core::error::{BudgetSource, ResponseLimitReason};
         use edgezero_core::http::header::{
             CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
         };
         use edgezero_core::outbound::{ContentTypeIneligibility, ContentTypeProvenance};
-        use edgezero_core::time::Deadline;
+        use edgezero_core::time::{Deadline, dispatch_budget};
         use flate2::{Compression, write::GzEncoder};
         use futures::executor::block_on;
         use futures_util::stream;
 
         use super::*;
 
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "legacy policy fixtures exercise the shared head finalizer through the real facade"
+        )]
+        async fn finish_native_fixture(
+            response: FastlyResponse,
+            method: Method,
+            marker: OutboundProxyMarker,
+            decoding: ResponseDecoding,
+            mode: ResponseMode,
+            budget: DispatchBudget,
+            decoder_memory: u64,
+            brotli: u8,
+            chunk: Option<NonZeroU64>,
+            decoded: Option<u64>,
+            encoded: Option<u64>,
+            header_bytes: Option<u64>,
+            header_count: Option<u64>,
+            time: OutboundTime,
+            progress: &NativeProgress,
+        ) -> Result<OutboundResponse, EdgeError> {
+            let mut request =
+                OutboundRequest::new(method, "https://example.com/".parse().unwrap())?
+                    .proxy_marker(marker)
+                    .response_decoding(decoding)
+                    .max_decoder_bytes(decoder_memory)
+                    .max_brotli_window_bits(brotli);
+            let mut parts = request.into_parts();
+            parts.timeout = Some(budget.duration);
+            parts.deadline =
+                (budget.cause != BudgetSource::PerCallTimeout).then_some(budget.deadline);
+            parts.max_chunk_bytes = chunk;
+            parts.max_decoded_response_bytes = decoded;
+            parts.max_encoded_response_bytes = encoded;
+            parts.max_response_header_bytes = header_bytes;
+            parts.max_response_header_count = header_count;
+            parts.response_mode = mode;
+            request = OutboundRequest::from_parts(parts)?;
+            let (_, context) = testing::dispatch_at(
+                request,
+                time,
+                budget
+                    .deadline
+                    .instant()
+                    .checked_sub(budget.duration)
+                    .unwrap(),
+            )
+            .into_parts();
+            progress
+                .drive(async { process_head(response, context, progress)?.finish().await })
+                .await?
+        }
+
+        fn shared_head_stream(
+            source: BodyStream,
+            budget: DispatchBudget,
+            time: OutboundTime,
+            progress: NativeProgress,
+        ) -> BodyStream {
+            let start = budget
+                .deadline
+                .instant()
+                .checked_sub(budget.duration)
+                .unwrap();
+            let request = OutboundRequest::get("https://example.com/")
+                .unwrap()
+                .stream_response()
+                .timeout(budget.duration)
+                .proxy_marker(OutboundProxyMarker::Off);
+            let (_, context) = testing::dispatch_at(request, time, start).into_parts();
+            stream! {
+                let head = OutboundHead::new(StatusCode::OK,
+                    OutboundHeaderInput::new("fastly", HeaderMap::new(), OutboundHeaderFidelity::AdapterVisibleFields),
+                    source, context, OutboundExchangeOwner::new(|| {}))?;
+                let response = progress.drive(head.finish()).await??;
+                let (BodyPayload::Stream(mut payload), _scope) = response.into_body().into_parts() else { return; };
+                while let Some(item) = progress.drive(payload.next()).await? {
+                    yield item;
+                }
+            }.boxed_local()
+        }
+
+        fn resolved(
+            slot: &edgezero_core::OutboundCollectedSlot,
+        ) -> &edgezero_core::OutboundSlotResult {
+            match slot {
+                edgezero_core::OutboundCollectedSlot::Resolved(result) => result,
+                edgezero_core::OutboundCollectedSlot::AlreadyDelivered
+                | edgezero_core::OutboundCollectedSlot::Unresolved => {
+                    panic!("expected resolved slot")
+                }
+            }
+        }
+
         fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
+            let last = *script.last().expect("clock script");
             let observations = Arc::new(Mutex::new(VecDeque::from(script)));
             MonotonicClock::new(move || {
                 observations
                     .lock()
                     .expect("clock observations")
                     .pop_front()
-                    .expect("clock observation")
+                    .unwrap_or(last)
             })
         }
 
@@ -1852,7 +1724,7 @@ mod fastly_impl {
                 let budget = clock_budget(start, Duration::from_secs(1));
                 let clock = scripted_clock(vec![start, budget.deadline.instant()]);
                 let response = FastlyResponse::from_status(status);
-                let result = block_on(process_response(
+                let result = block_on(finish_native_fixture(
                     response,
                     method,
                     OutboundProxyMarker::Off,
@@ -1914,8 +1786,14 @@ mod fastly_impl {
                     observed.fetch_add(1, Ordering::SeqCst);
                     start
                 });
+                let progress = NativeProgress::new(
+                    NativeTransport,
+                    clock.clone(),
+                    start,
+                    Some(budget.deadline),
+                );
                 let native = FastlyResponse::from_body("12345678");
-                let processed = block_on(process_response(
+                let processed = block_on(finish_native_fixture(
                     native,
                     Method::GET,
                     OutboundProxyMarker::Off,
@@ -1930,17 +1808,18 @@ mod fastly_impl {
                     Some(1024),
                     Some(10),
                     native_time(clock.clone()),
-                    &NativeProgress::new(NativeTransport, clock, start, Some(budget.deadline)),
+                    &progress,
                 ));
                 let outcome = match processed {
                     Ok(response) => {
                         assert!(response.body().is_stream());
                         assert_eq!(
                             samples.load(Ordering::SeqCst),
-                            2,
-                            "no native body read before handoff"
+                            3,
+                            "one provider and two shared finalization clock checks, without body reads"
                         );
-                        block_on(response.into_bytes_bounded(8))
+                        block_on(progress.drive(response.into_bytes_bounded(8)))
+                            .expect("callback progress")
                     }
                     Err(error) => Err(error),
                 };
@@ -1960,9 +1839,9 @@ mod fastly_impl {
             let completed = start
                 .checked_add(Duration::from_millis(9))
                 .expect("completed instant");
-            let client = FastlyOutboundClient::with_time(native_time(scripted_clock(vec![
-                start, completed,
-            ])));
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(native_time(
+                scripted_clock(vec![start, completed]),
+            )));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -1980,7 +1859,7 @@ mod fastly_impl {
                     .collect(),
             )
             .expect("valid batch driver");
-            let slot = results.slots[0].as_ref().expect("resolved slot");
+            let slot = resolved(&results.slots()[0]);
 
             assert_eq!(slot.elapsed, Duration::from_millis(9));
             assert!(matches!(slot.outcome, Err(EdgeError::BadRequest { .. })));
@@ -1995,9 +1874,9 @@ mod fastly_impl {
             let second = start
                 .checked_add(Duration::from_millis(8))
                 .expect("second completion");
-            let client = FastlyOutboundClient::with_time(native_time(scripted_clock(vec![
-                start, first, second,
-            ])));
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(native_time(
+                scripted_clock(vec![start, first, second]),
+            )));
             let requests = vec![
                 OutboundRequest::get("https://example.com/")
                     .expect("request")
@@ -2020,16 +1899,16 @@ mod fastly_impl {
                     .collect(),
             )
             .expect("valid batch driver");
-            let first_slot = results.slots[0].as_ref().expect("first resolved slot");
-            let second_slot = results.slots[1].as_ref().expect("second resolved slot");
+            let first_slot = resolved(&results.slots()[0]);
+            let second_slot = resolved(&results.slots()[1]);
 
             assert_eq!(first_slot.elapsed, Duration::from_millis(3));
             assert_eq!(second_slot.elapsed, Duration::from_millis(8));
             assert!(
                 results
-                    .slots
+                    .slots()
                     .iter()
-                    .flatten()
+                    .map(resolved)
                     .all(|slot| matches!(slot.outcome, Err(EdgeError::BadRequest { .. })))
             );
         }
@@ -2043,27 +1922,30 @@ mod fastly_impl {
                     .body("invalid GET body")
             };
             let single_outcome = block_on(
-                FastlyOutboundClient::with_time(native_time(constant_clock(now))).send(invalid()),
+                HttpClient::with_client(FastlyOutboundClient::with_time(native_time(
+                    constant_clock(now),
+                )))
+                .send(invalid()),
             );
             let batch = block_on(
-                FastlyOutboundClient::with_time(native_time(constant_clock(now)))
-                    .start_batch_until(
-                        vec![invalid()],
-                        Deadline::at_instant(
-                            now.checked_add(Duration::from_secs(1))
-                                .expect("batch cutoff"),
-                        ),
-                    )
-                    .collect(),
+                HttpClient::with_client(FastlyOutboundClient::with_time(native_time(
+                    constant_clock(now),
+                )))
+                .start_batch_until(
+                    vec![invalid()],
+                    Deadline::at_instant(
+                        now.checked_add(Duration::from_secs(1))
+                            .expect("batch cutoff"),
+                    ),
+                )
+                .collect(),
             )
             .expect("valid batch driver");
-            let batched_outcome = batch
-                .slots
-                .into_iter()
-                .next()
-                .flatten()
-                .expect("slot")
-                .outcome;
+            let collected = batch.into_parts().0.into_iter().next().unwrap();
+            let edgezero_core::OutboundCollectedSlot::Resolved(slot) = collected else {
+                panic!("resolved slot");
+            };
+            let batched_outcome = slot.outcome;
 
             let (Err(single_error), Err(batched_error)) = (single_outcome, batched_outcome) else {
                 panic!("single and batch paths must return errors");
@@ -2074,13 +1956,190 @@ mod fastly_impl {
         }
 
         #[test]
+        fn preexpired_batch_handoff_retains_earlier_own_timeouts_without_setup() {
+            use edgezero_core::outbound::{OutboundBatchTermination, OutboundCollectedSlot};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            for selected in [BudgetSource::PerCallTimeout, BudgetSource::RequestDeadline] {
+                for mixed in [false, true] {
+                    let started_at = MonotonicInstant::now();
+                    let handoff = started_at.checked_add(Duration::from_millis(150)).unwrap();
+                    let observation_cutoff = Deadline::at_instant(
+                        started_at.checked_add(Duration::from_millis(100)).unwrap(),
+                    );
+                    let reads = AtomicUsize::new(0);
+                    let clock = MonotonicClock::new(move || {
+                        if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                            started_at
+                        } else {
+                            handoff
+                        }
+                    });
+                    let time = OutboundTime::new(clock, |_, _| {
+                        panic!("preexpired work must not set up a timer")
+                    });
+                    let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
+                    let mut own = OutboundRequest::post("https://preexpired-no-io.example/bid")
+                        .unwrap()
+                        .body("buffered")
+                        .timeout(Duration::from_millis(50));
+                    if selected == BudgetSource::RequestDeadline {
+                        own =
+                            own.timeout(Duration::from_millis(500))
+                                .deadline(Deadline::at_instant(
+                                    started_at.checked_add(Duration::from_millis(50)).unwrap(),
+                                ));
+                    }
+                    let source_polls = Arc::new(AtomicUsize::new(0));
+                    let source_reads = Arc::clone(&source_polls);
+                    let requests = if mixed {
+                        let invalid =
+                            OutboundRequest::post("https://preexpired-no-io.example/invalid")
+                                .unwrap()
+                                .body(Body::from_stream(stream::poll_fn(move |_cx| {
+                                    source_reads.fetch_add(1, Ordering::SeqCst);
+                                    Poll::Pending
+                                })));
+                        let cutoff_slot =
+                            OutboundRequest::post("https://preexpired-no-io.example/cutoff")
+                                .unwrap()
+                                .body("buffered")
+                                .timeout(Duration::from_millis(500));
+                        vec![invalid, own, cutoff_slot]
+                    } else {
+                        vec![own]
+                    };
+                    let backend_count = || {
+                        BACKENDS
+                            .get()
+                            .map_or(0, |registry| registry.lock().expect("backends").len())
+                    };
+                    let registered_before = backend_count();
+                    let result = block_on(
+                        client
+                            .start_batch_until(requests, observation_cutoff)
+                            .collect(),
+                    )
+                    .expect("earlier own deadlines must resolve before cutoff validation");
+                    assert_eq!(backend_count(), registered_before);
+                    assert_eq!(source_polls.load(Ordering::SeqCst), 0);
+                    let own_slot = resolved(&result.slots()[usize::from(mixed)]);
+                    assert_eq!(own_slot.elapsed, Duration::from_millis(50));
+                    assert!(
+                        matches!(own_slot.outcome, Err(EdgeError::GatewayTimeout { cause, .. }) if cause == selected)
+                    );
+                    if mixed {
+                        assert!(matches!(
+                            resolved(&result.slots()[0]).outcome,
+                            Err(EdgeError::BadRequest { .. })
+                        ));
+                        assert!(matches!(
+                            result.slots()[2],
+                            OutboundCollectedSlot::Unresolved
+                        ));
+                        assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
+                    } else {
+                        assert_eq!(result.termination(), OutboundBatchTermination::Completed);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn batch_cutoff_clamping_preserves_cause_and_observation_boundary() {
+            use super::super::scope;
+            use edgezero_core::outbound::{
+                OutboundBatchTermination, OutboundCollectedSlot, OutboundScopeOwner,
+            };
+
+            for selected in [
+                BudgetSource::BatchCutoff,
+                BudgetSource::RequestDeadline,
+                BudgetSource::PerCallTimeout,
+            ] {
+                let start = MonotonicInstant::now();
+                let cutoff = Deadline::at_instant(
+                    start
+                        .checked_add(Duration::from_hours(192))
+                        .expect("eight days"),
+                );
+                for completed_at in [
+                    start.checked_add(DEADLINE_FAR_FUTURE).expect("seven days"),
+                    cutoff
+                        .instant()
+                        .checked_sub(Duration::from_nanos(1))
+                        .expect("before cutoff"),
+                    cutoff.instant(),
+                    cutoff
+                        .instant()
+                        .checked_add(Duration::from_nanos(1))
+                        .expect("after cutoff"),
+                ] {
+                    let now = Arc::new(Mutex::new(start));
+                    let sampled = Arc::clone(&now);
+                    let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+                    let callback = OutboundScopeOwner::callback();
+                    let time = native_time(clock);
+                    let progress =
+                        scope::native_progress(&callback.with(scope::capture), &time, start)
+                            .unwrap();
+                    let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
+                    let mut request = OutboundRequest::post("http://127.0.0.1:9/clamped-cutoff")
+                        .expect("request")
+                        .body("pending")
+                        .timeout(DEADLINE_FAR_FUTURE);
+                    if selected == BudgetSource::RequestDeadline {
+                        request = request.deadline(Deadline::at_instant(
+                            start
+                                .checked_add(Duration::from_hours(144))
+                                .expect("six days"),
+                        ));
+                    }
+                    if selected == BudgetSource::PerCallTimeout {
+                        request = request.timeout(Duration::from_hours(144));
+                    }
+                    let budget = dispatch_budget(&request, start, Some(cutoff)).expect("budget");
+                    assert_eq!(budget.cause, selected);
+                    assert!(budget.deadline.instant() < cutoff.instant());
+                    let batch = callback.with(|| client.start_batch_until(vec![request], cutoff));
+                    *now.lock().expect("clock") = completed_at;
+                    let result = block_on(callback.run(progress.drive(batch.collect())))
+                        .expect("callback progress")
+                        .expect("clamped cutoff is not premature EOF");
+
+                    if selected == BudgetSource::BatchCutoff && cutoff.is_expired_at(completed_at) {
+                        assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
+                        assert!(matches!(
+                            result.slots(),
+                            [OutboundCollectedSlot::Unresolved]
+                        ));
+                    } else {
+                        assert_eq!(result.termination(), OutboundBatchTermination::Completed);
+                        let slot = resolved(&result.slots()[0]);
+                        assert!(
+                            matches!(slot.outcome, Err(EdgeError::GatewayTimeout { cause, .. }) if cause == selected)
+                        );
+                        let terminal = if selected == BudgetSource::BatchCutoff {
+                            completed_at
+                        } else {
+                            budget.deadline.instant()
+                        };
+                        assert_eq!(slot.elapsed, terminal.saturating_duration_since(start));
+                    }
+                    drop(callback);
+                }
+            }
+        }
+
+        #[test]
         fn backwards_clock_fails_slot_without_invalid_elapsed() {
             let start = MonotonicInstant::now();
             let earlier = start
                 .checked_sub(Duration::from_millis(1))
                 .expect("earlier instant");
-            let client =
-                FastlyOutboundClient::with_time(native_time(scripted_clock(vec![start, earlier])));
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(native_time(
+                scripted_clock(vec![start, earlier]),
+            )));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -2097,9 +2156,8 @@ mod fastly_impl {
                     )
                     .collect(),
             )
-            .expect("valid batch driver");
-            let slot = results.slots[0].as_ref().expect("resolved slot");
-
+            .expect("typed regression outcome");
+            let slot = resolved(&results.slots()[0]);
             assert_eq!(slot.elapsed, Duration::ZERO);
             assert!(matches!(slot.outcome, Err(EdgeError::Internal { .. })));
         }
@@ -2250,19 +2308,29 @@ mod fastly_impl {
             }
             assert_eq!(samples.len(), 93);
             let start = MonotonicInstant::now();
-            let mut names = BTreeSet::new();
-            for sample in samples {
-                let request = OutboundRequest::get("https://example.com/").expect("request");
-                let budget = clock_budget(start, sample);
-                let (identity, _) = backend_identity(request, budget).expect("identity");
-                let expected = ceilings
-                    .iter()
-                    .find(|ceiling| **ceiling >= sample)
-                    .expect("ceiling");
-                assert_eq!(Duration::from_millis(identity.phase_ms), *expected);
-                names.insert(backend_name(&identity));
+            for configured in [
+                None,
+                Some(Duration::from_secs(1)),
+                Some(DEADLINE_FAR_FUTURE),
+            ] {
+                let mut names = BTreeSet::new();
+                for sample in &samples {
+                    let mut request =
+                        OutboundRequest::get("https://example.com/").expect("request");
+                    if let Some(connect) = configured {
+                        request = request.connect_timeout(connect);
+                    }
+                    let budget = clock_budget(start, *sample);
+                    let (identity, _) = backend_identity(request, budget).expect("identity");
+                    let expected = ceilings
+                        .iter()
+                        .find(|ceiling| **ceiling >= *sample)
+                        .expect("ceiling");
+                    assert_eq!(Duration::from_millis(identity.phase_ms), *expected);
+                    names.insert(backend_name(&identity));
+                }
+                assert_eq!(names.len(), 31, "fixed connect tuple {configured:?}");
             }
-            assert_eq!(names.len(), 31);
         }
 
         #[test]
@@ -2298,18 +2366,32 @@ mod fastly_impl {
                         .checked_add(Duration::from_millis(513))
                         .expect("deadline"),
                 ));
-            let first_prepared = first.prepare(first_request, start).expect("first backend");
+            let first_prepared = first
+                .configure(testing::dispatch(first_request, first.time()))
+                .expect("first backend");
             let second_prepared = second
-                .prepare(second_request, start)
+                .configure(testing::dispatch(second_request, second.time()))
                 .expect("second backend");
             assert_eq!(
                 first_prepared.backend.name(),
                 second_prepared.backend.name()
             );
-            assert_eq!(first_prepared.budget.duration, Duration::from_millis(511));
-            assert_eq!(second_prepared.budget.duration, Duration::from_millis(513));
-            assert_eq!(first_prepared.budget.cause, BudgetSource::RequestDeadline);
-            assert_eq!(second_prepared.budget.cause, BudgetSource::RequestDeadline);
+            assert_eq!(
+                first_prepared.context.budget().duration,
+                Duration::from_millis(511)
+            );
+            assert_eq!(
+                second_prepared.context.budget().duration,
+                Duration::from_millis(513)
+            );
+            assert_eq!(
+                first_prepared.context.budget().cause,
+                BudgetSource::RequestDeadline
+            );
+            assert_eq!(
+                second_prepared.context.budget().cause,
+                BudgetSource::RequestDeadline
+            );
         }
 
         #[cfg(target_env = "p1")]
@@ -2347,7 +2429,9 @@ mod fastly_impl {
                 if let Some(value) = override_authority {
                     request = request.host_authority_override(value).expect("authority");
                 }
-                let prepared = client.prepare(request, start).expect("registered backend");
+                let prepared = client
+                    .configure(testing::dispatch(request, client.time()))
+                    .expect("registered backend");
                 assert_eq!(prepared.backend.get_host(), host);
                 assert_eq!(
                     prepared.backend.get_host_override(),
@@ -2461,7 +2545,7 @@ mod fastly_impl {
         }
 
         #[test]
-        fn adapter_final_dispatch_reapplies_request_normalization() {
+        fn prepared_facade_conversion_removes_nominated_encoding_before_provider_default() {
             let mut request = OutboundRequest::get("https://example.com/").expect("request");
             request
                 .headers_mut()
@@ -2470,11 +2554,20 @@ mod fastly_impl {
                 .headers_mut()
                 .insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
 
-            normalize_fastly_request(&mut request).expect("normalized request");
+            let time = native_time(MonotonicClock::default());
+            let prepared = FastlyOutboundClient::with_time(time.clone())
+                .configure(testing::dispatch(request, time))
+                .expect("production prepared conversion");
+            let native = build_fastly_request(
+                &prepared.parts.method,
+                &prepared.parts.uri,
+                &prepared.parts.headers,
+                prepared.parts.cache_policy,
+            );
 
-            assert!(!request.headers().contains_key(CONNECTION));
+            assert!(native.get_header(CONNECTION.as_str()).is_none());
             assert_eq!(
-                request.headers().get(ACCEPT_ENCODING),
+                native.get_header(ACCEPT_ENCODING.as_str()),
                 Some(&HeaderValue::from_static("identity"))
             );
         }
@@ -2662,7 +2755,7 @@ mod fastly_impl {
             .boxed_local();
             let progress =
                 NativeProgress::new(NativeTransport, clock.clone(), start, Some(budget.deadline));
-            let mut guarded = deadline_stream(source, budget, native_time(clock), progress);
+            let mut guarded = shared_head_stream(source, budget, native_time(clock), progress);
             assert_eq!(
                 block_on(guarded.next())
                     .expect("first item")
@@ -2703,7 +2796,7 @@ mod fastly_impl {
                     start,
                     Some(budget.deadline),
                 );
-                let mut guarded = deadline_stream(source, budget, native_time(clock), progress);
+                let mut guarded = shared_head_stream(source, budget, native_time(clock), progress);
                 assert!(matches!(
                     block_on(guarded.next()),
                     Some(Err(EdgeError::GatewayTimeout {
@@ -2752,7 +2845,7 @@ mod fastly_impl {
                     start,
                     Some(budget.deadline),
                 );
-                let mut guarded = deadline_stream(source, budget, native_time(clock), progress);
+                let mut guarded = shared_head_stream(source, budget, native_time(clock), progress);
                 let error = block_on(guarded.next())
                     .expect("terminal item")
                     .expect_err("deadline");
@@ -2786,7 +2879,7 @@ mod fastly_impl {
             let clock =
                 MonotonicClock::new(move || *clock_observed.lock().expect("clock observation"));
             let native = FastlyResponse::from_status(StatusCode::NO_CONTENT.as_u16());
-            let response = block_on(process_response(
+            let response = block_on(finish_native_fixture(
                 native,
                 Method::GET,
                 OutboundProxyMarker::Inherit,
@@ -2881,7 +2974,7 @@ mod fastly_impl {
                         if nominated {
                             native.set_header(CONNECTION, "content-type");
                         }
-                        let mut response = block_on(process_response(
+                        let mut response = block_on(finish_native_fixture(
                             native,
                             Method::GET,
                             OutboundProxyMarker::Inherit,
@@ -2960,7 +3053,13 @@ mod fastly_impl {
             native.set_header(CONTENT_ENCODING, "gzip");
             native.set_body(gzip_bytes);
 
-            let response = block_on(process_response(
+            let progress = NativeProgress::new(
+                NativeTransport,
+                MonotonicClock::default(),
+                started_at,
+                Some(budget.deadline),
+            );
+            let response = block_on(finish_native_fixture(
                 native,
                 Method::GET,
                 OutboundProxyMarker::Inherit,
@@ -2975,25 +3074,21 @@ mod fastly_impl {
                 None,
                 None,
                 native_time(MonotonicClock::default()),
-                &NativeProgress::new(
-                    NativeTransport,
-                    MonotonicClock::default(),
-                    started_at,
-                    Some(budget.deadline),
-                ),
+                &progress,
             ))
             .expect("response head");
             let mut body = response.into_body().into_stream().expect("streamed body");
 
             assert_eq!(
-                block_on(body.next())
+                block_on(progress.drive(body.next()))
+                    .expect("callback progress")
                     .expect("first item")
                     .expect("first byte"),
                 Bytes::from_static(b"a")
             );
             thread::sleep(Duration::from_millis(125));
             assert!(matches!(
-                block_on(body.next()),
+                block_on(progress.drive(body.next())).expect("callback progress"),
                 Some(Err(EdgeError::GatewayTimeout {
                     cause: BudgetSource::PerCallTimeout,
                     ..
@@ -3009,7 +3104,7 @@ mod fastly_impl {
             native.set_header(CONTENT_LENGTH, "2");
             native.set_body("xx");
 
-            let error = block_on(process_response(
+            let error = block_on(finish_native_fixture(
                 native,
                 Method::GET,
                 OutboundProxyMarker::Inherit,
@@ -3051,7 +3146,7 @@ mod fastly_impl {
             native.set_header(CONTENT_LENGTH, "2");
             native.set_body("xx");
 
-            let error = block_on(process_response(
+            let error = block_on(finish_native_fixture(
                 native,
                 Method::GET,
                 OutboundProxyMarker::Inherit,
@@ -3601,6 +3696,7 @@ mod fastly_impl {
         fn backend_identity_uses_every_canonical_property() {
             let first = BackendIdentity {
                 phase_ms: 128,
+                connect_ms: None,
                 host: "example.com".to_owned(),
                 port: 443,
                 scheme: "https".to_owned(),
@@ -3659,8 +3755,8 @@ mod fastly_impl {
         }
 
         #[test]
-        fn dispatch_guard_checks_expiry_before_slack() {
-            use edgezero_core::time::{BATCH_DISPATCH_SLACK_MAX, Deadline};
+        fn dispatch_accepts_live_budget_after_preparation() {
+            use edgezero_core::time::Deadline;
 
             let started_at = MonotonicInstant::now();
             let duration = Duration::from_secs(1);
@@ -3671,26 +3767,18 @@ mod fastly_impl {
                 ),
                 duration,
             };
-            let at_limit = started_at
-                .checked_add(BATCH_DISPATCH_SLACK_MAX)
-                .expect("slack boundary");
-            dispatch_guard_at(started_at, budget, at_limit).expect("dispatch at slack boundary");
-
-            let over_limit = at_limit
-                .checked_add(Duration::from_nanos(1))
-                .expect("past slack boundary");
-            assert!(matches!(
-                dispatch_guard_at(started_at, budget, over_limit),
-                Err(EdgeError::Internal { source, .. })
-                    if source.to_string() == DISPATCH_SLACK_MESSAGE
-            ));
+            let observed_at = started_at
+                .checked_add(Duration::from_millis(26))
+                .expect("preparation time");
+            check_dispatch_budget_at(started_at, budget, observed_at)
+                .expect("preparation does not expire a live absolute budget");
 
             let expired_budget = DispatchBudget {
-                deadline: Deadline::at_instant(over_limit),
+                deadline: Deadline::at_instant(observed_at),
                 ..budget
             };
             assert!(matches!(
-                dispatch_guard_at(started_at, expired_budget, over_limit),
+                check_dispatch_budget_at(started_at, expired_budget, observed_at),
                 Err(EdgeError::GatewayTimeout {
                     cause: BudgetSource::PerCallTimeout,
                     ..
@@ -3699,13 +3787,267 @@ mod fastly_impl {
         }
 
         #[test]
-        fn cold_backend_registration_is_refused_before_more_synchronous_work() {
-            use edgezero_core::time::{BATCH_DISPATCH_SLACK_MAX, Deadline};
+        fn dispatch_budget_rejects_backwards_clock() {
+            let started_at = MonotonicInstant::now();
+            let earlier = started_at.checked_sub(Duration::from_nanos(1)).unwrap();
+            let budget = clock_budget(started_at, Duration::from_millis(500));
+            let error = ensure_dispatch_budget(started_at, budget, &constant_clock(earlier))
+                .expect_err("backwards clock must fail before SDK dispatch");
+            assert!(matches!(
+                error,
+                EdgeError::Internal { source, .. }
+                    if source.to_string() == "monotonic clock moved backwards before Fastly SDK dispatch"
+            ));
+        }
+
+        #[test]
+        fn get_head_empty_settlement_after_26ms_reaches_sdk_dispatch() {
+            use futures_util::future::pending;
+            use futures_util::task::{ArcWake, waker};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::task::Context;
+
+            struct DispatchWake;
+            impl ArcWake for DispatchWake {
+                fn wake(self: Arc<Self>) {
+                    Self::wake_by_ref(&self);
+                }
+
+                fn wake_by_ref(_arc_self: &Arc<Self>) {}
+            }
+
+            for method in [Method::GET, Method::HEAD] {
+                let started_at = MonotonicInstant::now();
+                let settled_at = started_at.checked_add(Duration::from_millis(26)).unwrap();
+                let deadline = started_at.checked_add(Duration::from_millis(500)).unwrap();
+                let observed = Arc::new(Mutex::new(started_at));
+                let clock_now = Arc::clone(&observed);
+                let clock = MonotonicClock::new(move || *clock_now.lock().unwrap());
+                let timers = Arc::new(Mutex::new(Vec::new()));
+                let registered = Arc::clone(&timers);
+                let time = OutboundTime::new(clock.clone(), move |bound, _| {
+                    registered.lock().unwrap().push(bound.instant());
+                    Box::pin(pending())
+                });
+                let polls = Arc::new(AtomicUsize::new(0));
+                let source_polls = Arc::clone(&polls);
+                let source = stream::poll_fn(move |_cx| {
+                    source_polls.fetch_add(1, Ordering::SeqCst);
+                    *observed.lock().unwrap() = settled_at;
+                    Poll::Ready(None)
+                });
+                let request = OutboundRequest::new(
+                    method,
+                    "http://127.0.0.1:9/settled-empty-dispatch".parse().unwrap(),
+                )
+                .unwrap()
+                .body(Body::from_stream(source))
+                .timeout(Duration::from_millis(500));
+                let dispatch = testing::dispatch(request, time.clone());
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert_eq!(*timers.lock().unwrap(), vec![deadline]);
+                assert_eq!(dispatch.entered_at(), started_at);
+                assert_eq!(dispatch.budget().deadline.instant(), deadline);
+                assert_eq!(dispatch.budget().duration, Duration::from_millis(500));
+                assert_eq!(dispatch.budget().cause, BudgetSource::PerCallTimeout);
+                assert!(!dispatch.request().is_stream_body());
+                assert_eq!(clock.now(), settled_at);
+                let client = FastlyOutboundClient::with_time(time);
+                let prepared = client.configure(dispatch).expect("live backend setup");
+                assert_eq!(prepared.context.mode(), OutboundSendMode::Send);
+                let progress = NativeProgress::new(NativeTransport, clock, started_at, None);
+                let mut head = Box::pin(client.execute_head(prepared, &progress));
+                let signal = Arc::new(DispatchWake);
+                let waiting = waker(Arc::clone(&signal));
+                let references = Arc::strong_count(&signal);
+                let observation = progress
+                    .with_current(|| head.as_mut().poll(&mut Context::from_waker(&waiting)));
+                assert!(
+                    observation.is_pending(),
+                    "SDK dispatch must issue a pending handle: {observation:?}"
+                );
+                assert_eq!(Arc::strong_count(&signal), references + 1);
+                drop(head);
+                assert_eq!(
+                    Arc::strong_count(&signal),
+                    references,
+                    "dropping the future must release its pending SDK lease"
+                );
+                drop(progress);
+            }
+        }
+
+        #[test]
+        fn invocation_runtime_precedes_settlement_and_survives_foreign_body_close() {
+            use super::super::progress::wait_current;
+            use super::super::scope;
+            use edgezero_core::{OutboundScopeKind, OutboundScopeOwner};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::task::{Context, Waker};
+
+            struct TimerOwner(Arc<AtomicUsize>);
+            #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+            impl Drop for TimerOwner {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+
+            let callback = OutboundScopeOwner::callback();
+            let installed = Arc::new(AtomicUsize::new(0));
+            let released = Arc::new(AtomicUsize::new(0));
+            let armed = Arc::clone(&installed);
+            let retired = Arc::clone(&released);
+            let time = OutboundTime::new(MonotonicClock::default(), move |deadline, clock| {
+                armed.fetch_add(1, Ordering::SeqCst);
+                let owner = TimerOwner(Arc::clone(&retired));
+                let timer = wait_current(deadline, clock);
+                Box::pin(async move {
+                    let _owner = owner;
+                    timer.await
+                })
+            });
+            let reads = Rc::new(Cell::new(0_usize));
+            let source_reads = Rc::clone(&reads);
+            let source = stream::poll_fn(move |_cx| {
+                assert_eq!(scope::capture().kind(), Some(OutboundScopeKind::Callback));
+                source_reads.set(source_reads.get().saturating_add(1));
+                Poll::Ready(None)
+            });
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
+            let request = OutboundRequest::get("http://127.0.0.1:9/captured-settlement")
+                .unwrap()
+                .body(Body::from_stream(source))
+                .timeout(Duration::from_millis(500));
+            let mut send = callback.with(|| client.send(request));
+            let body = callback.with(OutboundScopeOwner::response_body);
+            let first = body.with(|| send.as_mut().poll(&mut Context::from_waker(Waker::noop())));
+            assert!(
+                first.is_pending(),
+                "native timer context must precede settlement: {first:?}"
+            );
+            assert_eq!(reads.get(), 1);
+            assert_eq!(installed.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                1,
+                "only settlement has finished"
+            );
+            assert!(
+                !scope::capture().is_managed(),
+                "activation cannot leak between polls"
+            );
+            body.close();
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                1,
+                "body cleanup cannot cancel callback work"
+            );
+            callback.close();
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                2,
+                "callback releases the active request timer"
+            );
+            let error = block_on(send).unwrap_err();
+            assert!(
+                matches!(error, EdgeError::Internal { source: reason, .. } if reason.to_string() == "outbound Callback scope closed")
+            );
+        }
+
+        #[test]
+        fn scoped_begin_readiness_never_polls_the_sdk() {
+            use edgezero_core::OutboundScopeOwner;
+
+            let callback = OutboundScopeOwner::callback();
+            let client = HttpClient::with_client(FastlyOutboundClient::new());
+            NATIVE_HEAD_POLLS.set(0);
+            let mut pending = callback
+                .with(|| {
+                    block_on(
+                        client.begin(
+                            OutboundRequest::post("http://127.0.0.1:9/scoped-ready")
+                                .unwrap()
+                                .body("buffered")
+                                .timeout(Duration::from_millis(500)),
+                        ),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                NATIVE_HEAD_POLLS.get(),
+                0,
+                "begin only issues the SDK request"
+            );
+            let body = callback.with(OutboundScopeOwner::response_body);
+            assert!(!body.with(|| pending.is_ready()));
+            assert_eq!(
+                NATIVE_HEAD_POLLS.get(),
+                0,
+                "readiness cannot turn the SDK driver"
+            );
+            body.close();
+            assert!(!pending.is_ready());
+            assert_eq!(NATIVE_HEAD_POLLS.get(), 0);
+            callback.close();
+            assert!(pending.is_ready());
+            assert!(matches!(
+                block_on(pending.collect()),
+                Err(EdgeError::Internal { .. })
+            ));
+            assert_eq!(NATIVE_HEAD_POLLS.get(), 0);
+        }
+
+        #[test]
+        fn scoped_batch_check_never_turns_the_sdk() {
+            use edgezero_core::{OutboundBatchCheck, OutboundScopeOwner};
+
+            let callback = OutboundScopeOwner::callback();
+            let client = HttpClient::with_client(FastlyOutboundClient::new());
+            NATIVE_SELECTIONS.set(0);
+            NATIVE_HEAD_POLLS.set(0);
+            let mut batch = callback.with(|| {
+                client.start_batch_until(
+                    vec![
+                        OutboundRequest::post("http://127.0.0.1:9/scoped-check")
+                            .unwrap()
+                            .body("buffered")
+                            .timeout(Duration::from_secs(1)),
+                    ],
+                    Deadline::after(Duration::from_millis(500)),
+                )
+            });
+            assert_eq!(NATIVE_SELECTIONS.get(), 0, "eager batch setup never waits");
+            let body = callback.with(OutboundScopeOwner::response_body);
+            assert!(matches!(
+                body.with(|| batch.check()).unwrap(),
+                OutboundBatchCheck::Pending
+            ));
+            assert_eq!(
+                NATIVE_SELECTIONS.get(),
+                0,
+                "batch check cannot enter a native wait"
+            );
+            assert_eq!(NATIVE_HEAD_POLLS.get(), 0);
+            body.close();
+            assert!(matches!(
+                batch.check().unwrap(),
+                OutboundBatchCheck::Pending
+            ));
+            callback.close();
+            assert!(matches!(batch.check(), Err(EdgeError::Internal { .. })));
+            assert_eq!(NATIVE_SELECTIONS.get(), 0);
+            assert_eq!(NATIVE_HEAD_POLLS.get(), 0);
+        }
+
+        #[test]
+        fn cold_backend_registration_uses_the_original_deadline() {
+            use edgezero_core::time::Deadline;
 
             let started_at = MonotonicInstant::now();
-            let over_limit = started_at
-                .checked_add(BATCH_DISPATCH_SLACK_MAX + Duration::from_nanos(1))
-                .expect("past slack boundary");
+            let delayed = started_at
+                .checked_add(Duration::from_millis(26))
+                .expect("preparation time");
             let budget = DispatchBudget {
                 cause: BudgetSource::PerCallTimeout,
                 deadline: Deadline::at_instant(
@@ -3715,24 +4057,26 @@ mod fastly_impl {
                 ),
                 duration: Duration::from_secs(1),
             };
-            let clock = scripted_clock(vec![started_at, over_limit]);
+            let clock = scripted_clock(vec![started_at, delayed, budget.deadline.instant()]);
             let registrations = Cell::new(0_u8);
             let register = || {
                 registrations.set(registrations.get().saturating_add(1));
                 Ok::<_, ()>(())
             };
 
-            let first =
-                register_backend_with_batch_guard(Some(started_at), budget, &clock, register);
+            let first = register_backend_while_live(Some(started_at), budget, &clock, register);
             assert!(matches!(first, Ok(Ok(()))));
-            let second =
-                register_backend_with_batch_guard(Some(started_at), budget, &clock, register);
+            let second = register_backend_while_live(Some(started_at), budget, &clock, register);
+            assert!(matches!(second, Ok(Ok(()))));
+            let expired = register_backend_while_live(Some(started_at), budget, &clock, register);
             assert!(matches!(
-                second,
-                Err(EdgeError::Internal { source, .. })
-                    if source.to_string() == DISPATCH_SLACK_MESSAGE
+                expired,
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                })
             ));
-            assert_eq!(registrations.get(), 1);
+            assert_eq!(registrations.get(), 2);
         }
 
         #[test]
@@ -3775,7 +4119,7 @@ mod fastly_impl {
                 ),
                 (
                     SendErrorCause::ConnectionTimeout,
-                    super::super::SendFailure::BudgetedTimeout,
+                    super::super::SendFailure::ProviderTimeout,
                 ),
                 (
                     SendErrorCause::ConnectionLimitReached,
@@ -3890,24 +4234,28 @@ mod fastly_impl {
     }
 }
 
-#[cfg(all(feature = "fastly", feature = "test-utils"))]
-pub use fastly_impl::inject_dispatch_slack_for_test;
-#[cfg(feature = "fastly")]
-pub(crate) use fastly_impl::native_time;
 #[cfg(feature = "fastly")]
 pub use fastly_impl::{DYNAMIC_BACKENDS_DISABLED_MESSAGE, FastlyOutboundClient};
+#[cfg(feature = "fastly")]
+pub(crate) use fastly_impl::{drive_callback, native_time};
 
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
-fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
-    if request.image_optimizer_options().is_some() {
+fn validate_supported_options(
+    request: &OutboundRequest,
+    mode: OutboundSendMode,
+) -> Result<(), EdgeError> {
+    if request.image_optimizer_options().is_some()
+        && matches!(mode, OutboundSendMode::Batch | OutboundSendMode::Begin)
+    {
         return Err(EdgeError::bad_request(
             "image_optimizer is not supported by fastly batches",
         ));
     }
-    validate_for_dispatch(request, OutboundSendMode::Batch)
+    Ok(())
 }
 
 #[cfg(any(feature = "fastly", test))]
+#[cfg(test)]
 fn driver_selection_failure(error: EdgeError) -> OutboundBatchDriverEvent {
     OutboundBatchDriverEvent::Failed(error)
 }
@@ -3919,7 +4267,8 @@ fn driver_selection_failure(error: EdgeError) -> OutboundBatchDriverEvent {
 #[cfg(feature = "test-utils")]
 #[inline]
 pub fn validate_batch_request_for_test(request: &OutboundRequest) -> Result<(), EdgeError> {
-    validate_batch_request(request)
+    validate_supported_options(request, OutboundSendMode::Batch)?;
+    validate_for_dispatch(request, OutboundSendMode::Batch)
 }
 
 #[cfg(any(feature = "fastly", test))]
@@ -3932,12 +4281,13 @@ mod send_failure_policy_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundBatchDriverEvent, OutboundBatchItem, OutboundBatchTermination,
+        OutboundBatch, OutboundBatchDriverEvent, OutboundBatchTermination, OutboundCollectedSlot,
         OutboundSlotResult,
     };
     use futures::executor::block_on;
     use futures_util::stream;
 
+    use super::testing;
     use super::*;
 
     #[test]
@@ -4037,66 +4387,57 @@ mod send_failure_policy_tests {
         let OutboundBatchDriverEvent::Failed(_) = &event else {
             panic!("selection failure must become a driver failure event");
         };
-        let completed = OutboundBatchItem::new(
-            0,
-            OutboundSlotResult::new(
-                Duration::from_millis(1),
-                Err(EdgeError::bad_gateway("completed slot failure")),
-            ),
-        );
+        let completed = OutboundBatchDriverEvent::Item {
+            index: 0,
+            completed_at: testing::instant(),
+            outcome: Err(EdgeError::bad_gateway("completed slot failure")),
+        };
         let batch = OutboundBatch::from_driver(
-            2,
-            stream::iter([OutboundBatchDriverEvent::Item(completed), event]),
+            testing::batch_context(2),
+            stream::iter([completed, event]),
+            testing::owner(),
         );
         let failure =
             block_on(batch.collect()).expect_err("selection failure must fail collection");
 
         assert_eq!(
-            failure.error.to_string(),
+            failure.error().to_string(),
             "internal error: Fastly readiness returned an invalid handle index"
         );
-        assert!(matches!(failure.slots.first(), Some(Some(_))));
-        assert!(matches!(failure.slots.get(1), Some(None)));
+        assert!(matches!(
+            failure.slots().first(),
+            Some(OutboundCollectedSlot::Resolved(_))
+        ));
+        assert!(matches!(
+            failure.slots().get(1),
+            Some(OutboundCollectedSlot::Unresolved)
+        ));
     }
 
     #[test]
     fn early_observation_cutoff_attributed_timeout_preserves_a_later_sibling() {
         let started_at = MonotonicInstant::now();
-        let observation_cutoff = Deadline::at_instant(
-            started_at
-                .checked_add(Duration::from_millis(10))
-                .expect("cutoff instant"),
-        );
-        let early_timeout = finish_fastly_batch_observation(
-            0,
-            started_at,
-            started_at
-                .checked_add(Duration::from_millis(1))
-                .expect("early completion"),
-            observation_cutoff,
-            Err(timeout_error(BudgetSource::BatchCutoff)),
-        );
-        let sibling = finish_fastly_batch_observation(
-            1,
-            started_at,
-            started_at
-                .checked_add(Duration::from_millis(2))
-                .expect("sibling completion"),
-            observation_cutoff,
-            Err(EdgeError::bad_gateway("sibling completed")),
-        );
-        let events = [early_timeout, sibling].map(|observation| match observation {
-            FastlyBatchObservation::Continue(item) => OutboundBatchDriverEvent::Item(item),
-            FastlyBatchObservation::Cutoff => OutboundBatchDriverEvent::Cutoff,
-        });
-        let batch = OutboundBatch::from_driver(2, stream::iter(events));
+        let events = [
+            OutboundBatchDriverEvent::Item {
+                index: 0,
+                completed_at: started_at.checked_add(Duration::from_millis(1)).unwrap(),
+                outcome: Err(timeout_error(BudgetSource::BatchCutoff)),
+            },
+            OutboundBatchDriverEvent::Item {
+                index: 1,
+                completed_at: started_at.checked_add(Duration::from_millis(2)).unwrap(),
+                outcome: Err(EdgeError::bad_gateway("sibling completed")),
+            },
+        ];
+        let context = testing::batch_context_at(2, started_at, Duration::from_millis(10));
+        let batch = OutboundBatch::from_driver(context, stream::iter(events), testing::owner());
 
         let results = block_on(batch.collect()).expect("valid Fastly batch driver");
 
-        assert_eq!(results.termination, OutboundBatchTermination::Completed);
+        assert_eq!(results.termination(), OutboundBatchTermination::Completed);
         assert!(matches!(
-            results.slots.first(),
-            Some(Some(OutboundSlotResult {
+            results.slots().first(),
+            Some(OutboundCollectedSlot::Resolved(OutboundSlotResult {
                 outcome: Err(EdgeError::GatewayTimeout {
                     cause: BudgetSource::BatchCutoff,
                     ..
@@ -4105,17 +4446,72 @@ mod send_failure_policy_tests {
             }))
         ));
         assert!(matches!(
-            results.slots.get(1),
-            Some(Some(OutboundSlotResult {
+            results.slots().get(1),
+            Some(OutboundCollectedSlot::Resolved(OutboundSlotResult {
                 outcome: Err(EdgeError::BadGateway { .. }),
                 ..
             }))
         ));
     }
 
-    fn failures() -> [SendFailure; 9] {
+    #[test]
+    fn connect_timeout_reaches_provider_settings() {
+        let record =
+            |timers: BackendTimers| (timers.connect, timers.first_byte, timers.between_bytes);
+        assert_eq!(
+            with_backend_timers(0x4000, Some(1_000), record),
+            (
+                Duration::from_secs(1),
+                Duration::from_millis(0x4000),
+                Duration::from_millis(0x4000)
+            )
+        );
+        assert_eq!(
+            effective_connect_ms(Some(Duration::from_secs(20)), Duration::from_secs(15)),
+            None
+        );
+        assert_eq!(
+            effective_connect_ms(Some(Duration::from_nanos(1)), Duration::from_secs(15)),
+            Some(1)
+        );
+        assert_eq!(
+            with_backend_timers(0x4000, None, record),
+            (
+                Duration::from_millis(0x4000),
+                Duration::from_millis(0x4000),
+                Duration::from_millis(0x4000)
+            )
+        );
+    }
+
+    #[test]
+    fn connect_expiry_preserves_governing_budget_precedence() {
+        let start = MonotonicInstant::now();
+        for cause in [
+            BudgetSource::Default,
+            BudgetSource::PerCallTimeout,
+            BudgetSource::RequestDeadline,
+            BudgetSource::BatchCutoff,
+        ] {
+            let budget = test_budget(start, cause);
+            for at in [start, budget.deadline.instant()] {
+                let error = classify_send_failure(SendFailure::ConnectTimeout, budget, at);
+                let expected = if at == start {
+                    BudgetSource::ConnectTimeout
+                } else {
+                    cause
+                };
+                assert!(
+                    matches!(error, EdgeError::GatewayTimeout { cause: actual, .. } if actual == expected)
+                );
+            }
+        }
+    }
+
+    fn failures() -> [SendFailure; 10] {
         [
             SendFailure::BudgetedTimeout,
+            SendFailure::ConnectTimeout,
             SendFailure::ImageOptimizerUnavailable,
             SendFailure::LocalInvariant,
             SendFailure::PlatformInternal,

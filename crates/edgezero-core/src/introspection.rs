@@ -151,7 +151,7 @@ mod tests {
     }
 
     // Collect a buffered response body into JSON (introspection responses are
-    // always `Body::Once`). `Body::to_json` works on the buffered variant.
+    // always `BodyPayload::Once`). `Body::to_json` works on the buffered payload.
     fn body_json(resp: Response) -> serde_json::Value {
         resp.into_body().to_json().expect("buffered JSON body")
     }

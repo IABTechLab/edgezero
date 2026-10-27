@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 
 use axum::http::Response;
 use bytes::Bytes;
-use edgezero_core::body::{Body, BodyStream};
+use edgezero_core::body::{Body, BodyPayload, BodyStream};
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{Method, Response as CoreResponse, StatusCode};
 use edgezero_core::response_egress::{
@@ -275,17 +275,18 @@ impl AxumEgressBody {
             state.unregister();
             return Err(Box::new(attempt));
         }
+        let (payload, _scope) = body.into_parts();
         let (source, inferred_length) = if transmits_body {
-            match body {
-                Body::Once(bytes) if bytes.is_empty() => (ResponseSource::Done, Some(0)),
-                Body::Once(bytes) => {
+            match payload {
+                BodyPayload::Once(bytes) if bytes.is_empty() => (ResponseSource::Done, Some(0)),
+                BodyPayload::Once(bytes) => {
                     let length = u64::try_from(bytes.len()).ok();
                     (ResponseSource::Once(Some(bytes)), length)
                 }
-                Body::Stream(stream) => (ResponseSource::Stream(stream), None),
+                BodyPayload::Stream(stream) => (ResponseSource::Stream(stream), None),
             }
         } else {
-            drop(body);
+            drop(payload);
             (ResponseSource::Done, Some(0))
         };
         Ok(Self {
@@ -606,7 +607,8 @@ async fn validate_empty_stream(
         return Ok(prepared);
     }
     let mut response = prepared.into_response();
-    if let Body::Stream(mut source) = mem::take(response.body_mut()) {
+    let (payload, _scope) = mem::take(response.body_mut()).into_parts();
+    if let BodyPayload::Stream(mut source) = payload {
         let remaining = deadline
             .remaining_at(clock.now())
             .ok_or(ResponseEgressOutcome::DeadlineExceeded)?;

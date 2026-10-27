@@ -1,5 +1,8 @@
 use std::fmt;
 use std::io;
+use std::mem;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::stream::{LocalBoxStream, Stream, StreamExt};
@@ -7,15 +10,29 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{EdgeError, RequestBodyOverflowOrigin};
+use crate::outbound::{OutboundScope, OutboundScopeOwner, Revocable};
 
 pub type BodyStream = LocalBoxStream<'static, Result<Bytes, EdgeError>>;
 
-/// Lightweight HTTP body that can either contain a single `Bytes` buffer or a streaming source of
-/// chunks. The streaming variant is implemented with `LocalBoxStream` so it remains compatible with
-/// `wasm32` targets that lack thread support.
-pub enum Body {
+/// HTTP payload representation, independent of response-body lifetime ownership.
+pub enum BodyPayload {
     Once(Bytes),
     Stream(BodyStream),
+}
+
+/// A buffered or locally streamed HTTP body with optional response-egress ownership.
+pub struct Body {
+    egress_owner: Option<Box<OutboundScopeOwner>>,
+    payload: BodyPayload,
+}
+
+struct ManualBodyStream {
+    owner: Option<OutboundScopeOwner>,
+    source: Option<BodyStream>,
+}
+
+struct ScopedBodyStream {
+    source: Option<Revocable<BodyStream>>,
 }
 
 impl Body {
@@ -24,10 +41,44 @@ impl Body {
     /// [`Body::into_bytes_bounded`].
     #[inline]
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self {
-            Body::Once(bytes) => Some(bytes.as_ref()),
-            Body::Stream(_) => None,
+        match &self.payload {
+            BodyPayload::Once(bytes) => Some(bytes.as_ref()),
+            BodyPayload::Stream(_) => None,
         }
+    }
+
+    pub(crate) fn attach_egress_owner(
+        mut self,
+        owner: OutboundScopeOwner,
+    ) -> Result<Self, EdgeError> {
+        if self.egress_owner.is_some() {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "response body already owns an outbound scope"
+            )));
+        }
+        self.egress_owner = Some(Box::new(owner));
+        Ok(self)
+    }
+
+    pub(crate) fn bind_outbound_scope(mut self, scope: &OutboundScope) -> Result<Self, EdgeError> {
+        if let Err(error) = scope.check() {
+            scope.with_cleanup(|| drop(self));
+            return Err(error);
+        }
+        let payload = mem::replace(&mut self.payload, BodyPayload::Once(Bytes::new()));
+        self.payload = match payload {
+            BodyPayload::Once(bytes) => BodyPayload::Once(bytes),
+            BodyPayload::Stream(source) => {
+                let registered = Revocable::new(scope, source)?;
+                BodyPayload::Stream(
+                    ScopedBodyStream {
+                        source: Some(registered),
+                    }
+                    .boxed_local(),
+                )
+            }
+        };
+        Ok(self)
     }
 
     #[must_use]
@@ -41,7 +92,7 @@ impl Body {
     where
         B: Into<Bytes>,
     {
-        Self::Once(bytes.into())
+        Self::from_parts(BodyPayload::Once(bytes.into()), None)
     }
 
     #[inline]
@@ -50,13 +101,21 @@ impl Body {
         S: Stream<Item = Result<Bytes, E>> + 'static,
         anyhow::Error: From<E>,
     {
-        Self::Stream(
-            stream
-                .map(|result| {
-                    result.map_err(|error| EdgeError::internal(anyhow::Error::from(error)))
-                })
-                .boxed_local(),
+        Self::from_stream(
+            stream.map(|result| {
+                result.map_err(|error| EdgeError::internal(anyhow::Error::from(error)))
+            }),
         )
+    }
+
+    pub(crate) fn from_parts(
+        payload: BodyPayload,
+        egress_owner: Option<OutboundScopeOwner>,
+    ) -> Self {
+        Self {
+            egress_owner: egress_owner.map(Box::new),
+            payload,
+        }
     }
 
     #[inline]
@@ -64,7 +123,11 @@ impl Body {
     where
         S: Stream<Item = Result<Bytes, EdgeError>> + 'static,
     {
-        Self::Stream(stream.boxed_local())
+        Self::from_parts(BodyPayload::Stream(stream.boxed_local()), None)
+    }
+
+    pub(crate) fn has_egress_owner(&self) -> bool {
+        self.egress_owner.is_some()
     }
 
     /// Consume a buffered body and return its bytes, or `None` if this is a
@@ -72,9 +135,16 @@ impl Body {
     /// [`Body::into_bytes_bounded`].
     #[inline]
     pub fn into_bytes(self) -> Option<Bytes> {
-        match self {
-            Body::Once(bytes) => Some(bytes),
-            Body::Stream(_) => None,
+        let (payload, owner) = self.into_parts();
+        match payload {
+            BodyPayload::Once(bytes) => {
+                drop(owner);
+                Some(bytes)
+            }
+            BodyPayload::Stream(source) => {
+                drop(Self::from_parts(BodyPayload::Stream(source), owner));
+                None
+            }
         }
     }
 
@@ -87,8 +157,10 @@ impl Body {
     /// `max_size` bytes. Source errors retain their original category.
     #[inline]
     pub async fn into_bytes_bounded(self, max_size: usize) -> Result<Bytes, EdgeError> {
-        match self {
-            Body::Once(bytes) => {
+        let (payload, owner) = self.into_parts();
+        match payload {
+            BodyPayload::Once(bytes) => {
+                let _owner = owner;
                 if bytes.len() > max_size {
                     return Err(EdgeError::payload_too_large(
                         RequestBodyOverflowOrigin::Inbound,
@@ -96,7 +168,8 @@ impl Body {
                 }
                 Ok(bytes)
             }
-            Body::Stream(mut stream) => {
+            BodyPayload::Stream(source) => {
+                let mut stream = manual_stream(source, owner);
                 let mut buf = Vec::new();
                 while let Some(result) = StreamExt::next(&mut stream).await {
                     let chunk = result?;
@@ -115,17 +188,32 @@ impl Body {
         }
     }
 
+    /// Separates payload and its exact optional egress owner without copying bytes.
+    /// The caller must retain the owner through terminal response egress.
+    #[must_use]
     #[inline]
-    pub fn into_stream(self) -> Option<BodyStream> {
-        match self {
-            Body::Once(_) => None,
-            Body::Stream(stream) => Some(stream),
+    pub fn into_parts(mut self) -> (BodyPayload, Option<OutboundScopeOwner>) {
+        let payload = mem::replace(&mut self.payload, BodyPayload::Once(Bytes::new()));
+        (payload, self.take_egress_owner())
+    }
+
+    /// Explicitly converts to a manually consumed stream. An attached owner closes at
+    /// stream EOF, error, or drop; canonical egress extracts that owner before conversion.
+    ///
+    /// # Errors
+    /// Returns the original buffered body, including its owner, rather than discarding it.
+    #[inline]
+    pub fn into_stream(self) -> Result<BodyStream, Self> {
+        let (payload, owner) = self.into_parts();
+        match payload {
+            BodyPayload::Once(bytes) => Err(Self::from_parts(BodyPayload::Once(bytes), owner)),
+            BodyPayload::Stream(source) => Ok(manual_stream(source, owner)),
         }
     }
 
     #[inline]
     pub fn is_stream(&self) -> bool {
-        matches!(self, Body::Stream(_))
+        matches!(self.payload, BodyPayload::Stream(_))
     }
 
     /// # Errors
@@ -143,7 +231,11 @@ impl Body {
     where
         S: Stream<Item = Bytes> + 'static,
     {
-        Self::Stream(stream.map(Ok::<Bytes, EdgeError>).boxed_local())
+        Self::from_stream(stream.map(Ok::<Bytes, EdgeError>))
+    }
+
+    pub(crate) fn take_egress_owner(&mut self) -> Option<OutboundScopeOwner> {
+        self.egress_owner.take().map(|owner| *owner)
     }
 
     #[inline]
@@ -161,11 +253,86 @@ impl Body {
     where
         T: DeserializeOwned,
     {
-        match self {
-            Body::Once(bytes) => serde_json::from_slice(bytes.as_ref()),
-            Body::Stream(_) => Err(serde_json::Error::io(io::Error::other(
+        match &self.payload {
+            BodyPayload::Once(bytes) => serde_json::from_slice(bytes.as_ref()),
+            BodyPayload::Stream(_) => Err(serde_json::Error::io(io::Error::other(
                 "streaming body cannot be materialised as JSON",
             ))),
+        }
+    }
+}
+
+impl ManualBodyStream {
+    fn release(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            owner.with(|| {
+                let source = self.source.take();
+                owner.close();
+                drop(source);
+            });
+        }
+    }
+}
+
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl Drop for ManualBodyStream {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl Stream for ManualBodyStream {
+    type Item = Result<Bytes, EdgeError>;
+
+    #[inline]
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let Some(source) = &mut this.source else {
+            return Poll::Ready(None);
+        };
+        let polled = if let Some(owner) = &this.owner {
+            match owner.scope().check() {
+                Ok(()) => owner.with(|| source.as_mut().poll_next(cx)),
+                Err(error) => Poll::Ready(Some(Err(error))),
+            }
+        } else {
+            source.as_mut().poll_next(cx)
+        };
+        if matches!(polled, Poll::Ready(None | Some(Err(_)))) {
+            this.release();
+        }
+        polled
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.source.as_ref().map_or((0, Some(0)), Stream::size_hint)
+    }
+}
+
+impl Stream for ScopedBodyStream {
+    type Item = Result<Bytes, EdgeError>;
+
+    #[inline]
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let Some(source) = &self.source else {
+            return Poll::Ready(None);
+        };
+        let observation = source
+            .with(cx, StreamExt::poll_next_unpin)
+            .unwrap_or_else(|error| Poll::Ready(Some(Err(error))));
+        if matches!(observation, Poll::Ready(None | Some(Err(_)))) {
+            drop(self.source.take());
+        }
+        observation
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.source.is_none() {
+            (0, Some(0))
+        } else {
+            (0, None)
         }
     }
 }
@@ -177,15 +344,36 @@ impl Default for Body {
     }
 }
 
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl Drop for Body {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(owner) = self.egress_owner.take() {
+            owner.with(|| {
+                let payload = mem::replace(&mut self.payload, BodyPayload::Once(Bytes::new()));
+                owner.close();
+                drop(payload);
+            });
+        }
+    }
+}
+
 impl fmt::Debug for Body {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Body")
+            .field("payload", &self.payload)
+            .field("egress_owner", &self.egress_owner.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Debug for BodyPayload {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Body::Once(bytes) => f
-                .debug_struct("Body::Once")
-                .field("len", &bytes.len())
-                .finish(),
-            Body::Stream(_) => f.debug_tuple("Body::Stream").finish(),
+            Self::Once(bytes) => f.debug_struct("Once").field("len", &bytes.len()).finish(),
+            Self::Stream(_) => f.debug_tuple("Stream").finish(),
         }
     }
 }
@@ -193,7 +381,7 @@ impl fmt::Debug for Body {
 impl From<Bytes> for Body {
     #[inline]
     fn from(value: Bytes) -> Self {
-        Body::Once(value)
+        Body::from_bytes(value)
     }
 }
 
@@ -225,21 +413,221 @@ impl From<String> for Body {
     }
 }
 
+fn manual_stream(source: BodyStream, optional_owner: Option<OutboundScopeOwner>) -> BodyStream {
+    match optional_owner {
+        Some(owner) => ManualBodyStream {
+            owner: Some(owner),
+            source: Some(source),
+        }
+        .boxed_local(),
+        None => source,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::ResponseLimitReason;
     use crate::http::StatusCode;
+    use crate::outbound::{
+        IndependentOutboundProgress, OutboundScope, OutboundScopeOwner, Revocable,
+    };
     use futures::executor::block_on;
     use futures_util::stream;
     use std::cell::Cell;
     use std::io;
     use std::rc::Rc;
 
+    #[cfg(panic = "unwind")]
+    struct ClosingPanic;
+
+    #[cfg(panic = "unwind")]
+    struct ClosedSourceDrop(Rc<Cell<bool>>);
+
+    #[cfg(panic = "unwind")]
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for ClosingPanic {
+        fn drop(&mut self) {
+            panic!("fixture owner cleanup failure");
+        }
+    }
+
+    #[cfg(panic = "unwind")]
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for ClosedSourceDrop {
+        fn drop(&mut self) {
+            let ambient = OutboundScope::capture(Rc::new(IndependentOutboundProgress));
+            self.0.set(ambient.is_managed() && ambient.check().is_err());
+        }
+    }
+
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn owner_cleanup_unwind_cannot_retain_or_unbind_payload() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        for manual in [false, true] {
+            let owner = OutboundScopeOwner::response_body();
+            drop(
+                owner
+                    .scope()
+                    .provider_state(|| ClosingPanic)
+                    .expect("provider"),
+            );
+            let closed_drop = Rc::new(Cell::new(false));
+            let source_drop = ClosedSourceDrop(Rc::clone(&closed_drop));
+            let polls = Rc::new(Cell::new(0_usize));
+            let source_polls = Rc::clone(&polls);
+            let body = Body::from_stream(stream::poll_fn(move |_| {
+                let _held = &source_drop;
+                source_polls.set(source_polls.get().saturating_add(1));
+                Poll::Ready(None)
+            }))
+            .attach_egress_owner(owner)
+            .expect("attached owner");
+            if manual {
+                let mut source = body.into_stream().expect("manual source");
+                let failed_close = catch_unwind(AssertUnwindSafe(|| block_on(source.next())));
+                assert!(failed_close.is_err(), "fixture exercises cleanup unwind");
+                assert!(
+                    closed_drop.get(),
+                    "source drops while its closed owner is active"
+                );
+                assert!(block_on(source.next()).is_none());
+                assert_eq!(polls.get(), 1, "source cannot be polled after unwind");
+            } else {
+                let failed_close = catch_unwind(AssertUnwindSafe(|| drop(body)));
+                assert!(failed_close.is_err(), "fixture exercises cleanup unwind");
+                assert!(
+                    closed_drop.get(),
+                    "payload drops before restoring ambient scope"
+                );
+                assert_eq!(polls.get(), 0);
+            }
+        }
+    }
+
     #[test]
     fn as_bytes_returns_none_for_stream() {
         let body = Body::stream(stream::iter(vec![Bytes::from_static(b"data")]));
         assert!(body.as_bytes().is_none());
+    }
+
+    #[test]
+    fn attached_buffered_parts_preserve_bytes_and_exact_owner() {
+        let bytes = Bytes::from(vec![b'x'; 32]);
+        let original = bytes.as_ptr();
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let body = Body::from(bytes)
+            .attach_egress_owner(owner)
+            .expect("attach")
+            .bind_outbound_scope(&scope)
+            .expect("bind buffered payload without copying or losing its owner");
+        assert_eq!(body.as_bytes().expect("buffered").as_ptr(), original);
+        assert!(!body.is_stream());
+        let (payload, transferred_owner) = body.into_parts();
+        let BodyPayload::Once(transferred_bytes) = payload else {
+            panic!("buffered representation must remain Once");
+        };
+        assert_eq!(transferred_bytes.as_ptr(), original);
+        assert_eq!(transferred_bytes.len(), 32);
+        scope.check().expect("transferred owner remains live");
+        drop(transferred_owner);
+        assert!(scope.check().is_err());
+    }
+
+    #[test]
+    fn manual_stream_conversion_retains_owner_until_consumption() {
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let body = Body::from_stream(stream::iter([Ok(Bytes::from_static(b"data"))]))
+            .attach_egress_owner(owner)
+            .expect("attach");
+        let mut source = body.into_stream().expect("stream");
+        scope.check().expect("unpolled stream owns scope");
+        assert_eq!(
+            block_on(source.next()).expect("chunk").expect("bytes"),
+            "data"
+        );
+        scope.check().expect("nonterminal chunk retains scope");
+        assert!(block_on(source.next()).is_none());
+        assert!(scope.check().is_err());
+    }
+
+    #[test]
+    fn manual_buffered_stream_conversion_returns_original_owner() {
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let body = Body::from("payload")
+            .attach_egress_owner(owner)
+            .expect("attach");
+        let returned_body = body
+            .into_stream()
+            .err()
+            .expect("buffered body returned intact");
+        assert_eq!(returned_body.as_bytes(), Some(b"payload".as_slice()));
+        scope.check().expect("returned body keeps ownership");
+        drop(returned_body);
+        assert!(scope.check().is_err());
+    }
+
+    #[test]
+    fn dropping_attached_source_closes_roots_before_closed_scope_cleanup() {
+        struct Release(Rc<Cell<usize>>);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.set(self.0.get().saturating_add(1));
+            }
+        }
+        struct Cleanup(Rc<Cell<bool>>);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let ambient = OutboundScope::capture(Rc::new(IndependentOutboundProgress));
+                self.0.set(ambient.check().is_err());
+            }
+        }
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let released = Rc::new(Cell::new(0));
+        let retained = Revocable::new(&scope, Release(Rc::clone(&released))).expect("root");
+        let cleanup_closed = Rc::new(Cell::new(false));
+        let cleanup = Cleanup(Rc::clone(&cleanup_closed));
+        let body = Body::from_stream(stream::poll_fn(move |_| {
+            let _keep = &cleanup;
+            panic!("cleanup must not poll the source");
+        }))
+        .attach_egress_owner(owner)
+        .expect("attach");
+        drop(body);
+        assert!(retained.is_revoked());
+        assert_eq!(released.get(), 1);
+        assert!(cleanup_closed.get());
+    }
+
+    #[test]
+    fn manual_stream_error_and_abandonment_close_attached_scope() {
+        for fail in [false, true] {
+            let owner = OutboundScopeOwner::response_body();
+            let scope = owner.scope();
+            let body = Body::from_stream(stream::once(async {
+                Err(EdgeError::gateway_timeout("source error"))
+            }))
+            .attach_egress_owner(owner)
+            .expect("attach");
+            let mut source = body.into_stream().expect("stream");
+            if fail {
+                assert!(matches!(
+                    block_on(source.next()),
+                    Some(Err(EdgeError::GatewayTimeout { .. }))
+                ));
+                assert!(scope.check().is_err());
+            }
+            drop(source);
+            assert!(scope.check().is_err());
+        }
     }
 
     #[test]
@@ -265,11 +653,17 @@ mod tests {
     fn debug_formats_both_body_variants() {
         let buffered = Body::from("payload");
         let buffered_debug = format!("{buffered:?}");
-        assert!(buffered_debug.contains("Body::Once"));
+        assert_eq!(
+            buffered_debug,
+            "Body { payload: Once { len: 7 }, egress_owner: false }"
+        );
 
         let stream = Body::stream(stream::iter(vec![Bytes::from_static(b"chunk")]));
         let stream_debug = format!("{stream:?}");
-        assert!(stream_debug.contains("Body::Stream"));
+        assert_eq!(
+            stream_debug,
+            "Body { payload: Stream, egress_owner: false }"
+        );
     }
 
     #[test]
@@ -429,9 +823,10 @@ mod tests {
     }
 
     #[test]
-    fn into_stream_returns_none_for_buffered_body() {
+    fn into_stream_returns_buffered_body() {
         let body = Body::from("payload");
-        assert!(body.into_stream().is_none());
+        let returned_body = body.into_stream().err().expect("buffered body");
+        assert_eq!(returned_body.as_bytes(), Some(b"payload".as_slice()));
     }
 
     #[test]

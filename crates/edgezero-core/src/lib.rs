@@ -52,7 +52,7 @@ pub mod store_registry;
 pub mod test_env;
 pub mod time;
 
-pub use body::{Body, BodyStream};
+pub use body::{Body, BodyPayload, BodyStream};
 pub use compression::{
     BROTLI_DECODER_FIXED_CHARGE_BYTES, ContentEncoding, FLATE_DECODER_FIXED_CHARGE_BYTES,
     PassthroughReason, brotli_decoder_memory_charge, classify_content_encoding,
@@ -89,18 +89,23 @@ pub use manifest::{
 };
 pub use outbound::{
     ContentTypeIneligibility, ContentTypeProvenance, DEFAULT_MAX_DECODER_BYTES,
-    DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_OUTBOUND_REQUEST_BODY_BYTES, HttpClient, OutboundBatch,
-    OutboundBatchDriverEvent, OutboundBatchFailure, OutboundBatchItem, OutboundBatchNext,
-    OutboundBatchResults, OutboundBatchTermination, OutboundCachePolicy, OutboundCropFocus,
-    OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
-    OutboundHeaderInput, OutboundHttpClient, OutboundImageFormat, OutboundImageOptimizerOptions,
-    OutboundImageOptimizerRegion, OutboundLocationEvidence, OutboundPending, OutboundProxyMarker,
-    OutboundRequest, OutboundRequestParts, OutboundResizeFilter, OutboundResponse,
-    OutboundResponseContext, OutboundSendMode, OutboundSlotResult, OutboundTime, PROXY_HEADER,
-    ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeadNormalization,
-    ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
-    collect_response_stream_until_with_clock, enforce_payload_content_length, limit_decoded_stream,
-    limit_encoded_stream, normalize_for_dispatch, rechunk_stream, validate_for_dispatch,
+    DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_OUTBOUND_REQUEST_BODY_BYTES, HttpClient,
+    IndependentOutboundProgress, OutboundBatch, OutboundBatchAccumulator, OutboundBatchCheck,
+    OutboundBatchContext, OutboundBatchDriverEvent, OutboundBatchFailure,
+    OutboundBatchInsertFailure, OutboundBatchItem, OutboundBatchMergeFailure, OutboundBatchNext,
+    OutboundBatchResults, OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot,
+    OutboundCropFocus, OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture,
+    OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
+    OutboundImageFormat, OutboundImageOptimizerOptions, OutboundImageOptimizerRegion,
+    OutboundLocationEvidence, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
+    OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResizeFilter,
+    OutboundResponse, OutboundResponseContext, OutboundScope, OutboundScopeKind,
+    OutboundScopeOwner, OutboundSendMode, OutboundSlotResult, OutboundTask, OutboundTime,
+    PROXY_HEADER, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
+    ResponseHeadNormalization, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
+    collect_response_stream, collect_response_stream_until_with_clock,
+    enforce_payload_content_length, limit_decoded_stream, limit_encoded_stream,
+    normalize_for_dispatch, rechunk_stream, validate_for_dispatch,
 };
 pub use platform::{
     HostIngressMemoryAccounting, InboundRequestPopulationBound, MemoryCeiling, MemoryCeilingScope,
@@ -116,8 +121,9 @@ pub use response_egress::{
     ResponseEgressEnvelope, ResponseEgressFallbackDisposition, ResponseEgressFramingFailures,
     ResponseEgressHead, ResponseEgressObserver, ResponseEgressObserverHandle,
     ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressPolicyCallback,
-    ResponseEgressReport, ResponseEgressResource, ResponseEgressResourceInstallError,
-    ResponseEgressSourceFailure, default_response_egress_policy,
+    ResponseEgressPreparationError, ResponseEgressReport, ResponseEgressResource,
+    ResponseEgressResourceInstallError, ResponseEgressSourceFailure,
+    default_response_egress_policy,
 };
 #[doc(inline)]
 pub use response_egress_framing::ResponseEgressFramingError;
@@ -127,8 +133,8 @@ pub use response_headers::{
 };
 pub use router::{ResolvedDispatch, RouteId, RouteInfo, RouteMetadata, RouteResolution};
 pub use time::{
-    BATCH_DISPATCH_SLACK_MAX, DEADLINE_FAR_FUTURE, DEFAULT_NO_DEADLINE_BUDGET, Deadline,
-    DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
+    DEADLINE_FAR_FUTURE, DEFAULT_NO_DEADLINE_BUDGET, Deadline, DispatchBudget, MonotonicClock,
+    MonotonicInstant, dispatch_budget,
 };
 
 #[cfg(test)]
@@ -155,7 +161,6 @@ mod public_config_extraction_contract_tests {
             crate::DEFAULT_CONFIG_EXTRACTION_BYTES
         );
         assert_eq!(limits.timeout, crate::DEFAULT_CONFIG_EXTRACTION_TIMEOUT);
-        assert_eq!(crate::BATCH_DISPATCH_SLACK_MAX, Duration::from_millis(25));
         assert_eq!(crate::DEADLINE_FAR_FUTURE, Duration::from_hours(168));
         assert_eq!(crate::DEFAULT_NO_DEADLINE_BUDGET, Duration::from_secs(30));
     }

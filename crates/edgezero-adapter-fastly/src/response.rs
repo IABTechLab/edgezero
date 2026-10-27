@@ -10,9 +10,15 @@
 #[path = "fastly_response_abi.rs"]
 mod fastly_abi;
 
-use edgezero_core::body::Body;
+#[cfg(feature = "fastly")]
+use core::convert::identity;
+use std::task::Poll;
+
+use bytes::Bytes;
+use edgezero_core::body::{Body, BodyPayload, BodyStream};
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, Uri};
+use edgezero_core::outbound::{OutboundFuture, OutboundTime};
 use edgezero_core::response_egress::{
     RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET, ResponseEgressAttempt, ResponseEgressEnvelope,
     ResponseEgressFallbackDisposition, ResponseEgressOutcome, ResponseEgressPolicy,
@@ -24,9 +30,11 @@ use edgezero_core::response_egress_framing::{
 use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
 use futures::executor;
 use futures_util::StreamExt as _;
+use futures_util::future::poll_fn;
 
 use crate::delivery::{DeliveryError, FastlyResponseCommitState, FastlyResponseDelivery};
-use crate::outbound::scope::Guard as OutboundScope;
+#[cfg(feature = "fastly")]
+use crate::outbound::{drive_callback, native_time};
 
 const INTERNAL_FALLBACK_BODY: &[u8] = b"internal server error";
 const TIMEOUT_FALLBACK_BODY: &[u8] = b"response write deadline exceeded";
@@ -55,6 +63,12 @@ impl BufferedBody<'_> {
         }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+enum StreamRead {
+    Source(Option<Result<Bytes, EdgeError>>),
+    WriteDeadline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -371,7 +385,6 @@ fn transmit_prepared<Committer>(
 where
     Committer: EgressCommitter,
 {
-    let _scope = OutboundScope::response();
     if policy.write_deadline.is_expired_at(clock.now()) {
         return precommit_failure(
             kind,
@@ -543,30 +556,76 @@ fn pump_body<Sink>(
 where
     Sink: EgressSink,
 {
-    match body {
-        Body::Once(bytes) => write_chunk(bytes.as_ref(), sink, deadline, attempt, clock),
-        Body::Stream(mut source) => loop {
-            ensure_deadline(deadline, clock)?;
-            let next = executor::block_on(source.next());
-            if let Some(Err(error)) = &next {
-                attempt.record_source_error(error);
-            }
-            ensure_deadline(deadline, clock)?;
-            match next {
-                Some(Ok(bytes)) => {
-                    write_chunk(bytes.as_ref(), sink, deadline, attempt, clock)?;
+    let (payload, _scope) = body.into_parts();
+    match payload {
+        BodyPayload::Once(bytes) => write_chunk(bytes.as_ref(), sink, deadline, attempt, clock),
+        BodyPayload::Stream(mut source) => {
+            #[cfg(feature = "fastly")]
+            let time = native_time(clock.clone());
+            #[cfg(feature = "fastly")]
+            let mut write_timer = None;
+            loop {
+                let observed_at = clock.now();
+                if deadline.is_expired_at(observed_at) {
+                    return Err(DeliveryError::Deadline);
                 }
-                Some(Err(error)) => {
-                    log::warn!(
-                        "response-egress Fastly body source failed after commit: {}",
-                        response_egress_source_error_category(&error)
-                    );
-                    return Err(DeliveryError::Source);
+                #[cfg(feature = "fastly")]
+                let read = executor::block_on(drive_callback(
+                    read_stream_until(&mut source, &time, deadline, &mut write_timer),
+                    clock.clone(),
+                    observed_at,
+                ))
+                .and_then(identity)
+                .map_err(|error| {
+                    attempt.record_source_error(&error);
+                    DeliveryError::Source
+                })?;
+                #[cfg(feature = "fastly")]
+                let next = match read {
+                    StreamRead::WriteDeadline => return Err(DeliveryError::Deadline),
+                    StreamRead::Source(next) => next,
+                };
+                #[cfg(not(feature = "fastly"))]
+                let next = executor::block_on(source.next());
+                if let Some(Err(error)) = &next {
+                    attempt.record_source_error(error);
                 }
-                None => return Ok(()),
+                ensure_deadline(deadline, clock)?;
+                match next {
+                    Some(Ok(bytes)) => {
+                        write_chunk(bytes.as_ref(), sink, deadline, attempt, clock)?;
+                    }
+                    Some(Err(error)) => {
+                        log::warn!(
+                            "response-egress Fastly body source failed after commit: {}",
+                            response_egress_source_error_category(&error)
+                        );
+                        return Err(DeliveryError::Source);
+                    }
+                    None => return Ok(()),
+                }
             }
-        },
+        }
     }
+}
+
+async fn read_stream_until(
+    source: &mut BodyStream,
+    time: &OutboundTime,
+    deadline: Deadline,
+    write_timer: &mut Option<OutboundFuture<()>>,
+) -> Result<StreamRead, EdgeError> {
+    poll_fn(|cx| {
+        let timer = write_timer.get_or_insert_with(|| time.wait_until(deadline));
+        if let Poll::Ready(result) = timer.as_mut().poll(cx) {
+            drop(write_timer.take());
+            return Poll::Ready(result.map(|()| StreamRead::WriteDeadline));
+        }
+        source
+            .poll_next_unpin(cx)
+            .map(|next| Ok(StreamRead::Source(next)))
+    })
+    .await
 }
 
 fn write_chunk<Sink>(
@@ -689,6 +748,7 @@ pub(crate) fn parse_uri(uri: &str) -> Result<Uri, EdgeError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::outbound::testing;
     use edgezero_core::response_egress_framing::prepare_response_egress;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
@@ -709,6 +769,7 @@ mod tests {
     };
     use edgezero_core::router::RouterService;
     use edgezero_core::time::MonotonicInstant;
+    use futures_util::future::{pending, poll_fn as poll_future};
     use futures_util::stream::{self, poll_fn};
 
     use super::*;
@@ -732,6 +793,8 @@ mod tests {
     struct SinkState {
         abandon: MockTerminal,
         accepted: Vec<u8>,
+        advance_on_finish: Option<(Arc<Mutex<MonotonicInstant>>, MonotonicInstant)>,
+        advance_on_write: Option<(Arc<Mutex<MonotonicInstant>>, MonotonicInstant)>,
         commits: Vec<(StatusCode, HeaderMap, bool)>,
         events: Vec<&'static str>,
         finish: MockTerminal,
@@ -763,6 +826,9 @@ mod tests {
         fn finish(&mut self) -> Result<(), Self::Error> {
             let mut state = self.0.borrow_mut();
             state.events.push("finish");
+            if let Some((clock, observed)) = &state.advance_on_finish {
+                *clock.lock().map_err(|_poisoned| ())? = *observed;
+            }
             match state.finish {
                 MockTerminal::Error => Err(()),
                 MockTerminal::Success => Ok(()),
@@ -777,6 +843,9 @@ mod tests {
                 && accepted <= bytes.len()
             {
                 state.accepted.extend_from_slice(&bytes[..accepted]);
+            }
+            if let Some((clock, observed)) = &state.advance_on_write {
+                *clock.lock().map_err(|_poisoned| ())? = *observed;
             }
             result
         }
@@ -917,8 +986,15 @@ mod tests {
         let observer = RecordingObserver::default();
         let mut attempt = attempt(&observer, now);
         let mut committer = MockCommitter::new(state);
+        let prepared = attempt
+            .prepare_response(
+                ResponseEgressFramingMode::HostAutomatic,
+                &Method::GET,
+                Response::new(body),
+            )
+            .expect("prepared scoped response");
         let result = transmit_prepared(
-            prepared(body),
+            prepared,
             future_policy(now),
             &mut attempt,
             &clock,
@@ -932,7 +1008,7 @@ mod tests {
     #[test]
     fn body_created_batches_end_at_egress_without_closing_callback_work() {
         use crate::outbound::scope::bind_batch;
-        use edgezero_core::{OutboundBatch, OutboundBatchDriverEvent};
+        use edgezero_core::{OutboundBatch, OutboundBatchDriverEvent, OutboundScopeOwner};
         use futures_util::future::poll_fn as poll_future;
         use std::future::Future as _;
 
@@ -951,19 +1027,23 @@ mod tests {
                 let _keep_owner = &owner;
                 Poll::<Option<OutboundBatchDriverEvent>>::Pending
             });
-            OutboundBatch::from_driver(1, bind_batch(source))
+            let context = testing::batch_context(1);
+            let receiver = bind_batch(context.scope(), source);
+            OutboundBatch::from_driver(context, receiver, testing::owner())
         }
 
         for failure in 0_u8..4 {
-            let callback = OutboundScope::callback();
+            let callback = OutboundScopeOwner::callback();
             let callback_released = Rc::new(Cell::new(0));
-            let callback_batch = Rc::new(RefCell::new(batch(Rc::clone(&callback_released))));
+            let callback_batch = Rc::new(RefCell::new(
+                callback.with(|| batch(Rc::clone(&callback_released))),
+            ));
             let polled_callback = Rc::clone(&callback_batch);
             let response_released = Rc::new(Cell::new(0));
             let captured_release = Rc::clone(&response_released);
             let saved = Rc::new(RefCell::new(None));
             let captured_batch = Rc::clone(&saved);
-            let body = Body::Stream(Box::pin(async_stream::stream! {
+            let body = Body::from_stream(async_stream::stream! {
                 poll_future(|cx| {
                     let mut borrowed = polled_callback.borrow_mut();
                     let mut next = Box::pin(borrowed.next());
@@ -976,7 +1056,7 @@ mod tests {
                 } else {
                     yield Ok(Bytes::from_static(b"response"));
                 }
-            }));
+            });
             let state = Rc::new(RefCell::new(SinkState::default()));
             if failure == 2 {
                 state.borrow_mut().write_plan.push_back(Err(()));
@@ -984,7 +1064,7 @@ mod tests {
             if failure == 3 {
                 state.borrow_mut().finish = MockTerminal::Error;
             }
-            let (result, reports) = transmit(body, state);
+            let (result, reports) = callback.with(|| transmit(body, state));
             assert_eq!(result.is_err(), failure != 0);
             assert_eq!(reports.len(), 1);
             assert_eq!(response_released.get(), 1, "egress owns body-created work");
@@ -997,11 +1077,11 @@ mod tests {
             assert!(matches!(
                 executor::block_on(closed_batch.collect())
                     .unwrap_err()
-                    .error,
+                    .error(),
                 EdgeError::Internal { .. }
             ));
             let later_released = Rc::new(Cell::new(0));
-            let later_batch = batch(Rc::clone(&later_released));
+            let later_batch = callback.with(|| batch(Rc::clone(&later_released)));
             assert_eq!(later_released.get(), 0);
             drop(callback);
             assert_eq!(callback_released.get(), 1);
@@ -1563,22 +1643,510 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "fastly")]
+    use edgezero_core::OutboundBatchDriverEvent;
+    #[cfg(feature = "fastly")]
+    use futures_util::stream::LocalBoxStream;
+
+    #[cfg(feature = "fastly")]
+    struct TimedWorkOwner(Rc<Cell<usize>>);
+
+    #[cfg(feature = "fastly")]
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for TimedWorkOwner {
+        fn drop(&mut self) {
+            self.0.set(self.0.get().saturating_add(1));
+        }
+    }
+
+    #[cfg(feature = "fastly")]
+    fn timed_scope_work(
+        released: Rc<Cell<usize>>,
+        time: OutboundTime,
+        observation_cutoff: Deadline,
+    ) -> LocalBoxStream<'static, OutboundBatchDriverEvent> {
+        let owner = TimedWorkOwner(released);
+        async_stream::stream! {
+        let _owner = owner;
+            yield match time.wait_until(observation_cutoff).await {
+            Ok(()) => OutboundBatchDriverEvent::Cutoff,
+            Err(error) => OutboundBatchDriverEvent::Failed(error),
+        };
+        }
+        .boxed_local()
+    }
+
+    #[cfg(feature = "fastly")]
+    fn assert_unavailable_sdk_origin<Output>(outcome: &Result<Output, EdgeError>) {
+        use edgezero_core::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
+        let Err(error) = outcome else {
+            panic!("the controlled unavailable SDK origin cannot succeed");
+        };
+        assert!(
+            matches!(
+                error.provider_failure_detail(),
+                Some(ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::Send,
+                    cause: FastlyFailureCause::ConnectionRefused
+                        | FastlyFailureCause::InternalError {
+                            status: Some(1_i32)
+                        },
+                })
+            ),
+            "unavailable origin must retain its actual SDK cause: {error:?}"
+        );
+    }
+
+    #[cfg(feature = "fastly")]
+    async fn callback_origin_until(
+        client: &edgezero_core::HttpClient,
+        time: &OutboundTime,
+        origin_bound: Deadline,
+    ) -> Result<(), EdgeError> {
+        use edgezero_core::OutboundRequest;
+        let origin = client
+            .send(
+                OutboundRequest::get("http://127.0.0.1:9/callback-origin")
+                    .unwrap()
+                    .timeout(Duration::from_secs(1)),
+            )
+            .await;
+        assert_unavailable_sdk_origin(&origin);
+        time.wait_until(origin_bound).await
+    }
+
+    #[cfg(feature = "fastly")]
+    fn early_batch_timeline_body(
+        mut batch: edgezero_core::OutboundBatch,
+        mut delayed: edgezero_core::OutboundBatch,
+        time: OutboundTime,
+        entered: MonotonicInstant,
+        handoff_elapsed: Duration,
+        ready_elapsed: Duration,
+        checks: Rc<RefCell<Vec<u64>>>,
+    ) -> Body {
+        use edgezero_core::{OutboundBatchCheck, OutboundBatchTermination};
+        Body::from_stream(async_stream::stream! {
+            for millis in [260_u64, 320, 400] {
+                time.wait_until(Deadline::at_instant(entered.checked_add(Duration::from_millis(millis)).unwrap())).await?;
+                let observed = batch.check()?;
+                if millis == 260 {
+                    let OutboundBatchCheck::Item(item) = observed else { panic!("body-first SDK pipeline must already be recorded at first check"); };
+                    assert_eq!(item.index(), 0);
+                    assert!(item.result().elapsed < handoff_elapsed, "callback origin work must progress the idle body-owned pipeline before handoff");
+                    assert_unavailable_sdk_origin(&item.result().outcome);
+                } else {
+                    assert!(matches!(observed, OutboundBatchCheck::Finished(OutboundBatchTermination::Completed)));
+                }
+                let delayed_result = delayed.check()?;
+                match millis {
+                    260 => assert!(matches!(delayed_result, OutboundBatchCheck::Pending)),
+                    320 => {
+                        let OutboundBatchCheck::Item(item) = delayed_result else { panic!("body-owned native timer must keep progressing after callback exit"); };
+                        assert!(item.result().elapsed >= ready_elapsed);
+                        assert!(matches!(item.result().outcome, Err(EdgeError::BadGateway { .. })));
+                    }
+                    _ => assert!(matches!(delayed_result, OutboundBatchCheck::Finished(OutboundBatchTermination::Completed))),
+                }
+                checks.borrow_mut().push(millis);
+                yield Ok(Bytes::from_static(b"tick"));
+            }
+        })
+    }
+
+    #[cfg(feature = "fastly")]
+    fn delayed_body_scope_batch(
+        time: OutboundTime,
+        ready_at: Deadline,
+        observation_cutoff: Deadline,
+    ) -> (edgezero_core::OutboundBatch, Duration) {
+        use crate::outbound::scope::bind_batch;
+        let context = testing::batch_context_using(1, time.clone(), observation_cutoff);
+        let ready_elapsed = ready_at
+            .instant()
+            .saturating_duration_since(context.started_at());
+        let source = async_stream::stream! {
+            if let Err(error) = time.wait_until(ready_at).await {
+                yield OutboundBatchDriverEvent::Failed(error);
+                return;
+            }
+            yield OutboundBatchDriverEvent::Item {
+                index: 0, completed_at: time.clock().now(),
+                outcome: Err(EdgeError::bad_gateway("delayed pipeline fixture")),
+            };
+        };
+        let receiver = bind_batch(context.scope(), source);
+        (
+            edgezero_core::OutboundBatch::from_driver(context, receiver, testing::owner()),
+            ready_elapsed,
+        )
+    }
+
+    #[test]
+    #[cfg(feature = "fastly")]
+    fn precreated_body_batch_progresses_with_callback_origin_before_attachment() {
+        use crate::outbound::FastlyOutboundClient;
+        use crate::outbound::scope;
+        use edgezero_core::{HttpClient, OutboundRequest, OutboundScopeOwner};
+
+        let callback = OutboundScopeOwner::callback();
+        let body_owner = callback.with(OutboundScopeOwner::response_body);
+        let body_scope = body_owner.with(scope::capture);
+        let clock = MonotonicClock::default();
+        let entered = clock.now();
+        let time = native_time(clock.clone());
+        let client = HttpClient::with_client(FastlyOutboundClient::with_time(time.clone()));
+        let batch = body_owner.with(|| {
+            client.start_batch_until(
+                vec![
+                    OutboundRequest::post("http://127.0.0.1:9/body-first")
+                        .unwrap()
+                        .body("body-owned")
+                        .timeout(Duration::from_secs(1)),
+                ],
+                Deadline::at_instant(entered.checked_add(Duration::from_millis(500)).unwrap()),
+            )
+        });
+        let (delayed, ready_elapsed) = body_owner.with(|| {
+            delayed_body_scope_batch(
+                time.clone(),
+                Deadline::at_instant(entered.checked_add(Duration::from_millis(300)).unwrap()),
+                Deadline::at_instant(entered.checked_add(Duration::from_millis(500)).unwrap()),
+            )
+        });
+        executor::block_on(body_scope.run(time.clone(), entered, Box::pin(async { Ok(()) })))
+            .unwrap();
+        let origin_bound =
+            Deadline::at_instant(entered.checked_add(Duration::from_millis(120)).unwrap());
+        callback
+            .with(|| {
+                executor::block_on(drive_callback(
+                    callback_origin_until(&client, &time, origin_bound),
+                    clock.clone(),
+                    entered,
+                ))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(origin_bound.is_expired_at(clock.now()));
+        let handoff_elapsed = clock.now().saturating_duration_since(entered);
+        let checks = Rc::new(RefCell::new(Vec::new()));
+        let response = body_owner
+            .attach(Response::new(early_batch_timeline_body(
+                batch,
+                delayed,
+                time.clone(),
+                entered,
+                handoff_elapsed,
+                ready_elapsed,
+                Rc::clone(&checks),
+            )))
+            .unwrap();
+        assert_eq!(checks.borrow().len(), 0, "attachment cannot poll the body");
+        assert!(response.body().as_bytes().is_none());
+        let observer = RecordingObserver::default();
+        let mut attempt = attempt(&observer, entered);
+        let prepared = attempt
+            .prepare_response(
+                ResponseEgressFramingMode::HostAutomatic,
+                &Method::GET,
+                response,
+            )
+            .unwrap();
+        body_scope
+            .check()
+            .expect("framing adopts the exact precreated body owner");
+        callback.close();
+        body_scope
+            .check()
+            .expect("handler return cannot close precreated body work");
+        assert!(attempt.begin_writing());
+        let delivered = body_scope.run(
+            time,
+            entered,
+            Box::pin(async move {
+                prepared
+                    .into_response()
+                    .into_body()
+                    .into_bytes_bounded(64)
+                    .await
+            }),
+        );
+        assert_eq!(
+            executor::block_on(delivered).unwrap(),
+            Bytes::from_static(b"tickticktick")
+        );
+        assert_eq!(*checks.borrow(), [260, 320, 400]);
+        body_scope
+            .check()
+            .expect("source EOF is not transmission completion");
+        assert!(attempt.complete(clock.now()));
+        assert!(matches!(
+            body_scope.check(),
+            Err(EdgeError::Internal { .. })
+        ));
+    }
+
+    #[cfg(feature = "fastly")]
+    fn timed_scope_batch(
+        released: Rc<Cell<usize>>,
+        time: OutboundTime,
+        observation_cutoff: Deadline,
+    ) -> edgezero_core::OutboundBatch {
+        use crate::outbound::scope::bind_batch;
+        let context = testing::batch_context_using(1, time.clone(), observation_cutoff);
+        let receiver = bind_batch(
+            context.scope(),
+            timed_scope_work(released, time, observation_cutoff),
+        );
+        edgezero_core::OutboundBatch::from_driver(context, receiver, testing::owner())
+    }
+
+    #[cfg(feature = "fastly")]
+    fn pending_scoped_body(
+        time: OutboundTime,
+        observation_cutoff: Deadline,
+        task: Rc<RefCell<Option<edgezero_core::OutboundBatch>>>,
+        task_released: Rc<Cell<usize>>,
+        source_released: Rc<Cell<usize>>,
+    ) -> Body {
+        use edgezero_core::BudgetSource;
+        let owner = TimedWorkOwner(source_released);
+        let clock = time.clock().clone();
+        Body::from_stream(poll_fn(move |_cx| {
+            let _owner = &owner;
+            if task.borrow().is_none() {
+                task.borrow_mut().replace(timed_scope_batch(
+                    Rc::clone(&task_released),
+                    time.clone(),
+                    observation_cutoff,
+                ));
+            }
+            // Bound the old failure path without changing the egress or outbound deadline.
+            if observation_cutoff.is_expired_at(clock.now()) {
+                Poll::Ready(Some(Err(EdgeError::gateway_timeout_caused(
+                    "outbound fixture safety fence",
+                    BudgetSource::BatchCutoff,
+                ))))
+            } else {
+                Poll::Pending
+            }
+        }))
+    }
+
+    #[test]
+    fn write_timer_failure_precedes_source_and_releases_once() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("write timer fixture failed")]
+        struct TimerFailure;
+
+        struct TimerOwner(Arc<AtomicUsize>);
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for TimerOwner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for delayed in [false, true] {
+            let entered = MonotonicInstant::now();
+            let deadline =
+                Deadline::at_instant(entered.checked_add(Duration::from_secs(1)).unwrap());
+            let released = Arc::new(AtomicUsize::new(0));
+            let timer_released = Arc::clone(&released);
+            let armed = Arc::new(AtomicUsize::new(0));
+            let timer_armed = Arc::clone(&armed);
+            let time = OutboundTime::new(stable_clock(entered), move |_, _| {
+                timer_armed.fetch_add(1, Ordering::SeqCst);
+                let owner = TimerOwner(Arc::clone(&timer_released));
+                let mut first = true;
+                Box::pin(poll_future(move |cx| {
+                    let _owner = &owner;
+                    if delayed && first {
+                        first = false;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Err(EdgeError::internal(TimerFailure)))
+                    }
+                }))
+            });
+            let reads = Rc::new(Cell::new(0_usize));
+            let source_reads = Rc::clone(&reads);
+            let mut source = poll_fn(move |_cx| {
+                assert_eq!(
+                    armed.load(Ordering::SeqCst),
+                    1,
+                    "timer setup precedes payload reads"
+                );
+                source_reads.set(source_reads.get().saturating_add(1));
+                Poll::Pending
+            })
+            .boxed_local();
+            let mut timer = None;
+            let error =
+                executor::block_on(read_stream_until(&mut source, &time, deadline, &mut timer))
+                    .expect_err("timer failure is terminal");
+            let EdgeError::Internal {
+                source: failure, ..
+            } = error
+            else {
+                panic!("typed timer failure");
+            };
+            assert!(failure.is::<TimerFailure>());
+            assert_eq!(reads.get(), usize::from(delayed));
+            assert!(timer.is_none());
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+            drop(timer);
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn ready_body_chunks_keep_one_absolute_write_timer() {
+        let entered = MonotonicInstant::now();
+        let deadline = Deadline::at_instant(entered.checked_add(Duration::from_secs(1)).unwrap());
+        let registered = Arc::new(Mutex::new(Vec::new()));
+        let timer_registered = Arc::clone(&registered);
+        let time = OutboundTime::new(stable_clock(entered), move |bound, _| {
+            timer_registered.lock().unwrap().push(bound.instant());
+            Box::pin(pending())
+        });
+        let mut source = stream::iter([
+            Ok(Bytes::from_static(b"first")),
+            Ok(Bytes::from_static(b"second")),
+        ])
+        .boxed_local();
+        let mut timer = None;
+        for expected in [
+            Some(Bytes::from_static(b"first")),
+            Some(Bytes::from_static(b"second")),
+            None,
+        ] {
+            let next =
+                executor::block_on(read_stream_until(&mut source, &time, deadline, &mut timer))
+                    .unwrap();
+            let StreamRead::Source(outcome) = next else {
+                panic!("write deadline is still live");
+            };
+            assert_eq!(outcome.transpose().unwrap(), expected);
+        }
+        assert_eq!(*registered.lock().unwrap(), [deadline.instant()]);
+    }
+
+    #[test]
+    #[cfg(feature = "fastly")]
+    fn pending_body_write_deadline_releases_only_response_work() {
+        use edgezero_core::{OutboundBatchNext, OutboundBatchTermination, OutboundScopeOwner};
+
+        let entered = MonotonicInstant::now();
+        let clock = MonotonicClock::default();
+        let write_deadline =
+            Deadline::at_instant(entered.checked_add(Duration::from_millis(50)).unwrap());
+        let outbound_cutoff =
+            Deadline::at_instant(entered.checked_add(Duration::from_millis(500)).unwrap());
+        let callback = OutboundScopeOwner::callback();
+        callback
+            .with(|| executor::block_on(drive_callback(async {}, clock.clone(), entered)))
+            .unwrap();
+        let time = native_time(clock.clone());
+        let callback_released = Rc::new(Cell::new(0));
+        let mut sibling = callback.with(|| {
+            timed_scope_batch(Rc::clone(&callback_released), time.clone(), outbound_cutoff)
+        });
+        let response_released = Rc::new(Cell::new(0));
+        let body_task = Rc::new(RefCell::new(None));
+        let source_released = Rc::new(Cell::new(0));
+        let body = pending_scoped_body(
+            time,
+            outbound_cutoff,
+            Rc::clone(&body_task),
+            Rc::clone(&response_released),
+            Rc::clone(&source_released),
+        );
+        let observer = RecordingObserver::default();
+        let mut attempt = callback.with(|| attempt(&observer, entered));
+        let state = Rc::new(RefCell::new(SinkState::default()));
+        let mut committer = MockCommitter::new(Rc::clone(&state));
+        let prepared = callback
+            .with(|| {
+                attempt.prepare_response(
+                    ResponseEgressFramingMode::HostAutomatic,
+                    &Method::GET,
+                    Response::new(body),
+                )
+            })
+            .unwrap();
+        let result = callback.with(|| {
+            transmit_prepared(
+                prepared,
+                ResponseEgressPolicy { write_deadline },
+                &mut attempt,
+                &clock,
+                TransmitKind::Application,
+                &mut committer,
+            )
+        });
+        assert_eq!(
+            result,
+            Err(TransmitFailure::Postcommit(DeliveryError::Deadline))
+        );
+        assert!(
+            !outbound_cutoff.is_expired_at(clock.now()),
+            "egress must not wait for the outbound cutoff"
+        );
+        let reports = observer.reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].outcome, ResponseEgressOutcome::DeadlineExceeded);
+        assert!(
+            reports[0].source_failure.is_none(),
+            "write expiry is not a source timeout"
+        );
+        assert_eq!(source_released.get(), 1);
+        assert_eq!(response_released.get(), 1);
+        assert_eq!(callback_released.get(), 0);
+        assert_eq!(state.borrow().events, ["abandon"]);
+        let mut closed = body_task
+            .borrow_mut()
+            .take()
+            .expect("response-created work");
+        assert!(matches!(
+            executor::block_on(closed.next()),
+            Err(EdgeError::Internal { .. })
+        ));
+        let callback_result = callback
+            .with(|| executor::block_on(drive_callback(sibling.next(), clock.clone(), clock.now())))
+            .unwrap();
+        assert!(matches!(
+            callback_result,
+            Ok(OutboundBatchNext::Finished(
+                OutboundBatchTermination::Cutoff
+            ))
+        ));
+        assert!(
+            outbound_cutoff.is_expired_at(clock.now()),
+            "callback deadline is unchanged"
+        );
+        assert_eq!(callback_released.get(), 1);
+        drop(callback);
+        assert_eq!(source_released.get(), 1);
+        assert_eq!(response_released.get(), 1);
+    }
+
     #[test]
     fn accepted_prefix_at_deadline_is_accounted_before_deadline_wins() {
         let start = MonotonicInstant::now();
         let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
-        let reads = Arc::new(AtomicUsize::new(0));
-        let clock_reads = Arc::clone(&reads);
-        let clock = MonotonicClock::new(move || {
-            if clock_reads.fetch_add(1, Ordering::SeqCst) < 6 {
-                start
-            } else {
-                deadline
-            }
-        });
+        let now = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
         let report_observer = RecordingObserver::default();
         let mut attempt = attempt(&report_observer, start);
-        let state = Rc::new(RefCell::new(SinkState::default()));
+        let state = Rc::new(RefCell::new(SinkState {
+            advance_on_write: Some((Arc::clone(&now), deadline)),
+            ..SinkState::default()
+        }));
         let mut committer = MockCommitter::new(Rc::clone(&state));
         let result = transmit_prepared(
             prepared(Body::stream(stream::iter([Bytes::from_static(b"abc")]))),
@@ -1691,18 +2259,14 @@ mod tests {
     fn deadline_at_source_poll_abandons_before_writing_the_chunk() {
         let start = MonotonicInstant::now();
         let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
-        let reads = Arc::new(AtomicUsize::new(0));
-        let clock_reads = Arc::clone(&reads);
-        let clock = MonotonicClock::new(move || {
-            if clock_reads.fetch_add(1, Ordering::SeqCst) < 4 {
-                start
-            } else {
-                deadline
-            }
-        });
+        let now = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
         let polls = Rc::new(Cell::new(0_usize));
         let observed_polls = Rc::clone(&polls);
+        let source_now = Arc::clone(&now);
         let body = Body::from_stream(poll_fn(move |_| {
+            *source_now.lock().expect("source clock") = deadline;
             observed_polls.set(observed_polls.get() + 1);
             Poll::Ready(Some(Ok(Bytes::from_static(b"late"))))
         }));
@@ -1739,18 +2303,15 @@ mod tests {
     fn deadline_at_finish_wins_after_the_handle_is_consumed() {
         let start = MonotonicInstant::now();
         let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
-        let reads = Arc::new(AtomicUsize::new(0));
-        let clock_reads = Arc::clone(&reads);
-        let clock = MonotonicClock::new(move || {
-            if clock_reads.fetch_add(1, Ordering::SeqCst) < 6 {
-                start
-            } else {
-                deadline
-            }
-        });
+        let now = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
         let report_observer = RecordingObserver::default();
         let mut attempt = attempt(&report_observer, start);
-        let state = Rc::new(RefCell::new(SinkState::default()));
+        let state = Rc::new(RefCell::new(SinkState {
+            advance_on_finish: Some((Arc::clone(&now), deadline)),
+            ..SinkState::default()
+        }));
         let mut committer = MockCommitter::new(Rc::clone(&state));
 
         let result = transmit_prepared(

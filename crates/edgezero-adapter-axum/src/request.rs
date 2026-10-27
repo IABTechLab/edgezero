@@ -132,7 +132,6 @@ fn deadline_body(
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use edgezero_core::body::Body;
     use edgezero_core::http::{Method, StatusCode};
     use edgezero_core::time::MonotonicInstant;
     use std::io;
@@ -327,10 +326,10 @@ mod tests {
         assert_eq!(core_request.method(), &Method::POST);
         assert_eq!(core_request.uri().path(), "/demo");
         assert_eq!(core_request.headers()["x-test"], "1");
-        match core_request.body() {
-            Body::Stream(_) => {} // streaming bodies stay streaming
-            Body::Once(_) => panic!("body should remain streaming"),
-        }
+        assert!(
+            core_request.body().is_stream(),
+            "body should remain streaming"
+        );
 
         let context = AxumRequestContext::get(&core_request).expect("context");
         assert_eq!(context.remote_addr, Some("127.0.0.1:4000".parse().unwrap()));
@@ -393,7 +392,7 @@ mod tests {
             .expect("request conversion");
         assert_eq!(core_request.method(), &Method::POST);
 
-        assert!(matches!(core_request.body(), Body::Stream(_)));
+        assert!(core_request.body().is_stream());
     }
 
     #[tokio::test]
@@ -409,6 +408,6 @@ mod tests {
             .await
             .expect("request conversion");
 
-        assert!(matches!(core_request.body(), Body::Stream(_)));
+        assert!(core_request.body().is_stream());
     }
 }

@@ -2,6 +2,16 @@
 
 ## Status
 
+### Dispatch-Slack Retirement (2026-10-27)
+
+The requester authorized removing the fixed 25 ms dispatch-slack guard and its test injection
+helper. This supersedes older slack-pending and slack-unchanged statements below. Original
+absolute deadlines, timeout causes, late-result rejection, B31 backend/timer policy and resource
+limits remain unchanged. Synchronous SDK host calls remain non-preemptible; this does not establish
+a finite blocking horizon, promote capabilities or qualify hosted behavior. Historical hashes,
+measurements and failed probes remain intact. EZ-3 legs remain planned until their real commands
+and sentinels are bound and verified.
+
 ### Current Scoped Disposition (2026-10-24)
 
 The requester's [scoped timing and native integration approval](2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)

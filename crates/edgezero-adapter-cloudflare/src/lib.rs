@@ -28,6 +28,8 @@ pub mod secret_store;
 mod test_runtime;
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+use edgezero_core::OutboundScopeOwner;
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::app::StoresMetadata;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::app::{App, Hooks};
@@ -158,19 +160,24 @@ pub async fn run_app<A>(req: Request, env: Env, ctx: Context) -> Result<Response
 where
     A: Hooks,
 {
-    if !A::owns_logging() {
-        drop(init_logger());
-    }
-    let clock = MonotonicClock::default();
-    let request_start = clock.now();
-    let app = match build_target_app::<A>() {
-        Ok(app) => app,
-        Err(error) => {
-            drop(env);
-            return request::send_assembly_error(req, error, ctx, request_start, clock);
-        }
-    };
-    dispatch_app::<A>(&app, req, env, ctx).await
+    let callback = OutboundScopeOwner::callback();
+    callback
+        .run(async move {
+            if !A::owns_logging() {
+                drop(init_logger());
+            }
+            let clock = MonotonicClock::default();
+            let request_start = clock.now();
+            let app = match build_target_app::<A>() {
+                Ok(app) => app,
+                Err(error) => {
+                    drop(env);
+                    return request::send_assembly_error(req, error, ctx, request_start, clock);
+                }
+            };
+            dispatch_scoped_app::<A>(&app, req, env, ctx).await
+        })
+        .await
 }
 
 /// Dispatch a caller-owned app through canonical admission and response egress.
@@ -184,6 +191,19 @@ where
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[inline]
 pub async fn dispatch_app<A>(
+    app: &App,
+    req: Request,
+    env: Env,
+    ctx: Context,
+) -> Result<Response, WorkerError>
+where
+    A: Hooks,
+{
+    request::with_callback_scope(dispatch_scoped_app::<A>(app, req, env, ctx)).await
+}
+
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+async fn dispatch_scoped_app<A>(
     app: &App,
     req: Request,
     env: Env,
