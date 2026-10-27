@@ -20,7 +20,6 @@ use edgezero_core::ingress::{
 };
 use edgezero_core::key_value_store::{KvError, KvHandle, KvStoreOpenFailure};
 use edgezero_core::outbound::HttpClient;
-#[cfg(any(test, feature = "test-utils"))]
 use edgezero_core::response_egress::ResponseEgressEnvelope;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
@@ -34,15 +33,14 @@ use std::collections::BTreeMap;
 
 use crate::config_store::FastlyConfigStore;
 use crate::context::FastlyRequestContext;
-#[cfg(any(test, feature = "test-utils"))]
-use crate::delivery::FastlyResponseDelivery;
 use crate::delivery::{
     DispatchOutcome, FastlyNoAttempt, FastlyNoAttemptReason, FastlyRequestDelivery,
-    FastlyRequestHeadFailure, finish_request,
+    FastlyRequestHeadFailure, FastlyResponseDelivery, finish_request,
 };
 use crate::init_fastly_abi;
 use crate::key_value_store::FastlyKvStore;
 use crate::outbound::FastlyOutboundClient;
+use crate::outbound::scope::Guard as OutboundScope;
 use crate::response::{parse_uri, send_egress_response};
 use crate::secret_store::FastlySecretStore;
 
@@ -235,6 +233,24 @@ impl<'app> FastlyService<'app> {
         self
     }
 
+    fn run_request_with_delivery<State, Prepare, Finalize, Deliver>(
+        self,
+        req: FastlyRequest,
+        prepare: Prepare,
+        finalize: Finalize,
+        deliver: Deliver,
+    ) -> FastlyRequestDelivery<State>
+    where
+        Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+        Finalize: FnOnce(&mut Response) -> State,
+        Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+    {
+        let _scope = OutboundScope::fallback();
+        init_fastly_abi();
+        let outcome = self.dispatch_with(req, prepare);
+        finish_request(outcome, finalize, deliver)
+    }
+
     /// Exercises the closed request/response lifecycle with an injected delivery boundary.
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
@@ -251,8 +267,7 @@ impl<'app> FastlyService<'app> {
         Finalize: FnOnce(&mut Response) -> State,
         Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
     {
-        let outcome = self.dispatch_with(req, prepare);
-        finish_request(outcome, finalize, deliver)
+        self.run_request_with_delivery(req, prepare, finalize, deliver)
     }
 
     /// Resolve every wired store, receive the client request, and transmit its response.
@@ -262,6 +277,7 @@ impl<'app> FastlyService<'app> {
     /// the underlying handler returns an error.
     #[inline]
     pub fn send(self) -> Result<(), FastlyError> {
+        let _scope = OutboundScope::fallback();
         init_fastly_abi();
         let req = FastlyRequest::from_client();
         self.send_request_with_hooks(req, |_req, _extensions| {}, |_response| ())
@@ -289,9 +305,7 @@ impl<'app> FastlyService<'app> {
         Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
         Finalize: FnOnce(&mut Response) -> State,
     {
-        init_fastly_abi();
-        let outcome = self.dispatch_with(req, prepare);
-        finish_request(outcome, finalize, send_egress_response)
+        self.run_request_with_delivery(req, prepare, finalize, send_egress_response)
     }
 
     /// Open the Fastly Config Store named `name` and inject its
@@ -537,6 +551,7 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
 {
+    let _scope = OutboundScope::fallback();
     init_fastly_abi();
     let req = FastlyRequest::from_client();
     send_request_with_registries_and_hooks(app, stores, req, prepare, finalize)
@@ -561,6 +576,7 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
 {
+    let _scope = OutboundScope::fallback();
     init_fastly_abi();
     let request_start = app.monotonic_now();
     let kv_registry = build_kv_registry(stores.kv);

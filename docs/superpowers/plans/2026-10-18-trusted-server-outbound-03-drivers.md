@@ -58,6 +58,17 @@ unrelated operations or the eager public modes. Full P1/P4 and D1c/D1d integrati
 resource evidence and hosted qualification remain separately tracked. No public trait or frozen
 Interfaces/requirements change, acceptance-leg promotion or capability upgrade is implied.
 
+#### Existing-Batch Scope Checkpoint (2026-10-26)
+
+The [live batch ownership slice](2026-10-18-trusted-server-outbound-implementation.md#existing-batch-scope-checkpoint-2026-10-26)
+adds fresh callback guards, helper fallback/reuse and separate transmission scopes. Private weak
+registrations revoke whole current batch drivers, not only their progress slots. Retained handles
+fail with typed Internal closure and preserve already-collected results; they do not become Cutoff.
+Registry cleanup does not poll or drain work. D1a remains open for retained Send roots, transfer
+ownership, callback-wide scheduling and the atomic eager/head-first modes. Current-operation
+progress, B31, slack, original budgets, pins and capability disclosures are unchanged. No acceptance
+leg or hosted qualification is promoted by the new local ownership regressions.
+
 #### Mixed-Phase Prerequisite Checkpoint (2026-10-25)
 
 The existing SDK/ABI diagnostic now appends eighteen separately validated probes: a ready
@@ -72,7 +83,9 @@ fairness and full D1a integration remain open.
 **Files:** Modify `crates/edgezero-adapter-fastly/src/outbound.rs`; create
 `src/outbound/progress.rs` and `src/outbound/backend.rs` only for the progress engine and backend
 registry extracted by this change; update `src/lib.rs`, `src/request.rs`, `src/response.rs`,
-`src/lifecycle.rs`, `tests/contract.rs`, and colocated lifecycle tests. Callback ownership is
+`src/lifecycle.rs`, `tests/contract.rs`, and colocated lifecycle tests. The existing-batch scope
+checkpoint extracts only its private ownership registry into `src/outbound/scope.rs`.
+Callback ownership is
 blocking EZ-6 work here, not deferred until F1/F6 reuse or delivery-report changes.
 
 **Dependencies:** P1/P4, passing local G2, G3 and G4's API/Fastly-policy approval. Keep existing

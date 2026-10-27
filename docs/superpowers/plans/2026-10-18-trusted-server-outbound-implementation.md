@@ -69,7 +69,8 @@ remain authoritative over this summary. Pending follow-ups are not silently prom
    hosted/runtime promotion. The scoped B31 policy and current-operation multiplexer are approved
    for implementation; local/CI receive validation explicitly uses the tracked preserving repair.
    The isolated runtime repair is not a changed production pin or resource qualification.
-   Callback-wide ownership and the atomic public-protocol migration remain open. G2 does not
+   Existing-batch scope cleanup is implemented in the checkpoint below; complete Send ownership,
+   callback-wide scheduling and the atomic public-protocol migration remain open. G2 does not
    globally prohibit approved portable or other-adapter work; no lost-error fallback is allowed.
 4. **Q1/Q2 then Q3-Q5:** update examples/docs/checks with each implementation change. Finish source
    work before freezing and qualifying a candidate. Hosted deployment remains unauthorized;
@@ -112,6 +113,54 @@ configurations, 210 Fastly WASI unit tests, 29 Cloudflare contracts, 48 Cloudfla
 tests, all nine JS fixture tests, docs format/lint/build and the documentation/dependency guards.
 The actual-client Fastly suite again records twelve passing probes and eighteen origin requests,
 with the required unqualified exit 2; this does not replace the earlier failed SDK timing results.
+
+### Existing-Batch Scope Checkpoint (2026-10-26)
+
+Implement the private D1a ownership boundary for complete current batch drivers, without
+splitting the frozen public protocol. `Sandbox::handle` installs a fresh callback guard for
+both custom wrappers. Canonical send helpers install a fallback only outside an existing
+scope. Each response transmission has an independent owner for work created during body
+production, restored to the active callback at transmission exit. Saved clients resolve
+scope at batch creation, not client construction or later driver polling.
+
+Weak registrations track only live driver roots and unregister on terminal/drop paths.
+Scope exit first revokes every root, then drops whole streams outside registry/driver borrows,
+including queued results, pending processing and decoder state, and wakes waiting consumers.
+The closing scope stays active until cleanup ends, rejecting reentrant Send/Batch starts before
+clock/preflight/provider work; nested cleanup scopes cannot reopen it. Waker cloning/destruction
+runs outside driver borrows, with a final closure check preventing a stranded Pending result.
+A retained
+handle emits one typed Internal scope-closure failure instead of Cutoff or clean EOF. Core's
+existing poison and partial-failure collection rules remain unchanged. Closure after the last
+item but before validated EOF is still a failure, never inferred completion.
+
+The actual Fastly regression `callback_scope_exit_releases_retained_batch_driver` first failed
+because the unpolled driver's captured clock owner survived callback exit, then passed after
+integration. It uses queued preflight results to avoid claiming SDK-harvest coverage. The
+native response regression `body_created_batches_end_at_egress_without_closing_callback_work`
+likewise fails without the transmission guard, then passes for completion, source/write/finish
+failure while callback/post-delivery work stays live. The callback batch is polled inside body
+production without being reparented. Colocated tests additionally cover
+Ok/Err/supported unwind, partial collection, last-item/EOF, wakeups, unregistering, helper-scope
+reuse and the real-client `retained_client_resolves_fresh_callback_scope` across two invocations.
+The shared production/test helper lifecycle has a WASI fallback/reuse contract. Reentrant
+destructor and waker-drop regressions were observed failing before the cleanup-order fixes.
+
+This does not complete D1a, P1/P4 or an acceptance/qualification leg. Retained Send roots,
+response ownership transfers, callback-wide scheduling, unpolled eager modes, arrival recording,
+paired-time/trait migration and dispatch-slack retirement remain open. Neither dropping an SDK
+handle nor local cleanup proves host cancellation. No public API, SDK/runtime pin, B31 policy,
+Image Optimizer path, frozen requirement/interface digest or capability level changes.
+Demo/templates need no API migration for this adapter-private checkpoint; their forthcoming
+head-first migration remains atomic with all implementers/callers. Hosted deployment is not run.
+
+Verification passes all five primary Rust gates (2,272 workspace tests, one existing ignored
+test), Fastly CLI-only Clippy, WASI Clippy with/without test-utils, 226 Fastly WASI unit tests
+and 36 WASI contracts. Docs format/lint/build, legacy/API/docs/decoder guards and unchanged
+frozen requirement/Interfaces-plan hashes pass. The actual-client functional suite again records
+twelve passing probes and eighteen origin requests with the expected unqualified exit 2.
+Independent review reproduced the reentrant failures before correction and cleared the focused
+scope implementation afterward. Existing SDK timing failures and hosted gates remain unwaived.
 
 ### Current-Operation Multiplexer Checkpoint (2026-10-25)
 
@@ -1441,7 +1490,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-3        | D1/D5                | Blocking; remove slack only with verified bounded waits                   | **Not implemented:** current slack retained.                                                                                                                                                                                                                                      | D1a bounded waits plus D1b approved backend policy before joint slack removal; M7 comparison.                                                              |
 | EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **Existing-path repairs:** [checked handoff](#response-handoff-deadline-checkpoint-2026-10-25) and [Spin refusal fallback](#spin-connect-refusal-checkpoint-2026-10-25); configured mapping pending.                                                                              | Explicit connect configuration and mode/adapter mapping, unsplit head budgets, governing-expiry precedence and controlled expiry proof.                    |
 | EZ-5        | P3; D1-D4            | Blocking; Spin conditional host result recorded                           | **Current-API slice implemented:** [original coding](#p1p3-original-coding-checkpoint) and [local relay](#p3-downstream-relay-checkpoint).                                                                                                                                        | Head-first/new-mode integration, complete normalization/limit matrices and separately adopted optional metadata legs.                                      |
-| EZ-6        | P4; D1-D6            | Blocking except EZ-6.31 reuse-only                                        | **Partial foundations:** [pending ownership](#p1p4-ownership-checkpoint) and local progress characterization.                                                                                                                                                                     | Eager begin/batches on all adapters, arrival ledger/check, mixed collection/accumulator, callback/body scopes and lifetime/late-collection proof.          |
+| EZ-6        | P4; D1-D6            | Blocking except EZ-6.31 reuse-only                                        | **Partial implementation:** [existing Fastly batch scopes](#existing-batch-scope-checkpoint-2026-10-26), [pending ownership](#p1p4-ownership-checkpoint) and local progress characterization.                                                                                 | Complete Send/response transfer ownership, eager modes on all adapters, arrival ledger/check, mixed collection and callback-wide progress/lifetime proof. |
 | EZ-7        | P3; D1-D4            | Blocking                                                                  | **Current-API slice implemented:** [marker policy](#p1p3-marker-checkpoint), [shared header accounting](#shared-header-policy-consolidation-checkpoint).                                                                                                                          | Same policies through every new dispatch/follow path and full applicable adapter/normalization matrices.                                                   |
 | EZ-8        | P1; D1d/D5           | Blocking; Fastly single send only                                         | **Single Send implemented:** [direct native mapping](#send-first-implementation-checkpoint), `8b460dd6`.                                                                                                                                                                          | New-pipeline/Follow integration and actual hosted transformation/performance evidence. Blocking horizon UNKNOWN; no finite-bound claim.                    |
 | EZ-9        | P1/P5; D1-D5         | Blocking; supplied clients use the same dispatch boundary                 | **Follow not implemented:** head/Location foundations only.                                                                                                                                                                                                                       | Explicit per-hop supplied-client policy, original chain deadline, unread followed-body disposal and complete redirect decision table.                      |

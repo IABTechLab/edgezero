@@ -26,6 +26,7 @@ use futures::executor;
 use futures_util::StreamExt as _;
 
 use crate::delivery::{DeliveryError, FastlyResponseCommitState, FastlyResponseDelivery};
+use crate::outbound::scope::Guard as OutboundScope;
 
 const INTERNAL_FALLBACK_BODY: &[u8] = b"internal server error";
 const TIMEOUT_FALLBACK_BODY: &[u8] = b"response write deadline exceeded";
@@ -370,6 +371,7 @@ fn transmit_prepared<Committer>(
 where
     Committer: EgressCommitter,
 {
+    let _scope = OutboundScope::response();
     if policy.write_deadline.is_expired_at(clock.now()) {
         return precommit_failure(
             kind,
@@ -925,6 +927,89 @@ mod tests {
         );
         drop(attempt);
         (result, observer.reports())
+    }
+
+    #[test]
+    fn body_created_batches_end_at_egress_without_closing_callback_work() {
+        use crate::outbound::scope::bind_batch;
+        use edgezero_core::{OutboundBatch, OutboundBatchDriverEvent};
+        use futures_util::future::poll_fn as poll_future;
+        use std::future::Future as _;
+
+        struct Release(Rc<Cell<usize>>);
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.set(self.0.get().saturating_add(1));
+            }
+        }
+
+        fn batch(released: Rc<Cell<usize>>) -> OutboundBatch {
+            let owner = Release(released);
+            let source = poll_fn(move |_cx| {
+                let _keep_owner = &owner;
+                Poll::<Option<OutboundBatchDriverEvent>>::Pending
+            });
+            OutboundBatch::from_driver(1, bind_batch(source))
+        }
+
+        for failure in 0_u8..4 {
+            let callback = OutboundScope::callback();
+            let callback_released = Rc::new(Cell::new(0));
+            let callback_batch = Rc::new(RefCell::new(batch(Rc::clone(&callback_released))));
+            let polled_callback = Rc::clone(&callback_batch);
+            let response_released = Rc::new(Cell::new(0));
+            let captured_release = Rc::clone(&response_released);
+            let saved = Rc::new(RefCell::new(None));
+            let captured_batch = Rc::clone(&saved);
+            let body = Body::Stream(Box::pin(async_stream::stream! {
+                poll_future(|cx| {
+                    let mut borrowed = polled_callback.borrow_mut();
+                    let mut next = Box::pin(borrowed.next());
+                    assert!(next.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                }).await;
+                *captured_batch.borrow_mut() = Some(batch(captured_release));
+                if failure == 1 {
+                    yield Err(EdgeError::bad_gateway("fixture source failed"));
+                } else {
+                    yield Ok(Bytes::from_static(b"response"));
+                }
+            }));
+            let state = Rc::new(RefCell::new(SinkState::default()));
+            if failure == 2 {
+                state.borrow_mut().write_plan.push_back(Err(()));
+            }
+            if failure == 3 {
+                state.borrow_mut().finish = MockTerminal::Error;
+            }
+            let (result, reports) = transmit(body, state);
+            assert_eq!(result.is_err(), failure != 0);
+            assert_eq!(reports.len(), 1);
+            assert_eq!(response_released.get(), 1, "egress owns body-created work");
+            assert_eq!(
+                callback_released.get(),
+                0,
+                "callback remains active after egress"
+            );
+            let closed_batch = saved.borrow_mut().take().expect("body created a batch");
+            assert!(matches!(
+                executor::block_on(closed_batch.collect())
+                    .unwrap_err()
+                    .error,
+                EdgeError::Internal { .. }
+            ));
+            let later_released = Rc::new(Cell::new(0));
+            let later_batch = batch(Rc::clone(&later_released));
+            assert_eq!(later_released.get(), 0);
+            drop(callback);
+            assert_eq!(callback_released.get(), 1);
+            assert_eq!(later_released.get(), 1);
+            drop(callback_batch);
+            drop(later_batch);
+            assert_eq!(response_released.get(), 1);
+        }
     }
 
     #[test]

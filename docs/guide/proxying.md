@@ -39,6 +39,26 @@ and migrate the retired one-argument call directly. The mode argument alone does
 Begin or Follow. It does not change indexed results, partial failures, observation cutoff,
 per-slot timing, independent caps, coding/provenance, application clocks or lifecycle ownership.
 
+### Fastly Batch Ownership
+
+`run_custom` and each `serve_custom` callback own the batches started during that callback.
+Returning, failing or supported unwinding releases each complete driver, including queued
+results and processing state, even if the application retains a batch handle. Polling that
+handle afterward returns an internal driver failure, not a cutoff or timeout. Results already
+collected before failure remain available through `OutboundBatchFailure`.
+
+Canonical send helpers reuse an outer callback owner. Without one, they establish an owner
+through preparation and delivery and release it when the helper returns. Batches started while
+polling a response body have a separate owner released when that transmission ends, including
+source/write failure. Earlier callback work remains live, and post-delivery work uses the same
+still-active callback. Retained clients resolve ownership when starting each batch; they do not
+retain the previous request's scope. Polling a callback-created batch inside a body does not
+transfer its ownership.
+
+This applies to existing batch drivers, not general retained `send` futures or eager Begin.
+It does not add callback-wide progress, change deadlines or prove provider-side cancellation.
+Those remaining integration and hosted-evidence requirements stay open; capabilities are unchanged.
+
 ## Native Image Optimization
 
 Fastly single sends can request native image optimization from portable code:

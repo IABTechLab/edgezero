@@ -26,6 +26,9 @@ mod image_optimizer;
 #[cfg(any(feature = "fastly", test))]
 mod progress;
 
+#[cfg(any(feature = "fastly", test))]
+pub(crate) mod scope;
+
 #[cfg(test)]
 use std::time::Duration;
 
@@ -744,6 +747,7 @@ mod fastly_impl {
     impl OutboundHttpClient for FastlyOutboundClient {
         #[inline]
         async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
+            super::scope::ensure_open()?;
             let started_at = self.clock.now();
             let prepared = self.prepare(request, started_at)?;
             self.execute(prepared).await
@@ -755,6 +759,10 @@ mod fastly_impl {
             requests: Vec<OutboundRequest>,
             observation_cutoff: Deadline,
         ) -> OutboundBatch {
+            if let Err(error) = super::scope::ensure_open() {
+                let failed = stream! { yield OutboundBatchDriverEvent::Failed(error); };
+                return OutboundBatch::from_driver(requests.len(), failed);
+            }
             let batch_started_at = self.clock.now();
             let slot_count = requests.len();
             if observation_cutoff.is_expired_at(batch_started_at) {
@@ -851,7 +859,7 @@ mod fastly_impl {
                     yield OutboundBatchDriverEvent::Cutoff;
                 }
             };
-            OutboundBatch::from_driver(slot_count, completions)
+            OutboundBatch::from_driver(slot_count, super::scope::bind_batch(completions))
         }
     }
 

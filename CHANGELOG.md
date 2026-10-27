@@ -74,6 +74,24 @@ separately from the portable API and must be considered when declaring required 
   strict timing assertions and failed observations separately. Functional CI requires complete
   client evidence and exactly the unqualified exit-2 disposition, not a qualification pass.
 
+### Fastly Batch Lifetimes
+
+- Give each custom callback a fresh private batch owner; standalone send helpers establish a
+  fallback owner, while nested helpers reuse the callback. Resolve ownership per operation so
+  retained clients work in the next callback without retaining the previous request's scope.
+- Release complete drivers, processing state and queued outcomes at scope exit even when batch
+  handles are retained. Wake pending consumers and report typed internal scope closure once;
+  do not misclassify it as a cutoff or discard results collected before failure.
+- Revoke all roots before reentrant cleanup, keep the closing owner active until teardown ends,
+  and reject new sends/batches before preparation or provider work. Clone/drop wakers outside
+  driver borrows and observe closure before returning Pending.
+- Independently own batches created during response-body production through transmission cleanup.
+  Normal completion and source/write failure release them without cancelling callback work or
+  post-delivery operations. Keep driver EOF validation and exactly-once guest cleanup intact.
+- Preserve current transport, clocks, limits, B31, direct native image optimization and public
+  APIs. Full Send-root cancellation, eager/head-first migration, callback-wide progress and
+  provider cancellation/hosted qualification remain open; capabilities are unchanged.
+
 ### Fastly Mixed-Phase Readiness Diagnostic
 
 - Extend the existing local SDK/ABI suite with pending-head/ready-body and pending-body/delayed-head

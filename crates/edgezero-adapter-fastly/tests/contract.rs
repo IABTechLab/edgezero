@@ -440,6 +440,72 @@ mod tests {
     }
 
     #[test]
+    fn helper_batch_owner_is_local_or_reuses_custom_callback() {
+        use edgezero_adapter_fastly::lifecycle::run_custom;
+        use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
+        use edgezero_core::{OutboundBatch, OutboundHttpClient as _};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        struct ClockOwner(Arc<AtomicUsize>);
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for ClockOwner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for wrapped in [false, true] {
+            let app = build_test_app();
+            let released = Arc::new(AtomicUsize::new(0));
+            let saved: Rc<RefCell<Option<OutboundBatch>>> = Rc::new(RefCell::new(None));
+            let invoke = |request| {
+                let owner = ClockOwner(Arc::clone(&released));
+                let now = MonotonicInstant::now();
+                let clock = MonotonicClock::new(move || {
+                    let _keep_owner = &owner;
+                    now
+                });
+                let delivered = FastlyService::new(&app).run_request_with_hooks_for_test(
+                    request,
+                    |_raw, _extensions| {
+                        let client = FastlyOutboundClient::with_clock(clock);
+                        let outbound = OutboundRequest::get("https://example.com")
+                            .unwrap()
+                            .stream_response();
+                        *saved.borrow_mut() = Some(client.start_batch_until(
+                            vec![outbound],
+                            Deadline::after(Duration::from_secs(1)),
+                        ));
+                    },
+                    |_response| (),
+                    |envelope| {
+                        let (_response, report) = complete_envelope_with_report(envelope);
+                        response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+                    },
+                );
+                assert!(matches!(delivered, FastlyRequestDelivery::Routed { .. }));
+                assert_eq!(released.load(Ordering::SeqCst), usize::from(!wrapped));
+                Ok::<(), ()>(())
+            };
+            let request = fastly_request(FastlyMethod::GET, "/uri", None);
+            if wrapped {
+                run_custom::<(), (), _>(request, |raw, _state| invoke(raw)).unwrap();
+            } else {
+                invoke(request).unwrap();
+            }
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+            let batch = saved.borrow_mut().take().expect("prepared batch");
+            assert!(matches!(
+                block_on(batch.collect()).unwrap_err().error,
+                EdgeError::Internal { .. }
+            ));
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
     #[cfg(feature = "test-utils")]
     fn dispatch_streaming_route_preserves_chunks() {
         let app = build_test_app();
