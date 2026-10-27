@@ -19,8 +19,9 @@ use std::path::Path;
 
 use edgezero_adapter::process;
 use edgezero_adapter::registry::{
-    AuthState, GcFailure, GcReport, HealthcheckOutcome, ProvisionAction, ProvisionReport,
-    ProvisionStoreRef, ResolvedStoreId, RollbackOutcome, StoreKind,
+    AuthState, DeployOutcome, DeployedVersionState, GcFailure, GcReport, HealthcheckOutcome,
+    ProvisionAction, ProvisionReport, ProvisionStoreRef, ResolvedStoreId, RollbackOutcome,
+    StoreKind,
 };
 use serde::Serialize;
 
@@ -87,6 +88,10 @@ impl OutputScope {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for OutputScope {
     fn drop(&mut self) {
         if let Some((child_stdout, info)) = self.previous {
@@ -209,25 +214,37 @@ impl BuildResult {
 #[derive(Debug, Serialize)]
 pub(crate) struct DeployResult {
     adapter: String,
+    package_sha256: Option<String>,
     service_id: Option<String>,
     staging: bool,
     version: Option<u64>,
+    version_state: Option<WireDeployedVersionState>,
 }
 
 impl DeployResult {
-    pub(crate) fn new(
-        adapter: &str,
-        service_id: Option<String>,
-        staging: bool,
-        version: Option<u64>,
-    ) -> Self {
+    /// `deployed.failure` is not part of the result; it is the envelope's error.
+    pub(crate) fn new(adapter: &str, staging: bool, deployed: DeployOutcome) -> Self {
         Self {
             adapter: adapter.to_owned(),
-            service_id,
+            package_sha256: deployed.package_sha256,
+            service_id: deployed.service_id,
             staging,
-            version,
+            version: deployed.version,
+            version_state: deployed.version_state.map(|state| match state {
+                DeployedVersionState::Draft => WireDeployedVersionState::Draft,
+                DeployedVersionState::Published => WireDeployedVersionState::Published,
+                DeployedVersionState::Unknown => WireDeployedVersionState::Unknown,
+            }),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WireDeployedVersionState {
+    Draft,
+    Published,
+    Unknown,
 }
 
 /// `healthcheck` result.
@@ -257,7 +274,8 @@ impl HealthcheckResult {
             service_id: outcome.service_id.clone(),
             staging: outcome.staging,
             staging_ip: outcome.staging_ip.clone(),
-            status_code: outcome.status_code,
+            // curl reports `000` when no HTTP response arrived: not a status.
+            status_code: outcome.status_code.filter(|&code| code != 0),
             version: outcome.version,
             version_verified: outcome.version_verified,
         }
@@ -326,9 +344,7 @@ enum WireProvisionAction {
     Created,
     NotApplicable,
     Note,
-    Updated,
     WouldCreate,
-    WouldUpdate,
 }
 
 impl From<ProvisionAction> for WireProvisionAction {
@@ -338,9 +354,7 @@ impl From<ProvisionAction> for WireProvisionAction {
             ProvisionAction::Created => Self::Created,
             ProvisionAction::NotApplicable => Self::NotApplicable,
             ProvisionAction::Note => Self::Note,
-            ProvisionAction::Updated => Self::Updated,
             ProvisionAction::WouldCreate => Self::WouldCreate,
-            ProvisionAction::WouldUpdate => Self::WouldUpdate,
         }
     }
 }
@@ -348,7 +362,7 @@ impl From<ProvisionAction> for WireProvisionAction {
 #[derive(Debug, Serialize)]
 struct StoreResult {
     kind: WireStoreKind,
-    logical: Option<String>,
+    logical: String,
     platform: String,
 }
 
@@ -507,10 +521,13 @@ pub(crate) enum ValidateMode {
 // ---------------------------------------------------------------- rendering
 
 /// Render `outcome` as the pretty-printed JSON envelope.
-fn render_envelope<R: Serialize>(
+pub(crate) fn render_envelope<R>(
     command: CommandName,
     outcome: &Outcome<R>,
-) -> Result<String, String> {
+) -> Result<String, String>
+where
+    R: Serialize,
+{
     let envelope = match outcome {
         Ok(result) => Envelope {
             command: command.as_str(),
@@ -538,11 +555,14 @@ fn render_envelope<R: Serialize>(
 ///
 /// The envelope is written here, inside the library, so downstream CLIs whose
 /// `main` predates `--format` still emit failure envelopes.
-pub(crate) fn finish<R: Serialize>(
+pub(crate) fn finish<R>(
     command: CommandName,
     format: OutputFormat,
     outcome: Outcome<R>,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    R: Serialize,
+{
     match format {
         OutputFormat::Text => {}
         OutputFormat::Json => {
@@ -580,7 +600,10 @@ mod tests {
     use edgezero_adapter::registry::{GcCandidate, GcFailure, ProvisionEntry};
     use serde_json::{Value, json};
 
-    fn envelope_of<R: Serialize>(command: CommandName, outcome: &Outcome<R>) -> Value {
+    fn envelope_of<R>(command: CommandName, outcome: &Outcome<R>) -> Value
+    where
+        R: Serialize,
+    {
         let rendered = render_envelope(command, outcome).expect("renders");
         serde_json::from_str(&rendered).expect("valid JSON")
     }
@@ -663,6 +686,25 @@ mod tests {
     }
 
     #[test]
+    fn healthcheck_result_maps_curl_000_to_null() {
+        let outcome = HealthcheckOutcome {
+            attempts: 2,
+            domain: "app.example.com".to_owned(),
+            failure: Some("unhealthy HTTP status 0".to_owned()),
+            path: "/".to_owned(),
+            service_id: "SVC1".to_owned(),
+            staging: false,
+            staging_ip: None,
+            status_code: Some(0),
+            version: 7,
+            version_verified: false,
+        };
+        let result =
+            serde_json::to_value(HealthcheckResult::new("fastly", &outcome)).expect("serialize");
+        assert_eq!(result["status_code"], Value::Null);
+    }
+
+    #[test]
     fn every_command_name_is_spelled_as_typed() {
         let names: Vec<&str> = [
             CommandName::ActiveVersion,
@@ -703,11 +745,23 @@ mod tests {
         let build = serde_json::to_value(BuildResult::new("cloudflare", None)).expect("serialize");
         assert_eq!(build, json!({"adapter": "cloudflare", "artifact": null}));
 
-        let deploy = serde_json::to_value(DeployResult::new("fastly", None, true, Some(43)))
-            .expect("serialize");
+        let deploy = serde_json::to_value(DeployResult::new(
+            "fastly",
+            true,
+            DeployOutcome {
+                failure: Some("dropped: the envelope's error".to_owned()),
+                version: Some(43),
+                version_state: Some(DeployedVersionState::Draft),
+                ..DeployOutcome::default()
+            },
+        ))
+        .expect("serialize");
         assert_eq!(
             deploy,
-            json!({"adapter": "fastly", "service_id": null, "staging": true, "version": 43})
+            json!({
+                "adapter": "fastly", "package_sha256": null, "service_id": null,
+                "staging": true, "version": 43, "version_state": "draft",
+            })
         );
 
         let rollback = serde_json::to_value(RollbackResult::new(

@@ -112,8 +112,8 @@ it cannot honour.
 - `--format=json` and `--format json` are both accepted, as clap handles either.
 - `build` collects passthrough arguments with `trailing_var_arg`, so
   `--format` has to come before the first passthrough token. A `--format` (or
-  `--format=…`) token among the passthrough arguments is rejected with exit 1
-  and an empty stdout, instead of being forwarded and silently printing text.
+  `--format=…`) token among the passthrough arguments is rejected with a
+  command-failure exit (§6.4) and an empty stdout, instead of being forwarded and silently printing text.
   clap drops a leading `--`, so `build --adapter x -- --format json` is
   rejected too: `build` cannot forward a `--format` to its build command. No
   built-in build command takes one.
@@ -211,7 +211,7 @@ Exit codes do not change.
 | Command failure | 1 (bundled binary) / 2 (template-generated CLIs) | envelope, `ok: false` |
 | Usage error (reported by clap) | 2 | empty. clap parses before the format is known, and its message goes to stderr as today |
 | Bundled stub (`config push` / `config diff`) | 2 | empty |
-| `build` with `--format` among its passthrough arguments (§5.2) | 1 | empty |
+| `build` with `--format` among its passthrough arguments (§5.2) | 1 (bundled binary) / 2 (template-generated CLIs) | empty |
 | `--help` (clap) | 0 | clap's text, not an envelope |
 
 In a generated CLI, exit code 2 covers a command failure, a usage error and an
@@ -278,7 +278,7 @@ the same lines on stderr plus the envelope on stdout.
 ### 7.2 Adapter trait changes
 
 The crates are `publish = false`, and every `Adapter` implementation is in
-this workspace (fastly, cloudflare, spin, axum, plus two test adapters), so
+this workspace (fastly, cloudflare, spin, axum, plus four test adapters), so
 changing the trait breaks no external implementor.
 
 ```rust
@@ -289,9 +289,11 @@ pub enum ActionOutcome {
     ActiveVersion(ActiveVersionOutcome), // { service_id, version: Option<u64> }
     AuthStatus(AuthStatusOutcome),       // { state: AuthState }
     Build(BuildOutcome),                 // { artifact: Option<PathBuf> }
-    Deploy(DeployOutcome),               // { service_id: Option<String>, version: Option<u64> }
-    Empty,                               // login, logout, serve, production deploy,
-                                         //   manifest command overrides
+    Deploy(DeployOutcome),               // { failure, package_sha256, service_id, version,
+                                         //   version_state: Option<DeployedVersionState> }
+    Empty,                               // login, logout, serve, manifest command overrides,
+                                         //   a legacy Fastly production deploy before
+                                         //   finalize_deploy
     Healthcheck(HealthcheckOutcome),     // { attempts, domain, failure: Option<String>, path,
                                          //   service_id, staging, staging_ip, status_code,
                                          //   version, version_verified }; healthy() derives
@@ -300,10 +302,23 @@ pub enum ActionOutcome {
 }
 
 pub enum AuthState { Authenticated, NotApplicable, Unauthenticated { reason: String } }
+pub enum DeployedVersionState { Draft, Published, Unknown }
 
+fn preflight_deploy(&self, context: &AdapterDeployContext, args: &[String])
+    -> Result<DeployOwnership, String>;          // from #381, unchanged
+fn deploy(&self, context: &AdapterDeployContext, args: &[String])
+    -> Result<ActionOutcome, String>;
 fn execute(&self, action: AdapterAction, args: &[String]) -> Result<ActionOutcome, String>;
+fn finalize_deploy(&self, context: &AdapterDeployContext, command_output: Option<&str>)
+    -> Result<ActionOutcome, String>;
 fn provision(/* unchanged params */) -> Result<ProvisionReport, String>;
 fn gc_config_entries(/* unchanged params */) -> Result<GcReport, String>;
+
+// edgezero-cli/src/adapter.rs
+pub enum DeployFailure {
+    Deploy(String),   // failed before reporting anything it created
+    Finalize(String), // went live, but finalize_deploy failed
+}
 ```
 
 The outcome structs have public fields and no `#[non_exhaustive]`, so adapter
@@ -319,7 +334,9 @@ measuring is an `Ok` outcome carrying a `failure` message, not an `Err`:
 - a non-zero exit from `auth status` is `Unauthenticated { reason }`
   (`cli_support::native_auth_status`, or a manifest `auth-status` command);
 - a gc run with failed deletes has `failure: Some(GcFailure)`, whose
-  `diagnostic` holds exactly the error text it returned before.
+  `diagnostic` holds exactly the error text it returned before;
+- a deploy that fails after creating a version has `failure: Some(message)`,
+  with that version and its `version_state`.
 
 The CLI turns these into a non-zero exit, using the same message as before.
 `Err(String)` is kept for "could not determine a result": bad arguments, API
@@ -330,9 +347,9 @@ partial `result` described in §6.1.
 pub struct ProvisionReport { pub entries: Vec<ProvisionEntry> }   // + into_messages()
 pub struct ProvisionEntry {
     pub action: ProvisionAction,          // AlreadyPresent | Created | NotApplicable | Note
-                                          // | Updated | WouldCreate | WouldUpdate
+                                          // | WouldCreate
     pub message: String,                  // the exact line text mode prints
-    pub store: Option<ProvisionStoreRef>, // { kind: StoreKind, logical: Option<String>, platform }
+    pub store: Option<ProvisionStoreRef>, // { kind: StoreKind, logical: String, platform }
 }
 
 pub struct GcReport {
@@ -359,11 +376,14 @@ pub struct GcFailure {
 }
 ```
 
-**Data lines move from the Fastly adapter to the CLI.** The adapter used to
-print `version=`, `status-code=`, `healthy=` and `rolled-back-to=`, plus the
-prose line `active-version` prints after an empty `version=`. It now returns
+**Data lines move from the Fastly adapter to the CLI, except for deploy.** The
+adapter used to print `version=`, `status-code=`, `healthy=` and
+`rolled-back-to=`, plus the prose line `active-version` prints after an empty
+`version=`. For `active-version`, `healthcheck` and `rollback` it now returns
 them in its outcome, and the CLI logs the same bytes through the same
-`log::info!` channel. Prose-only lines, such as the staged-rollback message
+`log::info!` channel. Deploy's `version=` and `package-sha256=` lines stay in
+the adapter, which logs them as soon as they are known (the managed deploy's
+recovery contract); the outcome carries the same values. Prose-only lines, such as the staged-rollback message
 and the "no FASTLY_API_TOKEN" note, stay in the adapter. Under JSON they move
 to stderr like any other log line.
 
@@ -451,11 +471,13 @@ Every command's `result` includes `adapter` (string), except
   today's non-zero exit.
 - A native CLI that is missing or fails to spawn gives `ok: false` with
   `result: null`.
-- `state` comes from the probe command's exit status, or from a manifest
-  `commands.auth_status` override. Output and account details are not parsed,
-  so `authenticated` means "the probe exited 0", not "a token works": some
-  `wrangler whoami` versions exit 0 when logged out, and `fastly profile list`
-  only lists saved profiles.
+- Cloudflare's built-in probe is `wrangler whoami --json`, and `state` is its
+  `loggedIn` field (plain `wrangler whoami` exits 0 when logged out). Output
+  without that field gives `result: null`.
+- Otherwise `state` comes from the probe command's exit status, or from a
+  manifest `commands.auth_status` override. Output and account details are not
+  parsed, so `authenticated` means "the probe exited 0", not "a token works":
+  `fastly profile list` only lists saved profiles.
 
 ### `build`
 
@@ -469,21 +491,34 @@ adapter cannot know the path.
 ### `deploy`
 
 ```json
-{ "adapter": "fastly", "staging": false, "service_id": "SU1Z0isxPaozGVKXdv0eY", "version": 43 }
+{
+  "adapter": "fastly", "staging": false, "service_id": "SU1Z0isxPaozGVKXdv0eY",
+  "version": 43, "version_state": "published", "package_sha256": "9f2c…"
+}
 ```
 
-- For a staged deploy, `version` is the staged version.
-- For a production Fastly deploy with a service id, `version` is the active
-  version after the deploy, found the same way as text mode (captured
-  `version=` output verified active through the API, else the API's active
-  version).
-- Otherwise `version` is `null`.
-- `service_id` is the id the adapter resolved (a Fastly staged deploy falls
-  back to `FASTLY_SERVICE_ID`), else `--service-id` as passed, else `null`. A
-  production deploy reads only `--service-id`, so one that relies on
-  `FASTLY_SERVICE_ID` reports `null`.
-- A production deploy that went live but whose version could not be resolved
-  gives `ok: false` with `result` present and `version: null`.
+- `version_state` is `published` (staged for `--staging`, activated
+  otherwise), `draft` (created, never staged or activated) or `unknown`
+  (staging or activation was attempted and failed, so it may have committed).
+  It is `null` exactly when `version` is.
+- `package_sha256` is the verified package's digest for a managed Fastly
+  deploy, else `null`.
+- A **managed** Fastly deploy (any `--staging`, any `--application-release`,
+  or declared stores) reports the service id it used (`--service-id`, else the
+  release's `fastly.toml`, else `FASTLY_SERVICE_ID`) and the staged or
+  activated version.
+- A **legacy** Fastly production deploy (store-free, no release) reads only
+  `--service-id`. With it, `version` is the active version after the deploy,
+  found the same way as text mode (captured `version=` output verified active
+  through the API, else the API's active version). Without it, `service_id`
+  and `version` are `null`.
+- A managed deploy that fails after creating its draft gives `ok: false` with
+  `result` present: that `version`, with `version_state` `draft` or `unknown`.
+- A legacy deploy that went live but whose version could not be resolved
+  gives `ok: false` with `result` present and `version: null`; one whose
+  reported version could not be verified active keeps that `version` with
+  `version_state: unknown`.
+- A failure before anything was created gives `result: null`.
 
 ### `healthcheck`
 
@@ -502,7 +537,10 @@ adapter cannot know the path.
 - Unhealthy means `ok: false` with `result` present, `healthy: false`, and
   `error.message` set to today's failure message.
 - A failure before the probe (invalid arguments, version not active, staging
-  IP lookup) gives `result: null`.
+  IP lookup) gives `result: null`, as does a failed after-probe version check
+  on a healthy production probe.
+- `status_code` is `null` when the last probe got no response, including
+  curl's `000`. Text mode keeps printing `status-code=0` for that case.
 
 ### `rollback`
 
@@ -527,14 +565,12 @@ adapter cannot know the path.
 }
 ```
 
-- `action` is one of `created`, `already_present`, `would_create`, `updated`,
-  `would_update`, `not_applicable` or `note`. A dry run's `would_create` pairs
-  with a real run's `created` or `already_present`, and `would_update` with
-  `updated`. The Fastly and Spin dry runs report the plan without checking the
-  current state.
-- `store` is `null` for adapter-level notes. `store.logical` is `null` for
-  stores EdgeZero owns rather than the manifest, such as Fastly's
-  `edgezero_runtime_env`.
+- `action` is one of `created`, `already_present`, `would_create`,
+  `not_applicable` or `note`. A dry run's `would_create` pairs with a real
+  run's `created` or `already_present`. The Fastly and Spin dry runs report the
+  plan without checking the current state.
+- `store` is `null` for adapter-level notes. `store.logical` is the manifest
+  id and is never `null`.
 - `message` is the exact line text mode prints. It may span several lines, and
   it is meant for people, not parsing.
 
@@ -590,16 +626,18 @@ never on string matches (#383), and text tests assert exact bytes.
    `main` binaries through the same 21 hermetic scenarios and diffing stdout,
    stderr and exit code. The text output of all nine commands is now pinned as
    exact bytes in the end-to-end tests below, so the contract cannot drift. The
-   one intended change is `build` rejecting a passthrough `--format` (§5.2).
+   intended changes are `build` rejecting a passthrough `--format` (§5.2) and
+   Cloudflare `auth status` probing `wrangler whoami --json` (§8).
 3. **End-to-end stream tests** (`edgezero-cli/tests/format_json.rs`). These run
    `env!("CARGO_BIN_EXE_edgezero")` in a temp project, with fake `curl` /
    `fastly` binaries on `PATH`, and need no network or credentials. The
    harness clears `FASTLY_API_TOKEN`, `FASTLY_SERVICE_ID`, and every
    `EDGEZERO__*` and `DEMO_APP__*` variable. Each JSON test asserts that stdout
-   parses as exactly one JSON value. There are 28 tests:
+   parses as exactly one JSON value. There are 30 tests:
    - **build:** child stdout reaches only stderr under JSON; exact text bytes;
      a usage error leaves stdout empty; a passthrough `--format`, `--format=json`
-     or `-- --format json` is rejected with exit 1 and an empty stdout.
+     or `-- --format json` is rejected with the bundled binary's exit 1 and an
+     empty stdout.
    - **auth status:** a failing probe gives the `unauthenticated` partial
      result; a passing probe gives `authenticated`; a missing native CLI gives
      `result: null`; exact text bytes on success and failure.
@@ -611,11 +649,13 @@ never on string matches (#383), and text tests assert exact bytes.
    - **healthcheck:** the exact line-contract bytes; an unhealthy probe's full
      partial result; `version_verified` only when both API checks ran.
    - **deploy:** the version read from captured output; a deploy that went live
-     without a version keeps its result; a staged deploy without
+     without a version keeps its result; a reported version that cannot be
+     verified is kept as `unknown`; a staged deploy without
      `--application-release` failing with `result: null`; exact text bytes.
    - **rollback** and **active-version:** production and staged rollback, and
      an active version present or absent, each in text and JSON.
    - the bundled `config diff` stub still absorbs `--format json`.
+   - a failed envelope write (stdout on `/dev/full`) fails the command.
 4. **Argument parsing** (`args.rs`). Every in-scope command defaults to `Text`
    and accepts `--format json` and `--format=text`. `unified` and `structured`
    are rejected. `build --adapter fastly --format json --release` parses the
@@ -627,6 +667,11 @@ never on string matches (#383), and text tests assert exact bytes.
    `ProvisionReport::into_messages()`. The existing gc tests run unchanged,
    because their harness applies the same failure-diagnostic-to-`Err` mapping
    the CLI uses. `native_auth_status` and `process::status` have unit tests.
+   The Fastly managed-deploy outcome mapping is unit-tested for each
+   `version_state`, and the CLI's deploy mapping (a managed failure with a
+   version, the fallback path's finalizer precedence and `Finalize` failure) is
+   tested through a recording adapter. Cloudflare `auth status` is tested
+   against a fake `wrangler` for logged in, logged out and non-JSON output.
 6. **Lint gate.** `cargo clippy --workspace --all-targets --all-features -- -D warnings`
    passes with the new `disallowed-methods` entries, and so does every clippy
    variant in `format.yml`, including the wasm matrix.
@@ -757,3 +802,32 @@ shape changes.
 - **A Fastly production deploy's version** is resolved by `finalize_deploy`:
   a captured `version=` is verified active through the API, else the API's
   active version is used.
+
+Revision 6 records the changes from the third and fourth reviews of #388.
+Schema version 1 has not shipped, so the result changes below need no version
+bump.
+
+- **A managed deploy that fails after creating its draft keeps its result.**
+  `DeployOutcome` gains `failure` and `version_state` (`draft`, `published`,
+  `unknown`), following the `HealthcheckOutcome` pattern, and the CLI renders a
+  `failure` as `ok: false` with the result present. Errors are unchanged, so
+  text output is too.
+- **`deploy` reports `package_sha256`** for a managed Fastly deploy.
+- **§8 `deploy`** describes the managed and legacy Fastly paths separately.
+  Revision 4's "returns `Empty`" and revision 5's version resolution hold only
+  for the legacy path.
+- **A legacy deploy whose reported version cannot be verified** keeps that
+  version with `version_state: unknown`.
+- **`healthcheck`** maps curl's `000` to `null` only in the JSON result. This
+  reverts revision 4's adapter change, which had also altered text output.
+- **Cloudflare `auth status`** reads `loggedIn` from `wrangler whoami --json`;
+  plain `wrangler whoami` exits 0 when logged out.
+- **`provision`** drops `updated` / `would_update`, and `store.logical` is
+  never `null`: #381 removed the `edgezero_runtime_env` store that produced
+  them.
+- **Revision 3's `--require-active` note** is stale: nothing passes the flag.
+  `finalize_deploy` calls the require-active check directly.
+- **A failed envelope write** of a successful command returns the write error
+  (revision 4 covered a failed command, whose own error is kept).
+- **The build-rejection exit code** is non-zero, not `1`: the bundled binary
+  exits `1`, a generated CLI exits `2` (§6.4).

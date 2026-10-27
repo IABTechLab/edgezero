@@ -24,15 +24,15 @@ pub enum AdapterAction {
     /// to it, then marks it staged; other adapters return an
     /// "unsupported" error. Part of the Fastly staging lifecycle.
     DeployStaging,
-    /// Emit the deployed/active platform version in a parseable form
-    /// (`version=<N>`) so a CI action can capture it. Fastly resolves
-    /// the active service version; other adapters return
-    /// "unsupported". Companion to `Deploy` for the staging lifecycle.
+    /// Report the active platform version, which the CLI emits as
+    /// `version=<N>` so a CI action can capture it. Fastly resolves the
+    /// active service version; other adapters return "unsupported".
+    /// Companion to `Deploy` for the staging lifecycle.
     EmitVersion,
-    /// Probe a deployed version's health and exit non-zero when
-    /// unhealthy after retries. Fastly curls the domain (or its
-    /// staging IP resolved from the Fastly API); other adapters
-    /// return "unsupported".
+    /// Probe a deployed version's health. The outcome carries a `failure`
+    /// when unhealthy after retries, which the CLI turns into a non-zero
+    /// exit. Fastly curls the domain (or its staging IP resolved from the
+    /// Fastly API); other adapters return "unsupported".
     Healthcheck,
     /// Roll a service back: production activates the previous version,
     /// staging deactivates the staged version. Fastly-only; other
@@ -41,14 +41,16 @@ pub enum AdapterAction {
     Serve,
 }
 
-/// What an [`Adapter::execute`] action produced. The CLI renders it as the
+/// What an [`Adapter::execute`], [`Adapter::deploy`] or
+/// [`Adapter::finalize_deploy`] call produced. The CLI renders it as the
 /// pre-existing text output or, under `--format json`, as a JSON result, so
 /// adapters report data here instead of printing it.
 ///
-/// A negative result the action still measured (an unhealthy probe, an
-/// unauthenticated session) is an `Ok` outcome carrying a `failure` message;
-/// the CLI turns it into a non-zero exit. `Err` is reserved for "no result
-/// could be determined".
+/// A negative result the action still measured is an `Ok` outcome that says
+/// so: an unhealthy probe or a deploy that failed after creating a version
+/// carries a `failure` message, and an unauthenticated session is
+/// [`AuthState::Unauthenticated`]. The CLI turns these into a non-zero exit.
+/// `Err` is reserved for "no result could be determined".
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ActionOutcome {
@@ -56,7 +58,9 @@ pub enum ActionOutcome {
     AuthStatus(AuthStatusOutcome),
     Build(BuildOutcome),
     Deploy(DeployOutcome),
-    /// Nothing structured to report (login, logout, serve).
+    /// Nothing structured to report (login, logout, serve, a manifest
+    /// command override, or a legacy Fastly production deploy before
+    /// `finalize_deploy` resolves its version).
     Empty,
     Healthcheck(HealthcheckOutcome),
     Rollback(RollbackOutcome),
@@ -99,13 +103,37 @@ pub struct BuildOutcome {
     pub artifact: Option<PathBuf>,
 }
 
-/// Result of [`AdapterAction::Deploy`] / [`AdapterAction::DeployStaging`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Result of [`Adapter::deploy`] or [`Adapter::finalize_deploy`].
+///
+/// A deploy that fails after creating a platform version still reports it,
+/// with `failure` set, so a caller can inspect or recover that version.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DeployOutcome {
+    /// `None` when the deploy succeeded; why it failed otherwise.
+    pub failure: Option<String>,
+    /// SHA-256 of the deployed package, when the adapter verified one.
+    pub package_sha256: Option<String>,
     /// The service the deploy targeted, when the adapter resolved one.
     pub service_id: Option<String>,
-    /// The staged (or activated) platform version, when known.
+    /// The platform version the deploy created, staged or activated, when known.
     pub version: Option<u64>,
+    /// What happened to `version`; `None` when `version` is.
+    pub version_state: Option<DeployedVersionState>,
+}
+
+/// What a deploy did with [`DeployOutcome::version`].
+///
+/// Deliberately exhaustive: the CLI maps each variant onto its versioned JSON
+/// schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeployedVersionState {
+    /// Created, but never staged or activated.
+    Draft,
+    /// Staged (for a staging deploy) or activated.
+    Published,
+    /// Staging or activation was attempted and its outcome is not known, so
+    /// the version may be published.
+    Unknown,
 }
 
 /// Result of [`AdapterAction::Healthcheck`].
@@ -309,7 +337,7 @@ impl ProvisionEntry {
             message,
             store: Some(ProvisionStoreRef {
                 kind,
-                logical: Some(store.logical.clone()),
+                logical: store.logical.clone(),
                 platform: store.platform.clone(),
             }),
         }
@@ -335,18 +363,15 @@ pub enum ProvisionAction {
     /// The platform manages this store itself; nothing to provision.
     NotApplicable,
     Note,
-    Updated,
     WouldCreate,
-    WouldUpdate,
 }
 
 /// The store a [`ProvisionEntry`] concerns.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProvisionStoreRef {
     pub kind: StoreKind,
-    /// The declared logical id; `None` for stores `EdgeZero` itself owns
-    /// (e.g. Fastly's runtime-override store).
-    pub logical: Option<String>,
+    /// The declared logical id.
+    pub logical: String,
     pub platform: String,
 }
 

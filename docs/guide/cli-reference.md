@@ -105,7 +105,8 @@ edgezero build --adapter axum
 
 The command executes the `build` command from `[adapters.<name>.commands]` in `edgezero.toml`, or falls back to the built-in adapter helper.
 
-Any arguments after `--` are forwarded to the adapter command:
+Any arguments after `--` are forwarded to the adapter command, except
+`--format`, which is rejected there (see [`build`](#results) under Results):
 
 ```bash
 edgezero build --adapter fastly -- --flag value
@@ -658,12 +659,12 @@ it delegates to the adapter crate's built-in implementation.
 
 **Adapter built-ins:**
 
-| `--adapter`  | `login`                 | `logout`                | `status`              |
-| ------------ | ----------------------- | ----------------------- | --------------------- |
-| `axum`       | no-op (no remote auth)  | no-op                   | no-op                 |
-| `cloudflare` | `wrangler login`        | `wrangler logout`       | `wrangler whoami`     |
-| `fastly`     | `fastly profile create` | `fastly profile delete` | `fastly profile list` |
-| `spin`       | `spin cloud login`      | `spin cloud logout`     | `spin cloud info`     |
+| `--adapter`  | `login`                 | `logout`                | `status`                 |
+| ------------ | ----------------------- | ----------------------- | ------------------------ |
+| `axum`       | no-op (no remote auth)  | no-op                   | no-op                    |
+| `cloudflare` | `wrangler login`        | `wrangler logout`       | `wrangler whoami --json` |
+| `fastly`     | `fastly profile create` | `fastly profile delete` | `fastly profile list`    |
+| `spin`       | `spin cloud login`      | `spin cloud logout`     | `spin cloud info`        |
 
 **Per-project override** — pin to a script or a different binary in
 `edgezero.toml` (same precedence as `build` / `deploy` / `serve`
@@ -717,8 +718,8 @@ With `--format json`:
 An **empty stdout** with a non-zero exit means no envelope was produced. That
 happens on command-line usage errors (clap reports them before `--format` is
 read), on the bundled binary's `config push` / `config diff` stubs, on a
-`build` that rejects a `--format` among its passthrough arguments (exit `1`,
-see [`build`](#results)), and on a crash. Treat it as a failure.
+`build` that rejects a `--format` among its passthrough arguments (a non-zero
+exit, see [`build`](#results)), and on a crash. Treat it as a failure.
 
 `--help` is handled by clap before `--format` is read: it prints clap's text to
 stdout and exits `0`, with no envelope.
@@ -796,12 +797,14 @@ Every result except `config validate`'s also has a non-null `adapter` string.
 | ------- | ------ | -------- | --------------------------------------------------------------- |
 | `state` | string | no       | `authenticated`, `unauthenticated`, or `not_applicable` (axum). |
 
-`state` reflects the probe command's exit status only (the probes are listed
-under [Adapter built-ins](#edgezero-auth)): `authenticated` means the probe
-exited `0`, not that a token was checked. Some `wrangler whoami` versions exit
-`0` when logged out, and `fastly profile list` only lists saved profiles.
-`unauthenticated` gives `ok: false` with the result present. A missing native
-CLI gives `result: null`.
+For Cloudflare, `state` is the `loggedIn` field of `wrangler whoami --json`;
+output without that field (for example from a Wrangler too old for `--json`)
+gives `result: null`. For the other adapters, and for a manifest `auth-status`
+override, `state` reflects the probe command's exit status only (the probes are
+listed under [Adapter built-ins](#edgezero-auth)): `authenticated` means the
+probe exited `0`, not that a token was checked, and `fastly profile list` only
+lists saved profiles. `unauthenticated` gives `ok: false` with the result
+present. A missing native CLI gives `result: null`.
 
 **`build`**
 
@@ -810,25 +813,48 @@ CLI gives `result: null`.
 | `artifact` | string | yes      | The built file's path; `null` when a manifest `commands.build` override ran or the adapter does not track it (axum). |
 
 `--format` must come before the first passthrough argument. A `--format` (or
-`--format=…`) among the passthrough arguments is rejected with exit `1` rather
-than forwarded to the build command; stdout is empty unless `--format json`
-also came before the passthrough arguments. This includes
-`build --adapter <name> -- --format json`: `build` cannot forward a `--format`.
+`--format=…`) among the passthrough arguments is rejected with a non-zero exit
+(see **Exit codes** above) rather than forwarded to the build command; stdout
+is empty unless `--format json` also came before the passthrough arguments.
+This includes `build --adapter <name> -- --format json`: `build` cannot forward
+a `--format`.
 
 **`deploy`**
 
-| Key          | Type    | Nullable | Meaning                                                                                                                                       |
-| ------------ | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `service_id` | string  | yes      | The service the adapter resolved (a Fastly `--staging` deploy falls back to `FASTLY_SERVICE_ID`), else `--service-id` as passed, else `null`. |
-| `staging`    | boolean | no       | Whether `--staging` was passed.                                                                                                               |
-| `version`    | integer | yes      | The staged version for `--staging`, the activated version for a Fastly production deploy with `--service-id`, and `null` otherwise.           |
+| Key              | Type    | Nullable | Meaning                                                                                                                                                  |
+| ---------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `service_id`     | string  | yes      | The service the deploy targeted (see below), else `--service-id` as passed, else `null`.                                                                 |
+| `staging`        | boolean | no       | Whether `--staging` was passed.                                                                                                                          |
+| `version`        | integer | yes      | The version the deploy created, staged or activated (see below); `null` when none is known.                                                              |
+| `version_state`  | string  | yes      | `published` (staged for `--staging`, activated otherwise), `draft` (created, never staged or activated), or `unknown`. `null` exactly when `version` is. |
+| `package_sha256` | string  | yes      | The verified package's SHA-256 for a managed Fastly deploy (the text output's `package-sha256=` line); `null` otherwise.                                 |
 
-A production deploy reads only `--service-id`, so a Fastly production deploy
-that relies on `FASTLY_SERVICE_ID` reports `service_id: null`.
+A Fastly deploy takes one of two paths:
 
-A Fastly production deploy that went live but whose version could not be
-resolved gives `ok: false` with the result present and `version: null`. Check
-`result`, not only `ok`, before assuming nothing was deployed.
+- **Managed** (any `--staging`, any `--application-release`, or an app that
+  declares stores): `service_id` is the id the deploy used: `--service-id`,
+  else the release's `fastly.toml` `service_id`, else `FASTLY_SERVICE_ID`.
+  `version` is the staged or activated version.
+- **Legacy** (a store-free production deploy without `--application-release`,
+  run by a manifest `deploy` command or the built-in `fastly compute deploy`):
+  only `--service-id` is read, so a deploy that relies on `FASTLY_SERVICE_ID`
+  reports `service_id: null` and `version: null`. With `--service-id`,
+  `version` is the activated version.
+
+`--application-release` is not echoed in the result.
+
+A deploy that fails can still have changed the service, so check `result`, not
+only `ok`, before assuming nothing was deployed:
+
+- A managed deploy that fails after creating its draft gives `ok: false` with
+  the result present: `version` is that draft, and `version_state` is `draft`
+  if staging or activation was never attempted, or `unknown` if it was (the
+  request may have committed before failing).
+- A legacy deploy that went live but whose version could not be resolved gives
+  `ok: false` with the result present and `version: null`. When the deploy
+  command reported a version that could not be verified active, `version` is
+  that version with `version_state: unknown`.
+- A failure before anything was created gives `result: null`.
 
 **`healthcheck`**
 
@@ -845,7 +871,13 @@ resolved gives `ok: false` with the result present and `version: null`. Check
 | `attempts`         | integer | no       | The number of probes actually made.                                                                                                                 |
 | `version_verified` | boolean | no       | `true` when the version was confirmed active before and after the probe: a healthy production probe with `FASTLY_API_TOKEN` set. Otherwise `false`. |
 
-An unhealthy probe gives `ok: false` with the result present.
+An unhealthy probe gives `ok: false` with the result present. A failure that
+leaves no probe result gives `result: null`: a version check before the probe,
+or the after-probe version check of a healthy production probe (another version
+went active during the probe).
+
+`status_code` is `null` when the last probe got no response, including curl's
+`000`. The text output prints that as `status-code=0`, as before.
 
 **`rollback`**
 
@@ -865,20 +897,19 @@ An unhealthy probe gives `ok: false` with the result present.
 
 Each entry:
 
-| Key              | Type   | Nullable | Meaning                                                                                               |
-| ---------------- | ------ | -------- | ----------------------------------------------------------------------------------------------------- |
-| `action`         | string | no       | `created`, `already_present`, `would_create`, `updated`, `would_update`, `not_applicable`, or `note`. |
-| `store`          | object | yes      | `{ kind, logical, platform }`; `null` for an adapter-level note.                                      |
-| `store.kind`     | string | no       | `config`, `kv`, or `secrets`.                                                                         |
-| `store.logical`  | string | yes      | The manifest id; `null` for a store EdgeZero owns itself, such as Fastly's `edgezero_runtime_env`.    |
-| `store.platform` | string | no       | The platform name the runtime resolves.                                                               |
-| `message`        | string | no       | The line `text` mode prints. It may span several lines and is meant for people, not parsing.          |
+| Key              | Type   | Nullable | Meaning                                                                                      |
+| ---------------- | ------ | -------- | -------------------------------------------------------------------------------------------- |
+| `action`         | string | no       | `created`, `already_present`, `would_create`, `not_applicable`, or `note`.                   |
+| `store`          | object | yes      | `{ kind, logical, platform }`; `null` for an adapter-level note.                             |
+| `store.kind`     | string | no       | `config`, `kv`, or `secrets`.                                                                |
+| `store.logical`  | string | no       | The manifest id.                                                                             |
+| `store.platform` | string | no       | The platform name the runtime resolves.                                                      |
+| `message`        | string | no       | The line `text` mode prints. It may span several lines and is meant for people, not parsing. |
 
 A dry run's `would_create` pairs with a real run's `created` or
-`already_present`, and `would_update` with `updated`. The Fastly and Spin dry
-runs report the plan without checking the current state, so a store that
-already exists still shows `would_create`. Fastly's real run also omits the
-`edgezero_runtime_env` entry when `fastly.toml` already declares it.
+`already_present`. The Fastly and Spin dry runs report the plan without
+checking the current state, so a store that already exists still shows
+`would_create`.
 
 **`config gc`**
 

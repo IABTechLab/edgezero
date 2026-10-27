@@ -7,14 +7,13 @@ use std::process::Command;
 
 use ctor::ctor;
 use edgezero_adapter::cli_support::{
-    find_manifest_upwards, find_workspace_root, native_auth_status, path_distance,
-    read_package_name, run_native_cli,
+    find_manifest_upwards, find_workspace_root, path_distance, read_package_name, run_native_cli,
 };
 use edgezero_adapter::process;
 use edgezero_adapter::registry::{
-    ActionOutcome, Adapter, AdapterAction, AdapterPushContext, BuildOutcome, ProvisionAction,
-    ProvisionEntry, ProvisionReport, ProvisionStores, ReadConfigEntry, ResolvedStoreId, StoreKind,
-    register_adapter,
+    ActionOutcome, Adapter, AdapterAction, AdapterPushContext, AuthState, AuthStatusOutcome,
+    BuildOutcome, ProvisionAction, ProvisionEntry, ProvisionReport, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, StoreKind, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
@@ -150,10 +149,7 @@ impl Adapter for CloudflareCliAdapter {
                 run_native_cli("wrangler", &["logout"], WRANGLER_INSTALL_HINT)
                     .map(|()| ActionOutcome::Empty)
             }
-            AdapterAction::AuthStatus => {
-                native_auth_status("wrangler", &["whoami"], WRANGLER_INSTALL_HINT)
-                    .map(ActionOutcome::AuthStatus)
-            }
+            AdapterAction::AuthStatus => auth_status().map(ActionOutcome::AuthStatus),
             AdapterAction::Build => build(args).map(|artifact| {
                 log::info!(
                     "[edgezero] Cloudflare build artifact -> {}",
@@ -542,6 +538,46 @@ impl Adapter for CloudflareCliAdapter {
         // Secrets is a single flat bag).
         &["secrets"]
     }
+}
+
+/// `auth status`. Plain `wrangler whoami` exits 0 even when logged out, so
+/// this reads `loggedIn` from `wrangler whoami --json` instead of the exit
+/// status. Output that is not that JSON is a probe failure, not a state.
+fn auth_status() -> Result<AuthStatusOutcome, String> {
+    let output = Command::new("wrangler")
+        .args(["whoami", "--json"])
+        .output()
+        .map_err(|err| {
+            if err.kind() == ErrorKind::NotFound {
+                format!("`wrangler` not found on PATH; {WRANGLER_INSTALL_HINT}")
+            } else {
+                format!("failed to spawn `wrangler`: {err}")
+            }
+        })?;
+    parse_whoami(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        format!(
+            "`wrangler whoami --json` exited with status {} without reporting `loggedIn`: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    })
+}
+
+/// The session state in `wrangler whoami --json` output, if it reports one.
+fn parse_whoami(stdout: &str) -> Option<AuthStatusOutcome> {
+    let whoami: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let state = if whoami.get("loggedIn")?.as_bool()? {
+        if let Some(email) = whoami.get("email").and_then(serde_json::Value::as_str) {
+            log::info!("[edgezero] wrangler is logged in as {email}");
+        }
+        AuthState::Authenticated
+    } else {
+        AuthState::Unauthenticated {
+            reason: "`wrangler whoami --json` reports loggedIn: false; run `wrangler login`"
+                .to_owned(),
+        }
+    };
+    Some(AuthStatusOutcome { state })
 }
 
 /// Shell out to `wrangler kv namespace create <binding>`, capture
@@ -1731,7 +1767,7 @@ id = "00112233445566778899aabbccddeeff"
                 (
                     entry.action,
                     store.kind,
-                    store.logical.as_deref(),
+                    store.logical.as_str(),
                     store.platform.as_str(),
                 )
             })
@@ -1742,19 +1778,19 @@ id = "00112233445566778899aabbccddeeff"
                 (
                     ProvisionAction::AlreadyPresent,
                     StoreKind::Kv,
-                    Some(TEST_KV_ID),
+                    TEST_KV_ID,
                     TEST_KV_ID
                 ),
                 (
                     ProvisionAction::WouldCreate,
                     StoreKind::Config,
-                    Some(TEST_CONFIG_ID),
+                    TEST_CONFIG_ID,
                     "prod_config"
                 ),
                 (
                     ProvisionAction::NotApplicable,
                     StoreKind::Secrets,
-                    Some(TEST_SECRET_ID),
+                    TEST_SECRET_ID,
                     TEST_SECRET_ID
                 ),
             ]
@@ -2056,6 +2092,31 @@ id = "00112233445566778899aabbccddeeff"
         use std::sync::{Mutex, OnceLock};
         static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
         GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_status_reads_logged_in_from_whoami_json() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let state = |stdout: &str, code| {
+            let fake = fake_wrangler_returning(stdout, "probe stderr", code);
+            let _path = PathPrepend::new(fake.path());
+            auth_status().map(|outcome| outcome.state)
+        };
+
+        assert_eq!(
+            state(r#"{"loggedIn": true, "email": "a@example.com"}"#, 0_i32),
+            Ok(AuthState::Authenticated)
+        );
+        // Logged out: `whoami --json` exits non-zero with `loggedIn: false`.
+        assert!(matches!(
+            state(r#"{"loggedIn": false}"#, 1_i32),
+            Ok(AuthState::Unauthenticated { .. })
+        ));
+        // Plain-text output (e.g. a wrangler without `--json`) is a probe
+        // failure, never "authenticated", even on exit 0.
+        let error = state("You are not authenticated.", 0_i32).expect_err("no state");
+        assert!(error.contains("probe stderr"), "{error}");
     }
 
     #[cfg(unix)]

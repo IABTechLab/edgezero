@@ -67,6 +67,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
     impl Drop for PolicyOverride {
         fn drop(&mut self) {
             set_child_stdout_to_stderr(self.0);

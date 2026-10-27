@@ -66,7 +66,9 @@ use args::{
     ActiveVersionArgs, BuildArgs, DeployArgs, HealthcheckArgs, NewArgs, RollbackArgs, ServeArgs,
 };
 #[cfg(feature = "cli")]
-use edgezero_adapter::registry::{ActionOutcome, AdapterDeployContext, DeployStoreIds};
+use edgezero_adapter::registry::{
+    ActionOutcome, AdapterDeployContext, DeployOutcome, DeployStoreIds,
+};
 #[cfg(feature = "cli")]
 use edgezero_core::manifest::{Manifest, ManifestLoader, StoreDeclaration};
 #[cfg(feature = "cli")]
@@ -186,8 +188,8 @@ fn build(args: &BuildArgs) -> Outcome<BuildResult> {
         .find(|arg| *arg == "--format" || arg.starts_with("--format="))
     {
         return Err(format!(
-            "`{flag}` after a passthrough argument is forwarded to the build command, not read \
-             as EdgeZero's `--format`. Put `--format` before the first passthrough argument."
+            "`{flag}` among the passthrough arguments is rejected: `build` cannot forward a \
+             `--format`. Put EdgeZero's `--format` before the first passthrough argument."
         )
         .into());
     }
@@ -227,12 +229,14 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
 #[cfg(feature = "cli")]
 fn deploy(args: &DeployArgs) -> Outcome<DeployResult> {
     // `service_id`: the id the adapter resolved, else `--service-id` as passed.
-    let result = |service_id: Option<String>, version: Option<u64>| {
+    let result = |deployed: DeployOutcome| {
         DeployResult::new(
             &args.adapter,
-            service_id.or_else(|| args.service_id.clone()),
             args.staging,
-            version,
+            DeployOutcome {
+                service_id: deployed.service_id.or_else(|| args.service_id.clone()),
+                ..deployed
+            },
         )
     };
     // Reject reserved staging-lifecycle spellings in the passthrough. `--staging` is
@@ -302,25 +306,30 @@ fn deploy(args: &DeployArgs) -> Outcome<DeployResult> {
         &args.adapter_args,
     ) {
         Ok(outcome) => {
-            let (service_id, version) = deployed(outcome);
-            Ok(result(service_id, version))
+            let mut deployed = deployed(outcome);
+            // A deploy that failed after creating a version still reports it.
+            match deployed.failure.take() {
+                None => Ok(result(deployed)),
+                Some(message) => Err(Failure::with_result(message, result(deployed))),
+            }
         }
         Err(adapter::DeployFailure::Deploy(message)) => Err(message.into()),
         // The deploy went live; only finalizing it (e.g. resolving the
         // activated version) failed, so the failure still carries a result.
-        Err(adapter::DeployFailure::Finalize(message)) => {
-            Err(Failure::with_result(message, result(None, None)))
-        }
+        Err(adapter::DeployFailure::Finalize(message)) => Err(Failure::with_result(
+            message,
+            result(DeployOutcome::default()),
+        )),
     }
 }
 
-/// The service id and version a deploy outcome reports, if any.
+/// What a deploy outcome reports; empty when it reports nothing.
 #[cfg(feature = "cli")]
-fn deployed(outcome: ActionOutcome) -> (Option<String>, Option<u64>) {
+fn deployed(outcome: ActionOutcome) -> DeployOutcome {
     if let ActionOutcome::Deploy(deployed) = outcome {
-        (deployed.service_id, deployed.version)
+        deployed
     } else {
-        (None, None)
+        DeployOutcome::default()
     }
 }
 
@@ -769,7 +778,7 @@ mod tests {
     use crate::args::OutputFormat;
     use crate::test_support::{BASIC_MANIFEST, EnvOverride, manifest_guard};
     use edgezero_adapter::registry::{
-        self as adapter_registry, Adapter, AdapterAction, DeployOwnership,
+        self as adapter_registry, Adapter, AdapterAction, DeployOwnership, DeployedVersionState,
     };
     use edgezero_core::manifest::ManifestLoader;
     #[cfg(unix)]
@@ -792,6 +801,11 @@ mod tests {
     static DEPLOY_CONTEXT: LazyLock<Mutex<Option<AdapterDeployContext>>> =
         LazyLock::new(|| Mutex::new(None));
     static DEPLOY_FINALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    /// What `Adapter::deploy` / `finalize_deploy` return; `None` is `Ok(Empty)`.
+    static DEPLOY_OUTCOME: LazyLock<Mutex<Option<ActionOutcome>>> =
+        LazyLock::new(|| Mutex::new(None));
+    static FINALIZE_OUTCOME: LazyLock<Mutex<Option<Result<ActionOutcome, String>>>> =
+        LazyLock::new(|| Mutex::new(None));
     static DEPLOY_PREFLIGHT_CONTEXT: LazyLock<Mutex<Option<AdapterDeployContext>>> =
         LazyLock::new(|| Mutex::new(None));
     static RECORDING_DEPLOY_ADAPTER: RecordingDeployAdapter = RecordingDeployAdapter;
@@ -813,7 +827,11 @@ mod tests {
                 .map_err(|err| format!("deploy context lock poisoned: {err}"))? =
                 Some(context.clone());
             DEPLOY_CALLS.fetch_add(1, Ordering::SeqCst);
-            Ok(ActionOutcome::Empty)
+            Ok(DEPLOY_OUTCOME
+                .lock()
+                .map_err(|err| format!("deploy outcome lock poisoned: {err}"))?
+                .clone()
+                .unwrap_or(ActionOutcome::Empty))
         }
 
         fn execute(
@@ -833,7 +851,11 @@ mod tests {
             _command_output: Option<&str>,
         ) -> Result<ActionOutcome, String> {
             DEPLOY_FINALIZE_CALLS.fetch_add(1, Ordering::SeqCst);
-            Ok(ActionOutcome::Empty)
+            FINALIZE_OUTCOME
+                .lock()
+                .map_err(|err| format!("finalize outcome lock poisoned: {err}"))?
+                .clone()
+                .unwrap_or(Ok(ActionOutcome::Empty))
         }
 
         fn name(&self) -> &'static str {
@@ -863,6 +885,8 @@ mod tests {
         DEPLOY_CALLS.store(0, Ordering::SeqCst);
         *DEPLOY_CONTEXT.lock().expect("deploy context lock") = None;
         DEPLOY_FINALIZE_CALLS.store(0, Ordering::SeqCst);
+        *DEPLOY_OUTCOME.lock().expect("deploy outcome lock") = None;
+        *FINALIZE_OUTCOME.lock().expect("finalize outcome lock") = None;
         *DEPLOY_PREFLIGHT_CONTEXT
             .lock()
             .expect("deploy preflight context lock") = None;
@@ -1155,6 +1179,142 @@ deploy = "touch '{}'"
             )
         );
         assert!(deployed_context.application_release_root.is_none());
+    }
+
+    /// Writes a manifest for the recording adapter with no deploy command,
+    /// and points `EDGEZERO_MANIFEST` at it.
+    fn recording_adapter_manifest(temp: &TempDir) -> EnvOverride {
+        let manifest_path = temp.path().join("edgezero.toml");
+        fs::write(
+            &manifest_path,
+            "[app]\nname = \"demo\"\n[adapters.recording_deploy_test.adapter]\ncrate = \"crates/demo\"\n",
+        )
+        .expect("write manifest");
+        EnvOverride::set(
+            "EDGEZERO_MANIFEST",
+            manifest_path.to_string_lossy().into_owned(),
+        )
+    }
+
+    fn deploy_envelope(args: &DeployArgs) -> serde_json::Value {
+        let rendered =
+            output::render_envelope(CommandName::Deploy, &deploy(args)).expect("renders");
+        serde_json::from_str(&rendered).expect("valid JSON")
+    }
+
+    fn recording_deploy_args() -> DeployArgs {
+        DeployArgs {
+            adapter: "recording_deploy_test".to_owned(),
+            ..DeployArgs::default()
+        }
+    }
+
+    #[test]
+    fn managed_deploy_failure_after_a_version_exists_keeps_it_in_the_result() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        reset_recording_deploy_adapter(PREFLIGHT_ADAPTER_MANAGED);
+        let temp = TempDir::new().expect("temp dir");
+        let _env = recording_adapter_manifest(&temp);
+        *DEPLOY_OUTCOME.lock().expect("deploy outcome lock") =
+            Some(ActionOutcome::Deploy(DeployOutcome {
+                failure: Some("activate request failed".to_owned()),
+                package_sha256: Some("abc123".to_owned()),
+                service_id: Some("SVC1".to_owned()),
+                version: Some(42),
+                version_state: Some(DeployedVersionState::Unknown),
+            }));
+
+        let envelope = deploy_envelope(&recording_deploy_args());
+        assert_eq!(envelope["ok"], serde_json::json!(false));
+        assert_eq!(
+            envelope["error"],
+            serde_json::json!({"message": "activate request failed"})
+        );
+        assert_eq!(
+            envelope["result"],
+            serde_json::json!({
+                "adapter": "recording_deploy_test", "package_sha256": "abc123",
+                "service_id": "SVC1", "staging": false, "version": 42_i32,
+                "version_state": "unknown",
+            })
+        );
+        // Text mode prints the same error.
+        let error = run_deploy(&recording_deploy_args()).expect_err("the deploy failed");
+        assert_eq!(error, "activate request failed");
+        assert_eq!(DEPLOY_FINALIZE_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn fallback_deploy_failure_with_a_version_skips_finalize() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        reset_recording_deploy_adapter(PREFLIGHT_MANIFEST_COMMAND);
+        let temp = TempDir::new().expect("temp dir");
+        let _env = recording_adapter_manifest(&temp);
+        *DEPLOY_OUTCOME.lock().expect("deploy outcome lock") =
+            Some(ActionOutcome::Deploy(DeployOutcome {
+                failure: Some("stage failed".to_owned()),
+                version: Some(7),
+                version_state: Some(DeployedVersionState::Draft),
+                ..DeployOutcome::default()
+            }));
+
+        let envelope = deploy_envelope(&recording_deploy_args());
+        assert_eq!(envelope["ok"], serde_json::json!(false));
+        assert_eq!(envelope["result"]["version"], serde_json::json!(7_i32));
+        assert_eq!(
+            envelope["result"]["version_state"],
+            serde_json::json!("draft")
+        );
+        assert_eq!(DEPLOY_FINALIZE_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn fallback_deploy_prefers_the_finalizer_outcome() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        reset_recording_deploy_adapter(PREFLIGHT_MANIFEST_COMMAND);
+        let temp = TempDir::new().expect("temp dir");
+        let _env = recording_adapter_manifest(&temp);
+        *DEPLOY_OUTCOME.lock().expect("deploy outcome lock") =
+            Some(ActionOutcome::Deploy(DeployOutcome {
+                version: Some(1),
+                ..DeployOutcome::default()
+            }));
+        *FINALIZE_OUTCOME.lock().expect("finalize outcome lock") =
+            Some(Ok(ActionOutcome::Deploy(DeployOutcome {
+                service_id: Some("SVC1".to_owned()),
+                version: Some(2),
+                version_state: Some(DeployedVersionState::Published),
+                ..DeployOutcome::default()
+            })));
+
+        let envelope = deploy_envelope(&recording_deploy_args());
+        assert_eq!(envelope["ok"], serde_json::json!(true));
+        assert_eq!(envelope["result"]["service_id"], serde_json::json!("SVC1"));
+        assert_eq!(envelope["result"]["version"], serde_json::json!(2_i32));
+        assert_eq!(DEPLOY_FINALIZE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn fallback_finalize_failure_still_carries_a_result() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        reset_recording_deploy_adapter(PREFLIGHT_MANIFEST_COMMAND);
+        let temp = TempDir::new().expect("temp dir");
+        let _env = recording_adapter_manifest(&temp);
+        *FINALIZE_OUTCOME.lock().expect("finalize outcome lock") =
+            Some(Err("could not resolve the activated version".to_owned()));
+
+        let envelope = deploy_envelope(&DeployArgs {
+            service_id: Some("SVC1".to_owned()),
+            ..recording_deploy_args()
+        });
+        assert_eq!(envelope["ok"], serde_json::json!(false));
+        assert_eq!(
+            envelope["error"],
+            serde_json::json!({"message": "could not resolve the activated version"})
+        );
+        // The deploy went live, so the result is present (not `null`).
+        assert_eq!(envelope["result"]["service_id"], serde_json::json!("SVC1"));
+        assert_eq!(envelope["result"]["version"], serde_json::Value::Null);
     }
 
     #[cfg(not(windows))]

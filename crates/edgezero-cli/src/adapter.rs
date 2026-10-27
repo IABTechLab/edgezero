@@ -72,7 +72,9 @@ impl From<Action> for AdapterAction {
 /// Why [`deploy`] failed.
 #[derive(Debug)]
 pub enum DeployFailure {
-    /// The deploy itself failed; nothing is known to be live.
+    /// The deploy failed before reporting anything it created. A deploy that
+    /// fails after creating a version is instead an `Ok` [`ActionOutcome::Deploy`]
+    /// carrying that version and a `failure`.
     Deploy(String),
     /// The deploy went live, but finalizing it (e.g. resolving the activated
     /// version) failed.
@@ -258,6 +260,9 @@ pub fn deploy(
     }
     let fallback_adapter = require_adapter(adapter_name, manifest_loader.is_some())?;
     let deployed = fallback_adapter.deploy(context, adapter_args)?;
+    if matches!(&deployed, ActionOutcome::Deploy(outcome) if outcome.failure.is_some()) {
+        return Ok(deployed);
+    }
     let finalized = fallback_adapter
         .finalize_deploy(context, None)
         .map_err(DeployFailure::Finalize)?;

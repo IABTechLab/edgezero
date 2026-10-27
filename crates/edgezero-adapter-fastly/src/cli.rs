@@ -32,10 +32,10 @@ use edgezero_adapter::cli_support::{
 use edgezero_adapter::process;
 use edgezero_adapter::registry::{
     ActionOutcome, ActiveVersionOutcome, Adapter, AdapterAction, AdapterDeployContext,
-    AdapterPushContext, BuildOutcome, DeployOutcome, DeployOwnership, DeployStoreIds, GcCandidate,
-    GcFailure, GcReport, HealthcheckOutcome, ProvisionAction, ProvisionEntry, ProvisionReport,
-    ProvisionStores, ReadConfigEntry, ResolvedStoreId, RollbackOutcome, StoreKind,
-    register_adapter,
+    AdapterPushContext, BuildOutcome, DeployOutcome, DeployOwnership, DeployStoreIds,
+    DeployedVersionState, GcCandidate, GcFailure, GcReport, HealthcheckOutcome, ProvisionAction,
+    ProvisionEntry, ProvisionReport, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
+    RollbackOutcome, StoreKind, register_adapter,
 };
 use edgezero_adapter::release::{VerifiedApplicationRelease, verify_application_release};
 use edgezero_adapter::scaffold::{
@@ -898,25 +898,69 @@ fn build_managed_deploy_plan(
     })
 }
 
+/// A failure once a draft version exists is still an `Ok` outcome, carrying
+/// that version and the failure, so the caller can inspect or recover it.
 fn deploy_managed_with_context(
     context: &AdapterDeployContext,
     args: &[String],
 ) -> Result<DeployOutcome, String> {
     let plan = build_managed_deploy_plan(context, args)?;
-    let version = execute_managed_deploy_plan(&plan)?;
+    let mut progress = ManagedProgress::default();
+    let executed = execute_managed_deploy_plan(&plan, &mut progress);
+    managed_deploy_outcome(plan.service_id, plan.package_sha256, &progress, executed)
+}
+
+/// Maps a managed deploy's result onto its outcome. A failure before any
+/// draft exists stays an `Err`: nothing was created.
+fn managed_deploy_outcome(
+    service_id: String,
+    package_sha256: String,
+    progress: &ManagedProgress,
+    executed: Result<u64, String>,
+) -> Result<DeployOutcome, String> {
+    let (version, version_state, failure) = match executed {
+        Ok(version) => (version, DeployedVersionState::Published, None),
+        Err(error) => {
+            let Some(version) = progress.version else {
+                return Err(error);
+            };
+            let state = if progress.publish_attempted {
+                DeployedVersionState::Unknown
+            } else {
+                DeployedVersionState::Draft
+            };
+            (version, state, Some(error))
+        }
+    };
     Ok(DeployOutcome {
-        service_id: Some(plan.service_id),
+        failure,
+        package_sha256: Some(package_sha256),
+        service_id: Some(service_id),
         version: Some(version),
+        version_state: Some(version_state),
     })
 }
 
+/// How far a managed deploy got before it returned.
+#[derive(Debug, Default)]
+struct ManagedProgress {
+    /// The editable draft version, once one exists.
+    version: Option<u64>,
+    /// Whether the stage or activate request was sent.
+    publish_attempted: bool,
+}
+
 /// Returns the staged or activated version.
-fn execute_managed_deploy_plan(plan: &ManagedDeployPlan) -> Result<u64, String> {
-    execute_managed_deploy_plan_with_emit(plan, &mut |line| log::info!("{line}"))
+fn execute_managed_deploy_plan(
+    plan: &ManagedDeployPlan,
+    progress: &mut ManagedProgress,
+) -> Result<u64, String> {
+    execute_managed_deploy_plan_with_emit(plan, progress, &mut |line| log::info!("{line}"))
 }
 
 fn execute_managed_deploy_plan_with_emit(
     plan: &ManagedDeployPlan,
+    progress: &mut ManagedProgress,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64, String> {
     let cwd = plan
@@ -925,7 +969,7 @@ fn execute_managed_deploy_plan_with_emit(
         .parent()
         .ok_or_else(|| "verified Fastly manifest has no parent directory".to_owned())?;
     emit(&format!("package-sha256={}", plan.package_sha256));
-    let version = prepare_managed_version(plan, cwd, emit)?;
+    let version = prepare_managed_version(plan, cwd, progress, emit)?;
 
     if let Some(comment) = plan.arguments.comment.as_deref() {
         run_fastly_status(
@@ -996,6 +1040,7 @@ fn execute_managed_deploy_plan_with_emit(
 
     revalidate_managed_draft(plan, version, &expected_links, &expected_configuration, cwd)?;
 
+    progress.publish_attempted = true;
     match plan.target {
         PublishTarget::Staging => run_fastly_status(
             &[
@@ -1025,6 +1070,7 @@ struct CapturedFastlyCommand {
 fn prepare_managed_version(
     plan: &ManagedDeployPlan,
     cwd: &Path,
+    progress: &mut ManagedProgress,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64, String> {
     let package = plan.release.package().to_str().ok_or_else(|| {
@@ -1034,17 +1080,18 @@ fn prepare_managed_version(
     let version = match &plan.version_source {
         EditableVersionSource::CloneActive { active_version } => {
             revalidate_active_source(plan, *active_version, cwd, None)?;
-            clone_managed_source(plan, *active_version, cwd, emit)?
+            clone_managed_source(plan, *active_version, cwd, progress, emit)?
         }
         EditableVersionSource::CloneRetired(snapshot)
         | EditableVersionSource::CloneStaging(snapshot) => {
             revalidate_inactive_source(plan, snapshot, cwd, None)?;
             require_source_configuration(plan, snapshot.version.number)?;
-            clone_managed_source(plan, snapshot.version.number, cwd, emit)?
+            clone_managed_source(plan, snapshot.version.number, cwd, progress, emit)?
         }
         EditableVersionSource::InitialDraft(snapshot) => {
             revalidate_initial_draft_before_update(plan, snapshot, cwd)?;
             let version = snapshot.version.number;
+            progress.version = Some(version);
             emit(&format!("version={version}"));
             version
         }
@@ -1087,6 +1134,7 @@ fn clone_managed_source(
     plan: &ManagedDeployPlan,
     source_version: u64,
     cwd: &Path,
+    progress: &mut ManagedProgress,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64, String> {
     let raw = fastly_api_put_capture(
@@ -1097,6 +1145,7 @@ fn clone_managed_source(
         plan.token.as_str(),
     )?;
     let version = parse_cloned_version(&raw, &plan.service_id, source_version)?;
+    progress.version = Some(version);
     emit(&format!("version={version}"));
 
     match &plan.version_source {
@@ -2084,8 +2133,8 @@ impl Adapter for FastlyCliAdapter {
                     artifact: Some(artifact),
                 }))
             }
-            // Production: the CLI's `finalize_deploy` resolves the activated
-            // version (deploy output, then the Fastly API).
+            // Production: the adapter's `finalize_deploy` hook resolves the
+            // activated version (deploy output, then the Fastly API).
             AdapterAction::Deploy => deploy(args).map(|()| ActionOutcome::Empty),
             AdapterAction::Serve => serve(args).map(|()| ActionOutcome::Empty),
             AdapterAction::DeployStaging => Err(
@@ -2118,17 +2167,34 @@ impl Adapter for FastlyCliAdapter {
             ActionOutcome::Deploy(DeployOutcome {
                 service_id: Some(service_id.to_owned()),
                 version: Some(version),
+                version_state: Some(DeployedVersionState::Published),
+                ..DeployOutcome::default()
             })
         };
         if let Some(version) = command_output.and_then(parse_fastly_version) {
-            let token = require_token()?;
-            verify_version_active(
-                service_id,
-                version,
-                &token,
-                "after manifest-command deployment",
-            )?;
-            return Ok(deployed(version));
+            // The deploy command reported `version`, but until it is verified
+            // active its state is unknown; keep it so the caller can check it.
+            return Ok(require_token()
+                .and_then(|token| {
+                    verify_version_active(
+                        service_id,
+                        version,
+                        &token,
+                        "after manifest-command deployment",
+                    )
+                })
+                .map_or_else(
+                    |error| {
+                        ActionOutcome::Deploy(DeployOutcome {
+                            failure: Some(error),
+                            service_id: Some(service_id.to_owned()),
+                            version: Some(version),
+                            version_state: Some(DeployedVersionState::Unknown),
+                            ..DeployOutcome::default()
+                        })
+                    },
+                    |()| deployed(version),
+                ));
         }
         // `require_active`: a version was just activated, so "none" is an error.
         let active = emit_active_version_for(service_id, true).map_err(|error| {
@@ -6585,24 +6651,23 @@ fn resolve_deploy_manifest_path(context: &AdapterDeployContext) -> Result<PathBu
     find_fastly_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())
 }
 
-/// Production companion to `deploy`: resolve the active service version via the
-/// Fastly API and emit it as a `version=<N>` line.
+/// `active-version`: resolve the active service version via the Fastly API.
+/// The CLI emits it as a `version=<N>` line.
 ///
 /// Distinguishes "confirmed no active version" from an operational failure: a
 /// service with no active version yet (a first-ever deploy) is NOT an error — it
-/// emits an empty `version=` line and succeeds, so the caller records an empty
-/// rollback target. Only a real failure (API/auth error, or a version list that
-/// cannot be parsed) returns `Err`, so the caller can fail closed instead of
-/// silently proceeding without a rollback target.
+/// reports `version: None` (an empty `version=` line) and succeeds, so the caller
+/// records an empty rollback target. Only a real failure (API/auth error, or a
+/// version list that cannot be parsed) returns `Err`, so the caller can fail
+/// closed instead of silently proceeding without a rollback target.
 ///
-/// `--require-active` flips the no-active-version case to an error: it is passed
-/// by the production-`deploy` version fallback, where a version was JUST
-/// activated, so "no active version" is not a valid first-deploy state but an
-/// operational failure the CLI must not report as success.
+/// `finalize_deploy` calls [`emit_active_version_for`] with `require_active`
+/// set instead: a version was JUST activated there, so "no active version" is an
+/// operational failure, not a valid first-deploy state.
 fn emit_active_version(args: &[String]) -> Result<ActiveVersionOutcome, String> {
     let service_id = resolve_service_id(args)?;
     validate_service_id(&service_id)?;
-    emit_active_version_for(&service_id, arg_flag(args, "--require-active"))
+    emit_active_version_for(&service_id, false)
 }
 
 fn emit_active_version_for(
@@ -6621,7 +6686,7 @@ fn emit_active_version_for(
     })
 }
 
-/// Resolve the active version and apply the `--require-active` policy.
+/// Resolve the active version and apply the `require_active` policy.
 ///
 /// `Ok(Some(n))` — a version is active. `Ok(None)` — no active version and
 /// `require_active` is false (a first-ever `active-version` call; the caller
@@ -6831,16 +6896,12 @@ fn curl_status(args: &[String]) -> Result<u16, String> {
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match stdout.trim().parse::<u16>() {
-        // curl writes `000` when no HTTP response arrived; that is a transport
-        // failure, not a status code.
-        Ok(0) => Err("curl got no HTTP response (status 000)".to_owned()),
-        Ok(code) => Ok(code),
-        Err(err) => Err(format!(
+    stdout.trim().parse::<u16>().map_err(|err| {
+        format!(
             "could not parse HTTP status from curl output {:?}: {err}",
             stdout.trim()
-        )),
-    }
+        )
+    })
 }
 
 /// `rollback --adapter fastly ...`: production activates the explicit
@@ -7280,6 +7341,8 @@ mod tests {
             ActionOutcome::Deploy(DeployOutcome {
                 service_id: Some("SVC1".to_owned()),
                 version: Some(8),
+                version_state: Some(DeployedVersionState::Published),
+                ..DeployOutcome::default()
             }),
             "finalization reports the verified service version"
         );
@@ -7288,10 +7351,63 @@ mod tests {
             "finalization must consult the exact service"
         );
 
-        let error = FastlyCliAdapter
+        let unverified = FastlyCliAdapter
             .finalize_deploy(&context, Some("version=9"))
-            .expect_err("a version from another service or deployment must fail closed");
+            .expect("an unverified version is still reported");
+        let ActionOutcome::Deploy(DeployOutcome {
+            failure: Some(error),
+            version: Some(9),
+            version_state: Some(DeployedVersionState::Unknown),
+            ..
+        }) = unverified
+        else {
+            panic!("a version from another service or deployment must fail closed: {unverified:?}");
+        };
         assert!(error.contains('8') && error.contains('9'), "{error}");
+    }
+
+    #[test]
+    fn managed_deploy_outcome_keeps_a_created_version_on_failure() {
+        let outcome = |progress: &ManagedProgress, executed| {
+            managed_deploy_outcome("SVC1".to_owned(), "abc".to_owned(), progress, executed)
+        };
+
+        let preflight = ManagedProgress::default();
+        assert_eq!(
+            outcome(&preflight, Err("clone failed".to_owned())),
+            Err("clone failed".to_owned()),
+            "a failure before any draft exists reports nothing"
+        );
+
+        let drafted = ManagedProgress {
+            version: Some(42),
+            publish_attempted: false,
+        };
+        assert_eq!(
+            outcome(&drafted, Err("link create failed".to_owned())),
+            Ok(DeployOutcome {
+                failure: Some("link create failed".to_owned()),
+                package_sha256: Some("abc".to_owned()),
+                service_id: Some("SVC1".to_owned()),
+                version: Some(42),
+                version_state: Some(DeployedVersionState::Draft),
+            })
+        );
+
+        let publishing = ManagedProgress {
+            version: Some(42),
+            publish_attempted: true,
+        };
+        let unknown = outcome(&publishing, Err("activate timed out".to_owned())).expect("outcome");
+        assert_eq!(unknown.version_state, Some(DeployedVersionState::Unknown));
+        assert_eq!(unknown.failure.as_deref(), Some("activate timed out"));
+
+        let published = outcome(&publishing, Ok(42)).expect("outcome");
+        assert_eq!(
+            published.version_state,
+            Some(DeployedVersionState::Published)
+        );
+        assert_eq!(published.failure, None);
     }
 
     #[test]
@@ -8714,7 +8830,7 @@ mod tests {
         assert_eq!(active_version_or_require(active, true, "svc"), Ok(Some(5)));
 
         // No active version: tolerated for `active-version` (first deploy), but an
-        // ERROR for the production-deploy fallback (`--require-active`), which
+        // ERROR for the production-deploy fallback (`require_active`), which
         // must never report a deploy with no resolvable version.
         assert_eq!(active_version_or_require(none, false, "svc"), Ok(None));
         active_version_or_require(none, true, "svc")
@@ -8924,6 +9040,17 @@ mod tests {
         assert_eq!(
             between, 2_i32,
             "delay runs between attempts, not after the last"
+        );
+    }
+
+    #[test]
+    fn probe_with_retries_reports_the_last_code_of_a_mixed_run() {
+        let mut codes = [503_u16, 0].into_iter();
+        let result = probe_with_retries(2, || Ok(codes.next().expect("two probes")), || {});
+        assert_eq!(
+            result,
+            Err((Some(0), "unhealthy HTTP status 0".to_owned())),
+            "a `503` then `000` run reports the `000`, as `main` does"
         );
     }
 
@@ -10554,14 +10681,18 @@ exit 1
         );
         drop(unhealthy_path);
 
-        // curl's `000` means no HTTP response arrived: no status code.
+        // curl's `000` (no HTTP response) stays the text output's
+        // `status-code=0`; the JSON result maps it to `null`.
         let silent_curl = fake_curl(0);
         let _silent_path = PathPrepend::new(silent_curl.path());
         let silent = healthcheck(&args("1")).expect("a silent probe is an outcome");
         assert!(!silent.healthy());
-        assert_eq!(silent.status_code, None, "`000` is not a status code");
+        assert_eq!(silent.status_code, Some(0));
         let silent_failure = silent.failure.expect("carries its reason");
-        assert!(silent_failure.contains("status 000"), "{silent_failure}");
+        assert!(
+            silent_failure.contains("unhealthy HTTP status 0"),
+            "{silent_failure}"
+        );
     }
 
     /// `version_verified` claims the version was ACTIVE before AND after the

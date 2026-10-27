@@ -50,17 +50,6 @@ crate = "crates/demo-fastly"
 deploy = "echo 'SUCCESS: Deployed package (service SVC1, version 12)'"
 "#;
 
-    /// A Fastly app with no config stores, so a staged deploy needs only
-    /// `fastly compute update` to answer (no runtime-env relink).
-    const FASTLY_STAGING_MANIFEST: &str = r#"
-[app]
-name = "demo-app"
-
-[adapters.fastly.adapter]
-crate = "crates/demo-fastly"
-manifest = "fastly.toml"
-"#;
-
     /// A Fastly app with one config store, for `config gc`.
     const FASTLY_GC_MANIFEST: &str = r#"
 [app]
@@ -264,15 +253,6 @@ crate = "crates/demo-cloudflare"
              \x20 'config-store-entry list') echo '[{\"item_key\":\"greeting\",\"item_value\":\"hello\",\"created_at\":\"2026-07-01T00:00:00Z\"}]';;\n\
              \x20 'config-store-entry delete') echo \"$*\" >> \"$(dirname \"$0\")/deletes.log\";;\n\
              esac",
-        )
-    }
-
-    /// A fake `fastly` whose `compute update` makes draft version 8.
-    fn fake_fastly_staging() -> TempDir {
-        fake_binary(
-            "fastly",
-            "if [ \"$1 $2\" = 'compute update' ]; then \
-             echo 'SUCCESS: Updated package (service SVC1, version 8)'; fi",
         )
     }
 
@@ -506,7 +486,7 @@ crate = "crates/demo-cloudflare"
         assert!(output.stdout.is_empty(), "stdout: {:?}", stdout_of(&output));
         let stderr = stderr_of(&output);
         assert!(
-            stderr.contains("`--format` after a passthrough argument"),
+            stderr.contains("`--format` among the passthrough arguments is rejected"),
             "stderr: {stderr}"
         );
         assert!(
@@ -532,7 +512,7 @@ crate = "crates/demo-cloudflare"
                 stdout_of(&output)
             );
             assert!(
-                stderr_of(&output).contains("after a passthrough argument"),
+                stderr_of(&output).contains("among the passthrough arguments is rejected"),
                 "{args:?}: {}",
                 stderr_of(&output)
             );
@@ -671,7 +651,8 @@ crate = "crates/demo-cloudflare"
         let text = edgezero_with_token(dir.path(), &DEPLOY, Some(curl.path()), Some("t"));
         assert!(text.status.success(), "stderr: {}", stderr_of(&text));
         // The manifest command receives `--service-id SVC1` as passthrough. The
-        // tee echoes the child live, then the CLI prints the version line.
+        // tee echoes the child live, then the adapter's `finalize_deploy` logs
+        // the version line.
         assert_eq!(
             stdout_of(&text),
             executed(
@@ -689,7 +670,10 @@ crate = "crates/demo-cloudflare"
         assert!(output.status.success(), "stderr: {}", stderr_of(&output));
         assert_eq!(
             sole_json_document(&output)["result"],
-            json!({"adapter": "fastly", "service_id": "SVC1", "staging": false, "version": 12_i32})
+            json!({
+                "adapter": "fastly", "package_sha256": null, "service_id": "SVC1",
+                "staging": false, "version": 12_i32, "version_state": "published",
+            })
         );
         // The tee sends the captured child's stdout to stderr under JSON.
         let stderr = stderr_of(&output);
@@ -698,6 +682,30 @@ crate = "crates/demo-cloudflare"
             "stderr: {stderr}"
         );
         assert!(stderr.contains("version=12\n"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn deploy_keeps_a_reported_version_it_could_not_verify() {
+        let dir = project_with(FASTLY_MANIFEST);
+        let mut args = DEPLOY.to_vec();
+        args.extend(["--format", "json"]);
+        // The command reports `version=12`, but without a token it cannot be
+        // verified active.
+        let output = edgezero(dir.path(), &args, None);
+        assert_eq!(output.status.code(), Some(1_i32));
+        let envelope = sole_json_document(&output);
+        assert_eq!(envelope["ok"], json!(false));
+        assert_eq!(
+            envelope["result"],
+            json!({
+                "adapter": "fastly", "package_sha256": null, "service_id": "SVC1",
+                "staging": false, "version": 12_i32, "version_state": "unknown",
+            })
+        );
+        let message = envelope["error"]["message"]
+            .as_str()
+            .expect("error message");
+        assert!(message.contains("FASTLY_API_TOKEN"), "{message}");
     }
 
     #[test]
@@ -716,7 +724,10 @@ crate = "crates/demo-cloudflare"
         assert_eq!(envelope["ok"], json!(false));
         assert_eq!(
             envelope["result"],
-            json!({"adapter": "fastly", "service_id": "SVC1", "staging": false, "version": null}),
+            json!({
+                "adapter": "fastly", "package_sha256": null, "service_id": "SVC1",
+                "staging": false, "version": null, "version_state": null,
+            }),
             "the deploy went live, so the result is present"
         );
         let message = envelope["error"]["message"]
@@ -743,6 +754,37 @@ crate = "crates/demo-cloudflare"
             stderr_of(&output),
             "[edgezero] auth status command `echo child-wrote-to-stdout; false` exited with \
              status exit status: 1\n"
+        );
+    }
+
+    /// A JSON envelope that cannot be written turns a success into a failure
+    /// that says why. (Under JSON the probe's own output goes to stderr, so
+    /// only the envelope write fails.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn json_envelope_write_failure_is_reported() {
+        let dir = project_with(AUTH_MANIFEST);
+        let run = |format: &str| -> Output {
+            // Every write to `/dev/full` fails with ENOSPC.
+            let stdout = fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .expect("open /dev/full");
+            command(
+                dir.path(),
+                &["auth", "status", "--adapter", "axum", "--format", format],
+            )
+            .stdout(stdout)
+            .output()
+            .expect("run edgezero")
+        };
+
+        let json = run("json");
+        assert_eq!(json.status.code(), Some(1_i32));
+        let stderr = stderr_of(&json);
+        assert!(
+            stderr.contains("failed to write the JSON result to stdout"),
+            "stderr: {stderr}"
         );
     }
 
@@ -938,8 +980,7 @@ crate = "crates/demo-cloudflare"
 
     #[test]
     fn staged_deploy_without_a_release_fails_with_a_json_envelope() {
-        let dir = fastly_project(FASTLY_STAGING_MANIFEST);
-        let fastly = fake_fastly_staging();
+        let dir = fastly_project(FASTLY_MANIFEST);
         // A staged deploy is adapter-managed and needs an immutable release;
         // without one it fails before any provider call, so no result exists.
         let mut command = command(
@@ -953,7 +994,6 @@ crate = "crates/demo-cloudflare"
                 "json",
             ],
         );
-        prepend_path(&mut command, fastly.path());
         let output = command
             .env("FASTLY_API_TOKEN", "t")
             .env("FASTLY_SERVICE_ID", "SVC1")
