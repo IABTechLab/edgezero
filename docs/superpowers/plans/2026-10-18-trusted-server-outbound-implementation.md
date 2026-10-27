@@ -148,6 +148,36 @@ resource-accounting or delivery guarantees. Normative requirements and approved 
 remain unchanged; the SDK/decoder/runtime pins and scoped Viceroy qualification boundary remain
 unchanged.
 
+### Fastly Cooperative-Wake CI Repair (2026-10-27)
+
+CI at `e02c2360` passes the guest unit/contract suites but fails the reusable HTTP smoke on
+variant `b`'s first real outbound `/origin/repeated` request. The recorded socket error is
+Linux `WouldBlock` (11), reproduced locally as macOS `WouldBlock` (35); the dependency's
+future-incompatibility warning is not the failure. Fixed-phase local tracing shows the
+cooperative encoded-body stream waking and yielding after its first chunk, followed by
+Fastly entering an empty-handle host selection until the still-live 30-second deadline.
+The unchanged smoke's client times out first. No timeout or smoke assertion is relaxed.
+
+The existing progress engine now forwards source wakes through a per-poll waker and shares
+only a notification flag across its family. Same-family nesting never clears that flag;
+older retained wakers can notify the current caller. A notified turn still publishes expiry,
+but does not enter another host wait. Later non-waking pending polls resume ordinary waits.
+The progress state retains no parent task waker, and all temporary tracing is removed.
+
+The direct/nested-yield and retained-waker regressions first fail deterministic assertions
+without sleeping, then pass with the fix. A third control covers deadline expiry during the
+yield and restoration of normal waits afterward. All thirty progress tests pass. The exact
+`--adapter fastly --suite smoke` command passes locally with exit 0 under the approved repaired
+Viceroy, including every existing variant and assertion. This is local runtime evidence, not
+a frozen candidate, hosted qualification, a changed runtime pin or capability promotion.
+Provider-runtime redirect acceptance work remains open while this CI repair takes priority.
+
+Final repeat passes all five root gates, all four Fastly WASM clippy configurations, 265 guest
+library tests and 36 guest contracts without ignored or filtered cases, plus docs/legacy guards.
+The production-client progress suite passes all twelve probes with eighteen origin requests;
+the unchanged CI assertions pass. Its expected exit 2 retains `qualification: false`, not a
+qualification claim. The requirement inventory and frozen requirements/Interfaces are unchanged.
+
 ### Current Work Queue and Gates
 
 1. **G1/Q3 acceptance binding:** replace planned placeholder commands with actual, nonzero

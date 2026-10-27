@@ -112,6 +112,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Guest Validation
 
+- Honor cooperative source wakes in Fastly's existing progress loop instead of entering a
+  blocking host selection after a ready-to-repoll body yield. Preserve expiry publication,
+  nested progress, retained wakers and normal waits on later pending polls. Keep the caller's
+  waker out of persistent progress state, without changing deadlines, read sizes or runtime pins.
 - Compile Spin's test-only helpers only with the feature that calls them. Verify both
   `spin` and `spin,test-utils` WASM all-targets builds, without suppressing unused-code
   diagnostics or changing runtime behavior.

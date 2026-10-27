@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::mem::take;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -14,6 +16,7 @@ use edgezero_core::{
 };
 use futures_util::StreamExt as _;
 use futures_util::future::poll_fn;
+use futures_util::task::{ArcWake, waker};
 
 const READ_BYTES: usize = 16 * 1024;
 
@@ -130,6 +133,23 @@ pub(super) struct Progress<T: Transport> {
     driving: Rc<Cell<bool>>,
     entered: MonotonicInstant,
     state: Rc<RefCell<State<T>>>,
+    wake_requested: Arc<AtomicBool>,
+}
+
+struct SourceWake {
+    parent: Waker,
+    requested: Arc<AtomicBool>,
+}
+
+impl ArcWake for SourceWake {
+    fn wake(self: Arc<Self>) {
+        Self::wake_by_ref(&self);
+    }
+
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.requested.store(true, Ordering::Relaxed);
+        arc_self.parent.wake_by_ref();
+    }
 }
 
 pub(super) struct Lease<T: Transport> {
@@ -163,6 +183,7 @@ impl<T: Transport> Clone for Progress<T> {
             driving: Rc::clone(&self.driving),
             entered: self.entered,
             state: Rc::clone(&self.state),
+            wake_requested: Arc::clone(&self.wake_requested),
         }
     }
 
@@ -171,6 +192,7 @@ impl<T: Transport> Clone for Progress<T> {
         self.driving.clone_from(&source.driving);
         self.entered = source.entered;
         self.state.clone_from(&source.state);
+        self.wake_requested.clone_from(&source.wake_requested);
     }
 }
 
@@ -233,6 +255,7 @@ impl<T: Transport + 'static> Progress<T> {
                 transport,
                 wakes: Vec::new(),
             })),
+            wake_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -241,9 +264,19 @@ impl<T: Transport + 'static> Progress<T> {
         cx: &mut Context<'_>,
         step: &mut dyn FnMut(&mut Context<'_>) -> Poll<Output>,
     ) -> Poll<Result<Output, EdgeError>> {
+        let nested = self.driving.get();
+        let polled_waker = if nested {
+            cx.waker().clone()
+        } else {
+            self.wake_requested.store(false, Ordering::Relaxed);
+            waker(Arc::new(SourceWake {
+                parent: cx.waker().clone(),
+                requested: Arc::clone(&self.wake_requested),
+            }))
+        };
+        let mut inner_cx = Context::from_waker(&polled_waker);
         let progress = self.clone();
         let wait: WaitFactory = Rc::new(move |deadline, clock| progress.waiter(deadline, clock));
-        let nested = self.driving.get();
         let parent = CURRENT_DRIVER.with(|active| active.borrow().clone());
         let repoll = parent.as_ref().map_or_else(
             || Rc::new(Cell::new(false)),
@@ -263,8 +296,8 @@ impl<T: Transport + 'static> Progress<T> {
             previous_driver: CURRENT_DRIVER
                 .with(|active| active.replace(Some(Rc::clone(&current)))),
         };
-        super::scope::poll_current(cx);
-        let result = step(cx);
+        super::scope::poll_current(&mut inner_cx);
+        let result = step(&mut inner_cx);
         drop(guard);
         if let Poll::Ready(output) = result {
             current.repoll_parent();
@@ -272,6 +305,12 @@ impl<T: Transport + 'static> Progress<T> {
         }
         if nested {
             return Poll::Pending;
+        }
+        if self.wake_requested.load(Ordering::Relaxed) {
+            // A cooperative yield is runnable work, not permission to block in host selection.
+            current.repoll.set(true);
+            current.repoll_parent();
+            cx.waker().wake_by_ref();
         }
         let (turned, wakes) = {
             let mut shared = self.state.borrow_mut();
@@ -358,6 +397,7 @@ impl<T: Transport + 'static> Progress<T> {
             driving: Rc::clone(&self.driving),
             entered,
             state: Rc::clone(&self.state),
+            wake_requested: Arc::clone(&self.wake_requested),
         }
     }
 
@@ -838,6 +878,7 @@ pub(super) fn wait_current(deadline: Deadline, clock: MonotonicClock) -> Outboun
 )]
 mod tests {
     use std::io::ErrorKind;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Wake;
@@ -1282,6 +1323,160 @@ mod tests {
             42
         );
         assert_eq!(released.get(), 1);
+    }
+
+    #[test]
+    fn self_woken_source_yield_skips_host_wait_with_live_deadline() {
+        for nested in [false, true] {
+            let (progress, observed, now) = fixture();
+            let selected = budget(&now, 30_000, BudgetSource::RequestDeadline);
+            let start = *now.lock().expect("clock");
+            let mut timer =
+                progress.with_current(|| super::wait_current(selected.deadline, progress.clock()));
+            let mut yielded = false;
+            let source = poll_fn(move |cx| {
+                if yielded {
+                    return Poll::Ready(());
+                }
+                assert!(timer.as_mut().poll(cx).is_pending());
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            });
+            let source: Pin<Box<dyn Future<Output = ()>>> = if nested {
+                Box::pin(async { progress.drive(source).await.expect("nested progress") })
+            } else {
+                Box::pin(source)
+            };
+            let mut operation = Box::pin(progress.drive(source));
+            let wake_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wake_count));
+            let mut context = Context::from_waker(&waker);
+            assert!(operation.as_mut().poll(&mut context).is_pending());
+            assert!(wake_count.0.load(Ordering::SeqCst) > 0);
+            assert!(
+                observed.borrow().waits.is_empty(),
+                "a ready-to-repoll source must not sleep until its deadline"
+            );
+            assert_eq!(*now.lock().expect("clock"), start);
+            assert!(matches!(
+                operation.as_mut().poll(&mut context),
+                Poll::Ready(Ok(()))
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_source_waker_skips_wait_after_a_later_poll() {
+        let (progress, observed, now) = fixture();
+        let selected = budget(&now, 30_000, BudgetSource::RequestDeadline);
+        let start = *now.lock().expect("clock");
+        let releases = Rc::new(Cell::new(0));
+        let head = progress.head(handle(101, 0, false, &releases), selected);
+        let mut timer =
+            progress.with_current(|| super::wait_current(selected.deadline, progress.clock()));
+        let mut retained: Option<Waker> = None;
+        let mut yielded = false;
+        let source = poll_fn(move |cx| {
+            if yielded {
+                return Poll::Ready(());
+            }
+            assert!(timer.as_mut().poll(cx).is_pending());
+            if let Some(waker) = &retained {
+                yielded = true;
+                waker.wake_by_ref();
+            } else {
+                retained = Some(cx.waker().clone());
+            }
+            Poll::Pending
+        });
+        let mut operation = Box::pin(progress.drive(source));
+        let wake_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut context = Context::from_waker(&waker);
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert_eq!(observed.borrow().waits.len(), 1);
+        let notifications = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let replacement = Waker::from(Arc::clone(&notifications));
+        let mut replaced_context = Context::from_waker(&replacement);
+        assert!(operation.as_mut().poll(&mut replaced_context).is_pending());
+        assert!(notifications.0.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            observed.borrow().waits.len(),
+            1,
+            "a retained source waker still makes the current operation runnable"
+        );
+        assert_eq!(*now.lock().expect("clock"), start);
+        assert!(matches!(
+            operation.as_mut().poll(&mut replaced_context),
+            Poll::Ready(Ok(()))
+        ));
+        drop(head);
+        assert_eq!(releases.get(), 1);
+    }
+
+    #[test]
+    fn self_woken_poll_preserves_later_host_waits_and_expiry_publication() {
+        for expires_during_yield in [false, true] {
+            let (progress, observed, now) = fixture();
+            let selected = budget(&now, 200, BudgetSource::RequestDeadline);
+            let mut timer =
+                progress.with_current(|| super::wait_current(selected.deadline, progress.clock()));
+            let source_now = Arc::clone(&now);
+            let mut yielded = false;
+            let source = poll_fn(move |cx| {
+                if yielded {
+                    timer.as_mut().poll(cx)
+                } else {
+                    assert!(timer.as_mut().poll(cx).is_pending());
+                    yielded = true;
+                    if expires_during_yield {
+                        *source_now.lock().expect("clock") = selected.deadline.instant();
+                    }
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            });
+            let mut operation = Box::pin(progress.drive(source));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(operation.as_mut().poll(&mut context).is_pending());
+            assert!(observed.borrow().waits.is_empty());
+            assert_eq!(
+                progress
+                    .state
+                    .borrow()
+                    .timers
+                    .values()
+                    .next()
+                    .unwrap()
+                    .outcome
+                    .is_some(),
+                expires_during_yield,
+                "expiry must still be published during a self-woken turn"
+            );
+            if !expires_during_yield {
+                assert!(operation.as_mut().poll(&mut context).is_pending());
+                assert_eq!(observed.borrow().waits, [200]);
+                assert!(operation.as_mut().poll(&mut context).is_pending());
+                assert!(
+                    progress
+                        .state
+                        .borrow()
+                        .timers
+                        .values()
+                        .next()
+                        .unwrap()
+                        .outcome
+                        .is_some()
+                );
+            }
+            assert_eq!(*now.lock().expect("clock"), selected.deadline.instant());
+            assert!(matches!(
+                operation.as_mut().poll(&mut context),
+                Poll::Ready(Ok(Ok(())))
+            ));
+            assert!(progress.state.borrow().timers.is_empty());
+        }
     }
 
     #[test]
