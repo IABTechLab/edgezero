@@ -1,8 +1,6 @@
 # Shared request timing implementation plan
 
 Date: 2026-09-28
-Status: EdgeZero review API revision implemented and locally verified. Renewed
-Trusted Server integration, joint validation and release delivery remain pending.
 Spec: [Shared request timing collector and middleware](../specs/2026-09-28-request-timing-design.md).
 
 ## Outcome and approved scope
@@ -16,30 +14,9 @@ The approved scope is typed application phase enums over bounded generic slots,
 application-owned payload under the same clock and mutex, one concrete extension
 handle, and TS-owned rendering. The spec records the current API contract.
 
-[EdgeZero #389](https://github.com/stackpop/edgezero/pull/389) at
-`9c03cc59300363ae5339fc970dded08ede563e98` and
-[Trusted Server #1121](https://github.com/IABTechLab/trusted-server/pull/1121) at
-`2791ceb46908e6af04ccaae0c10b29d35336a9f4` record completed migration and joint
-validation. Historical completion below refers to those exact candidates. The
-review API revision needs matching TS facade changes, new candidate pins and
-renewed joint validation. The current consumer is
-[Trusted Server #1261](https://github.com/IABTechLab/trusted-server/pull/1261),
-which supersedes #1121 (closed on 2026-10-09). At the
-[review of EdgeZero `878be472`](https://github.com/stackpop/edgezero/pull/389#pullrequestreview-5541298609),
-it pinned all six EdgeZero crates to `ab444946`, not the merged candidate
-`878be472`. Merge/tag and final tag-backed delivery remain gated.
-
-## Repositories and starting state
-
-| Repository | Branch | Initial baseline |
-| --- | --- | --- |
-| EdgeZero | `feat/shared-request-timing` | `98930917d96cb665c7255f36ca8bbd61fc7539e1` |
-| Trusted Server | `feature/ts-console-improvements` | `f951955f537b89392dcb863fca7a01a5f6fa4846` |
-
-The initial TS baseline pinned six EdgeZero dependencies to `v0.0.7`. The migrated
-candidate pins all six to `9c03cc59`, with one resolved core identity and no local
-overrides. Record exact heads and changed inputs for every later validation;
-keep one writer per worktree.
+Candidate revisions, consumer pins, verification results and release status are
+tracked in [EdgeZero #389](https://github.com/IABTechLab/edgezero/pull/389)
+and the coordinated consumer [Trusted Server #1261](https://github.com/IABTechLab/trusted-server/pull/1261).
 
 ## Delivery dependencies
 
@@ -65,56 +42,30 @@ Files: spec, this plan, existing EdgeZero core modules and CI definitions,
 TS `request_timing.rs`, adapter timing integrations, and dependency manifests.
 No production code changes in this task.
 
-- [x] Check repository instructions, status, exact heads, installed toolchain and
-      WASM targets. Do not update branches or discard unrelated work implicitly.
-- [x] Record baseline `cargo test -p edgezero-core`, TS
-      `cargo test -p trusted-server-core request_timing`, and `cargo test-axum`.
-      Classify environment failures separately from code failures.
-- [x] Pin the operation/result contract in the spec before implementing the API:
-      successful updates, unavailable reads/writes on contention, invalid slots
-      rejected without mutation, and first-write versus last-write semantics.
-- [x] Define snapshot projection and payload updates under one lock. Mutable
-      access must not expose the origin or allow a request clock to be replaced.
-- [x] Resolve callback failure behavior. Recommended contract to review: callbacks
-      are synchronous and non-reentrant; panics propagate normally; there is no
-      rollback; payloads must remain valid on unwind; poisoned mutexes recover
-      best-effort as TS does today. Do not advertise arbitrary callbacks as
-      infallible. If this contract is unsuitable, stop for an API decision.
-- [x] Specify invalid-slot behavior for compound updates as well as plain records.
-      Validate slot inputs before invoking a payload callback so a rejected phase
-      cannot leave the payload changed. Do not introduce general transactions.
-- [x] Record the concrete generic extension type and TS facade strategy. Agree on
-      names and minimum bounds; avoid requiring `D: Clone` for handle cloning.
+- Check repository instructions, status, exact heads, installed toolchain and
+  WASM targets. Do not update branches or discard unrelated work implicitly.
+- Record baseline `cargo test -p edgezero-core`, TS
+  `cargo test -p trusted-server-core request_timing`, and `cargo test-axum`.
+  Classify environment failures separately from code failures.
+- Pin the operation/result contract in the spec before implementing the API:
+  successful updates, unavailable reads/writes on contention, invalid slots
+  rejected without mutation, and first-write versus last-write semantics.
+- Define snapshot projection and payload updates under one lock. Mutable
+  access must not expose the origin or allow a request clock to be replaced.
+- Resolve callback failure behavior. Recommended contract to review: callbacks
+  are synchronous and non-reentrant; panics propagate normally; there is no
+  rollback; payloads must remain valid on unwind; poisoned mutexes recover
+  best-effort as TS does today. Do not advertise arbitrary callbacks as
+  infallible. If this contract is unsuitable, stop for an API decision.
+- Specify invalid-slot behavior for compound updates as well as plain records.
+  Validate slot inputs before invoking a payload callback so a rejected phase
+  cannot leave the payload changed. Do not introduce general transactions.
+- Record the concrete generic extension type and TS facade strategy. Agree on
+  names and minimum bounds; avoid requiring `D: Clone` for handle cloning.
 
 Exit: a short API contract in the spec, known baseline results, and no unresolved
 safety semantics hidden in a TODO. This is a bounded API review, not another round
 of choosing ownership or adding a generic renderer.
-
-Historical verification recorded before the initial candidate was published:
-
-- Implementation started from `98930917d96cb665c7255f36ca8bbd61fc7539e1`.
-  The TS baseline was `f951955f537b89392dcb863fca7a01a5f6fa4846`.
-- Baseline EdgeZero core tests, TS core timing tests (13) and `cargo test-axum`
-  passed. The new consumer fixture initially failed to compile because the new
-  module did not exist; that is API red/green evidence, not a preexisting bug.
-- Final core run: 484 unit tests, two integration tests, one compile-fail timing
-  lifetime doctest passed (13 existing doctests ignored).
-- Workspace test, fmt, all-features clippy, feature check, generated-app build,
-  Fastly CLI/default gates, nested-config audits and excluded app-demo gates pass.
-- Runtime contract suites pass: Cloudflare 8 in headless Chromium using lockfile-
-  matched wasm-bindgen 0.2.122, Fastly 7 in Viceroy 0.17.0, Spin 13 in Wasmtime
-  44.0.1. Each includes the new portable clock/handle/router smoke test. Fastly's
-  WASM library suite passes all 88 tests. Adapter WASM check/clippy matrix passes,
-  including Fastly `fastly cli`. These are local runtime harnesses, not deployed
-  provider smoke tests or proof of TS migration.
-- Rust 1.95.0; the missing `wasm32-wasip2` target was installed with approval.
-  Wasmtime and wasm-bindgen runners were installed run-locally, not globally.
-  Guide formatting, docs lint/format and VitePress build pass.
-- Detailed implementation-stage logs are outside the repository. Independent
-  EdgeZero reviews subsequently cleared. Publication-stage core tests, fmt and
-  all-features clippy passed again. Later TS migration and joint results are
-  recorded by the linked PRs at `9c03cc59`/`2791ceb`; none of this historical
-  evidence establishes compatibility with the review API revision.
 
 ## Task 2: Implement the generic collector and consumer fixture
 
@@ -126,27 +77,27 @@ Files:
 
 Work in small tested slices rather than implementing all methods at once.
 
-- [x] Add the bounded phase storage, application payload, single origin, and one
-      shared mutex. Use `web_time::Instant`; add no Tokio or UUID dependency.
-- [x] Add construction, clone sharing, elapsed-from-origin access, saturating
-      accumulation, and consistent reads. Preserve absent versus recorded zero.
-- [x] Add headers-ready/request-complete first-write marks and last-write bytes.
-      Do not stamp lifecycle marks automatically on middleware return or drop.
-- [x] Add the narrow compound-update operation and its validated slot contract.
-      Test that contention prevents both phase and payload mutation.
-- [x] Add drop-time phase spans. Cancellation records work so far, not request
-      completion; no destructor guarantee is made for panic-abort environments.
-- [x] Test overflow, bounds, clone sharing, independent requests, first-write
-      marks, byte overwrite, compound snapshots, and the poison/panic behavior
-      agreed in task 1. Private test-only origin control is preferable to
-      wall-clock sleeps in core tests.
-- [x] Compile an external consumer fixture with an application enum, a small
-      application payload, and a facade around the installed generic handle.
-      Prove extension insertion and handler access use one type and shared origin;
-      task 3 will add the middleware path. Use generic example phases, not auction
-      definitions, in EdgeZero tests.
-- [x] Test public API use with a payload that is not `Clone`; verify the handle
-      still satisfies request-extension requirements with the necessary bounds.
+- Add the bounded phase storage, application payload, single origin, and one
+  shared mutex. Use `web_time::Instant`; add no Tokio or UUID dependency.
+- Add construction, clone sharing, elapsed-from-origin access, saturating
+  accumulation, and consistent reads. Preserve absent versus recorded zero.
+- Add headers-ready/request-complete first-write marks and last-write bytes.
+  Do not stamp lifecycle marks automatically on middleware return or drop.
+- Add the narrow compound-update operation and its validated slot contract.
+  Test that contention prevents both phase and payload mutation.
+- Add drop-time phase spans. Cancellation records work so far, not request
+  completion; no destructor guarantee is made for panic-abort environments.
+- Test overflow, bounds, clone sharing, independent requests, first-write
+  marks, byte overwrite, compound snapshots, and the poison/panic behavior
+  agreed in task 1. Private test-only origin control is preferable to
+  wall-clock sleeps in core tests.
+- Compile an external consumer fixture with an application enum, a small
+  application payload, and a facade around the installed generic handle.
+  Prove extension insertion and handler access use one type and shared origin;
+  task 3 will add the middleware path. Use generic example phases, not auction
+  definitions, in EdgeZero tests.
+- Test public API use with a payload that is not `Clone`; verify the handle
+  still satisfies request-extension requirements with the necessary bounds.
 
 Check after each slice: `cargo test -p edgezero-core request_timing`.
 Then run `cargo test -p edgezero-core`, including the consumer fixture.
@@ -166,24 +117,24 @@ Files:
 - `crates/edgezero-core/tests/request_timing_consumer.rs`.
 - `docs/guide/middleware.md`.
 
-- [x] Add generic attachment middleware using the collector from task 2.
-      Preserve an existing handle; create fresh state only for an eligible
-      request without one. Default to no exclusions.
-- [x] Support the agreed static exact-path exclusion list. Compare URI paths,
-      not the full path/query string. Exclusion never removes an existing handle.
-- [x] Verify default behavior, excluded paths, query strings, all methods,
-      duplicate registration, preinstalled handles, independent requests,
-      handler errors, and short-circuiting downstream middleware.
-- [x] Exercise real router dispatch. Pin that unmatched 404/405 routes bypass
-      middleware and that an error rendered outside the chain remains outside
-      attachment middleware's response-finalization control.
-- [x] Add an application-enum usage example based on the compiled fixture.
-      Explain opt-in installation, shared T0, payload ownership, and explicit
-      lifecycle marks. Add no generic header renderer.
-- [x] Correct the guide's existing statement that middleware runs before route
-      matching when documenting this behavior. Use `web_time`, not a new
-      `std::time::Instant` example for cross-platform timing. Limit other guide
-      edits to the timing section and directly contradictory lifecycle wording.
+- Add generic attachment middleware using the collector from task 2.
+  Preserve an existing handle; create fresh state only for an eligible
+  request without one. Default to no exclusions.
+- Support the agreed static exact-path exclusion list. Compare URI paths,
+  not the full path/query string. Exclusion never removes an existing handle.
+- Verify default behavior, excluded paths, query strings, all methods,
+  duplicate registration, preinstalled handles, independent requests,
+  handler errors, and short-circuiting downstream middleware.
+- Exercise real router dispatch. Pin that unmatched 404/405 routes bypass
+  middleware and that an error rendered outside the chain remains outside
+  attachment middleware's response-finalization control.
+- Add an application-enum usage example based on the compiled fixture.
+  Explain opt-in installation, shared T0, payload ownership, and explicit
+  lifecycle marks. Add no generic header renderer.
+- Correct the guide's existing statement that middleware runs before route
+  matching when documenting this behavior. Use `web_time`, not a new
+  `std::time::Instant` example for cross-platform timing. Limit other guide
+  edits to the timing section and directly contradictory lifecycle wording.
 
 Checks: `cargo test -p edgezero-core`, then documentation formatting and lint for
 the changed published guide. Internal spec/plan files are excluded from those
@@ -200,18 +151,18 @@ Files in Trusted Server:
 - `crates/trusted-server-adapter-axum/src/timing.rs`.
 - Existing Cloudflare/Spin middleware tests and Fastly timing tests.
 
-- [x] Capture baseline deterministic header and snapshot fixtures: order, precision,
-      missing versus zero, `u32` saturation, row-only phases, and auction fields.
-- [x] Add missing focused contract coverage for shared clones, compound wait and
-      placement, first-write marks/UUID, last-write bytes, and contention fallback.
-      These characterize intended current behavior and should pass before moving it.
-- [x] Add an Axum regression that inserts a pre-aged handle with a recorded phase
-      in an upstream service. Assert handler and private-response header retain
-      the same measurement. Run it before changing production code and capture
-      the failure caused by unconditional replacement.
-- [x] Pin health method differences: Cloudflare/Spin/Axum exclude every method on
-      `/health`; Fastly skips collection for `GET /health` only. Include query
-      strings and non-GET requests. Do not normalize these differences.
+- Capture baseline deterministic header and snapshot fixtures: order, precision,
+  missing versus zero, `u32` saturation, row-only phases, and auction fields.
+- Add missing focused contract coverage for shared clones, compound wait and
+  placement, first-write marks/UUID, last-write bytes, and contention fallback.
+  These characterize intended current behavior and should pass before moving it.
+- Add an Axum regression that inserts a pre-aged handle with a recorded phase
+  in an upstream service. Assert handler and private-response header retain
+  the same measurement. Run it before changing production code and capture
+  the failure caused by unconditional replacement.
+- Pin health method differences: Cloudflare/Spin/Axum exclude every method on
+  `/health`; Fastly skips collection for `GET /health` only. Include query
+  strings and non-GET requests. Do not normalize these differences.
 
 Focused checks: `cargo test -p trusted-server-core request_timing`,
 `cargo test-axum`, `cargo test-cloudflare`, `cargo test-spin`, and the nearest
@@ -233,32 +184,32 @@ Files in Trusted Server:
 - Temporary exact pushed git-revision pins and regenerated lockfile; replace with
   the eventual approved release tag before final TS delivery.
 
-- [x] Record the exact candidate EdgeZero revision and any uncommitted diff used
-      for validation. Temporarily pin all six TS dependencies to that pushed git
-      commit. Do not publish
-      developer-specific paths or local patches.
-- [x] Resolve the complete EdgeZero package dependency closure from the same
-      candidate git source, including macros/adapter registry.
-      Check `cargo tree`/metadata for duplicate EdgeZero core identities. Mixed
-      sources giving middleware and handlers different core types are invalid.
-- [x] Preserve the TS `Phase` enum and domain method names. Delegate generic
-      mechanics to EdgeZero, with auction state in its application payload.
-      Keep header rendering, privacy checks and access serialization local.
-- [x] Read the installed generic extension through the TS facade at every lookup.
-      Audit both initial-document and page-bids paths, telemetry, streaming, and
-      adapters. Do not leave an old-wrapper lookup that silently falls back to a
-      fresh collector or makes the page-bids missing-collector gate fire.
-- [x] Replace both Cloudflare/Spin middleware copies with shared registrations.
-      Keep sanitization first, preserve exclusions, and retain adapter integration
-      tests even though generic middleware unit tests now live upstream.
-- [x] Make Axum retrieve-or-create the same handle for non-excluded requests and
-      use it for terminal rendering. Run the task 4 regression and show it passes.
-- [x] Keep Fastly's clock creation and streaming/finalization boundaries unchanged.
-      Reuse its existing handle through every core-request conversion path.
-- [x] Preserve both diagnostic clock labels and browser payloads. Do not add the
-      separate initial-document missing-collector follow-up in this migration.
-- [x] Remove superseded collector mechanics and middleware tests only when their
-      replacement coverage exists. No parallel old/new collector at runtime.
+- Record the exact candidate EdgeZero revision and any uncommitted diff used
+  for validation. Temporarily pin all six TS dependencies to that pushed git
+  commit. Do not publish
+  developer-specific paths or local patches.
+- Resolve the complete EdgeZero package dependency closure from the same
+  candidate git source, including macros/adapter registry.
+  Check `cargo tree`/metadata for duplicate EdgeZero core identities. Mixed
+  sources giving middleware and handlers different core types are invalid.
+- Preserve the TS `Phase` enum and domain method names. Delegate generic
+  mechanics to EdgeZero, with auction state in its application payload.
+  Keep header rendering, privacy checks and access serialization local.
+- Read the installed generic extension through the TS facade at every lookup.
+  Audit both initial-document and page-bids paths, telemetry, streaming, and
+  adapters. Do not leave an old-wrapper lookup that silently falls back to a
+  fresh collector or makes the page-bids missing-collector gate fire.
+- Replace both Cloudflare/Spin middleware copies with shared registrations.
+  Keep sanitization first, preserve exclusions, and retain adapter integration
+  tests even though generic middleware unit tests now live upstream.
+- Make Axum retrieve-or-create the same handle for non-excluded requests and
+  use it for terminal rendering. Run the task 4 regression and show it passes.
+- Keep Fastly's clock creation and streaming/finalization boundaries unchanged.
+  Reuse its existing handle through every core-request conversion path.
+- Preserve both diagnostic clock labels and browser payloads. Do not add the
+  separate initial-document missing-collector follow-up in this migration.
+- Remove superseded collector mechanics and middleware tests only when their
+  replacement coverage exists. No parallel old/new collector at runtime.
 
 Checks after each adapter slice: its target-matched tests. Re-run core timing,
 page-bids, initial-document diagnostic tests, and the Axum regression at the end.
@@ -335,92 +286,32 @@ then run `npm run test:nextjs -- tests/nextjs/gpt-diagnostics.spec.ts` from
 `crates/trusted-server-integration-tests/browser`. Run the applicable full browser
 and integration CI jobs before PR handoff. No JS behavior change is planned.
 
-- [x] Fresh read-only review of collector API and synchronization contracts.
-- [x] Fresh read-only review of TS extension identity, timing origins, privacy,
-      and temporary pin compatibility at `2791ceb`. No concurrent writers during fixes.
-- [x] Implement EdgeZero review fixes and verify the local revision.
-- [ ] Revalidate TS against the revised candidate after updating its facade and pins.
+- Review collector API and synchronization contracts.
+- Review TS extension identity, timing origins, privacy and candidate pin compatibility.
 
 Exit: both repositories pass applicable gates against the same candidate;
 remaining risks are explicit. Release is blocked on unverified consumer adoption.
 
-## Review follow-up
+## Task 7: Remaining release checkpoints
 
-- [x] Move immutable T0 outside the state mutex and make `elapsed()` infallible.
-      The cross-thread regression fails before the change and passes afterward.
-- [x] Make errors/snapshots non-exhaustive, add payload-independent handle Debug,
-      default snapshot payload and neutral lifecycle names.
-- [x] Add const middleware configuration and real manifest registration coverage,
-      documenting replacement semantics and preserving attachment behavior.
-- [x] Add native shared-scenario coverage, separate local-harness advancement tests
-      and the core doctest CI step. Strengthen successful-response assertions.
-- [x] Correct guides and refresh this record and the spec. Keep optional counters,
-      owned exclusions, outer propagation/services, span control and extractors
-      deferred as documented in the spec.
-- [x] Complete affected native/WASM, docs and workspace verification for this revision.
-- [ ] Update six TS facade accesses, refresh all six candidate pins and jointly
-      revalidate before approving an EdgeZero release.
-
-### Review revision verification
-
-Historical local validation below covers the review API revision based on
-`9c03cc59`, before the merge of `main`. Native evidence was reused only where
-subsequent changes were confined to WASM-only test bodies; generated-project
-evidence predates equivalent private field ordering and test-only lint fixes,
-with generator inputs unchanged.
-
-| Check | Result |
-| --- | --- |
-| Core, macro fixture and compile-fail doctest | 486 core unit tests, four integration tests and one compile-fail test passed; 13 existing doctests ignored |
-| Workspace tests, fmt, strict all-features clippy and feature check | Passed |
-| Three WASM target checks and strict all-targets clippy | Passed |
-| Viceroy 0.17.0 contract and Fastly library suites | Eight contract tests and 88 library tests passed |
-| Wasmtime 44.0.1 contract suite | 14 tests passed |
-| Chromium 152, wasm-bindgen 0.2.122 contract suite | Nine tests passed |
-| Generated app, excluded app-demo and CLI/checker gates | Passed |
-| Docs lint, formatting/build, internal links/fences and diff whitespace | Passed |
-
-All four clock advancement entrypoints and the shared attachment scenario ran.
-These are local harness results, not deployed-provider smoke tests or refreshed
-TS integration evidence.
-
-The [review at `878be472`](https://github.com/stackpop/edgezero/pull/389#pullrequestreview-5541298609)
-reports the following post-merge CI results. These are distinct from the historical
-local runs above and do not establish renewed Trusted Server joint validation.
-
-| Post-merge CI check | Reported result at `878be472` |
-| --- | --- |
-| Cloudflare contract suite, headless Firefox | 10 tests passed |
-| Fastly/Viceroy contract suite | 9 tests passed |
-| Spin/Wasmtime contract suite | 14 tests passed |
-| Core doctests | One compile-fail test passed; 13 existing doctests ignored |
-
-An extra `cargo build --workspace --all-targets --all-features` native build fails
-linking Fastly's WASM-only hostcalls. The same failure was reproduced from an
-untouched archive of `9c03cc59`. It is a pre-existing native-link limitation,
-not a passing check or a configured CI gate; target-matched Fastly builds pass.
-
-## Task 7: Publish and finish coordinated adoption
-
-EdgeZero #389 and the superseding Trusted Server #1261 are the coordinated PRs.
-The temporary TS git-revision pin is for joint validation, not final
+Temporary TS git-revision pins support joint validation, not final
 release-backed delivery.
 
-- [x] Record linked EdgeZero and TS PRs and their initial tested commits above.
-- [ ] Record refreshed candidates and confirm that joint evidence covers them
-      before approving the upstream release.
-- [ ] Merge/tag EdgeZero through its normal release process. Select the tag then;
-      do not invent a tag or assume crates.io publication.
-- [ ] Point all six TS EdgeZero dependencies at the released tag. Remove every
-      local override, regenerate `Cargo.lock`, and inspect the full dependency diff.
-- [ ] Verify the released source matches the candidate tested jointly. If merge
-      changes alter it, re-run joint checks rather than relying on stale results.
-- [ ] Re-run TS gates without overrides. From the TS root, run
-      `cargo metadata --locked --format-version 1` and inspect the resolved
-      EdgeZero package IDs and git sources against the released tag and commit.
-      Confirm the lockfile uses the released git source, no local paths,
-      and one intended EdgeZero core identity.
-- [ ] Deliver TS only after final tag-backed validation and approval.
+- Record candidate revisions and joint validation results in the linked PRs
+  and confirm that the evidence covers those revisions
+  before approving the upstream release.
+- Merge/tag EdgeZero through its normal release process. Select the tag then;
+  do not invent a tag or assume crates.io publication.
+- Point all six TS EdgeZero dependencies at the released tag. Remove every
+  local override, regenerate `Cargo.lock`, and inspect the full dependency diff.
+- Verify the released source matches the candidate tested jointly. If merge
+  changes alter it, re-run joint checks rather than relying on stale results.
+- Re-run TS gates without overrides. From the TS root, run
+  `cargo metadata --locked --format-version 1` and inspect the resolved
+  EdgeZero package IDs and git sources against the released tag and commit.
+  Confirm the lockfile uses the released git source, no local paths,
+  and one intended EdgeZero core identity.
+- Deliver TS only after final tag-backed validation and approval.
 
 Completion: one shared EdgeZero middleware, generic collection used by all TS
 adapters, no duplicate clocks, unchanged TS output/privacy contracts, and final

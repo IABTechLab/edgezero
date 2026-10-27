@@ -285,10 +285,6 @@ pub struct PhaseSpan<const N: usize, D = ()> {
 }
 
 #[expect(
-    clippy::allow_attributes,
-    reason = "use allow for compatibility with Rust 1.95, which does not expose Drop::pin_drop"
-)]
-#[allow(
     clippy::missing_trait_methods,
     reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
 )]

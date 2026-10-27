@@ -287,7 +287,7 @@ Custom commands live in `.claude/commands/`:
 
 | Command           | Purpose                                            |
 | ----------------- | -------------------------------------------------- |
-| `/check-ci`       | Run all 5 CI gate checks locally                   |
+| `/check-ci`       | Run all 6 CI gate checks locally                   |
 | `/test-all`       | Run full workspace test suite                      |
 | `/test-crate`     | Run tests for a specific crate                     |
 | `/review-changes` | Staff-engineer-level review of uncommitted changes |

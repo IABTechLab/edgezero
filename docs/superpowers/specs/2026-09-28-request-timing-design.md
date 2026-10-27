@@ -1,21 +1,12 @@
 # Shared request timing collector and middleware
 
 Date: 2026-09-28
-Status: EdgeZero review API revision implemented and locally verified. Renewed Trusted Server integration and joint validation remain required before release.
 Scope: `edgezero-core` and coordinated Trusted Server adoption, shipped together.
 Plan: [Implementation plan](../plans/2026-09-28-request-timing.md).
 
-The initial candidate is [EdgeZero #389](https://github.com/stackpop/edgezero/pull/389)
-at `9c03cc59300363ae5339fc970dded08ede563e98`, adopted by
-[Trusted Server #1121](https://github.com/IABTechLab/trusted-server/pull/1121)
-at `2791ceb46908e6af04ccaae0c10b29d35336a9f4`. The linked PRs record completed
-migration and joint validation for those exact revisions, not later API changes.
-The current consumer is [Trusted Server #1261](https://github.com/IABTechLab/trusted-server/pull/1261),
-which supersedes #1121 (closed on 2026-10-09). At the
-[review of EdgeZero `878be472`](https://github.com/stackpop/edgezero/pull/389#pullrequestreview-5541298609),
-#1261 pinned all six EdgeZero crates to `ab444946`. That is not joint validation
-of the merged candidate `878be472`; renewed integration, merge, release/tag,
-final dependency pins and tag-backed validation remain pending.
+Candidate revisions, consumer pins, verification results and release status are
+tracked in [EdgeZero #389](https://github.com/IABTechLab/edgezero/pull/389)
+and the coordinated consumer [Trusted Server #1261](https://github.com/IABTechLab/trusted-server/pull/1261).
 
 ## Why this change
 
@@ -30,18 +21,6 @@ duplicated middleware into `trusted-server-core`.
 This is a cross-repository API change, not just moving a struct. EdgeZero cannot
 depend on Trusted Server, and replacing the collector must not reset the clock
 used by auction diagnostics or change telemetry and header output.
-
-Initial investigation used EdgeZero `567964158e4f8bd0d52321b9801de44966422e1b`,
-locally tagged `v0.0.8`. Before creating the implementation worktree, local `main`
-was fast-forwarded to fetched `origin/main` at
-`98930917d96cb665c7255f36ca8bbd61fc7539e1`. The intervening changes leave the timing
-integration points in core middleware, router, context, and Cargo dependencies
-unchanged. The middleware guide changed and must be edited against this new base.
-
-The initial Trusted Server baseline was `f951955f537b89392dcb863fca7a01a5f6fa4846`,
-with six EdgeZero dependencies pinned to `v0.0.7`. The migration at `2791ceb`
-replaced those with the exact `9c03cc59` candidate. See the plan for historical
-evidence and the remaining review-update and release gates.
 
 ## Approved decisions
 
@@ -179,9 +158,9 @@ Consequently:
 - Axum retains its outer terminal timing service and error-response coverage.
   For non-excluded requests, the migrated service retrieves the configured
   concrete handle if present, creating and inserting one only when absent. Both
-  the handler and terminal renderer use that handle. The regression at `2791ceb`
-  protects the fix to the baseline wrapper's unconditional replacement. The
-  health bypass remains unchanged.
+  the handler and terminal renderer use that handle. A regression protects
+  against unconditional replacement of a preinstalled handle. The health bypass
+  remains unchanged.
 - Fastly retains its early collector creation, app-build span, header emission,
   streaming duration, and successfully written-byte accounting.
 - Cloudflare and Spin adopt the shared attachment middleware without gaining
@@ -325,8 +304,8 @@ flowchart TD
    git-tag process. Do not assume a tag number or promise crates.io publication;
    the inspected workspace has `publish = false`.
 5. Update all six EdgeZero pins in TS `Cargo.toml` and review regenerated
-   `Cargo.lock`, including changes since `v0.0.7` unrelated to timing. Remove local
-   overrides and revalidate against the released tag before TS delivery.
+   `Cargo.lock`, including unrelated dependency changes since the previous pins.
+   Remove local overrides and revalidate against the released tag before TS delivery.
 
 Ship together means coordinated readiness and dependent releases, not simultaneous
 Git operations across repositories. EdgeZero's tag must exist before the final TS
@@ -449,30 +428,30 @@ Prettier check, so a passing site check would not validate this document.
 
 These review suggestions remain outside this release's scope:
 
-- [Contention diagnostics](https://github.com/stackpop/edgezero/pull/389#discussion_r4162404464):
+- [Contention diagnostics](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4162404464):
   explicit operations already report `Unavailable`. A future counter needs
   read/write and consistency rules; a request-wide count cannot attribute a
   missing phase or prove that no auction occurred.
-- [Runtime-config exclusions](https://github.com/stackpop/edgezero/pull/389#discussion_r4162404477):
+- [Runtime-config exclusions](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4162404477):
   current consumers use static paths. Any owned-path API should preserve const
   configuration where practical and specify allocation and validation behavior.
-- [Response propagation or an outer service](https://github.com/stackpop/edgezero/pull/389#discussion_r4162404480):
+- [Response propagation or an outer service](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4162404480):
   current outer layers preinstall and retain a clone. Successful-response
   extensions alone would not cover unmatched routes, rendered errors or every
   adapter conversion. A wrapper must preserve application measurement boundaries.
-- [Cloudflare/Spin request-extension hooks](https://github.com/stackpop/edgezero/pull/389#discussion_r4289432139):
+- [Cloudflare/Spin request-extension hooks](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4289432139):
   their public entrypoints convert platform requests internally and expose no
   hook equivalent to Fastly's request-extension injection. Application middleware
   can retain a handle across matched-route success/error results, but misses
   unmatched routes, final error rendering and streamed-body completion. Future
   `dispatch_app_with_request_extensions` APIs must preserve manifest store
   registries as well as existing collector identity and measurement boundaries.
-- [Explicit span finish/discard](https://github.com/stackpop/edgezero/pull/389#discussion_r4162634076):
+- [Explicit span finish/discard](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4162634076):
   manual `Instant` plus `record_with` handles conditional and compound recording
   today. Do not use `mem::forget` to discard a span; it leaks the shared handle.
   Future finish/cancel methods must avoid duplicate Drop recording and release
   the handle, with compound finishing considered separately.
-- [Optional timing extractor](https://github.com/stackpop/edgezero/pull/389#discussion_r4162634050):
+- [Optional timing extractor](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4162634050):
   use optional typed extension lookup today. A future extractor must preserve
   missing-handle behavior without creating router-wide collector state.
 
@@ -482,7 +461,7 @@ These review suggestions remain outside this release's scope:
    fields/methods while preserving TS facade and wire names. Refresh all six
    temporary dependency pins to one pushed candidate and verify one core identity.
 2. Revalidate both repositories against that exact candidate. Earlier joint
-   evidence at `9c03cc59`/`2791ceb` does not cover this API revision.
+   evidence does not cover later API or dependency changes.
 3. Approve the EdgeZero merge/tag through its normal release process, then replace
    temporary TS pins with that tag and perform final tag-backed validation.
 
@@ -501,7 +480,8 @@ EdgeZero implementation and runtime tests:
 - `crates/edgezero-core/Cargo.toml`: existing `web-time` dependency.
 - `.github/workflows/test.yml` and `.github/workflows/format.yml`: target matrices.
 
-Trusted Server initial-baseline sources, before the migration at `2791ceb`:
+Trusted Server initial-baseline sources (immutable design references, not
+current-candidate validation):
 
 - [Collector and application rendering](https://github.com/IABTechLab/trusted-server/blob/f951955f537b89392dcb863fca7a01a5f6fa4846/crates/trusted-server-core/src/request_timing.rs).
 - [Axum terminal timing service](https://github.com/IABTechLab/trusted-server/blob/f951955f537b89392dcb863fca7a01a5f6fa4846/crates/trusted-server-adapter-axum/src/timing.rs).
