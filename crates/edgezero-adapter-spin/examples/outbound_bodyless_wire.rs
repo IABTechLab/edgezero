@@ -1,7 +1,8 @@
 #[cfg(target_arch = "wasm32")]
 mod sdk {
     use core::str::from_utf8;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::convert::Infallible;
     use std::rc::Rc;
     use std::sync::{Arc, Weak};
     use std::time::Duration;
@@ -15,7 +16,8 @@ mod sdk {
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::outbound::{
         HttpClient, IndependentOutboundProgress, OutboundBatch, OutboundBatchTermination,
-        OutboundCollectedSlot, OutboundFuture, OutboundRequest, OutboundResponse, OutboundScope,
+        OutboundCollectedSlot, OutboundFollowFailure, OutboundFuture, OutboundRedirectAction,
+        OutboundRedirectLimit, OutboundRequest, OutboundResponse, OutboundScope,
         OutboundScopeOwner,
     };
     use edgezero_core::response_egress::{
@@ -24,7 +26,8 @@ mod sdk {
     use edgezero_core::router::RouterService;
     use edgezero_core::{Body, EdgeError, action};
     use futures_util::{StreamExt as _, stream};
-    use spin_sdk::http::{FromRequest as _, Request as SpinRequest};
+    use serde_json::{Value, json};
+    use spin_sdk::http::{FromRequest as _, IntoResponse as _, Request as SpinRequest};
     use spin_sdk::wasip3::exports::http::handler::Guest;
     use spin_sdk::wasip3::http::types::{ErrorCode, Fields, Request, Response};
     use spin_sdk::wasip3::{http, wit_future};
@@ -64,7 +67,7 @@ mod sdk {
                 return Ok(empty_response());
             }
             let method = match path.as_str() {
-                "/get" | "/get-settled" => Method::GET,
+                "/get" | "/get-settled" | "/p5" => Method::GET,
                 "/head" | "/head-settled" => Method::HEAD,
                 "/post" => Method::POST,
                 _ => return Err(ErrorCode::HttpRequestUriInvalid),
@@ -81,6 +84,9 @@ mod sdk {
                 || uri.port_u16().is_none()
             {
                 return Err(ErrorCode::HttpRequestUriInvalid);
+            }
+            if path == "/p5" {
+                return p5_exchange(uri, &headers).await;
             }
             let mut outgoing = OutboundRequest::new(method, uri)
                 .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?;
@@ -152,6 +158,106 @@ mod sdk {
 
     fn fixture_error(message: &'static str) -> EdgeError {
         EdgeError::internal(anyhow::anyhow!(message))
+    }
+
+    fn p5_error(error: &EdgeError) -> Value {
+        let reason = if let EdgeError::BadGateway { reason, .. } = error {
+            format!("{reason:?}")
+        } else if let EdgeError::ResponseTooLarge { reason, .. } = error {
+            format!("{reason:?}")
+        } else if let EdgeError::GatewayTimeout { cause, .. } = error {
+            format!("{cause:?}")
+        } else {
+            String::new()
+        };
+        json!({
+            "error": {
+                "kind": error.kind(),
+                "status": error.status().as_u16(),
+                "reason": reason,
+                "provider": error.provider_failure_detail().map(|detail| format!("{detail:?}")),
+            }
+        })
+    }
+
+    async fn p5_exchange(uri: Uri, headers: &Fields) -> Result<Response, ErrorCode> {
+        let modes = headers.get("x-p5-mode");
+        let mode = modes.first().map(Vec::as_slice).unwrap_or_default();
+        if !matches!(mode, b"send" | b"follow" | b"stop" | b"limit") {
+            return Err(ErrorCode::HttpRequestUriInvalid);
+        }
+        let streamed = headers.get("x-p5-stream") == [b"true".to_vec()];
+        let mut request = OutboundRequest::new(Method::GET, uri.clone())
+            .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?
+            .timeout(Duration::from_secs(3))
+            .max_response_bytes(10);
+        if streamed {
+            request = request.stream_response().max_decoded_response_bytes(10);
+        }
+        if headers.get("x-p5-encoded-cap") == [b"true".to_vec()] {
+            request = request.max_encoded_response_bytes(10);
+        }
+        let client = HttpClient::with_client(SpinOutboundClient::new());
+        let policies = Rc::new(Cell::new(0_usize));
+        let exchange = if mode == b"send" {
+            client
+                .send(request)
+                .await
+                .map(|response| (response, uri, 0, None))
+                .map_err(|error| (0, error))
+        } else {
+            let observed = Rc::clone(&policies);
+            let stop = mode == b"stop";
+            let limit = OutboundRedirectLimit::new(if mode == b"limit" { 1 } else { 4 })
+                .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?;
+            client
+                .follow(request, limit, move |_| {
+                    observed.set(observed.get().saturating_add(1));
+                    Ok::<_, Infallible>(if stop {
+                        OutboundRedirectAction::Stop
+                    } else {
+                        OutboundRedirectAction::FollowPrepared
+                    })
+                })
+                .await
+                .map(edgezero_core::OutboundFollowResult::into_parts)
+                .map_err(|failure| match failure {
+                    OutboundFollowFailure::Hop { index, error } => (index, error),
+                    OutboundFollowFailure::Policy { error, .. } => match error {},
+                })
+        };
+        let report = match exchange {
+            Ok((response, final_uri, redirects, stop)) => {
+                let status = response.status().as_u16();
+                let body_streamed = response.body().is_stream();
+                let mut fields = response
+                    .headers()
+                    .iter()
+                    .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+                    .collect::<Vec<_>>();
+                fields.sort_unstable();
+                // This safety bound is above every tested cap, including streamed caps.
+                let outcome = match response.into_bytes_bounded(1024).await {
+                    Ok(bytes) => {
+                        json!({"status": status, "headers": fields, "bytes": bytes.to_vec()})
+                    }
+                    Err(error) => p5_error(&error),
+                };
+                json!({
+                    "outcome": outcome,
+                    "hop": redirects,
+                    "final_uri": final_uri.to_string(),
+                    "redirects": redirects,
+                    "stop": stop.map(|reason| format!("{reason:?}")),
+                    "streamed": body_streamed,
+                    "policies": policies.get(),
+                })
+            }
+            Err((hop, error)) => json!({
+                "outcome": p5_error(&error), "hop": hop, "policies": policies.get(),
+            }),
+        };
+        report.to_string().into_response()
     }
 
     #[action]

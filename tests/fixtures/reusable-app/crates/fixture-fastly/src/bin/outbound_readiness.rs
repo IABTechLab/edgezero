@@ -6,6 +6,233 @@ use std::time::{Duration, Instant};
 
 const DEADLINE_US: u64 = 500_000;
 
+fn p5_failure(error: &edgezero_core::EdgeError) -> Value {
+    use edgezero_core::{EdgeError, FastlyFailureCause, ProviderFailureDetail};
+    let reason = match error {
+        EdgeError::BadGateway { reason, .. } => format!("{reason:?}"),
+        EdgeError::ResponseTooLarge { reason, .. } => format!("{reason:?}"),
+        _ => String::new(),
+    };
+    json!({"kind":"error","category":error.kind(),"status":error.status().as_u16(),
+        "reason":reason,"hop":null,"provider_optimizer_unsupported":matches!(error.provider_failure_detail(),
+            Some(ProviderFailureDetail::Fastly { cause:FastlyFailureCause::ImageOptimizerUnsupported,.. }))})
+}
+
+fn p5_options() -> Result<edgezero_core::OutboundImageOptimizerOptions, edgezero_core::EdgeError> {
+    use edgezero_core::{
+        OutboundImageFormat, OutboundImageOptimizerOptions, OutboundImageOptimizerRegion,
+    };
+    OutboundImageOptimizerOptions::new()
+        .region(OutboundImageOptimizerRegion::UsEast)
+        .format(OutboundImageFormat::WebP)
+        .preserve_origin_query(true)
+        .width(320)?
+        .quality(80)
+}
+
+async fn p5_response(
+    result: Result<edgezero_core::OutboundResponse, edgezero_core::EdgeError>,
+) -> Value {
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => return p5_failure(&error),
+    };
+    let status = response.status().as_u16();
+    let streamed = response.body().is_stream();
+    let mut headers: Vec<_> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.to_str().unwrap_or("<non-text>").to_owned(),
+            )
+        })
+        .collect();
+    headers.sort();
+    match response.into_bytes_bounded(10).await {
+        Ok(bytes) => {
+            json!({"kind":"ok","status":status,"headers":headers,"bytes":bytes.to_vec(),"streamed":streamed})
+        }
+        Err(error) => p5_failure(&error),
+    }
+}
+
+async fn p5_follow(
+    client: &edgezero_core::HttpClient,
+    request: edgezero_core::OutboundRequest,
+    final_uri: &str,
+    stop: bool,
+    attach_options: bool,
+) -> Result<Value, edgezero_core::EdgeError> {
+    use edgezero_core::{
+        EdgeError, OutboundFollowFailure, OutboundRedirectAction, OutboundRedirectLimit,
+    };
+    use std::{cell::Cell, rc::Rc};
+    let calls = Rc::new(Cell::new(0usize));
+    let observed_calls = Rc::clone(&calls);
+    let checked = Rc::new(Cell::new(false));
+    let observed_options = Rc::clone(&checked);
+    let initial_uri = request.uri().to_string();
+    let target = final_uri.to_owned();
+    let outcome = client
+        .follow(request, OutboundRedirectLimit::new(1)?, move |context| {
+            observed_calls.set(observed_calls.get() + 1);
+            if context.redirect_number() != 1
+                || context.status().as_u16() != 302
+                || context.request_uri().to_string() != initial_uri
+                || context.resolved_target() != target
+                || !context.is_cross_origin()
+            {
+                return Err(EdgeError::bad_request("unexpected P5 policy target"));
+            }
+            if stop {
+                return Ok(OutboundRedirectAction::Stop);
+            }
+            if attach_options {
+                let options = p5_options()?;
+                let next = context
+                    .take_prepared_request()
+                    .ok_or_else(|| EdgeError::bad_request("missing P5 prepared request"))?
+                    .image_optimizer(options.clone());
+                observed_options.set(next.image_optimizer_options() == Some(&options));
+                return Ok(OutboundRedirectAction::Follow(next));
+            }
+            Ok(OutboundRedirectAction::FollowPrepared)
+        })
+        .await;
+    let mut result = match outcome {
+        Ok(followed) => {
+            let (response, uri, redirects, reason) = followed.into_parts();
+            json!({"response":p5_response(Ok(response)).await,"final_uri":uri.to_string(),
+                "redirects":redirects,"stop_reason":reason.map(|reason|format!("{reason:?}"))})
+        }
+        Err(OutboundFollowFailure::Hop { index, error }) => {
+            json!({"response":p5_failure(&error),"hop":index})
+        }
+        Err(OutboundFollowFailure::Policy { error, .. }) => return Err(error),
+    };
+    result["policy_calls"] = json!(calls.get());
+    result["options_checked"] = json!(checked.get());
+    Ok(result)
+}
+
+fn p5_probe(request: &Request, case: &str) -> Result<(), fastly::Error> {
+    use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
+    use edgezero_core::http::Uri;
+    use edgezero_core::{Deadline, EdgeError, HttpClient, OutboundRequest, ResponseDecoding};
+    let token = request_token(request)?;
+    let target: Uri = request
+        .get_header_str("x-fixture-backend")
+        .ok_or_else(|| std::io::Error::other("missing P5 origin"))?
+        .parse()?;
+    let suffix = target
+        .path()
+        .strip_prefix(&format!("/p5/{token}/"))
+        .ok_or_else(|| std::io::Error::other("foreign P5 path"))?;
+    let (port, shape) = suffix
+        .split_once('/')
+        .ok_or_else(|| std::io::Error::other("invalid P5 path"))?;
+    let port: u16 = port.parse()?;
+    let expected = match case {
+        "two-origin" | "optimizer-next" => "redirect",
+        "pending-head" => "pending",
+        "optimizer-send" | "optimizer-initial" => "image",
+        _ => {
+            let fields: Vec<_> = case.split('/').collect();
+            if !matches!(
+                fields.as_slice(),
+                [
+                    "parity",
+                    "identity" | "gzip" | "passthrough",
+                    "buffered" | "streamed",
+                    "ten" | "eleven" | "declared"
+                ]
+            ) {
+                return Err(std::io::Error::other("unknown P5 case").into());
+            }
+            case
+        }
+    };
+    if target.scheme_str() != Some("http")
+        || target.host() != Some("127.0.0.1")
+        || target.port_u16().is_none_or(|port| port == 0)
+        || target.port_u16() == Some(port)
+        || target
+            .authority()
+            .is_none_or(|authority| authority.as_str().contains('@'))
+        || target.query().is_some()
+        || port == 0
+        || shape != expected
+    {
+        return Err(std::io::Error::other("P5 requires two controlled loopback origins").into());
+    }
+    let a_uri = target.to_string();
+    let b_uri = format!("http://127.0.0.1:{port}/p5/{token}/{port}/final");
+    let client = HttpClient::with_client(FastlyOutboundClient::new());
+    let decoding = ResponseDecoding::Decode;
+    let make = || -> Result<OutboundRequest, EdgeError> {
+        let request = OutboundRequest::get(&a_uri)?
+            .header("x-request-token", token)?
+            .timeout(Duration::from_secs(2))
+            .deadline(Deadline::after(Duration::from_secs(2)))
+            .max_encoded_response_bytes(64)
+            .max_decoded_response_bytes(10)
+            .max_response_bytes(10)
+            .response_decoding(decoding);
+        Ok(
+            if case.contains("/streamed/")
+                || case == "pending-head"
+                || case.starts_with("optimizer-")
+            {
+                request.stream_response()
+            } else {
+                request
+            },
+        )
+    };
+    let result = futures::executor::block_on(async {
+        if case.starts_with("optimizer-") {
+            // Viceroy proves native dispatch/unavailability, not transformed output or performance.
+            let options = p5_options()?;
+            let next = case == "optimizer-next";
+            let outbound = if next {
+                make()?
+            } else {
+                make()?.image_optimizer(options.clone())
+            };
+            let readback = outbound.image_optimizer_options() == Some(&options);
+            if case == "optimizer-send" {
+                return Ok::<_, EdgeError>(
+                    json!({"failure":p5_response(client.send(outbound).await).await,
+                    "policy_calls":0,"options_checked":readback}),
+                );
+            }
+            let followed = p5_follow(&client, outbound, &b_uri, false, next).await?;
+            let mut failure = followed["response"].clone();
+            failure["hop"] = followed["hop"].clone();
+            return Ok(
+                json!({"failure":failure,"policy_calls":followed["policy_calls"],
+                "options_checked":if next {followed["options_checked"] == true} else {readback}}),
+            );
+        }
+        if case == "pending-head" {
+            let followed = p5_follow(&client, make()?, &b_uri, false, false).await?;
+            let stopped = p5_follow(&client, make()?, &b_uri, true, false).await?;
+            return Ok(json!({"follow":followed,"stop":stopped}));
+        }
+        let sent = p5_response(client.send(make()?).await).await;
+        let followed = p5_follow(&client, make()?, &b_uri, false, false).await?;
+        Ok(json!({"send":sent,"follow":followed}))
+    });
+    let probe = json!({"event":"fastly-p5-probe","case":case,"token":token,
+        "revision":env!("EDGEZERO_QUALIFICATION_REVISION"),"qualification":false,
+        "a_uri":a_uri,"b_uri":b_uri,"response_decoding":format!("{decoding:?}"),
+        "result":result.map_err(|error|p5_failure(&error))});
+    Response::from_body(serde_json::to_string(&probe)?).send_to_client();
+    Ok(())
+}
+
 fn client_failure(error: &edgezero_core::EdgeError) -> Value {
     use edgezero_core::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
     let source_eof = matches!(
@@ -467,6 +694,9 @@ fn main() -> Result<(), fastly::Error> {
         .collect();
     if let ["timer-control", source, budget] = segments.as_slice() {
         return timer_control(&request, source, budget);
+    }
+    if let Some(case) = request.get_path().strip_prefix("/p5/") {
+        return p5_probe(&request, case);
     }
     let [case, mode, consumption, limit] = segments.as_slice() else {
         return Err(std::io::Error::other("invalid readiness route").into());

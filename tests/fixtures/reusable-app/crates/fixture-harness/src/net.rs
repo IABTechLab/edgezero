@@ -175,14 +175,30 @@ fn serve(
         .nth(1)
         .ok_or("missing request path")?
         .to_owned();
+    let mut request_token = None;
     loop {
         line.clear();
         reader.read_line(&mut line)?;
         if line == "\r\n" || line.is_empty() {
             break;
         }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("x-request-token")
+        {
+            request_token = Some(value.trim().to_owned());
+        }
     }
     receipts.lock().unwrap().push(path.clone());
+    if let Some(target) = path.strip_prefix("/p5/") {
+        return serve_p5(
+            &mut stream,
+            target,
+            &method,
+            request_token.as_deref(),
+            &signal,
+            &progress,
+        );
+    }
     if let Some(path) = path.strip_prefix("/marker/") {
         let parts: Vec<_> = path.split('/').collect();
         let [
@@ -306,6 +322,102 @@ fn serve(
     }
     Ok(())
 }
+
+fn serve_p5(
+    stream: &mut TcpStream,
+    target: &str,
+    method: &str,
+    request_token: Option<&str>,
+    signal: &Signal,
+    progress: &Mutex<Vec<Value>>,
+) -> Result<()> {
+    let mut fields = target.splitn(3, '/');
+    let token = fields.next().ok_or("missing P5 token")?;
+    let port: u16 = fields.next().ok_or("missing P5 redirect port")?.parse()?;
+    let case = fields.next().ok_or("missing P5 origin case")?;
+    require(
+        method == "GET" && request_token == Some(token) && port != 0,
+        "foreign P5 origin request",
+    )?;
+    let redirect = matches!(case, "redirect" | "pending");
+    write!(
+        stream,
+        "HTTP/1.1 {} Probe\r\nDate: Tue, 27 Oct 2026 00:00:00 GMT\r\nContent-Type: application/octet-stream\r\nCache-Control: no-store\r\nConnection: close\r\n",
+        if redirect { 302 } else { 200 }
+    )?;
+    if redirect {
+        write!(
+            stream,
+            "Location: http://127.0.0.1:{port}/p5/{token}/{port}/final\r\n"
+        )?;
+        if case == "pending" {
+            stream.write_all(b"Content-Encoding: br\r\nContent-Length: 10485760\r\n\r\n")?;
+            progress
+                .lock()
+                .unwrap()
+                .push(json!({"event":"p5-pending-head","token":token}));
+            stream.flush()?;
+            let (released, _) = signal
+                .1
+                .wait_timeout_while(
+                    signal.0.lock().unwrap(),
+                    Duration::from_secs(3),
+                    |released| !*released,
+                )
+                .map_err(|_| "P5 gate poisoned")?;
+            require(*released, "P5 body gate expired before client completion")?;
+        } else {
+            stream.write_all(b"Content-Length: 0\r\n\r\n")?;
+        }
+        return Ok(());
+    }
+    let (coding, size) = if let Some(parity) = case.strip_prefix("parity/") {
+        let fields: Vec<_> = parity.split('/').collect();
+        let [
+            coding @ ("identity" | "gzip" | "passthrough"),
+            "buffered" | "streamed",
+            size @ ("ten" | "eleven" | "declared"),
+        ] = fields.as_slice()
+        else {
+            return Err("invalid P5 parity origin".into());
+        };
+        (*coding, *size)
+    } else {
+        require(matches!(case, "final" | "image"), "invalid P5 origin case")?;
+        ("identity", "ten")
+    };
+    let body: &[u8] = match (coding, size) {
+        ("gzip", "ten") => &[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 19, 51, 48, 52, 50, 54, 49, 53, 51, 183, 176, 4, 0, 198,
+            199, 132, 166, 10, 0, 0, 0,
+        ],
+        ("gzip", _) => &[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 19, 51, 48, 52, 50, 54, 49, 53, 51, 183, 176, 172, 0, 0,
+            193, 245, 125, 254, 11, 0, 0, 0,
+        ],
+        (_, "ten") => b"0123456789",
+        _ => b"0123456789x",
+    };
+    match coding {
+        "gzip" => stream.write_all(b"Content-Encoding: gzip\r\n")?,
+        "passthrough" => stream.write_all(b"Content-Encoding: x-fixture-opaque\r\n")?,
+        _ => {}
+    }
+    if size == "declared" || !case.starts_with("parity/") {
+        write!(stream, "Content-Length: {}\r\n\r\n", body.len())?;
+        stream.write_all(body)?;
+    } else {
+        write!(
+            stream,
+            "Transfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            body.len()
+        )?;
+        stream.write_all(body)?;
+        stream.write_all(b"\r\n0\r\n\r\n")?;
+    }
+    Ok(())
+}
+
 pub fn port() -> Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
@@ -655,6 +767,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn p5_origin_has_deterministic_body_and_cross_port_redirect() {
+        let origin = Backend::start().unwrap();
+        let reply =
+            binary_request(origin.port, "/p5/p5-origin/8002/final", "p5-origin", None).unwrap();
+        assert_eq!(reply["body_bytes"], json!(b"0123456789"));
+        let redirect = binary_request(
+            origin.port,
+            "/p5/p5-origin/8002/redirect",
+            "p5-origin",
+            None,
+        )
+        .unwrap();
+        assert_eq!(redirect["status"], 302);
+        assert!(redirect["headers"].as_array().unwrap().iter().any(|field| {
+            field[0]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("location"))
+                && field[1] == "http://127.0.0.1:8002/p5/p5-origin/8002/final"
+        }));
+        assert_eq!(origin.receipts.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn p5_passthrough_origin_uses_an_unsupported_coding_token() {
+        let origin = Backend::start().unwrap();
+        let reply = binary_request(
+            origin.port,
+            "/p5/p5-origin/8002/parity/passthrough/streamed/ten",
+            "p5-origin",
+            None,
+        )
+        .unwrap();
+        assert_eq!(reply["body_bytes"], json!(b"0123456789"));
+        assert!(reply["headers"].as_array().unwrap().iter().any(|field| {
+            field[0]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("content-encoding"))
+                && field[1] == "x-fixture-opaque"
+        }));
     }
 
     #[test]

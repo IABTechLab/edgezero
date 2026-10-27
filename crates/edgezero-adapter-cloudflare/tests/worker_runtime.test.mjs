@@ -6,6 +6,77 @@ const installWorkersStreams = new Function(
   readFileSync(new URL('./worker_runtime.js', import.meta.url), 'utf8'),
 )
 
+const installRedirectFetch = new Function(
+  'wire', readFileSync(new URL('./redirect_runtime.js', import.meta.url), 'utf8'),
+)
+
+test('redirect fixture never prefetches an unread body and restores fetch', async () => {
+  const original = globalThis.fetch
+  const probe = installRedirectFetch(JSON.stringify([
+    { status: 302, kind: 'pending', headers: [['location', '/next']] },
+    { status: 200, kind: 'bytes', headers: [], bytes: [0, 255, 7] },
+  ]))
+  const first = new AbortController()
+  const init = signal => ({ signal, encodeResponseBody: 'manual' })
+  try {
+    const reply = await fetch(new Request('https://fixture.invalid/start', { redirect: 'manual' }), init(first.signal))
+    await Promise.resolve()
+    assert.deepEqual(probe.pulls, [0])
+    first.abort()
+    assert.deepEqual(probe.aborts, [1])
+    await reply.body.cancel()
+    assert.deepEqual(probe.cancellations, [1])
+    const final = await fetch(new Request('https://fixture.invalid/next', { redirect: 'manual' }), init(new AbortController().signal))
+    assert.deepEqual(new Uint8Array(await final.arrayBuffer()), new Uint8Array([0, 255, 7]))
+    assert.equal(probe.requests.length, 2)
+    assert.deepEqual(probe.aborts, [1, 0])
+  } finally {
+    probe.restore()
+  }
+  assert.equal(globalThis.fetch, original)
+})
+
+test('redirect fixture rejects implicit redirect or encoding and unexpected fetches', async () => {
+  const probe = installRedirectFetch(JSON.stringify([
+    { status: 200, kind: 'bytes', headers: [], bytes: [] },
+  ]))
+  const init = { signal: new AbortController().signal, encodeResponseBody: 'manual' }
+  try {
+    assert.throws(() => fetch(new Request('https://fixture.invalid/'), init), /manual fetch policy/)
+    const request = new Request('https://fixture.invalid/', { redirect: 'manual' })
+    assert.throws(() => fetch(request, { signal: init.signal }), /manual fetch policy/)
+    assert.equal(probe.requests.length, 0)
+    assert.equal((await fetch(request, init)).status, 200)
+    assert.throws(() => fetch(request, init), /unexpected fixture fetch/)
+    assert.equal(probe.requests.length, 1)
+  } finally {
+    probe.restore()
+  }
+})
+
+test('redirect fixture settles pending fetch and body callbacks during cleanup', async () => {
+  const probe = installRedirectFetch(JSON.stringify([
+    { kind: 'pending-head' },
+    { status: 200, kind: 'pending', headers: [] },
+  ]))
+  const init = { signal: new AbortController().signal, encodeResponseBody: 'manual' }
+  const request = new Request('https://fixture.invalid/', { redirect: 'manual' })
+  try {
+    const head = assert.rejects(fetch(request, init), { name: 'AbortError' })
+    const response = await fetch(request, init)
+    const reader = response.body.getReader()
+    const body = assert.rejects(reader.read(), { name: 'AbortError' })
+    await Promise.resolve()
+    assert.deepEqual(probe.pulls, [0, 1])
+    probe.restore()
+    await head
+    await body
+    reader.releaseLock()
+  } finally {
+    probe.restore()
+  }
+})
+
 async function exchange(length, chunks) {
   installWorkersStreams()
   const stream = new globalThis.FixedLengthStream(length)

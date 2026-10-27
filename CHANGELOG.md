@@ -87,6 +87,13 @@ their scope when introduced; the current summary supersedes their then-pending A
   Reuse the shared source binder and retain clock history through stopped responses and
   transport cleanup. Borrow the existing collection engine for buffered finalization instead of
   allocating another payload box; keep public collector signatures and typed error precedence.
+- Exercise the actual provider clients at their existing dispatch boundaries: Cloudflare guest
+  fetch fixtures, local Spin HTTP wire controls and repaired-Viceroy Fastly progress probes.
+  Compare plain Send with Follow for coding, caps and streamed final responses; verify unread
+  intermediate heads, stopped-body failures, hop metadata and native optimizer unavailability.
+  Run the Spin wire harness in its existing CI job and require the separate Fastly redirect
+  inventory without weakening the original progress inventory. These tests do not qualify
+  hosted cancellation, successful optimizer transformation or resource guarantees.
 
 ### Main Integration
 

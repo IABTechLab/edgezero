@@ -468,6 +468,23 @@ jobs:
           cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-eager
           wasmtime run -W component-model-async=y -S p3=y -S http=y target/wasm32-wasip2/debug/examples/outbound_eager.wasm
 
+      - name: Run Spin wire contracts
+        if: matrix.adapter == 'spin'
+        shell: bash
+        run: |
+          version="$(awk '$1 == "spin" {print $2}' .tool-versions)"
+          test "$version" = 4.1.0
+          install_dir="$RUNNER_TEMP/spin-wire-$version"
+          mkdir -p "$install_dir"
+          archive="spin-v${version}-linux-amd64.tar.gz"
+          curl -fL "https://github.com/spinframework/spin/releases/download/v${version}/${archive}" -o "$install_dir/$archive"
+          printf '%s  %s\n' aeeb892f94cf861f5302546faa0bdaa82cc4be30539621299746a6dc011f3b5a "$install_dir/$archive" | sha256sum --check --strict
+          tar -xzf "$install_dir/$archive" -C "$install_dir"
+          export PATH="$install_dir:$PATH"
+          test "$(spin --version | awk '{print $2}')" = "$version"
+          cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-bodyless-wire
+          python3 crates/edgezero-adapter-spin/tests/outbound_bodyless_wire.py
+
       - name: Run Cloudflare outbound runtime unit tests
         if: matrix.adapter == 'cloudflare'
         env:
@@ -509,6 +526,10 @@ jobs:
               | length == 1 and .[0].status == "pass"
               and .[0].probes == 12 and .[0].expected_probes == 12
               and .[0].origin_requests == 18 and .[0].qualification == false)
+            and ([.[] | select(.event == "fastly-p5-inventory")]
+              | length == 1 and .[0].status == "pass"
+              and .[0].probes == 23 and .[0].expected_probes == 23
+              and .[0].origin_requests == 43 and .[0].qualification == false)
             and any(.[]; .status == "unverified" and .qualification == false)
             and all(.[]; .status != "fail")
           ' "$run/events.jsonl"

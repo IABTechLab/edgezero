@@ -228,9 +228,18 @@ truncation. Require twelve probes and eighteen correlated origin requests, exact
 and checksums, preserved typed source errors, and the ready sibling observed before its cutoff.
 Preflight failures cannot count as exercised receive paths.
 
+The same suite also requires a separate P5 inventory: twenty-three redirect probes and
+forty-three correlated origin requests. Plain Send stays unfollowed; Follow reaches the second
+origin. Buffered and streamed no-redirect controls compare identity, decoded gzip and unsupported-
+token passthrough under normal decoding, including exact-cap, overflow and declared-length cases.
+A gated pending oversized compressed redirect progresses without origin body data; stopping at
+that head applies the ordinary typed cap. Native optimizer Send, initial Follow and a policy-
+supplied later hop reach Viceroy's typed unavailable boundary. These are compositional dispatch
+controls, not successful optimized-first-hop redirect, transformation or performance evidence.
+
 Both receive suites require `--adapter fastly` and the pinned runtime version. Select the
 [tracked Viceroy repair](../../../patches/viceroy/README.md) explicitly; an installed stock binary
-is not silently replaced. CI requires exactly exit 2, one passing complete client inventory,
+is not silently replaced. CI requires exactly exit 2, both passing complete client/P5 inventories,
 an explicit unverified disposition and no failure records. Exit 0 or an unavailable runtime
 does not satisfy that gate. The suite deliberately excludes SDK timing probes and timer controls.
 It does not establish callback-wide progress, host cancellation, memory bounds or qualification.

@@ -1156,6 +1156,9 @@ mod worker_impl {
     }
 
     #[cfg(test)]
+    mod redirect_tests;
+
+    #[cfg(test)]
     mod clock_tests {
         use edgezero_core::outbound::{
             HttpClient, OutboundBatchTermination, OutboundCollectedSlot,
@@ -1192,7 +1195,13 @@ mod worker_impl {
 
         use super::*;
 
-        struct RestoreGlobal(Function);
+        pub(super) struct RestoreGlobal(Function);
+
+        impl RestoreGlobal {
+            pub(super) fn new(restore: Function) -> Self {
+                Self(restore)
+            }
+        }
 
         #[wasm_bindgen_test]
         async fn streamed_send_keeps_original_scope_under_foreign_request_polling() {
@@ -1404,7 +1413,7 @@ mod worker_impl {
                 .expect("restore")
                 .dyn_into::<Function>()
                 .expect("restore function");
-            (probe, RestoreGlobal(restore))
+            (probe, RestoreGlobal::new(restore))
         }
 
         #[wasm_bindgen_test]
@@ -1950,7 +1959,7 @@ mod worker_impl {
                         .expect("patch setup")
                         .dyn_into()
                         .expect("restore function");
-                    let _restore = RestoreGlobal(restore);
+                    let _restore = RestoreGlobal::new(restore);
                     raw_fetch(
                         request,
                         budget,

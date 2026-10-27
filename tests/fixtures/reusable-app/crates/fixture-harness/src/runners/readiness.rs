@@ -139,6 +139,70 @@ fn client_probes(
     Ok((probes, failures))
 }
 
+fn p5_probes(port: u16, revision: &str, records: &mut Records) -> Result<()> {
+    let cases = p5_cases();
+    let expected = cases.len();
+    let mut probes = Vec::new();
+    let mut failures = Vec::new();
+    for case in cases {
+        let token = token();
+        let result = (|| -> Result<Value> {
+            let a = Backend::start()?;
+            let b = Backend::start()?;
+            let shape = match case.as_str() {
+                "two-origin" | "optimizer-next" => "redirect",
+                "pending-head" => "pending",
+                "optimizer-send" | "optimizer-initial" => "image",
+                _ => &case,
+            };
+            let initial = a.url(&format!("/p5/{token}/{}/{shape}", b.port));
+            let reply = net::request(port, &format!("/p5/{case}"), &token, Some(&initial), None);
+            let origin = json!({"a_port":a.port,"b_port":b.port,
+                "a":a.receipts.lock().unwrap().clone(),"b":b.receipts.lock().unwrap().clone(),
+                "pending_released_before_reply":*a.release.0.lock().unwrap(),
+                "pending_heads":a.progress.lock().unwrap().iter().filter(|event|
+                    event["event"] == "p5-pending-head" && event["token"] == token).count()});
+            // Never release a pending origin body until after the guest's final response.
+            net::release(&a.release);
+            let mut probe = guest(&reply?)?;
+            require(
+                probe["token"] == token && probe["case"] == case && probe["a_uri"] == initial,
+                "foreign P5 guest response",
+            )?;
+            probe["origin"] = origin;
+            records.push(probe.clone())?;
+            Ok(probe)
+        })();
+        let validation = match result {
+            Ok(probe) => {
+                let validation = validate_outbound_readiness_client_probe(&probe, revision);
+                probes.push(probe);
+                validation
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = validation {
+            failures.push(format!("{case}: {error}"));
+            records.push(
+                json!({"event":"fastly-p5-failure","status":"fail","case":case,
+                "token":token,"error":error.to_string(),"qualification":false}),
+            )?;
+        }
+    }
+    let validation = client_outcome(
+        validate_outbound_readiness_client(&probes, revision),
+        failures,
+    );
+    records.push(json!({"event":"fastly-p5-inventory","status":if validation.is_ok(){"pass"}else{"fail"},
+        "probes":probes.len(),"expected_probes":expected,
+        "origin_requests":probes.iter().map(|probe| ["a","b"].into_iter().map(|origin|
+            probe["origin"][origin].as_array().map_or(0, Vec::len)).sum::<usize>()).sum::<usize>(),
+        "error":validation.as_ref().err().map(ToString::to_string),"qualification":false,
+        "coding_evidence":"identity/gzip/unsupported-token passthrough with ResponseDecoding::Decode",
+        "optimizer_evidence":"compositional native unavailable boundaries; no optimized-first-hop redirect, transformation or hosted performance proof"}))?;
+    validation
+}
+
 pub(super) fn run(
     exe: &Path,
     run: &Path,
@@ -200,7 +264,9 @@ pub(super) fn run(
             "origin_requests":clients.iter().map(|p| p["origin"]["accepted"].as_u64().unwrap_or(0)).sum::<u64>(),
             "error":client_validation.as_ref().err().map(ToString::to_string), "qualification":false}))?;
         if suite == ReadinessSuite::ClientProgress {
+            let p5_validation = p5_probes(port, &revision, records);
             client_validation?;
+            p5_validation?;
             return records.push(json!({"status":"unverified", "suite":suite.name(),
                 "reason":"actual-client receive cases passed; SDK timing diagnostics, callback-wide progress, resource and hosted qualification remain open",
                 "qualification":false}));

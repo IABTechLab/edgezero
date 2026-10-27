@@ -112,6 +112,9 @@ fn client_leg(probe: &Value) -> Result<ReadinessLeg> {
 }
 
 pub fn validate_outbound_readiness_client_probe(probe: &Value, revision: &str) -> Result<()> {
+    if probe["event"] == "fastly-p5-probe" {
+        return validate_p5_probe(probe, revision);
+    }
     let leg = client_leg(probe)?;
     let token = probe["token"]
         .as_str()
@@ -186,6 +189,25 @@ pub fn validate_outbound_readiness_client_probe(probe: &Value, revision: &str) -
 }
 
 pub fn validate_outbound_readiness_client(probes: &[Value], revision: &str) -> Result<()> {
+    if probes
+        .iter()
+        .any(|probe| probe["event"] == "fastly-p5-probe")
+    {
+        require(
+            probes.len() == p5_cases().len(),
+            "missing P5 case inventory",
+        )?;
+        let mut cases = HashSet::new();
+        let mut tokens = HashSet::new();
+        for probe in probes {
+            validate_p5_probe(probe, revision)?;
+            require(
+                cases.insert(probe["case"].as_str()) && tokens.insert(probe["token"].as_str()),
+                "duplicate P5 case/token",
+            )?;
+        }
+        return Ok(());
+    }
     require(
         probes.len() == readiness_client_legs().len(),
         "missing actual-client case inventory",
@@ -223,6 +245,206 @@ pub fn validate_outbound_readiness_client(probes: &[Value], revision: &str) -> R
             failures.join("\n")
         ),
     )
+}
+
+pub fn p5_cases() -> Vec<String> {
+    let mut cases: Vec<_> = [
+        "two-origin",
+        "pending-head",
+        "optimizer-send",
+        "optimizer-initial",
+        "optimizer-next",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    for coding in ["identity", "gzip", "passthrough"] {
+        for mode in ["buffered", "streamed"] {
+            for size in ["ten", "eleven", "declared"] {
+                cases.push(format!("parity/{coding}/{mode}/{size}"));
+            }
+        }
+    }
+    cases
+}
+
+fn validate_p5_probe(probe: &Value, revision: &str) -> Result<()> {
+    let case = probe["case"].as_str().ok_or("missing P5 case")?;
+    let token = probe["token"].as_str().ok_or("missing P5 token")?;
+    require(
+        probe["event"] == "fastly-p5-probe"
+            && p5_cases().iter().any(|known| known == case)
+            && revision.len() == 40
+            && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && probe["revision"] == revision
+            && probe["qualification"] == false
+            && probe["response_decoding"] == "Decode"
+            && !token.is_empty()
+            && token.len() <= 128
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "invalid P5 identity",
+    )?;
+    let origin = &probe["origin"];
+    let a = origin["a_port"]
+        .as_u64()
+        .filter(|port| (1..=65535).contains(port))
+        .ok_or("invalid P5 origin A")?;
+    let b = origin["b_port"]
+        .as_u64()
+        .filter(|port| (1..=65535).contains(port))
+        .ok_or("invalid P5 origin B")?;
+    require(a != b, "P5 origins are not distinct")?;
+    let shape = match case {
+        "two-origin" | "optimizer-next" => "redirect",
+        "pending-head" => "pending",
+        "optimizer-send" | "optimizer-initial" => "image",
+        _ => case,
+    };
+    let path = format!("/p5/{token}/{b}/{shape}");
+    let final_path = format!("/p5/{token}/{b}/final");
+    let initial = format!("http://127.0.0.1:{a}{path}");
+    let final_uri = format!("http://127.0.0.1:{b}{final_path}");
+    require(
+        probe["a_uri"] == initial && probe["b_uri"] == final_uri,
+        "foreign P5 target",
+    )?;
+    let (a_count, b_count) = match case {
+        "optimizer-send" | "optimizer-initial" => (0, 0),
+        "optimizer-next" => (1, 0),
+        "two-origin" | "pending-head" => (2, 1),
+        _ => (2, 0),
+    };
+    require(
+        origin["a"] == serde_json::json!(vec![&path; a_count])
+            && origin["b"] == serde_json::json!(vec![&final_path; b_count])
+            && origin["pending_released_before_reply"] == false
+            && origin["pending_heads"] == if case == "pending-head" { 2 } else { 0 },
+        "missing, duplicate or foreign P5 receipts/pending-head evidence",
+    )?;
+    let envelope = probe["result"].as_object().ok_or("missing P5 result")?;
+    require(envelope.len() == 1, "contradictory P5 result")?;
+    let result = envelope
+        .get("Ok")
+        .filter(|value| value.is_object())
+        .ok_or("P5 guest failed")?;
+    let follow_metadata = |value: &Value, redirects| -> Result<()> {
+        require(
+            value["final_uri"]
+                == if redirects == 1 {
+                    final_uri.as_str()
+                } else {
+                    initial.as_str()
+                }
+                && value["redirects"] == redirects
+                && value.get("stop_reason") == Some(&Value::Null)
+                && value["policy_calls"] == redirects
+                && value.get("hop").is_none(),
+            "wrong P5 follow metadata/policy count",
+        )
+    };
+    let followed = |value: &Value, redirects, streamed| -> Result<()> {
+        follow_metadata(value, redirects)?;
+        let response = &value["response"];
+        require(
+            response["kind"] == "ok"
+                && response["status"] == 200
+                && response["bytes"] == serde_json::json!(b"0123456789")
+                && response["streamed"] == streamed,
+            "wrong P5 final bytes/mode/status",
+        )
+    };
+    if case.starts_with("optimizer-") {
+        let failure = &result["failure"];
+        let hop = match case {
+            "optimizer-send" => Value::Null,
+            "optimizer-initial" => serde_json::json!(0),
+            _ => serde_json::json!(1),
+        };
+        return require(
+            failure["kind"] == "error"
+                && failure["category"] == "bad_gateway"
+                && failure["status"] == 502
+                && failure["reason"] == "ImageOptimizerUnavailable"
+                && failure["provider_optimizer_unsupported"] == true
+                && failure.get("hop") == Some(&hop)
+                && result["policy_calls"] == usize::from(case == "optimizer-next")
+                && result["options_checked"] == true,
+            "P5 optimizer did not reach the expected native unavailable boundary",
+        );
+    }
+    if case == "two-origin" {
+        require(
+            result["send"]["kind"] == "ok"
+                && result["send"]["status"] == 302
+                && result["send"]["bytes"] == serde_json::json!([])
+                && result["send"]["streamed"] == false,
+            "P5 plain Send followed or changed the redirect",
+        )?;
+        return followed(&result["follow"], 1, false);
+    }
+    if case == "pending-head" {
+        followed(&result["follow"], 1, true)?;
+        return require(
+            result["stop"]["response"]["kind"] == "error"
+                && result["stop"]["response"]["category"] == "response_too_large"
+                && result["stop"]["response"]["status"] == 502
+                && result["stop"]["response"]["reason"] == "EncodedBody"
+                && result["stop"]["hop"] == 0
+                && result["stop"]["policy_calls"] == 1,
+            "P5 stopped pending redirect bypassed final body limits",
+        );
+    }
+    let follow = &result["follow"];
+    require(
+        result["send"] == follow["response"] && follow["policy_calls"] == 0,
+        "P5 Send/Follow parity changed",
+    )?;
+    if case.ends_with("/ten") {
+        followed(follow, 0, case.contains("/streamed/"))?;
+        let headers = result["send"]["headers"]
+            .as_array()
+            .ok_or("missing P5 response headers")?;
+        let encoding: Vec<_> = headers
+            .iter()
+            .filter(|field| field[0] == "content-encoding")
+            .collect();
+        require(
+            if case.contains("/passthrough/") {
+                encoding.len() == 1 && encoding[0][1] == "x-fixture-opaque"
+            } else {
+                encoding.is_empty()
+            },
+            "P5 coding normalization changed",
+        )
+    } else {
+        // Identity's declared decoded length can reject even before a streamed head is returned.
+        if case.contains("/buffered/") || case == "parity/identity/streamed/declared" {
+            require(
+                follow.get("hop") == Some(&serde_json::json!(0))
+                    && ["final_uri", "redirects", "stop_reason"]
+                        .iter()
+                        .all(|field| follow.get(*field).is_none()),
+                "wrong P5 finalization failure hop/metadata",
+            )?;
+        } else {
+            follow_metadata(follow, 0)?;
+        }
+        // Passthrough skips the decoded cap; both modes still collect under the final 10-byte cap.
+        let expected_reason = if case.contains("/passthrough/") {
+            "BufferedBody"
+        } else {
+            "DecodedBody"
+        };
+        require(
+            result["send"]["kind"] == "error"
+                && result["send"]["category"] == "response_too_large"
+                && result["send"]["status"] == 502
+                && result["send"]["reason"] == expected_reason,
+            "P5 overflow did not retain its typed response limit",
+        )
+    }
 }
 
 fn slot_count(case: &str) -> usize {
@@ -965,6 +1187,363 @@ mod tests {
                     "completed_us":500_100, "origin":source["origin"], "result":{"Ok":result}})
             })
             .collect()
+    }
+
+    fn p5_matrix() -> Vec<Value> {
+        p5_cases().into_iter().enumerate().map(|(index, case)| {
+            let token = format!("p5-{index}");
+            let shape = match case.as_str() {
+                "two-origin" | "optimizer-next" => "redirect",
+                "pending-head" => "pending",
+                "optimizer-send" | "optimizer-initial" => "image",
+                _ => &case,
+            };
+            let path = format!("/p5/{token}/8002/{shape}");
+            let final_path = format!("/p5/{token}/8002/final");
+            let initial = format!("http://127.0.0.1:8001{path}");
+            let final_uri = format!("http://127.0.0.1:8002{final_path}");
+            let response = json!({"kind":"ok", "status":200,
+                "headers":[["content-type","application/octet-stream"],
+                    ["date","Tue, 27 Oct 2026 00:00:00 GMT"]],
+                "bytes":b"0123456789", "streamed":case == "pending-head" || case.contains("/streamed/")});
+            let followed = |response: Value, redirects| json!({"response":response,
+                "final_uri":if redirects == 1 { &final_uri } else { &initial },
+                "redirects":redirects,"stop_reason":null,"policy_calls":redirects});
+            let limit = json!({"kind":"error","category":"response_too_large","status":502,
+                "reason":if case == "pending-head" {"EncodedBody"} else if case.contains("/passthrough/") {"BufferedBody"} else {"DecodedBody"},
+                "provider_optimizer_unsupported":false,"hop":null});
+            let mut a = vec![path.clone(), path.clone()];
+            let mut b = Vec::new();
+            let result = if case == "two-origin" {
+                let mut sent = response.clone();
+                sent["status"] = json!(302);
+                sent["bytes"] = json!([]);
+                b.push(final_path.clone());
+                json!({"send":sent,"follow":followed(response,1)})
+            } else if case == "pending-head" {
+                b.push(final_path.clone());
+                json!({"follow":followed(response,1),"stop":{"response":limit,"hop":0,"policy_calls":1}})
+            } else if case.starts_with("optimizer-") {
+                a.clear();
+                let next = case == "optimizer-next";
+                if next { a.push(path.clone()); }
+                json!({"failure":{"kind":"error","category":"bad_gateway","status":502,
+                    "reason":"ImageOptimizerUnavailable","provider_optimizer_unsupported":true,
+                    "hop":if case == "optimizer-send" { Value::Null } else { json!(usize::from(next)) }},
+                    "policy_calls":usize::from(next),"options_checked":true})
+            } else {
+                let mut response = response;
+                if case.ends_with("/ten") {
+                    if case.contains("/passthrough/") {
+                        response["headers"].as_array_mut().unwrap().push(json!(["content-encoding","x-fixture-opaque"]));
+                    }
+                } else { response = limit; }
+                let follow = if !case.ends_with("/ten")
+                    && (case.contains("/buffered/") || case == "parity/identity/streamed/declared")
+                {
+                    json!({"response":response,"hop":0,"policy_calls":0})
+                } else {
+                    followed(response.clone(),0)
+                };
+                json!({"send":response,"follow":follow})
+            };
+            json!({"event":"fastly-p5-probe","case":case,"token":token,"revision":REVISION,
+                "qualification":false,"a_uri":initial,"b_uri":final_uri,"response_decoding":"Decode","result":{"Ok":result},
+                "origin":{"a_port":8001,"b_port":8002,"a":a,"b":b,
+                    "pending_released_before_reply":false,
+                    "pending_heads":if case == "pending-head" { 2 } else { 0 }}})
+        }).collect()
+    }
+
+    #[test]
+    fn p5_inventory_is_twenty_three_unique_cases() {
+        let cases = p5_cases();
+        assert_eq!(cases.len(), 23);
+        assert_eq!(cases.iter().collect::<HashSet<_>>().len(), 23);
+        for coding in ["identity", "gzip", "passthrough"] {
+            assert_eq!(
+                cases
+                    .iter()
+                    .filter(|case| case.starts_with(&format!("parity/{coding}/")))
+                    .count(),
+                6
+            );
+        }
+        for case in [
+            "two-origin",
+            "pending-head",
+            "optimizer-send",
+            "optimizer-initial",
+            "optimizer-next",
+        ] {
+            assert!(cases.iter().any(|known| known == case));
+        }
+    }
+
+    #[test]
+    fn p5_inventory_requires_complete_correlated_evidence() {
+        let mut probes = p5_matrix();
+        assert_eq!(probes.len(), 23);
+        validate_outbound_readiness_client(&probes, REVISION).unwrap();
+        probes.reverse();
+        validate_outbound_readiness_client(&probes, REVISION).unwrap();
+        validate_outbound_readiness_client(&client_matrix(), REVISION).unwrap();
+    }
+
+    #[test]
+    fn p5_inventory_rejects_missing_duplicate_and_foreign_records() {
+        let baseline = p5_matrix();
+        assert!(validate_outbound_readiness_client(&[], REVISION).is_err());
+        for index in 0..baseline.len() {
+            let mut missing = baseline.clone();
+            missing.remove(index);
+            assert!(validate_outbound_readiness_client(&missing, REVISION).is_err());
+            let mut duplicate = baseline.clone();
+            duplicate[index] = baseline[(index + 1) % baseline.len()].clone();
+            assert!(validate_outbound_readiness_client(&duplicate, REVISION).is_err());
+            for field in [
+                "event",
+                "case",
+                "token",
+                "revision",
+                "qualification",
+                "response_decoding",
+                "result",
+                "origin",
+                "a_uri",
+                "b_uri",
+            ] {
+                let mut probes = baseline.clone();
+                probes[index].as_object_mut().unwrap().remove(field);
+                assert!(
+                    validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                    "{index}: {field}"
+                );
+            }
+        }
+        for (field, value) in [
+            ("case", json!("other")),
+            ("revision", json!("foreign")),
+            ("token", json!("invalid token")),
+            ("qualification", json!(true)),
+        ] {
+            let mut probes = baseline.clone();
+            probes[0][field] = value;
+            assert!(
+                validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                "{field}"
+            );
+        }
+        let mut duplicate = baseline.clone();
+        duplicate.push(baseline[0].clone());
+        assert!(validate_outbound_readiness_client(&duplicate, REVISION).is_err());
+        let mut foreign = baseline.clone();
+        foreign[0] = client_matrix()[0].clone();
+        assert!(validate_outbound_readiness_client(&foreign, REVISION).is_err());
+
+        let mut reused_token = baseline.clone();
+        let token = baseline[0]["token"].as_str().unwrap();
+        let path = format!("/p5/{token}/8002/pending");
+        let final_path = format!("/p5/{token}/8002/final");
+        let probe = &mut reused_token[1];
+        probe["token"] = json!(token);
+        probe["a_uri"] = json!(format!("http://127.0.0.1:8001{path}"));
+        probe["b_uri"] = json!(format!("http://127.0.0.1:8002{final_path}"));
+        probe["origin"]["a"] = json!([path, path]);
+        probe["origin"]["b"] = json!([final_path]);
+        probe["result"]["Ok"]["follow"]["final_uri"] = probe["b_uri"].clone();
+        validate_p5_probe(probe, REVISION).unwrap();
+        assert!(validate_outbound_readiness_client(&reused_token, REVISION).is_err());
+    }
+
+    #[test]
+    fn p5_inventory_requires_explicit_null_fields() {
+        for (case, parent, field) in [
+            ("two-origin", "/result/Ok/follow", "stop_reason"),
+            ("optimizer-send", "/result/Ok/failure", "hop"),
+        ] {
+            let mut probes = p5_matrix();
+            probes
+                .iter_mut()
+                .find(|probe| probe["case"] == case)
+                .unwrap()
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                "{case}: {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn p5_inventory_rejects_unrelated_limit_causes() {
+        let baseline = p5_matrix();
+        validate_outbound_readiness_client(&baseline, REVISION).unwrap();
+        for (index, probe) in baseline.iter().enumerate() {
+            let case = probe["case"].as_str().unwrap();
+            let pointers: &[&str] = if case == "pending-head" {
+                &["/result/Ok/stop/response/reason"]
+            } else if case.starts_with("parity/") && !case.ends_with("/ten") {
+                &[
+                    "/result/Ok/send/reason",
+                    "/result/Ok/follow/response/reason",
+                ]
+            } else {
+                continue;
+            };
+            let expected = probe.pointer(pointers[0]).unwrap().as_str().unwrap();
+            for reason in [
+                "BrotliWindow",
+                "BufferedBody",
+                "DecodedBody",
+                "DecoderMemory",
+                "EncodedBody",
+                "HeaderBytes",
+                "HeaderCount",
+                "Unspecified",
+            ] {
+                if reason == expected {
+                    continue;
+                }
+                let mut probes = baseline.clone();
+                for pointer in pointers {
+                    *probes[index].pointer_mut(pointer).unwrap() = json!(reason);
+                }
+                assert!(
+                    validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                    "{case}: accepted {reason} instead of {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p5_inventory_rejects_original_mode_evidence() {
+        let baseline = p5_matrix();
+        for index in 0..baseline.len() {
+            let mut probes = baseline.clone();
+            probes[index]["response_decoding"] = json!("Original");
+            assert!(validate_outbound_readiness_client(&probes, REVISION).is_err());
+        }
+    }
+
+    #[test]
+    fn p5_overflow_requires_correlated_follow_terminal_metadata() {
+        let baseline = p5_matrix();
+        validate_outbound_readiness_client(&baseline, REVISION).unwrap();
+        for (index, probe) in baseline.iter().enumerate() {
+            let case = probe["case"].as_str().unwrap();
+            if !case.starts_with("parity/") || case.ends_with("/ten") {
+                continue;
+            }
+            let original = probe.pointer("/result/Ok/follow").unwrap();
+            let mutations = if original.get("hop").is_some() {
+                vec![
+                    ("hop", None),
+                    ("hop", Some(json!(99))),
+                    ("hop", Some(Value::Null)),
+                    ("final_uri", Some(probe["a_uri"].clone())),
+                    ("redirects", Some(json!(0))),
+                    ("stop_reason", Some(Value::Null)),
+                ]
+            } else {
+                vec![
+                    ("final_uri", None),
+                    ("redirects", None),
+                    ("stop_reason", None),
+                    ("final_uri", Some(json!("http://127.0.0.1:8001/p5/foreign"))),
+                    ("redirects", Some(json!(20))),
+                    ("stop_reason", Some(json!("LimitReached"))),
+                    ("hop", Some(json!(99))),
+                ]
+            };
+            for (field, replacement) in mutations {
+                let mut probes = baseline.clone();
+                let follow = probes[index]
+                    .pointer_mut("/result/Ok/follow")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                if let Some(replacement) = replacement {
+                    follow.insert(field.to_owned(), replacement);
+                } else {
+                    follow.remove(field);
+                }
+                assert!(
+                    validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                    "{case}: accepted invalid {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p5_inventory_rejects_receipt_and_outcome_substitution() {
+        let baseline = p5_matrix();
+        for (case, pointer, replacement) in [
+            ("two-origin", "/origin/a", json!([])),
+            ("two-origin", "/origin/b", json!([])),
+            ("two-origin", "/origin/b", json!(["foreign"])),
+            ("two-origin", "/result/Ok/follow/redirects", json!(0)),
+            ("two-origin", "/result/Ok/follow/policy_calls", json!(0)),
+            ("two-origin", "/result/Ok/send/status", json!(200)),
+            (
+                "pending-head",
+                "/origin/pending_released_before_reply",
+                json!(true),
+            ),
+            ("pending-head", "/origin/pending_heads", json!(0)),
+            (
+                "pending-head",
+                "/result/Ok/follow/response/streamed",
+                json!(false),
+            ),
+            (
+                "pending-head",
+                "/result/Ok/stop/response/category",
+                json!("bad_gateway"),
+            ),
+            ("optimizer-send", "/origin/b", json!(["unexpected"])),
+            ("optimizer-initial", "/result/Ok/failure/hop", json!(1)),
+            ("optimizer-next", "/origin/a", json!([])),
+            ("optimizer-next", "/result/Ok/failure/hop", json!(0)),
+            (
+                "optimizer-next",
+                "/result/Ok/failure/provider_optimizer_unsupported",
+                json!(false),
+            ),
+            (
+                "optimizer-next",
+                "/result/Ok/failure/reason",
+                json!("Unspecified"),
+            ),
+            ("optimizer-next", "/result/Ok/options_checked", json!(false)),
+            (
+                "parity/gzip/streamed/ten",
+                "/result/Ok/follow/response/bytes",
+                json!([]),
+            ),
+            (
+                "parity/identity/buffered/eleven",
+                "/result/Ok/send/category",
+                json!("bad_gateway"),
+            ),
+        ] {
+            let mut probes = baseline.clone();
+            let probe = probes
+                .iter_mut()
+                .find(|probe| probe["case"] == case)
+                .unwrap();
+            *probe.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                validate_outbound_readiness_client(&probes, REVISION).is_err(),
+                "{case}: {pointer}"
+            );
+        }
     }
 
     #[test]
