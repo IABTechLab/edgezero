@@ -22,18 +22,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Extract validator's version from a file. Accepts the table form with
+# Extract a shared package's version from a file. Accepts the table form with
 # `version` in any key position (`validator = { features = [..], version
 # = "X" }`), the bare form (`validator = "X"`), and the escaped spelling
 # the scaffold seeds it as. Anchored to an assignment at line start so a
-# commented-out or prose mention cannot shadow the real pin, and kept
-# deliberately in step with `extract_version` in
-# crates/edgezero-cli/src/generator.rs -- the two parsers describe the
-# same grammar, and a difference between them shows up as this gate
-# reporting a missing pin for one that is merely reformatted.
+# commented-out or prose mention cannot shadow the real pin.
 # Require exactly one declaration and read its version value, independently
 # of numeric feature names. Missing or duplicate declarations print nothing.
 shared_version_in() {
+  [[ -f "$1" ]] || return 0
   awk -v package="$2" '
     {
       gsub(/\\/, "")

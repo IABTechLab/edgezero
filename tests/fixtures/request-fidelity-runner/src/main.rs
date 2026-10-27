@@ -321,7 +321,7 @@ fn run_prepared_command(
             .map(|()| String::new())
             .map_err(describe);
     }
-    // A file avoids pipe backpressure while waiting interruptibly for build tools.
+    // Capture --version output in files to keep waits interruptible without pipe backpressure.
     let mut output = tempfile::tempfile().map_err(describe)?;
     let mut stderr = tempfile::tempfile().map_err(describe)?;
     command.stdout(output.try_clone().map_err(describe)?);
@@ -345,6 +345,7 @@ fn run_prepared_command(
             ),
         ))
     })?;
+    // eprint! honors libtest capture, unlike stderr().write_all(), but panics on write failure.
     eprint!("{}", String::from_utf8_lossy(&diagnostics));
     String::from_utf8(bytes).map_err(|error| {
         describe(io::Error::new(

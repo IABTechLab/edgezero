@@ -312,13 +312,14 @@ dependencies: core does not re-export those crates. The `app!` path is relative
 to the crate root; the `include_str!` path is relative to the source file.
 Import any names used by the original arguments into the nested module (for
 example, `use super::app_state;` for `state = app_state()`).
-Point every adapter entry point (`run_app::<…>`, `serve_app::<…>` and
-`dispatch_app::<…>`) at `HookedApp`. Its `routes()` must explicitly
+Point every adapter entry point (`run_app::<…>`, `serve_app::<…>`,
+`dispatch_app::<…>`, their `_with_*` variants, and any `build_app()` call inside a
+custom `serve_custom`/`run_custom` callback) at `HookedApp`. Its `routes()` must explicitly
 re-register **all routes, manifest middleware and configured state**; delegating
 metadata alone does not preserve them. `with_manifest_json` above preserves
 manifest introspection. The lazy static parses and serializes the manifest once
 per runtime instance. Cloudflare isolates and reused Spin P3 instances share
-this cached JSON. Axum and Fastly `serve_app` build the application once, so
+this cached JSON. Axum's `run_app` and Fastly's `serve_app` build the application once, so
 `routes()` already runs once there. Classic Fastly Compute starts a fresh
 instance per request and pays the initialization cost each time. EdgeZero's
 spin-sdk 7 `#[http_service]` entry points export WASI P3 HTTP components.

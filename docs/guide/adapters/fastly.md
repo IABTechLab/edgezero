@@ -614,7 +614,7 @@ authority, including equivalent default ports. Origin provenance is
 `RuntimeUri`; absent TLS metadata does not establish an HTTP scheme. Synthetic
 requests and missing, duplicate, invalid or inconsistent Host have no origin.
 
-Use `dispatch_with_registries_and_ingress(app, req, stores, ingress, extend)`
+Use `request::dispatch_with_registries_and_ingress(app, req, stores, ingress, extend)`
 to retain that snapshot after later native mutations. The registry dispatcher
 preserves manifest store IDs through logical resource-link aliases and uses
 each logical config store ID as its entry key. It inserts

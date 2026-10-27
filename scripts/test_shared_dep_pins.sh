@@ -113,6 +113,19 @@ mutate_shared_pin() {
 
 reset_fixture
 check_case unchanged 0
+for file in examples/app-demo/Cargo.toml .github/actions/deploy-fastly/tests/make-smoke-fixture.sh crates/edgezero-cli/src/generator.rs; do
+  reset_fixture
+  rm "$WORK_DIR/repo/$file"
+  diagnostic="$file: violation: no validator pin found"
+  if [[ "$file" == crates/edgezero-cli/src/generator.rs ]]; then
+    diagnostic="$file: violation: no validator seed found"
+  fi
+  check_case "missing pinned file $file" 1 "$diagnostic"
+  if ! grep -Fq 'pin(s) out of sync' "$WORK_DIR/output"; then
+    echo "FAIL missing pinned file $file: remaining checks did not finish" >&2
+    exit 1
+  fi
+done
 for package in validator spin-sdk; do
   reset_fixture
   mutate_shared_pin Cargo.toml "$package" missing
