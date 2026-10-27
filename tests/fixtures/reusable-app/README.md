@@ -220,3 +220,5 @@ These are explicitly unverified, not assertions counted as passed:
 | Deployed eviction, endpoint handles, resource accounting, capacity, and workload gains | Require separately authorized deployment and application telemetry. Local CPU samples are not cross-run CPU benchmarks; finite origin tests do not establish service-wide capacity.      |
 
 No deployment is performed by these fixtures.
+
+Authored provider inputs use `.fixture.toml` filenames; the harness writes runtime manifests into ignored `.runs/` directories.
