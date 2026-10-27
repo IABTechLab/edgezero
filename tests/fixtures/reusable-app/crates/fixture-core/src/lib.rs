@@ -5,11 +5,11 @@ pub mod qualification;
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
 use edgezero_core::http::{Method, Response, response_builder};
 use edgezero_core::key_value_store::KvError;
-use edgezero_core::outbound::OutboundRequest;
+use edgezero_core::outbound::{HttpClient, OutboundRequest};
 use edgezero_core::router::RouterService;
 use edgezero_core::{action, body::Body, context::RequestContext, error::EdgeError};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 static INSTANCE: OnceLock<String> = OnceLock::new();
 static BUILDS: AtomicUsize = AtomicUsize::new(0);
@@ -414,6 +414,9 @@ impl edgezero_core::middleware::Middleware for ObserveRequest {
         mut ctx: RequestContext,
         next: edgezero_core::middleware::Next<'_>,
     ) -> Result<Response, EdgeError> {
+        if let Some(captured) = ctx.extensions().get::<Arc<Mutex<Option<HttpClient>>>>() {
+            *captured.lock().expect("request client capture lock") = ctx.http_client();
+        }
         if ctx.extensions().get::<Observation>().is_none() {
             let candidate = ctx
                 .headers()
@@ -451,7 +454,110 @@ mod tests {
     use edgezero_core::app::Hooks;
     use edgezero_core::body::Body;
     use edgezero_core::http::request_builder;
+    use edgezero_core::outbound::{
+        HttpClient, OutboundBatch, OutboundBatchDriverEvent, OutboundBatchItem, OutboundHttpClient,
+        OutboundResponse, OutboundSlotResult,
+    };
     use futures::executor::block_on;
+    use std::sync::Mutex;
+
+    struct NamedClient(&'static str);
+
+    #[async_trait::async_trait(?Send)]
+    impl OutboundHttpClient for NamedClient {
+        async fn send(&self, _request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
+            Err(EdgeError::bad_request(self.0))
+        }
+
+        fn start_batch_until(
+            &self,
+            requests: Vec<OutboundRequest>,
+            _cutoff: edgezero_core::Deadline,
+        ) -> OutboundBatch {
+            let name = self.0;
+            let count = requests.len();
+            OutboundBatch::from_driver(
+                count,
+                futures::stream::iter(requests.into_iter().enumerate().map(
+                    move |(index, _request)| {
+                        OutboundBatchDriverEvent::Item(OutboundBatchItem::new(
+                            index,
+                            OutboundSlotResult::new(
+                                std::time::Duration::ZERO,
+                                Err(EdgeError::bad_request(name)),
+                            ),
+                        ))
+                    },
+                )),
+            )
+        }
+    }
+
+    #[test]
+    fn capture_keeps_effective_client_for_success_and_rendered_handler_errors() {
+        for state_client in [false, true] {
+            let mut router = RouterService::builder()
+                .middleware(ObserveRequest)
+                .get("/cookies", cookies)
+                .get("/error", rendered_error);
+            if state_client {
+                router = router.with_state(HttpClient::with_client(NamedClient("state client")));
+            }
+            let app = App::new(router.build());
+            let mut captures = Vec::new();
+            for (path, expected_status) in [("/cookies", 200), ("/error", 400)] {
+                let captured: Arc<Mutex<Option<HttpClient>>> = Arc::new(Mutex::new(None));
+                let mut request = request_builder().uri(path).body(Body::empty()).unwrap();
+                request
+                    .extensions_mut()
+                    .insert(HttpClient::with_client(NamedClient("request client")));
+                request.extensions_mut().insert(Arc::clone(&captured));
+                let response = block_on(app.router().oneshot(request)).unwrap();
+                assert_eq!(response.status().as_u16(), expected_status);
+                captures.push(captured);
+            }
+            for captured in captures {
+                let client = captured
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("capture before handler");
+                let error =
+                    block_on(client.send(OutboundRequest::get("https://example.com").unwrap()))
+                        .unwrap_err();
+                assert_eq!(
+                    error.message(),
+                    if state_client {
+                        "state client"
+                    } else {
+                        "request client"
+                    }
+                );
+                assert!(
+                    captured.lock().unwrap().take().is_none(),
+                    "one request-owned transfer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn capture_does_not_create_a_client_for_absent_or_unrouted_requests() {
+        let app = App::build::<FixtureApp>(edgezero_core::PlatformMetadata::default()).unwrap();
+        for (path, status) in [("/cookies", 200), ("/unknown", 404)] {
+            let captured: Arc<Mutex<Option<HttpClient>>> = Arc::new(Mutex::new(None));
+            let mut request = request_builder().uri(path).body(Body::empty()).unwrap();
+            request.extensions_mut().insert(Arc::clone(&captured));
+            if status == 404 {
+                request
+                    .extensions_mut()
+                    .insert(HttpClient::with_client(NamedClient("not routed")));
+            }
+            let response = block_on(app.router().oneshot(request)).unwrap();
+            assert_eq!(response.status().as_u16(), status);
+            assert!(captured.lock().unwrap().take().is_none());
+        }
+    }
 
     #[test]
     fn retained_app_retries_failed_configuration_and_reuses_success() {

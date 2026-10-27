@@ -114,6 +114,34 @@ tests, all nine JS fixture tests, docs format/lint/build and the documentation/d
 The actual-client Fastly suite again records twelve passing probes and eighteen origin requests,
 with the required unqualified exit 2; this does not replace the earlier failed SDK timing results.
 
+### Fixture Client Selection Checkpoint (2026-10-26)
+
+Remove the Fastly custom fixture's manual clock-only client construction and prepare-time
+HTTP-client override. Its request-local capture retains the actual `RequestContext::http_client()`
+before the observation middleware awaits `Next`; routed handler errors therefore keep the client
+even though the framework renders their response outside that middleware. The finalizer transfers
+the captured handle through the existing owned delivery result. Post-send still requires committed
+application delivery and the existing local-origin policy, and a missing capture fails explicitly
+instead of constructing another client. Detached, no-attempt, abort and fallback gates are unchanged.
+
+Use the existing typed request-extension payload `Arc<Mutex<Option<HttpClient>>>`, not another
+transport, public factory or compatibility API. Each callback allocates its own capture and releases
+the lock before awaiting. App-state client precedence remains unchanged. Tests cover success/error
+rendering, effective request/state client selection, one consuming transfer, two-request isolation,
+and absent/unrouted clients without a fallback transport. The capture regression failed before
+middleware integration and passes afterward. The actual local Fastly smoke suite preserves
+progressive/large delivery, source-error reporting, post-send work, fallback exclusion and retained
+callback behavior. This is fixture preparation for the paired-time/full-protocol migration, not
+completion of P1/D1 or promotion of any acceptance/hosted qualification leg. Production APIs,
+default clients, clocks, caps, direct image optimization and frozen digests are unchanged.
+
+Verification passes all five primary Rust gates (2,272 workspace tests, one existing ignored),
+all 23 fixture-core tests with qualification enabled, fixture-core/Fastly guest Clippy, and
+all four fixture target builds. The real local Fastly smoke suite exits 0 with its existing
+progressive/source-error/post-send/fallback assertions intact. Docs format/lint/build and
+the outbound documentation/inventory guards pass; the inventory remains unqualified. Two
+independent read-only reviews found no actionable issue in the fixture implementation.
+
 ### Existing-Batch Scope Checkpoint (2026-10-26)
 
 Implement the private D1a ownership boundary for complete current batch drivers, without
@@ -1509,7 +1537,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-22       | F9a                  | Follow-up; individual SHOULD decisions explicit                           | **Local implementation:** [unified fallible assembly/failure delivery](#f9a-assembly-foundation-checkpoint), including adopted macro/serverless parts.                                                                                                                            | Consumer acceptance and exact-candidate qualification; no compatibility assembly path to add.                                                              |
 | EZ-23       | F9b                  | Follow-up                                                                 | **Local implementation:** [assembled-App Axum/TCP helpers](#f9b-assembled-app-tcp-checkpoint), twelve upstream sentinels.                                                                                                                                                         | Criterion 12's conditional begun-request portion and criterion 13's consumer route/parity evidence.                                                        |
 | EZ-24       | P6; F10a/F10b/F10c   | Host/WASI publication and each optional extension need separate decisions | **Not implemented as the proposed published utility; adoption pending.** Existing private doubles are not P6.                                                                                                                                                                     | Attributed applicability decisions, P1-P5 semantics, then selected published-client/cancellation/demo/JS work. Pending is not approved deferral.           |
-| EZ-25       | Q1/Q2                | Documentation updates accompany each affected behavior                    | **Partial:** [mandatory forwarding doctest](#q1q2-forwarding-documentation-checkpoint), shipped API/demo/template/docs changes and drift guards.                                                                                                                                  | Complete source-to-fix coverage and new-protocol migration, mode tests, selected checker decisions and CI/runtime matrix.                                  |
+| EZ-25       | Q1/Q2                | Documentation updates accompany each affected behavior                    | **Partial:** [fixture client selection](#fixture-client-selection-checkpoint-2026-10-26), [mandatory forwarding doctest](#q1q2-forwarding-documentation-checkpoint), shipped API/demo/template/docs changes and drift guards.                                                                                                                       | Complete source-to-fix coverage and new-protocol migration, mode tests, selected checker decisions and CI/runtime matrix.                                  |
 | EZ-Q1       | G1; Q3-Q5            | Required blocking, approved promoted, and confirmed-present parts only    | **Preparation only:** inventory/checker, [evidence assembly](#q3-evidence-preparation-checkpoint), [runbook source](#q2-runbook-source-preparation-checkpoint).                                                                                                                   | Executable leg bindings and scope decisions, remaining sources, candidate freeze, accepted Q4a package, authorized Q4b runs and durable passing Q5 record. |
 
 This summary inherits the normative-range-to-leaf ownership table in

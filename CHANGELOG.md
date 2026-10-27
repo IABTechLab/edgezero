@@ -76,6 +76,10 @@ separately from the portable API and must be considered when declaring required 
 
 ### Fastly Batch Lifetimes
 
+- Retain the fixture callback's effective injected HTTP client for post-delivery work, including
+  routed handler errors. Remove its manual Fastly client construction and prepare-time override;
+  preserve state precedence, request isolation, streaming and fallback/no-attempt gates.
+
 - Give each custom callback a fresh private batch owner; standalone send helpers establish a
   fallback owner, while nested helpers reuse the callback. Resolve ownership per operation so
   retained clients work in the next callback without retaining the previous request's scope.

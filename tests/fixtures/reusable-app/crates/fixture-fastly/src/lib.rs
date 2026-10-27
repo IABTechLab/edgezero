@@ -2,7 +2,6 @@ use edgezero_adapter_fastly::delivery::{
     FastlyNoAttemptReason, FastlyRequestDelivery, FastlyResponseCommitState,
 };
 use edgezero_adapter_fastly::lifecycle::{Sandbox, serve_custom};
-use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
 use edgezero_adapter_fastly::request::{
     send_assembly_error, send_request_with_registries_and_hooks,
 };
@@ -273,8 +272,8 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
     initialized(&obs, &token);
     let app = state.state().unwrap();
     let attempts = state.initialization_attempts();
-    let client = HttpClient::with_client(FastlyOutboundClient::with_clock(app.monotonic_clock()));
-    let request_client = client.clone();
+    let client = Arc::new(Mutex::new(None::<HttpClient>));
+    let request_client = Arc::clone(&client);
     let delivered = send_request_with_registries_and_hooks(
         app,
         stores,
@@ -291,7 +290,7 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
                     .headers_mut()
                     .insert("trailer", "fixture-trailer".parse().unwrap());
             }
-            client
+            client.lock().expect("request client capture lock").take()
         },
     );
     delivery_observed(&delivered, &obs, &token);
@@ -330,6 +329,8 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
         _ => return Err(Error::msg("unsupported request delivery disposition")),
     };
     if let Some(uri) = post_send {
+        let client =
+            client.ok_or_else(|| Error::msg("routed fixture did not capture HTTP client"))?;
         let outcome = block_on(async {
             let uri: Uri = uri.parse().map_err(EdgeError::internal)?;
             if !fixture_core::is_loopback_http(&uri) {

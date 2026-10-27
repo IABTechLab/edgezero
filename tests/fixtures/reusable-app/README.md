@@ -635,6 +635,12 @@ The `custom_` versions use the same three lifetimes with request preparation,
 response finalization, adapter-owned streaming, and post-send work. A/B/C remain
 short labels in experiment reports only.
 
+Custom callbacks retain the actual dispatch-selected HTTP client for post-send work, rather
+than constructing a second client or overriding request injection in preparation. A request-local
+capture is filled before middleware awaits the handler, so routed handler errors still retain
+the selected client. State-client precedence is unchanged. Detached/fallback delivery keeps its
+existing post-send restrictions; a missing capture never creates a substitute transport.
+
 With the pinned Viceroy installed, run a small synthetic comparison:
 
 ```sh
