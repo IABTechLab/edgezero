@@ -1,5 +1,5 @@
 #![cfg_attr(
-    feature = "fastly",
+    any(feature = "fastly", test),
     expect(
         clippy::self_named_module_files,
         reason = "retain the repository module-file convention despite contradictory restriction lints"

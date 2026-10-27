@@ -5,6 +5,10 @@
     reason = "wasm_bindgen_test functions are tests, but Clippy does not classify the generated wrappers as tests"
 )]
 
+#[cfg(all(test, feature = "cloudflare", target_arch = "wasm32"))]
+#[path = "../src/test_runtime.rs"]
+mod test_runtime;
+
 // Compile-time check: CloudflareSecretStore implements SecretStore.
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 mod secret_store_compile_check {
@@ -31,6 +35,8 @@ mod secret_store_compile_check {
     )
 )]
 mod tests {
+    use crate::test_runtime::NumericTimeoutGuard;
+
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -58,13 +64,11 @@ mod tests {
     use edgezero_core::router::RouterService;
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::stream;
-    use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+    use wasm_bindgen_test::wasm_bindgen_test;
     use worker::js_sys::{Function, Object, Reflect};
     use worker::wasm_bindgen::{JsCast as _, JsValue};
     use worker::worker_sys::Context as WorkerSysContext;
     use worker::{Context, Env, Method as CfMethod, Request as CfRequest, RequestInit};
-
-    wasm_bindgen_test_configure!(run_in_browser);
 
     struct FixedConfigStore(&'static str);
 
@@ -224,10 +228,20 @@ mod tests {
         }
 
         let url = format!("https://example.com{path}");
-        CfRequest::new_with_init(&url, &init).expect("cf request")
+        let request = CfRequest::new_with_init(&url, &init).expect("cf request");
+        assert_eq!(
+            request.inner().body().is_some(),
+            body.is_some(),
+            "request fixture must preserve native body presence before conversion"
+        );
+        request
     }
 
-    fn test_env_ctx() -> (Env, Context) {
+    fn test_env_ctx() -> (Env, Context, NumericTimeoutGuard) {
+        let timers = NumericTimeoutGuard::install();
+        Function::new_no_args(include_str!("worker_runtime.js"))
+            .call0(&JsValue::UNDEFINED)
+            .expect("install guest-only Workers stream fixture");
         let env = Object::new().unchecked_into::<Env>();
         let context_object = Object::new();
         let wait_until = Function::new_with_args("_promise", "return undefined;");
@@ -238,7 +252,7 @@ mod tests {
         )
         .expect("install test waitUntil");
         let js_context = context_object.unchecked_into::<WorkerSysContext>();
-        (env, Context::new(js_context))
+        (env, Context::new(js_context), timers)
     }
 
     #[cfg(feature = "test-utils")]
@@ -263,7 +277,7 @@ mod tests {
         let app = App::build::<TestApp>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
             .expect("prebuilt application");
         for body in [b"first".as_slice(), b"second".as_slice()] {
-            let (env, ctx) = test_env_ctx();
+            let (env, ctx, _timers) = test_env_ctx();
             let request = cf_request(CfMethod::Post, "/mirror", Some(body));
             let mut response =
                 edgezero_adapter_cloudflare::dispatch_app::<TestApp>(&app, request, env, ctx)
@@ -278,7 +292,7 @@ mod tests {
     async fn dispatch_passes_request_body_to_handlers() {
         let app = build_test_app();
         let req = cf_request(CfMethod::Post, "/mirror", Some(b"echo"));
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
 
         let mut response = CloudflareService::new(&app)
             .dispatch(req, env, ctx)
@@ -294,7 +308,7 @@ mod tests {
     async fn dispatch_runs_router_and_returns_response() {
         let app = build_test_app();
         let req = cf_request(CfMethod::Get, "/uri", None);
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
 
         let mut response = CloudflareService::new(&app)
             .dispatch(req, env, ctx)
@@ -310,7 +324,7 @@ mod tests {
     async fn dispatch_streaming_route_preserves_chunks() {
         let app = build_test_app();
         let req = cf_request(CfMethod::Get, "/stream", None);
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
 
         let mut response = CloudflareService::new(&app)
             .dispatch(req, env, ctx)
@@ -325,7 +339,7 @@ mod tests {
     #[wasm_bindgen_test]
     async fn into_core_request_preserves_method_uri_headers_body_and_context() {
         let req = cf_request(CfMethod::Post, "/mirror?foo=bar", Some(b"payload"));
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
 
         let core_request = into_core_request(req, env, ctx)
             .await
@@ -355,7 +369,7 @@ mod tests {
     async fn service_with_config_handle_injects_handle() {
         let app = build_test_app();
         let req = cf_request(CfMethod::Get, "/config-value", None);
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
         let handle = ConfigStoreHandle::new(Arc::new(FixedConfigStore("hello from cf test")));
 
         let mut response = CloudflareService::new(&app)
@@ -410,23 +424,15 @@ mod tests {
 
         // The empty environment cannot open this declared binding. It must
         // stay registered with a typed error rather than look unconfigured.
-        let mut app = App::new(
+        let app = App::new(
             RouterService::builder()
                 .get("/config-value", read_declared_config)
                 .build(),
         );
-        // Browser fixtures lack Workers' FixedLengthStream. A bodyless
-        // error renderer isolates binding failures from that host-only API.
-        app.set_error_response_renderer(|error| {
-            response_builder()
-                .status(error.status())
-                .body(Body::empty())
-                .expect("error response")
-        });
         let req = cf_request(CfMethod::Get, "/config-value", None);
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
 
-        let response = CloudflareService::new(&app)
+        let mut response = CloudflareService::new(&app)
             .with_config("nonexistent_binding")
             .dispatch(req, env, ctx)
             .await
@@ -436,13 +442,25 @@ mod tests {
             response.status_code(),
             StatusCode::SERVICE_UNAVAILABLE.as_u16()
         );
+        let bytes = response.bytes().await.expect("default config error body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "error": {
+                    "kind": "service_unavailable",
+                    "message": "config store is unavailable",
+                    "status": 503_u16
+                }
+            })
+        );
     }
 
     #[wasm_bindgen_test]
     async fn service_without_config_keeps_registry_absent() {
         let app = build_test_app();
         let req = cf_request(CfMethod::Get, "/has-config", None);
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
 
         let mut response = CloudflareService::new(&app)
             .dispatch(req, env, ctx)
@@ -662,7 +680,7 @@ mod tests {
             }
         }));
         let req = cf_request(CfMethod::Get, "/clock", None);
-        let (env, ctx) = test_env_ctx();
+        let (env, ctx, _timers) = test_env_ctx();
 
         let response = CloudflareService::new(&app)
             .dispatch(req, env, ctx)
@@ -809,7 +827,8 @@ mod tests {
             max_body_bytes: usize,
             read_budget: Duration,
             grant_drops: &Arc<AtomicUsize>,
-        ) -> (App, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        ) -> (App, Arc<AtomicUsize>, Arc<AtomicUsize>, NumericTimeoutGuard) {
+            let timers = NumericTimeoutGuard::install();
             let (mut app, handler_calls, middleware_calls) = guarded_fallback_app();
             let observed_grant_drops = Arc::clone(grant_drops);
             app.set_ingress_admission_policy(move |head| {
@@ -834,7 +853,7 @@ mod tests {
                     ),
                 }
             });
-            (app, handler_calls, middleware_calls)
+            (app, handler_calls, middleware_calls, timers)
         }
 
         fn terminal_headers(marker: &'static str) -> HeaderMap {
@@ -1253,7 +1272,7 @@ mod tests {
                 let grant_drops = Arc::new(AtomicUsize::new(0));
                 let source_drops = Arc::new(AtomicUsize::new(0));
                 let body_polls = Arc::new(AtomicUsize::new(0));
-                let (app, handler_calls, middleware_calls) =
+                let (app, handler_calls, middleware_calls, _timers) =
                     fallback_app(4, Duration::from_secs(30), &grant_drops);
                 let source = tracked_stream(
                     vec![Bytes::from_static(b"ab"), Bytes::from_static(b"cd")],
@@ -1292,7 +1311,7 @@ mod tests {
                 let grant_drops = Arc::new(AtomicUsize::new(0));
                 let source_drops = Arc::new(AtomicUsize::new(0));
                 let body_polls = Arc::new(AtomicUsize::new(0));
-                let (app, handler_calls, middleware_calls) =
+                let (app, handler_calls, middleware_calls, _timers) =
                     fallback_app(4, Duration::from_secs(30), &grant_drops);
                 let source = tracked_stream(
                     vec![Bytes::from_static(b"abcd"), Bytes::from_static(b"e")],
@@ -1313,7 +1332,11 @@ mod tests {
                 assert_terminal_response(
                     response,
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    terminal_headers("overflow"),
+                    {
+                        let mut headers = terminal_headers("overflow");
+                        headers.insert("content-length", HeaderValue::from_static("28"));
+                        headers
+                    },
                     b"cloudflare overflow\0response",
                 )
                 .await;
@@ -1327,10 +1350,10 @@ mod tests {
         #[wasm_bindgen_test]
         async fn standard_service_enforces_fallback_overflow() {
             let grant_drops = Arc::new(AtomicUsize::new(0));
-            let (app, handler_calls, middleware_calls) =
+            let (app, handler_calls, middleware_calls, _fallback_timers) =
                 fallback_app(4, Duration::from_secs(30), &grant_drops);
             let req = cf_request(CfMethod::Post, "/missing", Some(b"abcde"));
-            let (env, ctx) = test_env_ctx();
+            let (env, ctx, _timers) = test_env_ctx();
 
             let response = CloudflareService::new(&app)
                 .dispatch(req, env, ctx)
@@ -1340,7 +1363,11 @@ mod tests {
             assert_worker_response(
                 response,
                 StatusCode::UNPROCESSABLE_ENTITY,
-                terminal_headers("overflow"),
+                {
+                    let mut headers = terminal_headers("overflow");
+                    headers.insert("content-length", HeaderValue::from_static("28"));
+                    headers
+                },
                 b"cloudflare overflow\0response",
             )
             .await;
@@ -1354,7 +1381,7 @@ mod tests {
                 let grant_drops = Arc::new(AtomicUsize::new(0));
                 let source_drops = Arc::new(AtomicUsize::new(0));
                 let body_polls = Arc::new(AtomicUsize::new(0));
-                let (app, handler_calls, middleware_calls) =
+                let (app, handler_calls, middleware_calls, _timers) =
                     fallback_app(4, Duration::from_millis(100), &grant_drops);
                 let source = pending_stream(&grant_drops, &source_drops, &body_polls);
 
@@ -1370,7 +1397,11 @@ mod tests {
                 assert_terminal_response(
                     response,
                     StatusCode::GATEWAY_TIMEOUT,
-                    terminal_headers("timeout"),
+                    {
+                        let mut headers = terminal_headers("timeout");
+                        headers.insert("content-length", HeaderValue::from_static("28"));
+                        headers
+                    },
                     b"cloudflare timeout response\n",
                 )
                 .await;
@@ -1426,6 +1457,7 @@ mod tests {
                     {
                         let mut headers = HeaderMap::new();
                         headers.insert("x-ingress-refusal", HeaderValue::from_static("saturated"));
+                        headers.insert("content-length", HeaderValue::from_static("23"));
                         headers
                     },
                     b"cloudflare unavailable\n",
@@ -1444,7 +1476,7 @@ mod tests {
             let grant_drops = Arc::new(AtomicUsize::new(0));
             let source_drops = Arc::new(AtomicUsize::new(0));
             let body_polls = Arc::new(AtomicUsize::new(0));
-            let (app, handler_calls, middleware_calls) =
+            let (app, handler_calls, middleware_calls, _timers) =
                 fallback_app(4, Duration::from_secs(30), &grant_drops);
             let source = error_stream(&grant_drops, &source_drops, &body_polls);
 
@@ -1475,7 +1507,7 @@ mod tests {
             let grant_drops = Arc::new(AtomicUsize::new(0));
             let source_drops = Arc::new(AtomicUsize::new(0));
             let body_polls = Arc::new(AtomicUsize::new(0));
-            let (app, handler_calls, middleware_calls) =
+            let (app, handler_calls, middleware_calls, _timers) =
                 fallback_app(4, Duration::from_secs(30), &grant_drops);
             let source = pending_stream(&grant_drops, &source_drops, &body_polls);
             let mut dispatch = Box::pin(dispatch_ingress_stream_for_test(

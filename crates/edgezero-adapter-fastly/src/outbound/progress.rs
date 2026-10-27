@@ -103,6 +103,26 @@ impl<T: Transport> Clone for Progress<T> {
 }
 
 impl<T: Transport + 'static> Progress<T> {
+    pub(super) fn body(&self, handle: T::Body, budget: DispatchBudget) -> BodyStream {
+        let lease = self.register(
+            budget,
+            Phase::Body {
+                handle: Some(handle),
+                next: None,
+                requested: false,
+            },
+        );
+        let progress = self.clone();
+        stream! {
+            loop {
+                let read = poll_fn(|cx| lease.poll_body(cx));
+                let bytes = if progress.driving.get() { read.await } else { progress.drive(read).await? }?;
+                if bytes.is_empty() { return; }
+                yield Ok(bytes);
+            }
+        }.boxed_local()
+    }
+
     pub(super) async fn drive<F>(&self, future: F) -> Result<F::Output, EdgeError>
     where
         F: Future,
@@ -126,6 +146,10 @@ impl<T: Transport + 'static> Progress<T> {
         .await
     }
 
+    pub(super) fn head(&self, pending: T::Pending, budget: DispatchBudget) -> Lease<T> {
+        self.register(budget, Phase::Head(Some(pending)))
+    }
+
     pub(super) fn new(transport: T, clock: MonotonicClock, previous: MonotonicInstant) -> Self {
         Self {
             driving: Rc::new(Cell::new(false)),
@@ -138,30 +162,6 @@ impl<T: Transport + 'static> Progress<T> {
                 transport,
             })),
         }
-    }
-
-    pub(super) fn head(&self, pending: T::Pending, budget: DispatchBudget) -> Lease<T> {
-        self.register(budget, Phase::Head(Some(pending)))
-    }
-
-    pub(super) fn body(&self, handle: T::Body, budget: DispatchBudget) -> BodyStream {
-        let lease = self.register(
-            budget,
-            Phase::Body {
-                handle: Some(handle),
-                next: None,
-                requested: false,
-            },
-        );
-        let progress = self.clone();
-        stream! {
-            loop {
-                let read = poll_fn(|cx| lease.poll_body(cx));
-                let bytes = if progress.driving.get() { read.await } else { progress.drive(read).await? }?;
-                if bytes.is_empty() { return; }
-                yield Ok(bytes);
-            }
-        }.boxed_local()
     }
 
     fn register(&self, budget: DispatchBudget, phase: Phase<T>) -> Lease<T> {
@@ -182,26 +182,6 @@ impl<T: Transport + 'static> Progress<T> {
 }
 
 impl<T: Transport + 'static> Lease<T> {
-    pub(super) async fn receive(self) -> Result<T::Head, EdgeError> {
-        poll_fn(|cx| {
-            let mut state = self.progress.state.borrow_mut();
-            let slot = state
-                .slots
-                .get_mut(self.index)
-                .and_then(Option::as_mut)
-                .ok_or_else(missing_slot)?;
-            match &mut slot.phase {
-                Phase::HeadReady(result) => Poll::Ready(result.take().ok_or_else(missing_slot)?),
-                Phase::Head(_) => {
-                    slot.waker = Some(cx.waker().clone());
-                    Poll::Pending
-                }
-                Phase::Body { .. } => Poll::Ready(Err(missing_slot())),
-            }
-        })
-        .await
-    }
-
     fn poll_body(&self, cx: &mut Context<'_>) -> Poll<Result<Bytes, EdgeError>> {
         let mut state = self.progress.state.borrow_mut();
         let slot = state
@@ -222,6 +202,26 @@ impl<T: Transport + 'static> Lease<T> {
         slot.waker = Some(cx.waker().clone());
         Poll::Pending
     }
+
+    pub(super) async fn receive(self) -> Result<T::Head, EdgeError> {
+        poll_fn(|cx| {
+            let mut state = self.progress.state.borrow_mut();
+            let slot = state
+                .slots
+                .get_mut(self.index)
+                .and_then(Option::as_mut)
+                .ok_or_else(missing_slot)?;
+            match &mut slot.phase {
+                Phase::HeadReady(result) => Poll::Ready(result.take().ok_or_else(missing_slot)?),
+                Phase::Head(_) => {
+                    slot.waker = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+                Phase::Body { .. } => Poll::Ready(Err(missing_slot())),
+            }
+        })
+        .await
+    }
 }
 
 #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
@@ -234,6 +234,37 @@ impl<T: Transport> Drop for Lease<T> {
 }
 
 impl<T: Transport> State<T> {
+    fn poll_head(&mut self, index: usize) -> Result<(), EdgeError> {
+        let slot = self
+            .slots
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or_else(missing_slot)?;
+        let Phase::Head(owned) = &mut slot.phase else {
+            return Err(missing_slot());
+        };
+        let pending = owned.take().ok_or_else(missing_slot)?;
+        match self.transport.poll_head(pending, slot.budget, &self.clock) {
+            HeadPoll::Pending(waiting) => slot.phase = Phase::Head(Some(waiting)),
+            HeadPoll::Ready(result) => {
+                slot.phase = Phase::HeadReady(Some(result));
+                if let Some(waker) = slot.waker.take() {
+                    waker.wake();
+                }
+            }
+        }
+        let now = self.sample()?;
+        let polled = self
+            .slots
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or_else(missing_slot)?;
+        if polled.budget.deadline.is_expired_at(now) {
+            expire(polled);
+        }
+        Ok(())
+    }
+
     fn sample(&mut self) -> Result<MonotonicInstant, EdgeError> {
         let now = self.clock.now();
         if now < self.previous {
@@ -243,6 +274,54 @@ impl<T: Transport> State<T> {
         }
         self.previous = now;
         Ok(now)
+    }
+
+    fn service(&mut self, index: usize) -> Result<(), EdgeError> {
+        let slot = self
+            .slots
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or_else(missing_slot)?;
+        if slot.budget.deadline.is_expired_at(self.previous) {
+            expire(slot);
+            return Ok(());
+        }
+        match slot.phase {
+            Phase::Head(_) => self.poll_head(index)?,
+            Phase::Body { .. } => {
+                let Phase::Body {
+                    handle,
+                    next,
+                    requested,
+                } = &mut slot.phase
+                else {
+                    return Err(missing_slot());
+                };
+                let body = handle.as_mut().ok_or_else(missing_slot)?;
+                let result = self
+                    .transport
+                    .read_body(body, READ_BYTES, slot.budget, &self.clock);
+                *requested = false;
+                if result.as_ref().map_or(true, Bytes::is_empty) {
+                    *handle = None;
+                }
+                *next = Some(result);
+                if let Some(waker) = slot.waker.take() {
+                    waker.wake();
+                }
+            }
+            Phase::HeadReady(_) => return Err(missing_slot()),
+        }
+        let now = self.sample()?;
+        let serviced = self
+            .slots
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or_else(missing_slot)?;
+        if serviced.budget.deadline.is_expired_at(now) {
+            expire(serviced);
+        }
+        Ok(())
     }
 
     fn turn(&mut self) -> Result<bool, EdgeError> {
@@ -347,85 +426,6 @@ impl<T: Transport> State<T> {
         self.service(index)?;
         Ok(true)
     }
-
-    fn service(&mut self, index: usize) -> Result<(), EdgeError> {
-        let slot = self
-            .slots
-            .get_mut(index)
-            .and_then(Option::as_mut)
-            .ok_or_else(missing_slot)?;
-        if slot.budget.deadline.is_expired_at(self.previous) {
-            expire(slot);
-            return Ok(());
-        }
-        match slot.phase {
-            Phase::Head(_) => self.poll_head(index)?,
-            Phase::Body { .. } => {
-                let Phase::Body {
-                    handle,
-                    next,
-                    requested,
-                } = &mut slot.phase
-                else {
-                    return Err(missing_slot());
-                };
-                let body = handle.as_mut().ok_or_else(missing_slot)?;
-                let result = self
-                    .transport
-                    .read_body(body, READ_BYTES, slot.budget, &self.clock);
-                *requested = false;
-                if result.as_ref().map_or(true, Bytes::is_empty) {
-                    *handle = None;
-                }
-                *next = Some(result);
-                if let Some(waker) = slot.waker.take() {
-                    waker.wake();
-                }
-            }
-            Phase::HeadReady(_) => return Err(missing_slot()),
-        }
-        let now = self.sample()?;
-        let serviced = self
-            .slots
-            .get_mut(index)
-            .and_then(Option::as_mut)
-            .ok_or_else(missing_slot)?;
-        if serviced.budget.deadline.is_expired_at(now) {
-            expire(serviced);
-        }
-        Ok(())
-    }
-
-    fn poll_head(&mut self, index: usize) -> Result<(), EdgeError> {
-        let slot = self
-            .slots
-            .get_mut(index)
-            .and_then(Option::as_mut)
-            .ok_or_else(missing_slot)?;
-        let Phase::Head(owned) = &mut slot.phase else {
-            return Err(missing_slot());
-        };
-        let pending = owned.take().ok_or_else(missing_slot)?;
-        match self.transport.poll_head(pending, slot.budget, &self.clock) {
-            HeadPoll::Pending(waiting) => slot.phase = Phase::Head(Some(waiting)),
-            HeadPoll::Ready(result) => {
-                slot.phase = Phase::HeadReady(Some(result));
-                if let Some(waker) = slot.waker.take() {
-                    waker.wake();
-                }
-            }
-        }
-        let now = self.sample()?;
-        let polled = self
-            .slots
-            .get_mut(index)
-            .and_then(Option::as_mut)
-            .ok_or_else(missing_slot)?;
-        if polled.budget.deadline.is_expired_at(now) {
-            expire(polled);
-        }
-        Ok(())
-    }
 }
 
 fn expire<T>(slot: &mut Slot<T>) -> bool
@@ -500,9 +500,9 @@ mod tests {
 
     struct Handle {
         id: u32,
-        remaining: usize,
         opaque: bool,
         released: Rc<Cell<usize>>,
+        remaining: usize,
     }
     #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
     impl Drop for Handle {
@@ -513,19 +513,19 @@ mod tests {
 
     #[derive(Default)]
     struct Observations {
-        reads: Vec<u32>,
-        domains: Vec<Vec<u32>>,
-        waits: Vec<u32>,
-        polls: Vec<u32>,
-        permission: Option<u32>,
-        invalid_index: bool,
         complete_at: Option<MonotonicInstant>,
+        domains: Vec<Vec<u32>>,
+        invalid_index: bool,
+        permission: Option<u32>,
+        polls: Vec<u32>,
+        reads: Vec<u32>,
         source_error: bool,
         spurious_heads: usize,
+        waits: Vec<u32>,
     }
     struct TestTransport {
-        observations: Rc<RefCell<Observations>>,
         now: Arc<Mutex<MonotonicInstant>>,
+        observations: Rc<RefCell<Observations>>,
     }
     impl Transport for TestTransport {
         type Body = Handle;

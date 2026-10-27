@@ -81,6 +81,38 @@ its inventory bindings rather than reporting a percentage from checkbox or test 
 parent task only after every applicable child and acceptance leg closes. Requirements/digest
 changes need explicit review; neither a dashboard edit nor a passing checker supplies approval.
 
+### Post-Merge Guest CI Repair (2026-10-26)
+
+At merge `b7a288d2`, the primary workspace gates passed but two additional CI jobs failed.
+The Fastly CLI-only lint configuration exposed declaration ordering hidden by the runtime
+feature's ordering exception. Reorder declarations without changing their bodies and apply
+the existing conflicting module-file lint exception to the matching native test configuration.
+Do not weaken ordering checks or rewrite the earlier source-hashed multiplexer evidence.
+
+Cloudflare's browser fixture lacked Workers' `FixedLengthStream`; its native request-body
+presence check also failed before entering adapter conversion. Run the guest contracts on
+the pinned Node host already used by the library tests, retaining the native body-presence
+tripwire and sharing the existing scoped numeric-timer guard. A test-only fixed-length stream
+model exercises the response writer without a production fallback, bodyless error renderer
+or request-body polyfill. Its nine JS tests cover exact/zero/bigint lengths, both length errors,
+backpressure, reader cancellation, writer abort, invalid inputs and existing-host preservation.
+CI runs that suite alongside the existing nonzero WASM contract sentinel.
+
+Keep exact response-header map comparisons and explicitly expect canonical buffered lengths
+on overflow, timeout and admission-refusal responses. Keep exact payload, status, admission,
+source-release and completion assertions. Local Node execution passes all 29 contract cases;
+the prior Firefox run and its body-presence failure are diagnostic evidence, not passing
+provider qualification. No production response-conversion, SDK pin, capability or frozen
+requirements/interface change is introduced. Full head-first/callback ownership integration,
+dispatch-slack retirement, candidate freeze and hosted qualification remain open.
+
+Local repair verification passes all five primary Rust gates (2,257 workspace tests, one
+existing ignored test), Fastly CLI-only/default/test-utils Clippy, both Cloudflare WASM Clippy
+configurations, 210 Fastly WASI unit tests, 29 Cloudflare contracts, 48 Cloudflare library guest
+tests, all nine JS fixture tests, docs format/lint/build and the documentation/dependency guards.
+The actual-client Fastly suite again records twelve passing probes and eighteen origin requests,
+with the required unqualified exit 2; this does not replace the earlier failed SDK timing results.
+
 ### Current-Operation Multiplexer Checkpoint (2026-10-25)
 
 Implement the requester's [scoped approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-fastly-current-operation-multiplexer-approval-2026-10-25)

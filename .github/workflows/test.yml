@@ -296,6 +296,21 @@ jobs:
       - name: Add wasm target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Retrieve Node version for Cloudflare guest contracts
+        if: matrix.adapter == 'cloudflare'
+        id: guest-node-version
+        run: echo "version=$(awk '$1 == "nodejs" {print $2}' .tool-versions)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node for Cloudflare guest contracts
+        if: matrix.adapter == 'cloudflare'
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.guest-node-version.outputs.version }}
+
+      - name: Verify Cloudflare guest stream fixture
+        if: matrix.adapter == 'cloudflare'
+        run: node --test crates/edgezero-adapter-cloudflare/tests/worker_runtime.test.mjs
+
       - name: Resolve wasm-bindgen CLI version
         if: matrix.adapter == 'cloudflare'
         id: wasm-bindgen-version

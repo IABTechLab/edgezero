@@ -31,6 +31,19 @@ separately from the portable API and must be considered when declaring required 
 - Align bounded Axum secret reads with the prefixed uppercase environment mapping
   used by unbounded reads, preserving independent byte caps and deadlines.
 
+### Guest Validation
+
+- Keep Fastly's declaration ordering valid in CLI-only tests, where the runtime-feature
+  ordering exception does not apply. Extend the existing conflicting module-file lint
+  exception to native test builds without changing scheduling or transport behavior.
+- Run Cloudflare guest contracts on pinned Node, matching the library guest suite. Assert
+  native request-body presence before conversion, reuse scoped numeric-timer guards, and
+  model only the fixed-length byte-stream surface missing from that host in a test fixture.
+- Test exact bytes, length violations, backpressure, cancellation, abort and large declared
+  lengths. Preserve exact canonical response-header assertions and exercise the default
+  configuration-error renderer rather than a bodyless workaround. Guest tests are not
+  Workers-host qualification; production transport and capability declarations are unchanged.
+
 ### Forwarding Documentation Gate
 
 - Compile the forwarding example directly from the guide using offline/locked Cargo artifacts
