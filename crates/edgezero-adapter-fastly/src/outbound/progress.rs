@@ -1,16 +1,69 @@
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::mem::take;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use async_stream::stream;
 use bytes::Bytes;
-use edgezero_core::{BodyStream, DispatchBudget, EdgeError, MonotonicClock, MonotonicInstant};
+use edgezero_core::{
+    BodyStream, Deadline, DispatchBudget, EdgeError, MonotonicClock, MonotonicInstant,
+    OutboundFuture,
+};
 use futures_util::StreamExt as _;
 use futures_util::future::poll_fn;
 
 const READ_BYTES: usize = 16 * 1024;
+
+type WaitFactory = Rc<dyn Fn(Deadline, MonotonicClock) -> OutboundFuture<()>>;
+type WaitLimit = Rc<dyn Fn() -> Result<Option<Duration>, EdgeError>>;
+std::thread_local! {
+    static CURRENT_WAIT: RefCell<Option<WaitFactory>> = const { RefCell::new(None) };
+    static CURRENT_DRIVER: RefCell<Option<Rc<DriverContext>>> = const { RefCell::new(None) };
+}
+
+struct DriverContext {
+    limit: WaitLimit,
+    parent: Option<Rc<Self>>,
+    repoll: Rc<Cell<bool>>,
+    waker: Waker,
+}
+
+impl DriverContext {
+    fn ancestor_limit(&self) -> Result<Option<Duration>, EdgeError> {
+        let mut remaining = None;
+        let mut ancestor = self.parent.as_ref();
+        while let Some(parent) = ancestor {
+            if let Some(limit) = (parent.limit)()? {
+                remaining = Some(remaining.map_or(limit, |prior: Duration| prior.min(limit)));
+            }
+            ancestor = parent.parent.as_ref();
+        }
+        Ok(remaining)
+    }
+
+    fn repoll_parent(&self) {
+        if let Some(parent) = &self.parent {
+            self.repoll.set(true);
+            parent.waker.wake_by_ref();
+        }
+    }
+}
+
+struct Timer {
+    clock: MonotonicClock,
+    deadline: Deadline,
+    outcome: Option<Result<(), EdgeError>>,
+    previous: MonotonicInstant,
+    waker: Option<Waker>,
+}
+
+struct TimerLease<T: Transport> {
+    id: u64,
+    progress: Progress<T>,
+}
 
 pub(super) enum HeadPoll<Pending, Head> {
     Pending(Pending),
@@ -58,12 +111,16 @@ struct Slot<T: Transport> {
 }
 
 struct State<T: Transport> {
+    boundary: Option<Deadline>,
     clock: MonotonicClock,
     cursor: usize,
     opaque_cursor: usize,
     previous: MonotonicInstant,
     slots: Vec<Option<Slot<T>>>,
+    timer_id: u64,
+    timers: BTreeMap<u64, Timer>,
     transport: T,
+    wakes: Vec<Waker>,
 }
 
 pub(super) struct Progress<T: Transport> {
@@ -79,12 +136,19 @@ pub(super) struct Lease<T: Transport> {
 struct Driving {
     active: Rc<Cell<bool>>,
     previous: bool,
+    previous_driver: Option<Rc<DriverContext>>,
+    previous_wait: Option<WaitFactory>,
 }
 
 #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
 impl Drop for Driving {
     fn drop(&mut self) {
         self.active.set(self.previous);
+        let retired = CURRENT_WAIT.with(|active| active.replace(self.previous_wait.take()));
+        let retired_driver =
+            CURRENT_DRIVER.with(|active| active.replace(self.previous_driver.take()));
+        drop(retired);
+        drop(retired_driver);
     }
 }
 
@@ -128,19 +192,52 @@ impl<T: Transport + 'static> Progress<T> {
         F: Future,
     {
         futures_util::pin_mut!(future);
+        let progress = self.clone();
+        let wait: WaitFactory = Rc::new(move |deadline, clock| progress.waiter(deadline, clock));
         poll_fn(|cx| {
+            let nested = self.driving.get();
+            let parent = CURRENT_DRIVER.with(|active| active.borrow().clone());
+            let repoll = parent.as_ref().map_or_else(
+                || Rc::new(Cell::new(false)),
+                |ancestor| Rc::clone(&ancestor.repoll),
+            );
+            let state = Rc::clone(&self.state);
+            let current = Rc::new(DriverContext {
+                limit: Rc::new(move || state.borrow_mut().wait_limit()),
+                parent,
+                repoll,
+                waker: cx.waker().clone(),
+            });
             let guard = Driving {
                 previous: self.driving.replace(true),
                 active: Rc::clone(&self.driving),
+                previous_wait: CURRENT_WAIT.with(|active| active.replace(Some(Rc::clone(&wait)))),
+                previous_driver: CURRENT_DRIVER
+                    .with(|active| active.replace(Some(Rc::clone(&current)))),
             };
             let result = future.as_mut().poll(cx);
             drop(guard);
             if let Poll::Ready(output) = result {
+                current.repoll_parent();
                 return Poll::Ready(Ok(output));
             }
-            if self.state.borrow_mut().turn()? {
+            if nested {
+                return Poll::Pending;
+            }
+            let (turned, wakes) = {
+                let mut shared = self.state.borrow_mut();
+                let turned = shared.turn(!current.repoll.get(), || current.ancestor_limit());
+                (turned, take(&mut shared.wakes))
+            };
+            if turned.as_ref().is_ok_and(|made_progress| *made_progress) || turned.is_err() {
+                current.repoll.set(true);
+                current.repoll_parent();
                 cx.waker().wake_by_ref();
             }
+            for waiting in wakes {
+                waiting.wake();
+            }
+            turned?;
             Poll::Pending
         })
         .await
@@ -150,16 +247,25 @@ impl<T: Transport + 'static> Progress<T> {
         self.register(budget, Phase::Head(Some(pending)))
     }
 
-    pub(super) fn new(transport: T, clock: MonotonicClock, previous: MonotonicInstant) -> Self {
+    pub(super) fn new(
+        transport: T,
+        clock: MonotonicClock,
+        previous: MonotonicInstant,
+        boundary: Option<Deadline>,
+    ) -> Self {
         Self {
             driving: Rc::new(Cell::new(false)),
             state: Rc::new(RefCell::new(State {
+                boundary,
                 clock,
                 cursor: 0,
                 opaque_cursor: 0,
                 previous,
                 slots: Vec::new(),
+                timer_id: 0,
+                timers: BTreeMap::new(),
                 transport,
+                wakes: Vec::new(),
             })),
         }
     }
@@ -178,6 +284,70 @@ impl<T: Transport + 'static> Progress<T> {
             index,
             progress: self.clone(),
         }
+    }
+
+    fn waiter(&self, deadline: Deadline, clock: MonotonicClock) -> OutboundFuture<()> {
+        let mut state = self.state.borrow_mut();
+        let id = state.timer_id;
+        let Some(next) = id.checked_add(1) else {
+            return Box::pin(async {
+                Err(EdgeError::internal(anyhow::anyhow!(
+                    "Fastly timer registration exhausted"
+                )))
+            });
+        };
+        state.timer_id = next;
+        state.timers.insert(
+            id,
+            Timer {
+                previous: clock.now(),
+                clock,
+                deadline,
+                outcome: None,
+                waker: None,
+            },
+        );
+        let lease = TimerLease {
+            id,
+            progress: self.clone(),
+        };
+        Box::pin(async move {
+            poll_fn(|cx| {
+                let replacement = cx.waker().clone();
+                let (observation, previous) = {
+                    let mut shared = lease.progress.state.borrow_mut();
+                    let timer = shared.timers.get_mut(&lease.id).ok_or_else(missing_slot)?;
+                    let prior = timer.waker.replace(replacement);
+                    (
+                        timer.outcome.take().map_or(Poll::Pending, Poll::Ready),
+                        prior,
+                    )
+                };
+                drop(previous);
+                observation
+            })
+            .await
+        })
+    }
+
+    pub(super) fn with_current<Output>(&self, operation: impl FnOnce() -> Output) -> Output {
+        let progress = self.clone();
+        let wait: WaitFactory = Rc::new(move |deadline, clock| progress.waiter(deadline, clock));
+        let _guard = Driving {
+            previous: self.driving.replace(true),
+            active: Rc::clone(&self.driving),
+            previous_wait: CURRENT_WAIT.with(|active| active.replace(Some(wait))),
+            previous_driver: CURRENT_DRIVER.with(|active| active.borrow().clone()),
+        };
+        operation()
+    }
+}
+
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl<T: Transport> Drop for TimerLease<T> {
+    fn drop(&mut self) {
+        let retired = self.progress.state.borrow_mut().timers.remove(&self.id);
+        drop(retired);
     }
 }
 
@@ -227,13 +397,35 @@ impl<T: Transport + 'static> Lease<T> {
 #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
 impl<T: Transport> Drop for Lease<T> {
     fn drop(&mut self) {
-        if let Some(slot) = self.progress.state.borrow_mut().slots.get_mut(self.index) {
-            *slot = None;
-        }
+        let retired = self
+            .progress
+            .state
+            .borrow_mut()
+            .slots
+            .get_mut(self.index)
+            .and_then(Option::take);
+        drop(retired);
     }
 }
 
 impl<T: Transport> State<T> {
+    fn opaque_head(&self) -> Option<usize> {
+        self.slots
+            .iter()
+            .enumerate()
+            .skip(self.opaque_cursor)
+            .chain(self.slots.iter().enumerate().take(self.opaque_cursor))
+            .find_map(|(index, entry)| {
+                entry
+                    .as_ref()
+                    .is_some_and(|slot| {
+                        matches!(&slot.phase,
+                            Phase::Head(Some(pending)) if T::head_handle(pending).is_none())
+                    })
+                    .then_some(index)
+            })
+    }
+
     fn poll_head(&mut self, index: usize) -> Result<(), EdgeError> {
         let slot = self
             .slots
@@ -249,7 +441,7 @@ impl<T: Transport> State<T> {
             HeadPoll::Ready(result) => {
                 slot.phase = Phase::HeadReady(Some(result));
                 if let Some(waker) = slot.waker.take() {
-                    waker.wake();
+                    self.wakes.push(waker);
                 }
             }
         }
@@ -260,7 +452,7 @@ impl<T: Transport> State<T> {
             .and_then(Option::as_mut)
             .ok_or_else(missing_slot)?;
         if polled.budget.deadline.is_expired_at(now) {
-            expire(polled);
+            expire(polled, &mut self.wakes);
         }
         Ok(())
     }
@@ -276,6 +468,30 @@ impl<T: Transport> State<T> {
         Ok(now)
     }
 
+    fn select_ready(
+        &mut self,
+        remaining: Duration,
+        active: &[(usize, u32)],
+    ) -> Result<bool, EdgeError> {
+        let milliseconds = u32::try_from(remaining.as_millis())
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let handles = active.iter().map(|(_, handle)| *handle).collect::<Vec<_>>();
+        let selection = self.transport.select(&handles, milliseconds)?;
+        self.sample()?;
+        let Some(selected) = selection else {
+            return Ok(true);
+        };
+        let (index, _) = *active.get(selected).ok_or_else(|| {
+            EdgeError::internal(anyhow::anyhow!(
+                "Fastly readiness returned an invalid handle index"
+            ))
+        })?;
+        self.cursor = index.saturating_add(1);
+        self.service(index)?;
+        Ok(true)
+    }
+
     fn service(&mut self, index: usize) -> Result<(), EdgeError> {
         let slot = self
             .slots
@@ -283,7 +499,7 @@ impl<T: Transport> State<T> {
             .and_then(Option::as_mut)
             .ok_or_else(missing_slot)?;
         if slot.budget.deadline.is_expired_at(self.previous) {
-            expire(slot);
+            expire(slot, &mut self.wakes);
             return Ok(());
         }
         match slot.phase {
@@ -307,7 +523,7 @@ impl<T: Transport> State<T> {
                 }
                 *next = Some(result);
                 if let Some(waker) = slot.waker.take() {
-                    waker.wake();
+                    self.wakes.push(waker);
                 }
             }
             Phase::HeadReady(_) => return Err(missing_slot()),
@@ -319,17 +535,53 @@ impl<T: Transport> State<T> {
             .and_then(Option::as_mut)
             .ok_or_else(missing_slot)?;
         if serviced.budget.deadline.is_expired_at(now) {
-            expire(serviced);
+            expire(serviced, &mut self.wakes);
         }
         Ok(())
     }
 
-    fn turn(&mut self) -> Result<bool, EdgeError> {
-        let now = self.sample()?;
+    fn timers(&mut self) -> (bool, Option<Duration>) {
         let mut newly_expired = false;
+        let mut timer_remaining = None;
+        for timer in self
+            .timers
+            .values_mut()
+            .filter(|timer| timer.outcome.is_none())
+        {
+            let observed = timer.clock.now();
+            let outcome = if observed < timer.previous {
+                Some(Err(EdgeError::internal(anyhow::anyhow!(
+                    "Fastly timer clock moved backwards"
+                ))))
+            } else if let Some(remaining) = timer.deadline.remaining_at(observed) {
+                timer_remaining =
+                    Some(timer_remaining.map_or(remaining, |prior: Duration| prior.min(remaining)));
+                None
+            } else {
+                Some(Ok(()))
+            };
+            timer.previous = observed;
+            if let Some(result) = outcome {
+                timer.outcome = Some(result);
+                newly_expired = true;
+                if let Some(waiting) = timer.waker.take() {
+                    self.wakes.push(waiting);
+                }
+            }
+        }
+        (newly_expired, timer_remaining)
+    }
+
+    fn turn(
+        &mut self,
+        allow_wait: bool,
+        mut ancestor_limit: impl FnMut() -> Result<Option<Duration>, EdgeError>,
+    ) -> Result<bool, EdgeError> {
+        let now = self.sample()?;
+        let (mut newly_expired, timer_remaining) = self.timers();
         for slot in self.slots.iter_mut().flatten() {
             if slot.budget.deadline.is_expired_at(now) {
-                newly_expired |= expire(slot);
+                newly_expired |= expire(slot, &mut self.wakes);
             }
         }
         // Publish a new timeout promptly, but an occupied mailbox backpressures only its slot.
@@ -337,24 +589,24 @@ impl<T: Transport> State<T> {
             return Ok(true);
         }
 
-        if self.slots.is_empty() {
+        // A child turn still permits expiry publication, but never a second host wait.
+        if !allow_wait {
             return Ok(false);
         }
-        let opaque = self
-            .slots
-            .iter()
-            .enumerate()
-            .skip(self.opaque_cursor)
-            .chain(self.slots.iter().enumerate().take(self.opaque_cursor))
-            .find_map(|(index, entry)| {
-                entry
-                    .as_ref()
-                    .is_some_and(|slot| {
-                        matches!(&slot.phase,
-                Phase::Head(Some(pending)) if T::head_handle(pending).is_none())
-                    })
-                    .then_some(index)
-            });
+
+        let boundary_remaining = self
+            .boundary
+            .map(|deadline| deadline.remaining_at(self.previous).unwrap_or_default());
+        if boundary_remaining.is_some_and(|remaining| remaining.is_zero()) {
+            return Ok(true);
+        }
+        if self.slots.is_empty() && timer_remaining.is_none() && boundary_remaining.is_none() {
+            return Ok(false);
+        }
+        if ancestor_limit()?.is_some_and(|remaining| remaining.is_zero()) {
+            return Ok(true);
+        }
+        let opaque = self.opaque_head();
         if let Some(index) = opaque {
             self.opaque_cursor = index.saturating_add(1);
             self.poll_head(index)?;
@@ -369,7 +621,7 @@ impl<T: Transport> State<T> {
             }
         }
 
-        let mut earliest = None;
+        let mut earliest = timer_remaining.into_iter().chain(boundary_remaining).min();
         let mut active = Vec::new();
         for (index, entry) in self
             .slots
@@ -400,7 +652,11 @@ impl<T: Transport> State<T> {
         let Some(mut remaining) = earliest else {
             return Ok(false);
         };
-        if active.is_empty() && opaque.is_none() {
+        if active.is_empty()
+            && opaque.is_none()
+            && timer_remaining.is_none()
+            && boundary_remaining.is_none()
+        {
             return Ok(false);
         }
         // Opaque SDK cache stages expose nonblocking poll, but not their changing wait handle.
@@ -408,27 +664,65 @@ impl<T: Transport> State<T> {
         if opaque.is_some() {
             remaining = remaining.min(Duration::from_millis(1));
         }
-        let milliseconds = u32::try_from(remaining.as_millis())
-            .unwrap_or(u32::MAX)
-            .max(1);
-        let handles = active.iter().map(|(_, handle)| *handle).collect::<Vec<_>>();
-        let selection = self.transport.select(&handles, milliseconds)?;
-        self.sample()?;
-        let Some(selected) = selection else {
-            return Ok(true);
-        };
-        let (index, _) = *active.get(selected).ok_or_else(|| {
-            EdgeError::internal(anyhow::anyhow!(
-                "Fastly readiness returned an invalid handle index"
-            ))
-        })?;
-        self.cursor = index.saturating_add(1);
-        self.service(index)?;
-        Ok(true)
+        if let Some(limit) = ancestor_limit()? {
+            if limit.is_zero() {
+                return Ok(true);
+            }
+            remaining = remaining.min(limit);
+        }
+        if let Some(limit) = self.wait_limit()? {
+            if limit.is_zero() {
+                return Ok(true);
+            }
+            remaining = remaining.min(limit);
+        }
+        self.select_ready(remaining, &active)
+    }
+
+    fn wait_limit(&mut self) -> Result<Option<Duration>, EdgeError> {
+        let now = self.sample()?;
+        let mut remaining = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|slot| {
+                !slot.expired
+                    && matches!(
+                        &slot.phase,
+                        Phase::Head(Some(_))
+                            | Phase::Body {
+                                handle: Some(_),
+                                next: None,
+                                requested: true
+                            }
+                    )
+            })
+            .map(|slot| slot.budget.deadline.remaining_at(now).unwrap_or_default())
+            .chain(
+                self.boundary
+                    .map(|deadline| deadline.remaining_at(now).unwrap_or_default()),
+            )
+            .min();
+        for timer in self
+            .timers
+            .values_mut()
+            .filter(|timer| timer.outcome.is_none())
+        {
+            let observed = timer.clock.now();
+            if observed < timer.previous {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "Fastly timer clock moved backwards"
+                )));
+            }
+            timer.previous = observed;
+            let limit = timer.deadline.remaining_at(observed).unwrap_or_default();
+            remaining = Some(remaining.map_or(limit, |prior| prior.min(limit)));
+        }
+        Ok(remaining)
     }
 }
 
-fn expire<T>(slot: &mut Slot<T>) -> bool
+fn expire<T>(slot: &mut Slot<T>, wakes: &mut Vec<Waker>) -> bool
 where
     T: Transport,
 {
@@ -464,7 +758,7 @@ where
         }
     }
     if let Some(waker) = slot.waker.take() {
-        waker.wake();
+        wakes.push(waker);
     }
     true
 }
@@ -473,6 +767,20 @@ fn missing_slot() -> EdgeError {
     EdgeError::internal(anyhow::anyhow!(
         "Fastly progress exchange is no longer owned"
     ))
+}
+
+pub(super) fn wait_current(deadline: Deadline, clock: MonotonicClock) -> OutboundFuture<()> {
+    let factory = CURRENT_WAIT.with(|active| active.borrow().clone());
+    factory.map_or_else(
+        || -> OutboundFuture<()> {
+            Box::pin(async {
+                Err(EdgeError::internal(anyhow::anyhow!(
+                    "Fastly timer requires an active outbound progress scope"
+                )))
+            })
+        },
+        |wait| wait(deadline, clock),
+    )
 }
 
 #[cfg(test)]
@@ -486,15 +794,17 @@ fn missing_slot() -> EdgeError {
 )]
 mod tests {
     use std::io::ErrorKind;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::task::Wake;
 
     use edgezero_core::{
         BadGatewayReason, BudgetSource, Deadline, FastlyFailureCause, ProviderFailureDetail,
         ProviderFailurePhase,
     };
     use futures::executor::block_on;
-    use futures_util::future::join;
-    use futures_util::task::noop_waker_ref;
+    use futures_util::future::{join, pending};
+    use futures_util::task::{AtomicWaker, noop_waker_ref};
 
     use super::*;
 
@@ -526,6 +836,35 @@ mod tests {
     struct TestTransport {
         now: Arc<Mutex<MonotonicInstant>>,
         observations: Rc<RefCell<Observations>>,
+    }
+
+    struct WakeCount(AtomicUsize);
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "default wake_by_ref delegates to wake"
+    )]
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    std::thread_local! {
+        static CANCEL_TIMER: RefCell<Option<OutboundFuture<()>>> = const { RefCell::new(None) };
+    }
+
+    struct CancelTimer;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "default wake_by_ref delegates to wake"
+    )]
+    impl Wake for CancelTimer {
+        fn wake(self: Arc<Self>) {
+            let retired = CANCEL_TIMER.with(|slot| slot.borrow_mut().take());
+            drop(retired);
+        }
     }
     impl Transport for TestTransport {
         type Body = Handle;
@@ -623,7 +962,16 @@ mod tests {
         Rc<RefCell<Observations>>,
         Arc<Mutex<MonotonicInstant>>,
     ) {
-        let now = Arc::new(Mutex::new(MonotonicInstant::now()));
+        fixture_at(Arc::new(Mutex::new(MonotonicInstant::now())))
+    }
+
+    fn fixture_at(
+        now: Arc<Mutex<MonotonicInstant>>,
+    ) -> (
+        Progress<TestTransport>,
+        Rc<RefCell<Observations>>,
+        Arc<Mutex<MonotonicInstant>>,
+    ) {
         let source = Arc::clone(&now);
         let clock = MonotonicClock::new(move || *source.lock().expect("clock"));
         let observations = Rc::new(RefCell::new(Observations::default()));
@@ -635,6 +983,7 @@ mod tests {
             },
             clock,
             previous,
+            None,
         );
         (progress, observations, now)
     }
@@ -670,6 +1019,333 @@ mod tests {
             bytes += chunk?.len();
         }
         Ok(bytes)
+    }
+
+    #[test]
+    fn nested_wait_is_bounded_by_all_ancestor_deadlines() {
+        let (parent, parent_observed, now) = fixture();
+        let (middle, middle_observed, _) = fixture_at(Arc::clone(&now));
+        let (child, child_observed, _) = fixture_at(Arc::clone(&now));
+        let released = Rc::new(Cell::new(0));
+        let selected = budget(&now, 200, BudgetSource::RequestDeadline);
+        let parent_head = parent.head(handle(0, 0, false, &released), selected);
+        let middle_head = middle.head(
+            handle(0, 0, false, &released),
+            budget(&now, 1_000, BudgetSource::Default),
+        );
+        let child_head = child.head(
+            handle(0, 0, false, &released),
+            budget(&now, 10_000, BudgetSource::Default),
+        );
+        let mut operation = Box::pin(parent.drive(middle.drive(child.drive(child_head.receive()))));
+        assert!(
+            operation
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(child_observed.borrow().waits, [200]);
+        assert!(middle_observed.borrow().waits.is_empty());
+        assert!(parent_observed.borrow().waits.is_empty());
+        assert_eq!(*now.lock().expect("clock"), selected.deadline.instant());
+        drop(operation);
+        assert!(matches!(
+            block_on(parent_head.receive()),
+            Err(EdgeError::GatewayTimeout {
+                cause: BudgetSource::RequestDeadline,
+                ..
+            })
+        ));
+        drop(middle_head);
+        assert_eq!(released.get(), 3);
+    }
+
+    #[test]
+    fn custom_pair_upload_boundary_limits_child_without_parent_slots_or_timers() {
+        let (parent, parent_observed, now) = fixture();
+        let (child, child_observed, _) = fixture_at(Arc::clone(&now));
+        let selected = budget(&now, 200, BudgetSource::RequestDeadline);
+        parent.state.borrow_mut().boundary = Some(selected.deadline);
+        let clock = parent.state.borrow().clock.clone();
+        let registered = Arc::new(AtomicWaker::new());
+        let time = edgezero_core::OutboundTime::new(clock, move |deadline, timer_clock| {
+            let waiter = Arc::clone(&registered);
+            Box::pin(poll_fn(move |cx| {
+                waiter.register(cx.waker());
+                if deadline.is_expired_at(timer_clock.now()) {
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Pending
+                }
+            }))
+        });
+        let mut timer = time.wait_until(selected.deadline);
+        let released = Rc::new(Cell::new(0));
+        let child_head = child.head(
+            handle(0, 0, false, &released),
+            budget(&now, 10_000, BudgetSource::Default),
+        );
+        let mut source = Box::pin(child.drive(child_head.receive()));
+        let mut operation = Box::pin(parent.drive(poll_fn(|cx| {
+            if let Poll::Ready(result) = timer.as_mut().poll(cx) {
+                return Poll::Ready(result);
+            }
+            assert!(source.as_mut().poll(cx).is_pending());
+            Poll::Pending
+        })));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert!(parent.state.borrow().slots.is_empty());
+        assert!(parent.state.borrow().timers.is_empty());
+        assert_eq!(child_observed.borrow().waits, [200]);
+        assert!(parent_observed.borrow().waits.is_empty());
+        assert_eq!(*now.lock().expect("clock"), selected.deadline.instant());
+        assert!(matches!(
+            operation.as_mut().poll(&mut context),
+            Poll::Ready(Ok(Ok(())))
+        ));
+        drop(operation);
+        drop(source);
+        assert_eq!(released.get(), 1);
+    }
+
+    #[test]
+    fn child_turn_and_ready_result_repoll_parent_without_another_selection() {
+        let (parent, parent_observed, now) = fixture();
+        let (child, child_observed, _) = fixture_at(Arc::clone(&now));
+        let released = Rc::new(Cell::new(0));
+        let selected = budget(&now, 1_000, BudgetSource::Default);
+        let parent_head = parent.head(handle(0, 0, false, &released), selected);
+        let child_head = child.head(handle(101, 0, false, &released), selected);
+        let wake_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut context = Context::from_waker(&waker);
+        let mut operation = Box::pin(parent.drive(async {
+            assert_eq!(
+                child.drive(child_head.receive()).await.unwrap().unwrap(),
+                101
+            );
+            pending::<()>().await;
+        }));
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert_eq!(child_observed.borrow().polls, [101]);
+        assert!(parent_observed.borrow().waits.is_empty());
+        wake_count.0.store(0, Ordering::SeqCst);
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert!(
+            wake_count.0.load(Ordering::SeqCst) > 0,
+            "a ready child must wake its parent"
+        );
+        assert!(parent_observed.borrow().waits.is_empty());
+        drop(operation);
+        drop(parent_head);
+        assert_eq!(released.get(), 2);
+        assert!(!parent.driving.get());
+        assert!(!child.driving.get());
+    }
+
+    #[test]
+    fn expired_timer_can_cancel_a_sibling_from_its_waker() {
+        let (progress, _, now) = fixture();
+        let clock = progress.state.borrow().clock.clone();
+        let deadline = budget(&now, 10, BudgetSource::Default).deadline;
+        let sibling_deadline = budget(&now, 1_000, BudgetSource::Default).deadline;
+        let mut first = progress.with_current(|| super::wait_current(deadline, clock.clone()));
+        let sibling = progress.with_current(|| super::wait_current(sibling_deadline, clock));
+        CANCEL_TIMER.with(|slot| *slot.borrow_mut() = Some(sibling));
+        let cancel_waker = Waker::from(Arc::new(CancelTimer));
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&cancel_waker))
+                .is_pending()
+        );
+        let mut operation = Box::pin(progress.drive(pending::<()>()));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert!(CANCEL_TIMER.with(|slot| slot.borrow().is_none()));
+        assert_eq!(progress.state.borrow().timers.len(), 1);
+        assert!(matches!(
+            first.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        drop(first);
+        drop(operation);
+        assert!(progress.state.borrow().timers.is_empty());
+    }
+
+    #[test]
+    fn nested_live_wait_ignores_unconsumed_ancestor_timeout_mailboxes() {
+        let (parent, parent_observed, now) = fixture();
+        let (child, child_observed, _) = fixture_at(Arc::clone(&now));
+        let released = Rc::new(Cell::new(0));
+        let expired = budget(&now, 10, BudgetSource::PerCallTimeout);
+        let retained = parent.head(handle(0, 0, false, &released), expired);
+        let clock = parent.state.borrow().clock.clone();
+        let mut retained_timer =
+            parent.with_current(|| super::wait_current(expired.deadline, clock));
+        *now.lock().expect("clock") = expired.deadline.instant();
+        let mut publisher = Box::pin(parent.drive(pending::<()>()));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(publisher.as_mut().poll(&mut context).is_pending());
+        drop(publisher);
+        let selected = budget(&now, 50, BudgetSource::RequestDeadline);
+        let live = parent.head(handle(0, 0, false, &released), selected);
+        let child_head = child.head(
+            handle(0, 0, false, &released),
+            budget(&now, 10_000, BudgetSource::Default),
+        );
+        let mut operation = Box::pin(parent.drive(child.drive(child_head.receive())));
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert_eq!(child_observed.borrow().waits, [50]);
+        assert!(parent_observed.borrow().waits.is_empty());
+        drop(operation);
+        assert!(matches!(
+            block_on(live.receive()),
+            Err(EdgeError::GatewayTimeout {
+                cause: BudgetSource::RequestDeadline,
+                ..
+            })
+        ));
+        assert!(matches!(
+            block_on(retained.receive()),
+            Err(EdgeError::GatewayTimeout {
+                cause: BudgetSource::PerCallTimeout,
+                ..
+            })
+        ));
+        assert!(matches!(
+            retained_timer.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        drop(retained_timer);
+        assert!(parent.state.borrow().timers.is_empty());
+        assert_eq!(released.get(), 3);
+    }
+
+    #[test]
+    fn nested_poll_cost_keeps_original_deadline_and_checks_before_opaque_poll() {
+        for elapsed in [199, 200] {
+            let (parent, parent_observed, now) = fixture();
+            let (child, child_observed, _) = fixture_at(Arc::clone(&now));
+            let released = Rc::new(Cell::new(0));
+            let selected = budget(&now, 200, BudgetSource::RequestDeadline);
+            let after_poll = budget(&now, elapsed, BudgetSource::Default)
+                .deadline
+                .instant();
+            let parent_head = parent.head(handle(0, 0, false, &released), selected);
+            let child_head = child.head(
+                handle(0, 0, true, &released),
+                budget(&now, 10_000, BudgetSource::Default),
+            );
+            let mut operation = Box::pin(parent.drive(child.drive(async {
+                *now.lock().expect("clock") = after_poll;
+                child_head.receive().await
+            })));
+            assert!(
+                operation
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            if elapsed == 200 {
+                assert!(
+                    child_observed.borrow().polls.is_empty(),
+                    "expired ancestor must precede opaque host polling"
+                );
+                assert!(child_observed.borrow().waits.is_empty());
+            } else {
+                assert_eq!(child_observed.borrow().polls, [0]);
+                assert_eq!(child_observed.borrow().waits, [1]);
+            }
+            assert!(parent_observed.borrow().waits.is_empty());
+            assert_eq!(*now.lock().expect("clock"), selected.deadline.instant());
+            drop(operation);
+            assert!(matches!(
+                block_on(parent_head.receive()),
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::RequestDeadline,
+                    ..
+                })
+            ));
+            assert_eq!(released.get(), 2);
+        }
+    }
+
+    #[test]
+    fn timer_only_wait_uses_shared_selection_and_unregisters() {
+        let (progress, observed, now) = fixture();
+        let deadline = budget(&now, 10, BudgetSource::RequestDeadline).deadline;
+        let clock = progress.state.borrow().clock.clone();
+        block_on(progress.drive(async { super::wait_current(deadline, clock).await }))
+            .expect("progress")
+            .expect("timer");
+        assert_eq!(observed.borrow().waits, [10]);
+        assert_eq!(observed.borrow().domains, [Vec::<u32>::new()]);
+        assert!(progress.state.borrow().timers.is_empty());
+    }
+
+    #[test]
+    fn ready_operation_cancels_its_timer_without_host_selection() {
+        let (progress, observed, now) = fixture();
+        let deadline = budget(&now, 10, BudgetSource::RequestDeadline).deadline;
+        let clock = progress.state.borrow().clock.clone();
+        block_on(progress.drive(async {
+            let mut timer = super::wait_current(deadline, clock);
+            assert!(
+                timer
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            assert_eq!(progress.state.borrow().timers.len(), 1);
+            drop(timer);
+        }))
+        .expect("ready operation");
+        assert!(observed.borrow().waits.is_empty());
+        assert!(progress.state.borrow().timers.is_empty());
+    }
+
+    #[test]
+    fn nested_timer_is_driven_only_by_the_outer_progress_loop() {
+        let (progress, observed, now) = fixture();
+        let deadline = budget(&now, 10, BudgetSource::RequestDeadline).deadline;
+        let clock = progress.state.borrow().clock.clone();
+        block_on(
+            progress.drive(progress.drive(async { super::wait_current(deadline, clock).await })),
+        )
+        .expect("outer")
+        .expect("inner")
+        .expect("timer");
+        assert_eq!(observed.borrow().waits, [10]);
+        assert!(progress.state.borrow().timers.is_empty());
+        assert!(
+            block_on(super::wait_current(
+                deadline,
+                progress.state.borrow().clock.clone()
+            ))
+            .is_err(),
+            "activation must be restored"
+        );
+    }
+
+    #[test]
+    fn cancelling_driver_releases_pending_timer_registration() {
+        let (progress, _observed, now) = fixture();
+        let deadline = budget(&now, 10, BudgetSource::RequestDeadline).deadline;
+        let clock = progress.state.borrow().clock.clone();
+        let mut operation =
+            Box::pin(progress.drive(async { super::wait_current(deadline, clock).await }));
+        assert!(
+            operation
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(progress.state.borrow().timers.len(), 1);
+        drop(operation);
+        assert!(progress.state.borrow().timers.is_empty());
     }
 
     #[test]

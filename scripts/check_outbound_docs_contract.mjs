@@ -809,12 +809,15 @@ function headerNormalizationContractError(source, fidelity) {
   const constructors = code.match(/OutboundResponse::new\(/gu)?.length ?? 0
   const paired =
     code.match(
-      /response_clock,\s*normalization\.content_type_provenance,\s*\)\)/gu
+      /(?:response_clock|response_time\.clock\(\)\.clone\(\)),\s*normalization\.content_type_provenance,\s*\)\)/gu
     )?.length ?? 0
   if (
     constructors === 0 ||
     constructors !== paired ||
-    !code.includes('let response_clock = clock.clone();')
+    !(
+      code.includes('let response_clock = clock.clone();') ||
+      code.includes('let response_time = time.clone();')
+    )
   ) {
     return 'must pass the paired clock and shared original provenance to every response'
   }
@@ -834,6 +837,21 @@ function runHeaderNormalizationContractSelfTests() {
   const unknown = 'ProviderFieldBoundariesUnknown'
   const cases = [
     [source, unknown, true],
+    [
+      source
+        .replace(
+          'let response_clock = clock.clone();',
+          'let response_time = time.clone();'
+        )
+        .replace('response_clock,', 'response_time.clock().clone(),'),
+      unknown,
+      true,
+    ],
+    [
+      source.replace('response_clock,', 'MonotonicClock::default(),'),
+      unknown,
+      false,
+    ],
     [source, 'AdapterVisibleFields', false],
     [source.replace('.normalize(', '.bypass('), unknown, false],
     [source.replace('OutboundHeaderInput::new(', 'raw_head('), unknown, false],
@@ -1982,6 +2000,19 @@ if (
 }
 for (const adapterPath of outboundAdapterPaths) {
   const adapterSource = readFileSync(adapterPath, 'utf8')
+  const adapterCode = maskObservationCutoffNonCode(adapterSource)
+  const pairedConstructor = adapterPath.includes('axum')
+    ? /pub fn try_with_time\(time: OutboundTime\)/u
+    : /pub fn with_time\(time: OutboundTime\)/u
+  if (
+    !pairedConstructor.test(adapterCode) ||
+    /\bfn\s+(?:try_)?with_clock\s*\(/u.test(adapterCode) ||
+    !adapterCode.includes('time.wait_until(')
+  ) {
+    fail(
+      `${adapterPath} must hard-migrate to paired time and use its deadline wakeup`
+    )
+  }
   const fidelity = adapterPath.includes('cloudflare')
     ? 'ProviderFieldBoundariesUnknown'
     : 'AdapterVisibleFields'

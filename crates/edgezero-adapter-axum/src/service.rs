@@ -34,7 +34,7 @@ use tower::Service as TowerService;
 use crate::connection::{ConnectionExit, serve_http1};
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
-use crate::outbound::AxumOutboundClient;
+use crate::outbound::{AxumOutboundClient, native_time};
 use crate::request::into_core_request_parts;
 use crate::response::{AxumEgressBody, EgressConnection, prepare_egress_response};
 
@@ -66,7 +66,7 @@ impl AxumServiceState {
     #[inline]
     pub fn from_app(app: App) -> Self {
         Self::from_app_with_client_factory(app, |clock| {
-            AxumOutboundClient::try_with_clock(clock)
+            AxumOutboundClient::try_with_time(native_time(clock))
                 .ok()
                 .map(HttpClient::with_client)
         })

@@ -44,7 +44,9 @@ mod tests {
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
-    use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
+    use edgezero_core::outbound::{
+        OutboundRequest, OutboundSendMode, OutboundTime, validate_for_dispatch,
+    };
     use edgezero_core::response_egress::ResponseEgressCompletion;
     use edgezero_core::response_egress::{ResponseEgressEnvelope, ResponseEgressReport};
     use edgezero_core::router::{RouteMetadata, RouterService};
@@ -52,6 +54,12 @@ mod tests {
     use fastly::Request as FastlyRequest;
     use fastly::http::Method as FastlyMethod;
     use futures::{executor::block_on, stream};
+
+    fn preflight_time(clock: MonotonicClock) -> OutboundTime {
+        OutboundTime::new(clock, |_, _| {
+            panic!("preflight must not register an outbound timer")
+        })
+    }
 
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
         complete_envelope_with_report(envelope).0
@@ -470,7 +478,7 @@ mod tests {
                 let delivered = FastlyService::new(&app).run_request_with_hooks_for_test(
                     request,
                     |_raw, _extensions| {
-                        let client = FastlyOutboundClient::with_clock(clock);
+                        let client = FastlyOutboundClient::with_time(preflight_time(clock));
                         let outbound = OutboundRequest::get("https://example.com")
                             .unwrap()
                             .stream_response();
@@ -1779,8 +1787,11 @@ mod outbound_contract_tests {
         #[test]
         fn expired_observation_cutoff_leaves_slot_unresolved() {
             let now = edgezero_core::MonotonicInstant::now();
-            let client =
-                FastlyOutboundClient::with_clock(edgezero_core::MonotonicClock::new(move || now));
+            let time = edgezero_core::OutboundTime::new(
+                edgezero_core::MonotonicClock::new(move || now),
+                |_, _| panic!("expired cutoff must not register an outbound timer"),
+            );
+            let client = FastlyOutboundClient::with_time(time);
             let request = request().body(Bytes::from_static(b"body"));
 
             let results = block_on(

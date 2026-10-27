@@ -11,29 +11,35 @@ use edgezero_core::error_detail::{
 use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use edgezero_core::outbound::{
-    OutboundBatch, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
+    OutboundBatch, OutboundFuture, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
     OutboundProxyMarker, OutboundRequest, OutboundRequestParts, OutboundResponse, OutboundSendMode,
-    ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
-    ResponseMode, apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
-    validate_for_dispatch,
+    OutboundTime, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
+    ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
+    normalize_for_dispatch, validate_for_dispatch,
 };
 use edgezero_core::time::{
     Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
 };
 use futures_util::StreamExt as _;
-use futures_util::future::{FutureExt as _, LocalBoxFuture};
+use futures_util::future::{FutureExt as _, LocalBoxFuture, poll_fn};
 use reqwest::header::HeaderMap as ReqwestHeaderMap;
 use reqwest::redirect::Policy;
 use std::error::Error as _;
+use std::future::Future;
 use std::io::Error as IoError;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::task::Poll;
+use tokio::runtime::Handle;
+use tokio::time::sleep;
+#[cfg(test)]
 use tokio::time::timeout;
 
 /// Native outbound HTTP implementation used by the Axum adapter.
 #[derive(Clone)]
 pub struct AxumOutboundClient {
     client: Arc<reqwest::Client>,
-    clock: MonotonicClock,
+    time: OutboundTime,
 }
 
 struct PreparedRequest {
@@ -72,17 +78,30 @@ impl AxumOutboundClient {
             headers.insert(HOST, value);
         }
         let request_body =
-            collect_request_body(body, max_request_body_bytes, budget, &self.clock).await?;
+            collect_request_body(body, max_request_body_bytes, budget, &self.time).await?;
         let request_builder = self
             .client
             .request(reqwest_method(&method)?, uri.to_string())
             .headers(headers)
             .body(request_body);
-        let request = apply_dispatch_timeout(request_builder, budget, &self.clock)?;
-        let response = request
-            .send()
-            .await
-            .map_err(|error| classify_send_error(&error, budget, &self.clock))?;
+        let mut previous = self.time.clock().now();
+        let mut timer = self.time.wait_until(budget.deadline);
+        let response = race_with_timer(
+            request_builder.send(),
+            budget,
+            &self.time,
+            &mut timer,
+            &mut previous,
+            None,
+            |result| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| reqwest_failure_detail(error, ProviderFailurePhase::Send))
+            },
+        )
+        .await?
+        .map_err(|error| classify_send_error(&error, budget, self.time.clock()))?;
 
         process_response(
             response,
@@ -98,7 +117,7 @@ impl AxumOutboundClient {
             max_encoded_response_bytes,
             max_response_header_bytes,
             max_response_header_count,
-            self.clock.clone(),
+            self.time.clone(),
         )
         .await
     }
@@ -141,7 +160,7 @@ impl AxumOutboundClient {
     /// Returns the underlying client-construction error when TLS initialization fails.
     #[inline]
     pub fn try_new() -> Result<Self, reqwest::Error> {
-        Self::try_with_clock(MonotonicClock::default())
+        Self::try_with_time(native_time(MonotonicClock::default()))
     }
 
     pub(crate) fn try_transport() -> Result<Arc<reqwest::Client>, reqwest::Error> {
@@ -155,13 +174,13 @@ impl AxumOutboundClient {
         Ok(Arc::new(client))
     }
 
-    /// Builds a client that evaluates every outbound lifetime against `clock`.
+    /// Builds a client using the supplied monotonic clock and cancellable timer factory.
     ///
     /// # Errors
     /// Returns the underlying client-construction error when TLS initialization fails.
     #[inline]
-    pub fn try_with_clock(clock: MonotonicClock) -> Result<Self, reqwest::Error> {
-        Self::try_transport().map(|client| Self { client, clock })
+    pub fn try_with_time(time: OutboundTime) -> Result<Self, reqwest::Error> {
+        Self::try_transport().map(|client| Self::with_transport_and_time(client, time))
     }
 
     fn validate_options(request: &OutboundRequest) -> Result<(), EdgeError> {
@@ -172,13 +191,20 @@ impl AxumOutboundClient {
         }
         Ok(())
     }
+
+    pub(crate) fn with_transport_and_time(
+        client: Arc<reqwest::Client>,
+        time: OutboundTime,
+    ) -> Self {
+        Self { client, time }
+    }
 }
 
 #[async_trait(?Send)]
 impl OutboundHttpClient for AxumOutboundClient {
     #[inline]
     async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-        let started_at = self.clock.now();
+        let started_at = self.time.clock().now();
         let prepared = Self::prepare(request, started_at)?;
         self.execute(prepared).await
     }
@@ -189,7 +215,7 @@ impl OutboundHttpClient for AxumOutboundClient {
         requests: Vec<OutboundRequest>,
         observation_cutoff: Deadline,
     ) -> OutboundBatch {
-        let batch_started_at = self.clock.now();
+        let batch_started_at = self.time.clock().now();
         let slot_count = requests.len();
         if observation_cutoff.is_expired_at(batch_started_at) {
             return OutboundBatch::cutoff(slot_count);
@@ -204,12 +230,12 @@ impl OutboundHttpClient for AxumOutboundClient {
                     pending_slots.push(
                         async move {
                             let outcome = client.execute(prepared).await;
-                            (index, client.clock.now(), outcome)
+                            (index, client.time.clock().now(), outcome)
                         }
                         .boxed_local(),
                     );
                 }
-                Err(error) => completed.push((index, self.clock.now(), Err(error))),
+                Err(error) => completed.push((index, self.time.clock().now(), Err(error))),
             }
         }
 
@@ -227,8 +253,9 @@ async fn collect_request_body(
     body: Body,
     maximum: u64,
     budget: DispatchBudget,
-    clock: &MonotonicClock,
+    time: &OutboundTime,
 ) -> Result<Bytes, EdgeError> {
+    let clock = time.clock();
     match body {
         Body::Once(bytes) => {
             let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -243,11 +270,24 @@ async fn collect_request_body(
         Body::Stream(mut source) => {
             let mut collected = Vec::new();
             let mut total = 0_u64;
+            let mut previous = clock.now();
+            let mut timer = time.wait_until(budget.deadline);
             loop {
-                let remaining = budget_remaining(budget, clock)?;
-                let next_item = timeout(remaining, source.next())
-                    .await
-                    .map_err(|_elapsed| timeout_error(budget.cause))?;
+                let next_item = race_with_timer(
+                    source.next(),
+                    budget,
+                    time,
+                    &mut timer,
+                    &mut previous,
+                    None,
+                    |item| {
+                        item.as_ref()
+                            .and_then(|outcome| outcome.as_ref().err())
+                            .and_then(EdgeError::provider_failure_detail)
+                            .copied()
+                    },
+                )
+                .await?;
                 budget_remaining(budget, clock).map_err(|selected| {
                     let detail = next_item
                         .as_ref()
@@ -278,35 +318,30 @@ async fn collect_request_body(
     }
 }
 
-fn deadline_stream(
-    mut source: BodyStream,
-    budget: DispatchBudget,
-    clock: MonotonicClock,
-) -> BodyStream {
+fn deadline_stream(input: BodyStream, budget: DispatchBudget, time: OutboundTime) -> BodyStream {
     stream! {
+        let mut source = Some(input);
+        let mut previous = time.clock().now();
+        let mut timer = time.wait_until(budget.deadline);
         loop {
-            let remaining = match budget_remaining(budget, &clock) {
-                Ok(remaining) => remaining,
+            let next_item = match race_with_timer(source.as_mut().ok_or_else(|| EdgeError::internal(anyhow::anyhow!("response source already released")))?.next(), budget, &time, &mut timer, &mut previous, None, |item| {
+                item.as_ref().and_then(|outcome| outcome.as_ref().err()).and_then(EdgeError::provider_failure_detail).copied()
+            }).await {
+                Ok(item) => item,
                 Err(error) => {
+                    drop(source.take());
+                    drop(timer);
+                    drop(time);
                     yield Err(error);
                     return;
                 }
             };
-            let next_item = match timeout(remaining, source.next()).await {
-                Ok(item) => item,
-                Err(_elapsed) => {
-                    yield Err(timeout_error(budget.cause));
-                    return;
-                }
-            };
-            if budget_remaining(budget, &clock).is_err() {
-                let detail = next_item.as_ref().and_then(|item| item.as_ref().err()).and_then(EdgeError::provider_failure_detail).copied();
-                yield Err(preserve_timeout_detail(timeout_error(budget.cause), detail));
-                return;
-            }
             match next_item {
                 Some(Ok(bytes)) => yield Ok(bytes),
                 Some(Err(error)) => {
+                    drop(source.take());
+                    drop(timer);
+                    drop(time);
                     yield Err(error);
                     return;
                 }
@@ -335,9 +370,10 @@ async fn process_response(
     max_encoded_response_bytes: Option<u64>,
     max_response_header_bytes: Option<u64>,
     max_response_header_count: Option<u64>,
-    clock: MonotonicClock,
+    time: OutboundTime,
 ) -> Result<OutboundResponse, EdgeError> {
-    budget_remaining(budget, &clock)?;
+    let clock = time.clock();
+    budget_remaining(budget, clock)?;
     let response_clock = clock.clone();
     let status = StatusCode::from_u16(response.status().as_u16()).map_err(EdgeError::internal)?;
     let (mut headers, normalization, _) = OutboundHeaderInput::new(
@@ -365,7 +401,7 @@ async fn process_response(
         let native = response_stream(response, budget, clock.clone());
         if matches!(disposition, ResponseBodyDisposition::ResetContent { .. }) {
             if !declared_reset_body {
-                let mut reset_stream = deadline_stream(native, budget, clock);
+                let mut reset_stream = deadline_stream(native, budget, time.clone());
                 if let Some(item) = reset_stream.next().await {
                     item?;
                 }
@@ -386,7 +422,7 @@ async fn process_response(
                     status,
                 },
             )?;
-            let deadline_bound = deadline_stream(shaped, budget, clock);
+            let deadline_bound = deadline_stream(shaped, budget, time.clone());
             match response_mode {
                 ResponseMode::Buffered { max_bytes } => {
                     Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
@@ -552,12 +588,83 @@ fn preserve_timeout_detail(
     selected
 }
 
-fn apply_dispatch_timeout(
-    request: reqwest::RequestBuilder,
+pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
+    OutboundTime::new(clock, |deadline, paired_clock| {
+        Box::pin(async move {
+            if Handle::try_current().is_err() {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "outbound timer requires a Tokio runtime"
+                )));
+            }
+            let Some(remaining) = deadline.remaining_at(paired_clock.now()) else {
+                return Ok(());
+            };
+            AssertUnwindSafe(async move {
+                sleep(remaining).await;
+            })
+            .catch_unwind()
+            .await
+            .map_err(|_panic| EdgeError::internal(anyhow::anyhow!("outbound timer is unavailable")))
+        })
+    })
+}
+
+fn checked_now(
+    time: &OutboundTime,
+    previous: &mut MonotonicInstant,
+) -> Result<MonotonicInstant, EdgeError> {
+    let now = time.clock().now();
+    if now < *previous {
+        return Err(EdgeError::internal(anyhow::anyhow!(
+            "outbound clock moved backwards during I/O"
+        )));
+    }
+    *previous = now;
+    Ok(now)
+}
+
+async fn race_with_timer<Output>(
+    future: impl Future<Output = Output>,
     budget: DispatchBudget,
-    clock: &MonotonicClock,
-) -> Result<reqwest::RequestBuilder, EdgeError> {
-    Ok(request.timeout(budget_remaining(budget, clock)?))
+    time: &OutboundTime,
+    timer: &mut OutboundFuture<()>,
+    previous: &mut MonotonicInstant,
+    expiry_detail: Option<ProviderFailureDetail>,
+    detail: impl FnOnce(&Output) -> Option<ProviderFailureDetail>,
+) -> Result<Output, EdgeError> {
+    let mut extract_detail = Some(detail);
+    futures_util::pin_mut!(future);
+    poll_fn(|cx| {
+        checked_now(time, previous)?;
+        if let Poll::Ready(result) = timer.as_mut().poll(cx) {
+            result?;
+            checked_now(time, previous)?;
+            return Poll::Ready(Err(preserve_timeout_detail(
+                timeout_error(budget.cause),
+                expiry_detail,
+            )));
+        }
+        if budget.deadline.is_expired_at(checked_now(time, previous)?) {
+            return Poll::Ready(Err(preserve_timeout_detail(
+                timeout_error(budget.cause),
+                expiry_detail,
+            )));
+        }
+        let output = future.as_mut().poll(cx);
+        if budget.deadline.is_expired_at(checked_now(time, previous)?) {
+            let observed_detail = if let Poll::Ready(value) = &output {
+                extract_detail.take().and_then(|extract| extract(value))
+            } else {
+                None
+            };
+            return Poll::Ready(Err(preserve_timeout_detail(
+                timeout_error(budget.cause),
+                observed_detail.or(expiry_detail),
+            )));
+        }
+        output.map(Ok)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -575,6 +682,7 @@ mod clock_tests {
     use edgezero_core::{
         AxumFailureCause, AxumFailureKind, ProviderFailureDetail, ProviderFailurePhase,
     };
+    use futures::executor::block_on;
     use futures_util::stream;
     use http_body::Frame;
     use tokio::net::TcpListener;
@@ -616,6 +724,93 @@ mod clock_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             Poll::Pending
         }
+    }
+
+    #[test]
+    fn supplied_timer_setup_error_precedes_upload_polling() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&reads);
+        let source = stream::poll_fn(move |_context| {
+            captured.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending
+        });
+        let pair = OutboundTime::new(MonotonicClock::default(), |_deadline, _clock| {
+            Box::pin(async {
+                Err(EdgeError::internal(anyhow::anyhow!(
+                    "fixture timer setup failed"
+                )))
+            })
+        });
+        let client = AxumOutboundClient::try_with_time(pair).unwrap();
+        let request = OutboundRequest::post("http://127.0.0.1:9/upload")
+            .unwrap()
+            .body(Body::from_stream(source));
+        let error = block_on(client.send(request)).expect_err("timer setup");
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn native_timer_without_runtime_returns_internal_error() {
+        let pair = native_time(MonotonicClock::default());
+        let deadline = pair.clock().deadline_after(Duration::from_secs(1));
+        let error = block_on(pair.wait_until(deadline)).expect_err("no runtime");
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert!(error.to_string().contains("Tokio runtime"));
+    }
+
+    #[test]
+    fn native_timer_without_timer_driver_returns_internal_error() {
+        use tokio::runtime::Builder;
+
+        let runtime = Builder::new_current_thread().build().expect("runtime");
+        let pair = native_time(MonotonicClock::default());
+        let deadline = pair.clock().deadline_after(Duration::from_secs(1));
+        let error = runtime
+            .block_on(pair.wait_until(deadline))
+            .expect_err("no timer driver");
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert!(error.to_string().contains("timer is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn review_cross_chunk_regression_releases_retained_source() {
+        use std::future::pending;
+
+        let start = MonotonicInstant::now();
+        let budget = test_budget(start, Duration::from_secs(10));
+        let advanced = start.checked_add(Duration::from_millis(2)).unwrap();
+        let regressed = start.checked_add(Duration::from_millis(1)).unwrap();
+        let observed = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&observed);
+        let pair = native_time(MonotonicClock::new(move || *sampled.lock().unwrap()));
+        let owner = Arc::new(());
+        let released = Arc::downgrade(&owner);
+        let source_clock = Arc::clone(&observed);
+        let source = stream! {
+            *source_clock.lock().unwrap() = advanced;
+            yield Ok(Bytes::from_static(b"first"));
+            yield Ok(Bytes::from_static(b"second"));
+            pending::<()>().await;
+            drop(owner);
+        }
+        .boxed_local();
+        let mut guarded = deadline_stream(source, budget, pair);
+        assert_eq!(
+            guarded.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"first")
+        );
+        *observed.lock().unwrap() = regressed;
+        let error = guarded
+            .next()
+            .await
+            .unwrap()
+            .expect_err("cross-chunk clock regression");
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert!(
+            released.upgrade().is_none(),
+            "release before terminal wrapper drop"
+        );
     }
 
     #[test]
@@ -731,19 +926,24 @@ mod clock_tests {
         for upload in [false, true] {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_secs(1));
-            let source = stream::iter([Err(EdgeError::bad_gateway_with_detail(
-                "source failed",
-                BadGatewayReason::Transport,
-                detail,
-            ))])
+            let observed = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&observed);
+            let clock = MonotonicClock::new(move || *sampled.lock().unwrap());
+            let source = stream::once(async move {
+                *observed.lock().unwrap() = budget.deadline.instant();
+                Err(EdgeError::bad_gateway_with_detail(
+                    "source failed",
+                    BadGatewayReason::Transport,
+                    detail,
+                ))
+            })
             .boxed_local();
-            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
             let error = if upload {
-                collect_request_body(Body::from_stream(source), 32, budget, &clock)
+                collect_request_body(Body::from_stream(source), 32, budget, &native_time(clock))
                     .await
                     .expect_err("late upload error")
             } else {
-                deadline_stream(source, budget, clock)
+                deadline_stream(source, budget, native_time(clock))
                     .next()
                     .await
                     .expect("terminal")
@@ -877,7 +1077,8 @@ mod clock_tests {
                 } else {
                     Body::from(bytes)
                 };
-                let result = collect_request_body(body, 8, budget, &clock).await;
+                let result =
+                    collect_request_body(body, 8, budget, &native_time(clock.clone())).await;
                 if len > 8 {
                     let error = result.expect_err("upload overflow");
                     assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -893,7 +1094,7 @@ mod clock_tests {
         let source_error =
             EdgeError::payload_too_large(edgezero_core::RequestBodyOverflowOrigin::Inbound);
         let body = Body::from_stream(stream::iter([Err(source_error)]));
-        let error = collect_request_body(body, 8, budget, &clock)
+        let error = collect_request_body(body, 8, budget, &native_time(clock))
             .await
             .expect_err("source overflow");
         assert_eq!(
@@ -944,7 +1145,7 @@ mod clock_tests {
                     Some(0),
                     max_bytes,
                     max_count,
-                    MonotonicClock::new(move || start),
+                    native_time(MonotonicClock::new(move || start)),
                 )
                 .await;
                 if setting == OutboundProxyMarker::Off {
@@ -1016,7 +1217,7 @@ mod clock_tests {
                             None,
                             None,
                             None,
-                            scripted_clock(vec![start, observed]),
+                            native_time(scripted_clock(vec![start, observed])),
                         )
                         .await;
                         assert_eq!(
@@ -1078,7 +1279,7 @@ mod clock_tests {
                         Some(1),
                         None,
                         None,
-                        MonotonicClock::new(move || start),
+                        native_time(MonotonicClock::new(move || start)),
                     )
                     .await
                     .expect("bodyless response");
@@ -1121,8 +1322,9 @@ mod clock_tests {
         let completed = start
             .checked_add(Duration::from_millis(9))
             .expect("completed instant");
-        let client = AxumOutboundClient::try_with_clock(scripted_clock(vec![start, completed]))
-            .expect("client");
+        let client =
+            AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![start, completed])))
+                .expect("client");
         let request = OutboundRequest::get("https://example.com/")
             .expect("request")
             .stream_response();
@@ -1144,8 +1346,9 @@ mod clock_tests {
         let earlier = start
             .checked_sub(Duration::from_millis(1))
             .expect("earlier instant");
-        let client = AxumOutboundClient::try_with_clock(scripted_clock(vec![start, earlier]))
-            .expect("client");
+        let client =
+            AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![start, earlier])))
+                .expect("client");
         let request = OutboundRequest::get("https://example.com/")
             .expect("request")
             .stream_response();
@@ -1177,14 +1380,23 @@ mod clock_tests {
     }
 
     #[test]
-    fn request_timer_arms_from_final_remaining_budget() {
+    fn paired_timer_rejects_final_expiry_before_transport_poll() {
         let start = MonotonicInstant::now();
         let budget = test_budget(start, Duration::from_millis(10));
-        let clock = scripted_clock(vec![budget.deadline.instant()]);
-        let request = reqwest::Client::new().get("https://example.com/");
-
-        let error = apply_dispatch_timeout(request, budget, &clock)
-            .expect_err("final dispatch sample must reject equality expiry");
+        let clock = MonotonicClock::new(move || budget.deadline.instant());
+        let time = native_time(clock);
+        let mut previous = start;
+        let mut timer = time.wait_until(budget.deadline);
+        let error = block_on(race_with_timer(
+            async {},
+            budget,
+            &time,
+            &mut timer,
+            &mut previous,
+            None,
+            |()| None,
+        ))
+        .expect_err("dispatch sample must reject equality expiry without a runtime");
 
         assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
     }
@@ -1198,9 +1410,10 @@ mod clock_tests {
             .expect("observed instant");
         let clock = scripted_clock(vec![observed, observed]);
 
-        let body = collect_request_body(Body::from("body"), 16, budget, &clock)
-            .await
-            .expect("prepared body");
+        let body =
+            collect_request_body(Body::from("body"), 16, budget, &native_time(clock.clone()))
+                .await
+                .expect("prepared body");
         let remaining = budget_remaining(budget, &clock).expect("remaining budget");
 
         assert_eq!(body, Bytes::from_static(b"body"));
@@ -1211,10 +1424,15 @@ mod clock_tests {
     async fn streamed_upload_checks_injected_clock_after_ready_item() {
         let start = MonotonicInstant::now();
         let budget = test_budget(start, Duration::from_millis(10));
-        let clock = scripted_clock(vec![start, budget.deadline.instant()]);
-        let body = Body::from_stream(stream::once(async { Ok(Bytes::from_static(b"body")) }));
+        let observed = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&observed);
+        let clock = MonotonicClock::new(move || *sampled.lock().unwrap());
+        let body = Body::from_stream(stream::once(async move {
+            *observed.lock().unwrap() = budget.deadline.instant();
+            Ok(Bytes::from_static(b"body"))
+        }));
 
-        let error = collect_request_body(body, 16, budget, &clock)
+        let error = collect_request_body(body, 16, budget, &native_time(clock))
             .await
             .expect_err("post-ready expiry");
 
@@ -1248,7 +1466,7 @@ mod clock_tests {
             None,
             None,
             None,
-            clock,
+            native_time(clock),
         )
         .await
         .expect("converted response");
@@ -1382,7 +1600,7 @@ mod clock_tests {
                     None,
                     None,
                     None,
-                    MonotonicClock::new(move || start),
+                    native_time(MonotonicClock::new(move || start)),
                 )
                 .await
                 .expect("converted response");
@@ -1400,9 +1618,15 @@ mod clock_tests {
     async fn response_stream_retains_clock_for_post_ready_expiry() {
         let start = MonotonicInstant::now();
         let budget = test_budget(start, Duration::from_millis(10));
-        let clock = scripted_clock(vec![start, budget.deadline.instant()]);
-        let source = stream::once(async { Ok(Bytes::from_static(b"body")) }).boxed_local();
-        let mut body = deadline_stream(source, budget, clock);
+        let observed = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&observed);
+        let clock = MonotonicClock::new(move || *sampled.lock().unwrap());
+        let source = stream::once(async move {
+            *observed.lock().unwrap() = budget.deadline.instant();
+            Ok(Bytes::from_static(b"body"))
+        })
+        .boxed_local();
+        let mut body = deadline_stream(source, budget, native_time(clock));
 
         let error = body
             .next()

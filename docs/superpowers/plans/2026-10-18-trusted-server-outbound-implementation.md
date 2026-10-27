@@ -989,8 +989,32 @@ and hosted/frozen-candidate acceptance remain gates. This does not complete P1 o
 - [ ] Hard-migrate the shared dispatch trait, every current implementation, adapter injectors,
       behavioral tests, demo, generator and guards together. No old-signature defaults or aliases.
 
-The foundation does not change transport behavior or qualify a runtime. G1 applicability, remaining
+The initial foundation did not change transport behavior or qualify a runtime. The approved
+paired-time integration below now replaces clock-only constructors, while the dispatch-trait
+hard cut remains open. G1 applicability, remaining
 G3 premises, Fastly B/H(K), and hosted results retain their own open gates.
+
+### P1 Paired-Time Integration Checkpoint
+
+The requester explicitly approved moving this integration ahead of the atomic dispatch cut on
+2026-10-26; see the scoped approval audit. The frozen Interfaces and Plan 02 are unchanged.
+
+- [x] Hard-migrate all four live clients, request injectors and affected fixtures to `with_time`
+      / `try_with_time`, pairing standard entrypoints with the exact application clock. Remove
+      the clock-only constructors without aliases; leave the public dispatch trait unchanged.
+- [x] Use the supplied timer for upload/head/body deadline races, check it before source I/O,
+      retain pending registrations, preserve typed failures and recheck original deadlines after
+      ready I/O. Native reqwest total timeouts no longer introduce a second clock domain.
+- [x] Register Fastly timers in the existing progress multiplexer, including timer-only waits,
+      without per-slot sleep/select. Check Workers scheduling and cancellation before fetch;
+      retain a real host-event yield for frozen-clock fairness.
+- [x] Complete cross-target regression checks, deterministic wake/cancellation proofs, strict
+      lint and independent ownership review; record the result in the approval audit.
+
+This is live timer integration, not completion of P1. Support-first settlement/context issuance,
+the atomic trait and batch-receipt migration, external-client conformance, redirect following and
+hosted qualification retain their separate gates. Demo and generator use standard injection,
+not removed custom constructors; no alternate client API is added for them.
 
 ### P1 Head Foundation Checkpoint
 
@@ -1018,8 +1042,9 @@ G3 premises, Fastly B/H(K), and hosted results retain their own open gates.
       eager progress, settlement, batch-ledger migration and redirect following separately.
 
 This is a core-internal execution foundation, not live head-first dispatch. Unit tests construct
-private contexts; external implementations cannot manufacture them. The existing facade/trait and
-adapter constructors have not changed, so demo, generator and fixtures keep their current valid
+private contexts; external implementations cannot manufacture them. The existing facade/trait
+has not changed. Adapter constructors migrate in the separately approved paired-time checkpoint;
+demo, generator and fixtures keep their current valid
 implementations until the atomic migration. No compatibility alias, silent option default or second
 transport was added. The current inventory is eleven implementation blocks, including the fully
 qualified qualification-fixture client; rediscover all callers before that cut.

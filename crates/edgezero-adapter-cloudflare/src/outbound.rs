@@ -88,12 +88,12 @@ impl HeaderSink for worker::Headers {
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 mod worker_impl {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::future::Future;
     use std::num::NonZeroU64;
     use std::pin::Pin;
     use std::rc::Rc;
-    use std::task::{Context, Poll};
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     use async_stream::stream;
@@ -109,24 +109,24 @@ mod worker_impl {
     use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundCachePolicy, OutboundHeaderFidelity, OutboundHeaderInput,
-        OutboundHttpClient, OutboundProxyMarker, OutboundRequest, OutboundRequestParts,
-        OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
-        ResponseHeaderLimiter, ResponseMode, apply_response_body_policy, collect_response_stream,
-        normalize_for_dispatch,
+        OutboundBatch, OutboundCachePolicy, OutboundFuture, OutboundHeaderFidelity,
+        OutboundHeaderInput, OutboundHttpClient, OutboundProxyMarker, OutboundRequest,
+        OutboundRequestParts, OutboundResponse, OutboundTime, ResponseBodyDisposition,
+        ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter, ResponseMode,
+        apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
     };
     use edgezero_core::time::{
         Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget,
     };
     use futures_util::StreamExt as _;
-    use futures_util::future::{Either, FutureExt as _, LocalBoxFuture, select};
+    use futures_util::future::{FutureExt as _, LocalBoxFuture, poll_fn};
     use worker::js_sys::{Function, Reflect, Uint8Array, global};
     use worker::wasm_bindgen::closure::Closure;
     use worker::wasm_bindgen::{JsCast as _, JsValue};
     use worker::wasm_bindgen_futures::JsFuture;
     use worker::web_sys;
     use worker::{
-        CacheMode, Delay, Headers, Method as WorkerMethod, Request as WorkerRequest, RequestInit,
+        CacheMode, Headers, Method as WorkerMethod, Request as WorkerRequest, RequestInit,
         RequestRedirect, Response as WorkerResponse, ResponseBody as WorkerResponseBody,
     };
 
@@ -137,15 +137,25 @@ mod worker_impl {
     struct HostEventYield {
         awoken: Rc<Cell<bool>>,
         callback: Option<Closure<dyn FnMut()>>,
+        cancellation: Option<(Function, JsValue)>,
+        duration: Duration,
         timeout_handle: Option<JsValue>,
+        waker: Rc<RefCell<Option<Waker>>>,
     }
 
     impl HostEventYield {
         fn new() -> Self {
+            Self::after(Duration::ZERO)
+        }
+
+        fn after(duration: Duration) -> Self {
             Self {
                 awoken: Rc::new(Cell::new(false)),
                 callback: None,
+                cancellation: None,
+                duration,
                 timeout_handle: None,
+                waker: Rc::new(RefCell::new(None)),
             }
         }
     }
@@ -156,17 +166,28 @@ mod worker_impl {
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
             if this.awoken.get() {
+                drop(this.callback.take());
+                drop(this.cancellation.take());
+                drop(this.timeout_handle.take());
+                let previous = this.waker.borrow_mut().take();
+                drop(previous);
                 return Poll::Ready(Ok(()));
             }
+            let next_waker = cx.waker().clone();
+            let previous = this.waker.borrow_mut().replace(next_waker);
+            drop(previous);
             if this.callback.is_some() {
                 return Poll::Pending;
             }
 
             let awoken = Rc::clone(&this.awoken);
-            let waker = cx.waker().clone();
+            let waker = Rc::clone(&this.waker);
             let callback = Closure::<dyn FnMut()>::new(move || {
                 awoken.set(true);
-                waker.wake_by_ref();
+                let registered = waker.borrow_mut().take();
+                if let Some(waiting) = registered {
+                    waiting.wake();
+                }
             });
             let global_scope = global();
             let Some(set_timeout) = Reflect::get(&global_scope, &JsValue::from_str("setTimeout"))
@@ -175,16 +196,26 @@ mod worker_impl {
             else {
                 return Poll::Ready(Err(host_event_schedule_error()));
             };
+            let Some(clear_timeout) =
+                Reflect::get(&global_scope, &JsValue::from_str("clearTimeout"))
+                    .ok()
+                    .and_then(|value| value.dyn_into::<Function>().ok())
+            else {
+                return Poll::Ready(Err(host_event_schedule_error()));
+            };
+            let milliseconds =
+                i32::try_from(this.duration.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
             let timeout_handle = match set_timeout.call2(
                 &global_scope,
                 callback.as_ref(),
-                &JsValue::from_f64(0.0),
+                &JsValue::from_f64(f64::from(milliseconds)),
             ) {
                 Ok(handle) => handle,
                 Err(_error) => return Poll::Ready(Err(host_event_schedule_error())),
             };
             this.callback = Some(callback);
             this.timeout_handle = Some(timeout_handle);
+            this.cancellation = Some((clear_timeout, global_scope.into()));
             Poll::Pending
         }
     }
@@ -201,15 +232,9 @@ mod worker_impl {
             let Some(timeout_handle) = self.timeout_handle.take() else {
                 return;
             };
-            let global_scope = global();
-            let Ok(clear_timeout) = Reflect::get(&global_scope, &JsValue::from_str("clearTimeout"))
-            else {
-                return;
-            };
-            let Some(clear_timeout_function) = clear_timeout.dyn_ref::<Function>() else {
-                return;
-            };
-            let _ignored = clear_timeout_function.call1(&global_scope, &timeout_handle);
+            if let Some((clear, receiver)) = self.cancellation.take() {
+                let _ignored = clear.call1(&receiver, &timeout_handle);
+            }
         }
     }
 
@@ -220,7 +245,7 @@ mod worker_impl {
     /// Native outbound HTTP implementation for Cloudflare Workers.
     #[derive(Clone)]
     pub struct CloudflareOutboundClient {
-        clock: MonotonicClock,
+        time: OutboundTime,
     }
 
     struct AbortGuard {
@@ -277,10 +302,10 @@ mod worker_impl {
                 headers.insert(HOST, value);
             }
             let worker_body =
-                request_body(body, max_request_body_bytes, budget, self.clock.clone()).await?;
+                request_body(body, max_request_body_bytes, budget, self.time.clone()).await?;
             let url = uri.to_string();
             let request = build_worker_request(&method, &url, &headers, worker_body, cache_policy)?;
-            let (response, abort_guard) = raw_fetch(request, budget, &self.clock).await?;
+            let (response, abort_guard) = raw_fetch(request, budget, &self.time).await?;
 
             process_response(
                 response,
@@ -297,7 +322,7 @@ mod worker_impl {
                 max_encoded_response_bytes,
                 max_response_header_bytes,
                 max_response_header_count,
-                self.clock.clone(),
+                self.time.clone(),
             )
             .await
         }
@@ -336,14 +361,14 @@ mod worker_impl {
         #[must_use]
         #[inline]
         pub fn new() -> Self {
-            Self::with_clock(MonotonicClock::default())
+            Self::with_time(native_time(MonotonicClock::default()))
         }
 
         /// Builds a client that evaluates every outbound lifetime against `clock`.
         #[must_use]
         #[inline]
-        pub fn with_clock(clock: MonotonicClock) -> Self {
-            Self { clock }
+        pub fn with_time(time: OutboundTime) -> Self {
+            Self { time }
         }
     }
 
@@ -370,7 +395,7 @@ mod worker_impl {
     impl OutboundHttpClient for CloudflareOutboundClient {
         #[inline]
         async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
-            let started_at = self.clock.now();
+            let started_at = self.time.clock().now();
             let prepared = Self::prepare(request, started_at)?;
             self.execute(prepared).await
         }
@@ -381,7 +406,7 @@ mod worker_impl {
             requests: Vec<OutboundRequest>,
             observation_cutoff: Deadline,
         ) -> OutboundBatch {
-            let batch_started_at = self.clock.now();
+            let batch_started_at = self.time.clock().now();
             let slot_count = requests.len();
             if observation_cutoff.is_expired_at(batch_started_at) {
                 return OutboundBatch::cutoff(slot_count);
@@ -396,12 +421,12 @@ mod worker_impl {
                         pending_slots.push(
                             async move {
                                 let outcome = client.execute(prepared).await;
-                                (index, client.clock.now(), outcome)
+                                (index, client.time.clock().now(), outcome)
                             }
                             .boxed_local(),
                         );
                     }
-                    Err(error) => completed.push((index, self.clock.now(), Err(error))),
+                    Err(error) => completed.push((index, self.time.clock().now(), Err(error))),
                 }
             }
 
@@ -446,56 +471,62 @@ mod worker_impl {
     }
 
     fn deadline_stream(
-        mut source: BodyStream,
+        input: BodyStream,
         budget: DispatchBudget,
-        clock: MonotonicClock,
-        mut abort_guard: AbortGuard,
+        time: OutboundTime,
+        guard: AbortGuard,
     ) -> BodyStream {
         stream! {
+            let mut source = Some(input);
+            let mut abort_guard = Some(guard);
+            let mut previous = time.clock().now();
+            let mut timer = time.wait_until(budget.deadline);
             let mut ready_items = 0_u32;
             loop {
-                let remaining = match budget_remaining(budget, &clock) {
-                    Ok(remaining) => remaining,
+                let next_item = match race_with_timer(source.as_mut().ok_or_else(|| EdgeError::internal(anyhow::anyhow!("response source already released")))?.next(), budget, &time, &mut timer, &mut previous, None, |item| stream_error_detail(item.as_ref())).await {
+                    Ok(item) => item,
                     Err(error) => {
+                        drop(source.take());
+                        drop(abort_guard.take());
+                        drop(timer);
+                        drop(time);
                         yield Err(error);
                         return;
                     }
                 };
-                let next = source.next();
-                let timer = Delay::from(remaining);
-                futures_util::pin_mut!(next, timer);
-                let next_item = match select(next, timer).await {
-                    Either::Left((item, _timer)) => item,
-                    Either::Right(((), _next)) => {
-                        yield Err(timeout_error(budget.cause));
-                        return;
-                    }
-                };
-                if budget_remaining(budget, &clock).is_err() {
-                    let detail = stream_error_detail(next_item.as_ref());
-                    yield Err(preserve_timeout_detail(timeout_error(budget.cause), detail));
-                    return;
-                }
                 match next_item {
                     Some(Ok(bytes)) => yield Ok(bytes),
                     Some(Err(error)) => {
-                        yield Err(terminal_error_after_host_event(error, budget, &clock).await);
+                        let selected = terminal_error_after_host_event(error, budget, &time, &mut previous).await;
+                        drop(source.take());
+                        drop(abort_guard.take());
+                        drop(timer);
+                        drop(time);
+                        yield Err(selected);
                         return;
                     }
                     None => {
-                        if let Err(error) = yield_host_event(budget, &clock).await {
+                        if let Err(error) = yield_host_event(budget, &time, &mut previous, None).await {
+                            drop(source.take());
+                            drop(abort_guard.take());
+                            drop(timer);
+                            drop(time);
                             yield Err(error);
                             return;
                         }
-                        abort_guard.disarm();
+                        if let Some(completed) = &mut abort_guard { completed.disarm(); }
                         return;
                     }
                 }
                 ready_items = ready_items.saturating_add(1);
                 if ready_items >= READY_ITEM_YIELD_QUOTA {
-                    let checkpoint = yield_host_event(budget, &clock).await;
+                    let checkpoint = yield_host_event(budget, &time, &mut previous, None).await;
                     ready_items = 0;
                     if let Err(error) = checkpoint {
+                        drop(source.take());
+                        drop(abort_guard.take());
+                        drop(timer);
+                        drop(time);
                         yield Err(error);
                         return;
                     }
@@ -524,8 +555,9 @@ mod worker_impl {
         max_encoded_response_bytes: Option<u64>,
         max_response_header_bytes: Option<u64>,
         max_response_header_count: Option<u64>,
-        clock: MonotonicClock,
+        time: OutboundTime,
     ) -> Result<OutboundResponse, EdgeError> {
+        let clock = time.clock().clone();
         budget_remaining(budget, &clock)?;
         let response_clock = clock.clone();
         let status = StatusCode::from_u16(response.status_code()).map_err(EdgeError::internal)?;
@@ -553,20 +585,23 @@ mod worker_impl {
                 ResetContentAction::Disarm => abort_guard.disarm(),
                 ResetContentAction::InspectStream => {
                     let native = response_stream(&mut response)?;
-                    let remaining = budget_remaining(budget, &clock)?;
                     let next = native.into_future();
-                    let timer = Delay::from(remaining);
-                    futures_util::pin_mut!(next, timer);
-                    let ready = match select(next, timer).await {
-                        Either::Left((ready, _timer)) => ready,
-                        Either::Right(((), _next)) => return Err(timeout_error(budget.cause)),
-                    };
+                    let mut previous = time.clock().now();
+                    let mut timer = time.wait_until(budget.deadline);
+                    let ready = race_with_timer(
+                        next,
+                        budget,
+                        &time,
+                        &mut timer,
+                        &mut previous,
+                        None,
+                        |ready| stream_error_detail(ready.0.as_ref()),
+                    )
+                    .await?;
                     let detail = stream_error_detail(ready.0.as_ref());
                     budget_remaining(budget, &clock)
                         .map_err(|selected| preserve_timeout_detail(selected, detail))?;
-                    yield_host_event(budget, &clock)
-                        .await
-                        .map_err(|selected| preserve_timeout_detail(selected, detail))?;
+                    yield_host_event(budget, &time, &mut previous, detail).await?;
                     match ready {
                         (Some(item), _rest) => {
                             item?;
@@ -592,7 +627,7 @@ mod worker_impl {
                     status,
                 },
             )?;
-            let deadline_bound = deadline_stream(shaped, budget, clock, abort_guard);
+            let deadline_bound = deadline_stream(shaped, budget, time, abort_guard);
             match response_mode {
                 ResponseMode::Buffered { max_bytes } => {
                     Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
@@ -614,8 +649,22 @@ mod worker_impl {
     async fn raw_fetch(
         request: WorkerRequest,
         budget: DispatchBudget,
-        clock: &MonotonicClock,
+        time: &OutboundTime,
     ) -> Result<(WorkerResponse, AbortGuard), EdgeError> {
+        let clock = time.clock();
+        let mut previous = clock.now();
+        let mut timer = time.wait_until(budget.deadline);
+        // Register a checked wakeup before the eager fetch promise can start network work.
+        poll_fn(|cx| {
+            Poll::Ready(match timer.as_mut().poll(cx) {
+                Poll::Ready(result) => {
+                    Err(result.err().unwrap_or_else(|| timeout_error(budget.cause)))
+                }
+                Poll::Pending => Ok(()),
+            })
+        })
+        .await?;
+        checked_now(time, &mut previous)?;
         let controller = web_sys::AbortController::new().map_err(|error| {
             js_preparation_error(&error, "failed to construct abort controller")
         })?;
@@ -636,16 +685,23 @@ mod worker_impl {
         }
 
         let global: web_sys::WorkerGlobalScope = global().unchecked_into();
-        let (promise, remaining) = begin_fetch(budget, clock, || {
+        let (promise, _remaining) = begin_fetch(budget, clock, || {
             global.fetch_with_request_and_init(request.inner(), &fetch_init)
         })?;
         let fetch = JsFuture::from(promise);
-        let timer = Delay::from(remaining);
-        futures_util::pin_mut!(fetch, timer);
-        let result = match select(fetch, timer).await {
-            Either::Left((result, _timer)) => result,
-            Either::Right(((), _fetch)) => return Err(timeout_error(budget.cause)),
-        };
+        let result = race_with_timer(
+            fetch,
+            budget,
+            time,
+            &mut timer,
+            &mut previous,
+            None,
+            |result| {
+                let error = result.as_ref().err()?;
+                map_fetch_failure(error).provider_failure_detail().copied()
+            },
+        )
+        .await?;
         let value = finish_fetch_result(result, budget_remaining(budget, clock))?;
         let web_response: web_sys::Response = value.dyn_into().map_err(|_non_response| {
             EdgeError::internal(anyhow::anyhow!("fetch returned a non-response value"))
@@ -666,8 +722,9 @@ mod worker_impl {
         body: Body,
         maximum: u64,
         budget: DispatchBudget,
-        clock: MonotonicClock,
+        time: OutboundTime,
     ) -> Result<Option<JsValue>, EdgeError> {
+        let clock = time.clock();
         match body {
             Body::Once(bytes) => {
                 let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -676,7 +733,7 @@ mod worker_impl {
                         edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     ));
                 }
-                budget_remaining(budget, &clock)?;
+                budget_remaining(budget, clock)?;
                 if bytes.is_empty() {
                     Ok(None)
                 } else {
@@ -684,7 +741,7 @@ mod worker_impl {
                 }
             }
             Body::Stream(source) => {
-                let mut bounded = upload_stream(source, maximum, budget, clock);
+                let mut bounded = upload_stream(source, maximum, budget, time);
                 let mut collected = Vec::new();
                 while let Some(item) = bounded.next().await {
                     collected.extend_from_slice(&item?);
@@ -738,7 +795,7 @@ mod worker_impl {
                 None,
                 None,
                 None,
-                clock,
+                native_time(clock),
             )
             .await
             .ok()?;
@@ -919,21 +976,33 @@ mod worker_impl {
 
     async fn yield_host_event(
         budget: DispatchBudget,
-        clock: &MonotonicClock,
+        time: &OutboundTime,
+        previous: &mut MonotonicInstant,
+        expiry_detail: Option<ProviderFailureDetail>,
     ) -> Result<(), EdgeError> {
-        HostEventYield::new().await?;
-        budget_remaining(budget, clock).map(drop)
+        let mut timer = time.wait_until(budget.deadline);
+        race_with_timer(
+            HostEventYield::new(),
+            budget,
+            time,
+            &mut timer,
+            previous,
+            expiry_detail,
+            |_result| None,
+        )
+        .await?
     }
 
     async fn terminal_error_after_host_event(
         error: EdgeError,
         budget: DispatchBudget,
-        clock: &MonotonicClock,
+        time: &OutboundTime,
+        previous: &mut MonotonicInstant,
     ) -> EdgeError {
         let detail = error.provider_failure_detail().copied();
-        match yield_host_event(budget, clock).await {
+        match yield_host_event(budget, time, previous, detail).await {
             Ok(()) => error,
-            Err(selected) => preserve_timeout_detail(selected, detail),
+            Err(selected) => selected,
         }
     }
 
@@ -941,36 +1010,29 @@ mod worker_impl {
         mut source: BodyStream,
         maximum: u64,
         budget: DispatchBudget,
-        clock: MonotonicClock,
+        time: OutboundTime,
     ) -> BodyStream {
         stream! {
             let mut ready_items = 0_u32;
             let mut total = 0_u64;
+            let mut previous = time.clock().now();
+            let mut timer = time.wait_until(budget.deadline);
             loop {
-                let remaining = match budget_remaining(budget, &clock) {
-                    Ok(remaining) => remaining,
+                let next_item = match race_with_timer(source.next(), budget, &time, &mut timer, &mut previous, None, |item| stream_error_detail(item.as_ref())).await {
+                    Ok(item) => item,
                     Err(error) => {
+                        drop(source);
+                        drop(timer);
+                        drop(time);
                         yield Err(error);
                         return;
                     }
                 };
-                let next = source.next();
-                let timer = Delay::from(remaining);
-                futures_util::pin_mut!(next, timer);
-                let next_item = match select(next, timer).await {
-                    Either::Left((item, _timer)) => item,
-                    Either::Right(((), _next)) => {
-                        yield Err(timeout_error(budget.cause));
-                        return;
-                    }
-                };
-                if budget_remaining(budget, &clock).is_err() {
-                    let detail = stream_error_detail(next_item.as_ref());
-                    yield Err(preserve_timeout_detail(timeout_error(budget.cause), detail));
-                    return;
-                }
                 let Some(item) = next_item else {
-                    if let Err(error) = yield_host_event(budget, &clock).await {
+                    if let Err(error) = yield_host_event(budget, &time, &mut previous, None).await {
+                        drop(source);
+                        drop(timer);
+                        drop(time);
                         yield Err(error);
                     }
                     return;
@@ -978,7 +1040,11 @@ mod worker_impl {
                 let bytes = match item {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        yield Err(terminal_error_after_host_event(error, budget, &clock).await);
+                        let selected = terminal_error_after_host_event(error, budget, &time, &mut previous).await;
+                        drop(source);
+                        drop(timer);
+                        drop(time);
+                        yield Err(selected);
                         return;
                     }
                 };
@@ -987,23 +1053,28 @@ mod worker_impl {
                     let error = EdgeError::payload_too_large(
                         edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     );
-                    yield Err(terminal_error_after_host_event(error, budget, &clock).await);
+                    let selected = terminal_error_after_host_event(error, budget, &time, &mut previous).await;
+                    drop(source); drop(timer); drop(time);
+                    yield Err(selected);
                     return;
                 };
                 if next_total > maximum {
                     let error = EdgeError::payload_too_large(
                         edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
                     );
-                    yield Err(terminal_error_after_host_event(error, budget, &clock).await);
+                    let selected = terminal_error_after_host_event(error, budget, &time, &mut previous).await;
+                    drop(source); drop(timer); drop(time);
+                    yield Err(selected);
                     return;
                 }
                 total = next_total;
                 yield Ok(bytes);
                 ready_items = ready_items.saturating_add(1);
                 if ready_items >= READY_ITEM_YIELD_QUOTA {
-                    let checkpoint = yield_host_event(budget, &clock).await;
+                    let checkpoint = yield_host_event(budget, &time, &mut previous, None).await;
                     ready_items = 0;
                     if let Err(error) = checkpoint {
+                        drop(source); drop(timer); drop(time);
                         yield Err(error);
                         return;
                     }
@@ -1011,6 +1082,75 @@ mod worker_impl {
             }
         }
         .boxed_local()
+    }
+
+    pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
+        OutboundTime::new(clock, |deadline, paired_clock| {
+            Box::pin(async move {
+                let Some(remaining) = deadline.remaining_at(paired_clock.now()) else {
+                    return Ok(());
+                };
+                HostEventYield::after(remaining).await
+            })
+        })
+    }
+
+    fn checked_now(
+        time: &OutboundTime,
+        previous: &mut MonotonicInstant,
+    ) -> Result<MonotonicInstant, EdgeError> {
+        let now = time.clock().now();
+        if now < *previous {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "outbound clock moved backwards during I/O"
+            )));
+        }
+        *previous = now;
+        Ok(now)
+    }
+
+    async fn race_with_timer<Output>(
+        future: impl Future<Output = Output>,
+        budget: DispatchBudget,
+        time: &OutboundTime,
+        timer: &mut OutboundFuture<()>,
+        previous: &mut MonotonicInstant,
+        expiry_detail: Option<ProviderFailureDetail>,
+        detail: impl FnOnce(&Output) -> Option<ProviderFailureDetail>,
+    ) -> Result<Output, EdgeError> {
+        let mut extract_detail = Some(detail);
+        futures_util::pin_mut!(future);
+        poll_fn(|cx| {
+            checked_now(time, previous)?;
+            if let Poll::Ready(result) = timer.as_mut().poll(cx) {
+                result?;
+                checked_now(time, previous)?;
+                return Poll::Ready(Err(preserve_timeout_detail(
+                    timeout_error(budget.cause),
+                    expiry_detail,
+                )));
+            }
+            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
+                return Poll::Ready(Err(preserve_timeout_detail(
+                    timeout_error(budget.cause),
+                    expiry_detail,
+                )));
+            }
+            let output = future.as_mut().poll(cx);
+            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
+                let observed_detail = if let Poll::Ready(value) = &output {
+                    extract_detail.take().and_then(|extract| extract(value))
+                } else {
+                    None
+                };
+                return Poll::Ready(Err(preserve_timeout_detail(
+                    timeout_error(budget.cause),
+                    observed_detail.or(expiry_detail),
+                )));
+            }
+            output.map(Ok)
+        })
+        .await
     }
 
     fn worker_method(method: &Method) -> WorkerMethod {
@@ -1030,21 +1170,10 @@ mod worker_impl {
     #[doc(hidden)]
     #[inline]
     pub async fn deferred_clock_paths_hold_for_test() -> bool {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex, PoisonError};
 
         use futures_util::stream::once;
-
-        fn expiring_clock(start: MonotonicInstant, deadline: MonotonicInstant) -> MonotonicClock {
-            let observations = Arc::new(AtomicUsize::new(0));
-            MonotonicClock::new(move || {
-                if observations.fetch_add(1, Ordering::SeqCst) == 0 {
-                    start
-                } else {
-                    deadline
-                }
-            })
-        }
 
         let start = MonotonicInstant::now();
         let Ok(request) = OutboundRequest::get("https://example.com/") else {
@@ -1054,13 +1183,21 @@ mod worker_impl {
         else {
             return false;
         };
-        let upload_source = once(async { Ok(Bytes::from_static(b"body")) }).boxed_local();
-        let mut upload = upload_stream(
-            upload_source,
-            16,
-            budget,
-            expiring_clock(start, budget.deadline.instant()),
-        );
+        let observed = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&observed);
+        let clock =
+            MonotonicClock::new(move || *sampled.lock().unwrap_or_else(PoisonError::into_inner));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let upload_clock = Arc::clone(&observed);
+        let upload_polls = Arc::clone(&polls);
+        let upload_source = once(async move {
+            upload_polls.fetch_add(1, Ordering::SeqCst);
+            *upload_clock.lock().unwrap_or_else(PoisonError::into_inner) =
+                budget.deadline.instant();
+            Ok(Bytes::from_static(b"body"))
+        })
+        .boxed_local();
+        let mut upload = upload_stream(upload_source, 16, budget, native_time(clock.clone()));
         let upload_holds = matches!(
             upload.next().await,
             Some(Err(EdgeError::GatewayTimeout { .. }))
@@ -1069,11 +1206,18 @@ mod worker_impl {
         let Ok(controller) = web_sys::AbortController::new() else {
             return false;
         };
-        let response_source = once(async { Ok(Bytes::from_static(b"body")) }).boxed_local();
+        *observed.lock().unwrap_or_else(PoisonError::into_inner) = start;
+        let response_polls = Arc::clone(&polls);
+        let response_source = once(async move {
+            response_polls.fetch_add(1, Ordering::SeqCst);
+            *observed.lock().unwrap_or_else(PoisonError::into_inner) = budget.deadline.instant();
+            Ok(Bytes::from_static(b"body"))
+        })
+        .boxed_local();
         let mut response = deadline_stream(
             response_source,
             budget,
-            expiring_clock(start, budget.deadline.instant()),
+            native_time(clock),
             AbortGuard::new(controller),
         );
         let response_holds = matches!(
@@ -1081,15 +1225,16 @@ mod worker_impl {
             Some(Err(EdgeError::GatewayTimeout { .. }))
         );
 
-        upload_holds && response_holds
+        upload_holds && response_holds && polls.load(Ordering::SeqCst) == 2
     }
 
     #[cfg(test)]
     mod clock_tests {
         use std::collections::VecDeque;
         use std::ptr;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
-        use std::task::Poll;
+        use std::task::{Poll, Wake};
 
         use crate::test_runtime::NumericTimeoutGuard;
         use edgezero_core::error::BudgetSource;
@@ -1104,6 +1249,202 @@ mod worker_impl {
         use super::*;
 
         struct RestoreGlobal(Function);
+
+        #[wasm_bindgen_test]
+        async fn review_cross_chunk_regression_releases_retained_source() {
+            use std::future::pending;
+
+            let _timers = NumericTimeoutGuard::install();
+            let start = MonotonicInstant::now();
+            let budget = test_budget(start, Duration::from_secs(10));
+            let advanced = start.checked_add(Duration::from_millis(2)).unwrap();
+            let regressed = start.checked_add(Duration::from_millis(1)).unwrap();
+            let observed = Arc::new(Mutex::new(start));
+            let pair = native_time(controlled_clock(Arc::clone(&observed)));
+            let owner = Arc::new(());
+            let released = Arc::downgrade(&owner);
+            let source_clock = Arc::clone(&observed);
+            let source = stream! {
+                *source_clock.lock().unwrap() = advanced;
+                yield Ok(Bytes::from_static(b"first"));
+                yield Ok(Bytes::from_static(b"second"));
+                pending::<()>().await;
+                drop(owner);
+            }
+            .boxed_local();
+            let controller = web_sys::AbortController::new().unwrap();
+            let signal = controller.signal();
+            let mut guarded = deadline_stream(source, budget, pair, AbortGuard::new(controller));
+            assert_eq!(
+                guarded.next().await.unwrap().unwrap(),
+                Bytes::from_static(b"first")
+            );
+            *observed.lock().unwrap() = regressed;
+            let error = guarded
+                .next()
+                .await
+                .unwrap()
+                .expect_err("cross-chunk clock regression");
+            assert!(matches!(error, EdgeError::Internal { .. }));
+            assert!(
+                released.upgrade().is_none(),
+                "release before terminal wrapper drop"
+            );
+            assert!(signal.aborted());
+        }
+
+        #[wasm_bindgen_test]
+        async fn review_host_yield_preserves_supplied_timer_failure_detail() {
+            let start = MonotonicInstant::now();
+            let budget = test_budget(start, Duration::from_secs(10));
+            let timer_detail = ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::Send,
+                cause: CloudflareFailureCause::AbortError,
+            };
+            let source_detail = ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::ResponseBodyRead,
+                cause: CloudflareFailureCause::TypeError,
+            };
+            let pair = OutboundTime::new(constant_clock(start), move |_, _| {
+                Box::pin(async move {
+                    Err(preserve_timeout_detail(
+                        EdgeError::gateway_timeout_caused(
+                            "supplied timer failure",
+                            BudgetSource::Unspecified,
+                        ),
+                        Some(timer_detail),
+                    ))
+                })
+            });
+            let original = EdgeError::bad_gateway_with_detail(
+                "source failed",
+                BadGatewayReason::Transport,
+                source_detail,
+            );
+            let mut previous = start;
+            let selected =
+                terminal_error_after_host_event(original, budget, &pair, &mut previous).await;
+            assert_eq!(selected.message(), "supplied timer failure");
+            assert_eq!(selected.provider_failure_detail(), Some(&timer_detail));
+        }
+
+        #[wasm_bindgen_test]
+        async fn review_host_yield_keeps_prior_source_high_water() {
+            let start = MonotonicInstant::now();
+            let budget = test_budget(start, Duration::from_secs(10));
+            let mut previous = start.checked_add(Duration::from_millis(2)).unwrap();
+            let regressed = start.checked_add(Duration::from_millis(1)).unwrap();
+            let pair = native_time(constant_clock(regressed));
+            let error = yield_host_event(budget, &pair, &mut previous, None)
+                .await
+                .expect_err("host yield must retain the preceding source observation");
+            assert!(matches!(error, EdgeError::Internal { .. }));
+        }
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn timer_replaces_waker_and_cancels_only_pending_registration() {
+            let saved = Function::new_no_args("const set = globalThis.setTimeout, clear = globalThis.clearTimeout; globalThis.__edgezeroTimer = {arms:0, clears:0}; globalThis.setTimeout = (callback, milliseconds) => { const t = globalThis.__edgezeroTimer; t.arms++; t.callback=callback; t.milliseconds=milliseconds; return 123; }; globalThis.clearTimeout = () => {globalThis.__edgezeroTimer.clears++;}; return () => {globalThis.setTimeout=set; globalThis.clearTimeout=clear; delete globalThis.__edgezeroTimer;};")
+                .call0(&JsValue::UNDEFINED).unwrap().dyn_into::<Function>().unwrap();
+            let guard = RestoreGlobal(saved);
+            let first = Arc::new(WakeCount::default());
+            let second = Arc::new(WakeCount::default());
+            let first_waker = Waker::from(Arc::clone(&first));
+            let second_waker = Waker::from(Arc::clone(&second));
+            let mut timer = Box::pin(HostEventYield::after(Duration::from_nanos(1)));
+            assert!(
+                timer
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&first_waker))
+                    .is_pending()
+            );
+            assert!(
+                timer
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&second_waker))
+                    .is_pending()
+            );
+            let state = Reflect::get(&global(), &JsValue::from_str("__edgezeroTimer")).unwrap();
+            assert_eq!(
+                Reflect::get(&state, &JsValue::from_str("arms"))
+                    .unwrap()
+                    .as_f64(),
+                Some(1.0_f64)
+            );
+            assert_eq!(
+                Reflect::get(&state, &JsValue::from_str("milliseconds"))
+                    .unwrap()
+                    .as_f64(),
+                Some(1.0_f64)
+            );
+            let callback = Reflect::get(&state, &JsValue::from_str("callback"))
+                .unwrap()
+                .dyn_into::<Function>()
+                .unwrap();
+            callback.call0(&JsValue::UNDEFINED).unwrap();
+            assert_eq!(first.0.load(Ordering::SeqCst), 0);
+            assert_eq!(second.0.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                timer.as_mut().poll(&mut Context::from_waker(&second_waker)),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(timer.callback.is_none());
+            assert!(timer.waker.borrow().is_none());
+            drop(timer);
+            assert_eq!(
+                Reflect::get(&state, &JsValue::from_str("clears"))
+                    .unwrap()
+                    .as_f64(),
+                Some(0.0_f64)
+            );
+            let mut pending = Box::pin(HostEventYield::new());
+            assert!(
+                pending
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&first_waker))
+                    .is_pending()
+            );
+            drop(pending);
+            assert_eq!(
+                Reflect::get(&state, &JsValue::from_str("clears"))
+                    .unwrap()
+                    .as_f64(),
+                Some(1.0_f64)
+            );
+            drop(guard);
+        }
+
+        #[wasm_bindgen_test]
+        fn timer_validates_cancellation_before_registering() {
+            let restore = Function::new_no_args("const set = globalThis.setTimeout, clear = globalThis.clearTimeout; globalThis.__edgezeroTimerRegistrations = 0; globalThis.setTimeout = () => { globalThis.__edgezeroTimerRegistrations++; return 123; }; globalThis.clearTimeout = undefined; return () => { globalThis.setTimeout = set; globalThis.clearTimeout = clear; delete globalThis.__edgezeroTimerRegistrations; };")
+                .call0(&JsValue::UNDEFINED).unwrap().dyn_into::<Function>().unwrap();
+            let guard = RestoreGlobal(restore);
+            let mut timer = Box::pin(HostEventYield::new());
+            let outcome = timer.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            let registrations = Reflect::get(
+                &global(),
+                &JsValue::from_str("__edgezeroTimerRegistrations"),
+            )
+            .unwrap();
+            drop(timer);
+            drop(guard);
+            assert!(matches!(
+                outcome,
+                Poll::Ready(Err(EdgeError::Internal { .. }))
+            ));
+            assert_eq!(registrations.as_f64(), Some(0.0_f64));
+        }
 
         #[expect(
             clippy::missing_trait_methods,
@@ -1276,7 +1617,12 @@ mod worker_impl {
                         .dyn_into()
                         .expect("restore function");
                     let _restore = RestoreGlobal(restore);
-                    raw_fetch(request, budget, &MonotonicClock::new(move || start)).await
+                    raw_fetch(
+                        request,
+                        budget,
+                        &native_time(MonotonicClock::new(move || start)),
+                    )
+                    .await
                 };
                 let error = outcome.err().expect("setup refusal");
                 assert_eq!(
@@ -1330,16 +1676,22 @@ mod worker_impl {
             for during_yield in [false, true] {
                 let start = MonotonicInstant::now();
                 let budget = test_budget(start, Duration::from_secs(1));
-                let mut observations = vec![start, start];
-                if during_yield {
-                    observations.push(start);
-                }
-                observations.push(budget.deadline.instant());
-                let native = WorkerResponse::from_stream(stream::iter([Err::<Vec<u8>, _>(
-                    worker::Error::RustError("provider-secret-token".to_owned()),
-                )]))
-                .expect("stream response")
-                .with_status(205);
+                let observed = Arc::new(Mutex::new(start));
+                let pair = if during_yield {
+                    expire_at_host_yield(budget, Arc::clone(&observed))
+                } else {
+                    native_time(controlled_clock(Arc::clone(&observed)))
+                };
+                let late = Arc::clone(&observed);
+                let classify = Closure::<dyn FnMut()>::new(move || {
+                    if !during_yield {
+                        *late.lock().expect("clock") = budget.deadline.instant();
+                    }
+                });
+                let raw = Function::new_with_args("classify", "const error = new Error('provider-secret-token'); Object.defineProperty(error, 'name', {get() {classify(); return 'TypeError';}}); return new Response(new ReadableStream({start(c) {c.error(error);}}));")
+                    .call1(&JsValue::UNDEFINED, classify.as_ref()).expect("error response")
+                    .dyn_into::<web_sys::Response>().expect("native response");
+                let native = WorkerResponse::from(raw).with_status(205);
                 let result = process_response(
                     native,
                     AbortGuard::new(web_sys::AbortController::new().expect("controller")),
@@ -1355,7 +1707,7 @@ mod worker_impl {
                     None,
                     None,
                     None,
-                    scripted_clock(observations),
+                    pair,
                 )
                 .await;
                 let error = result.expect_err("expiry overrides body failure");
@@ -1370,7 +1722,7 @@ mod worker_impl {
                     error.provider_failure_detail(),
                     Some(&ProviderFailureDetail::Cloudflare {
                         phase: ProviderFailurePhase::ResponseBodyRead,
-                        cause: CloudflareFailureCause::Unknown,
+                        cause: CloudflareFailureCause::TypeError,
                     })
                 );
             }
@@ -1386,20 +1738,24 @@ mod worker_impl {
             for upload in [false, true] {
                 let start = MonotonicInstant::now();
                 let budget = test_budget(start, Duration::from_secs(1));
-                let source = stream::iter([Err(EdgeError::bad_gateway_with_detail(
-                    "source failed",
-                    BadGatewayReason::Transport,
-                    detail,
-                ))])
+                let observed = Arc::new(Mutex::new(start));
+                let clock = controlled_clock(Arc::clone(&observed));
+                let source = stream::once(async move {
+                    *observed.lock().expect("clock") = budget.deadline.instant();
+                    Err(EdgeError::bad_gateway_with_detail(
+                        "source failed",
+                        BadGatewayReason::Transport,
+                        detail,
+                    ))
+                })
                 .boxed_local();
-                let clock = scripted_clock(vec![start, budget.deadline.instant()]);
                 let mut wrapped = if upload {
-                    upload_stream(source, 32, budget, clock)
+                    upload_stream(source, 32, budget, native_time(clock))
                 } else {
                     deadline_stream(
                         source,
                         budget,
-                        clock,
+                        native_time(clock),
                         AbortGuard::new(web_sys::AbortController::new().expect("controller")),
                     )
                 };
@@ -1410,6 +1766,7 @@ mod worker_impl {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_secs(1));
             let clock = constant_clock(budget.deadline.instant());
+            let mut previous = start;
             let error = terminal_error_after_host_event(
                 EdgeError::bad_gateway_with_detail(
                     "source failed",
@@ -1417,7 +1774,8 @@ mod worker_impl {
                     detail,
                 ),
                 budget,
-                &clock,
+                &native_time(clock),
+                &mut previous,
             )
             .await;
             assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
@@ -1563,6 +1921,34 @@ mod worker_impl {
             MonotonicClock::new(move || now)
         }
 
+        fn controlled_clock(observed: Arc<Mutex<MonotonicInstant>>) -> MonotonicClock {
+            MonotonicClock::new(move || *observed.lock().expect("clock"))
+        }
+
+        fn expire_at_host_yield(
+            budget: DispatchBudget,
+            observed: Arc<Mutex<MonotonicInstant>>,
+        ) -> OutboundTime {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let arms = Arc::new(AtomicUsize::new(0));
+            OutboundTime::new(
+                controlled_clock(Arc::clone(&observed)),
+                move |_deadline, _clock| {
+                    let during_yield = arms.fetch_add(1, Ordering::SeqCst) > 0;
+                    let late = Arc::clone(&observed);
+                    Box::pin(async move {
+                        if during_yield {
+                            HostEventYield::new().await?;
+                            *late.lock().expect("clock") = budget.deadline.instant();
+                        } else {
+                            HostEventYield::after(budget.duration).await?;
+                        }
+                        Ok(())
+                    })
+                },
+            )
+        }
+
         fn empty_worker_response(
             status: StatusCode,
             content_length: Option<&str>,
@@ -1594,7 +1980,7 @@ mod worker_impl {
             for len in [7_usize, 8, 9] {
                 let clock = MonotonicClock::new(move || start);
                 let source = stream::iter([Ok(Bytes::from(vec![b'x'; len]))]).boxed_local();
-                let mut bounded = upload_stream(source, 8, budget, clock);
+                let mut bounded = upload_stream(source, 8, budget, native_time(clock));
                 let result = bounded.next().await.expect("upload item");
                 if len > 8 {
                     let error = result.expect_err("upload overflow");
@@ -1613,7 +1999,7 @@ mod worker_impl {
                 stream::iter([Err(source_error)]).boxed_local(),
                 8,
                 budget,
-                MonotonicClock::new(move || start),
+                native_time(MonotonicClock::new(move || start)),
             );
             let error = source
                 .next()
@@ -1659,8 +2045,9 @@ mod worker_impl {
             let completed = start
                 .checked_add(Duration::from_millis(9))
                 .expect("completed instant");
-            let client =
-                CloudflareOutboundClient::with_clock(scripted_clock(vec![start, completed]));
+            let client = CloudflareOutboundClient::with_time(native_time(scripted_clock(vec![
+                start, completed,
+            ])));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -1689,7 +2076,9 @@ mod worker_impl {
             let earlier = start
                 .checked_sub(Duration::from_millis(1))
                 .expect("earlier instant");
-            let client = CloudflareOutboundClient::with_clock(scripted_clock(vec![start, earlier]));
+            let client = CloudflareOutboundClient::with_time(native_time(scripted_clock(vec![
+                start, earlier,
+            ])));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -1735,7 +2124,7 @@ mod worker_impl {
                 .checked_add(Duration::from_millis(3))
                 .expect("observed instant");
             let clock = scripted_clock(vec![observed, observed]);
-            let body = request_body(Body::from("body"), 16, budget, clock.clone())
+            let body = request_body(Body::from("body"), 16, budget, native_time(clock.clone()))
                 .await
                 .expect("prepared body");
             let remaining = budget_remaining(budget, &clock).expect("remaining budget");
@@ -1762,9 +2151,14 @@ mod worker_impl {
             })
             .boxed_local();
 
-            let body = request_body(Body::stream(source), 16, budget, constant_clock(start))
-                .await
-                .expect("prepared body");
+            let body = request_body(
+                Body::stream(source),
+                16,
+                budget,
+                native_time(constant_clock(start)),
+            )
+            .await
+            .expect("prepared body");
 
             assert!(body.is_some());
             assert_eq!(polls.load(Ordering::SeqCst), 2);
@@ -1774,9 +2168,14 @@ mod worker_impl {
         async fn streamed_upload_checks_injected_clock_after_ready_item() {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_millis(10));
-            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
-            let source = stream::once(async { Ok(Bytes::from_static(b"body")) }).boxed_local();
-            let mut body = upload_stream(source, 16, budget, clock);
+            let observed = Arc::new(Mutex::new(start));
+            let clock = controlled_clock(Arc::clone(&observed));
+            let source = stream::once(async move {
+                *observed.lock().expect("clock") = budget.deadline.instant();
+                Ok(Bytes::from_static(b"body"))
+            })
+            .boxed_local();
+            let mut body = upload_stream(source, 16, budget, native_time(clock));
 
             let error = body
                 .next()
@@ -1791,9 +2190,9 @@ mod worker_impl {
         async fn streamed_upload_cap_error_yields_before_final_precedence() {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_millis(10));
-            let clock = scripted_clock(vec![start, start, budget.deadline.instant()]);
+            let pair = expire_at_host_yield(budget, Arc::new(Mutex::new(start)));
             let source = stream::once(async { Ok(Bytes::from_static(b"too large")) }).boxed_local();
-            let mut body = upload_stream(source, 1, budget, clock);
+            let mut body = upload_stream(source, 1, budget, pair);
 
             let error = body
                 .next()
@@ -1808,8 +2207,8 @@ mod worker_impl {
         async fn streamed_upload_eof_yields_before_final_precedence() {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_millis(10));
-            let clock = scripted_clock(vec![start, start, budget.deadline.instant()]);
-            let mut body = upload_stream(stream::empty().boxed_local(), 1, budget, clock);
+            let pair = expire_at_host_yield(budget, Arc::new(Mutex::new(start)));
+            let mut body = upload_stream(stream::empty().boxed_local(), 1, budget, pair);
 
             let error = body
                 .next()
@@ -1829,10 +2228,10 @@ mod worker_impl {
         async fn streamed_upload_source_error_yields_before_final_precedence() {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_millis(10));
-            let clock = scripted_clock(vec![start, start, budget.deadline.instant()]);
+            let pair = expire_at_host_yield(budget, Arc::new(Mutex::new(start)));
             let source =
                 stream::once(async { Err(EdgeError::bad_gateway("source failed")) }).boxed_local();
-            let mut body = upload_stream(source, 1, budget, clock);
+            let mut body = upload_stream(source, 1, budget, pair);
 
             let error = body
                 .next()
@@ -1847,10 +2246,20 @@ mod worker_impl {
         async fn response_stream_retains_clock_for_post_ready_expiry() {
             let start = MonotonicInstant::now();
             let budget = test_budget(start, Duration::from_millis(10));
-            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
-            let source = stream::once(async { Ok(Bytes::from_static(b"body")) }).boxed_local();
+            let observed = Arc::new(Mutex::new(start));
+            let clock = controlled_clock(Arc::clone(&observed));
+            let source = stream::once(async move {
+                *observed.lock().expect("clock") = budget.deadline.instant();
+                Ok(Bytes::from_static(b"body"))
+            })
+            .boxed_local();
             let controller = web_sys::AbortController::new().expect("abort controller");
-            let mut body = deadline_stream(source, budget, clock, AbortGuard::new(controller));
+            let mut body = deadline_stream(
+                source,
+                budget,
+                native_time(clock),
+                AbortGuard::new(controller),
+            );
 
             let error = body
                 .next()
@@ -1885,7 +2294,7 @@ mod worker_impl {
                 None,
                 None,
                 None,
-                clock,
+                native_time(clock),
             )
             .await
             .expect("converted response");
@@ -1959,7 +2368,7 @@ mod worker_impl {
                             None,
                             None,
                             None,
-                            constant_clock(start),
+                            native_time(constant_clock(start)),
                         )
                         .await
                         .expect("converted response");
@@ -2013,7 +2422,7 @@ mod worker_impl {
                         None,
                         None,
                         None,
-                        scripted_clock(vec![start, observed]),
+                        native_time(scripted_clock(vec![start, observed])),
                     )
                     .await;
 
@@ -2097,7 +2506,7 @@ mod worker_impl {
                                 None,
                                 None,
                                 None,
-                                scripted_clock(vec![start, observed]),
+                                native_time(scripted_clock(vec![start, observed])),
                             )
                             .await;
                             if offset < 10 {
@@ -2147,7 +2556,7 @@ mod worker_impl {
                 None,
                 None,
                 None,
-                constant_clock(start),
+                native_time(constant_clock(start)),
             )
             .await
             .expect("bodyless response");
@@ -2162,6 +2571,8 @@ mod worker_impl {
 pub use worker_impl::CloudflareOutboundClient;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32", feature = "test-utils"))]
 pub use worker_impl::deferred_clock_paths_hold_for_test;
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+pub(crate) use worker_impl::native_time;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32", feature = "test-utils"))]
 pub use worker_impl::response_abort_lifecycle_holds_for_test;
 

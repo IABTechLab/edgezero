@@ -225,6 +225,9 @@ fn finish_fastly_batch_observation(
 
 #[cfg(feature = "fastly")]
 mod fastly_impl {
+    use core::convert::identity;
+    use core::future::Future;
+    use core::task::{Context, Poll, Waker};
     #[cfg(feature = "test-utils")]
     use std::cell::Cell;
     use std::collections::HashMap;
@@ -246,11 +249,12 @@ mod fastly_impl {
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundHeaderFidelity,
-        OutboundHeaderInput, OutboundHttpClient, OutboundProxyMarker, OutboundRequest,
-        OutboundRequestParts, OutboundResponse, ResponseBodyDisposition, ResponseBodyPolicy,
-        ResponseDecoding, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
-        collect_response_stream, normalize_for_dispatch, validate_for_dispatch,
+        OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundFuture,
+        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundProxyMarker,
+        OutboundRequest, OutboundRequestParts, OutboundResponse, OutboundTime,
+        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
+        ResponseMode, apply_response_body_policy, collect_response_stream, normalize_for_dispatch,
+        validate_for_dispatch,
     };
     use edgezero_core::time::{
         BATCH_DISPATCH_SLACK_MAX, DEADLINE_FAR_FUTURE, Deadline, DispatchBudget, MonotonicClock,
@@ -264,6 +268,7 @@ mod fastly_impl {
     use fastly::http::request::{PendingRequest, PollResult, SendError, SendErrorCause};
     use fastly::{Backend, Request as FastlyRequest, Response as FastlyResponse};
     use fastly_sys::fastly_async_io;
+    use futures_util::future::poll_fn;
     use futures_util::stream::FuturesUnordered;
     use futures_util::{FutureExt as _, StreamExt as _};
     use sha2::{Digest as _, Sha256};
@@ -275,6 +280,10 @@ mod fastly_impl {
     };
 
     type NativeProgress = Progress<NativeTransport>;
+
+    pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
+        OutboundTime::new(clock, super::progress::wait_current)
+    }
 
     enum PendingHead {
         Direct(PendingRequestHandle),
@@ -480,21 +489,21 @@ mod fastly_impl {
 
     /// Native outbound HTTP implementation for Fastly Compute.
     pub struct FastlyOutboundClient {
-        clock: MonotonicClock,
+        time: OutboundTime,
     }
 
     impl FastlyOutboundClient {
         #[must_use]
         #[inline]
         pub fn new() -> Self {
-            Self::with_clock(MonotonicClock::default())
+            Self::with_time(native_time(MonotonicClock::default()))
         }
 
         /// Builds a client that evaluates every outbound lifetime against `clock`.
         #[must_use]
         #[inline]
-        pub fn with_clock(clock: MonotonicClock) -> Self {
-            Self { clock }
+        pub fn with_time(time: OutboundTime) -> Self {
+            Self { time }
         }
 
         fn ensure_backend(
@@ -505,8 +514,12 @@ mod fastly_impl {
         ) -> Result<(Backend, OutboundRequestParts), EdgeError> {
             let (identity, parts) = backend_identity(request, budget)?;
             let registry = BACKENDS.get_or_init(|| Mutex::new(HashMap::new()));
-            let backend =
-                cached_backend(registry, identity, budget, &self.clock, |name, settings| {
+            let backend = cached_backend(
+                registry,
+                identity,
+                budget,
+                self.time.clock(),
+                |name, settings| {
                     let target =
                         format!("{}:{}", parts.uri.host().unwrap_or_default(), settings.port);
                     let timers = backend_timers(settings.phase_ms);
@@ -521,10 +534,14 @@ mod fastly_impl {
                             builder = builder.sni_hostname(&settings.host);
                         }
                     }
-                    register_backend_with_batch_guard(batch_started_at, budget, &self.clock, || {
-                        builder.finish()
-                    })
-                })?;
+                    register_backend_with_batch_guard(
+                        batch_started_at,
+                        budget,
+                        self.time.clock(),
+                        || builder.finish(),
+                    )
+                },
+            )?;
             Ok((backend, parts))
         }
 
@@ -556,10 +573,10 @@ mod fastly_impl {
         ) -> Result<PreparedRequest, EdgeError> {
             let budget = dispatch_budget(&request, started_at, observation_cutoff)?;
             normalize_fastly_request(&mut request)?;
-            budget_remaining(budget, &self.clock)?;
+            budget_remaining(budget, self.time.clock())?;
             let (backend, parts) =
                 self.ensure_backend(request, budget, enforce_batch_slack.then_some(started_at))?;
-            budget_remaining(budget, &self.clock)?;
+            budget_remaining(budget, self.time.clock())?;
             Ok(PreparedRequest {
                 backend,
                 budget,
@@ -569,10 +586,20 @@ mod fastly_impl {
         }
 
         async fn execute(&self, prepared: PreparedRequest) -> Result<OutboundResponse, EdgeError> {
-            let progress =
-                NativeProgress::new(NativeTransport, self.clock.clone(), prepared.started_at);
+            let budget = prepared.budget;
+            let progress = NativeProgress::new(
+                NativeTransport,
+                self.time.clock().clone(),
+                prepared.started_at,
+                Some(budget.deadline),
+            );
             progress
-                .drive(self.execute_with_progress(prepared, &progress))
+                .drive(race_deadline(
+                    self.execute_with_progress(prepared, &progress)
+                        .boxed_local(),
+                    budget,
+                    &self.time,
+                ))
                 .await?
         }
 
@@ -615,18 +642,18 @@ mod fastly_impl {
                     if let Some(options) = image_optimizer {
                         buffered_request
                             .set_image_optimizer(super::image_optimizer::native_options(&options)?);
-                        dispatch_guard(started_at, budget, &self.clock)?;
-                        super::synchronous_send_until(budget, &self.clock, || {
+                        dispatch_guard(started_at, budget, self.time.clock())?;
+                        super::synchronous_send_until(budget, self.time.clock(), || {
                             buffered_request
                                 .send(backend)
-                                .map_err(|error| map_send_error(&error, budget, &self.clock))
+                                .map_err(|error| map_send_error(&error, budget, self.time.clock()))
                         })?
                     } else {
                         buffered_request.set_body(bytes.to_vec());
-                        dispatch_guard(started_at, budget, &self.clock)?;
+                        dispatch_guard(started_at, budget, self.time.clock())?;
                         let pending = buffered_request
                             .send_async(backend)
-                            .map_err(|error| map_send_error(&error, budget, &self.clock))?;
+                            .map_err(|error| map_send_error(&error, budget, self.time.clock()))?;
                         progress
                             .head(PendingHead::Sdk(Box::new(pending)), budget)
                             .receive()
@@ -641,7 +668,7 @@ mod fastly_impl {
                         max_request_body_bytes,
                         budget,
                         started_at,
-                        self.clock.clone(),
+                        self.time.clock().clone(),
                         progress,
                     )
                     .await?
@@ -661,7 +688,7 @@ mod fastly_impl {
                 max_encoded_response_bytes,
                 max_response_header_bytes,
                 max_response_header_count,
-                self.clock.clone(),
+                self.time.clone(),
                 progress,
             )
             .await
@@ -705,7 +732,7 @@ mod fastly_impl {
             validate_request_body_length(&bytes, max_request_body_bytes)?;
             let mut request = build_fastly_request(&method, &uri, &headers, cache_policy);
             request.set_body(bytes.to_vec());
-            dispatch_guard(started_at, budget, &self.clock)?;
+            dispatch_guard(started_at, budget, self.time.clock())?;
             let (request_handle, optional_body_handle) = request.into_handles();
             let body_handle = optional_body_handle.ok_or_else(|| {
                 EdgeError::internal(anyhow::anyhow!(
@@ -714,7 +741,7 @@ mod fastly_impl {
             })?;
             let pending = request_handle
                 .send_async_to_backend(body_handle, &backend)
-                .map_err(|cause| map_send_cause(&cause, budget, &self.clock))?;
+                .map_err(|cause| map_send_cause(&cause, budget, self.time.clock()))?;
             Ok(PendingSlot {
                 metadata: PendingSlotMetadata {
                     index,
@@ -748,7 +775,7 @@ mod fastly_impl {
         #[inline]
         async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, EdgeError> {
             super::scope::ensure_open()?;
-            let started_at = self.clock.now();
+            let started_at = self.time.clock().now();
             let prepared = self.prepare(request, started_at)?;
             self.execute(prepared).await
         }
@@ -763,11 +790,18 @@ mod fastly_impl {
                 let failed = stream! { yield OutboundBatchDriverEvent::Failed(error); };
                 return OutboundBatch::from_driver(requests.len(), failed);
             }
-            let batch_started_at = self.clock.now();
+            let batch_started_at = self.time.clock().now();
             let slot_count = requests.len();
             if observation_cutoff.is_expired_at(batch_started_at) {
                 return OutboundBatch::cutoff(slot_count);
             }
+
+            let progress = NativeProgress::new(
+                NativeTransport,
+                self.time.clock().clone(),
+                batch_started_at,
+                Some(observation_cutoff),
+            );
 
             let mut completed = Vec::new();
             let mut pending = Vec::new();
@@ -775,11 +809,23 @@ mod fastly_impl {
             for (index, request) in requests.into_iter().enumerate() {
                 let prepared = self
                     .prepare_batch(request, batch_started_at, observation_cutoff)
-                    .and_then(|prepared| self.dispatch_batch_slot(index, prepared));
+                    .and_then(|prepared| {
+                        let mut timer = self.time.wait_until(prepared.budget.deadline);
+                        let ready = progress.with_current(|| {
+                            timer.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+                        });
+                        if let Poll::Ready(result) = ready {
+                            return Err(result
+                                .err()
+                                .unwrap_or_else(|| timeout_error(prepared.budget.cause)));
+                        }
+                        self.dispatch_batch_slot(index, prepared)
+                            .map(|slot| (slot, timer))
+                    });
                 match prepared {
                     Ok(slot) => pending.push(slot),
                     Err(error) => {
-                        let completed_at = self.clock.now();
+                        let completed_at = self.time.clock().now();
                         match finish_fastly_batch_observation(
                             index,
                             batch_started_at,
@@ -797,26 +843,12 @@ mod fastly_impl {
                 }
             }
 
-            let clock = self.clock.clone();
-            let progress = NativeProgress::new(NativeTransport, clock.clone(), batch_started_at);
+            let clock = self.time.clock().clone();
             let mut exchanges = pending
                 .into_iter()
-                .map(|slot| {
-                    let PendingSlot {
-                        metadata,
-                        pending: handle,
-                    } = slot;
-                    let index = metadata.index;
-                    let lease = progress.head(PendingHead::Direct(handle), metadata.budget);
-                    let operation = progress.clone();
-                    let observed_clock = clock.clone();
-                    async move {
-                        let response = lease.receive().await;
-                        let outcome =
-                            finish_selected(response, metadata, &observed_clock, &operation).await;
-                        (index, observed_clock.now(), outcome)
-                    }
-                    .boxed_local()
+                .map(|(slot, timer)| {
+                    finish_timed_slot(slot, timer, self.time.clone(), progress.clone())
+                        .boxed_local()
                 })
                 .collect::<FuturesUnordered<_>>();
             let completions = stream! {
@@ -1027,7 +1059,7 @@ mod fastly_impl {
     async fn finish_selected(
         response: Result<FastlyResponse, EdgeError>,
         metadata: PendingSlotMetadata,
-        clock: &MonotonicClock,
+        time: &OutboundTime,
         progress: &NativeProgress,
     ) -> Result<OutboundResponse, EdgeError> {
         let PendingSlotMetadata {
@@ -1059,7 +1091,7 @@ mod fastly_impl {
             max_encoded_response_bytes,
             max_response_header_bytes,
             max_response_header_count,
-            clock.clone(),
+            time.clone(),
             progress,
         )
         .await
@@ -1311,9 +1343,10 @@ mod fastly_impl {
         max_encoded_response_bytes: Option<u64>,
         max_response_header_bytes: Option<u64>,
         max_response_header_count: Option<u64>,
-        clock: MonotonicClock,
+        time: OutboundTime,
         progress: &NativeProgress,
     ) -> Result<OutboundResponse, EdgeError> {
+        let clock = time.clock().clone();
         budget_remaining(budget, &clock)?;
         let response_clock = clock.clone();
         let status = StatusCode::from_u16(response.get_status().as_u16()).map_err(|_error| {
@@ -1367,12 +1400,13 @@ mod fastly_impl {
                         status,
                     },
                 )?;
-                let deadline_bound = deadline_stream(shaped, budget, clock);
                 match response_mode {
                     ResponseMode::Buffered { max_bytes } => {
-                        Body::from(collect_response_stream(deadline_bound, max_bytes).await?)
+                        Body::from(collect_response_stream(shaped, max_bytes).await?)
                     }
-                    ResponseMode::Streamed => Body::from_stream(deadline_bound),
+                    ResponseMode::Streamed => {
+                        Body::from_stream(deadline_stream(shaped, budget, time, progress.clone()))
+                    }
                 }
             }
         };
@@ -1541,36 +1575,35 @@ mod fastly_impl {
             .instant()
             .checked_sub(budget.duration)
             .unwrap_or(budget.deadline.instant());
-        NativeProgress::new(NativeTransport, clock, entered).body(body.into_handle(), budget)
+        NativeProgress::new(NativeTransport, clock, entered, Some(budget.deadline))
+            .body(body.into_handle(), budget)
     }
 
     fn deadline_stream(
         mut source: BodyStream,
         budget: DispatchBudget,
-        clock: MonotonicClock,
+        time: OutboundTime,
+        progress: NativeProgress,
     ) -> BodyStream {
         stream! {
+            let mut timer = time.wait_until(budget.deadline);
+            let mut previous = time.clock().now();
             loop {
-                if let Err(error) = budget_remaining(budget, &clock) {
-                    drop(source);
-                    yield Err(error);
-                    return;
-                }
-                let next_item = source.next().await;
-                if let Err(mut error) = budget_remaining(budget, &clock) {
-                    if let EdgeError::GatewayTimeout { provider_detail, .. } = &mut error {
-                        *provider_detail = next_item.as_ref().and_then(|item| item.as_ref().err())
-                            .and_then(EdgeError::provider_failure_detail).copied();
+                let read = race_with_timer(source.next(), budget, &time, &mut timer, &mut previous, |item| {
+                    item.as_ref().and_then(|outcome| outcome.as_ref().err()).and_then(EdgeError::provider_failure_detail).copied()
+                });
+                let next_item = match progress.drive(read).await.and_then(identity) {
+                    Ok(item) => item,
+                    Err(error) => {
+                        drop(source); drop(timer); drop(time); drop(progress);
+                        yield Err(error);
+                        return;
                     }
-                    drop(next_item);
-                    drop(source);
-                    yield Err(error);
-                    return;
-                }
+                };
                 match next_item {
                     Some(Ok(bytes)) => yield Ok(bytes),
                     Some(Err(error)) => {
-                        drop(source);
+                        drop(source); drop(timer); drop(time); drop(progress);
                         yield Err(error);
                         return;
                     }
@@ -1579,6 +1612,111 @@ mod fastly_impl {
             }
         }
         .boxed_local()
+    }
+
+    async fn finish_timed_slot(
+        slot: PendingSlot,
+        mut timer: OutboundFuture<()>,
+        time: OutboundTime,
+        progress: NativeProgress,
+    ) -> (usize, MonotonicInstant, Result<OutboundResponse, EdgeError>) {
+        let PendingSlot {
+            metadata,
+            pending: handle,
+        } = slot;
+        let index = metadata.index;
+        let budget = metadata.budget;
+        let lease = progress.head(PendingHead::Direct(handle), budget);
+        let exchange = async {
+            let response = lease.receive().await;
+            finish_selected(response, metadata, &time, &progress).await
+        };
+        let mut previous = time.clock().now();
+        let outcome = race_with_timer(
+            exchange,
+            budget,
+            &time,
+            &mut timer,
+            &mut previous,
+            |result| {
+                result
+                    .as_ref()
+                    .err()
+                    .and_then(EdgeError::provider_failure_detail)
+                    .copied()
+            },
+        )
+        .await
+        .and_then(identity);
+        (index, time.clock().now(), outcome)
+    }
+
+    async fn race_deadline<Output>(
+        future: impl Future<Output = Result<Output, EdgeError>>,
+        budget: DispatchBudget,
+        time: &OutboundTime,
+    ) -> Result<Output, EdgeError> {
+        let mut timer = time.wait_until(budget.deadline);
+        let mut previous = time.clock().now();
+        race_with_timer(future, budget, time, &mut timer, &mut previous, |result| {
+            result
+                .as_ref()
+                .err()
+                .and_then(EdgeError::provider_failure_detail)
+                .copied()
+        })
+        .await?
+    }
+
+    fn checked_now(
+        time: &OutboundTime,
+        previous: &mut MonotonicInstant,
+    ) -> Result<MonotonicInstant, EdgeError> {
+        let observed = time.clock().now();
+        if observed < *previous {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "outbound clock moved backwards during I/O"
+            )));
+        }
+        *previous = observed;
+        Ok(observed)
+    }
+
+    async fn race_with_timer<Output>(
+        future: impl Future<Output = Output>,
+        budget: DispatchBudget,
+        time: &OutboundTime,
+        timer: &mut OutboundFuture<()>,
+        previous: &mut MonotonicInstant,
+        detail: impl FnOnce(&Output) -> Option<edgezero_core::ProviderFailureDetail>,
+    ) -> Result<Output, EdgeError> {
+        let mut extract_detail = Some(detail);
+        futures_util::pin_mut!(future);
+        poll_fn(|cx| {
+            checked_now(time, previous)?;
+            if let Poll::Ready(result) = timer.as_mut().poll(cx) {
+                return Poll::Ready(Err(result
+                    .err()
+                    .unwrap_or_else(|| timeout_error(budget.cause))));
+            }
+            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
+                return Poll::Ready(Err(timeout_error(budget.cause)));
+            }
+            let output = future.as_mut().poll(cx);
+            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
+                let mut error = timeout_error(budget.cause);
+                if let EdgeError::GatewayTimeout {
+                    provider_detail, ..
+                } = &mut error
+                    && let Poll::Ready(value) = &output
+                {
+                    *provider_detail = extract_detail.take().and_then(|extract| extract(value));
+                }
+                return Poll::Ready(Err(error));
+            }
+            output.map(Ok)
+        })
+        .await
     }
 
     fn validate_request_body_length(bytes: &Bytes, maximum: u64) -> Result<(), EdgeError> {
@@ -1728,8 +1866,8 @@ mod fastly_impl {
                     Some(16),
                     Some(1024),
                     Some(10),
-                    clock.clone(),
-                    &NativeProgress::new(NativeTransport, clock, start),
+                    native_time(clock.clone()),
+                    &NativeProgress::new(NativeTransport, clock, start, Some(budget.deadline)),
                 ));
                 assert!(
                     matches!(
@@ -1769,6 +1907,7 @@ mod fastly_impl {
                 ),
             ] {
                 let start = MonotonicInstant::now();
+                let budget = clock_budget(start, Duration::from_secs(1));
                 let samples = Arc::new(AtomicUsize::new(0));
                 let observed = Arc::clone(&samples);
                 let clock = MonotonicClock::new(move || {
@@ -1782,7 +1921,7 @@ mod fastly_impl {
                     OutboundProxyMarker::Off,
                     ResponseDecoding::Decode,
                     mode,
-                    clock_budget(start, Duration::from_secs(1)),
+                    budget,
                     0x0010_0000,
                     24,
                     None,
@@ -1790,8 +1929,8 @@ mod fastly_impl {
                     Some(encoded),
                     Some(1024),
                     Some(10),
-                    clock.clone(),
-                    &NativeProgress::new(NativeTransport, clock, start),
+                    native_time(clock.clone()),
+                    &NativeProgress::new(NativeTransport, clock, start, Some(budget.deadline)),
                 ));
                 let outcome = match processed {
                     Ok(response) => {
@@ -1821,7 +1960,9 @@ mod fastly_impl {
             let completed = start
                 .checked_add(Duration::from_millis(9))
                 .expect("completed instant");
-            let client = FastlyOutboundClient::with_clock(scripted_clock(vec![start, completed]));
+            let client = FastlyOutboundClient::with_time(native_time(scripted_clock(vec![
+                start, completed,
+            ])));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -1854,8 +1995,9 @@ mod fastly_impl {
             let second = start
                 .checked_add(Duration::from_millis(8))
                 .expect("second completion");
-            let client =
-                FastlyOutboundClient::with_clock(scripted_clock(vec![start, first, second]));
+            let client = FastlyOutboundClient::with_time(native_time(scripted_clock(vec![
+                start, first, second,
+            ])));
             let requests = vec![
                 OutboundRequest::get("https://example.com/")
                     .expect("request")
@@ -1900,10 +2042,11 @@ mod fastly_impl {
                     .expect("request")
                     .body("invalid GET body")
             };
-            let single_outcome =
-                block_on(FastlyOutboundClient::with_clock(constant_clock(now)).send(invalid()));
+            let single_outcome = block_on(
+                FastlyOutboundClient::with_time(native_time(constant_clock(now))).send(invalid()),
+            );
             let batch = block_on(
-                FastlyOutboundClient::with_clock(constant_clock(now))
+                FastlyOutboundClient::with_time(native_time(constant_clock(now)))
                     .start_batch_until(
                         vec![invalid()],
                         Deadline::at_instant(
@@ -1936,7 +2079,8 @@ mod fastly_impl {
             let earlier = start
                 .checked_sub(Duration::from_millis(1))
                 .expect("earlier instant");
-            let client = FastlyOutboundClient::with_clock(scripted_clock(vec![start, earlier]));
+            let client =
+                FastlyOutboundClient::with_time(native_time(scripted_clock(vec![start, earlier])));
             let request = OutboundRequest::get("https://example.com/")
                 .expect("request")
                 .stream_response();
@@ -2136,8 +2280,8 @@ mod fastly_impl {
         #[test]
         fn b31_independent_clients_share_verified_backend() {
             let start = MonotonicInstant::now();
-            let first = FastlyOutboundClient::with_clock(constant_clock(start));
-            let second = FastlyOutboundClient::with_clock(constant_clock(start));
+            let first = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
+            let second = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
             let first_request = OutboundRequest::get("http://127.0.0.1:9/b31-client-reuse")
                 .expect("request")
                 .timeout(Duration::from_millis(800))
@@ -2172,7 +2316,7 @@ mod fastly_impl {
         #[test]
         fn b31_registered_transport_preserves_origin_and_wire_authority() {
             let start = MonotonicInstant::now();
-            let client = FastlyOutboundClient::with_clock(constant_clock(start));
+            let client = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
             for (target, override_authority, host, authority, port, tls) in [
                 (
                     "https://api.example:8443/",
@@ -2484,10 +2628,10 @@ mod fastly_impl {
         }
 
         #[test]
-        fn response_stream_retains_clock_for_post_ready_expiry() {
+        fn native_body_read_rejects_expiry_before_payload_read() {
             let start = MonotonicInstant::now();
             let budget = clock_budget(start, Duration::from_millis(10));
-            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
+            let clock = constant_clock(budget.deadline.instant());
             let mut body = fastly_body_stream(FastlyBody::from("body"), budget, clock);
 
             let error = block_on(body.next())
@@ -2495,6 +2639,84 @@ mod fastly_impl {
                 .expect_err("post-ready expiry");
 
             assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+        }
+
+        #[test]
+        fn deadline_stream_rejects_clock_regression_between_chunks_before_polling_source() {
+            use futures_util::stream::poll_fn as stream_poll_fn;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_secs(1));
+            let observed = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&observed);
+            let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+            let source_now = Arc::clone(&observed);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let source_polls = Arc::clone(&polls);
+            let source = stream_poll_fn(move |_context| {
+                source_polls.fetch_add(1, Ordering::SeqCst);
+                *source_now.lock().expect("clock") =
+                    start.checked_add(Duration::from_millis(20)).expect("later");
+                Poll::Ready(Some(Ok(Bytes::from_static(b"chunk"))))
+            })
+            .boxed_local();
+            let progress =
+                NativeProgress::new(NativeTransport, clock.clone(), start, Some(budget.deadline));
+            let mut guarded = deadline_stream(source, budget, native_time(clock), progress);
+            assert_eq!(
+                block_on(guarded.next())
+                    .expect("first item")
+                    .expect("first chunk"),
+                Bytes::from_static(b"chunk")
+            );
+            *observed.lock().expect("clock") = start
+                .checked_add(Duration::from_millis(15))
+                .expect("regression");
+            assert!(matches!(
+                block_on(guarded.next()),
+                Some(Err(EdgeError::Internal { .. }))
+            ));
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn deadline_stream_checks_clock_after_ready_bytes_and_eof() {
+            use futures_util::stream::poll_fn as stream_poll_fn;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            for eof in [false, true] {
+                let start = MonotonicInstant::now();
+                let budget = clock_budget(start, Duration::from_secs(1));
+                let observed = Arc::new(Mutex::new(start));
+                let sampled = Arc::clone(&observed);
+                let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+                let reads = Arc::new(AtomicUsize::new(0));
+                let source_reads = Arc::clone(&reads);
+                let source = stream_poll_fn(move |_context| {
+                    source_reads.fetch_add(1, Ordering::SeqCst);
+                    *observed.lock().expect("clock") = budget.deadline.instant();
+                    Poll::Ready((!eof).then_some(Ok(Bytes::from_static(b"late"))))
+                })
+                .boxed_local();
+                let progress = NativeProgress::new(
+                    NativeTransport,
+                    clock.clone(),
+                    start,
+                    Some(budget.deadline),
+                );
+                let mut guarded = deadline_stream(source, budget, native_time(clock), progress);
+                assert!(matches!(
+                    block_on(guarded.next()),
+                    Some(Err(EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    }))
+                ));
+                assert_eq!(
+                    reads.load(Ordering::SeqCst),
+                    1,
+                    "must sample after source completion"
+                );
+            }
         }
 
         #[test]
@@ -2524,7 +2746,13 @@ mod fastly_impl {
                     yield Err(EdgeError::bad_gateway_with_detail("fixture source failed", BadGatewayReason::Transport, detail));
                     drop(owned_until_source_drop);
                 }.boxed_local();
-                let mut guarded = deadline_stream(source, budget, clock);
+                let progress = NativeProgress::new(
+                    NativeTransport,
+                    clock.clone(),
+                    start,
+                    Some(budget.deadline),
+                );
+                let mut guarded = deadline_stream(source, budget, native_time(clock), progress);
                 let error = block_on(guarded.next())
                     .expect("terminal item")
                     .expect_err("deadline");
@@ -2572,8 +2800,8 @@ mod fastly_impl {
                 None,
                 None,
                 None,
-                clock.clone(),
-                &NativeProgress::new(NativeTransport, clock, start),
+                native_time(clock.clone()),
+                &NativeProgress::new(NativeTransport, clock, start, Some(budget.deadline)),
             ))
             .expect("converted response");
             *observed.lock().expect("clock observation") = budget.deadline.instant();
@@ -2645,6 +2873,7 @@ mod fastly_impl {
                         ResponseMode::Buffered { max_bytes: 64 },
                     ] {
                         let start = MonotonicInstant::now();
+                        let budget = clock_budget(start, Duration::from_secs(1));
                         let mut native = FastlyResponse::from_status(status.as_u16());
                         for value in values {
                             native.append_header(CONTENT_TYPE, *value);
@@ -2658,7 +2887,7 @@ mod fastly_impl {
                             OutboundProxyMarker::Inherit,
                             ResponseDecoding::Decode,
                             mode,
-                            clock_budget(start, Duration::from_secs(1)),
+                            budget,
                             1024,
                             24,
                             None,
@@ -2666,8 +2895,13 @@ mod fastly_impl {
                             None,
                             None,
                             None,
-                            constant_clock(start),
-                            &NativeProgress::new(NativeTransport, constant_clock(start), start),
+                            native_time(constant_clock(start)),
+                            &NativeProgress::new(
+                                NativeTransport,
+                                constant_clock(start),
+                                start,
+                                Some(budget.deadline),
+                            ),
                         ))
                         .expect("converted response");
 
@@ -2700,10 +2934,10 @@ mod fastly_impl {
         }
 
         #[test]
-        fn response_read_checks_deadline_after_eof() {
+        fn expired_native_body_read_does_not_accept_eof() {
             let start = MonotonicInstant::now();
             let budget = clock_budget(start, Duration::from_millis(10));
-            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
+            let clock = constant_clock(budget.deadline.instant());
             let mut body = fastly_body_stream(FastlyBody::new(), budget, clock);
 
             assert!(matches!(
@@ -2740,8 +2974,13 @@ mod fastly_impl {
                 None,
                 None,
                 None,
-                MonotonicClock::default(),
-                &NativeProgress::new(NativeTransport, MonotonicClock::default(), started_at),
+                native_time(MonotonicClock::default()),
+                &NativeProgress::new(
+                    NativeTransport,
+                    MonotonicClock::default(),
+                    started_at,
+                    Some(budget.deadline),
+                ),
             ))
             .expect("response head");
             let mut body = response.into_body().into_stream().expect("streamed body");
@@ -2784,8 +3023,13 @@ mod fastly_impl {
                 None,
                 None,
                 None,
-                constant_clock(start),
-                &NativeProgress::new(NativeTransport, constant_clock(start), start),
+                native_time(constant_clock(start)),
+                &NativeProgress::new(
+                    NativeTransport,
+                    constant_clock(start),
+                    start,
+                    Some(budget.deadline),
+                ),
             ))
             .expect_err("content length exceeds final buffer cap");
 
@@ -2821,8 +3065,13 @@ mod fastly_impl {
                 None,
                 None,
                 None,
-                constant_clock(start),
-                &NativeProgress::new(NativeTransport, constant_clock(start), start),
+                native_time(constant_clock(start)),
+                &NativeProgress::new(
+                    NativeTransport,
+                    constant_clock(start),
+                    start,
+                    Some(budget.deadline),
+                ),
             ))
             .expect_err("content length exceeds decoded cap");
 
@@ -3643,6 +3892,8 @@ mod fastly_impl {
 
 #[cfg(all(feature = "fastly", feature = "test-utils"))]
 pub use fastly_impl::inject_dispatch_slack_for_test;
+#[cfg(feature = "fastly")]
+pub(crate) use fastly_impl::native_time;
 #[cfg(feature = "fastly")]
 pub use fastly_impl::{DYNAMIC_BACKENDS_DISABLED_MESSAGE, FastlyOutboundClient};
 

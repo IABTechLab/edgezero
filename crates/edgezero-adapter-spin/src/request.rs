@@ -55,7 +55,7 @@ use spin_sdk::http::Request as SpinRequest;
 use spin_sdk::http::body::IncomingBodyExt as _;
 use spin_sdk::time::sleep;
 
-use crate::outbound::SpinOutboundClient;
+use crate::outbound::{SpinOutboundClient, native_time};
 
 /// Per-dispatch store wiring assembled before the request enters the router.
 /// The struct itself is `pub(crate)` because `dispatch_with_handles` takes it
@@ -174,7 +174,7 @@ fn into_core_request_head_for_app(parts: RequestParts, app: &App) -> Request {
 }
 
 fn outbound_client(clock: MonotonicClock) -> HttpClient {
-    HttpClient::with_client(SpinOutboundClient::with_clock(clock))
+    HttpClient::with_client(SpinOutboundClient::with_time(native_time(clock)))
 }
 
 fn deadline_body_with_timer<Source, SourceError, Timer, MakeTimer>(

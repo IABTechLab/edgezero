@@ -1988,8 +1988,10 @@ pub const DEADLINE_FAR_FUTURE: Duration = Duration::from_hours(168); // 7 days; 
 
 Every standard adapter entry clones the exact `App::monotonic_clock()` used to capture
 ingress timing into the outbound client inserted in request extensions. Axum exposes
-`try_with_clock`; Cloudflare, Fastly, and Spin expose `with_clock`. Default low-level
-constructors remain convenient and explicitly use `MonotonicClock::default()`.
+`try_with_time(OutboundTime)`; Cloudflare, Fastly, and Spin expose `with_time(OutboundTime)`.
+These replace the clock-only constructors without compatibility aliases. A supplied pair must
+provide wakeups in the same monotonic domain; advancing a fake clock alone is not a wakeup.
+Default low-level constructors pair `MonotonicClock::default()` with the runtime timer.
 They are not app-clock propagation paths. Cloudflare and Spin's former unit-struct literal
 construction is intentionally removed by this hard cut; low-level callers migrate to
 `CloudflareOutboundClient::new()` / `SpinOutboundClient::new()` or `Default` so every client
@@ -2001,8 +2003,13 @@ provider error precedence, pre/post-ready checks, and streamed upload/response c
 deferred body stream owns a clock clone; it never falls back to process-global time after
 `send` returns. Each returned `OutboundResponse` also owns that clock clone, so
 `into_bytes_bounded_until` and `json_bounded_until` remain in the same time domain after adapter
-return. Provider timers still supply target-specific preemption, but the duration
-armed into them comes from the same paired clock snapshot. Later remaining-budget reads use
+return. All EdgeZero-owned asynchronous deadline races use the supplied `OutboundTime` timer,
+polled before source I/O. Default timer setup failures are internal errors, not timeouts;
+supplied timer errors propagate unchanged. Workers use
+checked host scheduling/cancellation, and Fastly registers timers with its existing progress
+multiplexer, including timer-only waits; no per-slot blocking sleep is introduced. Native
+reqwest total timeouts are disabled so they cannot override the supplied pair. Provider-side
+phase timers and non-preemptible host calls retain their documented limitations. Later remaining-budget reads use
 `min(budget.deadline.remaining_at(clock.now()), budget.duration)`, so a backwards injected
 clock cannot enlarge the budget selected at method entry. Checked elapsed subtraction maps a
 backwards terminal sample to the existing zero-elapsed internal invariant outcome.

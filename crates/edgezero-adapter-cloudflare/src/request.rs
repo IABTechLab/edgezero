@@ -46,7 +46,7 @@ use worker::{
 use crate::config_store::CloudflareConfigStore;
 use crate::context::CloudflareRequestContext;
 use crate::key_value_store::CloudflareKvStore;
-use crate::outbound::CloudflareOutboundClient;
+use crate::outbound::{CloudflareOutboundClient, native_time};
 use crate::response::{CloudflareEgressRuntime, from_egress_response};
 use crate::secret_store::CloudflareSecretStore;
 
@@ -351,7 +351,7 @@ fn into_core_request_head(
 }
 
 fn outbound_client(clock: MonotonicClock) -> HttpClient {
-    HttpClient::with_client(CloudflareOutboundClient::with_clock(clock))
+    HttpClient::with_client(CloudflareOutboundClient::with_time(native_time(clock)))
 }
 
 fn cloudflare_body_stream(

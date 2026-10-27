@@ -172,6 +172,8 @@ mod tests {
     use std::task::Poll;
 
     use super::{DeliveryResult, Sandbox};
+    #[cfg(feature = "fastly")]
+    use crate::outbound::native_time;
     use crate::outbound::scope::bind_batch;
 
     // Neither the retained value nor an error payload needs framework traits.
@@ -315,7 +317,7 @@ mod tests {
         });
         let mut sandbox = Sandbox::<()>::default();
         let batch = sandbox.handle((), move |(), _| {
-            let client = FastlyOutboundClient::with_clock(clock);
+            let client = FastlyOutboundClient::with_time(native_time(clock));
             // A queued preflight result still retains the whole unpolled driver.
             let request = OutboundRequest::get("https://example.com")
                 .unwrap()

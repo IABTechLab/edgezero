@@ -7,6 +7,8 @@
 
 use core::convert::Infallible;
 use std::io::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_stream::stream as async_body_stream;
@@ -24,15 +26,40 @@ use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError, ResponseLi
 use edgezero_core::http::{HeaderMap, Method, StatusCode};
 use edgezero_core::time::Deadline;
 use edgezero_core::{
-    FLATE_DECODER_FIXED_CHARGE_BYTES, HttpClient, OutboundBatchNext, OutboundBatchTermination,
-    OutboundCachePolicy, OutboundHttpClient as _, OutboundProxyMarker, OutboundRequest,
-    PROXY_HEADER, ResponseDecoding,
+    FLATE_DECODER_FIXED_CHARGE_BYTES, HttpClient, MonotonicClock, OutboundBatchNext,
+    OutboundBatchTermination, OutboundCachePolicy, OutboundHttpClient as _, OutboundProxyMarker,
+    OutboundRequest, OutboundTime, PROXY_HEADER, ResponseDecoding,
 };
 use flate2::Compression;
 use flate2::write::{GzEncoder, ZlibEncoder};
+use futures_util::future::{Either, select};
 use futures_util::stream;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::time::sleep;
+
+fn paired_cutoff_time(
+    clock: MonotonicClock,
+    advancement: Arc<Notify>,
+    wake_count: Arc<AtomicUsize>,
+) -> OutboundTime {
+    OutboundTime::new(clock, move |deadline, paired_clock| {
+        let notifier = Arc::clone(&advancement);
+        let counter = Arc::clone(&wake_count);
+        Box::pin(async move {
+            let remaining = deadline
+                .remaining_at(paired_clock.now())
+                .unwrap_or_default();
+            let notification = notifier.notified();
+            let timeout = sleep(remaining);
+            futures_util::pin_mut!(notification, timeout);
+            if let Either::Left(((), _)) = select(notification, timeout).await {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    })
+}
 
 fn gzip(input: &[u8]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -447,14 +474,11 @@ async fn batch_yields_complete_exchanges_in_completion_order() {
 #[tokio::test(start_paused = true)]
 async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_none() {
     use std::future::Future as _;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::Instant;
 
-    use edgezero_core::{
-        MonotonicClock, MonotonicInstant, OutboundBatch, OutboundBatchDriverEvent,
-    };
+    use edgezero_core::{MonotonicInstant, OutboundBatch, OutboundBatchDriverEvent};
     use futures_util::future::poll_fn;
-    use tokio::sync::Notify;
 
     let slow_started = Arc::new(Notify::new());
     let release_slow = Arc::new(Notify::new());
@@ -481,7 +505,10 @@ async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_n
     let sampled = Arc::clone(&now);
     let clock = MonotonicClock::new(move || *sampled.lock().expect("fake clock"));
     let observation_cutoff = clock.deadline_after(Duration::from_millis(25));
-    let client = AxumOutboundClient::try_with_clock(clock).expect("client");
+    let clock_advanced = Arc::new(Notify::new());
+    let timer_wakes = Arc::new(AtomicUsize::new(0));
+    let time = paired_cutoff_time(clock, Arc::clone(&clock_advanced), Arc::clone(&timer_wakes));
+    let client = AxumOutboundClient::try_with_time(time).expect("client");
     let mut batch = client.start_batch_until(
         vec![
             OutboundRequest::get(format!("{origin}/fast")).expect("fast request"),
@@ -498,10 +525,10 @@ async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_n
                         assert_eq!(item.index, 0);
                         assert_eq!(item.result.outcome.as_ref().expect("fast response").status(), StatusCode::OK);
                         yield OutboundBatchDriverEvent::Item(item);
-                        // Collect retains the fast result before the pending response is released at cutoff.
+                        // Advance the deadline without making the pending response ready.
                         slow_started.notified().await;
                         *now.lock().expect("fake clock") = observation_cutoff.instant();
-                        release_slow.notify_one();
+                        clock_advanced.notify_waiters();
                     }
                     OutboundBatchNext::Finished(OutboundBatchTermination::Cutoff) => {
                         yield OutboundBatchDriverEvent::Cutoff;
@@ -531,6 +558,11 @@ async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_n
     .await
     .expect("valid batch driver");
 
+    release_slow.notify_one();
+    assert!(
+        timer_wakes.load(Ordering::SeqCst) > 0,
+        "advancing the fake clock must wake the paired timer"
+    );
     assert_eq!(results.termination, OutboundBatchTermination::Cutoff);
     assert!(results.slots[0].is_some());
     assert!(results.slots[1].is_none());

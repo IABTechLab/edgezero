@@ -39,8 +39,8 @@ use crate::delivery::{
 };
 use crate::init_fastly_abi;
 use crate::key_value_store::FastlyKvStore;
-use crate::outbound::FastlyOutboundClient;
 use crate::outbound::scope::Guard as OutboundScope;
+use crate::outbound::{FastlyOutboundClient, native_time};
 use crate::response::{parse_uri, send_egress_response};
 use crate::secret_store::FastlySecretStore;
 
@@ -762,7 +762,7 @@ fn into_core_request_head(
 }
 
 fn outbound_client(clock: MonotonicClock) -> HttpClient {
-    HttpClient::with_client(FastlyOutboundClient::with_clock(clock))
+    HttpClient::with_client(FastlyOutboundClient::with_time(native_time(clock)))
 }
 
 fn attach_core_body(

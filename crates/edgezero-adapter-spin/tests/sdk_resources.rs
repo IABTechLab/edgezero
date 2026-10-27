@@ -21,7 +21,7 @@ mod tests {
         SpinFailureCause, SpinFieldSize, SpinTimeoutOption,
     };
     use edgezero_core::http::{HeaderMap, HeaderValue};
-    use edgezero_core::outbound::{OutboundHttpClient, OutboundRequest};
+    use edgezero_core::outbound::{OutboundHttpClient, OutboundRequest, OutboundTime};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::executor::block_on;
     use spin_sdk::wasip3::http::types::{
@@ -29,6 +29,12 @@ mod tests {
         RequestOptionsError, Response, TlsAlertReceivedPayload,
     };
     use spin_sdk::wasip3::http_compat::BodyWriter;
+
+    fn preflight_time(clock: MonotonicClock) -> OutboundTime {
+        OutboundTime::new(clock, |_, _| {
+            panic!("preflight must not register an outbound timer")
+        })
+    }
 
     fn assert_outbound_client<Client>()
     where
@@ -57,13 +63,14 @@ mod tests {
             .expect("completed instant");
         let observations = Arc::new(Mutex::new(VecDeque::from([start, completed])));
         let clock_observations = Arc::clone(&observations);
-        let client = SpinOutboundClient::with_clock(MonotonicClock::new(move || {
-            clock_observations
-                .lock()
-                .expect("clock observations")
-                .pop_front()
-                .expect("clock observation")
-        }));
+        let client =
+            SpinOutboundClient::with_time(preflight_time(MonotonicClock::new(move || {
+                clock_observations
+                    .lock()
+                    .expect("clock observations")
+                    .pop_front()
+                    .expect("clock observation")
+            })));
         let request = OutboundRequest::get("https://example.com/")
             .expect("request")
             .stream_response();
@@ -90,7 +97,8 @@ mod tests {
         use futures_util::stream::poll_fn;
 
         let start = MonotonicInstant::now();
-        let client = SpinOutboundClient::with_clock(MonotonicClock::new(move || start));
+        let client =
+            SpinOutboundClient::with_time(preflight_time(MonotonicClock::new(move || start)));
         let observation_cutoff = Deadline::at_instant(
             start
                 .checked_add(Duration::from_secs(1))

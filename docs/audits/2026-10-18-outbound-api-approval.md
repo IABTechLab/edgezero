@@ -297,6 +297,63 @@ checkpoint does not complete D1d or any full criterion. No deployment, Native ca
 hosted qualification or performance-parity claim is authorized. Existing failed evidence,
 255 acceptance criteria and 511 legs retain their IDs, statuses, applicability and comparison gates.
 
+### Paired-Time Sequencing Approval (2026-10-26)
+
+The requester answered `Approve this sequencing change` in this conversation to:
+
+> May I move paired clock/timer integration ahead of the full trait migration? This would
+> hard-migrate all four adapters to the already-approved `with_time`/`try_with_time`
+> constructors, wire `OutboundTime` into live deadline handling, and migrate every caller
+> without aliases. Public trait, batch-receipt and head-finalizer changes would remain one
+> later atomic cut.
+
+This supersedes only the earlier constructor/paired-time sequencing dependency. Use the
+existing approved names and one live paired time source per client, including request injection
+and real wakeups. Remove clock-only constructors; add no compatibility aliases, inert timers,
+public factory helpers or standalone trait `time()` transition. Preserve support-first checks,
+original deadlines, typed timer failures, source/transport cleanup and provider diagnostics.
+Fastly timers participate in its cooperative multiplexer rather than blocking before source
+polling. Keep application-clock/frozen-clock checks and host-event yields on the other targets.
+
+The public trait, prepared contexts, batch identity/receipts, head finalization and caller
+protocol still migrate together later. The frozen Interfaces and requirements are unchanged.
+No SDK/runtime pin, B31/slack policy, capability level or hosted qualification is approved here.
+
+#### Paired-Time Verification
+
+The live checkpoint removes clock-only constructors from all four adapters and every caller;
+standard injectors retain the exact application clock and pair it with a crate-private runtime
+factory. The default constructors use real clocks and timers, not inert waits. Timer setup
+precedes source/network polling, supplied failures retain their type and detail, and clock
+high-water observations persist across chunks and cooperative yields. Terminal streams release
+their source, timer and factory capture before yielding an error, even if the wrapper is retained.
+
+Fastly's existing progress engine owns its timer registrations and original operation boundary.
+Nested engines respect all ancestor deadlines, including custom-pair uploads without pending
+handles; child progress causes parent repoll before another host wait. Expired/unconsumed
+mailboxes do not block live siblings. Wakes and removed timer state are released outside state
+borrows. No extra transport, per-slot blocking timer or public factory API was added.
+
+Two independent review passes found cross-chunk clock-regression, timer-diagnostic and nested
+progress/cancellation defects; deterministic regressions reproduced them and pass after repair.
+Fresh local verification passes all five required Rust gates: formatting, workspace strict
+Clippy, 2,293 workspace tests (one existing ignored test), all-target adapter feature compilation
+and the Spin WASM check. Strict Clippy also passes for the three provider WASM targets. Runtime
+tests pass: Cloudflare 53 library/29 contract cases, Fastly 238 library/36 contract cases and
+Spin 15 SDK-resource cases on Wasmtime 48.0.2. The deterministic Spin helper uses its controlled
+wakeable pair rather than polling a WASI 0.3 host timer under a non-WASI test executor.
+
+Demo workspace tests, reusable fixture tests, dependency/legacy/documentation guards, the
+evidence checker tests and docs format/lint/build pass. The final actual-client Fastly probe
+suite passes its receive cases on the tracked repaired Viceroy; Spin's local component smoke
+passes functional cases. Both correctly exit 2 with qualification still open. They do not prove
+hosted lifecycle timing, provider allocation bounds, callback-wide progress or end-client receipt.
+No deployment occurred. The requirements and frozen Plan 02 hashes remain unchanged.
+
+This completes only the approved paired-time sequencing checkpoint. Shared support-first
+settlement/context issuance, the public trait and batch-receipt hard cut, eager Begin,
+head finalization integration, redirects and hosted qualification remain separate work.
+
 ## Hard-Migration Inventory
 
 This is the submission-time worktree inventory, including untracked G3 callers, not a claim that the
@@ -478,6 +535,10 @@ public begin/batches, nor any adapter/runtime qualification. Existing client tra
 request options, demo and generator still use the current implemented contract. They must migrate
 together in the later atomic dispatch cut; no compatibility alias was introduced to defer it.
 Historical G2/G3 source/artifact records have not been relabeled as evidence for this later work.
+
+That constructor status describes the initial foundation only. The subsequently approved
+2026-10-26 paired-time sequencing checkpoint hard-migrates constructors and live timer races;
+the dispatch trait and head/batch protocol remain reserved for their later atomic cut.
 
 Verification for this foundation passed all five workspace Rust CI commands, 761 core unit
 tests (including the eleven time tests), the nonzero timer sentinel, core compilation for

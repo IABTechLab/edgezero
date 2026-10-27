@@ -513,8 +513,14 @@ separately from the portable API and must be considered when declaring required 
 - Add the portable `OutboundFuture` / `OutboundTime` foundation for pairing the application
   clock with an adapter-owned wakeup factory. Preserve absolute deadlines across early wakes,
   yield cooperatively, propagate timer errors unchanged, reject observed clock regression and
-  release timer/factory state on termination or cancellation. This core foundation does not yet
-  migrate client constructors or dispatch traits, or strengthen provider capabilities.
+  release timer/factory state on termination or cancellation. All four adapters now use the pair
+  for live upload, fetch and response deadline handling. Hard-migrate clock-only constructors to
+  Axum `try_with_time` / internal `with_transport_and_time` and serverless `with_time`, with no
+  compatibility aliases. Standard request injectors pair the application clock with the existing
+  runtime timer. Timer setup/failure precedes source polling; Fastly timer-only waits share its
+  progress multiplexer, Workers validate scheduling/cancellation together, and Axum has no
+  independent reqwest total-timeout clock. Dispatch-trait migration and hosted qualification
+  remain separate; provider capability levels are unchanged.
 - Replace the proxy-client/service API with `HttpClient`, `OutboundHttpClient`, `OutboundRequest`,
   and `OutboundResponse`. Standard adapters inject the client into request extensions; handlers
   access it through `RequestContext::http_client()`. Missing manual wiring remains explicit.

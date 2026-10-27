@@ -60,15 +60,26 @@ mod tests {
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{Method, Response, StatusCode, response_builder};
-    use edgezero_core::outbound::{OutboundHttpClient as _, OutboundRequest};
+    use edgezero_core::outbound::{OutboundHttpClient as _, OutboundRequest, OutboundTime};
     use edgezero_core::router::RouterService;
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::stream;
+    use std::io::Error as IoError;
     use wasm_bindgen_test::wasm_bindgen_test;
     use worker::js_sys::{Function, Object, Reflect};
     use worker::wasm_bindgen::{JsCast as _, JsValue};
     use worker::worker_sys::Context as WorkerSysContext;
     use worker::{Context, Env, Method as CfMethod, Request as CfRequest, RequestInit};
+
+    fn preflight_time(clock: MonotonicClock) -> OutboundTime {
+        OutboundTime::new(clock, |_, _| {
+            Box::pin(async {
+                Err(EdgeError::internal(IoError::other(
+                    "preflight must not register an outbound timer",
+                )))
+            })
+        })
+    }
 
     struct FixedConfigStore(&'static str);
 
@@ -493,7 +504,9 @@ mod tests {
             .checked_add(Duration::from_millis(9))
             .expect("completed instant");
         let forward_client =
-            CloudflareOutboundClient::with_clock(scripted_clock(vec![start, completed]));
+            CloudflareOutboundClient::with_time(preflight_time(scripted_clock(vec![
+                start, completed,
+            ])));
         let forward_request = OutboundRequest::get("https://example.com/")
             .expect("request")
             .stream_response();
@@ -528,7 +541,9 @@ mod tests {
             .checked_sub(Duration::from_millis(1))
             .expect("earlier instant");
         let backwards_client =
-            CloudflareOutboundClient::with_clock(scripted_clock(vec![start, earlier]));
+            CloudflareOutboundClient::with_time(preflight_time(scripted_clock(vec![
+                start, earlier,
+            ])));
         let backwards_request = OutboundRequest::get("https://example.com/")
             .expect("request")
             .stream_response();
@@ -558,7 +573,8 @@ mod tests {
     #[wasm_bindgen_test]
     async fn expired_observation_cutoff_leaves_slot_unresolved() {
         let now = MonotonicInstant::now();
-        let client = CloudflareOutboundClient::with_clock(MonotonicClock::new(move || now));
+        let client =
+            CloudflareOutboundClient::with_time(preflight_time(MonotonicClock::new(move || now)));
         let request = OutboundRequest::get("https://example.com/").expect("request");
 
         let results = client
@@ -577,7 +593,8 @@ mod tests {
     #[wasm_bindgen_test]
     async fn batch_preserves_three_preflight_slots_in_input_order() {
         let now = MonotonicInstant::now();
-        let client = CloudflareOutboundClient::with_clock(MonotonicClock::new(move || now));
+        let client =
+            CloudflareOutboundClient::with_time(preflight_time(MonotonicClock::new(move || now)));
         let streamed_upload = OutboundRequest::post("https://example.com/upload")
             .expect("upload request")
             .body(Body::stream(stream::iter([Bytes::from_static(b"body")])));

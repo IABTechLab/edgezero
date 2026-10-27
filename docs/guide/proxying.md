@@ -39,6 +39,25 @@ and migrate the retired one-argument call directly. The mode argument alone does
 Begin or Follow. It does not change indexed results, partial failures, observation cutoff,
 per-slot timing, independent caps, coding/provenance, application clocks or lifecycle ownership.
 
+### Paired Clocks And Timers
+
+Standard entrypoints pair the application's monotonic clock with their runtime's cancellable
+timer and inject that client. Demo and generated apps use this path unchanged. Custom client
+construction now takes `OutboundTime`: Axum uses `try_with_time`, while Cloudflare, Fastly and
+Spin use `with_time`. The old clock-only constructors are removed, not deprecated aliases.
+
+`OutboundTime::new(clock, factory)` requires a factory that returns an owned local wakeup future
+for the supplied absolute deadline and clock domain. A fake clock must wake its pending timers
+when advanced. Merely returning a permanently pending future or advancing time without waking
+does not implement that contract. Early successful wakeups are rearmed against the original
+deadline; operational timer errors propagate unchanged and do not become request timeouts.
+
+Timers are checked before source polling, retained while pending and cancelled with their
+exchange. Native transport total timeouts do not override the supplied pair. Fastly uses its
+existing progress multiplexer for timer-only waits as well as transport readiness. Provider
+phase timers, synchronous host calls and the published BestEffort limitations remain separate;
+this integration is not a hosted capability promotion or the head-first trait migration.
+
 ### Fastly Batch Ownership
 
 `run_custom` and each `serve_custom` callback own the batches started during that callback.

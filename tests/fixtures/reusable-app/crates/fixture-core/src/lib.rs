@@ -472,7 +472,7 @@ mod tests {
         fn start_batch_until(
             &self,
             requests: Vec<OutboundRequest>,
-            _cutoff: edgezero_core::Deadline,
+            _observation_cutoff: edgezero_core::Deadline,
         ) -> OutboundBatch {
             let name = self.0;
             let count = requests.len();
