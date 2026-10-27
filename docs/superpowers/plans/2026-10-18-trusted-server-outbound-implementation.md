@@ -75,6 +75,12 @@ and legacy/dependency/evidence guards pass. These are working-tree observations,
 candidate or hosted qualification. Subsequent interface and slack authorizations are recorded in the
 [approval record](../../audits/2026-10-18-outbound-api-approval.md#original-exact-api-subject).
 
+CI at `2be1dd87` exposed a local verification gap: Spin's `spin`-only WASM lib-test build
+included two helpers called only by `test-utils`. Both red jobs report that same compile
+failure, not a guest contract failure. Narrow those helper gates and reproduce both
+`spin` and `spin,test-utils` Clippy all-targets commands plus the complete existing
+feature matrix; native all-features checks cannot stand in for these combinations.
+
 Independent core/protocol and caller reviewers identified timer-error precedence, future terminal
 observations, cutoff handoff and fixture EOF defects. Adapter reviewers/validators covered the
 Axum/Cloudflare pair, Fastly and Spin independently; caller validation covered actual demo,

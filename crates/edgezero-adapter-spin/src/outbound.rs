@@ -439,7 +439,7 @@ mod spin_impl {
         }
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(feature = "test-utils")]
     use edgezero_core::time::dispatch_budget;
     #[cfg(any(test, feature = "test-utils"))]
     use edgezero_core::{OutboundProxyMarker, OutboundResponse, ResponseDecoding, ResponseMode};
@@ -2073,6 +2073,7 @@ mod spin_impl {
             Ok(())
         }
 
+        #[cfg(feature = "test-utils")]
         pub(super) async fn check_batch_handoff() -> Result<(), EdgeError> {
             use edgezero_core::{HttpClient, OutboundBatchTermination, OutboundCollectedSlot};
 

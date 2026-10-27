@@ -87,6 +87,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Guest Validation
 
+- Compile Spin's test-only helpers only with the feature that calls them. Verify both
+  `spin` and `spin,test-utils` WASM all-targets builds, without suppressing unused-code
+  diagnostics or changing runtime behavior.
 - Keep Fastly's declaration ordering valid in CLI-only tests, where the runtime-feature
   ordering exception does not apply. Extend the existing conflicting module-file lint
   exception to native test builds without changing scheduling or transport behavior.
