@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use futures_util::stream::{LocalBoxStream, Stream, StreamExt};
+use futures_util::stream::{self, LocalBoxStream, Stream, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -41,10 +41,7 @@ impl Body {
     /// [`Body::into_bytes_bounded`].
     #[inline]
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        match &self.payload {
-            BodyPayload::Once(bytes) => Some(bytes.as_ref()),
-            BodyPayload::Stream(_) => None,
-        }
+        self.buffered_bytes().map(Bytes::as_ref)
     }
 
     pub(crate) fn attach_egress_owner(
@@ -79,6 +76,13 @@ impl Body {
             }
         };
         Ok(self)
+    }
+
+    pub(crate) fn buffered_bytes(&self) -> Option<&Bytes> {
+        match &self.payload {
+            BodyPayload::Once(bytes) => Some(bytes),
+            BodyPayload::Stream(_) => None,
+        }
     }
 
     #[must_use]
@@ -319,7 +323,14 @@ impl Stream for ScopedBodyStream {
             return Poll::Ready(None);
         };
         let observation = source
-            .with(cx, StreamExt::poll_next_unpin)
+            .with(cx, |payload, context| {
+                let terminal = payload.poll_next_unpin(context);
+                if matches!(terminal, Poll::Ready(None | Some(Err(_)))) {
+                    // Include terminal cleanup in the revocation check before exposing EOF.
+                    drop(mem::replace(payload, stream::empty().boxed_local()));
+                }
+                terminal
+            })
             .unwrap_or_else(|error| Poll::Ready(Some(Err(error))));
         if matches!(observation, Poll::Ready(None | Some(Err(_)))) {
             drop(self.source.take());
@@ -430,7 +441,8 @@ mod tests {
     use crate::error::ResponseLimitReason;
     use crate::http::StatusCode;
     use crate::outbound::{
-        IndependentOutboundProgress, OutboundScope, OutboundScopeOwner, Revocable,
+        IndependentOutboundProgress, OutboundExchangeOwner, OutboundScope, OutboundScopeOwner,
+        Revocable,
     };
     use futures::executor::block_on;
     use futures_util::stream;
@@ -756,6 +768,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn assert_scoped_terminal_drop_is_not_completion(errored: bool) {
+        let callback = Rc::new(OutboundScopeOwner::callback());
+        let closing = Rc::clone(&callback);
+        let drops = Rc::new(Cell::new(0_usize));
+        let counted = Rc::clone(&drops);
+        let release = OutboundExchangeOwner::new(move || {
+            counted.set(counted.get().saturating_add(1));
+            closing.close();
+        });
+        let scope = callback.with(|| OutboundScope::capture(Rc::new(IndependentOutboundProgress)));
+        let raw = stream::poll_fn(move |_| {
+            let _retained = &release;
+            Poll::Ready(errored.then(|| Err(EdgeError::bad_request("fixture source error"))))
+        });
+        let body = Body::from_stream(raw)
+            .bind_outbound_scope(&scope)
+            .expect("bound source");
+        let mut source = body.into_stream().expect("stream");
+        let terminal = block_on(source.next());
+        assert!(
+            matches!(terminal, Some(Err(EdgeError::Internal { .. }))),
+            "terminal source cleanup must not hide scope closure"
+        );
+        assert!(block_on(source.next()).is_none());
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn scoped_eof_cleanup_closure_is_reported_as_internal() {
+        assert_scoped_terminal_drop_is_not_completion(false);
+    }
+
+    #[test]
+    fn scoped_error_cleanup_closure_is_reported_as_internal() {
+        assert_scoped_terminal_drop_is_not_completion(true);
     }
 
     #[test]

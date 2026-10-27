@@ -23,6 +23,7 @@ const outboundCoreProductionPaths = [
     'head',
     'image_optimizer',
     'progress',
+    'redirect',
     'scope',
   ].map((name) => `crates/edgezero-core/src/outbound/${name}.rs`),
 ]
@@ -159,6 +160,7 @@ const expectedOutboundRows = [
     'BestEffort',
     'Unsupported',
   ],
+  ['outbound-redirect-following', 'Native', 'Native', 'Native', 'Native'],
   [
     'outbound-flexible-phase-budget',
     'Native',
@@ -356,6 +358,163 @@ function normalizeSupport(value) {
     .replace(/\[\^[^\]]+\]$/u, '')
     .replace(/[¹²³⁴⁵⁶⁷⁸⁹]+$/u, '')
     .trim()
+}
+
+const redirectMethodHeader = [
+  'Status',
+  'Method of answering hop',
+  'Next method',
+  'Next body',
+]
+const redirectMethodRows = [
+  ['301, 302', 'GET, HEAD', 'same', 'empty'],
+  ['301, 302', 'POST', 'GET', 'empty'],
+  ['301, 302', 'any other method', 'not followed: MethodNotRewritable', 'none'],
+  ['303', 'HEAD', 'HEAD', 'empty'],
+  ['303', 'any other method', 'GET', 'empty'],
+  ['307, 308', 'any method', 'same', 'replayed'],
+]
+const redirectGuideFragments = [
+  '`OutboundRedirectLimit::new` accepts only 1..=20',
+  '`send`, `begin`, and batches never follow redirects',
+  'Every other status is final',
+  'The initial target is not passed to the redirect policy',
+  'An open policy also follows private or link-local addresses',
+  'There is no built-in SSRF filter',
+  'scheme, host, or effective port',
+  'only `Authorization`, `Cookie`, and `host_authority_override`',
+  'custom API-key headers and `x-amz-*` signatures remain',
+  'does not strip credentials a second time',
+  'does not add `Referer` or `Origin`',
+  '`Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language`, `Content-Location`, and `Expect`',
+  'settled once before the initial hop',
+  'Streamed uploads cannot be replayed',
+  'followable status, Location presence, method, replayability, limit, Location resolution, then policy',
+  'resolved non-HTTP target reaches the policy with no prepared request',
+  'Original Location multiplicity and text eligibility are captured before filtering',
+  'fragments never reach the wire',
+  'per-call timeout starts afresh at each hop',
+  'initial absolute deadline remains an independent chain-wide upper bound',
+  'including policy execution and final streamed body consumption',
+  'unsupported options are rejected before an expired budget',
+  'synchronous policy cannot be preempted',
+  'followed response body is discarded unread',
+  'Response-header caps and body-independent validation still apply to every head',
+  'final response, including stopped or limit-reached 3xx, uses ordinary decoding, caps, body mode and idle policy',
+  'Neither the policy nor its error needs `Send` or `Clone`',
+  'zero-based hop index (initial request = 0)',
+  'one-based redirect number, unchanged',
+  'prepared request retains every unchanged option',
+  'fresh request is a complete replacement with its own defaults',
+  'same supplied client and shared preparation/head-finalization pipeline',
+  'supersedes the historical outbound spec',
+  'Spin requires plain-HTTP origins and targets outside a narrowed host list to be declared',
+  'same native Image Optimizer call path, with no extra fetch, buffering or serialization',
+]
+const redirectCapabilityFragments = [
+  '`outbound-redirect-following` reports shared redirect policy, not native deadlines, cancellation or complete resource bounds',
+  'Spin requires plain-HTTP origins and targets outside a narrowed host list to be declared',
+  'Local redirect tests are not hosted qualification',
+  'Native Image Optimizer qualification remains open',
+  'synchronous blocking horizon is unknown',
+]
+
+function redirectDocumentationContractError(guide, capability) {
+  const section = guide.match(
+    /^## Following Redirects\r?\n([\s\S]*?)(?=^## |(?![\s\S]))/mu
+  )?.[1]
+  if (section === undefined)
+    return 'outbound guide is missing Following Redirects'
+  const table = section
+    .split(/\r?\n/u)
+    .map(cells)
+    .filter((row) => row !== null)
+  const expected = [
+    redirectMethodHeader,
+    redirectMethodHeader.map(() => '---'),
+    ...redirectMethodRows,
+  ]
+  const normalizedTable = table.map((row, index) =>
+    row.map((cell) =>
+      index === 1 && /^:?-{3,}:?$/u.test(cell)
+        ? '---'
+        : normalizeCapability(cell)
+    )
+  )
+  if (JSON.stringify(normalizedTable) !== JSON.stringify(expected)) {
+    return 'redirect method/body table disagrees with EZ-9'
+  }
+  for (const [source, fragments] of [
+    [section, redirectGuideFragments],
+    [capability, redirectCapabilityFragments],
+  ]) {
+    const normalized = source.replaceAll(/\s+/gu, ' ')
+    for (const fragment of fragments) {
+      if (!normalized.includes(fragment))
+        return `redirect documentation is missing: ${fragment}`
+    }
+  }
+  for (const source of [guide, capability]) {
+    if (
+      /redirect following (?:are |is |remains )?(?:not implemented|pending)|begun\/redirect integration remains/iu.test(
+        source
+      )
+    ) {
+      return 'redirect documentation still marks implementation pending'
+    }
+  }
+  return null
+}
+
+function runRedirectDocumentationContractSelfTests() {
+  const guide = [
+    '## Following Redirects',
+    ...[
+      redirectMethodHeader,
+      redirectMethodHeader.map(() => '---'),
+      ...redirectMethodRows,
+    ].map((row) => `| ${row.join(' | ')} |`),
+    ...redirectGuideFragments,
+  ].join('\n')
+  const capability = redirectCapabilityFragments.join('\n')
+  const cases = [
+    [guide, capability, true],
+    [guide.replace('## Following Redirects', '## Other'), capability, false],
+  ]
+  cases.push([guide + '\n## Next Section\n| Other | Table |', capability, true])
+  cases.push([
+    guide.replace(redirectGuideFragments[0], '') +
+      '\n## Next Section\n' +
+      redirectGuideFragments[0],
+    capability,
+    false,
+  ])
+  for (const fragment of redirectGuideFragments)
+    cases.push([guide.replace(fragment, ''), capability, false])
+  for (const fragment of redirectCapabilityFragments)
+    cases.push([guide, capability.replace(fragment, ''), false])
+  for (const row of redirectMethodRows)
+    cases.push([guide.replace(row.join(' | '), 'incorrect'), capability, false])
+  cases.push([
+    guide + '\nredirect following remains pending',
+    capability,
+    false,
+  ])
+  for (const [
+    index,
+    [candidateGuide, candidateCapability, valid],
+  ] of cases.entries()) {
+    if (
+      (redirectDocumentationContractError(
+        candidateGuide,
+        candidateCapability
+      ) ===
+        null) !==
+      valid
+    ) {
+      fail(`redirect documentation checker self-test ${index} failed`)
+    }
+  }
 }
 
 function readRustU64Constant(source, name) {
@@ -1257,7 +1416,11 @@ function runLiveOutboundContractSelfTests() {
 runObservationCutoffContractSelfTests()
 runHeaderNormalizationContractSelfTests()
 runLiveOutboundContractSelfTests()
-if (process.argv.includes('--observation-cutoff-self-test')) {
+runRedirectDocumentationContractSelfTests()
+if (
+  process.argv.includes('--observation-cutoff-self-test') ||
+  process.argv.includes('--redirect-self-test')
+) {
   process.exit(0)
 }
 
@@ -1495,6 +1658,11 @@ const hardCutSurfaces = [
   [fastlyGuidePath, readFileSync(fastlyGuidePath, 'utf8')],
   [scaffoldReadmePath, readFileSync(scaffoldReadmePath, 'utf8')],
 ]
+const redirectDocumentationError = redirectDocumentationContractError(
+  hardCutSurfaces[2][1],
+  capabilitySource
+)
+if (redirectDocumentationError !== null) fail(redirectDocumentationError)
 for (const [path, source] of hardCutSurfaces) {
   for (const staleFragment of [
     'HttpClient::send_all`',

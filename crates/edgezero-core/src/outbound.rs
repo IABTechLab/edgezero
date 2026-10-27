@@ -9,6 +9,9 @@ mod exchange;
 mod head;
 mod image_optimizer;
 mod progress;
+mod redirect;
+#[cfg(test)]
+mod redirect_tests;
 mod scope;
 #[cfg(test)]
 mod scope_tests;
@@ -23,8 +26,8 @@ use std::time::Duration;
 
 use async_stream::stream;
 use bytes::Bytes;
-use futures_util::StreamExt as _;
 use futures_util::future::LocalBoxFuture;
+use futures_util::{Stream, StreamExt as _};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -57,6 +60,10 @@ pub use batch::{
     OutboundCollectedSlot, OutboundPreparedBatch,
 };
 pub(crate) use dispatch::ForwardedReadDeadline;
+pub use redirect::{
+    OutboundFollowFailure, OutboundFollowResult, OutboundRedirectAction, OutboundRedirectContext,
+    OutboundRedirectLimit, OutboundRedirectStopReason,
+};
 pub(crate) use scope::Revocable;
 pub use scope::{
     IndependentOutboundProgress, OutboundProgressRuntime, OutboundScope, OutboundScopeKind,
@@ -258,8 +265,8 @@ pub enum OutboundImageOptimizerRegion {
 
 /// Validated native transformation settings with no implicit selectors.
 ///
-/// Attach with [`OutboundRequest::image_optimizer`]. Only Fastly single sends support these
-/// settings; their synchronous provider call cannot be interrupted. Query preservation
+/// Attach with [`OutboundRequest::image_optimizer`]. Only Fastly Send/Follow hops support these
+/// settings; Begin/Batch reject them. The synchronous provider call cannot be interrupted. Query preservation
 /// defaults to false. Transformation and performance qualification require hosted evidence.
 ///
 /// ```compile_fail
@@ -589,6 +596,34 @@ impl HttpClient {
         }
     }
 
+    /// Follows only with an explicit synchronous target policy and validated hop limit.
+    ///
+    /// Every hop uses this client's ordinary prepared dispatch and head finalizer. Followed
+    /// bodies are dropped unread. Per-call timeouts restart per hop, but the initial absolute
+    /// deadline remains binding through policy execution and final streamed body consumption.
+    /// Plain send, begin and batches never follow. Custom credentials are policy-owned: only
+    /// Authorization, Cookie and authority overrides are stripped on prepared cross-origin hops.
+    ///
+    /// # Errors
+    /// Returns an unchanged hop error with its zero-based index, or an unchanged policy value
+    /// with its one-based redirect number. The policy and its error need not be Send or Clone.
+    #[inline]
+    pub fn follow<P, E>(
+        &self,
+        request: OutboundRequest,
+        limit: OutboundRedirectLimit,
+        policy: P,
+    ) -> LocalBoxFuture<'static, Result<OutboundFollowResult, OutboundFollowFailure<E>>>
+    where
+        P: for<'head> FnMut(
+                &mut OutboundRedirectContext<'head>,
+            ) -> Result<OutboundRedirectAction, E>
+            + 'static,
+        E: 'static,
+    {
+        redirect::follow(self, request, limit, policy)
+    }
+
     #[inline]
     pub fn new(client: Arc<dyn OutboundHttpClient>) -> Self {
         Self {
@@ -621,7 +656,10 @@ impl HttpClient {
             mode,
             time.clone(),
             entered_at,
-            cutoff,
+            dispatch::DispatchBounds {
+                observation_cutoff: cutoff,
+                original_chain_deadline: None,
+            },
             scope.clone(),
         )?;
         Ok((scope, time, entered_at, prepared))
@@ -711,7 +749,10 @@ impl HttpClient {
                 OutboundSendMode::Batch,
                 time.clone(),
                 started_at,
-                Some(observation_cutoff),
+                dispatch::DispatchBounds {
+                    observation_cutoff: Some(observation_cutoff),
+                    original_chain_deadline: None,
+                },
                 scope.clone(),
             ) {
                 Ok(prepared) => {
@@ -732,6 +773,9 @@ impl HttpClient {
             preflight,
             scope,
         );
+        if context.scope().check().is_err() {
+            return OutboundBatch::cutoff(context);
+        }
         self.inner
             .start_batch_until(OutboundPreparedBatch::new(context, slots))
     }
@@ -1197,7 +1241,7 @@ impl OutboundRequest {
 
     /// Attaches native optimizer settings without changing the target or headers.
     ///
-    /// Fastly supports these only for bodiless GET/HEAD single sends with default caching.
+    /// Fastly supports these only for bodiless GET/HEAD Send/Follow hops with default caching.
     /// Its synchronous optimizer call has no established blocking-time bound; late results
     /// are rejected against the original deadline when control returns.
     #[must_use]
@@ -1923,11 +1967,14 @@ fn canonicalize_url(raw: &str) -> Result<Uri, EdgeError> {
         .map_err(|_error| EdgeError::bad_request("outbound URI cannot be represented as HTTP URI"))
 }
 
-async fn collect_response_stream_inner(
-    mut source: BodyStream,
+async fn collect_response_stream_inner<S>(
+    mut source: S,
     max: u64,
     optional_deadline: Option<(Deadline, &MonotonicClock)>,
-) -> Result<Bytes, EdgeError> {
+) -> Result<Bytes, EdgeError>
+where
+    S: Stream<Item = Result<Bytes, EdgeError>> + Unpin,
+{
     let mut collected = Vec::new();
     let mut total = 0_u64;
     loop {

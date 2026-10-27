@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{BudgetSource, EdgeError};
-use crate::outbound::OutboundRequest;
+use crate::outbound::{BudgetInputs, OutboundRequest};
 
 /// Hard clamp on any caller-supplied duration, so construction cannot panic.
 pub const DEADLINE_FAR_FUTURE: Duration = Duration::from_hours(168);
@@ -154,7 +154,15 @@ pub fn dispatch_budget(
     now: MonotonicInstant,
     observation_cutoff: Option<Deadline>,
 ) -> Result<DispatchBudget, EdgeError> {
-    let inputs = request.budget_inputs();
+    dispatch_budget_inputs(request.budget_inputs(), now, observation_cutoff, None)
+}
+
+pub(crate) fn dispatch_budget_inputs(
+    inputs: BudgetInputs,
+    now: MonotonicInstant,
+    observation_cutoff: Option<Deadline>,
+    original_chain_deadline: Option<Deadline>,
+) -> Result<DispatchBudget, EdgeError> {
     let deadline_from_duration = |duration: Duration| {
         let bounded_duration = duration.min(DEADLINE_FAR_FUTURE);
         Deadline::at_instant(now.checked_add(bounded_duration).unwrap_or(now))
@@ -169,6 +177,10 @@ pub fn dispatch_budget(
         let far = now.checked_add(DEADLINE_FAR_FUTURE).unwrap_or(now);
         Deadline::at_instant(deadline.instant().min(far))
     });
+    let from_chain = original_chain_deadline.map(|deadline| {
+        let far = now.checked_add(DEADLINE_FAR_FUTURE).unwrap_or(now);
+        Deadline::at_instant(deadline.instant().min(far))
+    });
     let from_default = (inputs.timeout.is_none() && inputs.deadline.is_none())
         .then(|| deadline_from_duration(DEFAULT_NO_DEADLINE_BUDGET));
 
@@ -176,6 +188,7 @@ pub fn dispatch_budget(
         from_observation_cutoff.map(|deadline| (BudgetSource::BatchCutoff, deadline)),
         from_timeout.map(|deadline| (BudgetSource::PerCallTimeout, deadline)),
         from_caller.map(|deadline| (BudgetSource::RequestDeadline, deadline)),
+        from_chain.map(|deadline| (BudgetSource::RequestDeadline, deadline)),
         from_default.map(|deadline| (BudgetSource::Default, deadline)),
     ]
     .into_iter()

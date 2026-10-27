@@ -110,6 +110,8 @@ mod tests {
         let listed_stdout = String::from_utf8_lossy(&listed.stdout);
         for sentinel in [
             "generated_outbound_http_smoke",
+            "follow_demo_uses_supplied_head_client_and_app_deadline",
+            "follow_demo_allows_canonical_equivalent_origins",
             "scripted_batch_preserves_receipts_through_mixed_collection",
             "fanout_rejects_delivered_and_completed_unresolved_slots",
             "scripted_batch_cutoff_retains_only_earlier_completions",

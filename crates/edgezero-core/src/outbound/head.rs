@@ -14,7 +14,7 @@ use super::{
     OutboundResponse, OutboundResponseContext, OutboundScope, OutboundScopeKind,
     OutboundScopeOwner, OutboundSendMode, OutboundTime, ResponseBodyDisposition,
     ResponseBodyPolicy, ResponseHeadNormalization, ResponseHeaderLimiter, ResponseMode,
-    apply_response_body_policy, collect_response_stream, insert_proxy_header,
+    apply_response_body_policy, collect_response_stream_inner, insert_proxy_header,
     normalize_response_headers,
 };
 use crate::body::{Body, BodyPayload, BodyStream};
@@ -24,12 +24,13 @@ use crate::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use crate::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
 
 struct OwnedPayload {
+    body_progress: bool,
     cause: BudgetSource,
     deadline: Deadline,
     entered_at: MonotonicInstant,
     owner: Option<OutboundExchangeOwner>,
     previous: MonotonicInstant,
-    scope: Option<OutboundScope>,
+    scope: OutboundScope,
     source: Option<BodyStream>,
     time: Option<OutboundTime>,
     timer: Option<OutboundFuture<()>>,
@@ -224,6 +225,14 @@ impl OutboundHead {
     #[inline]
     #[must_use]
     pub fn finish(self) -> OutboundFuture<OutboundResponse> {
+        let previous = self.context.entered_at;
+        self.finish_from(previous)
+    }
+
+    pub(super) fn finish_from(
+        self,
+        observed_at: MonotonicInstant,
+    ) -> OutboundFuture<OutboundResponse> {
         let scope = self.context.scope.clone();
         let time = self.context.time.clone();
         let entered_at = self.context.entered_at;
@@ -243,8 +252,10 @@ impl OutboundHead {
                 } = self;
                 let clock = context.clock().clone();
                 let (deadline, cause) = effective_deadline(&context);
-                let mut previous = context.entered_at;
+                let mut previous = observed_at;
+                context.scope.check()?;
                 checked_live(&clock, &mut previous, deadline, cause)?;
+                context.scope.check()?;
                 let mode = context.body_policy.response_mode;
                 let body = match normalization.body_disposition {
                     ResponseBodyDisposition::FramingBodyless
@@ -262,6 +273,7 @@ impl OutboundHead {
                         if let Some(item) = source.next().await {
                             item?;
                         }
+                        previous = source.previous;
                         drop(source);
                         Body::empty()
                     }
@@ -273,9 +285,14 @@ impl OutboundHead {
                         )?;
                         let mut source = OwnedPayload::new(shaped, owner, &context, previous);
                         match mode {
-                            ResponseMode::Buffered { max_bytes } => Body::from(
-                                collect_response_stream(source.boxed_local(), max_bytes).await?,
-                            ),
+                            ResponseMode::Buffered { max_bytes } => {
+                                let bytes =
+                                    collect_response_stream_inner(&mut source, max_bytes, None)
+                                        .await?;
+                                previous = source.previous;
+                                drop(source);
+                                Body::from(bytes)
+                            }
                             ResponseMode::Streamed => {
                                 let (body_scope, body_owner) = source.bind_body_scope(&context)?;
                                 Body::from_parts(
@@ -287,7 +304,9 @@ impl OutboundHead {
                         }
                     }
                 };
+                context.scope.check()?;
                 checked_live(&clock, &mut previous, deadline, cause)?;
+                context.scope.check()?;
                 Ok(OutboundResponse::new(
                     context.request_method,
                     status,
@@ -368,13 +387,15 @@ impl OwnedPayload {
     ) -> Result<(OutboundScope, Option<OutboundScopeOwner>), EdgeError> {
         if context.scope.kind() == Some(OutboundScopeKind::ResponseBody) {
             context.scope.check()?;
-            self.scope = Some(context.scope.clone());
+            self.scope = context.scope.clone();
+            self.body_progress = true;
             return Ok((context.scope.clone(), None));
         }
         let owner = OutboundScopeOwner::response_body();
         owner.accept_body_handoff()?;
         let scope = owner.with(|| OutboundScope::capture(context.scope.progress()));
-        self.scope = Some(scope.clone());
+        self.scope = scope.clone();
+        self.body_progress = true;
         Ok((scope, Some(owner)))
     }
 
@@ -386,6 +407,7 @@ impl OwnedPayload {
     ) -> Self {
         let (deadline, cause) = effective_deadline(context);
         Self {
+            body_progress: false,
             entered_at: context.entered_at,
             owner: Some(owner),
             source: Some(source),
@@ -394,7 +416,7 @@ impl OwnedPayload {
             cause,
             deadline,
             previous,
-            scope: None,
+            scope: context.scope.clone(),
         }
     }
 
@@ -402,18 +424,24 @@ impl OwnedPayload {
         let Some(time) = &self.time else {
             return Poll::Ready(None);
         };
+        self.scope.check()?;
         checked_sample(time.clock(), &mut self.previous)?;
+        self.scope.check()?;
         let timer = self
             .timer
             .get_or_insert_with(|| time.wait_until(self.deadline));
+        self.scope.check()?;
         if let Poll::Ready(result) = timer.as_mut().poll(cx) {
             result?;
+            self.scope.check()?;
             return Poll::Ready(Some(Err(timeout_error(self.cause))));
         }
+        self.scope.check()?;
         let Some(source) = &mut self.source else {
             return Poll::Ready(None);
         };
         let next = source.as_mut().poll_next(cx);
+        self.scope.check()?;
         checked_live(time.clock(), &mut self.previous, self.deadline, self.cause).map_err(
             |mut selected| {
                 if let EdgeError::GatewayTimeout {
@@ -426,23 +454,25 @@ impl OwnedPayload {
                 selected
             },
         )?;
+        self.scope.check()?;
         next
     }
 
     fn release(&mut self) {
-        if let Some(scope) = self.scope.take() {
+        if self.time.is_some() {
+            let scope = self.scope.clone();
             scope.with_cleanup(|| self.release_transport());
-        } else {
-            self.release_transport();
         }
     }
 
     fn release_transport(&mut self) {
-        drop(self.owner.take());
-        drop(self.source.take());
-        drop(self.timer.take());
-        drop(self.time.take());
-        drop(self.scope.take());
+        let resources = (
+            self.owner.take(),
+            self.source.take(),
+            self.timer.take(),
+            self.time.take(),
+        );
+        drop(resources);
     }
 }
 
@@ -458,7 +488,10 @@ impl Stream for OwnedPayload {
 
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let result = if let (Some(scope), Some(time)) = (self.scope.clone(), self.time.clone()) {
+        let result = if self.body_progress
+            && let Some(time) = self.time.clone()
+        {
+            let scope = self.scope.clone();
             let entered_at = self.entered_at;
             let mut read = poll_fn(|context| self.poll_active(context));
             scope
@@ -486,7 +519,7 @@ impl Stream for OwnedPayload {
     }
 }
 
-fn checked_live(
+pub(super) fn checked_live(
     clock: &MonotonicClock,
     previous: &mut MonotonicInstant,
     deadline: Deadline,
@@ -500,7 +533,7 @@ fn checked_live(
     }
 }
 
-fn checked_sample(
+pub(super) fn checked_sample(
     clock: &MonotonicClock,
     previous: &mut MonotonicInstant,
 ) -> Result<MonotonicInstant, EdgeError> {
@@ -568,7 +601,7 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::io::Write as _;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -589,10 +622,23 @@ mod tests {
     use crate::{
         BodyStream, BudgetSource, ContentTypeProvenance, DispatchBudget, EdgeError, MonotonicClock,
         OutboundExchangeOwner, OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput,
-        OutboundProxyMarker, OutboundResponseContext, OutboundSendMode, OutboundTime,
-        ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding, ResponseHeaderLimiter,
-        ResponseLimitReason, ResponseMode,
+        OutboundProxyMarker, OutboundResponseContext, OutboundScopeOwner, OutboundSendMode,
+        OutboundTime, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
+        ResponseHeaderLimiter, ResponseLimitReason, ResponseMode,
     };
+
+    thread_local! {
+        static REENTRANT_OWNER: RefCell<Option<Rc<OutboundScopeOwner>>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum CancelAt {
+        FinalizerClock,
+        ReadClock,
+        TimerCreationClock,
+        TimerFactory,
+        TimerPoll,
+    }
 
     #[derive(Clone)]
     struct FakeTime(Arc<Mutex<FakeState>>);
@@ -756,6 +802,137 @@ mod tests {
             headers,
             OutboundHeaderFidelity::AdapterVisibleFields,
         )
+    }
+
+    fn assert_finalizer_scope_guard(cancel_at: CancelAt) {
+        for status in [StatusCode::OK, StatusCode::RESET_CONTENT] {
+            let callback = Rc::new(OutboundScopeOwner::callback());
+            REENTRANT_OWNER.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&callback)));
+            let mut captured = callback.with(|| context(ResponseMode::Buffered { max_bytes: 16 }));
+            let start = captured.entered_at;
+            let sample_to_cancel = match cancel_at {
+                CancelAt::FinalizerClock => 1_usize,
+                CancelAt::ReadClock => 2,
+                CancelAt::TimerCreationClock => 3,
+                CancelAt::TimerFactory | CancelAt::TimerPoll => 0,
+            };
+            let samples = Arc::new(AtomicUsize::new(0));
+            let clock = MonotonicClock::new(move || {
+                let sample = samples.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+                if sample == sample_to_cancel {
+                    cancel_test_scope();
+                }
+                start
+            });
+            captured.time = OutboundTime::new(clock, move |_, _| {
+                if cancel_at == CancelAt::TimerFactory {
+                    cancel_test_scope();
+                }
+                Box::pin(poll_fn(move |_| {
+                    if cancel_at == CancelAt::TimerPoll {
+                        cancel_test_scope();
+                    }
+                    Poll::Pending
+                }))
+            });
+            let polls = Rc::new(Cell::new(0_usize));
+            let observed_polls = Rc::clone(&polls);
+            let source_drops = Rc::new(Cell::new(0));
+            let source_lease = SourceLease(Rc::clone(&source_drops));
+            let source = stream::poll_fn(move |_| {
+                let _lease = &source_lease;
+                observed_polls.set(observed_polls.get().saturating_add(1));
+                Poll::Pending
+            })
+            .boxed_local();
+            let releases = Rc::new(Cell::new(0));
+            let head = OutboundHead::new(
+                status,
+                input(HeaderMap::new()),
+                source,
+                captured,
+                owner(&releases),
+            )
+            .expect("head");
+            let result = block_on(callback.with(|| head.finish()));
+            REENTRANT_OWNER.with(|slot| drop(slot.borrow_mut().take()));
+            assert!(matches!(result, Err(EdgeError::Internal { .. })));
+            assert_eq!(polls.get(), 0, "closed finalization cannot poll the source");
+            assert_eq!(source_drops.get(), 1);
+            assert_eq!(releases.get(), 1);
+        }
+    }
+
+    fn cancel_test_scope() {
+        let callback = REENTRANT_OWNER
+            .with(|slot| slot.borrow().clone())
+            .expect("test owner");
+        callback.close();
+    }
+
+    #[test]
+    fn finalizer_scope_closed_by_initial_clock_never_polls_source() {
+        assert_finalizer_scope_guard(CancelAt::FinalizerClock);
+    }
+
+    #[test]
+    fn finalizer_scope_closed_by_read_clock_never_polls_source() {
+        assert_finalizer_scope_guard(CancelAt::ReadClock);
+    }
+
+    #[test]
+    fn finalizer_scope_closed_by_timer_creation_clock_never_polls_source() {
+        assert_finalizer_scope_guard(CancelAt::TimerCreationClock);
+    }
+
+    #[test]
+    fn finalizer_scope_closed_by_timer_factory_never_polls_source() {
+        assert_finalizer_scope_guard(CancelAt::TimerFactory);
+    }
+
+    #[test]
+    fn finalizer_scope_closed_by_timer_poll_never_polls_source() {
+        assert_finalizer_scope_guard(CancelAt::TimerPoll);
+    }
+
+    #[test]
+    fn finalizer_cleanup_cannot_reset_observed_read_clock_history() {
+        for status in [StatusCode::OK, StatusCode::RESET_CONTENT] {
+            let fake = FakeTime::new();
+            let mut captured = fake.response_context();
+            captured.body_policy.response_mode = ResponseMode::Buffered { max_bytes: 16 };
+            let restore = captured
+                .entered_at
+                .checked_add(Duration::from_millis(5))
+                .expect("restored clock");
+            let advancing = fake.clone();
+            let source = stream::poll_fn(move |_| {
+                advancing.advance(Duration::from_millis(10));
+                Poll::Ready(None)
+            })
+            .boxed_local();
+            let releases = Rc::new(Cell::new(0_usize));
+            let counted = Rc::clone(&releases);
+            let clock_state = Arc::clone(&fake.0);
+            let transport_owner = OutboundExchangeOwner::new(move || {
+                counted.set(counted.get().saturating_add(1));
+                clock_state.lock().expect("cleanup clock").now = restore;
+            });
+            let head = OutboundHead::new(
+                status,
+                input(HeaderMap::new()),
+                source,
+                captured,
+                transport_owner,
+            )
+            .expect("head");
+            let result = block_on(head.finish());
+            assert!(
+                matches!(result, Err(EdgeError::Internal { .. })),
+                "final checks must retain read-time history across transport cleanup"
+            );
+            assert_eq!(releases.get(), 1);
+        }
     }
 
     #[test]

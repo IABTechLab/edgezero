@@ -15,6 +15,7 @@ This workspace demonstrates a multi-target EdgeZero app.
 - `POST /echo` - echoes JSON payloads
 - `GET /admission` - confirms route-aware admission and one-time grant consumption
 - `GET|POST /proxy/{*rest}` - sends the request to `API_BASE_URL`, falling back to a 501 when the active adapter does not inject an outbound HTTP client
+- `GET /follow` - requests `API_BASE_URL/redirect/1` and follows at most four redirects, allowing only the configured scheme and authority
 - `POST /fanout` - attempts up to eight relative paths before harvest and returns index-aligned status, error category, unresolved state, and per-slot elapsed milliseconds
 
 ## Outbound HTTP
@@ -28,7 +29,7 @@ capability check passes. See the
 [capability guide](https://iabtechlab.github.io/edgezero/guide/capabilities) for
 the current support matrix and deployment prerequisites.
 
-Both outbound examples bypass adapter-managed caches and set a 5-second timeout, a 1 MiB request-body cap,
+The outbound examples bypass adapter-managed caches and set a 5-second timeout, a 1 MiB request-body cap,
 independent 2 MiB encoded / 1 MiB decoded / 2 MiB final-buffer response caps,
 64 KiB / 100-field response-header caps, and explicit Brotli window and decoder
 memory limits. `/fanout` also gives every slot one shared absolute deadline and
@@ -38,6 +39,16 @@ RTT. Cross-slot timing isolation is adapter-dependent; deployments that require
 it must declare `outbound-batch-slot-isolation` as a required capability. Applications
 that retain partial results after cancellation should also require the appropriate
 `outbound-batch-completion-order` and `outbound-batch-cancellation` support levels.
+
+`/proxy` returns upstream redirects unchanged; only `/follow` calls the explicit
+redirect API. `/follow` checks its initial destination and every prepared hop
+against the same configured scheme and authority, retains one 5-second absolute
+application-clock deadline across the chain, and returns the final upstream
+response with `x-follow-redirects` recording the number of followed redirects.
+A changed scheme, host or port, or a non-HTTP target, is refused with a fixed
+403 response before another request is sent. The allowlist does not replace
+deployment-level destination restrictions or DNS/network policy. Transport and
+limit failures retain their original typed error classification.
 
 ## Dev
 

@@ -157,7 +157,8 @@ impl Adapter for CloudflareCliAdapter {
             | Capability::OutboundBatchSlotIsolation
             | Capability::OutboundCacheBypass
             | Capability::OutboundFlexiblePhaseBudget
-            | Capability::OutboundHttp => CapabilitySupport::Native,
+            | Capability::OutboundHttp
+            | Capability::OutboundRedirectFollowing => CapabilitySupport::Native,
             Capability::ConfigReadAllocationBounds
             | Capability::OutboundCompleteResourceAccounting
             | Capability::RawIngressFramingValidation
@@ -1268,6 +1269,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete capability data table together"
+    )]
     fn adapter_capability_matrix_matches_contracts() {
         for (capability, support) in [
             (
@@ -1316,6 +1321,10 @@ mod tests {
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundHttp, CapabilitySupport::Native),
+            (
+                Capability::OutboundRedirectFollowing,
+                CapabilitySupport::Native,
+            ),
             (
                 Capability::OutboundCompleteResourceAccounting,
                 CapabilitySupport::Unsupported,

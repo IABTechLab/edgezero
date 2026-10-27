@@ -14,8 +14,9 @@ use edgezero_core::extractor::{
 };
 use edgezero_core::http::{self, Method, Response, StatusCode, Uri};
 use edgezero_core::outbound::{
-    OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot, OutboundImageFormat,
-    OutboundImageOptimizerOptions, OutboundImageOptimizerRegion, OutboundRequest, ResponseDecoding,
+    OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot, OutboundFollowFailure,
+    OutboundImageFormat, OutboundImageOptimizerOptions, OutboundImageOptimizerRegion,
+    OutboundRedirectAction, OutboundRedirectLimit, OutboundRequest, ResponseDecoding,
 };
 use edgezero_core::response::Text;
 use futures::{StreamExt as _, stream};
@@ -40,6 +41,7 @@ const MAX_RESPONSE_HEADER_COUNT: u64 = 100;
 // 512 (KV key limit) - 5 (len of "note:") = 507
 const MAX_NOTE_ID_LEN: u64 = 507;
 const OUTBOUND_BATCH_BUDGET: Duration = Duration::from_secs(5);
+const OUTBOUND_FOLLOW_BUDGET: Duration = Duration::from_secs(5);
 const OUTBOUND_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_EGRESS_BUDGET: Duration = Duration::from_secs(2);
 const SMOKE_SECRET_MISSING_NAME: &str = "SMOKE_SECRET_MISSING";
@@ -232,6 +234,67 @@ pub async fn fanout(RequestContext(ctx): RequestContext) -> Result<Response, Edg
         .extensions_mut()
         .insert(ResponseEgressDeadline::after(RESPONSE_EGRESS_BUDGET));
     Ok(response)
+}
+
+#[action]
+pub async fn follow_demo(RequestContext(ctx): RequestContext) -> Result<Response, EdgeError> {
+    let Some(client) = ctx.http_client() else {
+        return proxy_not_available_response();
+    };
+    let base = ctx
+        .variable("API_BASE_URL")
+        .unwrap_or_else(|| DEFAULT_PROXY_BASE.to_owned());
+    let allowed = base
+        .parse::<Uri>()
+        .map_err(|_error| EdgeError::bad_request("invalid follow base URI"))?;
+    let target = build_proxy_target(&base, "redirect/1", &Uri::from_static("/follow"))?;
+    if !follow_target_allowed(&allowed, &target) {
+        return follow_denied_response();
+    }
+    let deadline = ctx.monotonic_clock().deadline_after(OUTBOUND_FOLLOW_BUDGET);
+    let request = outbound_policy(OutboundRequest::new(Method::GET, target)?).deadline(deadline);
+    let allowed_origin = request.uri().clone();
+    let followed = client
+        .follow(request, OutboundRedirectLimit::new(4)?, move |redirect| {
+            if redirect
+                .prepared_request()
+                .is_some_and(|next| follow_target_allowed(&allowed_origin, next.uri()))
+            {
+                Ok(OutboundRedirectAction::FollowPrepared)
+            } else {
+                Err(EdgeError::bad_request("redirect target is not allowed"))
+            }
+        })
+        .await;
+    let result = match followed {
+        Ok(result) => result,
+        Err(OutboundFollowFailure::Hop { error, .. }) => return Err(error),
+        Err(OutboundFollowFailure::Policy { .. }) => return follow_denied_response(),
+    };
+    let (upstream, _, redirects_followed, _) = result.into_parts();
+    let mut response = upstream.into_response()?;
+    response.headers_mut().insert(
+        "x-follow-redirects",
+        http::HeaderValue::from(redirects_followed),
+    );
+    Ok(response)
+}
+
+fn follow_denied_response() -> Result<Response, EdgeError> {
+    http::response_builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::text("redirect target is not allowed\n"))
+        .map_err(EdgeError::internal)
+}
+
+fn follow_target_allowed(allowed: &Uri, target: &Uri) -> bool {
+    matches!(allowed.scheme_str(), Some("http" | "https"))
+        && allowed
+            .authority()
+            .is_some_and(|authority| !authority.as_str().contains('@'))
+        && target.scheme() == allowed.scheme()
+        && target.authority() == allowed.authority()
 }
 
 #[action]
@@ -546,13 +609,14 @@ pub async fn state_demo(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use edgezero_core::app::App as EdgeZeroApp;
     use edgezero_core::blob_envelope::BlobEnvelope;
     use edgezero_core::body::Body;
     use edgezero_core::config_store::{
         BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
         finish_bounded_config_read,
     };
-    use edgezero_core::context::RequestContext;
+    use edgezero_core::context::{RequestContext, RuntimeVariables};
     use edgezero_core::http::header::{HeaderName, HeaderValue};
     use edgezero_core::http::{HeaderMap, Method, StatusCode, Uri, request_builder};
     use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
@@ -565,6 +629,7 @@ mod tests {
     };
     use edgezero_core::params::PathParams;
     use edgezero_core::response::IntoResponse as _;
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use edgezero_core::secret_store::{InMemorySecretStore, SecretHandle};
     use edgezero_core::store_registry::{
         ConfigRegistry, ConfigStoreBinding, KvRegistry, StoreRegistry,
@@ -688,6 +753,8 @@ mod tests {
     #[derive(Clone)]
     struct TestOutboundClient {
         clock: TestTime,
+        follow_requests: Arc<Mutex<Vec<(Uri, Deadline)>>>,
+        redirect_location: Option<&'static str>,
         time: OutboundTime,
     }
 
@@ -697,17 +764,20 @@ mod tests {
             Self {
                 time: clock.pair(),
                 clock,
+                follow_requests: Arc::default(),
+                redirect_location: None,
             }
         }
     }
 
     impl TestOutboundClient {
         fn finish_ready(
+            &self,
             request: OutboundDispatchRequest,
             expected_deadline: Option<Deadline>,
         ) -> Result<OutboundResponse, EdgeError> {
             let mut future =
-                Box::pin(async move { Self::head(request, expected_deadline)?.finish().await });
+                Box::pin(async move { self.head(request, expected_deadline)?.finish().await });
             // Fixed replies have at most one chunk; the finalizer yields once before EOF.
             for _ in 0_u8..2 {
                 if let Some(outcome) = future.as_mut().now_or_never() {
@@ -724,12 +794,26 @@ mod tests {
             reason = "scripted transport assertions preserve effective request checks"
         )]
         fn head(
+            &self,
             request: OutboundDispatchRequest,
             expected_deadline: Option<Deadline>,
         ) -> Result<OutboundHead, EdgeError> {
             let (parts, context) = request.into_parts();
             assert_outbound_policy(&parts);
-            if context.mode() == OutboundSendMode::Batch {
+            if context.mode() == OutboundSendMode::Follow {
+                assert_eq!(parts.method, Method::GET);
+                assert_eq!(parts.response_decoding, ResponseDecoding::Decode);
+                assert_eq!(parts.proxy_marker, OutboundProxyMarker::On);
+                let deadline = parts.deadline.ok_or_else(|| {
+                    EdgeError::internal(IoError::other("missing scripted chain deadline"))
+                })?;
+                self.follow_requests
+                    .lock()
+                    .map_err(|_error| {
+                        EdgeError::internal(IoError::other("scripted request log poisoned"))
+                    })?
+                    .push((parts.uri.clone(), deadline));
+            } else if context.mode() == OutboundSendMode::Batch {
                 assert_eq!(parts.response_decoding, ResponseDecoding::Decode);
                 assert_eq!(parts.proxy_marker, OutboundProxyMarker::On);
                 let deadline = parts.deadline.expect("batch deadline");
@@ -748,7 +832,7 @@ mod tests {
                 assert_eq!(parts.response_decoding, ResponseDecoding::Original);
                 assert_eq!(parts.proxy_marker, OutboundProxyMarker::Off);
             }
-            response_for(&parts, context)
+            response_for(&parts, context, self.redirect_location)
         }
     }
 
@@ -848,7 +932,7 @@ mod tests {
 
     impl OutboundHttpClient for TestOutboundClient {
         fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
-            let outcome = Self::finish_ready(request, None);
+            let outcome = self.finish_ready(request, None);
             Ok(OutboundPending::new(
                 Box::pin(ready(outcome)),
                 OutboundExchangeOwner::new(|| {}),
@@ -856,7 +940,7 @@ mod tests {
         }
 
         fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
-            Box::pin(ready(Self::head(request, None)))
+            Box::pin(ready(self.head(request, None)))
         }
 
         fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
@@ -879,7 +963,7 @@ mod tests {
                 );
                 self.clock
                     .advance_to(started_at.checked_add(elapsed).expect("terminal instant"));
-                let outcome = Self::finish_ready(request, Some(observation_cutoff));
+                let outcome = self.finish_ready(request, Some(observation_cutoff));
                 let completed_at = self.time.clock().now();
                 cutoff_unresolved |= observation_cutoff.is_expired_at(completed_at)
                     && budget.deadline.instant() >= observation_cutoff.instant();
@@ -1014,6 +1098,7 @@ mod tests {
     fn response_for(
         parts: &OutboundRequestParts,
         context: OutboundResponseContext,
+        redirect_location: Option<&'static str>,
     ) -> Result<OutboundHead, EdgeError> {
         if parts.uri.path() == "/fail" {
             return Err(EdgeError::gateway_timeout_caused(
@@ -1022,12 +1107,19 @@ mod tests {
             ));
         }
         let status = match parts.uri.path() {
+            "/redirect/1" => StatusCode::FOUND,
             "/status/201" => StatusCode::CREATED,
             "/status/204" => StatusCode::NO_CONTENT,
             _ => StatusCode::OK,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-outbound-test", HeaderValue::from_static("preserved"));
+        if status == StatusCode::FOUND {
+            headers.insert(
+                "location",
+                HeaderValue::from_static(redirect_location.expect("scripted redirect target")),
+            );
+        }
         let encoded = if status == StatusCode::NO_CONTENT {
             stream::empty().boxed_local()
         } else {
@@ -1044,6 +1136,157 @@ mod tests {
             context,
             OutboundExchangeOwner::new(|| {}),
         )
+    }
+
+    #[test]
+    fn follow_demo_uses_supplied_head_client_and_app_deadline() {
+        let scripted = TestOutboundClient {
+            redirect_location: Some("/status/201"),
+            ..TestOutboundClient::default()
+        };
+        let start = scripted.time.clock().now();
+        let requests = Arc::clone(&scripted.follow_requests);
+        let response = run_follow_demo(scripted, "https://allowed.example");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()["x-follow-redirects"], "1");
+        assert_eq!(response.headers()["x-outbound-test"], "preserved");
+        assert_eq!(
+            response.into_body().into_bytes().expect("buffered"),
+            Bytes::from_static(b"outbound-response")
+        );
+        let recorded = requests.lock().expect("recorded requests");
+        let expected_deadline = start.checked_add(Duration::from_secs(5)).expect("deadline");
+        assert_eq!(recorded.len(), 2);
+        for (request, path) in recorded.iter().zip(["/redirect/1", "/status/201"]) {
+            assert_eq!(request.0.scheme_str(), Some("https"));
+            assert_eq!(
+                request.0.authority().expect("authority").as_str(),
+                "allowed.example"
+            );
+            assert_eq!(request.0.path(), path);
+            assert_eq!(request.1.instant(), expected_deadline);
+        }
+    }
+
+    #[test]
+    fn follow_demo_allows_canonical_equivalent_origins() {
+        for base in [
+            "https://example.com:443",
+            "https://ExAmPlE.CoM",
+            "https://ExAmPlE.CoM:443",
+        ] {
+            let scripted = TestOutboundClient {
+                redirect_location: Some("/status/201"),
+                ..TestOutboundClient::default()
+            };
+            let requests = Arc::clone(&scripted.follow_requests);
+            let response = run_follow_demo(scripted, base);
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(response.headers()["x-follow-redirects"], "1");
+            let recorded = requests.lock().expect("recorded requests");
+            assert_eq!(recorded.len(), 2);
+            for (request, path) in recorded.iter().zip(["/redirect/1", "/status/201"]) {
+                assert_eq!(request.0.scheme_str(), Some("https"));
+                assert_eq!(
+                    request.0.authority().expect("authority").as_str(),
+                    "example.com"
+                );
+                assert_eq!(request.0.path(), path);
+            }
+        }
+    }
+
+    #[test]
+    fn follow_demo_checks_initial_target_before_dispatch() {
+        for base in [
+            "ftp://allowed.example",
+            "https://user:secret@allowed.example",
+        ] {
+            let scripted = TestOutboundClient::default();
+            let requests = Arc::clone(&scripted.follow_requests);
+            let response = run_follow_demo(scripted, base);
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                response.into_body().into_bytes().expect("buffered"),
+                Bytes::from_static(b"redirect target is not allowed\n")
+            );
+            assert!(requests.lock().expect("recorded requests").is_empty());
+        }
+    }
+
+    #[test]
+    fn follow_demo_stops_after_four_redirects() {
+        let scripted = TestOutboundClient {
+            redirect_location: Some("/redirect/1"),
+            ..TestOutboundClient::default()
+        };
+        let requests = Arc::clone(&scripted.follow_requests);
+        let response = run_follow_demo(scripted, "https://allowed.example");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers()["location"], "/redirect/1");
+        assert_eq!(response.headers()["x-follow-redirects"], "4");
+        assert_eq!(requests.lock().expect("recorded requests").len(), 5);
+    }
+
+    #[test]
+    fn follow_demo_denies_changed_origin_without_sending_another_hop() {
+        for base in ["https://allowed.example", "https://AlLoWeD.ExAmPlE:443"] {
+            for target in [
+                "https://other.example/private?token=secret",
+                "http://allowed.example/private?token=secret",
+                "https://allowed.example:8443/private?token=secret",
+                "mailto:user@example.invalid",
+            ] {
+                let scripted = TestOutboundClient {
+                    redirect_location: Some(target),
+                    ..TestOutboundClient::default()
+                };
+                let requests = Arc::clone(&scripted.follow_requests);
+                let response = run_follow_demo(scripted, base);
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert_eq!(
+                    response.into_body().into_bytes().expect("buffered"),
+                    Bytes::from_static(b"redirect target is not allowed\n")
+                );
+                assert_eq!(requests.lock().expect("recorded requests").len(), 1);
+            }
+        }
+    }
+
+    fn run_follow_demo(scripted: TestOutboundClient, base: &str) -> Response {
+        let mut app = EdgeZeroApp::new(crate::build_router().expect("demo routes"));
+        app.set_monotonic_clock(scripted.time.clock().clone());
+        let mut request = request_builder()
+            .uri("/follow")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(HttpClient::with_client(scripted));
+        request
+            .extensions_mut()
+            .insert(RuntimeVariables::from_vars([(
+                "API_BASE_URL".to_owned(),
+                base.to_owned(),
+            )]));
+        let outcome = block_on(app.dispatch_ingress(
+            request,
+            app.monotonic_now(),
+            edgezero_core::IngressHeadAccounting::HostManaged,
+            edgezero_core::IngressFraming::HostManaged,
+        ))
+        .expect("ingress dispatch");
+        let edgezero_core::IngressDispatchOutcome::Response(envelope) = outcome else {
+            panic!("response outcome");
+        };
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+        else {
+            panic!("response egress");
+        };
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(clock.now()));
+        prepared.into_response()
     }
 
     #[test]

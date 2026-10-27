@@ -191,3 +191,59 @@ fn owned_head_first_facade_compile_contract() {
         Some(Duration::from_millis(10))
     );
 }
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "external redirect API contract"
+)]
+fn public_follow_and_option_readback_compile_contract() {
+    use std::rc::Rc;
+
+    use edgezero_core::http::{HeaderMap, StatusCode, Uri};
+    use edgezero_core::{
+        HttpClient, OutboundFollowFailure, OutboundFollowResult, OutboundRedirectAction,
+        OutboundRedirectContext, OutboundRedirectLimit,
+    };
+    use futures_util::future::LocalBoxFuture;
+
+    fn owned_follow(
+        client: &HttpClient,
+        request: OutboundRequest,
+        rejection: Rc<()>,
+    ) -> LocalBoxFuture<'static, Result<OutboundFollowResult, OutboundFollowFailure<Rc<()>>>> {
+        client.follow(
+            request,
+            OutboundRedirectLimit::new(4).expect("limit"),
+            move |context: &mut OutboundRedirectContext<'_>| {
+                let _: (
+                    usize,
+                    StatusCode,
+                    &Uri,
+                    &str,
+                    &HeaderMap,
+                    bool,
+                    Option<&OutboundRequest>,
+                ) = (
+                    context.redirect_number(),
+                    context.status(),
+                    context.request_uri(),
+                    context.resolved_target(),
+                    context.headers(),
+                    context.is_cross_origin(),
+                    context.prepared_request(),
+                );
+                match context.take_prepared_request() {
+                    Some(prepared) => Ok(OutboundRedirectAction::Follow(prepared)),
+                    None => Err(Rc::clone(&rejection)),
+                }
+            },
+        )
+    }
+    let _ = owned_follow;
+    assert_eq!(OutboundRedirectLimit::new(4).expect("limit").get(), 4);
+    for invalid in [0, 21] {
+        let error = OutboundRedirectLimit::new(invalid).expect_err("invalid limit");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    }
+}

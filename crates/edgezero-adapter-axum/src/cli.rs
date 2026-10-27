@@ -157,6 +157,7 @@ impl Adapter for AxumCliAdapter {
             | Capability::OutboundFlexiblePhaseBudget
             | Capability::OutboundHeaderFidelity
             | Capability::OutboundHttp
+            | Capability::OutboundRedirectFollowing
             | Capability::LazyStreamedResponsePassthrough
             | Capability::StreamedUploadDeadlines => CapabilitySupport::Native,
             Capability::ConfigReadAllocationBounds
@@ -895,6 +896,10 @@ mod tests {
                 CapabilitySupport::Native,
             ),
             (Capability::OutboundHttp, CapabilitySupport::Native),
+            (
+                Capability::OutboundRedirectFollowing,
+                CapabilitySupport::Native,
+            ),
             (
                 Capability::OutboundCompleteResourceAccounting,
                 CapabilitySupport::Unsupported,

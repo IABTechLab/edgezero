@@ -11,7 +11,15 @@ use super::{
 };
 use crate::error::EdgeError;
 use crate::http::StatusCode;
-use crate::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget};
+use crate::time::{
+    Deadline, DispatchBudget, MonotonicClock, MonotonicInstant, dispatch_budget_inputs,
+};
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct DispatchBounds {
+    pub observation_cutoff: Option<Deadline>,
+    pub original_chain_deadline: Option<Deadline>,
+}
 
 /// Private forwarding metadata, not a second body or a public policy override.
 #[derive(Clone)]
@@ -76,14 +84,23 @@ pub(super) fn prepare(
     mode: OutboundSendMode,
     time: OutboundTime,
     entered_at: MonotonicInstant,
-    cutoff: Option<Deadline>,
+    bounds: DispatchBounds,
     scope: OutboundScope,
 ) -> Result<OutboundDispatchRequest, EdgeError> {
+    scope.check()?;
     client.inner.validate_supported_options(&request, mode)?;
+    scope.check()?;
     validate_for_dispatch(&request, mode)?;
-    let budget = dispatch_budget(&request, entered_at, cutoff)?;
+    let budget = dispatch_budget_inputs(
+        request.budget_inputs(),
+        entered_at,
+        bounds.observation_cutoff,
+        bounds.original_chain_deadline,
+    )?;
     request = client.resolve_proxy_marker(request);
     normalize_for_dispatch(&mut request)?;
+    request.body = take(&mut request.body).bind_outbound_scope(&scope)?;
+    scope.check()?;
     let body_policy = ResponseBodyPolicy {
         max_brotli_window_bits: request.max_brotli_window_bits,
         max_chunk_bytes: request.max_chunk_bytes,
@@ -101,7 +118,7 @@ pub(super) fn prepare(
         max_response_header_bytes: request.max_response_header_bytes,
         max_response_header_count: request.max_response_header_count,
         mode,
-        original_chain_deadline: request.deadline,
+        original_chain_deadline: bounds.original_chain_deadline.or(request.deadline),
         proxy_marker: request.proxy_marker,
         request_method: request.method.clone(),
         scope,
@@ -113,12 +130,10 @@ pub(super) fn prepare(
 pub(super) async fn settle(
     mut prepared: OutboundDispatchRequest,
 ) -> Result<OutboundDispatchRequest, EdgeError> {
-    let entry_now = prepared.clock().now();
-    if entry_now < prepared.entered_at() {
-        return Err(EdgeError::internal(anyhow::anyhow!(
-            "monotonic clock moved backwards during outbound settlement"
-        )));
-    }
+    let scope = prepared.scope().clone();
+    let time = prepared.time().clone();
+    let mut previous = prepared.entered_at();
+    let entry_now = settlement_now(&time, &scope, &mut previous)?;
     if !matches!(prepared.request.method, Method::GET | Method::HEAD)
         || !prepared.request.body.is_stream()
     {
@@ -132,12 +147,10 @@ pub(super) async fn settle(
     }
     let outbound = prepared.budget();
     let inbound = prepared.request.inbound_read_deadline;
-    let time = prepared.time().clone();
     let deadline = inbound
         .filter(|bound| bound.instant() <= outbound.deadline.instant())
         .unwrap_or(outbound.deadline);
     let mut timer = time.wait_until(deadline);
-    let mut previous = prepared.entered_at();
     let body = take(&mut prepared.request.body);
     let mut source = body.into_stream().map_err(|unexpected_body| {
         drop(unexpected_body);
@@ -146,13 +159,7 @@ pub(super) async fn settle(
         ))
     })?;
     poll_fn(|cx| {
-        let now = time.clock().now();
-        if now < previous {
-            return Poll::Ready(Err(EdgeError::internal(anyhow::anyhow!(
-                "monotonic clock moved backwards during outbound settlement"
-            ))));
-        }
-        previous = now;
+        settlement_now(&time, &scope, &mut previous)?;
         // The paired waiter preserves registered faults even at expiry. An expired unarmed
         // wait completes without creating a timer, and the body is still never polled.
         match timer.as_mut().poll(cx) {
@@ -171,14 +178,9 @@ pub(super) async fn settle(
             }
             Poll::Pending => {}
         }
+        scope.check()?;
         let polled = source.poll_next_unpin(cx);
-        let after = time.clock().now();
-        if after < previous {
-            return Poll::Ready(Err(EdgeError::internal(anyhow::anyhow!(
-                "monotonic clock moved backwards during outbound settlement"
-            ))));
-        }
-        previous = after;
+        let after = settlement_now(&time, &scope, &mut previous)?;
         if let Some(error) = settlement_expiry(inbound, outbound, after) {
             return Poll::Ready(Err(error));
         }
@@ -198,6 +200,13 @@ pub(super) async fn settle(
     .await?;
     drop(source);
     drop(timer);
+    let released_at = settlement_now(&time, &scope, &mut previous)?;
+    if outbound.deadline.is_expired_at(released_at) {
+        return Err(EdgeError::gateway_timeout_caused(
+            "outbound request deadline exceeded",
+            outbound.cause,
+        ));
+    }
     Ok(prepared)
 }
 
@@ -222,6 +231,23 @@ fn settlement_expiry(
     }
 }
 
+fn settlement_now(
+    time: &OutboundTime,
+    scope: &OutboundScope,
+    previous: &mut MonotonicInstant,
+) -> Result<MonotonicInstant, EdgeError> {
+    scope.check()?;
+    let now = time.clock().now();
+    scope.check()?;
+    if now < *previous {
+        return Err(EdgeError::internal(anyhow::anyhow!(
+            "monotonic clock moved backwards during outbound settlement"
+        )));
+    }
+    *previous = now;
+    Ok(now)
+}
+
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
@@ -230,6 +256,7 @@ mod tests {
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
+    use bytes::Bytes;
     use futures::executor::block_on;
     use futures_util::future::poll_fn;
     use futures_util::{StreamExt as _, stream};
@@ -240,7 +267,8 @@ mod tests {
         MonotonicInstant, OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest,
         OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
         OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
-        OutboundProgressRuntime, OutboundRequest, OutboundScope, OutboundSendMode, OutboundTime,
+        OutboundProgressRuntime, OutboundRequest, OutboundScope, OutboundScopeOwner,
+        OutboundSendMode, OutboundTime,
     };
 
     #[derive(Clone)]
@@ -378,6 +406,41 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[test]
+    fn prepared_upload_revokes_a_reentrant_chunk_before_the_transport_can_write() {
+        let fake = Fake::new();
+        let owner = Rc::new(OutboundScopeOwner::callback());
+        let close_from_source = Rc::clone(&owner);
+        let request = OutboundRequest::post("https://example.com/")
+            .expect("request")
+            .body(Body::from_stream(stream::poll_fn(move |_| {
+                close_from_source.close();
+                Poll::Ready(Some(Ok(Bytes::from_static(b"must not be written"))))
+            })));
+        let time = fake.pair();
+        let prepared = owner
+            .with(|| {
+                super::prepare(
+                    &fake.client(false),
+                    request,
+                    OutboundSendMode::Send,
+                    time.clone(),
+                    time.clock().now(),
+                    super::DispatchBounds::default(),
+                    OutboundScope::capture(Rc::new(IndependentOutboundProgress)),
+                )
+            })
+            .expect("prepared upload");
+        let (parts, _context) = prepared.into_parts();
+        let mut source = parts.body.into_stream().expect("streamed upload");
+        let observed = block_on(source.next());
+        assert!(
+            matches!(observed, Some(Err(EdgeError::Internal { .. }))),
+            "reentrant closure must suppress the source chunk before a provider write"
+        );
+        assert_eq!(fake.dispatches.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -642,7 +705,7 @@ mod tests {
             OutboundSendMode::Send,
             time,
             entered_at,
-            None,
+            super::DispatchBounds::default(),
             OutboundScope::capture(Rc::new(IndependentOutboundProgress)),
         )
         .expect("prepared");

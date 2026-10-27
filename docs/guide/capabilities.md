@@ -291,6 +291,7 @@ not included. These limitations block whole-response-lifetime certification.
 | `outbound-deadlines`                    | Native                            | BestEffort⁸                       | BestEffort¹                         | BestEffort⁸                       |
 | `outbound-failure-diagnostics`          | BestEffort                        | BestEffort                        | Native                              | Native                            |
 | `outbound-image-optimizer`              | Unsupported                       | Unsupported                       | BestEffort[^native-image-optimizer] | Unsupported                       |
+| `outbound-redirect-following`           | Native                            | Native                            | Native                              | Native                            |
 | `outbound-flexible-phase-budget`        | Native                            | Native                            | BestEffort⁵                         | BestEffort⁵                       |
 | `streamed-upload-deadlines`             | Native                            | BestEffort⁸                       | BestEffort²                         | BestEffort⁸                       |
 | `lazy-streamed-response-passthrough`    | Native³                           | Native                            | BestEffort⁶                         | BestEffort⁷                       |
@@ -302,8 +303,9 @@ not included. These limitations block whole-response-lifetime certification.
     The synchronous call cannot be interrupted and its full blocking horizon is unknown.
     The original absolute deadline is checked before dispatch and after return; late results
     are rejected, not granted additional budget. Existing response limits and lazy streamed
-    handling apply afterward. Batch slots reject the option; begun/redirect integration remains
-    pending. No hosted transformation, pooling or performance qualification is claimed.
+    handling apply afterward. Begun requests and batch slots reject the option. Explicit redirect
+    following uses the same supported single-send mapping on each hop, without another fetch,
+    buffering or serialization. No hosted transformation, pooling or performance qualification is claimed.
 
 [^resource-accounting]:
     Complete accounting includes provider parsing and field-section
@@ -384,6 +386,24 @@ it preserves the visible header semantics used by the client.
 ⁹ Fastly outbound HTTP uses dynamic backends, which must be enabled on the deployed service.
 The CLI cannot currently prove that entitlement. If disabled, dispatch returns a typed 502
 with the documented enablement diagnostic.
+
+## Redirect Policy
+
+`outbound-redirect-following` reports shared redirect policy, not native deadlines, cancellation
+or complete resource bounds. The `Native` cells mean `HttpClient::follow` applies the same explicit
+limit, method/replay rules, target callback and head-first body disposition on all four adapters,
+using the same client dispatch and response policy as a plain send. Plain sends, begun requests
+and batches still return 3xx unfollowed. See [Following Redirects](./proxying.md#following-redirects)
+for credential, security, option inheritance and chain-deadline rules.
+
+Spin requires plain-HTTP origins and targets outside a narrowed host list to be declared. A target
+can pass the application policy and still fail at a provider boundary. Fastly dynamic-backend
+entitlement, B31 registration and non-preemptible host-call limits remain unchanged.
+
+Local redirect tests are not hosted qualification. Native Image Optimizer qualification remains
+open: its synchronous blocking horizon is unknown, and following retains its existing native call
+path without extra fetches, buffering or serialization. No deadline, cancellation, egress or
+resource-accounting capability is promoted by this row; the separate matrix cells still apply.
 
 ## Provider Failure Diagnostics
 

@@ -2042,7 +2042,8 @@ impl Adapter for FastlyCliAdapter {
             | Capability::OutboundAuthorityOverride
             | Capability::OutboundCacheBypass
             | Capability::OutboundFailureDiagnostics
-            | Capability::OutboundHeaderFidelity => CapabilitySupport::Native,
+            | Capability::OutboundHeaderFidelity
+            | Capability::OutboundRedirectFollowing => CapabilitySupport::Native,
             Capability::BufferedResponseContentLength
             | Capability::ConfigReadDeadlines
             | Capability::InboundReadDeadlines
@@ -6864,6 +6865,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete capability data table together"
+    )]
     fn adapter_capability_matrix_matches_outbound_spec() {
         for (capability, support) in [
             (
@@ -6912,6 +6917,10 @@ mod tests {
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundHttp, CapabilitySupport::BestEffort),
+            (
+                Capability::OutboundRedirectFollowing,
+                CapabilitySupport::Native,
+            ),
             (
                 Capability::OutboundCompleteResourceAccounting,
                 CapabilitySupport::Unsupported,

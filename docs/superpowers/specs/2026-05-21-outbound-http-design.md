@@ -9,6 +9,23 @@
 
 ## 1. Overview
 
+### Explicit Redirect Following Supersession (2026-10-27)
+
+The explicit `HttpClient::follow` API and [redirect guide](../../guide/proxying.md#following-redirects)
+supersede this document's historical manual `Location` loop guidance for applications opting in.
+Plain Send, Begin and Batch remain unfollowed. Each opted-in hop uses the same supplied client,
+shared preparation, provider head acquisition and ordinary finalizer, with a required target policy
+and a validated 1..=20 limit. Followed heads are discarded without polling or decoding their bodies;
+final heads retain all normal response limits, decoding, provenance and ownership.
+
+The initial absolute deadline remains an independent upper bound across replacement requests,
+policy execution and final streamed consumption. Per-call timeouts remain per-hop. Method/body,
+credential and original Location evidence rules are defined by EZ-9 and the approved Interfaces;
+this supersession does not authorize an alternate transport, permissive default policy, compatibility
+API or a weaker batch contract. Native Image Optimizer requests retain their direct native path.
+Local implementation and tests do not close remaining all-target runtime acceptance, candidate
+binding, hosted qualification or the optimizer's unknown synchronous blocking horizon.
+
 ### Dispatch-Slack Retirement (2026-10-27)
 
 The requester authorized retirement of the fixed 25 ms dispatch-slack refusal. The

@@ -105,6 +105,8 @@ pub enum Capability {
     OutboundHeaderFidelity,
     OutboundHttp,
     OutboundImageOptimizer,
+    /// Shared explicit redirect policy; transport deadlines and cancellation stay separate.
+    OutboundRedirectFollowing,
     RawIngressFramingValidation,
     RawIngressHeadLimits,
     ResponseEgressAbort,
@@ -146,6 +148,7 @@ impl Capability {
             Self::OutboundHeaderFidelity => "outbound-header-fidelity",
             Self::OutboundHttp => "outbound-http",
             Self::OutboundImageOptimizer => "outbound-image-optimizer",
+            Self::OutboundRedirectFollowing => "outbound-redirect-following",
             Self::RawIngressFramingValidation => "raw-ingress-framing-validation",
             Self::RawIngressHeadLimits => "raw-ingress-head-limits",
             Self::ResponseEgressAbort => "response-egress-abort",
@@ -1698,6 +1701,33 @@ env = "APP_TOKEN"
     }
 
     #[test]
+    fn outbound_redirect_following_capability_round_trip() {
+        let name = "outbound-redirect-following";
+        let capability: Capability =
+            serde_json::from_value(serde_json::json!(name)).expect("redirect capability");
+        assert_eq!(capability, Capability::OutboundRedirectFollowing);
+        assert_eq!(capability.as_str(), name);
+        assert_eq!(
+            serde_json::to_value(capability).expect("serialize redirect capability"),
+            serde_json::json!(name)
+        );
+        for disposition in ["required", "optional"] {
+            let source = format!("[capabilities]\n{disposition} = [\"{name}\"]\n");
+            let loader = ManifestLoader::try_load_from_str(&source).expect("redirect manifest");
+            let serialized = toml::to_string(loader.manifest()).expect("serialize manifest");
+            let reparsed = ManifestLoader::try_load_from_str(&serialized).expect("round trip");
+            let declared = &reparsed.manifest().capabilities;
+            let (selected, other) = if disposition == "required" {
+                (&declared.required, &declared.optional)
+            } else {
+                (&declared.optional, &declared.required)
+            };
+            assert_eq!(selected, &[capability]);
+            assert!(other.is_empty());
+        }
+    }
+
+    #[test]
     fn provider_failure_diagnostics_capability_round_trip() {
         let name = "outbound-failure-diagnostics";
         let capability: Capability =
@@ -1752,6 +1782,7 @@ required = [
     "outbound-header-fidelity",
     "outbound-http",
     "outbound-image-optimizer",
+    "outbound-redirect-following",
     "raw-ingress-framing-validation",
     "raw-ingress-head-limits",
     "response-egress-abort",
@@ -1786,6 +1817,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             Capability::OutboundHeaderFidelity,
             Capability::OutboundHttp,
             Capability::OutboundImageOptimizer,
+            Capability::OutboundRedirectFollowing,
             Capability::RawIngressFramingValidation,
             Capability::RawIngressHeadLimits,
             Capability::ResponseEgressAbort,
@@ -1824,6 +1856,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             "outbound-header-fidelity",
             "outbound-http",
             "outbound-image-optimizer",
+            "outbound-redirect-following",
             "raw-ingress-framing-validation",
             "raw-ingress-head-limits",
             "response-egress-abort",

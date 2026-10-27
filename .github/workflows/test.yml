@@ -134,6 +134,10 @@ jobs:
           cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core --features fixture-core/qualification
           node --test scripts/qualify_response_egress.test.mjs
 
+      - name: Shared redirect policy contracts
+        if: matrix.suite == 'workspace'
+        run: scripts/run_test_nonzero.sh redirect_chain_uses_supplied_head_client_and_original_deadline cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests
+
       - name: Check Axum lifecycle fixture
         if: matrix.suite == 'axum'
         run: >-
@@ -457,6 +461,12 @@ jobs:
         env:
           ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
         run: scripts/run_test_nonzero.sh spin_error_code_table_is_exhaustive cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --test sdk_resources
+
+      - name: Run Spin eager exchange component
+        if: matrix.adapter == 'spin'
+        run: |
+          cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-eager
+          wasmtime run -W component-model-async=y -S p3=y -S http=y target/wasm32-wasip2/debug/examples/outbound_eager.wasm
 
       - name: Run Cloudflare outbound runtime unit tests
         if: matrix.adapter == 'cloudflare'

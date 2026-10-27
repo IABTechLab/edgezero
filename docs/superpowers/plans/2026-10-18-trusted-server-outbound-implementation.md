@@ -23,7 +23,8 @@ Explicit early body ownership is attached unchanged and accepted at canonical eg
 unaccepted responses remain callback-bound. The retained 25 ms rejection and injection APIs are
 removed; original deadlines, B31 and every portable cap remain enforced. The three requested
 implementation slices (shared pipeline, bounded GET/HEAD settlement, eager Begin/Batch ownership)
-are locally verified. This does not close Follow, acceptance binding or hosted qualification.
+are locally verified. The subsequent P5 checkpoint below adds explicit same-client Follow;
+all-target acceptance binding and hosted qualification remain open.
 This is the current task-level implementation summary, not qualification of that SHA. The
 recorded [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
 activates eleven existing criteria without changing the production implementation snapshot.
@@ -36,10 +37,10 @@ The six approved consolidation commitments are **not collectively complete**:
 | Commitment                                                            | Current Implementation                                                                                                                                                                                              | Remaining Work                                                                                                                                                                                               |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 1. Shared preparation, validation, normalization, decoding and limits | **Hard-cut implementation locally verified.** The facade captures invocation ownership/time and prepared contexts; all four adapters return raw heads to shared normalization, disposition, decoding and bounded collection. | Bind applicable exact-candidate acceptance legs (P1-P3, D1-D4). |
-| 2. One pipeline for send, begin, batches and redirects | **Send/Begin/Batch locally verified.** The shared pipeline includes eager drivers, ownership, raw observations, observation-only checks, mixed collection and lossless identity-bound recovery. | Implement explicit same-client Follow and complete qualification (P5, D1-D6, Q3-Q5). |
-| 3. Remove superseded implementations and APIs without compatibility | **Hard cut locally verified.** Old implementer send/raw-vector batches, `from_futures`, `finish_batch_item`, public receipt construction, Fastly's separate lifetime registry, copied task/deadline policies and old Body enum API are removed; no aliases remain. | Complete applicable acceptance bindings and Follow before closing all P1-P5 work. |
-| 4. Preserve direct native Image Optimizer | **Single Send integrated.** The native SDK mapping now hands its response head to the common finalizer without another fetch or transformation pipeline. | Implement Follow and qualify hosted transformation/performance. The synchronous blocking horizon remains UNKNOWN (D1d/Q4b). |
-| 5. Migrate demo, templates, clients and docs together | **Hard-cut migration locally verified.** Supplied clients, demo, generator, fixtures, guides and guards use prepared contexts, shared ownership/progress, raw events and explicit collection states. | Migrate Follow's examples when that separate operation lands; complete acceptance and qualification (P5/Q1-Q5). |
+| 2. One pipeline for send, begin, batches and redirects | **Send/Begin/Batch plus explicit Follow implemented.** The shared pipeline includes eager drivers, ownership, raw observations, observation-only checks, mixed collection, lossless identity-bound recovery and head-first redirect policy. | Complete all-target redirect runtime parity and acceptance/qualification (P5, D1-D6, Q3-Q5). |
+| 3. Remove superseded implementations and APIs without compatibility | **Hard cut locally verified.** Old implementer send/raw-vector batches, `from_futures`, `finish_batch_item`, public receipt construction, Fastly's separate lifetime registry, copied task/deadline policies and old Body enum API are removed; no aliases remain. Follow uses those same primitives. | Complete applicable acceptance bindings before closing all P1-P5 work. |
+| 4. Preserve direct native Image Optimizer | **Send/Follow share native dispatch.** The native SDK mapping hands its head to the common finalizer without another fetch or transformation pipeline; prepared redirects retain optimizer options. | Qualify hosted transformation/performance and the actual Follow mapping. The synchronous blocking horizon remains UNKNOWN (D1d/Q4b). |
+| 5. Migrate demo, templates, clients and docs together | **Hard-cut callers migrated.** Supplied clients, demo, generator, fixtures, guides and guards use prepared contexts, shared ownership/progress, raw events and explicit collection states; demo/scaffold add explicit allowlisted Follow. | Complete remaining acceptance and qualification (P5/Q1-Q5). |
 | 6. Document the TS hard-cut ownership boundary                        | **Documented** in the [adoption guide](../../guide/proxying.md#hard-cut-adoption). Transport stays upstream; application policies stay in the consumer.                                                             | Implement the remaining EdgeZero prerequisites and obtain consumer composition/qualification evidence before cutover. Do not delegate body dropping, buffering or transport workarounds to TS (P1-P5/Q4/Q5). |
 
 Keep three different status questions separate:
@@ -65,7 +66,7 @@ Fastly's pending response-source read now races its absolute write deadline, rep
 and releases response-owned work without cancelling callback siblings. Registered timer failures
 remain typed source failures; these guest fixes do not certify interruption of a blocking hostcall.
 
-Verification includes 984 core unit tests, six external prepared-client tests, 262 repaired-Viceroy
+Prior shared-scope checkpoint verification includes 984 core unit tests, six external prepared-client tests, 262 repaired-Viceroy
 unit tests and 36 Fastly contracts with no filtered readiness cases, 74 Cloudflare guest unit tests
 and 29 contracts, and 21 Spin SDK tests plus 35 WASI contracts. The consolidated native TCP gate
 passes 261 library cases plus 25 contracts, including all eleven bound sentinels. Refreshed demo
@@ -96,6 +97,57 @@ existing batch/cutoff/cancellation, timing, cap, encoding, provenance or lifecyc
 Normative requirements, attributed approval amendments and explicit applicability decisions
 remain authoritative over this summary. Pending follow-ups are not silently promoted or waived.
 
+### P5 Explicit Redirect Policy Checkpoint (2026-10-27)
+
+The approved `HttpClient::follow` surface is implemented through the same prepared dispatch and
+head finalizer as Send, including supplied clients. A synchronous application policy and a
+validated 1..=20 limit are required. The implementation preserves the exact decision order,
+original Location evidence, byte-sharing replay, method/header/credential rules, unchanged
+options and arbitrary policy errors. Followed heads are dropped without polling or decoding;
+final heads keep normal body policy. The original absolute deadline survives replacement
+requests and final streamed consumption, while per-hop timeouts/defaults remain per-hop.
+
+Core verification passes 1,044 unit tests and fourteen integration tests, including fifty redirect
+tests, the complete status/method table and the mandatory supplied-client/original-deadline
+sentinel. Real-TCP Axum controls cover plain Send remaining unfollowed, two-origin following,
+pending oversized compressed intermediate bodies and no-redirect coding/limit parity. The
+fixture fixes `Date` explicitly so comparing independent responses does not depend on wall time.
+
+Independent review reproduced reentrant scope closure during policy, unread-head disposal,
+GET/HEAD settlement, upload polling and finalizer clock/timer callbacks. Shared preparation,
+source binding and finalization now check their captured scope before advancing; there are no
+adapter-specific cancellation copies. Finalization retains read-time clock history through
+cleanup. Terminal source disposal runs inside the existing revocation check, so a cleanup callback
+cannot turn scope closure into clean EOF. The existing private collector accepts a borrowed
+payload, avoiding another box without changing public signatures, caps or error precedence.
+All reproduced red cases now pass.
+
+Demo and generated `/follow` handlers use the existing bounded request policy, an app-clock
+absolute deadline and initial/per-hop same-origin authorization. Canonical equivalent authorities
+are covered; existing `/proxy` and fanout behavior is unchanged. The public capability and guide
+describe portable redirect policy separately from provider transport guarantees. The CI pipeline
+runs the core sentinel and the existing Spin eager component rather than merely compiling it.
+
+Final verification after the terminal-cleanup fix passes all five root gates, the consolidated
+Axum suite (261 library tests and 27 contracts), sixty demo-core tests, thirty-three freshly
+generated core tests and strict clippy for the generated workspace. All eight WASM feature
+clippy configurations pass. Runtime suites execute without ignored or filtered cases:
+Cloudflare 74 library tests plus 29 contracts and nine Node fixture tests; Spin 35 contracts
+plus 21 SDK-resource tests and the eager component; Fastly 262 library tests plus 36 contracts.
+Fastly uses the already-approved repaired Viceroy with `SSL_CERT_FILE=/etc/ssl/cert.pem`,
+not disabled TLS verification or a promoted runtime pin. The initial sandboxed native run
+could not bind sockets; the full workspace and TCP suites pass with local-network permission.
+The expensive ignored full generated-workspace gate was not rerun locally; the fresh generated
+core tests and workspace clippy above are not a claim that this separate CI gate ran.
+
+This checkpoint does **not** close P5's complete acceptance matrix. Other provider-runtime Follow
+parity, actual Fastly optimizer-hop mapping, consumer composition, criterion-level binding and
+hosted qualification remain open. The inventory is unchanged: eleven ready legs, 500 planned,
+`qualified: false`. Native redirect policy is not a promotion of deadline, cancellation, framing,
+resource-accounting or delivery guarantees. Normative requirements and approved Interfaces
+remain unchanged; the SDK/decoder/runtime pins and scoped Viceroy qualification boundary remain
+unchanged.
+
 ### Current Work Queue and Gates
 
 1. **G1/Q3 acceptance binding:** replace planned placeholder commands with actual, nonzero
@@ -103,7 +155,8 @@ remain authoritative over this summary. Pending follow-ups are not silently prom
    applicability/approval records separately; mark a leg `ready` only when its complete declared
    command/assertions are implemented. Historical characterization is not exact-candidate acceptance.
 2. **P1-P5 and D2-D4 integration:** bind mode/lifetime acceptance for the locally verified shared
-   invocation scope and canonical body handoff. Complete explicit same-client Follow separately.
+   invocation scope and canonical body handoff. Complete all-target runtime acceptance of the
+   implemented explicit same-client Follow policy.
    Do not restore lazy compatibility implementations, duplicate schedulers or unused foundations.
 3. **Fastly D1 prerequisites:** the stock readiness/error-preservation failure still gates its
    hosted/runtime promotion. The scoped B31 policy and current-operation multiplexer are approved
@@ -1607,12 +1660,12 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-1 | P2; D1-D4 | Blocking, including actual ingress forwarding | **Shared settlement implemented in the worktree.** Certified-empty conversion remains zero-read; unknown GET/HEAD sources settle before dispatch with paired 408/504 deadlines, preserved source errors and hidden deadline provenance across parts. Fastly's approved slack retirement removes the later false rejection. | Complete all-target/runtime acceptance bindings and hosted forwarding evidence. Fastly synchronous inbound reads remain BestEffort. |
 | EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial implementation:** [B31 existing-path identity/timers](#existing-path-b31-implementation-checkpoint-2026-10-25); [current-operation multiplexer](#current-operation-multiplexer-checkpoint-2026-10-25). Historical mixed/full-buffer readiness failures remain retained. | Callback-wide ownership, remaining modes and registration observations. F1 retirement, hosted pooling and resource qualification remain separate.          |
 | EZ-3 | D1/D5 | Blocking; bounded waits and original budgets retained | **Approved retirement locally verified.** Remove the 25 ms rejection, exported constant and injection hook. A 26 ms settlement no longer rejects a live budget; dispatch/registration still reject actual expiry and backwards clocks. | Bind bounded-wait acceptance and run the M7 comparison. Preserve original deadlines and B31; hosted/runtime promotion remains separate. |
-| EZ-4 | P1; D1-D4 | Blocking; Native/BestEffort distinctions retained | **Configured mapping implemented locally.** Connect setting/readback/round-trip, zero rejection, Fastly stable backend mapping, Spin advisory setter/refusal and configured-vs-unconfigured timeout causes are covered. Axum preserves its shared pool and accepts BestEffort aggregate enforcement; Cloudflare does likewise. | Bind the complete mode/adapter matrices, update capability rows only with evidence, and obtain controlled hosted connect-expiry proof. Follow remains separate. |
-| EZ-5 | P3; D1-D4 | Blocking; Spin conditional host result recorded | **Integrated through the shared head finalizer.** Send/Begin/Batch retain original-coding policy, body disposition, provenance and independent limits; adapters no longer finalize these separately. | Complete remaining normalization/limit/runtime acceptance bindings, Follow and separately adopted metadata legs. |
-| EZ-6 | P4; D1-D6 | Blocking except EZ-6.31 reuse-only | **Shared scope integration locally verified.** Eager drivers feed the arrival ledger, observation-only checks and lossless mixed collection. Core captures unpolled operations, revokes producer roots without dropping recorded results, and accepts exact provisional body owners before egress policy/framing. Provider family leases preserve early body progress without retaining callback roots. | Bind all applicable mode/lifetime runtime acceptance and qualify providers. Follow remains separate; local ownership proofs do not close parent qualification. |
-| EZ-7 | P3; D1-D4 | Blocking | **Integrated through shared preparation and head finalization.** The facade resolves marker policy before dispatch; original fields and the optional marker are charged once across Send/Begin/Batch. | Complete Follow and remaining all-target marker/normalization acceptance bindings. |
-| EZ-8 | P1; D1d/D5 | Blocking; Fastly single send only | **Single Send uses the shared pipeline.** Direct native optimizer mapping is preserved without another fetch, buffering or serialization; unsupported modes/adapters reject before settlement. | Implement Follow and obtain hosted transformation/performance evidence. Blocking horizon remains UNKNOWN. |
-| EZ-9 | P1/P5; D1-D5 | Blocking; supplied clients use the same dispatch boundary | **Follow not implemented.** The live head-first primitive, opaque contexts, unread-head disposal and Location evidence are available through supplied clients. | Implement per-hop policy, immutable chain deadline, decision table and redirect acceptance; no compatibility transport. |
+| EZ-4 | P1; D1-D4 | Blocking; Native/BestEffort distinctions retained | **Configured mapping implemented locally.** Connect setting/readback/round-trip, zero rejection, Fastly stable backend mapping, Spin advisory setter/refusal and configured-vs-unconfigured timeout causes are covered. Axum preserves its shared pool and accepts BestEffort aggregate enforcement; Cloudflare does likewise. Follow retains those settings. | Bind the complete mode/adapter matrices, update capability rows only with evidence, and obtain controlled hosted connect-expiry proof. |
+| EZ-5 | P3; D1-D4 | Blocking; Spin conditional host result recorded | **Integrated through the shared head finalizer.** Send/Begin/Batch and final Follow heads retain original-coding policy, body disposition, provenance and independent limits; followed heads are discarded unread. | Complete remaining all-target normalization/limit/runtime acceptance bindings and separately adopted metadata legs. |
+| EZ-6 | P4; D1-D6 | Blocking except EZ-6.31 reuse-only | **Shared scope integration locally verified.** Eager drivers feed the arrival ledger, observation-only checks and lossless mixed collection. Core captures unpolled operations including Follow, revokes producer roots without dropping recorded results, and accepts exact provisional body owners before egress policy/framing. Provider family leases preserve early body progress without retaining callback roots. | Bind all applicable mode/lifetime runtime acceptance and qualify providers; local ownership proofs do not close parent qualification. |
+| EZ-7 | P3; D1-D4 | Blocking | **Integrated through shared preparation and head finalization.** The facade resolves marker policy before dispatch; original fields and the optional marker are charged once across Send/Begin/Batch/Follow. | Complete remaining all-target marker/normalization acceptance bindings. |
+| EZ-8 | P1; D1d/D5 | Blocking; Fastly single-request Send/Follow only | **Send/Follow use the shared pipeline.** Direct native optimizer mapping is preserved without another fetch, buffering or serialization; unsupported modes/adapters reject before settlement. | Obtain actual adapter Follow mapping and hosted transformation/performance evidence. Blocking horizon remains UNKNOWN. |
+| EZ-9 | P1/P5; D1-D5 | Blocking; supplied clients use the same dispatch boundary | **Explicit Follow implemented.** Core owns the decision table, per-hop policy, immutable initial chain deadline, replay and unread disposal. Supplied-client tests and real-TCP Axum parity/two-origin controls pass. | Bind full criterion-level acceptance, complete other provider-runtime parity and consumer/hosted evidence; no compatibility transport. |
 | EZ-10       | F2                   | Follow-up unless approved as promoted/present                             | **Local implementation with a known failure:** [typed overflow/uploads/rendering](#f2-overflow-checkpoint); generated/demo TCP proof exists.                                                                                                                                      | Cloudflare front-proxy recovery failure, required hosted HTTP/2 and consumer end-to-end acceptance. Passing sibling cases do not waive the failure.        |
 | EZ-11       | F3a                  | Follow-up                                                                 | **Not implemented:** cache tags.                                                                                                                                                                                                                                                  | Tag validation/deduplication, provider mapping, mode/support matrix and actual cache probes.                                                               |
 | EZ-12       | F3b                  | Follow-up                                                                 | **Not implemented:** TLS name-check policy.                                                                                                                                                                                                                                       | Typed setting/readback, backend-key isolation and trusted-chain/wrong-name fixture; no global verification bypass.                                         |
@@ -1628,7 +1681,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-22       | F9a                  | Follow-up; individual SHOULD decisions explicit                           | **Local implementation:** [unified fallible assembly/failure delivery](#f9a-assembly-foundation-checkpoint), including adopted macro/serverless parts.                                                                                                                            | Consumer acceptance and exact-candidate qualification; no compatibility assembly path to add.                                                              |
 | EZ-23       | F9b                  | Follow-up                                                                 | **Local implementation:** [assembled-App Axum/TCP helpers](#f9b-assembled-app-tcp-checkpoint), twelve upstream sentinels.                                                                                                                                                         | Criterion 12's conditional begun-request portion and criterion 13's consumer route/parity evidence.                                                        |
 | EZ-24       | P6; F10a/F10b/F10c   | Host/WASI publication and each optional extension need separate decisions | **Not implemented as the proposed published utility; adoption pending.** Existing private doubles are not P6.                                                                                                                                                                     | Attributed applicability decisions, P1-P5 semantics, then selected published-client/cancellation/demo/JS work. Pending is not approved deferral.           |
-| EZ-25 | Q1/Q2 | Documentation updates accompany each affected behavior | **Hard-cut caller migration locally verified.** Supplied clients, demo, generator and fixtures use prepared contexts, raw events, explicit states, shared progress and the Body payload/owner split. Guides, changelog and guards track the same implementation. | Complete applicable acceptance bindings and Follow migration, then qualify the frozen candidate. |
+| EZ-25 | Q1/Q2 | Documentation updates accompany each affected behavior | **Hard-cut caller migration locally verified.** Supplied clients, demo, generator and fixtures use prepared contexts, raw events, explicit states, shared progress and the Body payload/owner split. Guides, changelog and guards track the same implementation, including explicit Follow. | Complete applicable acceptance bindings, then qualify the frozen candidate. |
 | EZ-Q1       | G1; Q3-Q5            | Required blocking, approved promoted, and confirmed-present parts only    | **Preparation only:** inventory/checker, [evidence assembly](#q3-evidence-preparation-checkpoint), [runbook source](#q2-runbook-source-preparation-checkpoint).                                                                                                                   | Executable leg bindings and scope decisions, remaining sources, candidate freeze, accepted Q4a package, authorized Q4b runs and durable passing Q5 record. |
 
 This summary inherits the normative-range-to-leaf ownership table in

@@ -69,6 +69,15 @@ adapters = [{{{adapter_list}}}]
 class = "outbound"
 
 [[triggers.http]]
+id = "follow_demo"
+path = "/follow"
+methods = ["GET"]
+handler = "{{proj_core_mod}}::handlers::follow_demo"
+adapters = [{{{adapter_list}}}]
+class = "outbound"
+description = "Follows at most four redirects within the configured API origin"
+
+[[triggers.http]]
 id = "fanout"
 path = "/fanout"
 methods = ["POST"]

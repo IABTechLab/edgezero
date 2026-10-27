@@ -22,9 +22,9 @@ The head-first client contract replaces the old implementer `send` and raw-vecto
 there are no compatibility wrappers. Core captures invocation time, validates support before body
 polling, prepares requests and finalizes provider heads. Adapters retain I/O, scheduling and
 transport ownership. Eager work and nonblocking batch observation use that same pipeline.
-Explicit policy-driven redirect following and hosted qualification remain separate work;
-applications must gate adoption on the behavior and target evidence they require, not maintain
-another SDK client or supply lazy futures as eager work.
+Explicit redirect following uses that same pipeline with an application-supplied target policy.
+Hosted qualification remains separate; applications must gate adoption on the behavior and
+target evidence they require, not maintain another SDK client or supply lazy futures as eager work.
 
 Header-policy consolidation is active: all four adapters pass `OutboundHeaderInput` to the shared
 `OutboundHead` constructor. Adapter authors migrate the retired separate header
@@ -123,6 +123,137 @@ boilerplate. A closed canonical scope never falls back to caller-owned work. Exi
 caps, source errors and provider-side cancellation guarantees are unchanged; hosted qualification
 remains separate.
 
+## Following Redirects
+
+`HttpClient::follow` is an explicit per-call choice with a mandatory target policy and hop limit.
+`OutboundRedirectLimit::new` accepts only 1..=20 and has no default. At most limit plus one
+requests are sent; for example, limit 4 allows five requests. Plain `send`, `begin`, and batches
+never follow redirects. This section supersedes the historical outbound spec's instruction to
+read `Location` and issue another request when using `follow`; plain sends retain that rule.
+
+```rust
+use edgezero_core::{OutboundRedirectAction, OutboundRedirectLimit, OutboundRequest};
+
+enum TargetPolicyError {
+    TargetDenied,
+}
+
+// The initial target is application-authorized before this call.
+let request = OutboundRequest::get("https://assets.example.com/start")?;
+let result = client.follow(request, OutboundRedirectLimit::new(4)?, |hop| {
+    let Some(next) = hop.prepared_request() else {
+        return Ok(OutboundRedirectAction::Stop);
+    };
+    if next.uri().scheme_str() != Some("https")
+        || next.uri().host() != Some("assets.example.com")
+        || next.uri().port_u16().is_some_and(|port| port != 443)
+    {
+        return Err(TargetPolicyError::TargetDenied);
+    }
+    Ok(OutboundRedirectAction::FollowPrepared)
+}).await;
+```
+
+The initial target is not passed to the redirect policy: authorize it before calling `follow`.
+The policy is the only target authorization policy. An open policy also follows private or
+link-local addresses. There is no built-in SSRF filter; select schemes, hosts, ports and any
+application-specific network restrictions deliberately. A platform host declaration is not a
+substitute for application authorization.
+
+### Methods And Replay
+
+Exactly 301, 302, 303, 307 and 308 are followable. Every other status is final, including 300,
+304, 305 and 306. Rules apply to the request that received the answering response:
+
+| Status   | Method of answering hop | Next method                       | Next body |
+| -------- | ----------------------- | --------------------------------- | --------- |
+| 301, 302 | GET, HEAD               | same                              | empty     |
+| 301, 302 | POST                    | GET                               | empty     |
+| 301, 302 | any other method        | not followed: MethodNotRewritable | none      |
+| 303      | HEAD                    | HEAD                              | empty     |
+| 303      | any other method        | GET                               | empty     |
+| 307, 308 | any method              | same                              | replayed  |
+
+For example, PUT, PATCH, DELETE and OPTIONS stop on 301/302, become empty GET on 303, and retain
+their method and replayable body on 307/308. Buffered bodies replay byte for byte through cheap
+`Bytes` sharing. Streamed uploads cannot be replayed: a 307/308 is final with `BodyNotReplayable`,
+without consulting policy. An unknown inbound GET/HEAD body is settled once before the initial
+hop; EOF makes it replayable as empty, while a nonempty byte is rejected before dispatch.
+
+Dropping a body removes `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language`,
+`Content-Location`, and `Expect` from the prepared request. They stay absent on a subsequent
+307/308 unless the trusted policy deliberately supplies replacement content and metadata.
+An empty buffered body replayed by 307/308 retains its `Content-Type`; replay is not a rewrite.
+Ordinary validation still prohibits nonempty GET/HEAD bodies.
+
+### Targets And Credentials
+
+The decision order is followable status, Location presence, method, replayability, limit,
+Location resolution, then policy. A missing or single empty Location yields `NoLocation`.
+Original Location multiplicity and text eligibility are captured before filtering; duplicate or
+non-text values fail resolution as typed 502 Protocol errors rather than becoming a valid
+singleton after filtering. Provider-hidden original fields remain unavailable. Relative paths,
+`../next` and `//other.example/next` resolve against the answering request URI, and fragments
+never reach the wire. Invalid URL references, user information and unusable HTTP(S) targets are
+Protocol errors. Earlier method/replay/limit stop reasons take precedence over resolution errors.
+
+A resolved non-HTTP target reaches the policy with no prepared request. The policy may `Stop`,
+reject, or `Follow(request)` with its own valid target. Asking for `FollowPrepared` without an
+available prepared request, including after `take_prepared_request()`, is a Protocol error.
+
+When the target changes scheme, host, or effective port, the automatic credential rule removes
+only `Authorization`, `Cookie`, and `host_authority_override` before calling the policy. These
+carry over on same-origin hops. Other credential-bearing fields, including custom API-key headers
+and `x-amz-*` signatures remain: the policy must remove or replace them when necessary. It may
+deliberately authorize or re-sign a replacement request; EdgeZero does not strip credentials a
+second time afterward. Ordinary request validation and normalization still apply. EdgeZero does
+not add `Referer` or `Origin`.
+
+The prepared request retains every unchanged option: timeout, deadline, cache policy and tags,
+upload/response/header/decoder/chunk limits, response decoding, proxy marker, Image Optimizer,
+TLS verification, connect timeout and stream idle policy. Use `take_prepared_request()` to modify
+it, then return `Follow(request)`. A fresh request is a complete replacement with its own defaults;
+caps and options are not implicitly copied into it. Subsequent automatic preparation inherits
+the effective preceding request's options, not the initial defaults.
+
+### Budgets, Bodies And Outcomes
+
+The per-call timeout starts afresh at each hop, while the initial absolute deadline remains an
+independent chain-wide upper bound, including policy execution and final streamed body consumption.
+Initial GET/HEAD settlement counts against that bound too. A replacement request cannot remove
+or extend that original deadline; an earlier policy deadline may shorten a hop. For a selected
+next request, unsupported options are rejected before an expired budget. No expired hop is sent
+and no late final success
+is returned. A synchronous policy cannot be preempted; its rejection value remains unchanged even
+if time passes during the callback. An accepted action remains subject to the original deadline.
+
+Every hop uses the same supplied client and shared preparation/head-finalization pipeline,
+including custom clients. A followed response body is discarded unread: it is not decoded,
+buffered, delivered or drained for reuse, and its declared length or source failure cannot fail
+the chain. Response-header caps and body-independent validation still apply to every head.
+The final response, including stopped or limit-reached 3xx, uses ordinary decoding, caps, body
+mode and idle policy. Thus a final body may still fail; a stop reason never bypasses body policy.
+With no redirect, `follow` has the same response and limit behavior as `send`.
+
+`OutboundFollowResult` exposes `response()`, `final_uri()`, `redirects_followed()` and
+`stop_reason()`, or transfers them through `into_parts()`. The stop reason is present exactly
+for a final followable status: `NoLocation`, `MethodNotRewritable`, `BodyNotReplayable`,
+`LimitReached`, or `StoppedByPolicy`.
+
+`OutboundFollowFailure::Hop` preserves the hop's original `EdgeError` with its zero-based hop
+index (initial request = 0). `OutboundFollowFailure::Policy` carries the application's rejection
+with its one-based redirect number, unchanged. Neither the policy nor its error needs `Send` or
+`Clone`, and no `Sync`, `Debug` or standard error trait is required. The policy is synchronous
+`FnMut`; the future owns it. Dropping the future cancels the current hop as a plain send would
+and sends no later hop. Framework hop logs include status, scheme, host, port and path, not queries.
+
+Spin requires plain-HTTP origins and targets outside a narrowed host list to be declared. Fastly
+hops wait one at a time and use the same backend identity policy as equivalent single sends.
+On Fastly, supported optimizer hops use the same native Image Optimizer call path, with no extra
+fetch, buffering or serialization. This does not strengthen its unknown blocking horizon,
+deadline/cancellation guarantees or hosted performance qualification. The `Native` redirect
+capability describes shared policy only; see the [capability matrix](./capabilities.md#outbound-matrix).
+
 ## Native Image Optimization
 
 Fastly single sends can request native image optimization from portable code:
@@ -149,7 +280,8 @@ assert!(request.image_optimizer_options().is_some());
 
 Only bodiless GET/HEAD and `PlatformDefault` caching are supported. Do not combine this with
 cache bypass. Region is required; no default region or transformation is invented. Other
-adapters and Fastly batch slots reject `image_optimizer` before body polling or dispatch.
+adapters and Fastly begun requests and batch slots reject `image_optimizer` before body polling
+or dispatch. Explicit redirect following uses the same supported single-send mapping per hop.
 Viceroy and services without the feature return typed `BadGatewayReason::ImageOptimizerUnavailable`
 (502), retaining text-free provider detail. There is no software fallback or automatic extra fetch.
 
@@ -164,7 +296,8 @@ The provider separately interprets optimizer query parameters, with explicit opt
 precedence. `preserve_origin_query(true)` preserves only other query parameters at the origin;
 it does not stop that transformation. Query stripping before signing, SVG selection, profiles,
 authorization and any preflight requests remain application policy. Forwarded inbound GET/HEAD
-settlement and optimizer redirect following are not implemented by this checkpoint.
+settlement and explicit redirect following use the same shared dispatch pipeline; neither adds
+an optimizer fallback or another provider fetch.
 
 ## Forward An Inbound Request
 

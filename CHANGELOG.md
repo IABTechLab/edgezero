@@ -30,8 +30,8 @@ their scope when introduced; the current summary supersedes their then-pending A
   and public receipt construction rather than retaining compatibility helpers.
 - Preserve malformed/trailing driver validation, partial results, logical own-deadline timing,
   strict cutoff equality and exactly-once local teardown. Migrate supplied clients, fixtures,
-  demo, generator and documentation together. Redirect following and hosted qualification remain
-  separate work; this migration does not promote provider guarantees.
+  demo, generator and documentation together. Explicit redirect policy uses the same pipeline;
+  hosted qualification remains separate and this migration does not promote provider guarantees.
 - Use one core scope implementation for callback/body ownership and revocable operation roots.
   Capture retained Send futures, begun exchanges and batches at invocation, before first polling.
   Retained clients resolve fresh request ownership, and later polling cannot reparent the work.
@@ -62,6 +62,31 @@ their scope when introduced; the current summary supersedes their then-pending A
   observation cutoff, without starting expired provider work. Make supplied fixtures return
   cutoff rather than premature EOF for exact-cutoff requests. Race Fastly's pending response
   source against its write deadline without cancelling callback-owned siblings.
+
+### Explicit Redirect Following
+
+- Add `HttpClient::follow` with a required synchronous target policy and validated 1..=20 limit.
+  Plain send, begin and batches remain unfollowed. Every hop uses the same supplied client and
+  shared preparation/head finalization; no alternate transport or compatibility wrapper is added.
+- Apply the specified status/method/body decision order, relative Location resolution and original
+  duplicate/nontext evidence. Replay buffered `Bytes` without copying; never buffer a streamed
+  upload for replay. Discard followed heads unread, including pending, erroneous, compressed and
+  oversized bodies. Stopped/final responses retain ordinary response policies and typed failures.
+- Strip only Authorization, Cookie and authority overrides from automatically prepared cross-origin
+  requests. Preserve deliberate policy replacements, unchanged caps/options and arbitrary local
+  policy errors with their redirect number. Applications retain initial and per-hop target policy.
+- Keep the initial absolute deadline through policy replacements and final streamed consumption,
+  while renewing per-hop timeouts and retaining a fresh request's normal default budget.
+  Capture invocation ownership and cancel through the same scoped operation machinery as send.
+- Publish `outbound-redirect-following` for the portable policy, separate from provider deadline,
+  cancellation, allocation and hosted qualification guarantees. Preserve the native optimizer call.
+  Add real-TCP Axum parity and two-origin tests, deterministic supplied-client tests, documentation
+  guards, a mandatory core sentinel and execution of the existing Spin eager SDK component in CI.
+- Stop reentrant scope cancellation before another dispatch, upload chunk or response-source
+  read, including cancellation from terminal source disposal instead of exposing clean EOF.
+  Reuse the shared source binder and retain clock history through stopped responses and
+  transport cleanup. Borrow the existing collection engine for buffered finalization instead of
+  allocating another payload box; keep public collector signatures and typed error precedence.
 
 ### Main Integration
 

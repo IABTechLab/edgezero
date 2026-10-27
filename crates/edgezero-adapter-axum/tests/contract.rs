@@ -30,7 +30,8 @@ use edgezero_core::time::Deadline;
 use edgezero_core::{
     FLATE_DECODER_FIXED_CHARGE_BYTES, HttpClient, MonotonicClock, OutboundBatchNext,
     OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot, OutboundProxyMarker,
-    OutboundRequest, OutboundSlotResult, OutboundTime, PROXY_HEADER, ResponseDecoding,
+    OutboundRedirectAction, OutboundRedirectLimit, OutboundRequest, OutboundSlotResult,
+    OutboundTime, PROXY_HEADER, ResponseDecoding,
 };
 use flate2::Compression;
 use flate2::write::{GzEncoder, ZlibEncoder};
@@ -100,6 +101,140 @@ async fn start_origin(router: Router) -> String {
         axum::serve(listener, router).await.expect("serve origin");
     });
     format!("http://{address}")
+}
+
+#[tokio::test]
+async fn redirect_following_uses_two_origins_and_discards_pending_bodies() {
+    let final_origin = start_origin(Router::new().route("/final", get(|| async { "final" }))).await;
+    let target = format!("{final_origin}/final");
+    let ordinary_location = target.clone();
+    let pending_location = target.clone();
+    let first_origin = start_origin(
+        Router::new()
+            .route(
+                "/ordinary",
+                get(move || {
+                    let location = ordinary_location.clone();
+                    async move {
+                        Response::builder()
+                            .status(StatusCode::FOUND)
+                            .header("location", location)
+                            .body(Body::empty())
+                            .expect("redirect")
+                    }
+                }),
+            )
+            .route(
+                "/pending",
+                get(move || {
+                    let location = pending_location.clone();
+                    async move {
+                        Response::builder()
+                            .status(StatusCode::FOUND)
+                            .header("location", location)
+                            .header(CONTENT_ENCODING, "br")
+                            .header(CONTENT_LENGTH, "10485760")
+                            .body(Body::from_stream(stream::pending::<
+                                Result<Bytes, Infallible>,
+                            >()))
+                            .expect("pending redirect")
+                    }
+                }),
+            ),
+    )
+    .await;
+    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let plain = client
+        .send(OutboundRequest::get(format!("{first_origin}/ordinary")).expect("request"))
+        .await
+        .expect("plain redirect");
+    assert_eq!(plain.status(), StatusCode::FOUND);
+    for path in ["ordinary", "pending"] {
+        let result = timeout(
+            Duration::from_secs(2),
+            client.follow(
+                OutboundRequest::get(format!("{first_origin}/{path}"))
+                    .expect("request")
+                    .max_response_bytes(5)
+                    .timeout(Duration::from_secs(2)),
+                OutboundRedirectLimit::new(1).expect("limit"),
+                |_context| Ok::<_, Infallible>(OutboundRedirectAction::FollowPrepared),
+            ),
+        )
+        .await
+        .expect("following never waits for intermediate payload")
+        .expect("followed redirect");
+        assert_eq!(result.response().status(), StatusCode::OK);
+        assert_eq!(result.final_uri().to_string(), target);
+        assert_eq!(result.redirects_followed(), 1);
+        assert_eq!(result.stop_reason(), None);
+        let (response, _, _, _) = result.into_parts();
+        assert_eq!(response.into_bytes_bounded(5).await.expect("body"), "final");
+    }
+}
+
+#[tokio::test]
+async fn follow_without_redirect_preserves_adapter_coding_and_limit_results() {
+    let origin = start_origin(Router::new().route(
+        "/{coding}/{length}",
+        get(|Path((coding, length)): Path<(String, usize)>| async move {
+            let input = vec![b'x'; length];
+            let bytes = match coding.as_str() {
+                "gzip" => gzip(&input),
+                "deflate" => zlib(&input),
+                _ => input,
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("date", "Tue, 27 Oct 2026 00:00:00 GMT")
+                .header(CONTENT_ENCODING, coding)
+                .header(CONTENT_LENGTH, bytes.len())
+                .body(Body::from(bytes))
+                .expect("response")
+        }),
+    ))
+    .await;
+    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    for coding in ["identity", "gzip", "deflate", "unsupported"] {
+        for length in [10_usize, 11] {
+            let make_request = || {
+                OutboundRequest::get(format!("{origin}/{coding}/{length}"))
+                    .expect("request")
+                    .max_response_bytes(10)
+            };
+            let plain = client.send(make_request()).await;
+            let following = client
+                .follow(
+                    make_request(),
+                    OutboundRedirectLimit::new(1).expect("limit"),
+                    |_context| Ok::<_, Infallible>(OutboundRedirectAction::FollowPrepared),
+                )
+                .await;
+            match (plain, following) {
+                (Ok(sent), Ok(followed)) => {
+                    assert_eq!(length, 10);
+                    assert_eq!(sent.status(), followed.response().status());
+                    assert_eq!(sent.headers(), followed.response().headers());
+                    assert_eq!(followed.redirects_followed(), 0);
+                    let (response, _, _, _) = followed.into_parts();
+                    assert_eq!(
+                        sent.into_bytes_bounded(10).await.expect("sent bytes"),
+                        response
+                            .into_bytes_bounded(10)
+                            .await
+                            .expect("followed bytes")
+                    );
+                }
+                (Err(sent), Err(edgezero_core::OutboundFollowFailure::Hop { index, error })) => {
+                    assert_eq!(length, 11);
+                    assert_eq!(index, 0);
+                    assert_eq!(sent.status(), error.status());
+                    assert_eq!(sent.message(), error.message());
+                }
+                other => panic!("plain/follow mismatch: {other:?}"),
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

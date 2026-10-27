@@ -77,6 +77,15 @@ adapters = ["axum", "cloudflare", "fastly", "spin"]
 class = "outbound"
 
 [[triggers.http]]
+id = "follow_demo"
+path = "/follow"
+methods = ["GET"]
+handler = "app_demo_core::handlers::follow_demo"
+adapters = ["axum", "cloudflare", "fastly", "spin"]
+class = "outbound"
+description = "Follows at most four redirects within the configured API origin"
+
+[[triggers.http]]
 id = "fanout"
 path = "/fanout"
 methods = ["POST"]

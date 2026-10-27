@@ -144,7 +144,8 @@ impl Adapter for SpinCliAdapter {
             | Capability::OutboundBatchSlotIsolation
             | Capability::OutboundCacheBypass
             | Capability::OutboundFailureDiagnostics
-            | Capability::OutboundHttp => CapabilitySupport::Native,
+            | Capability::OutboundHttp
+            | Capability::OutboundRedirectFollowing => CapabilitySupport::Native,
             Capability::BufferedResponseContentLength
             | Capability::ConfigReadDeadlines
             | Capability::InboundReadDeadlines
@@ -1328,6 +1329,10 @@ mod tests {
     const TEST_COMPONENT_ID: &str = "demo";
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete capability data table together"
+    )]
     fn adapter_capability_matrix_matches_contracts() {
         for (capability, support) in [
             (
@@ -1376,6 +1381,10 @@ mod tests {
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundHttp, CapabilitySupport::Native),
+            (
+                Capability::OutboundRedirectFollowing,
+                CapabilitySupport::Native,
+            ),
             (
                 Capability::OutboundCompleteResourceAccounting,
                 CapabilitySupport::Unsupported,
