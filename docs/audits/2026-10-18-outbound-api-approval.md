@@ -343,6 +343,11 @@ tests pass: Cloudflare 53 library/29 contract cases, Fastly 238 library/36 contr
 Spin 15 SDK-resource cases on Wasmtime 48.0.2. The deterministic Spin helper uses its controlled
 wakeable pair rather than polling a WASI 0.3 host timer under a non-WASI test executor.
 
+Hosted CI additionally exposed test-helper declaration order in the isolated `cloudflare`
+feature build, masked in `cloudflare,test-utils` by the existing module grouping expectation.
+Move the helper after its fixtures rather than adding a suppression. Both isolated feature
+combinations now pass strict WASM Clippy; the bare-feature contract also passes its 12 cases.
+
 Demo workspace tests, reusable fixture tests, dependency/legacy/documentation guards, the
 evidence checker tests and docs format/lint/build pass. The final actual-client Fastly probe
 suite passes its receive cases on the tracked repaired Viceroy; Spin's local component smoke

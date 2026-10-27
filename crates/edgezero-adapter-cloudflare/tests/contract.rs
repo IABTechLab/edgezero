@@ -71,16 +71,6 @@ mod tests {
     use worker::worker_sys::Context as WorkerSysContext;
     use worker::{Context, Env, Method as CfMethod, Request as CfRequest, RequestInit};
 
-    fn preflight_time(clock: MonotonicClock) -> OutboundTime {
-        OutboundTime::new(clock, |_, _| {
-            Box::pin(async {
-                Err(EdgeError::internal(IoError::other(
-                    "preflight must not register an outbound timer",
-                )))
-            })
-        })
-    }
-
     struct FixedConfigStore(&'static str);
 
     #[cfg(feature = "test-utils")]
@@ -246,6 +236,16 @@ mod tests {
             "request fixture must preserve native body presence before conversion"
         );
         request
+    }
+
+    fn preflight_time(clock: MonotonicClock) -> OutboundTime {
+        OutboundTime::new(clock, |_, _| {
+            Box::pin(async {
+                Err(EdgeError::internal(IoError::other(
+                    "preflight must not register an outbound timer",
+                )))
+            })
+        })
     }
 
     fn test_env_ctx() -> (Env, Context, NumericTimeoutGuard) {
