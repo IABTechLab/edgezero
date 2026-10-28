@@ -4,14 +4,17 @@ This standalone Cargo workspace tests provider HTTP behavior without changing
 normal generated entry points. Run from the repository root:
 
 ```sh
-cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core
+cargo test --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
+cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-core
 ./scripts/smoke_test_reusable_app.sh --adapter fastly --suite smoke
 ./scripts/smoke_test_reusable_app.sh --adapter cloudflare --suite smoke
 ./scripts/smoke_test_reusable_app.sh --adapter spin --suite smoke
 ./scripts/smoke_test_reusable_app.sh --adapter axum --suite smoke
 ```
 
-The driver is the native Rust `fixture-harness` crate. Its HTTP clients, controlled
+The driver is the standalone native Rust `edgezero-test-harness` crate under `crates/`.
+It has its own workspace and lockfile, separate from the runtime and fixture applications.
+Its HTTP clients, controlled
 loopback backend, process management, and evidence checks run outside the WASM
 applications. The shell script only launches it through Cargo.
 
@@ -69,7 +72,7 @@ nor closes the separate Fastly readiness/scheduling gate.
 ### Qualification Inventory
 
 Start with the implementation plan's
-[current delivery dashboard](../../../docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md#current-delivery-dashboard-2026-10-24)
+[current delivery dashboard](../../../docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md#current-delivery-dashboard-2026-10-27)
 for shipped checkpoints, unfinished implementation and blockers. Its requirement table tracks
 task-level progress; this inventory tracks criterion/environment execution readiness and the
 qualification checker validates separate evidence. These are not interchangeable completion claims.
@@ -96,9 +99,11 @@ setting a leg to `ready`. No staging deployment or approval is inferred from thi
 
 Specifically, `implementation: planned | ready` means the declared leg's command/sentinel is
 planned or implemented and executable with its full assertions. It does not mean the corresponding
-feature is absent or qualified. EZ-23 local criteria 01-11 now bind guarded Cargo tests and the
-existing Axum CI job; the remaining 500 legs are planned. Criteria 12/13 stay planned for their
-begun-request and consumer-owned gaps. G1/Q3 must still reconcile the other executable bindings.
+feature is absent or qualified. EZ-23 local criteria 01-11 bind guarded Cargo tests and the
+existing Axum CI job. EZ-9 core criteria 01-15 bind all 51 redirect tests through one inventory
+guard, and runtime criteria 16/17 bind the complete four-adapter wire matrix. There are 32 ready
+legs and 479 planned. EZ-23 criteria 12/13 stay planned for their begun-request and consumer-owned
+gaps. G1/Q3 must still reconcile the other executable bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
 
@@ -107,6 +112,20 @@ The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 ```sh
 scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
+
+The EZ-9 core legs likewise discover every bound primary/additional sentinel before running:
+
+```sh
+scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests
+```
+
+Runtime commands select `--suite outbound-wire` and write their JSONL to
+`.runs/outbound/redirect/{environment}/events.jsonl`. Each adapter must complete 68 exchanges and
+84 ordered origin receipts. Idle-body policy remains an unadopted conditional leg; these bindings
+do not qualify that policy, native optimizer transformation or consumer/hosted behavior.
+Axum, Fastly and Spin execute these bindings in their existing CI jobs. Workerd's command is
+locally executable; automatic CI runtime activation remains pending explicit setup of its
+matching build tools and selected runtime. Green CI alone does not cover that workerd leg.
 
 The existing guard asks the evidence checker for every ready sentinel in that environment and
 requires exact discovery of all twelve names before executing the suite once. Criterion 10's
@@ -174,7 +193,7 @@ node scripts/check_outbound_cutover_evidence.mjs --assemble \
   --output NEW_DRAFT.json
 node scripts/check_outbound_cutover_evidence.mjs --report \
   --candidate SOURCE_SHA --record NEW_DRAFT.json --artifacts EVIDENCE_DIRECTORY
-scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness outbound_evidence_assembly_retains_case_counts_and_hashes
+scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
 ```
 
 Both assembly and report exit nonzero while release gates are blocked. Successful draft creation
@@ -845,7 +864,7 @@ guest and pinned Spin. The runner builds and stages that guest; there is no sepa
 runner or alternate outbound client:
 
 ```sh
-cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness
+cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
 ./scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire
 ```
 

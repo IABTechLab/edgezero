@@ -310,10 +310,10 @@ impl Matrix<'_> {
 }
 
 fn source_error_reason(adapter: &str) -> &'static str {
-    if adapter == "cloudflare" {
-        "Transport"
-    } else {
+    if adapter == "spin" {
         "Protocol"
+    } else {
+        "Transport"
     }
 }
 
@@ -418,8 +418,11 @@ fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Proc
 }
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
-    if name == "cloudflare" {
-        return cloudflare(run, records);
+    match name {
+        "cloudflare" => return cloudflare(run, records),
+        "axum" => return progress_wire("axum", run, records, None),
+        "fastly" => return progress_wire("fastly", run, records, None),
+        _ => {}
     }
     require(name == "spin", "wire suite requires Spin")?;
     let repo = root().join("../../..").canonicalize()?;
@@ -517,6 +520,15 @@ fn cloudflare(run: &Path, records: &mut Records) -> Result<()> {
     require(version.status.success(), "workerd version probe failed")?;
     records.push(json!({"event":"workerd-runtime","adapter":"cloudflare",
         "version":String::from_utf8(version.stdout)?.trim(),"artifact":artifact(&workerd)?,"qualification":false}))?;
+    progress_wire("cloudflare", run, records, Some(workerd))
+}
+
+fn progress_wire(
+    name: &'static str,
+    run: &Path,
+    records: &mut Records,
+    workerd: Option<PathBuf>,
+) -> Result<()> {
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root())
@@ -526,28 +538,34 @@ fn cloudflare(run: &Path, records: &mut Records) -> Result<()> {
         "cannot determine wire source revision",
     )?;
     let revision = String::from_utf8(revision.stdout)?;
-    let state = run.join("retained/worker-state");
-    let log = run.join("cloudflare-wire.log");
+    let state = if name == "axum" {
+        run.join("axum-state")
+    } else {
+        run.join("retained/worker-state")
+    };
+    let log = run.join(format!("{name}-wire.log"));
     let mut process = None;
     let mut origins = None;
     let outcome: Result<Option<(usize, usize)>> = (|| {
         let Some((mut command, port)) =
-            progress::build("cloudflare", run, records, revision.trim(), "outbound-wire")?
+            progress::build(name, run, records, revision.trim(), "outbound-wire")?
         else {
             return Ok(None);
         };
-        command
-            .env("MINIFLARE_WORKERD_PATH", workerd)
-            .env("WRANGLER_SEND_METRICS", "false")
-            .env("WRANGLER_LOG_PATH", run.join("wrangler-logs"));
-        records.push(
-            json!({"event":"workerd-configuration","adapter":"cloudflare",
-            "configuration":fs::read_to_string(run.join("wrangler.toml"))?,"qualification":false}),
-        )?;
+        if let Some(workerd) = workerd {
+            command
+                .env("MINIFLARE_WORKERD_PATH", workerd)
+                .env("WRANGLER_SEND_METRICS", "false")
+                .env("WRANGLER_LOG_PATH", run.join("wrangler-logs"));
+            records.push(
+                json!({"event":"workerd-configuration","adapter":"cloudflare",
+                "configuration":fs::read_to_string(run.join("wrangler.toml"))?,"qualification":false}),
+            )?;
+        }
         let origins = origins.insert(WireOrigins::start()?);
         let running = process.insert(Process::start(&mut command, &log, port)?);
         let mut matrix = Matrix {
-            adapter: "cloudflare",
+            adapter: name,
             endpoint: "/progress/redirect",
             port,
             origins,
@@ -559,19 +577,15 @@ fn cloudflare(run: &Path, records: &mut Records) -> Result<()> {
         running.check_running()?;
         Ok(Some((matrix.exchanges, matrix.dispatches)))
     })();
-    let Some((exchanges, dispatches)) = finish_wire(
-        "cloudflare",
-        &mut process,
-        origins,
-        &state,
-        records,
-        outcome,
-    )?
+    let Some((exchanges, dispatches)) =
+        finish_wire(name, &mut process, origins, &state, records, outcome)?
     else {
         return Ok(());
     };
-    records.push(json!({"event":"cloudflare-wire-inventory","status":"pass",
-        "exchanges":exchanges,"origin_requests":dispatches,"qualification":false}))
+    records.push(
+        json!({"event":format!("{name}-wire-inventory"),"status":"pass",
+        "exchanges":exchanges,"origin_requests":dispatches,"qualification":false}),
+    )
 }
 
 fn finish_wire<T>(
@@ -631,6 +645,8 @@ mod tests {
     fn source_error_expectations_are_provider_specific() {
         assert_eq!(source_error_reason("spin"), "Protocol");
         assert_eq!(source_error_reason("cloudflare"), "Transport");
+        assert_eq!(source_error_reason("axum"), "Transport");
+        assert_eq!(source_error_reason("fastly"), "Transport");
     }
 
     #[test]

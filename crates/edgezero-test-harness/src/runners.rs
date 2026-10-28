@@ -263,6 +263,9 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
     }
+    if args.suite == "outbound-wire" {
+        return wire::run("fastly", run, records);
+    }
     if args.suite == "response-framing" {
         return framing::run("fastly", run, records);
     }
@@ -2183,7 +2186,7 @@ mod tests {
     }
     #[test]
     fn served_artifacts_are_copies_inside_the_run_directory() {
-        let run = std::env::temp_dir().join(format!("fixture-harness-stage-{}", token()));
+        let run = std::env::temp_dir().join(format!("edgezero-test-harness-stage-{}", token()));
         let source = run.join("source/fixture-fastly-retained-app.wasm");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, b"first").unwrap();

@@ -108,7 +108,7 @@ node --test scripts/check_outbound_cutover_evidence.test.mjs
 node scripts/check_outbound_cutover_evidence.mjs --manifest
 node --test scripts/check_forwarding_example.test.mjs
 node scripts/check_forwarding_example.mjs
-scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness outbound_evidence_assembly_retains_case_counts_and_hashes
+scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
 ```
 
 Expected: nonzero Node test listings with zero failures, exactly one passing non-ignored

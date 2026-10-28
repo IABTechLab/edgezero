@@ -36,6 +36,7 @@ jobs:
             ~/.cargo/git/db/
             target/
             tests/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/target/
           key: ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-
@@ -69,6 +70,7 @@ jobs:
           cargo fetch --locked
           cargo fetch --locked --manifest-path examples/app-demo/Cargo.toml
           cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
 
       - name: No placeholder pins
         if: matrix.suite == 'workspace'
@@ -130,13 +132,14 @@ jobs:
       - name: Lifecycle fixture host tests
         if: matrix.suite == 'workspace'
         run: |
-          scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness outbound_evidence_assembly_retains_case_counts_and_hashes
-          cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core --features fixture-core/qualification
+          scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
+          cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
+          cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-core --features qualification
           node --test scripts/qualify_response_egress.test.mjs
 
       - name: Shared redirect policy contracts
         if: matrix.suite == 'workspace'
-        run: scripts/run_test_nonzero.sh redirect_chain_uses_supplied_head_client_and_original_deadline cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests
+        run: scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests
 
       - name: Check Axum lifecycle fixture
         if: matrix.suite == 'axum'
@@ -144,6 +147,29 @@ jobs:
           cargo check --locked
           --manifest-path tests/fixtures/reusable-app/Cargo.toml
           -p fixture-axum
+
+      - name: Native redirect wire acceptance
+        if: matrix.suite == 'axum'
+        run: |
+          run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/outbound/redirect/axum"
+          CARGO_NET_OFFLINE=true ./scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-wire --output "$run"
+          jq --slurp --exit-status --arg adapter axum '
+            ([.[] | select(.event == ($adapter + "-wire-inventory"))]
+              | length == 1 and .[0].status == "pass" and .[0].exchanges == 68
+              and .[0].origin_requests == 84 and .[0].qualification == false)
+            and ([.[] | select(.event == ($adapter + "-wire-case"))]
+              | length == 68 and ([.[].origin_requests | length] | add) == 84)
+            and all(.[]; .status != "fail")
+          ' "$run/events.jsonl"
+
+      - name: Preserve native lifecycle evidence
+        if: always() && matrix.suite == 'axum'
+        uses: actions/upload-artifact@v4
+        with:
+          name: axum-lifecycle-evidence
+          path: tests/fixtures/reusable-app/.runs/
+          include-hidden-files: true
+          if-no-files-found: ignore
 
       - name: Check opt-in lifecycle qualification fixtures
         if: matrix.suite == 'workspace'
@@ -283,6 +309,7 @@ jobs:
             ~/.wasmtime/bin/
             target/
             tests/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/target/
           key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-${{ hashFiles('**/Cargo.lock', '.tool-versions', 'patches/viceroy/0.21.0-body-readiness.patch') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-
@@ -445,8 +472,9 @@ jobs:
       - name: Fetch dependencies (locked)
         run: |
           cargo fetch --locked
-          if [ "${{ matrix.adapter }}" = spin ]; then
+          if [ "${{ matrix.adapter }}" = spin ] || [ "${{ matrix.adapter }}" = fastly ]; then
             cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
+            cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
           fi
 
       - name: Run ${{ matrix.adapter }} wasm tests
@@ -486,7 +514,7 @@ jobs:
           tar -xzf "$install_dir/$archive" -C "$install_dir"
           export PATH="$install_dir:$PATH"
           test "$(spin --version | awk '{print $2}')" = "$version"
-          run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/ci-spin-wire"
+          run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/outbound/redirect/spin"
           CARGO_NET_OFFLINE=true ./scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output "$run"
           jq --slurp --exit-status '
             ([.[] | select(.event == "spin-wire-inventory")]
@@ -544,6 +572,22 @@ jobs:
               and .[0].probes == 23 and .[0].expected_probes == 23
               and .[0].origin_requests == 43 and .[0].qualification == false)
             and any(.[]; .status == "unverified" and .qualification == false)
+            and all(.[]; .status != "fail")
+          ' "$run/events.jsonl"
+
+      - name: Fastly redirect wire acceptance
+        if: matrix.adapter == 'fastly'
+        env:
+          VICEROY_BIN: ${{ steps.viceroy-repair.outputs.executable }}
+        run: |
+          run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/outbound/redirect/viceroy"
+          CARGO_NET_OFFLINE=true ./scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-wire --output "$run"
+          jq --slurp --exit-status --arg adapter fastly '
+            ([.[] | select(.event == ($adapter + "-wire-inventory"))]
+              | length == 1 and .[0].status == "pass" and .[0].exchanges == 68
+              and .[0].origin_requests == 84 and .[0].qualification == false)
+            and ([.[] | select(.event == ($adapter + "-wire-case"))]
+              | length == 68 and ([.[].origin_requests | length] | add) == 84)
             and all(.[]; .status != "fail")
           ' "$run/events.jsonl"
 

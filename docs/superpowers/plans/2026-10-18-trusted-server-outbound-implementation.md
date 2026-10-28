@@ -27,7 +27,8 @@ are locally verified. The subsequent P5 checkpoints below add explicit same-clie
 provider-boundary controls; all-target acceptance binding and hosted qualification remain open.
 This is the current task-level implementation summary, not qualification of that SHA. The
 recorded [local acceptance binding checkpoint](#g1f9b-local-acceptance-binding-checkpoint)
-activates eleven existing criteria without changing the production implementation snapshot.
+activates existing criteria without changing the production implementation snapshot; the
+standalone-runner checkpoint below adds the complete local redirect bindings.
 The checkpoint sections below retain their historical commands, results and limitations. The
 [Requirement Coverage](#requirement-coverage) table maps every EZ requirement group to its owning
 tasks, current implementation/checkpoint and remaining closure work.
@@ -52,8 +53,9 @@ Keep three different status questions separate:
   [inventory](../../../tests/fixtures/reusable-app/outbound-cutover-cases.json) covers 255 source
   criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
   readiness of that leg's declared command/sentinel, not overall feature implementation.
-  EZ-23 local criteria 01-11 are `ready`; the other 500 legs remain `planned`. G1/Q3 binding work
-  remains unfinished, not evidence that 500 features are absent. Only the explicitly bound
+  EZ-23 local criteria 01-11 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
+  `ready`: 32 legs, with 479 still `planned`. G1/Q3 binding work remains unfinished, not evidence
+  that 479 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -256,6 +258,32 @@ globally or repinned. No deployment, SDK/runtime pin change, capability promotio
 or hosted qualification occurs. Successful native optimizer redirects, conditional idle-policy
 coverage, complete criterion-level binding and consumer/hosted acceptance remain open. The G1
 inventory remains eleven ready legs, 500 planned and `qualified: false`.
+
+### Standalone Test Harness and Local Redirect Bindings (2026-10-27)
+
+The shared native runner now lives at `crates/edgezero-test-harness`, with its own unpublished
+workspace and Cargo lockfile. The old runner package and source directory are removed without an
+alias. Unit/contract tests remain in their owning crates, and deployable applications remain in
+the fixture workspace. Fixture cwd, fixed build target, staging and `.runs` locations are unchanged;
+the launcher resolves the repository before selecting its toolchain. Both fixture and harness
+lock identities are recorded separately. The fixture lock only loses packages made unused by
+the move; existing dependency versions, decoder/SDK/runtime pins and frozen documents are unchanged.
+
+All four adapters now execute the same 68-exchange/84-receipt redirect matrix. Spin retains its
+bodyless, upload, scope and SDK-terminal controls; Fastly retains its separate progress and native
+optimizer-unavailable inventories. Exact provider-specific failures remain enforced. The existing
+Rust tests add the literal two-hop query-redaction and signed-date-header controls, plus first-hop
+cancellation, without replacing the older controls. EZ-9 unit criteria 01-15 bind all 51 guarded
+tests, and local runtime 16/17 bind six environment legs. Together with EZ-23's eleven legs, the
+inventory has 32 ready and 479 planned; no applicability approval, candidate freeze, deployment,
+provider capability promotion or qualification is inferred. EZ-14 remains an unadopted follow-up.
+
+CI and active guides use the new manifest and separately fetch, format, lint and test each
+workspace. Historical commands and audit paths remain revision-specific records. Axum/Fastly/Spin
+runtime jobs use the declared redirect output paths; workerd runtime CI activation remains pending
+its explicit tool/runtime setup, separately from the passing local command. Remaining lifetime,
+registration, consumer and hosted acceptance work stays open in the owning tasks;
+this relocation does not mark the complete adoption plan finished.
 
 ### Current Work Queue and Gates
 

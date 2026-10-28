@@ -9,7 +9,7 @@ members = [
     "crates/edgezero-core",
     "crates/edgezero-macros",
 ]
-exclude = ["examples/app-demo"]
+exclude = ["examples/app-demo", "crates/edgezero-test-harness"]
 resolver = "2"
 
 [workspace.package]

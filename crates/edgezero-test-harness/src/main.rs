@@ -45,17 +45,21 @@ impl Args {
             construction_rounds: 0,
             max_requests: 10,
         };
+        let mut adapter_selected = false;
         let mut args = arguments.into_iter();
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "fixture-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
+                    "edgezero-test-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
                 );
                 std::process::exit(0);
             }
             let value = args.next().ok_or(format!("missing value for {key}"))?;
             match key.as_str() {
-                "--adapter" => a.adapter = value,
+                "--adapter" => {
+                    a.adapter = value;
+                    adapter_selected = true;
+                }
                 "--suite" => a.suite = value,
                 "--output" => a.output = Some(value.into()),
                 "--requests" => a.requests = value.parse()?,
@@ -94,8 +98,8 @@ impl Args {
             "Fastly receive suites require --adapter fastly",
         )?;
         require(
-            a.suite != "outbound-wire" || matches!(a.adapter.as_str(), "spin" | "cloudflare"),
-            "outbound-wire requires --adapter spin or cloudflare",
+            a.suite != "outbound-wire" || (adapter_selected && a.adapter != "all"),
+            "outbound-wire requires one explicit adapter",
         )?;
         require(
             a.requests > 0 && a.repetitions > 0,
@@ -110,7 +114,7 @@ impl Args {
 }
 pub fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+        .join("../../tests/fixtures/reusable-app")
         .canonicalize()
         .expect("fixture workspace root")
 }
@@ -146,7 +150,7 @@ impl Records {
             v["status"].as_str(),
             Some("fail" | "unverified" | "unsupported")
         ) {
-            eprintln!("fixture-harness: {v}");
+            eprintln!("edgezero-test-harness: {v}");
         }
         writeln!(
             OpenOptions::new()
@@ -539,12 +543,16 @@ fn run() -> Result<i32> {
     fs::create_dir_all(&path)?;
     let path = path.canonicalize()?;
     fs::copy(root().join("Cargo.lock"), path.join("Cargo.lock"))?;
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"),
+        path.join("harness-Cargo.lock"),
+    )?;
     let mut records = Records {
         path: path.join("events.jsonl"),
         values: Vec::new(),
     };
     records.push(json!({"event":"run","seed":args.seed,"suite":args.suite,"construction_rounds":args.construction_rounds,"max_requests":args.max_requests}))?;
-    records.push(json!({"event":"build_environment","rustc":String::from_utf8_lossy(&Command::new(rustc()).arg("--version").output()?.stdout).trim(),"host_os":std::env::consts::OS,"host_arch":std::env::consts::ARCH,"lockfile":artifact(&path.join("Cargo.lock"))?}))?;
+    records.push(json!({"event":"build_environment","rustc":String::from_utf8_lossy(&Command::new(rustc()).arg("--version").output()?.stdout).trim(),"host_os":std::env::consts::OS,"host_arch":std::env::consts::ARCH,"lockfile":artifact(&path.join("Cargo.lock"))?,"harness_lockfile":artifact(&path.join("harness-Cargo.lock"))?}))?;
     let adapters = if args.adapter == "all" {
         vec!["fastly", "cloudflare", "spin", "axum"]
     } else {
@@ -609,9 +617,79 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("fixture-harness: {error}");
+            eprintln!("edgezero-test-harness: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn metadata(manifest: &Path) -> Value {
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args([
+                "metadata",
+                "--offline",
+                "--locked",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--manifest-path",
+            ])
+            .arg(manifest)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    #[test]
+    fn runner_workspace_is_separate_from_runtime_and_fixture_graphs() {
+        let runner = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .unwrap();
+        assert_eq!(runner.file_name().unwrap(), "edgezero-test-harness");
+        let repository = root().join("../../..").canonicalize().unwrap();
+        assert_eq!(runner, repository.join("crates/edgezero-test-harness"));
+        let own = metadata(&runner.join("Cargo.toml"));
+        assert_eq!(
+            Path::new(own["workspace_root"].as_str().unwrap())
+                .canonicalize()
+                .unwrap(),
+            runner
+        );
+        assert_eq!(own["packages"].as_array().unwrap().len(), 1);
+        assert_eq!(own["packages"][0]["name"], "edgezero-test-harness");
+        assert_eq!(own["packages"][0]["publish"], json!([]));
+        assert!(
+            own["packages"][0]["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|dependency| {
+                    !dependency["name"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("edgezero-")
+                })
+        );
+        for manifest in [repository.join("Cargo.toml"), root().join("Cargo.toml")] {
+            let other = metadata(&manifest);
+            assert!(other["packages"].as_array().unwrap().iter().all(|package| {
+                package["name"] != "edgezero-test-harness" && package["name"] != "fixture-harness"
+            }));
+        }
+        assert!(!root().join("crates/fixture-harness/Cargo.toml").exists());
+        let launcher =
+            fs::read_to_string(repository.join("scripts/smoke_test_reusable_app.sh")).unwrap();
+        assert!(launcher.contains("crates/edgezero-test-harness/Cargo.toml"));
+        assert!(launcher.find("cd \"$REPO_DIR\"").unwrap() < launcher.find("exec ").unwrap());
     }
 }
 
@@ -625,11 +703,7 @@ mod argument_tests {
             let result = Args::parse_from(
                 ["--adapter", adapter, "--suite", "outbound-wire"].map(str::to_owned),
             );
-            assert_eq!(
-                result.is_ok(),
-                matches!(adapter, "spin" | "cloudflare"),
-                "{adapter}"
-            );
+            assert_eq!(result.is_ok(), adapter != "all", "{adapter}");
         }
         assert!(Args::parse_from(["--suite", "outbound-wire"].map(str::to_owned)).is_err());
     }

@@ -106,6 +106,12 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Main Integration
 
+- Move the shared native HTTP test runner to the unpublished, standalone
+  `crates/edgezero-test-harness` workspace. Keep fixture applications separate, preserve guest
+  build/output paths, record both lockfiles and remove the old runner package without aliases.
+  Update active CI and commands; preserve all four redirect inventories and bind exact core/runtime
+  acceptance tests without promoting hosted qualification or optional idle-body policy.
+
 - Integrate main's IABTechLab repository transfer; align outbound guide links,
   generated READMEs and capability diagnostics with the canonical repository
   and GitHub Pages site.

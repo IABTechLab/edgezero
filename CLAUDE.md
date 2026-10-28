@@ -4,9 +4,9 @@
 
 EdgeZero is a portable HTTP workload toolkit in Rust. Write once, deploy to
 Fastly Compute, Cloudflare Workers, Fermyon Spin, or native Axum servers. The
-codebase is a Cargo workspace with 8 crates under `crates/`, an example app
-under `examples/app-demo/`, a VitePress documentation site under `docs/`, and
-CI workflows under `.github/workflows/`.
+codebase has an eight-crate production Cargo workspace and an isolated test
+runner under `crates/`, an example app under `examples/app-demo/`, a VitePress
+documentation site under `docs/`, and CI workflows under `.github/workflows/`.
 
 ## Workspace Layout
 
@@ -20,6 +20,7 @@ crates/
   edgezero-adapter-spin/      # Fermyon Spin bridge (wasm32-wasip2)
   edgezero-adapter-axum/      # Axum/Tokio bridge (native, dev server)
   edgezero-cli/               # CLI lib + bin: new, build, deploy, serve, auth, provision, config (validate|push), demo
+  edgezero-test-harness/      # Standalone native integration-test runner (own workspace/lockfile)
 examples/app-demo/            # Reference app with all 4 adapters (excluded from workspace)
 docs/                         # VitePress documentation site (Node.js)
 scripts/                      # Build/deploy/test helper scripts

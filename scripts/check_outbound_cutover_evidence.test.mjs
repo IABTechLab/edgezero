@@ -511,6 +511,262 @@ test("local assembled-app criteria bind guarded tests without closing pending le
     "no duplicate CI sentinel list",
   );
 });
+test("redirect core criteria bind every required test before one module execution", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const spec = readFileSync(
+    new URL(
+      "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.deepEqual(validateManifest(manifest, spec), {
+    criteria: 255,
+    legs: 511,
+    planned: 479,
+  });
+  const command =
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests";
+  const bindings = [
+    [
+      "01",
+      [
+        "every_status_and_portable_method_obeys_the_redirect_table",
+        "nonredirect_status_precedes_all_location_rules",
+        "plain_send_does_not_follow_a_scripted_redirect",
+      ],
+    ],
+    [
+      "02",
+      [
+        "rewritten_post_drops_content_metadata_and_expectation_for_later_replay",
+        "replaying_empty_post_preserves_content_type",
+        "buffered_redirect_replay_shares_the_original_nonempty_allocation",
+      ],
+    ],
+    [
+      "03",
+      [
+        "streamed_upload_cannot_replay_and_never_consults_policy",
+        "replay_rule_precedes_limit_and_invalid_location",
+      ],
+    ],
+    [
+      "04",
+      [
+        "inbound_empty_get_stream_is_settled_once_before_all_replayed_hops",
+        "send_empty_get_scope_closed_from_eof_never_dispatches",
+        "send_empty_get_scope_closed_from_source_drop_never_dispatches",
+        "follow_empty_get_scope_closed_from_eof_never_dispatches",
+        "follow_empty_get_scope_closed_from_source_drop_never_dispatches",
+      ],
+    ],
+    [
+      "05",
+      [
+        "limit_four_sends_five_requests_and_skips_a_fifth_policy_call",
+        "redirect_limit_accepts_only_one_through_twenty",
+        "location_presence_and_method_rules_precede_limit_and_location_resolution",
+        "limit_precedes_invalid_location_and_policy",
+      ],
+    ],
+    ["06", ["origin_changes_strip_only_automatic_credentials_before_policy"]],
+    [
+      "07",
+      [
+        "relative_and_absolute_locations_resolve_without_sending_fragments",
+        "location_presence_and_method_rules_precede_limit_and_location_resolution",
+        "unusable_locations_fail_at_the_answering_hop_before_policy",
+        "original_nontext_and_duplicate_location_evidence_survives_normalization",
+      ],
+    ],
+    [
+      "08",
+      [
+        "original_nontext_and_duplicate_location_evidence_survives_normalization",
+        "earlier_stop_rules_do_not_bypass_normal_header_filtering",
+      ],
+    ],
+    [
+      "09",
+      [
+        "policy_owns_local_state_and_returns_nonclone_nonsend_nondebug_error_unchanged",
+        "policy_stop_returns_the_answering_head_as_final",
+        "non_http_target_can_be_stopped_rejected_or_replaced_but_not_followed_prepared",
+        "taking_prepared_request_then_following_prepared_is_a_protocol_failure",
+        "policy_observes_normalized_head_and_next_request_before_any_next_dispatch",
+        "policy_returned_invalid_request_remains_a_client_error_at_the_selected_hop",
+      ],
+    ],
+    [
+      "10",
+      [
+        "followed_bodies_are_dropped_without_polling_or_finalization",
+        "stopped_and_limit_reached_heads_keep_ordinary_final_body_errors",
+        "stopped_pending_final_body_waits_only_until_the_original_deadline",
+        "transport_errors_keep_their_original_category_and_failed_hop_index",
+      ],
+    ],
+    [
+      "11",
+      [
+        "redirect_chain_uses_supplied_head_client_and_original_deadline",
+        "original_chain_deadline_does_not_replace_a_fresh_requests_default_timeout",
+        "later_prepared_hops_inherit_policy_overrides_not_the_original_options",
+        "policy_time_is_charged_to_original_deadline_before_follow_or_finalization",
+        "expired_policy_rejection_is_not_replaced_with_a_deadline_error",
+        "unsupported_next_options_win_before_the_expired_chain_budget",
+        "replacement_deadlines_cannot_extend_the_original_final_stream_bound",
+        "policy_stop_clock_rewind_after_observed_head_is_internal",
+        "policy_error_survives_a_clock_rewind_after_observed_head",
+      ],
+    ],
+    [
+      "12",
+      [
+        "prepared_requests_retain_all_unchanged_caps_and_options",
+        "policy_authorized_cross_origin_credentials_are_not_stripped_again",
+        "image_optimizer_options_survive_every_prepared_follow_hop",
+        "freshly_built_policy_request_uses_its_own_default_caps_and_options",
+        "later_prepared_hops_inherit_policy_overrides_not_the_original_options",
+      ],
+    ],
+    [
+      "13",
+      [
+        "dropping_inflight_second_hop_releases_it_and_prevents_a_third_dispatch",
+        "dropping_unpolled_follow_releases_the_owned_request_without_transport_work",
+        "first_pending_hop_drop_prevents_a_second_dispatch",
+        "closing_callback_during_policy_prevents_the_next_dispatch",
+        "closing_callback_from_followed_source_drop_prevents_the_next_dispatch",
+      ],
+    ],
+    ["14", ["followed_hop_logs_omit_query_names_values_and_fragments"]],
+    [
+      "15",
+      [
+        "redirect_chain_uses_supplied_head_client_and_original_deadline",
+        "every_status_and_portable_method_obeys_the_redirect_table",
+        "rewritten_post_drops_content_metadata_and_expectation_for_later_replay",
+        "relative_and_absolute_locations_resolve_without_sending_fragments",
+        "origin_changes_strip_only_automatic_credentials_before_policy",
+      ],
+    ],
+  ];
+  const required = new Set();
+  for (const [criterion, names] of bindings) {
+    const c = manifest.cases.find(
+      (entry) =>
+        entry.case_id === `EZ-9/acceptance/${criterion}` &&
+        entry.environment === "unit/core",
+    );
+    assert.ok(c, criterion);
+    assert.equal(c.implementation, "ready", criterion);
+    assert.equal(c.applicability, "blocking", criterion);
+    assert.equal(c.approval, null, criterion);
+    assert.equal(c.condition, null, criterion);
+    assert.equal(c.command, command, criterion);
+    assert.equal(
+      c.artifact_path,
+      "outbound/redirect/unit/core/raw.log",
+      criterion,
+    );
+    const expected = names.map((name) => `outbound::redirect_tests::${name}`);
+    assert.deepEqual(
+      [c.sentinel, ...(c.additional_sentinels ?? [])],
+      expected,
+      criterion,
+    );
+    for (const sentinel of expected) required.add(sentinel);
+  }
+  assert.equal(required.size, 51);
+  assert.deepEqual(checker.readySentinels(manifest, "unit/core"), [
+    ...required,
+  ]);
+});
+
+test("redirect runtime bindings retain exact output paths and leave unproved legs planned", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const providers = [
+    ["axum", "axum"],
+    ["viceroy", "fastly"],
+    ["workerd", "cloudflare"],
+    ["spin", "spin"],
+  ];
+  const bound = [];
+  for (const [environment, adapter] of providers) {
+    const criteria = ["axum", "viceroy"].includes(environment)
+      ? ["16", "17"]
+      : ["16"];
+    for (const criterion of criteria) {
+      const c = manifest.cases.find(
+        (entry) =>
+          entry.case_id === `EZ-9/acceptance/${criterion}` &&
+          entry.environment === environment,
+      );
+      assert.ok(c, `${criterion}@${environment}`);
+      assert.equal(c.implementation, "ready");
+      assert.equal(c.applicability, "blocking");
+      assert.equal(c.approval, null);
+      assert.equal(c.condition, null);
+      assert.equal(c.sentinel, `${adapter}-wire-inventory`);
+      assert.equal(
+        c.command,
+        `scripts/smoke_test_reusable_app.sh --adapter ${adapter} --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/${environment}`,
+      );
+      assert.equal(
+        c.artifact_path,
+        `outbound/redirect/${environment}/events.jsonl`,
+      );
+      bound.push(c);
+    }
+  }
+  assert.equal(bound.length, 6);
+  const pending = manifest.cases.filter((c) =>
+    ["16b", "18", "19", "20"].some(
+      (criterion) => c.case_id === `EZ-9/acceptance/${criterion}`,
+    ),
+  );
+  assert.equal(pending.length, 8);
+  for (const c of pending) {
+    assert.equal(c.implementation, "planned", `${c.case_id}@${c.environment}`);
+    if (c.case_id.endsWith("/16b")) {
+      assert.equal(c.applicability, "conditional");
+      assert.equal(c.condition, "EZ-14 present");
+      assert.equal(c.approval, `EZ-14 present@${c.environment}`);
+      assert.equal(
+        manifest.decisions.find((d) => d.id === c.approval)?.status,
+        "pending",
+      );
+    }
+  }
+  const ready = manifest.cases.filter((c) => c.implementation === "ready");
+  assert.equal(ready.length, 32);
+  assert.ok(
+    ready.every(
+      (c) =>
+        c.case_id.startsWith("EZ-9/acceptance/") ||
+        (c.case_id.startsWith("EZ-23/acceptance/") &&
+          Number(c.case_id.split("/").at(-1)) <= 11),
+    ),
+  );
+});
 test("rejects deletion of reviewed split cases or environment legs", () => {
   const path = new URL(
     "../tests/fixtures/reusable-app/outbound-cutover-cases.json",

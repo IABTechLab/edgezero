@@ -1342,6 +1342,8 @@ fn credential_request() -> OutboundRequest {
         .expect("header")
         .header("x-api-key", "application-managed")
         .expect("header")
+        .header("x-amz-date", "20261027T000000Z")
+        .expect("header")
         .host_authority_override("virtual.example")
         .expect("authority")
 }
@@ -1372,6 +1374,7 @@ fn origin_changes_strip_only_automatic_credentials_before_policy() {
                 assert_eq!(prepared.headers().contains_key("cookie"), !cross_origin);
                 assert_eq!(prepared.has_host_authority_override(), !cross_origin);
                 assert_eq!(prepared.headers()["x-api-key"], "application-managed");
+                assert_eq!(prepared.headers()["x-amz-date"], "20261027T000000Z");
                 Ok::<_, ()>(OutboundRedirectAction::FollowPrepared)
             },
         )));
@@ -1382,6 +1385,7 @@ fn origin_changes_strip_only_automatic_credentials_before_policy() {
         assert_eq!(next.headers.contains_key("cookie"), !cross_origin);
         assert_eq!(next.host_authority_override.is_some(), !cross_origin);
         assert_eq!(next.headers["x-api-key"], "application-managed");
+        assert_eq!(next.headers["x-amz-date"], "20261027T000000Z");
         assert!(!next.headers.contains_key("referer"));
         assert!(!next.headers.contains_key("origin"));
     }
@@ -1833,6 +1837,29 @@ fn replacement_deadlines_cannot_extend_the_original_final_stream_bound() {
 }
 
 #[test]
+fn first_pending_hop_drop_prevents_a_second_dispatch() {
+    let dropped = Rc::new(Cell::new(0));
+    let fixture = Fixture::new([
+        Step::Pending(Rc::clone(&dropped)),
+        Reply::bytes(StatusCode::OK, b"must not send").step(),
+    ]);
+    let mut future = fixture
+        .client
+        .follow(request(Method::GET), limit(4), allow_follow);
+    assert!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(fixture.sent(), 1);
+    drop(future);
+    assert_eq!(dropped.get(), 1);
+    assert_eq!(fixture.sent(), 1);
+    assert_eq!(fixture.state.borrow().steps.len(), 1);
+}
+
+#[test]
 fn dropping_inflight_second_hop_releases_it_and_prevents_a_third_dispatch() {
     let dropped = Rc::new(Cell::new(0));
     let probe = SourceProbe::default();
@@ -1927,6 +1954,29 @@ fn followed_hop_logs_omit_query_names_values_and_fragments() {
         assert!(!message.contains("private-fragment"));
     }
     assert_eq!(fixture.sent(), 3);
+
+    let literal = Fixture::new([
+        Reply::bytes(StatusCode::FOUND, b"")
+            .location("https://b.example/final?ts-ec=abc")
+            .step(),
+        Reply::bytes(StatusCode::OK, b"").step(),
+    ]);
+    let initial = OutboundRequest::get("https://a.example/start?ts-ec=abc").expect("request");
+    success(block_on(literal.client.follow(
+        initial,
+        limit(4),
+        allow_follow,
+    )));
+    let messages = REDIRECT_LOGS.with(|messages| take(&mut *messages.borrow_mut()));
+    assert!(
+        !messages.is_empty(),
+        "literal two-hop proof must capture logs"
+    );
+    for message in &messages {
+        assert!(!message.contains("ts-ec"));
+        assert!(!message.contains("abc"));
+    }
+    assert_eq!(literal.sent(), 2);
 }
 
 #[test]

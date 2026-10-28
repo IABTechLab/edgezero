@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-11 bind guarded Axum TCP tests; 12/13 and all other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-11 and EZ-9 unit acceptance 01-15 plus local runtime 16/17 bind executable guarded commands; 479 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -24,9 +24,7 @@
     {
       "id": "hosted HTTP3 enabled@hosted-fastly/http3",
       "status": "pending",
-      "scope": [
-        "EZ-1/acceptance/02@hosted-fastly/http3"
-      ],
+      "scope": ["EZ-1/acceptance/02@hosted-fastly/http3"],
       "owner": "P2",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -37,9 +35,7 @@
     {
       "id": "EZ-16 present@hosted-fastly",
       "status": "pending",
-      "scope": [
-        "EZ-2/acceptance/10b@hosted-fastly"
-      ],
+      "scope": ["EZ-2/acceptance/10b@hosted-fastly"],
       "owner": "F6a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -50,9 +46,7 @@
     {
       "id": "previous-record backend configuration changed@hosted-fastly",
       "status": "pending",
-      "scope": [
-        "EZ-2/acceptance/13b@hosted-fastly"
-      ],
+      "scope": ["EZ-2/acceptance/13b@hosted-fastly"],
       "owner": "D1b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -119,9 +113,7 @@
     {
       "id": "EZ-5.9 adopted@unit/core",
       "status": "pending",
-      "scope": [
-        "EZ-5/acceptance/11b@unit/core"
-      ],
+      "scope": ["EZ-5/acceptance/11b@unit/core"],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -132,9 +124,7 @@
     {
       "id": "EZ-5.10 adopted@unit/core",
       "status": "pending",
-      "scope": [
-        "EZ-5/acceptance/12@unit/core"
-      ],
+      "scope": ["EZ-5/acceptance/12@unit/core"],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -145,9 +135,7 @@
     {
       "id": "EZ-5.10 adopted@unit/axum",
       "status": "pending",
-      "scope": [
-        "EZ-5/acceptance/12@unit/axum"
-      ],
+      "scope": ["EZ-5/acceptance/12@unit/axum"],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -158,9 +146,7 @@
     {
       "id": "EZ-5.10 adopted@unit/fastly",
       "status": "pending",
-      "scope": [
-        "EZ-5/acceptance/12@unit/fastly"
-      ],
+      "scope": ["EZ-5/acceptance/12@unit/fastly"],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -171,9 +157,7 @@
     {
       "id": "EZ-5.10 adopted@unit/cloudflare",
       "status": "pending",
-      "scope": [
-        "EZ-5/acceptance/12@unit/cloudflare"
-      ],
+      "scope": ["EZ-5/acceptance/12@unit/cloudflare"],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -184,9 +168,7 @@
     {
       "id": "EZ-5.10 adopted@unit/spin",
       "status": "pending",
-      "scope": [
-        "EZ-5/acceptance/12@unit/spin"
-      ],
+      "scope": ["EZ-5/acceptance/12@unit/spin"],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -197,9 +179,7 @@
     {
       "id": "reusable-sandbox adoption@unit/fastly/both-wrappers",
       "status": "pending",
-      "scope": [
-        "EZ-6/acceptance/23b@unit/fastly/both-wrappers"
-      ],
+      "scope": ["EZ-6/acceptance/23b@unit/fastly/both-wrappers"],
       "owner": "F1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -210,9 +190,7 @@
     {
       "id": "reusable-sandbox adoption@viceroy",
       "status": "pending",
-      "scope": [
-        "EZ-6/acceptance/23b@viceroy"
-      ],
+      "scope": ["EZ-6/acceptance/23b@viceroy"],
       "owner": "F1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -223,9 +201,7 @@
     {
       "id": "EZ-11 present@viceroy",
       "status": "pending",
-      "scope": [
-        "EZ-8/acceptance/06b@viceroy"
-      ],
+      "scope": ["EZ-8/acceptance/06b@viceroy"],
       "owner": "F3a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -236,9 +212,7 @@
     {
       "id": "EZ-14 present@axum",
       "status": "pending",
-      "scope": [
-        "EZ-9/acceptance/16b@axum"
-      ],
+      "scope": ["EZ-9/acceptance/16b@axum"],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -249,9 +223,7 @@
     {
       "id": "EZ-14 present@viceroy",
       "status": "pending",
-      "scope": [
-        "EZ-9/acceptance/16b@viceroy"
-      ],
+      "scope": ["EZ-9/acceptance/16b@viceroy"],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -262,9 +234,7 @@
     {
       "id": "EZ-14 present@workerd",
       "status": "pending",
-      "scope": [
-        "EZ-9/acceptance/16b@workerd"
-      ],
+      "scope": ["EZ-9/acceptance/16b@workerd"],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -275,9 +245,7 @@
     {
       "id": "EZ-14 present@spin",
       "status": "pending",
-      "scope": [
-        "EZ-9/acceptance/16b@spin"
-      ],
+      "scope": ["EZ-9/acceptance/16b@spin"],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -288,9 +256,7 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/axum",
       "status": "pending",
-      "scope": [
-        "EZ-19/acceptance/08@unit/axum"
-      ],
+      "scope": ["EZ-19/acceptance/08@unit/axum"],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -301,9 +267,7 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/fastly",
       "status": "pending",
-      "scope": [
-        "EZ-19/acceptance/08@unit/fastly"
-      ],
+      "scope": ["EZ-19/acceptance/08@unit/fastly"],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -314,9 +278,7 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/cloudflare",
       "status": "pending",
-      "scope": [
-        "EZ-19/acceptance/08@unit/cloudflare"
-      ],
+      "scope": ["EZ-19/acceptance/08@unit/cloudflare"],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -327,9 +289,7 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/spin",
       "status": "pending",
-      "scope": [
-        "EZ-19/acceptance/08@unit/spin"
-      ],
+      "scope": ["EZ-19/acceptance/08@unit/spin"],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -341,9 +301,7 @@
       "id": "EZ-20.7 adopted@workerd",
       "status": "pending",
       "implementation_adoption": "Requester approved same-release implementation on 2026-10-21; see docs/audits/evidence/2026-10-21-declared-kv.json. Local implementation evidence does not supply the separate release approval fields below.",
-      "scope": [
-        "EZ-20/acceptance/04@workerd"
-      ],
+      "scope": ["EZ-20/acceptance/04@workerd"],
       "owner": "F8",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -355,9 +313,7 @@
       "id": "EZ-20.7 adopted@spin",
       "status": "pending",
       "implementation_adoption": "Requester approved same-release implementation on 2026-10-21; see docs/audits/evidence/2026-10-21-declared-kv.json. Local implementation evidence does not supply the separate release approval fields below.",
-      "scope": [
-        "EZ-20/acceptance/04@spin"
-      ],
+      "scope": ["EZ-20/acceptance/04@spin"],
       "owner": "F8",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -368,9 +324,7 @@
     {
       "id": "EZ-22.8 adopted@workerd/retained-instance",
       "status": "pending",
-      "scope": [
-        "EZ-22/acceptance/07b@workerd/retained-instance"
-      ],
+      "scope": ["EZ-22/acceptance/07b@workerd/retained-instance"],
       "owner": "F9a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -381,9 +335,7 @@
     {
       "id": "EZ-22.8 adopted@spin/retained-instance",
       "status": "pending",
-      "scope": [
-        "EZ-22/acceptance/07b@spin/retained-instance"
-      ],
+      "scope": ["EZ-22/acceptance/07b@spin/retained-instance"],
       "owner": "F9a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -394,9 +346,7 @@
     {
       "id": "EZ-22.10 adopted@unit/core",
       "status": "pending",
-      "scope": [
-        "EZ-22/acceptance/08@unit/core"
-      ],
+      "scope": ["EZ-22/acceptance/08@unit/core"],
       "owner": "F9a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -426,9 +376,7 @@
     {
       "id": "EZ-24.11 adopted@unit/core",
       "status": "pending",
-      "scope": [
-        "EZ-24/acceptance/12@unit/core"
-      ],
+      "scope": ["EZ-24/acceptance/12@unit/core"],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -439,9 +387,7 @@
     {
       "id": "EZ-24.11 adopted@unit/core-wasip1",
       "status": "pending",
-      "scope": [
-        "EZ-24/acceptance/12@unit/core-wasip1"
-      ],
+      "scope": ["EZ-24/acceptance/12@unit/core-wasip1"],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -452,9 +398,7 @@
     {
       "id": "EZ-24.11 adopted and JS target adopted@unit/core-js",
       "status": "pending",
-      "scope": [
-        "EZ-24/acceptance/12@unit/core-js"
-      ],
+      "scope": ["EZ-24/acceptance/12@unit/core-js"],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -465,9 +409,7 @@
     {
       "id": "EZ-14 present@unit/core",
       "status": "pending",
-      "scope": [
-        "EZ-24/acceptance/14@unit/core"
-      ],
+      "scope": ["EZ-24/acceptance/14@unit/core"],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -478,9 +420,7 @@
     {
       "id": "EZ-14 present@unit/core-wasip1",
       "status": "pending",
-      "scope": [
-        "EZ-24/acceptance/14@unit/core-wasip1"
-      ],
+      "scope": ["EZ-24/acceptance/14@unit/core-wasip1"],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -491,9 +431,7 @@
     {
       "id": "EZ-14 present and EZ-24.2 JS target adopted@unit/core-js",
       "status": "pending",
-      "scope": [
-        "EZ-24/acceptance/14@unit/core-js"
-      ],
+      "scope": ["EZ-24/acceptance/14@unit/core-js"],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -504,9 +442,7 @@
     {
       "id": "EZ-25.42 adopted@edgezero-ci",
       "status": "pending",
-      "scope": [
-        "EZ-25/acceptance/03@edgezero-ci"
-      ],
+      "scope": ["EZ-25/acceptance/03@edgezero-ci"],
       "owner": "Q1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -517,9 +453,7 @@
     {
       "id": "EZ-24.12 adopted@axum/demo",
       "status": "pending",
-      "scope": [
-        "EZ-24/requirements/12@axum/demo"
-      ],
+      "scope": ["EZ-24/requirements/12@axum/demo"],
       "owner": "F10b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -530,9 +464,7 @@
     {
       "id": "EZ-24.12 adopted@axum/generated",
       "status": "pending",
-      "scope": [
-        "EZ-24/requirements/12@axum/generated"
-      ],
+      "scope": ["EZ-24/requirements/12@axum/generated"],
       "owner": "F10b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -543,9 +475,7 @@
     {
       "id": "EZ-25.43 adopted@edgezero-ci",
       "status": "pending",
-      "scope": [
-        "EZ-25/acceptance/05b@edgezero-ci"
-      ],
+      "scope": ["EZ-25/acceptance/05b@edgezero-ci"],
       "owner": "Q1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -2413,10 +2343,7 @@
       "case_id": "EZ-2/acceptance/10b",
       "source_id": "EZ-2/acceptance/10",
       "source_digest": "94a115b099a40a89e22c18dd0b54ab51bada5b9644d35d0f0480c3060557132f",
-      "requirement_ids": [
-        "EZ-2.13",
-        "EZ-16.1"
-      ],
+      "requirement_ids": ["EZ-2.13", "EZ-16.1"],
       "environment": "hosted-fastly",
       "applicability": "conditional",
       "approval": "EZ-16 present@hosted-fastly",
@@ -4465,9 +4392,7 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/axum",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/axum",
@@ -4518,9 +4443,7 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/fastly",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/fastly",
@@ -4571,9 +4494,7 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/cloudflare",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/cloudflare",
@@ -4624,9 +4545,7 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/spin",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/spin",
@@ -4837,9 +4756,7 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/core",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/core",
@@ -4890,9 +4807,7 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/axum",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/axum",
@@ -4943,9 +4858,7 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/fastly",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/fastly",
@@ -4996,9 +4909,7 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/cloudflare",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/cloudflare",
@@ -5049,9 +4960,7 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": [
-        "EZ-5.9"
-      ],
+      "requirement_ids": ["EZ-5.9"],
       "environment": "unit/spin",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/spin",
@@ -5070,9 +4979,7 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": [
-        "EZ-5.10"
-      ],
+      "requirement_ids": ["EZ-5.10"],
       "environment": "unit/core",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/core",
@@ -5091,9 +4998,7 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": [
-        "EZ-5.10"
-      ],
+      "requirement_ids": ["EZ-5.10"],
       "environment": "unit/axum",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/axum",
@@ -5112,9 +5017,7 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": [
-        "EZ-5.10"
-      ],
+      "requirement_ids": ["EZ-5.10"],
       "environment": "unit/fastly",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/fastly",
@@ -5133,9 +5036,7 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": [
-        "EZ-5.10"
-      ],
+      "requirement_ids": ["EZ-5.10"],
       "environment": "unit/cloudflare",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/cloudflare",
@@ -5154,9 +5055,7 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": [
-        "EZ-5.10"
-      ],
+      "requirement_ids": ["EZ-5.10"],
       "environment": "unit/spin",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/spin",
@@ -9459,9 +9358,7 @@
       "case_id": "EZ-6/acceptance/23b",
       "source_id": "EZ-6/acceptance/23",
       "source_digest": "9367265200604b97708ec941ce019be407122026eb1c79e4720091db9fc5323d",
-      "requirement_ids": [
-        "EZ-6.31"
-      ],
+      "requirement_ids": ["EZ-6.31"],
       "environment": "unit/fastly/both-wrappers",
       "applicability": "conditional",
       "approval": "reusable-sandbox adoption@unit/fastly/both-wrappers",
@@ -9531,9 +9428,7 @@
       "case_id": "EZ-6/acceptance/23b",
       "source_id": "EZ-6/acceptance/23",
       "source_digest": "9367265200604b97708ec941ce019be407122026eb1c79e4720091db9fc5323d",
-      "requirement_ids": [
-        "EZ-6.31"
-      ],
+      "requirement_ids": ["EZ-6.31"],
       "environment": "viceroy",
       "applicability": "conditional",
       "approval": "reusable-sandbox adoption@viceroy",
@@ -10387,10 +10282,7 @@
       "case_id": "EZ-8/acceptance/06b",
       "source_id": "EZ-8/acceptance/06",
       "source_digest": "e1375e35a5b0d640f6648371d1d1406f34a1b968077ad3a3059e0973dff88fe1",
-      "requirement_ids": [
-        "EZ-8.6",
-        "EZ-11.1"
-      ],
+      "requirement_ids": ["EZ-8.6", "EZ-11.1"],
       "environment": "viceroy",
       "applicability": "conditional",
       "approval": "EZ-11 present@viceroy",
@@ -10585,11 +10477,15 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-01-unit-core",
-      "sentinel": "ez_9_acceptance_01_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_01_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::every_status_and_portable_method_obeys_the_redirect_table",
+      "additional_sentinels": [
+        "outbound::redirect_tests::nonredirect_status_precedes_all_location_rules",
+        "outbound::redirect_tests::plain_send_does_not_follow_a_scripted_redirect"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit, with a scripted upstream. For every status from 300 to 308 and each of GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS with a 5-byte buffered body (empty for GET and HEAD), the number of requests and the second request's method, body and body headers match EZ-9.6.",
-      "artifact_path": "outbound/EZ-9/acceptance/01/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10624,11 +10520,15 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-02-unit-core",
-      "sentinel": "ez_9_acceptance_02_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_02_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::rewritten_post_drops_content_metadata_and_expectation_for_later_replay",
+      "additional_sentinels": [
+        "outbound::redirect_tests::replaying_empty_post_preserves_content_type",
+        "outbound::redirect_tests::buffered_redirect_replay_shares_the_original_nonempty_allocation"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. A POST with `Expect: 100-continue` answered by 302 and then 307 sends POST, GET, GET, with the body and expectation only on the first request and no body headers on the later two. A POST with an empty buffered body and `Content-Type` answered by 307 sends `Content-Type` on both requests.",
-      "artifact_path": "outbound/EZ-9/acceptance/02/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10663,11 +10563,14 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-03-unit-core",
-      "sentinel": "ez_9_acceptance_03_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_03_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::streamed_upload_cannot_replay_and_never_consults_policy",
+      "additional_sentinels": [
+        "outbound::redirect_tests::replay_rule_precedes_limit_and_invalid_location"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. A streamed upload answered by 307 sends one request and reports \"body not replayable\".",
-      "artifact_path": "outbound/EZ-9/acceptance/03/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10702,11 +10605,17 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-04-unit-core",
-      "sentinel": "ez_9_acceptance_04_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_04_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::inbound_empty_get_stream_is_settled_once_before_all_replayed_hops",
+      "additional_sentinels": [
+        "outbound::redirect_tests::send_empty_get_scope_closed_from_eof_never_dispatches",
+        "outbound::redirect_tests::send_empty_get_scope_closed_from_source_drop_never_dispatches",
+        "outbound::redirect_tests::follow_empty_get_scope_closed_from_eof_never_dispatches",
+        "outbound::redirect_tests::follow_empty_get_scope_closed_from_source_drop_never_dispatches"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. A GET whose body is an empty unread stream, answered by 307, sends two requests with empty bodies and reports no stop reason.",
-      "artifact_path": "outbound/EZ-9/acceptance/04/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10741,11 +10650,16 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-05-unit-core",
-      "sentinel": "ez_9_acceptance_05_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_05_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::limit_four_sends_five_requests_and_skips_a_fifth_policy_call",
+      "additional_sentinels": [
+        "outbound::redirect_tests::redirect_limit_accepts_only_one_through_twenty",
+        "outbound::redirect_tests::location_presence_and_method_rules_precede_limit_and_location_resolution",
+        "outbound::redirect_tests::limit_precedes_invalid_location_and_policy"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. With limit 4 and five 302 responses to GET, five requests are sent and the result is a 302 with \"limit reached\" and four redirects followed. A PUT answered by 301 at the limit reports \"method not rewritable\". A 302 with no `Location` answering a PUT at the limit reports \"no location\". Limits 0 and 21 are rejected.",
-      "artifact_path": "outbound/EZ-9/acceptance/05/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10780,11 +10694,11 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-06-unit-core",
-      "sentinel": "ez_9_acceptance_06_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_06_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::origin_changes_strip_only_automatic_credentials_before_policy",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. `Authorization` and `Cookie` reach a same-origin hop and do not reach a hop that changes host, port, or only the scheme. A host authority override reaches a same-origin hop only. An `x-amz-date` header reaches both.",
-      "artifact_path": "outbound/EZ-9/acceptance/06/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10819,11 +10733,16 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-07-unit-core",
-      "sentinel": "ez_9_acceptance_07_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_07_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::relative_and_absolute_locations_resolve_without_sending_fragments",
+      "additional_sentinels": [
+        "outbound::redirect_tests::location_presence_and_method_rules_precede_limit_and_location_resolution",
+        "outbound::redirect_tests::unusable_locations_fail_at_the_answering_hop_before_policy",
+        "outbound::redirect_tests::original_nontext_and_duplicate_location_evidence_survives_normalization"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. Relative, `../x`, `//b.example/x` and absolute `Location` values follow. A fragment never reaches the wire. A missing or empty value reports \"no location\". Two `Location` fields, user information, or an unusable http target give a 502 protocol failure.",
-      "artifact_path": "outbound/EZ-9/acceptance/07/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10858,11 +10777,14 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-08-unit-core",
-      "sentinel": "ez_9_acceptance_08_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_08_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::original_nontext_and_duplicate_location_evidence_survives_normalization",
+      "additional_sentinels": [
+        "outbound::redirect_tests::earlier_stop_rules_do_not_bypass_normal_header_filtering"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit, through actual response normalization and an application-supplied head-first client. A 302 containing `Location: /next` and a second `Location` with invalid UTF-8 still fails as a 502 protocol error and sends no next hop. A single invalid value also fails as 502 rather than reporting \"no location\". A method-not-rewritable or limit-reached control retains EZ-9.18's earlier stop reason. The public response retains the normal header-filtering behavior; immutable evidence, not an unfiltered header copy, enforces the redirect rule.",
-      "artifact_path": "outbound/EZ-9/acceptance/08/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10897,11 +10819,18 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-09-unit-core",
-      "sentinel": "ez_9_acceptance_09_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_09_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::policy_owns_local_state_and_returns_nonclone_nonsend_nondebug_error_unchanged",
+      "additional_sentinels": [
+        "outbound::redirect_tests::policy_stop_returns_the_answering_head_as_final",
+        "outbound::redirect_tests::non_http_target_can_be_stopped_rejected_or_replaced_but_not_followed_prepared",
+        "outbound::redirect_tests::taking_prepared_request_then_following_prepared_is_a_protocol_failure",
+        "outbound::redirect_tests::policy_observes_normalized_head_and_next_request_before_any_next_dispatch",
+        "outbound::redirect_tests::policy_returned_invalid_request_remains_a_client_error_at_the_selected_hop"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. A policy rejection returns the application's value with redirect number 1 and no second request. A policy stop returns the 3xx with \"stopped by policy\". A modified next request is sent exactly as returned. A `javascript:` target reaches the policy with no prepared request. A policy that asks to follow a prepared request there gets a 502 protocol failure.",
-      "artifact_path": "outbound/EZ-9/acceptance/09/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10936,11 +10865,16 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-10-unit-core",
-      "sentinel": "ez_9_acceptance_10_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_10_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::followed_bodies_are_dropped_without_polling_or_finalization",
+      "additional_sentinels": [
+        "outbound::redirect_tests::stopped_and_limit_reached_heads_keep_ordinary_final_body_errors",
+        "outbound::redirect_tests::stopped_pending_final_body_waits_only_until_the_original_deadline",
+        "outbound::redirect_tests::transport_errors_keep_their_original_category_and_failed_hop_index"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit, through an application-supplied recording client implementing the shared head-first dispatch contract. A followed 302 whose body errors, one with `Content-Encoding: br` and an empty body, one declaring a 10 MiB `Content-Length` under a 1 MiB cap, and one whose body stays permanently pending each lead to the final 200, without waiting for intermediate body data. The client records every hop exactly once. Returning the same 302 as final by policy stop or limit applies ordinary decoding and caps and yields the corresponding error instead of hiding it.",
-      "artifact_path": "outbound/EZ-9/acceptance/10/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10975,11 +10909,21 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-11-unit-core",
-      "sentinel": "ez_9_acceptance_11_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_11_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::redirect_chain_uses_supplied_head_client_and_original_deadline",
+      "additional_sentinels": [
+        "outbound::redirect_tests::original_chain_deadline_does_not_replace_a_fresh_requests_default_timeout",
+        "outbound::redirect_tests::later_prepared_hops_inherit_policy_overrides_not_the_original_options",
+        "outbound::redirect_tests::policy_time_is_charged_to_original_deadline_before_follow_or_finalization",
+        "outbound::redirect_tests::expired_policy_rejection_is_not_replaced_with_a_deadline_error",
+        "outbound::redirect_tests::unsupported_next_options_win_before_the_expired_chain_budget",
+        "outbound::redirect_tests::replacement_deadlines_cannot_extend_the_original_final_stream_bound",
+        "outbound::redirect_tests::policy_stop_clock_rewind_after_observed_head_is_internal",
+        "outbound::redirect_tests::policy_error_survives_a_clock_rewind_after_observed_head"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. A deadline that passes after the first hop fails the second hop as a gateway timeout attributed to the deadline, and the second hop is not sent. Prepared hops retain the preceding request's per-call timeout unless the policy changes it. A fresh policy request with no deadline or a later deadline still cannot send or consume its final streamed body past the original absolute chain deadline; an earlier policy deadline shortens the budget. A synchronous policy cannot be preempted. If it returns an action after the original deadline expired, no next hop is sent and no late final success is returned; unsupported-option rejection still precedes budget rejection for a selected next request. If it rejects instead, its original application error remains unchanged under EZ-9.14.",
-      "artifact_path": "outbound/EZ-9/acceptance/11/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11014,11 +10958,17 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-12-unit-core",
-      "sentinel": "ez_9_acceptance_12_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_12_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::prepared_requests_retain_all_unchanged_caps_and_options",
+      "additional_sentinels": [
+        "outbound::redirect_tests::policy_authorized_cross_origin_credentials_are_not_stripped_again",
+        "outbound::redirect_tests::image_optimizer_options_survive_every_prepared_follow_hop",
+        "outbound::redirect_tests::freshly_built_policy_request_uses_its_own_default_caps_and_options",
+        "outbound::redirect_tests::later_prepared_hops_inherit_policy_overrides_not_the_original_options"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. A policy modifying the prepared request retains every unchanged cap and option. A freshly built policy request uses its own caps and options, including constructor defaults, while still observing the original absolute chain deadline. A policy can deliberately re-sign a new origin's request without EdgeZero stripping its credentials afterward.",
-      "artifact_path": "outbound/EZ-9/acceptance/12/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11053,11 +11003,17 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-13-unit-core",
-      "sentinel": "ez_9_acceptance_13_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_13_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::dropping_inflight_second_hop_releases_it_and_prevents_a_third_dispatch",
+      "additional_sentinels": [
+        "outbound::redirect_tests::dropping_unpolled_follow_releases_the_owned_request_without_transport_work",
+        "outbound::redirect_tests::first_pending_hop_drop_prevents_a_second_dispatch",
+        "outbound::redirect_tests::closing_callback_during_policy_prevents_the_next_dispatch",
+        "outbound::redirect_tests::closing_callback_from_followed_source_drop_prevents_the_next_dispatch"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. Dropping a following call while hop 1 is in flight sends no hop 2.",
-      "artifact_path": "outbound/EZ-9/acceptance/13/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11092,11 +11048,11 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-14-unit-core",
-      "sentinel": "ez_9_acceptance_14_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_14_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::followed_hop_logs_omit_query_names_values_and_fragments",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. With logging captured at trace level, a two-hop chain whose URIs carry `?ts-ec=abc` logs neither `ts-ec` nor `abc`.",
-      "artifact_path": "outbound/EZ-9/acceptance/14/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11131,11 +11087,17 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-15-unit-core",
-      "sentinel": "ez_9_acceptance_15_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_9_acceptance_15_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::redirect_chain_uses_supplied_head_client_and_original_deadline",
+      "additional_sentinels": [
+        "outbound::redirect_tests::every_status_and_portable_method_obeys_the_redirect_table",
+        "outbound::redirect_tests::rewritten_post_drops_content_metadata_and_expectation_for_later_replay",
+        "outbound::redirect_tests::relative_and_absolute_locations_resolve_without_sending_fragments",
+        "outbound::redirect_tests::origin_changes_strip_only_automatic_credentials_before_policy"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests",
       "expected": "Unit. A following call made on an application-supplied recording client records one ordinary send per hop, with each hop's method, URI, headers and body.",
-      "artifact_path": "outbound/EZ-9/acceptance/15/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11170,21 +11132,18 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-16-axum",
-      "sentinel": "ez_9_acceptance_16_axum",
-      "command": "scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-cutover --case EZ-9/acceptance/16",
+      "sentinel": "axum-wire-inventory",
+      "command": "scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/axum",
       "expected": "Axum, workerd, Spin 4.1 and Viceroy 0.21.0. For each adapter, with a 200 and no redirect under a 10-byte buffered cap, bodies of 10 and 11 bytes and a declared `Content-Length: 11` give the same status, headers, bytes or limit error from a plain send and from a following call, for identity, gzip and passthrough encodings. Repeat the followed and final 302 body cases from the supplied-client criterion on each adapter, and verify streamed final-response parity; when EZ-14 is present, include its idle-bounded final-body policy.",
-      "artifact_path": "outbound/EZ-9/acceptance/16/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": [
-        "EZ-9.9",
-        "EZ-14.11"
-      ],
+      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
       "environment": "axum",
       "applicability": "conditional",
       "approval": "EZ-14 present@axum",
@@ -11231,21 +11190,18 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-16-viceroy",
-      "sentinel": "ez_9_acceptance_16_viceroy",
-      "command": "scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-cutover --case EZ-9/acceptance/16",
+      "sentinel": "fastly-wire-inventory",
+      "command": "scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/viceroy",
       "expected": "Axum, workerd, Spin 4.1 and Viceroy 0.21.0. For each adapter, with a 200 and no redirect under a 10-byte buffered cap, bodies of 10 and 11 bytes and a declared `Content-Length: 11` give the same status, headers, bytes or limit error from a plain send and from a following call, for identity, gzip and passthrough encodings. Repeat the followed and final 302 body cases from the supplied-client criterion on each adapter, and verify streamed final-response parity; when EZ-14 is present, include its idle-bounded final-body policy.",
-      "artifact_path": "outbound/EZ-9/acceptance/16/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": [
-        "EZ-9.9",
-        "EZ-14.11"
-      ],
+      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
       "environment": "viceroy",
       "applicability": "conditional",
       "approval": "EZ-14 present@viceroy",
@@ -11292,21 +11248,18 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-16-workerd",
-      "sentinel": "ez_9_acceptance_16_workerd",
-      "command": "scripts/smoke_test_reusable_app.sh --adapter cloudflare --suite outbound-cutover --case EZ-9/acceptance/16",
+      "sentinel": "cloudflare-wire-inventory",
+      "command": "scripts/smoke_test_reusable_app.sh --adapter cloudflare --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "Axum, workerd, Spin 4.1 and Viceroy 0.21.0. For each adapter, with a 200 and no redirect under a 10-byte buffered cap, bodies of 10 and 11 bytes and a declared `Content-Length: 11` give the same status, headers, bytes or limit error from a plain send and from a following call, for identity, gzip and passthrough encodings. Repeat the followed and final 302 body cases from the supplied-client criterion on each adapter, and verify streamed final-response parity; when EZ-14 is present, include its idle-bounded final-body policy.",
-      "artifact_path": "outbound/EZ-9/acceptance/16/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": [
-        "EZ-9.9",
-        "EZ-14.11"
-      ],
+      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
       "environment": "workerd",
       "applicability": "conditional",
       "approval": "EZ-14 present@workerd",
@@ -11353,21 +11306,18 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-16-spin",
-      "sentinel": "ez_9_acceptance_16_spin",
-      "command": "scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-cutover --case EZ-9/acceptance/16",
+      "sentinel": "spin-wire-inventory",
+      "command": "scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Axum, workerd, Spin 4.1 and Viceroy 0.21.0. For each adapter, with a 200 and no redirect under a 10-byte buffered cap, bodies of 10 and 11 bytes and a declared `Content-Length: 11` give the same status, headers, bytes or limit error from a plain send and from a following call, for identity, gzip and passthrough encodings. Repeat the followed and final 302 body cases from the supplied-client criterion on each adapter, and verify streamed final-response parity; when EZ-14 is present, include its idle-bounded final-body policy.",
-      "artifact_path": "outbound/EZ-9/acceptance/16/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": [
-        "EZ-9.9",
-        "EZ-14.11"
-      ],
+      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
       "environment": "spin",
       "applicability": "conditional",
       "approval": "EZ-14 present@spin",
@@ -11414,11 +11364,11 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-17-axum",
-      "sentinel": "ez_9_acceptance_17_axum",
-      "command": "scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-cutover --case EZ-9/acceptance/17",
+      "sentinel": "axum-wire-inventory",
+      "command": "scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/axum",
       "expected": "Axum and Viceroy 0.21.0, with two local origins where A answers 302 to B and B answers 200. A plain send returns 302. A following call returns 200 with B as the final URI and one redirect followed.",
-      "artifact_path": "outbound/EZ-9/acceptance/17/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11453,11 +11403,11 @@
       "owner": "EdgeZero",
       "task": "P5",
       "substep": "EZ-9-acceptance-17-viceroy",
-      "sentinel": "ez_9_acceptance_17_viceroy",
-      "command": "scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-cutover --case EZ-9/acceptance/17",
+      "sentinel": "fastly-wire-inventory",
+      "command": "scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/viceroy",
       "expected": "Axum and Viceroy 0.21.0, with two local origins where A answers 302 to B and B answers 200. A plain send returns 302. A following call returns 200 with B as the final URI and one redirect followed.",
-      "artifact_path": "outbound/EZ-9/acceptance/17/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -12872,12 +12822,7 @@
       "case_id": "EZ-13/acceptance/01",
       "source_id": "EZ-13/acceptance/01",
       "source_digest": "4d652ab0a99f09ef7e062522b05f795ca06e7135ba94a23c87aaedd1e6b77f64",
-      "requirement_ids": [
-        "EZ-13.1",
-        "EZ-13.2",
-        "EZ-13.3",
-        "EZ-13.4"
-      ],
+      "requirement_ids": ["EZ-13.1", "EZ-13.2", "EZ-13.3", "EZ-13.4"],
       "environment": "spin",
       "applicability": "follow-up",
       "approval": null,
@@ -12896,12 +12841,7 @@
       "case_id": "EZ-13/acceptance/02",
       "source_id": "EZ-13/acceptance/02",
       "source_digest": "c23920bd0d5cc25e83b131caa5c8ae5556fe43f53536df46cd71b734ee8327e0",
-      "requirement_ids": [
-        "EZ-13.1",
-        "EZ-13.2",
-        "EZ-13.3",
-        "EZ-13.4"
-      ],
+      "requirement_ids": ["EZ-13.1", "EZ-13.2", "EZ-13.3", "EZ-13.4"],
       "environment": "spin",
       "applicability": "follow-up",
       "approval": null,
@@ -12920,12 +12860,7 @@
       "case_id": "EZ-13/acceptance/03",
       "source_id": "EZ-13/acceptance/03",
       "source_digest": "2cab3d473eeead7a8a4d066b532c75537b7d0d8dfc6dc651071aea89c55aa51c",
-      "requirement_ids": [
-        "EZ-13.1",
-        "EZ-13.2",
-        "EZ-13.3",
-        "EZ-13.4"
-      ],
+      "requirement_ids": ["EZ-13.1", "EZ-13.2", "EZ-13.3", "EZ-13.4"],
       "environment": "consumer-spin",
       "applicability": "follow-up",
       "approval": null,
@@ -15977,9 +15912,7 @@
       "case_id": "EZ-22/acceptance/07b",
       "source_id": "EZ-22/acceptance/07",
       "source_digest": "ae01686760141a5d6e7d9ceef0fffdcae177fdabe578caedfd1864473575523f",
-      "requirement_ids": [
-        "EZ-22.8"
-      ],
+      "requirement_ids": ["EZ-22.8"],
       "environment": "workerd/retained-instance",
       "applicability": "conditional",
       "approval": "EZ-22.8 adopted@workerd/retained-instance",
@@ -16030,9 +15963,7 @@
       "case_id": "EZ-22/acceptance/07b",
       "source_id": "EZ-22/acceptance/07",
       "source_digest": "ae01686760141a5d6e7d9ceef0fffdcae177fdabe578caedfd1864473575523f",
-      "requirement_ids": [
-        "EZ-22.8"
-      ],
+      "requirement_ids": ["EZ-22.8"],
       "environment": "spin/retained-instance",
       "applicability": "conditional",
       "approval": "EZ-22.8 adopted@spin/retained-instance",
@@ -18549,9 +18480,7 @@
       "case_id": "EZ-18/acceptance/03b",
       "source_id": "EZ-18/acceptance/03",
       "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
-      "requirement_ids": [
-        "EZ-18.5"
-      ],
+      "requirement_ids": ["EZ-18.5"],
       "environment": "hosted-fastly/http1",
       "applicability": "follow-up",
       "approval": null,
@@ -18571,9 +18500,7 @@
       "case_id": "EZ-18/acceptance/03b",
       "source_id": "EZ-18/acceptance/03",
       "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
-      "requirement_ids": [
-        "EZ-18.5"
-      ],
+      "requirement_ids": ["EZ-18.5"],
       "environment": "hosted-fastly/http2",
       "applicability": "follow-up",
       "approval": null,
@@ -18593,9 +18520,7 @@
       "case_id": "EZ-24/requirements/12",
       "source_id": "EZ-24.12",
       "source_digest": "99bbb8bf53e20c00884675bc178f50cc62ac2deefdbfd56834f34cd3c3bb6879",
-      "requirement_ids": [
-        "EZ-24.12"
-      ],
+      "requirement_ids": ["EZ-24.12"],
       "environment": "axum/demo",
       "applicability": "conditional",
       "approval": "EZ-24.12 adopted@axum/demo",
@@ -18616,9 +18541,7 @@
       "case_id": "EZ-24/requirements/12",
       "source_id": "EZ-24.12",
       "source_digest": "99bbb8bf53e20c00884675bc178f50cc62ac2deefdbfd56834f34cd3c3bb6879",
-      "requirement_ids": [
-        "EZ-24.12"
-      ],
+      "requirement_ids": ["EZ-24.12"],
       "environment": "axum/generated",
       "applicability": "conditional",
       "approval": "EZ-24.12 adopted@axum/generated",
@@ -18639,9 +18562,7 @@
       "case_id": "EZ-25/acceptance/05b",
       "source_id": "EZ-25/acceptance/05",
       "source_digest": "1f720daf578c15ddb539ea9eee47fbc90d9a061b54b6218d9699b16638dbc7aa",
-      "requirement_ids": [
-        "EZ-25.43"
-      ],
+      "requirement_ids": ["EZ-25.43"],
       "environment": "edgezero-ci",
       "applicability": "conditional",
       "approval": "EZ-25.43 adopted@edgezero-ci",
