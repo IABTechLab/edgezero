@@ -922,7 +922,7 @@ cutoff. These probes do not close the complete scenario 16 acceptance leg or cer
 cancellation. Release ends the fixture's hold; it is not evidence of provider teardown.
 Bodies are capped at 64 bytes. The existing bounded origin collector/parser and joined worker
 ownership are reused; registrations, roles and event counts are finite, and unexpected or late
-worker failures prevent a passing inventory. The suite runs all four cases even when an earlier
+worker failures prevent a passing inventory. The suite runs all six cases even when an earlier
 case fails, but publishes success only after runtime and origin cleanup succeed.
 
 Host request-send and guest request-start have different origins, particularly on a cold guest.
