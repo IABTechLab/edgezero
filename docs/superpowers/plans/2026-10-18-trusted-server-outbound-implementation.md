@@ -348,6 +348,44 @@ and two strict timing failures. A pre-existing trailing worker diagnostic was re
 requested shutdown with identical guest artifacts; retain that caveat, not a clean-hosted-
 shutdown claim. These checks do not change any acceptance binding or qualification gate.
 
+### Main Integration Checkpoint (2026-10-28)
+
+Merge main `87456c70` into the signed-SDK checkpoint `7b68f737`, preserving the existing
+outbound implementation and hard-cut APIs. Main's request-fidelity types remain available
+under `edgezero_core::ingress`, alongside route-aware admission. Canonical adapters admit
+before running the pre-dispatch hook exactly once, before state, middleware, handlers or
+fallback draining. Refusal/abort remain zero-read paths without hook invocation. Direct
+router dispatch runs the hook before lookup; method/path continuation guards remain enforced.
+
+All four adapters capture metadata on their existing lazy conversion paths. Cloudflare head
+conversion failures use detached Send/Abort policy and owned completion, sharing one runtime
+context. Migrate main's fixture/macro callers to fallible assembly and adapter-owned egress;
+extend the structured SDK guard to the fourth application lockfile. Keep main's independent
+docs-tool updates and all existing outbound CI gates, separating browser ingress tests from
+Node contracts rather than replacing either suite. Historical fidelity observations are not
+candidate evidence. No outbound, compression or signed dependency pin changes are authorized
+by this integration.
+
+The unfinished D6 pending-head/body probes are parked separately during this merge. They are
+not part of the merge checkpoint and must retain their unresolved timing/evidence regressions
+when resumed. The frozen requirements, interfaces and acceptance inventory remain unchanged;
+hosted qualification, runtime promotion, candidate freeze and optional EZ-14 stay open.
+
+Local verification passes the five primary Rust gates (1,067 core tests), strict Clippy on
+all three provider WASM targets, strict public Rustdoc, the demo's 60 core tests, and the
+retained shared harness (203 tests, one ignored). Axum's consolidated real-TCP suites pass;
+provider contracts pass Cloudflare 30, Fastly 36 and Spin 35, with 271 Fastly library cases.
+The five Cloudflare browser regressions pass separately from Node contracts. Structured
+dependency, decoder/map, docs/legacy/evidence guards and docs lint/format/build pass. Changed
+CI workflows pass actionlint; two existing shellcheck warnings in untouched deploy-docs remain.
+
+All existing request-fidelity observations compare unchanged on local repaired Viceroy,
+Wrangler/workerd and Spin. The fixture explicitly drains the two known-empty framing bodies
+under a zero-byte cap, preserving failure on nonempty data. This avoids a reproduced Wrangler
+proxy 503 sequence after unread cancellation; it does not restore eager production reads,
+accept 503 as a baseline, or claim unread-body cancellation evidence. The full ignored
+generated-project matrix and hosted qualification were not rerun by this merge checkpoint.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

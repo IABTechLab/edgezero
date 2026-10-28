@@ -1,3 +1,17 @@
+#![expect(
+    clippy::self_named_module_files,
+    reason = "the workspace denies both contradictory module-file conventions; retain its self-named-file convention"
+)]
+
+//! Route-aware admission, owned ingress lifetimes and conservative request facts.
+
+mod fidelity;
+
+pub use fidelity::{
+    CapturedTarget, CompleteTarget, HeaderFidelity, InboundOrigin, MAX_AUTHORITY_BYTES,
+    MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress, TargetSource, TargetUnavailable,
+};
+
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;

@@ -17,6 +17,7 @@ use bytes::Bytes;
 use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
 use crate::context::{SpinRequestContext, parse_client_addr};
+use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
 use crate::response::from_egress_response;
 use crate::secret_store::SpinSecretStore;
@@ -142,6 +143,7 @@ pub fn send_assembly_error(
 }
 
 fn into_core_request_head(parts: RequestParts, outbound_clock: MonotonicClock) -> Request {
+    let ingress = capture_request_ingress(&parts.uri);
     let client_addr = parts
         .headers
         .get("spin-client-addr")
@@ -155,6 +157,7 @@ fn into_core_request_head(parts: RequestParts, outbound_clock: MonotonicClock) -
 
     let mut request = Request::from_parts(parts, Body::empty());
 
+    request.extensions_mut().insert(ingress);
     SpinRequestContext::insert(
         &mut request,
         SpinRequestContext {

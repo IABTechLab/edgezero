@@ -207,7 +207,7 @@ use edgezero_core::context::RequestContext;
 use edgezero_adapter_cloudflare::context::CloudflareRequestContext;
 
 async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
-    if let Some(cf_ctx) = CloudflareRequestContext::get(ctx.request()) {
+    if let Some(cf_ctx) = ctx.extensions().get::<CloudflareRequestContext>() {
         // Access Cloudflare-specific data
         let env = cf_ctx.env();
         let ctx = cf_ctx.ctx();
@@ -323,7 +323,9 @@ bindings = [
 
 ## Streaming
 
-Cloudflare Workers support streaming via `ReadableStream`. The adapter automatically converts `Body::Stream` to Cloudflare's streaming format.
+Cloudflare Workers support streaming via `ReadableStream`. Construct a core
+streaming body with `Body::stream(...)`; the adapter owns lazy conversion and
+delivery under the admitted response-egress policy.
 
 See the [Streaming guide](/guide/streaming) for examples and patterns.
 
@@ -428,6 +430,42 @@ Fetch invocations may overlap. Verify isolation while two requests are actually
 in flight in the same instance. A serialized test or two separate instances does
 not establish this property. Restore the existing `run_app` entry point to remove
 explicit retention. The generated default remains unchanged.
+
+## Runtime request fidelity
+
+Inbound conversion reads `req.inner().method()` rather than the closed Workers
+method enum. Valid runtime extension tokens retain their spelling.
+`Headers.entries()` values follow workerd's UTF-8 string convention and are copied through `HeaderValue::from_bytes(value.as_bytes())`. Invalid runtime HeaderValues produce bounded conversion errors. Conversion never comma-splits combined fields. Browser ByteString construction is not evidence of Worker wire-byte preservation.
+
+Ingress captures `req.inner().url()` before additional parsing. It records a
+runtime URL and validated runtime origin. Fetch can already have normalized dot
+segments and combined repeated fields; those changes cannot be reversed by
+EdgeZero. Header fidelity remains conservative.
+
+Browser converter tests cover custom methods, high bytes, metadata and service
+hook dispatch in the separate `ingress_fidelity` target. Existing contracts and
+outbound runtime unit tests remain Node-based. The historical local workerd
+observations imported from main `87456c70` distinguish pre-Worker rejections:
+its HTTP parser returns 501 for extension methods. These are not results from
+the merged candidate; rerun the locked fixture before citing current evidence.
+Real Worker tests assert valid UTF-8 values C3 A9 and C4 80 survive conversion. Local wire FF becomes U+FFFD in Web Headers before Rust, so its runtime UTF-8 copy EF BF BD cannot prove original bytes. Common octet and multiplicity fidelity is `Unknown`: the observed transformations do not prove every particular field changed. Local absolute-form and duplicate Content-Length requests return 500 without a hook verdict. These transport/runtime limits remain separate from runtime-to-core conversion correctness.
+See [the capability matrix](./overview#inbound-request-fidelity).
+
+Captured runtime-target preservation is `Unknown`. Fetch URL normalization is
+a known runtime capability, but the original request target is unavailable, so
+a transformation cannot be established for each individual incoming request.
+
+### Conversion compatibility
+
+Unknown method tokens are retained rather than coerced to GET, so they no longer
+match a GET route. Invalid runtime header values fail conversion with a bounded
+`EdgeError::bad_request`. Direct converter callers receive that error;
+`run_app`, `dispatch_app` and `CloudflareService` surface it as `worker::Error`,
+which the standard fetch wrapper returns as HTTP 500.
+Method, URL, URI and header conversion errors use bounded messages without parse
+details. Primary routing still uses the existing SDK URL conversion, including
+Unicode percent encoding and backslash normalization; ingress target metadata is
+captured separately before that conversion.
 
 ## Next Steps
 

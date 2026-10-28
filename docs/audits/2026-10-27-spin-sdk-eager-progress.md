@@ -9,10 +9,13 @@ The SDK is pinned to `https://github.com/stackpop/spin-rust-sdk.git` at
 It upgrades WASIp3 from 0.7.1 to 0.9.0 while retaining WASI 0.3.0 interfaces and uses
 wit-bindgen 0.62.0, whose executor includes the eager task-queue correction.
 
-The root workspace, demo, reusable fixture and generator all declare the same SDK version,
+The root workspace, demo, reusable fixture, request-fidelity fixture and generator all declare the same SDK version,
 Git URL and full revision. Their lockfiles select the SDK and macro from that source.
 Applications using the SDK directly must use the same source rather than mixing registry
 and Git SDK instances. Dependency guards compare source/revision as well as version.
+
+Main integration adds the request-fidelity fixture to that guard. Its lockfile must select the
+same immutable SDK and macro source as the root workspace, not a second registry SDK instance.
 
 The deliberate API migration is `wasip3::spawn` to `wasip3::spawn_local`. There is no alias,
 vendored SDK, observer-driven producer, second executor or transport workaround. The private

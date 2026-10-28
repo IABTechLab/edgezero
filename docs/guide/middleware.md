@@ -22,8 +22,8 @@ impl Middleware for RequestLogger {
         ctx: RequestContext,
         next: Next<'_>,
     ) -> Result<Response, EdgeError> {
-        let method = ctx.request().method().clone();
-        let path = ctx.request().uri().path().to_string();
+        let method = ctx.method().clone();
+        let path = ctx.uri().path().to_string();
         let start = std::time::Instant::now();
 
         let response = next.run(ctx).await?;
@@ -58,7 +58,9 @@ middleware = [
 ]
 ```
 
-Middleware are applied in order before routes are matched.
+Middleware runs in registration order after a route matches, before its handler.
+Use a pre-dispatch hook for work before handler or 404/405 fallback execution.
+Canonical admission has already resolved the route before that hook.
 
 ### Programmatically
 
@@ -105,7 +107,7 @@ impl Middleware for AuthMiddleware {
         next: Next<'_>,
     ) -> Result<Response, EdgeError> {
         // Check authorization header
-        let auth_header = ctx.request().headers().get("authorization");
+        let auth_header = ctx.headers().get("authorization");
 
         match auth_header {
             Some(value) if self.verify_token(value) => {
@@ -227,6 +229,18 @@ EdgeZero provides these middleware out of the box:
 
 If you already hold an `Arc<dyn Middleware>` (`BoxMiddleware`), register it with
 `.middleware_arc(...)` instead of `.middleware(...)`.
+
+## Work before dispatch
+
+Ordinary middleware runs after route selection and router-owned extension setup.
+For method-independent interception before 404/405, use the
+[pre-dispatch hook](./routing#intercepting-before-dispatch). A terminal hook
+response or error bypasses ordinary middleware and handlers. A continuing hook
+passes header, extension, body and query changes into the existing middleware
+chain. Canonical adapter admission resolves the route before the hook; changing
+the method or path returns an internal error rather than selecting a new route.
+Only direct router calls perform lookup after the hook. Hook responses still
+pass through canonical response egress when dispatched by an adapter.
 
 ## Next Steps
 

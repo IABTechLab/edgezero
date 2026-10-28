@@ -6,6 +6,8 @@ pub mod cli;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 pub mod config_store;
 pub mod context;
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+mod ingress;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 pub mod key_value_store;
 // `kv_pagination` is the pure paging logic for `SpinKvStore::list_keys_page`.

@@ -65,7 +65,9 @@ mod tests {
     };
     use edgezero_core::router::RouterService;
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
-    use futures::stream;
+    use futures::channel::mpsc::unbounded;
+    use futures::future::{Either, select};
+    use futures::{StreamExt as _, pin_mut, stream};
     use std::io::Error as IoError;
     use wasm_bindgen_test::wasm_bindgen_test;
     use worker::js_sys::{Function, Object, Reflect};
@@ -141,6 +143,69 @@ mod tests {
             OutboundCollectedSlot::AlreadyDelivered | OutboundCollectedSlot::Unresolved => None,
         }
         .expect("expected a resolved slot")
+    }
+
+    #[wasm_bindgen_test]
+    async fn head_conversion_error_uses_detached_completion_or_abort() {
+        use edgezero_core::response_egress::{
+            DetachedResponseEgressDecision, ResponseEgressCompletion,
+        };
+
+        for abort in [false, true] {
+            let factories = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::new(AtomicUsize::new(0));
+            let observed_factory = Arc::clone(&factories);
+            let observed_completion = Arc::clone(&completions);
+            let (terminal_sender, mut terminal_receiver) = unbounded();
+            let mut app = App::new(RouterService::builder().build());
+            app.set_detached_response_egress_decision_factory(move |head| {
+                assert_eq!(head.status(), StatusCode::BAD_REQUEST);
+                observed_factory.fetch_add(1, Ordering::SeqCst);
+                if abort {
+                    DetachedResponseEgressDecision::Abort
+                } else {
+                    let terminal = Arc::clone(&observed_completion);
+                    let notification_sender = terminal_sender.clone();
+                    DetachedResponseEgressDecision::Send {
+                        completion: ResponseEgressCompletion::new(move |_report| {
+                            terminal.fetch_add(1, Ordering::SeqCst);
+                            notification_sender
+                                .unbounded_send(())
+                                .expect("terminal receiver");
+                        }),
+                        deadline: head.write_deadline_after(Duration::from_secs(1)),
+                    }
+                }
+            });
+            let (env, context, _timers) = test_env_ctx();
+            let mut request =
+                CfRequest::new_with_init("https://example.com/reserved", &RequestInit::default())
+                    .expect("request");
+            request
+                .headers_mut()
+                .expect("mutable headers")
+                .set("x-invalid", "a\u{1}b")
+                .expect("runtime header");
+            let result = CloudflareService::new(&app)
+                .dispatch(request, env, context)
+                .await;
+            if abort {
+                assert!(result.is_err());
+            } else {
+                let mut response = result.expect("detached response");
+                assert_eq!(response.status_code(), 400);
+                assert!(!response.bytes().await.expect("error body").is_empty());
+                let notification = terminal_receiver.next();
+                let timeout = worker::Delay::from(Duration::from_secs(1));
+                pin_mut!(notification, timeout);
+                assert!(matches!(
+                    select(notification, timeout).await,
+                    Either::Left((Some(()), _timeout))
+                ));
+            }
+            assert_eq!(factories.load(Ordering::SeqCst), 1);
+            assert_eq!(completions.load(Ordering::SeqCst), usize::from(!abort));
+        }
     }
 
     fn build_test_app() -> App {

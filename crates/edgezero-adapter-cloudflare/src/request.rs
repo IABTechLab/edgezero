@@ -19,10 +19,11 @@ use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::context::RuntimeVariables;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::{Method as CoreMethod, Request, Uri, request_builder};
+use edgezero_core::http::{HeaderValue, Method as CoreMethod, Request, Uri, request_builder};
 use edgezero_core::ingress::{
-    IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
-    IngressHeadParts, PreparedIngress,
+    CapturedTarget, HeaderFidelity, InboundOrigin, IngressBeginOutcome, IngressDispatchOutcome,
+    IngressFraming, IngressHeadAccounting, IngressHeadParts, OriginSource, PreparedIngress,
+    Preservation, RequestIngress, TargetSource,
 };
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::outbound::HttpClient;
@@ -312,7 +313,8 @@ fn detached_error_envelope(
 /// Convert a Cloudflare Worker request into an `EdgeZero` core request.
 ///
 /// # Errors
-/// Returns [`EdgeError::bad_request`] if the URL or URI cannot be parsed,
+/// Returns [`EdgeError::bad_request`] for invalid runtime methods, header values,
+/// URLs or URIs,
 /// and [`EdgeError::internal`] if the body cannot be read or the core
 /// request cannot be built.
 #[inline]
@@ -325,7 +327,7 @@ pub async fn into_core_request(
     env: Env,
     ctx: Context,
 ) -> Result<Request, EdgeError> {
-    let mut request = into_core_request_head(&req, env, ctx, MonotonicClock::default())?;
+    let mut request = into_core_request_head(&req, env, Arc::new(ctx), MonotonicClock::default())?;
     *request.body_mut() =
         cloudflare_body_stream(req)?.map_or_else(Body::empty, Body::from_external_stream);
     Ok(request)
@@ -334,26 +336,44 @@ pub async fn into_core_request(
 fn into_core_request_head(
     req: &CfRequest,
     env: Env,
-    ctx: Context,
+    ctx: Arc<Context>,
     outbound_clock: MonotonicClock,
 ) -> Result<Request, EdgeError> {
-    let method = into_core_method(&req.method());
-    let url = req
-        .url()
-        .map_err(|err| EdgeError::bad_request(format!("invalid URL: {err}")))?;
+    let method = CoreMethod::from_bytes(req.inner().method().as_bytes())
+        .map_err(|_error| EdgeError::bad_request("invalid runtime method"))?;
+    let runtime_url = req.inner().url();
+    let target = CapturedTarget::capture(
+        &runtime_url,
+        TargetSource::RuntimeUrl,
+        Preservation::Unknown,
+    );
+    let url: worker::Url = runtime_url
+        .parse()
+        .map_err(|_error| EdgeError::bad_request("invalid runtime URL"))?;
     let uri: Uri = url
         .as_str()
         .parse()
-        .map_err(|err| EdgeError::bad_request(format!("invalid URI: {err}")))?;
+        .map_err(|_error| EdgeError::bad_request("invalid runtime URI"))?;
+    let origin = uri
+        .scheme_str()
+        .zip(uri.authority())
+        .and_then(|(scheme, authority)| {
+            InboundOrigin::parse(scheme, authority.as_str(), OriginSource::RuntimeUri).ok()
+        });
+    let fidelity = HeaderFidelity::RUNTIME_HEADER_MAP;
+    let ingress = RequestIngress::new(target, origin, fidelity);
 
     let mut builder = request_builder().method(method).uri(uri);
     let headers = req.headers();
     for (name, value) in headers.entries() {
-        builder = builder.header(name.as_str(), value);
+        let header_value = HeaderValue::from_bytes(value.as_bytes())
+            .map_err(|_error| EdgeError::bad_request("invalid runtime header value"))?;
+        builder = builder.header(name.as_str(), header_value);
     }
 
     let mut request = builder.body(Body::empty()).map_err(EdgeError::internal)?;
 
+    request.extensions_mut().insert(ingress);
     CloudflareRequestContext::insert(&mut request, env, ctx);
     request
         .extensions_mut()
@@ -585,12 +605,19 @@ pub(crate) async fn dispatch_with_handles(
     request_start: MonotonicInstant,
 ) -> Result<CfResponse, WorkerError> {
     let signal = req.inner().signal();
-    let head_request = into_core_request_head(&req, env, ctx, app.monotonic_clock())
-        .map_err(|error| edge_error_to_worker(&error))?;
-    let context = CloudflareRequestContext::get(&head_request)
-        .map(CloudflareRequestContext::context_handle)
-        .ok_or_else(|| WorkerError::RustError("missing Cloudflare request context".to_owned()))?;
-    let runtime = CloudflareEgressRuntime::new(signal, context);
+    let request_method =
+        CoreMethod::from_bytes(req.inner().method().as_bytes()).unwrap_or(CoreMethod::GET);
+    let context = Arc::new(ctx);
+    let runtime = CloudflareEgressRuntime::new(signal, Arc::clone(&context));
+    let head_request = match into_core_request_head(&req, env, context, app.monotonic_clock()) {
+        Ok(request) => request,
+        Err(error) => {
+            drop(req);
+            let egress = detached_error_envelope(app, error, request_method, request_start)?;
+            return from_egress_response(egress, runtime)
+                .map_err(|delivery_error| edge_error_to_worker(&delivery_error));
+        }
+    };
     dispatch_ingress_stream_and(
         app,
         head_request,
@@ -1522,7 +1549,7 @@ mod tests {
         req: CfRequest,
     ) -> Result<ResponseEgressEnvelope, WorkerError> {
         let (env, context) = env_context();
-        let head = into_core_request_head(&req, env, context, app.monotonic_clock())
+        let head = into_core_request_head(&req, env, Arc::new(context), app.monotonic_clock())
             .expect("request head");
         dispatch_ingress_stream_and(
             app,

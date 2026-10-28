@@ -36,7 +36,7 @@ use crate::connection::{ConnectionExit, serve_http1};
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
 use crate::outbound::{AxumOutboundClient, native_time};
-use crate::request::into_core_request_parts;
+use crate::request::{HttpTransport, into_core_request_parts};
 use crate::response::{AxumEgressBody, EgressConnection, prepare_egress_response};
 
 /// Private Hyper service error used only to close/reset an admission-aborted connection.
@@ -343,7 +343,8 @@ impl HyperService<Request<Incoming>> for AxumConnectionService {
         let state = self.state.clone();
         let connection = self.connection.clone();
         let remote_addr = self.remote_addr;
-        let converted_request = req.map(AxumBody::new);
+        let mut converted_request = req.map(AxumBody::new);
+        converted_request.extensions_mut().insert(HttpTransport);
         Box::pin(async move {
             state
                 .dispatch_request(converted_request, &connection, Some(remote_addr))

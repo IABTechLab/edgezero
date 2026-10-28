@@ -3,6 +3,7 @@ use std::fmt::Display;
 #[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
 use std::io::Cursor;
 use std::io::Read;
+use std::str::from_utf8;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::Poll;
 
@@ -11,12 +12,14 @@ use edgezero_core::app::{App, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::error::EdgeError;
-#[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
-use edgezero_core::http::Uri;
-use edgezero_core::http::{Extensions, Method, Request, Response, request_builder};
+use edgezero_core::http::header::HOST;
+use edgezero_core::http::{
+    Extensions, HeaderValue, Method, Request, Response, Uri, request_builder,
+};
 use edgezero_core::ingress::{
-    IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
-    IngressHeadParts, PreparedIngress,
+    CapturedTarget, HeaderFidelity, InboundOrigin, IngressBeginOutcome, IngressDispatchOutcome,
+    IngressFraming, IngressHeadAccounting, IngressHeadParts, OriginSource, PreparedIngress,
+    RequestIngress, TargetUnavailable,
 };
 use edgezero_core::key_value_store::{KvError, KvHandle, KvStoreOpenFailure};
 use edgezero_core::outbound::HttpClient;
@@ -452,10 +455,12 @@ fn dispatch_with_handles<Prepare>(
 where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
+    let ingress = capture_request_ingress(&req);
     let mut scratch = apply_request_prepare(&mut req, prepare);
+    scratch.remove::<RequestIngress>();
     let synthesized_headers = scratch.remove::<edgezero_core::SynthesizedResponseHeaders>();
     let mut head_request =
-        into_core_request_head(&req, app.monotonic_clock()).map_err(|failure| {
+        into_core_request_head(&req, app.monotonic_clock(), ingress).map_err(|failure| {
             FastlyNoAttempt::new(
                 FastlyNoAttemptReason::RequestHeadConversion(failure.cause),
                 map_edge_error(&failure.error),
@@ -733,18 +738,74 @@ fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretReg
     StoreRegistry::from_parts(by_id, meta.default.to_owned())
 }
 
+/// Capture available ingress facts without consuming the native request.
+///
+/// Fastly SDK 0.13.1 does not expose a safe borrowed raw target accessor.
+/// Record target unavailability before reading the SDK URL for the canonical
+/// origin. That URL may normalize the path and is never used as an original
+/// target. Client requests require exactly one validated Host matching the
+/// runtime URL authority. No forwarded headers or missing TLS facts supply a
+/// scheme. This function does not clone handles or change client provenance.
+///
+/// Original header names/count APIs expose partial ordering and aggregate count,
+/// but do not associate original fields with converted values. They cannot prove
+/// per-name multiplicity or full global order. Fidelity remains unknown pending
+/// production evidence; aggregate count equality is not proof of preservation.
+/// Unlike the other adapters, Fastly exposes partial original-header metadata,
+/// so unresolved native capability is intentionally `Unknown` rather than
+/// `Unavailable`. This extension does not supply original global order to hooks.
+/// Consumers requiring it must accept only `Preserved`; both `Unknown` and
+/// `Unavailable` are insufficient.
+///
+/// # Panics
+/// The SDK URL accessor can panic if its runtime URI cannot be parsed.
+#[inline]
+#[must_use]
+pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
+    let target = CapturedTarget::Unavailable(TargetUnavailable::NotExposed);
+    let origin = if req.is_from_client() {
+        parse_uri(req.get_url_str()).ok().and_then(|uri| {
+            origin_from_runtime_uri(&uri, req.get_header_all(HOST).map(HeaderValue::as_bytes))
+        })
+    } else {
+        None
+    };
+    RequestIngress::new(target, origin, HeaderFidelity::default())
+}
+
+fn origin_from_runtime_uri<'header>(
+    uri: &Uri,
+    mut hosts: impl Iterator<Item = &'header [u8]>,
+) -> Option<InboundOrigin> {
+    let host = from_utf8(hosts.next()?).ok()?;
+    if hosts.next().is_some() {
+        return None;
+    }
+    let scheme = uri.scheme_str()?;
+    let runtime_origin =
+        InboundOrigin::parse(scheme, uri.authority()?.as_str(), OriginSource::RuntimeUri).ok()?;
+    let origin = InboundOrigin::parse(scheme, host, OriginSource::RuntimeUri).ok()?;
+    runtime_origin
+        .same_authority(&origin)
+        .then_some(runtime_origin)
+}
+
+/// Converts a request without eagerly reading its body.
+///
 /// # Errors
-/// Returns [`EdgeError::Internal`] if the Fastly request cannot be reconstituted into a core request (e.g., method or URI conversion failure).
+/// Returns a typed error for invalid request-head conversion.
 #[inline]
 pub fn into_core_request(mut req: FastlyRequest) -> Result<Request, EdgeError> {
-    let request =
-        into_core_request_head(&req, MonotonicClock::default()).map_err(|failure| failure.error)?;
+    let ingress = capture_request_ingress(&req);
+    let request = into_core_request_head(&req, MonotonicClock::default(), ingress)
+        .map_err(|failure| failure.error)?;
     Ok(attach_core_body(&mut req, request, None))
 }
 
 fn into_core_request_head(
     req: &FastlyRequest,
     outbound_clock: MonotonicClock,
+    ingress: RequestIngress,
 ) -> Result<Request, HeadConversionFailure> {
     let method = req.get_method().clone();
     let uri = parse_uri(req.get_url_str()).map_err(|error| HeadConversionFailure {
@@ -771,6 +832,7 @@ fn into_core_request_head(
     request
         .extensions_mut()
         .insert(outbound_client(outbound_clock));
+    request.extensions_mut().insert(ingress);
 
     Ok(request)
 }
@@ -1398,5 +1460,222 @@ mod synthesis_tests {
     #[test]
     fn resolve_secret_handle_builds_handle_when_required_true_matches_require_secrets() {
         let _handle = resolve_secret_handle(true);
+    }
+}
+
+#[cfg(test)]
+mod ingress_tests {
+    use super::{
+        Stores, capture_request_ingress, dispatch_with_handles, into_core_request_head,
+        origin_from_runtime_uri,
+    };
+    use crate::context::FastlyRequestContext;
+    use crate::delivery::DispatchOutcome;
+    use async_trait::async_trait;
+    use edgezero_core::app::App;
+    use edgezero_core::body::Body;
+    use edgezero_core::error::EdgeError;
+    use edgezero_core::http::header::HOST;
+    use edgezero_core::http::{HeaderValue, Request, Response, Uri, response_builder};
+    use edgezero_core::ingress::{
+        CapturedTarget, HeaderFidelity, OriginSource, Preservation, RequestIngress, TargetSource,
+        TargetUnavailable,
+    };
+    use edgezero_core::router::{PreDispatchHook, RouterService};
+    use edgezero_core::{HttpClient, MonotonicClock};
+    use fastly::Request as FastlyRequest;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct ScratchMarker;
+
+    struct VerifySnapshot {
+        scratch_expected: bool,
+    }
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for VerifySnapshot {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            assert_eq!(
+                request.extensions().get::<ScratchMarker>().is_some(),
+                self.scratch_expected
+            );
+            let ingress = request
+                .extensions()
+                .get::<RequestIngress>()
+                .expect("should expose chosen snapshot");
+            assert!(matches!(
+                ingress.target(),
+                CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
+            ));
+            Ok(Some(
+                response_builder()
+                    .status(204)
+                    .body(Body::empty())
+                    .map_err(EdgeError::internal)?,
+            ))
+        }
+    }
+
+    #[test]
+    fn ingress_runtime_origin_accepts_one_matching_authority() {
+        for (url, host, expected_scheme) in [
+            ("http://example.com/reserved", "EXAMPLE.com:80", "http"),
+            ("https://example.com/reserved", "example.com:443", "https"),
+            (
+                "https://example.com:8443/reserved",
+                "example.com:8443",
+                "https",
+            ),
+            ("https://[::1]/reserved", "[::1]:443", "https"),
+        ] {
+            let uri: Uri = url.parse().expect("should parse runtime URI");
+            let origin = origin_from_runtime_uri(&uri, [host.as_bytes()].into_iter())
+                .expect("should recover the matching runtime origin");
+            assert_eq!(
+                origin.scheme(),
+                expected_scheme,
+                "should use runtime scheme"
+            );
+            assert_eq!(
+                origin.authority(),
+                uri.authority()
+                    .expect("should have runtime authority")
+                    .as_str(),
+                "should retain runtime authority rather than Host spelling"
+            );
+            assert_eq!(
+                origin.source(),
+                OriginSource::RuntimeUri,
+                "should identify runtime provenance"
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_runtime_origin_rejects_missing_duplicate_and_conflicting_hosts() {
+        let uri: Uri = "https://example.com/reserved"
+            .parse()
+            .expect("should parse URI");
+        for hosts in [
+            vec![],
+            vec![b"example.com".as_slice(), b"example.com".as_slice()],
+            vec![b"other.example.com".as_slice()],
+            vec![b"example.com:80".as_slice()],
+            vec![b"example.com, other.example.com".as_slice()],
+            vec![b"example.com:invalid".as_slice()],
+            vec![b"a=\xff".as_slice()],
+        ] {
+            assert!(
+                origin_from_runtime_uri(&uri, hosts.into_iter()).is_none(),
+                "should not invent an origin from unavailable or inconsistent authority"
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_runtime_origin_rejects_invalid_runtime_authorities() {
+        for url in [
+            "https://user@example.com/reserved",
+            "https://example.com:invalid/reserved",
+            "https://example.com:65536/reserved",
+        ] {
+            let uri: Uri = url
+                .parse()
+                .expect("should represent invalid runtime authority");
+            assert!(
+                origin_from_runtime_uri(&uri, [b"example.com".as_slice()].into_iter()).is_none(),
+                "should validate the complete runtime authority before comparing host or default port"
+            );
+        }
+    }
+
+    fn snapshot() -> RequestIngress {
+        RequestIngress::new(
+            CapturedTarget::capture(
+                "/reserved/%2e",
+                TargetSource::TransportRequestTarget,
+                Preservation::Unknown,
+            ),
+            None,
+            HeaderFidelity::default(),
+        )
+    }
+
+    #[test]
+    fn ingress_current_sdk_reports_missing_target_and_no_synthetic_origin() {
+        let native = FastlyRequest::get("https://example.com/reserved");
+        let ingress = capture_request_ingress(&native);
+        assert_eq!(
+            ingress.header_fidelity(&HOST).global_field_order(),
+            Preservation::Unknown
+        );
+        assert!(matches!(
+            ingress.target(),
+            CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
+        ));
+        assert!(ingress.origin().is_none());
+    }
+
+    #[test]
+    fn ingress_snapshot_and_header_bytes_survive_conversion() {
+        let mut native = FastlyRequest::new("EXAMPLE-METHOD", "https://example.com/later");
+        native.append_header("cookie", b"a=\xff".as_slice());
+        native.append_header("cookie", "b=2");
+        let client_ip = native.get_client_ip_addr();
+        let core = into_core_request_head(&native, MonotonicClock::default(), snapshot())
+            .map_err(|failure| failure.error)
+            .expect("should convert snapshot");
+        assert_eq!(
+            FastlyRequestContext::get(&core)
+                .expect("should preserve context")
+                .client_ip,
+            client_ip
+        );
+        assert!(core.extensions().get::<HttpClient>().is_some());
+        assert_eq!(core.method().as_str(), "EXAMPLE-METHOD");
+        let values: Vec<_> = core
+            .headers()
+            .get_all("cookie")
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect();
+        assert_eq!(values, [b"a=\xff".as_slice(), b"b=2".as_slice()]);
+        let CapturedTarget::Complete(target) = core
+            .extensions()
+            .get::<RequestIngress>()
+            .expect("should carry snapshot")
+            .target()
+        else {
+            panic!("should retain target")
+        };
+        assert_eq!(target.value(), "/reserved/%2e");
+    }
+
+    #[test]
+    fn ingress_registry_dispatch_wins_scratch_collision() {
+        let app = App::new(
+            RouterService::builder()
+                .pre_dispatch_hook_arc(Arc::new(VerifySnapshot {
+                    scratch_expected: true,
+                }))
+                .build(),
+        );
+        let outcome = dispatch_with_handles(
+            &app,
+            FastlyRequest::get("https://example.com/later"),
+            Stores::default(),
+            app.monotonic_now(),
+            |native, scratch| {
+                native.set_url("https://spoof.example.com/changed");
+                scratch.insert(snapshot());
+                scratch.insert(ScratchMarker);
+            },
+        )
+        .expect("should dispatch with chosen snapshot");
+        let DispatchOutcome::Routed(mut envelope) = outcome else {
+            panic!("expected routed hook response")
+        };
+        assert_eq!(envelope.response_mut().status().as_u16(), 204);
     }
 }

@@ -7,6 +7,12 @@ use axum::http::{Request, request::Parts};
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::Request as CoreRequest;
+use edgezero_core::http::header::HOST;
+use edgezero_core::http::{HeaderMap, Uri};
+use edgezero_core::ingress::{
+    CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
+    TargetSource,
+};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::{StreamExt as _, stream};
@@ -16,15 +22,22 @@ use tokio::time::timeout;
 use crate::context::AxumRequestContext;
 use crate::outbound::AxumOutboundClient;
 
+/// Marks the plain HTTP listener owned by this adapter.
+#[derive(Clone, Copy)]
+pub(crate) struct HttpTransport;
+
 /// Convert an Axum/Hyper request into an `EdgeZero` core request while preserving streaming bodies
 /// and exposing connection metadata through `AxumRequestContext`.
 ///
 /// # Errors
 /// Returns an error if the outbound client cannot be initialized.
 #[inline]
-#[expect(
-    clippy::unused_async,
-    reason = "the public converter retains its established async API while request bodies remain lazy"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::unused_async,
+        reason = "the public converter retains its established async API while request bodies remain lazy"
+    )
 )]
 pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest, String> {
     let (parts, axum_body) = request.into_parts();
@@ -39,11 +52,13 @@ pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest
 }
 
 pub(crate) fn into_core_request_parts(
-    parts: Parts,
+    mut parts: Parts,
     axum_body: AxumBody,
     read_lifetime: Option<(Deadline, MonotonicClock)>,
     outbound_client: HttpClient,
 ) -> CoreRequest {
+    let transport = parts.extensions.remove::<HttpTransport>();
+    let ingress = capture_request_ingress(&parts.uri, &parts.headers, transport);
     // A zero size hint can still leave trailers; only the transport's terminal signal is enough.
     let body = if axum_body.is_end_stream() {
         Body::empty()
@@ -57,6 +72,7 @@ pub(crate) fn into_core_request_parts(
     };
 
     let mut core_request = CoreRequest::from_parts(parts, body);
+    core_request.extensions_mut().insert(ingress);
 
     if let Some(remote_addr) = core_request
         .extensions()
@@ -77,6 +93,53 @@ pub(crate) fn into_core_request_parts(
     core_request.extensions_mut().insert(outbound_client);
 
     core_request
+}
+
+fn capture_request_ingress(
+    uri: &Uri,
+    headers: &HeaderMap,
+    transport: Option<HttpTransport>,
+) -> RequestIngress {
+    let source = if uri.scheme().is_some() {
+        TargetSource::RuntimeUrl
+    } else {
+        TargetSource::RuntimePathAndQuery
+    };
+    let target = CapturedTarget::capture(&uri.to_string(), source, Preservation::Unknown);
+    RequestIngress::new(
+        target,
+        inbound_origin(uri, headers, transport),
+        HeaderFidelity::RUNTIME_HEADER_MAP,
+    )
+}
+
+fn inbound_origin(
+    uri: &Uri,
+    headers: &HeaderMap,
+    transport: Option<HttpTransport>,
+) -> Option<InboundOrigin> {
+    transport?;
+    let mut hosts = headers.get_all(HOST).iter();
+    let host = hosts.next()?.to_str().ok()?;
+    if hosts.next().is_some() {
+        return None;
+    }
+    let origin = InboundOrigin::parse("http", host, OriginSource::TransportBinding).ok()?;
+    if uri
+        .scheme_str()
+        .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("http"))
+    {
+        return None;
+    }
+    if let Some(authority) = uri.authority() {
+        let supplied =
+            InboundOrigin::parse("http", authority.as_str(), OriginSource::TransportBinding)
+                .ok()?;
+        if !origin.same_authority(&supplied) {
+            return None;
+        }
+    }
+    Some(origin)
 }
 
 fn deadline_body(
@@ -409,5 +472,174 @@ mod tests {
             .expect("request conversion");
 
         assert!(core_request.body().is_stream());
+    }
+}
+
+#[cfg(test)]
+mod ingress_tests {
+    use super::{HttpTransport, into_core_request};
+    use axum::body::Body as AxumBody;
+    use edgezero_core::http::{HeaderValue, Method, request_builder};
+    use edgezero_core::ingress::{
+        CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
+        TargetUnavailable,
+    };
+
+    #[tokio::test]
+    async fn ingress_retains_runtime_parts_without_trusting_headers() {
+        let mut request = request_builder()
+            .method(Method::from_bytes(b"EXAMPLE-METHOD").expect("should parse method"))
+            .uri("/reserved/%2e//%2F?q=a%2Fb")
+            .header("host", "example.com")
+            .header("forwarded", "proto=https;host=spoof.example.com")
+            .body(AxumBody::empty())
+            .expect("should build request");
+        request.headers_mut().append(
+            "cookie",
+            HeaderValue::from_bytes(b"a=\xff").expect("should parse bytes"),
+        );
+        request
+            .headers_mut()
+            .append("cookie", HeaderValue::from_static("b=2"));
+        let core = into_core_request(request)
+            .await
+            .expect("should convert request");
+        let ingress = core
+            .extensions()
+            .get::<RequestIngress>()
+            .expect("should insert metadata");
+        assert!(ingress.origin().is_none());
+        let CapturedTarget::Complete(target) = ingress.target() else {
+            panic!("should capture whole target")
+        };
+        assert_eq!(target.value(), "/reserved/%2e//%2F?q=a%2Fb");
+        assert_eq!(core.method().as_str(), "EXAMPLE-METHOD");
+        let values: Vec<_> = core
+            .headers()
+            .get_all("cookie")
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect();
+        assert_eq!(values, [b"a=\xff".as_slice(), b"b=2".as_slice()]);
+        assert_eq!(
+            ingress
+                .header_fidelity(&"content-length".parse().expect("should parse name"))
+                .field_multiplicity(),
+            Preservation::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_content_length_fidelity_is_unknown_with_or_without_transport() {
+        for bound in [false, true] {
+            for count in 0..=2 {
+                let mut request = request_builder()
+                    .uri("/reserved")
+                    .header("host", "example.com")
+                    .body(AxumBody::empty())
+                    .expect("should build request");
+                for _ in 0..count {
+                    request
+                        .headers_mut()
+                        .append("content-length", HeaderValue::from_static("0"));
+                }
+                if bound {
+                    request.extensions_mut().insert(HttpTransport);
+                }
+                let core = into_core_request(request)
+                    .await
+                    .expect("should convert request");
+                assert_eq!(
+                    core.headers().get_all("content-length").iter().count(),
+                    count
+                );
+                let ingress = core
+                    .extensions()
+                    .get::<RequestIngress>()
+                    .expect("should insert metadata");
+                assert_eq!(
+                    ingress
+                        .header_fidelity(&"content-length".parse().expect("should parse name"))
+                        .field_multiplicity(),
+                    Preservation::Unknown
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ingress_bound_does_not_change_uri_body_or_extensions() {
+        let path = format!("/{}", "a".repeat(MAX_TARGET_BYTES));
+        let mut request = request_builder()
+            .uri(&path)
+            .header("content-type", "application/json")
+            .body(AxumBody::from("{}"))
+            .expect("should build request");
+        request.extensions_mut().insert(17_u32);
+        let converted = into_core_request(request)
+            .await
+            .expect("should convert bounded metadata");
+        assert_eq!(converted.uri().path(), path);
+        assert!(converted.body().is_stream());
+        assert_eq!(converted.extensions().get::<u32>(), Some(&17));
+        assert!(matches!(
+            converted
+                .extensions()
+                .get::<RequestIngress>()
+                .expect("should insert metadata")
+                .target(),
+            CapturedTarget::Unavailable(TargetUnavailable::TooLarge)
+        ));
+        assert_eq!(
+            converted
+                .into_body()
+                .into_bytes_bounded(16)
+                .await
+                .expect("read preserved body")
+                .as_ref(),
+            b"{}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_transport_origin_requires_consistent_single_authority() {
+        for (uri, hosts, expected) in [
+            ("/reserved", vec!["example.com"], true),
+            ("http://EXAMPLE.com:80/reserved", vec!["example.com"], true),
+            ("https://example.com/reserved", vec!["example.com"], false),
+            (
+                "http://other.example.com/reserved",
+                vec!["example.com"],
+                false,
+            ),
+            ("/reserved", vec!["example.com", "example.com"], false),
+            ("/reserved", vec!["example.com/path"], false),
+            ("/reserved", vec![], false),
+        ] {
+            let mut request = request_builder()
+                .uri(uri)
+                .body(AxumBody::empty())
+                .expect("should build request");
+            for host in hosts {
+                request.headers_mut().append(
+                    "host",
+                    HeaderValue::from_str(host).expect("should parse host"),
+                );
+            }
+            request.extensions_mut().insert(HttpTransport);
+            let core = into_core_request(request)
+                .await
+                .expect("should convert request");
+            let ingress = core
+                .extensions()
+                .get::<RequestIngress>()
+                .expect("should insert metadata");
+            assert_eq!(ingress.origin().is_some(), expected);
+            if let Some(origin) = ingress.origin() {
+                assert_eq!(origin.scheme(), "http");
+                assert_eq!(origin.source(), OriginSource::TransportBinding);
+            }
+            assert!(core.extensions().get::<HttpTransport>().is_none());
+        }
     }
 }

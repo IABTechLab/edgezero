@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::io::Error as IoError;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use async_trait::async_trait;
 use matchit::Router as PathRouter;
 use tower_service::Service;
 
@@ -14,6 +16,30 @@ use crate::introspection::{ManifestJson, RouteTable};
 use crate::middleware::{BoxMiddleware, Middleware, Next};
 use crate::params::PathParams;
 use crate::response::IntoResponse as _;
+
+/// Shared optional interception performed before router lookup and state injection.
+pub type BoxPreDispatchHook = Arc<dyn PreDispatchHook>;
+
+/// Inspect or terminate an admitted request before handler dispatch and route middleware.
+///
+/// Adapter admission may resolve route identity first. The hook cannot bypass admission,
+/// inbound read deadlines, or the response's owned egress lifecycle.
+///
+/// The hook receives adapter extensions but no router-injected state or
+/// introspection. It may capture application state in its own implementation.
+/// Futures deliberately do not require `Send` so WASM runtimes remain supported.
+#[async_trait(?Send)]
+pub trait PreDispatchHook: Send + Sync + 'static {
+    /// Return a terminal response, or continue with the mutated request.
+    /// Continuing hooks may change headers, extensions, the body and URI query,
+    /// but must preserve the method and URI path. A violation is an internal error.
+    ///
+    /// # Errors
+    ///
+    /// Errors prevent dispatch. [`Service::call`] propagates them, while
+    /// [`RouterService::oneshot`] uses the existing error-response rendering.
+    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError>;
+}
 
 struct RouteEntry {
     handler: BoxHandler,
@@ -182,6 +208,7 @@ enum RouteMatch<'route> {
 pub struct RouterBuilder {
     manifest_json: Option<Arc<str>>,
     middlewares: Vec<BoxMiddleware>,
+    pre_dispatch_hook: Option<BoxPreDispatchHook>,
     route_info: Vec<RouteInfo>,
     routes: HashMap<Method, PathRouter<RouteEntry>>,
     /// App state registered via [`RouterBuilder::with_state`], keyed by type.
@@ -234,6 +261,7 @@ impl RouterBuilder {
             route_index,
             self.manifest_json,
             self.state_extensions,
+            self.pre_dispatch_hook,
         )
     }
 
@@ -285,6 +313,37 @@ impl RouterBuilder {
         H: IntoHandler,
     {
         self.route(path, Method::POST, handler)
+    }
+
+    /// Install one hook before route lookup, state injection and middleware.
+    ///
+    /// Router clones share the same instance. None of the normal route lifecycle
+    /// runs after a terminal response; outer adapter/application finalizers may run.
+    ///
+    /// # Panics
+    /// Panics if a hook is already registered.
+    #[must_use]
+    #[inline]
+    pub fn pre_dispatch_hook<H>(self, hook: H) -> Self
+    where
+        H: PreDispatchHook,
+    {
+        self.pre_dispatch_hook_arc(Arc::new(hook))
+    }
+
+    /// Install a shared hook with the same guarantees as [`Self::pre_dispatch_hook`].
+    ///
+    /// # Panics
+    /// Panics if a hook is already registered.
+    #[must_use]
+    #[inline]
+    pub fn pre_dispatch_hook_arc(mut self, hook: BoxPreDispatchHook) -> Self {
+        assert!(
+            self.pre_dispatch_hook.is_none(),
+            "pre-dispatch hook already registered"
+        );
+        self.pre_dispatch_hook = Some(hook);
+        self
     }
 
     #[must_use]
@@ -357,13 +416,17 @@ impl RouterBuilder {
 struct RouterInner {
     manifest_json: Option<Arc<str>>,
     middlewares: Vec<BoxMiddleware>,
+    pre_dispatch_hook: Option<BoxPreDispatchHook>,
     route_index: Arc<[RouteInfo]>,
     routes: HashMap<Method, PathRouter<RouteEntry>>,
     state_extensions: Extensions,
 }
 
 impl RouterInner {
-    async fn dispatch(&self, request: Request) -> Result<Response, EdgeError> {
+    async fn dispatch(&self, mut request: Request) -> Result<Response, EdgeError> {
+        if let Some(response) = self.pre_dispatch(&mut request).await? {
+            return Ok(response);
+        }
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
 
@@ -453,6 +516,21 @@ impl RouterInner {
             RouteMatch::MethodNotAllowed(allowed)
         }
     }
+    async fn pre_dispatch(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        if let Some(hook) = &self.pre_dispatch_hook {
+            if let Some(response) = hook.handle(request).await? {
+                return Ok(Some(response));
+            }
+            if request.method() != method || request.uri().path() != path {
+                return Err(EdgeError::internal(IoError::other(
+                    "pre-dispatch hook changed the request method or path",
+                )));
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -493,7 +571,7 @@ impl RouterService {
     pub async fn dispatch_resolved(
         &self,
         resolved: ResolvedDispatch,
-        request: Request,
+        mut request: Request,
         ingress: AdmittedIngress,
     ) -> Result<Response, EdgeError> {
         if !Arc::ptr_eq(&self.inner, &resolved.owner) {
@@ -505,6 +583,9 @@ impl RouterService {
             return Err(EdgeError::internal(anyhow::anyhow!(
                 "request method or path changed after ingress route resolution"
             )));
+        }
+        if let Some(response) = self.inner.pre_dispatch(&mut request).await? {
+            return Ok(response);
         }
 
         match resolved.target {
@@ -543,11 +624,13 @@ impl RouterService {
         route_index: Arc<[RouteInfo]>,
         manifest_json: Option<Arc<str>>,
         state_extensions: Extensions,
+        pre_dispatch_hook: Option<BoxPreDispatchHook>,
     ) -> Self {
         Self {
             inner: Arc::new(RouterInner {
                 manifest_json,
                 middlewares,
+                pre_dispatch_hook,
                 route_index,
                 routes,
                 state_extensions,
@@ -1519,5 +1602,713 @@ mod tests {
 
         let response = block_on(service.oneshot(request)).expect("response");
         assert_eq!(response.body().as_bytes().expect("buffered"), b"7-hi");
+    }
+}
+
+#[cfg(test)]
+mod pre_dispatch_tests {
+    mod admitted {
+        use super::*;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        use crate::app::App;
+        use crate::ingress::{
+            AdmissionDecision, BufferedIngressResponse, IngressBeginOutcome,
+            IngressDispatchOutcome, IngressFraming, IngressGrant, IngressHeadAccounting,
+            IngressHeadParts,
+        };
+        use crate::response_egress::{
+            ResponseEgressCompletion, ResponseEgressEnvelope, ResponseEgressOutcome,
+        };
+        use crate::response_egress_framing::ResponseEgressFramingMode;
+
+        struct CountedContinueHook {
+            calls: Arc<AtomicUsize>,
+            mutation: Option<bool>,
+        }
+
+        struct DropCount(Arc<AtomicUsize>);
+
+        #[async_trait(?Send)]
+        impl PreDispatchHook for CountedContinueHook {
+            async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(method) = self.mutation {
+                    RoutingMutationHook {
+                        method,
+                        terminal: false,
+                    }
+                    .handle(request)
+                    .await
+                } else {
+                    ContinueHook.handle(request).await
+                }
+            }
+        }
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
+        impl Drop for DropCount {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn complete(envelope: ResponseEgressEnvelope) -> Response {
+            let Ok((prepared, _, mut attempt, clock)) =
+                envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            else {
+                panic!("response egress begin");
+            };
+            assert!(attempt.begin_writing());
+            assert!(attempt.complete(clock.now()));
+            prepared.into_response()
+        }
+
+        #[test]
+        fn continuation_preserves_the_admitted_route_and_rejects_routing_mutations() {
+            for mutation in [None, Some(false), Some(true)] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let clones = Arc::new(AtomicUsize::new(0));
+                let middleware = Arc::new(AtomicUsize::new(0));
+                let app = App::new(
+                    RouterService::builder()
+                        .with_state(CountedState {
+                            clones: Arc::clone(&clones),
+                        })
+                        .middleware(CountingMiddleware {
+                            calls: Arc::clone(&middleware),
+                        })
+                        .pre_dispatch_hook(CountedContinueHook {
+                            calls: Arc::clone(&calls),
+                            mutation,
+                        })
+                        .get("/before", unreachable_handler)
+                        .post("/after", after_handler)
+                        .build(),
+                );
+                let (method, path) = if mutation.is_none() {
+                    (Method::POST, "/after")
+                } else {
+                    (Method::GET, "/before")
+                };
+                let response =
+                    complete(envelope(dispatch(&app, input(method, path, Body::empty()))));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                if mutation.is_none() {
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(response.body().as_bytes(), Some(b"continued".as_slice()));
+                    assert_eq!(clones.load(Ordering::SeqCst), 1);
+                    assert_eq!(middleware.load(Ordering::SeqCst), 1);
+                } else {
+                    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                    assert_eq!(clones.load(Ordering::SeqCst), 0);
+                    assert_eq!(middleware.load(Ordering::SeqCst), 0);
+                }
+            }
+        }
+
+        fn dispatch(app: &App, request: Request) -> IngressDispatchOutcome {
+            block_on(app.dispatch_ingress(
+                request,
+                app.monotonic_now(),
+                IngressHeadAccounting::HostManaged,
+                IngressFraming::HostManaged,
+            ))
+            .expect("canonical ingress")
+        }
+
+        fn envelope(outcome: IngressDispatchOutcome) -> ResponseEgressEnvelope {
+            let IngressDispatchOutcome::Response(envelope) = outcome else {
+                panic!("expected response");
+            };
+            *envelope
+        }
+
+        #[test]
+        fn refusal_and_abort_precede_hooks_without_reading_the_request_body() {
+            for abort in [false, true] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let polls = Arc::new(AtomicUsize::new(0));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let mut app = App::new(
+                    RouterService::builder()
+                        .pre_dispatch_hook(TerminalHook {
+                            calls: Arc::clone(&calls),
+                            fail: false,
+                        })
+                        .post("/after", unreachable_handler)
+                        .build(),
+                );
+                app.set_ingress_admission_policy(move |_| {
+                    if abort {
+                        AdmissionDecision::Abort
+                    } else {
+                        AdmissionDecision::Refuse {
+                            completion: ResponseEgressCompletion::empty(),
+                            response: response_builder()
+                                .status(StatusCode::SERVICE_UNAVAILABLE)
+                                .body(Body::empty())
+                                .expect("refusal"),
+                        }
+                    }
+                });
+                let outcome = dispatch(
+                    &app,
+                    input(Method::POST, "/after", unread_body(&polls, &drops)),
+                );
+                if abort {
+                    assert!(matches!(outcome, IngressDispatchOutcome::Aborted));
+                } else {
+                    assert_eq!(
+                        complete(envelope(outcome)).status(),
+                        StatusCode::SERVICE_UNAVAILABLE
+                    );
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn terminal_hook_and_error_release_ingress_but_retain_completion_through_attempt() {
+            for fail in [false, true] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let polls = Arc::new(AtomicUsize::new(0));
+                let body_drops = Arc::new(AtomicUsize::new(0));
+                let grant_drops = Arc::new(AtomicUsize::new(0));
+                let completions = Arc::new(AtomicUsize::new(0));
+                let completion_drops = Arc::new(AtomicUsize::new(0));
+                let mut app = App::new(
+                    RouterService::builder()
+                        .pre_dispatch_hook(TerminalHook {
+                            calls: Arc::clone(&calls),
+                            fail,
+                        })
+                        .post("/after", unreachable_handler)
+                        .build(),
+                );
+                let grants = Arc::clone(&grant_drops);
+                let completed = Arc::clone(&completions);
+                let retained = Arc::clone(&completion_drops);
+                app.set_ingress_admission_policy(move |head| {
+                    let owned = DropCount(Arc::clone(&retained));
+                    let observed_completions = Arc::clone(&completed);
+                    AdmissionDecision::Admit {
+                        completion: ResponseEgressCompletion::new(move |report| {
+                            assert_eq!(report.outcome, ResponseEgressOutcome::Completed);
+                            observed_completions.fetch_add(1, Ordering::SeqCst);
+                            drop(owned);
+                        }),
+                        grant: IngressGrant::new(DropCount(Arc::clone(&grants))),
+                        read_deadline: head.read_deadline_after(Duration::from_secs(1)),
+                    }
+                });
+                let request = input(Method::POST, "/after", unread_body(&polls, &body_drops));
+                let head = IngressHeadParts::from_request(
+                    &request,
+                    IngressHeadAccounting::HostManaged,
+                    IngressFraming::HostManaged,
+                );
+                let IngressBeginOutcome::Admitted(prepared) = app
+                    .begin_ingress(head, app.monotonic_now())
+                    .expect("admission")
+                else {
+                    panic!("expected admitted request");
+                };
+                let mut envelope = block_on(app.dispatch_admitted(prepared, request));
+                assert_eq!(
+                    envelope.response_mut().status(),
+                    if fail {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::IM_A_TEAPOT
+                    }
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(body_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(grant_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(completions.load(Ordering::SeqCst), 0);
+                assert_eq!(completion_drops.load(Ordering::SeqCst), 0);
+                let Ok((prepared_response, _, mut attempt, clock)) =
+                    envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+                else {
+                    panic!("response egress begin");
+                };
+                drop(prepared_response);
+                assert!(attempt.begin_writing());
+                assert_eq!(completions.load(Ordering::SeqCst), 0);
+                assert_eq!(completion_drops.load(Ordering::SeqCst), 0);
+                assert!(attempt.complete(clock.now()));
+                assert!(!attempt.complete(clock.now()));
+                assert_eq!(completions.load(Ordering::SeqCst), 1);
+                assert_eq!(completion_drops.load(Ordering::SeqCst), 1);
+                drop(attempt);
+                assert_eq!(completions.load(Ordering::SeqCst), 1);
+                assert_eq!(completion_drops.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn terminal_hook_runs_once_before_matched_missing_method_and_fallback_dispatch() {
+            for (method, path, fallback) in [
+                (Method::POST, "/after", false),
+                (Method::GET, "/after", false),
+                (Method::GET, "/missing", false),
+                (Method::GET, "/after", true),
+                (Method::GET, "/missing", true),
+            ] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let clones = Arc::new(AtomicUsize::new(0));
+                let middleware = Arc::new(AtomicUsize::new(0));
+                let polls = Arc::new(AtomicUsize::new(0));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let admissions = Arc::new(AtomicUsize::new(0));
+                let mut app = App::new(
+                    RouterService::builder()
+                        .with_state(CountedState {
+                            clones: Arc::clone(&clones),
+                        })
+                        .with_manifest_json("{}")
+                        .middleware(CountingMiddleware {
+                            calls: Arc::clone(&middleware),
+                        })
+                        .pre_dispatch_hook(TerminalHook {
+                            calls: Arc::clone(&calls),
+                            fail: false,
+                        })
+                        .post("/after", unreachable_handler)
+                        .build(),
+                );
+                let admitted = Arc::clone(&admissions);
+                app.set_ingress_admission_policy(move |head| {
+                    admitted.fetch_add(1, Ordering::SeqCst);
+                    let read_deadline = head.read_deadline_after(Duration::from_secs(1));
+                    if fallback {
+                        AdmissionDecision::ReadBodyBeforeFallback {
+                            completion: ResponseEgressCompletion::empty(),
+                            grant: IngressGrant::empty(),
+                            max_body_bytes: 0,
+                            read_deadline,
+                            on_exceeded: BufferedIngressResponse::text(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "too large",
+                            ),
+                            on_timeout: BufferedIngressResponse::text(
+                                StatusCode::REQUEST_TIMEOUT,
+                                "late",
+                            ),
+                        }
+                    } else {
+                        AdmissionDecision::Admit {
+                            completion: ResponseEgressCompletion::empty(),
+                            grant: IngressGrant::empty(),
+                            read_deadline,
+                        }
+                    }
+                });
+                let response = complete(envelope(dispatch(
+                    &app,
+                    input(method, path, unread_body(&polls, &drops)),
+                )));
+                assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+                assert_eq!(response.headers()["allow"], "POST");
+                assert_eq!(response.headers()["www-authenticate"], "Basic");
+                assert_eq!(response.body().as_bytes(), Some(b"local".as_slice()));
+                assert_eq!(admissions.load(Ordering::SeqCst), 1);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(clones.load(Ordering::SeqCst), 0);
+                assert_eq!(middleware.load(Ordering::SeqCst), 0);
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        fn unread_body(polls: &Arc<AtomicUsize>, drops: &Arc<AtomicUsize>) -> Body {
+            let observed_polls = Arc::clone(polls);
+            let owned = DropCount(Arc::clone(drops));
+            Body::from_stream(stream::poll_fn(move |_| {
+                let _retained = &owned;
+                observed_polls.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(None::<Result<Bytes, EdgeError>>)
+            }))
+        }
+    }
+
+    use std::io::Error as IoError;
+    use std::mem::take;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::executor::block_on;
+    use futures::future::ready;
+    use futures::stream;
+    use tower_service::Service as _;
+
+    use crate::action;
+    use crate::body::Body;
+    use crate::context::RequestContext;
+    use crate::error::EdgeError;
+    use crate::http::{Method, Request, Response, StatusCode, request_builder, response_builder};
+    use crate::introspection::{ManifestJson, RouteTable};
+    use crate::middleware::{Middleware, Next};
+    use crate::router::{PreDispatchHook, RouterService};
+
+    struct CountedState {
+        clones: Arc<AtomicUsize>,
+    }
+
+    impl Clone for CountedState {
+        fn clone(&self) -> Self {
+            self.clones.fetch_add(1, Ordering::SeqCst);
+            Self {
+                clones: Arc::clone(&self.clones),
+            }
+        }
+
+        fn clone_from(&mut self, source: &Self) {
+            *self = source.clone();
+        }
+    }
+
+    struct CountingMiddleware {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait(?Send)]
+    impl Middleware for CountingMiddleware {
+        async fn handle(&self, ctx: RequestContext, next: Next<'_>) -> Result<Response, EdgeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            next.run(ctx).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct HookMarker;
+
+    struct InspectHook;
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for InspectHook {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            let local = Rc::new(7_u32);
+            let body = take(request.body_mut());
+            body.into_bytes_bounded(0).await?;
+            ready(()).await;
+            assert_eq!(*local, 7_u32, "should support a non-Send hook future");
+            Ok(Some(
+                response_builder()
+                    .status(204)
+                    .body(Body::empty())
+                    .map_err(EdgeError::internal)?,
+            ))
+        }
+    }
+
+    struct RoutingMutationHook {
+        method: bool,
+        terminal: bool,
+    }
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for RoutingMutationHook {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            if self.method {
+                *request.method_mut() = Method::POST;
+            } else {
+                *request.uri_mut() = "/after".parse().expect("fixed URI");
+            }
+            if self.terminal {
+                return response_builder()
+                    .status(204)
+                    .body(Body::empty())
+                    .map(Some)
+                    .map_err(EdgeError::internal);
+            }
+            Ok(None)
+        }
+    }
+
+    struct ContinueHook;
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for ContinueHook {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            assert!(request.extensions().get::<CountedState>().is_none());
+            *request.uri_mut() = "/after?hook=present"
+                .parse()
+                .expect("should parse fixed URI");
+            request.headers_mut().insert(
+                "x-hook",
+                "present".parse().expect("should parse fixed header"),
+            );
+            request.extensions_mut().insert(HookMarker);
+            *request.body_mut() = Body::text("changed");
+            Ok(None)
+        }
+    }
+
+    struct TerminalHook {
+        calls: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for TerminalHook {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(request.extensions().get::<CountedState>().is_none());
+            assert!(request.extensions().get::<ManifestJson>().is_none());
+            assert!(request.extensions().get::<RouteTable>().is_none());
+            if self.fail {
+                return Err(EdgeError::bad_request("hook rejected request"));
+            }
+            Ok(Some(
+                response_builder()
+                    .status(418)
+                    .header("allow", "POST")
+                    .header("www-authenticate", "Basic")
+                    .body(Body::text("local"))
+                    .map_err(EdgeError::internal)?,
+            ))
+        }
+    }
+
+    #[action]
+    async fn after_handler(context: RequestContext) -> Result<Response, EdgeError> {
+        assert!(context.extensions().get::<HookMarker>().is_some());
+        assert!(context.extensions().get::<CountedState>().is_some());
+        assert_eq!(context.headers()["x-hook"], "present");
+        assert_eq!(context.uri().query(), Some("hook=present"));
+        assert_eq!(
+            context.body_bytes(16).await.expect("changed body").as_ref(),
+            b"changed"
+        );
+        response_builder()
+            .body(Body::text("continued"))
+            .map_err(EdgeError::internal)
+    }
+
+    #[action(manifest, routes)]
+    async fn unreachable_handler() -> &'static str {
+        panic!("should short-circuit before handler");
+    }
+
+    fn input(method: Method, path: &str, body: Body) -> Request {
+        request_builder()
+            .method(method)
+            .uri(path)
+            .body(body)
+            .expect("should build hook input")
+    }
+
+    #[test]
+    fn pre_dispatch_continuation_uses_mutated_request() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let router = RouterService::builder()
+            .with_state(CountedState {
+                clones: Arc::clone(&clones),
+            })
+            .pre_dispatch_hook(ContinueHook)
+            .post("/after", after_handler)
+            .build();
+        let response = block_on(router.oneshot(input(Method::POST, "/after", Body::empty())))
+            .expect("should dispatch continuing request");
+        assert_eq!(response.body().as_bytes(), Some(b"continued".as_slice()));
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn pre_dispatch_rejects_continued_method_or_path_changes() {
+        for method in [false, true] {
+            let clones = Arc::new(AtomicUsize::new(0));
+            let middleware_calls = Arc::new(AtomicUsize::new(0));
+            let router = RouterService::builder()
+                .with_state(CountedState {
+                    clones: Arc::clone(&clones),
+                })
+                .middleware(CountingMiddleware {
+                    calls: Arc::clone(&middleware_calls),
+                })
+                .pre_dispatch_hook(RoutingMutationHook {
+                    method,
+                    terminal: false,
+                })
+                .post("/before", unreachable_handler)
+                .get("/after", unreachable_handler)
+                .build();
+            let error = block_on(
+                router
+                    .clone()
+                    .call(input(Method::GET, "/before", Body::empty())),
+            )
+            .expect_err("routing mutation must fail before lookup");
+            assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(
+                error
+                    .to_string()
+                    .contains("pre-dispatch hook changed the request method or path")
+            );
+            let response = block_on(router.oneshot(input(Method::GET, "/before", Body::empty())))
+                .expect("oneshot renders routing mutation error");
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(clones.load(Ordering::SeqCst), 0);
+            assert_eq!(middleware_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn pre_dispatch_terminal_response_allows_method_or_path_changes() {
+        for method in [false, true] {
+            let router = RouterService::builder()
+                .pre_dispatch_hook(RoutingMutationHook {
+                    method,
+                    terminal: true,
+                })
+                .build();
+            let response = block_on(router.clone().call(input(
+                Method::GET,
+                "/before",
+                Body::empty(),
+            )))
+            .expect("terminal response precedes mutation guard");
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let oneshot_response =
+                block_on(router.oneshot(input(Method::GET, "/before", Body::empty())))
+                    .expect("terminal response through oneshot");
+            assert_eq!(oneshot_response.status(), StatusCode::NO_CONTENT);
+        }
+    }
+
+    #[test]
+    fn pre_dispatch_errors_stop_routing_in_both_service_apis() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = RouterService::builder()
+            .with_state(CountedState {
+                clones: Arc::clone(&clones),
+            })
+            .pre_dispatch_hook_arc(Arc::new(TerminalHook {
+                calls: Arc::clone(&calls),
+                fail: true,
+            }))
+            .post("/after", after_handler)
+            .build();
+        let error = block_on(
+            router
+                .clone()
+                .call(input(Method::POST, "/after", Body::empty())),
+        )
+        .expect_err("should propagate hook error from Service");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        let response = block_on(router.oneshot(input(Method::POST, "/after", Body::empty())))
+            .expect("should render hook error from oneshot");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(clones.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn pre_dispatch_hook_is_shared_across_router_clones() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = RouterService::builder()
+            .pre_dispatch_hook_arc(Arc::new(TerminalHook {
+                calls: Arc::clone(&calls),
+                fail: false,
+            }))
+            .build();
+        for service in [router.clone(), router] {
+            let response = block_on(service.oneshot(input(Method::GET, "/missing", Body::empty())))
+                .expect("should reuse shared hook");
+            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn pre_dispatch_inspects_empty_stream_without_send_bound() {
+        let router = RouterService::builder()
+            .pre_dispatch_hook_arc(Arc::new(InspectHook))
+            .build();
+        let chunks = stream::iter([Ok::<Bytes, EdgeError>(Bytes::new()), Ok(Bytes::new())]);
+        let response =
+            block_on(router.oneshot(input(Method::POST, "/unknown", Body::from_stream(chunks))))
+                .expect("should inspect clean streamed EOF");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    #[should_panic(expected = "pre-dispatch hook already registered")]
+    fn pre_dispatch_registration_rejects_duplicate_hook() {
+        let _builder = RouterService::builder()
+            .pre_dispatch_hook_arc(Arc::new(InspectHook))
+            .pre_dispatch_hook(ContinueHook);
+    }
+
+    #[test]
+    fn pre_dispatch_rejects_nonempty_or_failed_streams() {
+        let router = RouterService::builder()
+            .pre_dispatch_hook_arc(Arc::new(InspectHook))
+            .build();
+        let chunks = stream::iter([Ok::<Bytes, EdgeError>(Bytes::from_static(b"x"))]);
+        let response =
+            block_on(router.oneshot(input(Method::POST, "/unknown", Body::from_stream(chunks))))
+                .expect("should render nonempty body rejection");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let failure = stream::iter([Err::<Bytes, EdgeError>(EdgeError::internal(
+            IoError::other("fixture failure"),
+        ))]);
+        let failure_response =
+            block_on(router.oneshot(input(Method::POST, "/unknown", Body::from_stream(failure))))
+                .expect("should render stream failure");
+        assert_eq!(failure_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn pre_dispatch_terminal_response_precedes_method_path_and_lifecycle() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let clones = Arc::new(AtomicUsize::new(0));
+        let middleware_calls = Arc::new(AtomicUsize::new(0));
+        let router = RouterService::builder()
+            .with_state(CountedState {
+                clones: Arc::clone(&clones),
+            })
+            .with_manifest_json("{}")
+            .middleware(CountingMiddleware {
+                calls: Arc::clone(&middleware_calls),
+            })
+            .pre_dispatch_hook_arc(Arc::new(TerminalHook {
+                calls: Arc::clone(&calls),
+                fail: false,
+            }))
+            .post("/after", unreachable_handler)
+            .build();
+        for (method, path) in [
+            (Method::POST, "/after"),
+            (Method::GET, "/after"),
+            (
+                Method::from_bytes(b"EXAMPLE-METHOD").expect("should parse extension method"),
+                "/after",
+            ),
+            (Method::GET, "/missing"),
+        ] {
+            let response = block_on(router.oneshot(input(method, path, Body::empty())))
+                .expect("should intercept before method/path lookup");
+            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+            assert_eq!(response.headers()["allow"], "POST");
+            assert_eq!(response.headers()["www-authenticate"], "Basic");
+            assert_eq!(response.body().as_bytes(), Some(b"local".as_slice()));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(clones.load(Ordering::SeqCst), 0);
+        assert_eq!(middleware_calls.load(Ordering::SeqCst), 0);
     }
 }

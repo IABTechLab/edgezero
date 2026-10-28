@@ -118,6 +118,18 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Main Integration
 
+- Integrate main's pre-dispatch hooks and immutable request-ingress fidelity metadata without
+  bypassing route-aware admission, lazy inbound reads or owned response egress. Canonical
+  adapters admit first, then run the hook exactly once before dispatch or fallback reads;
+  refusals and aborts do not invoke the hook. Direct router calls run it before route lookup.
+  Preserve method/path continuation checks and conservative provider-fidelity reporting.
+- Route Cloudflare runtime-head conversion failures through detached Send/Abort policy and
+  exactly-once egress completion. `CloudflareRequestContext::insert` now accepts `Arc<Context>`
+  so request and error delivery share the same runtime ownership; no legacy overload remains.
+- Migrate main's request-fidelity fixture to fallible application assembly, adapter-owned
+  streaming delivery and the same signed Spin SDK source/revision. Extend the structured
+  dependency guard and retain both Node contracts and separate browser-only ingress tests.
+  Historical runtime observations do not qualify this merged candidate or promote capabilities.
 - Move the shared native HTTP test runner to the unpublished, standalone
   `crates/edgezero-test-harness` workspace. Keep fixture applications separate, preserve guest
   build/output paths, record both lockfiles and remove the old runner package without aliases.

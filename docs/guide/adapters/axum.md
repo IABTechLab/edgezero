@@ -533,6 +533,29 @@ extensions, and body. Restarting the server creates a fresh app. Native Axum
 measurements are a useful ownership reference but do not establish WASM runtime
 performance or resource lifetimes.
 
+## Ingress provenance
+
+Conversion captures runtime URI parts and retains the original HeaderMap and
+extensions. Canonical dispatch attaches the body lazily after admission, under
+the admitted limits and deadline. The standard
+plain HTTP listener supplies a private transport marker. Origin is available
+only with that marker and one valid Host consistent with any URI authority and
+scheme; forwarded headers do not supply a scheme. Generic conversion without
+the marker leaves origin unavailable.
+
+The historical raw TCP observations imported from main `87456c70` retain
+extension methods, tested path spelling, same-name duplicates and FF values.
+Rerun the fixture with the merged candidate's dependencies before citing a new
+result. In that record, Hyper folds identical Content-Length values and
+rejects conflicting lengths before the hook. Common field multiplicity remains
+`Unknown`, including Content-Length: the runtime binding does not reveal whether
+the parser folded original fields. Global wire order remains unavailable.
+See [the capability matrix](./overview#inbound-request-fidelity).
+
+Origin validation checks HTTP(S) URI authority syntax, including registered
+names and trailing-dot hosts. It does not establish DNS resolution or ownership.
+Consumers that require DNS-label syntax must apply that additional policy.
+
 ## Next Steps
 
 - Deploy to [Fastly Compute](/guide/adapters/fastly) for production

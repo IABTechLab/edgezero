@@ -37,8 +37,11 @@ jobs:
             target/
             tests/fixtures/reusable-app/target/
             crates/edgezero-test-harness/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-${{ hashFiles('**/Cargo.lock') }}
+            tests/fixtures/request-fidelity/target/
+            tests/fixtures/request-fidelity-runner/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-ingress-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-ingress-v1-
             ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-
 
       - name: Retrieve Rust version
@@ -49,8 +52,8 @@ jobs:
       - name: Set up Rust tool chain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: "clippy, rustfmt"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
+          components: clippy, rustfmt
 
       - name: Install wasm targets for generated-project checks
         if: matrix.suite == 'cli' || matrix.suite == 'workspace' || matrix.suite == 'app-demo'
@@ -71,6 +74,8 @@ jobs:
           cargo fetch --locked --manifest-path examples/app-demo/Cargo.toml
           cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
+          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
+          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml
 
       - name: No placeholder pins
         if: matrix.suite == 'workspace'
@@ -119,6 +124,7 @@ jobs:
       # deploy fixture). A mismatch only surfaces as a confusing
       # "trait bound not satisfied" in a deploy smoke job, so gate it here.
       - name: Shared dependency pins agree
+        if: matrix.suite == 'workspace'
         run: ./scripts/check_shared_dep_pins.sh
 
       - name: Nested AppConfig audit
@@ -128,6 +134,13 @@ jobs:
       - name: Nested AppConfig checker tests
         if: matrix.suite == 'cli'
         run: cargo test -p edgezero-cli --features nested-app-config-check --bin check_no_nested_app_config
+
+      - name: Verify native request ingress harness
+        if: matrix.suite == 'workspace'
+        run: |
+          cargo fmt --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml --all -- --check
+          cargo test --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml --locked
+          cargo clippy --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml --all-targets --locked -- -D warnings
 
       - name: Lifecycle fixture host tests
         if: matrix.suite == 'workspace'
@@ -310,8 +323,11 @@ jobs:
             target/
             tests/fixtures/reusable-app/target/
             crates/edgezero-test-harness/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-${{ hashFiles('**/Cargo.lock', '.tool-versions', 'patches/viceroy/0.21.0-body-readiness.patch') }}
+            tests/fixtures/request-fidelity/target/
+            tests/fixtures/request-fidelity-runner/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-${{ hashFiles('**/Cargo.lock', '.tool-versions', 'patches/viceroy/0.21.0-body-readiness.patch') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-
 
       - name: Retrieve Rust version
@@ -323,6 +339,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
+          components: clippy, rustfmt
 
       - name: Add wasm target
         run: rustup target add ${{ matrix.target }}
@@ -337,10 +354,28 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ steps.guest-node-version.outputs.version }}
+          cache: npm
+          cache-dependency-path: tests/fixtures/request-fidelity/package-lock.json
 
       - name: Verify Cloudflare guest stream fixture
         if: matrix.adapter == 'cloudflare'
         run: node --test crates/edgezero-adapter-cloudflare/tests/worker_runtime.test.mjs
+
+      - name: Set up matching browser and driver
+        if: matrix.adapter == 'cloudflare'
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: 154.0.8037.92
+          install-chromedriver: true
+          install-dependencies: true
+
+      - name: Bind browser tests to pinned Chrome
+        if: matrix.adapter == 'cloudflare'
+        env:
+          CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          node -e 'require("node:fs").writeFileSync(require("node:path").join(process.env.RUNNER_TEMP, "edgezero-webdriver.json"), JSON.stringify({"goog:chromeOptions": {binary: process.env.CHROME_BINARY}}))'
 
       - name: Resolve wasm-bindgen CLI version
         if: matrix.adapter == 'cloudflare'
@@ -476,6 +511,8 @@ jobs:
             cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
             cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
           fi
+          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
+          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml
 
       - name: Run ${{ matrix.adapter }} wasm tests
         env:
@@ -506,6 +543,8 @@ jobs:
         run: |
           version="$(awk '$1 == "spin" {print $2}' .tool-versions)"
           test "$version" = 4.1.0
+          fixture_version="$(awk '{ sub(/[[:space:]]*#.*/, "") } /^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") } in_pins && $1 == "spin-cli" && $2 == "=" { gsub(/"/, "", $3); count++; found=$3 } END { if (count == 1) print found }' tests/fixtures/request-fidelity/Cargo.toml)"
+          test "$fixture_version" = "$version"
           install_dir="$RUNNER_TEMP/spin-wire-$version"
           mkdir -p "$install_dir"
           archive="spin-v${version}-linux-amd64.tar.gz"
@@ -513,6 +552,7 @@ jobs:
           printf '%s  %s\n' aeeb892f94cf861f5302546faa0bdaa82cc4be30539621299746a6dc011f3b5a "$install_dir/$archive" | sha256sum --check --strict
           tar -xzf "$install_dir/$archive" -C "$install_dir"
           export PATH="$install_dir:$PATH"
+          echo "$install_dir" >> "$GITHUB_PATH"
           test "$(spin --version | awk '{print $2}')" = "$version"
           run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/outbound/redirect/spin"
           CARGO_NET_OFFLINE=true ./scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output "$run"
@@ -525,6 +565,15 @@ jobs:
               | length == 68 and ([.[].origin_requests | length] | add) == 84)
             and all(.[]; .status != "fail")
           ' "$run/events.jsonl"
+
+      - name: Run Cloudflare browser ingress fidelity tests
+        if: matrix.adapter == 'cloudflare'
+        env:
+          CHROMEDRIVER: ${{ steps.chrome.outputs.chromedriver-path }}
+          WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ runner.temp }}/edgezero-webdriver.json
+          HEADLESS: "1"
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: scripts/run_test_nonzero.sh ingress_preserves_runtime_extension_methods_and_header_strings cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --test ingress_fidelity
 
       - name: Run Cloudflare outbound runtime unit tests
         if: matrix.adapter == 'cloudflare'
@@ -545,6 +594,69 @@ jobs:
 
       - name: Check ${{ matrix.adapter }} wasm feature matrix
         run: bash scripts/check_adapter_feature_matrix.sh ${{ matrix.adapter }} ${{ matrix.target }}
+
+      - name: Read fixture worker-build pin
+        if: matrix.adapter == 'cloudflare'
+        id: worker-build-pin
+        shell: bash
+        run: |
+          version="$(awk '{ sub(/[[:space:]]*#.*/, "") } /^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") } in_pins && $1 == "worker-build" && $2 == "=" { gsub(/"/, "", $3); count++; found=$3 } END { if (count == 1) print found }' tests/fixtures/request-fidelity/Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The pinned release has no Linux prebuilt. Keep its compiled executable
+      # separate from Cargo's broad bin cache and verify it on every restore.
+      - name: Cache pinned worker-build executable
+        if: matrix.adapter == 'cloudflare'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/worker-build
+          key: worker-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.worker-build-pin.outputs.version }}
+
+      - name: Install lock-matched worker-build
+        if: matrix.adapter == 'cloudflare'
+        shell: bash
+        env:
+          VERSION: ${{ steps.worker-build-pin.outputs.version }}
+        run: |
+          install_dir="$RUNNER_TEMP/worker-build"
+          if [[ "$("$install_dir/bin/worker-build" --version 2>/dev/null || true)" != "$VERSION" ]]; then
+            cargo install worker-build --version "$VERSION" --locked --root "$install_dir" --force
+          fi
+          test "$("$install_dir/bin/worker-build" --version)" = "$VERSION"
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
+
+      - name: Check isolated fixture formatting
+        run: cargo fmt --manifest-path tests/fixtures/request-fidelity/Cargo.toml --all -- --check
+
+      - name: Lint isolated ingress fixture
+        run: >-
+          cargo clippy --manifest-path tests/fixtures/request-fidelity/Cargo.toml
+          --features ${{ matrix.adapter }} --target ${{ matrix.target }}
+          --all-targets --locked -- -D warnings
+
+      - name: Run local HTTP ingress probes
+        shell: bash
+        env:
+          REPAIRED_VICEROY: ${{ steps.viceroy-repair.outputs.executable }}
+        run: |
+          if [ "${{ matrix.adapter }}" = "fastly" ]; then
+            repaired_dir="$(dirname "$REPAIRED_VICEROY")"
+            export PATH="$repaired_dir:$PATH"
+            test "$(command -v viceroy)" = "$REPAIRED_VICEROY"
+          fi
+          if [ "${{ matrix.adapter }}" = "cloudflare" ]; then
+            version="$(awk '$1 == "name" && $3 == "\"wasm-bindgen\"" { in_pkg=1; next } in_pkg && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' tests/fixtures/request-fidelity/Cargo.lock)"
+            test -n "$version"
+            WASM_BINDGEN_BIN="$(command -v wasm-bindgen || true)"
+            if [[ -z "$WASM_BINDGEN_BIN" ]] || [[ "$("$WASM_BINDGEN_BIN" --version 2>/dev/null || true)" != "wasm-bindgen $version" ]]; then
+              cargo install wasm-bindgen-cli --version "$version" --locked --root "$RUNNER_TEMP/fixture-wasm-bindgen"
+              WASM_BINDGEN_BIN="$RUNNER_TEMP/fixture-wasm-bindgen/bin/wasm-bindgen"
+            fi
+            export WASM_BINDGEN_BIN
+          fi
+          ./scripts/test-request-fidelity.sh ${{ matrix.adapter }}
+
       - name: Fastly reusable HTTP smoke
         if: matrix.adapter == 'fastly'
         env:

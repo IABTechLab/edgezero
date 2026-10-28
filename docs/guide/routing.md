@@ -190,6 +190,171 @@ surfaces before any traffic, but the Fastly, Cloudflare, and Spin entry points c
 the first request.
 Run the app under the Axum dev server before deploying to an edge target.
 
+## Intercepting before dispatch
+
+Use an optional `PreDispatchHook` to intercept an admitted request before
+handler, middleware or router-generated 404/405 fallback execution. Canonical
+adapter dispatch resolves the route during admission, before the hook. The hook
+cannot bypass admission or change that route selection. Direct
+`RouterService::call` and `RouterService::oneshot` instead perform their route
+lookup after the hook; they are not substitutes for canonical adapter admission.
+The hook receives the converted request before router state, introspection and
+`RequestContext` injection. Its future can be non-`Send`.
+
+```rust
+use async_trait::async_trait;
+use edgezero_core::body::Body;
+use edgezero_core::error::EdgeError;
+use edgezero_core::http::{Request, Response, response_builder};
+use edgezero_core::router::{PreDispatchHook, RouterService};
+
+struct ExampleHook;
+
+#[async_trait(?Send)]
+impl PreDispatchHook for ExampleHook {
+    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        if request.headers().contains_key("x-example-stop") {
+            return Ok(Some(
+                response_builder()
+                    .status(204)
+                    .body(Body::empty())
+                    .map_err(EdgeError::internal)?,
+            ));
+        }
+        Ok(None)
+    }
+}
+
+let router = RouterService::builder()
+    .pre_dispatch_hook(ExampleHook)
+    .build();
+```
+
+`Ok(None)` continues with modified headers, extensions, remaining body and URI
+query. The method and URI path must remain unchanged; changing either returns
+an internal error before handler, middleware or fallback execution; canonical
+admission has already selected the route. Consuming a stream does not restore
+it. `Ok(Some(response))` skips router state, introspection, request-context
+injection, middleware, handlers and fallback execution. In canonical dispatch,
+the response still uses the admitted response-egress policy and coordinator.
+Return a complete response when exact challenge or hardening headers matter.
+`Err(error)` stops dispatch; direct `Service::call` propagates it,
+while `RouterService::oneshot` renders it through the existing error response
+conversion.
+
+Register a value with `pre_dispatch_hook`, or an existing shared hook with
+`pre_dispatch_hook_arc`. A second registration panics during router construction.
+Router clones share the same hook instance.
+Without a hook, existing routing is unchanged. Admission, lazy request-body
+ownership, capability bootstrap and response egress retain their adapter-owned
+boundaries; the hook does not replace those layers.
+
+The hook value must be `Send + Sync + 'static`; it cannot hold `Rc` state,
+although its returned future may be non-`Send`. Adapter extensions such as
+`RequestIngress`, platform context and store registries are available. Router
+state, introspection and `RequestContext` have not been injected yet:
+
+```rust
+let ingress = request.extensions()
+    .get::<edgezero_core::ingress::RequestIngress>();
+```
+
+If the hook consumes the body and returns `Ok(None)`, the handler receives only
+what remains unless the hook replaces the body. Generated `app!` applications
+cannot install a hook through the macro or modify the built router. A
+hand-written `Hooks` implementation does not inherit the generated metadata.
+Move your existing `app!` invocation **unchanged, including all arguments**
+(`owns_logging = …`, `state = …`), into a separate module. Delegate the baked
+manifest, stores, logging, name and application configuration. For example, an application whose
+existing invocation uses `owns_logging = true, state = 42_u32` would keep them.
+If the invocation has no app name, scaffolded projects use
+`app!("../../edgezero.toml")`, which defines `App`; import it as
+`use manifest_app::App as ManifestApp;` instead of the import below.
+
+When combining this with the hook example above, omit its illustrative
+`let router = …build();` statement and duplicate `RouterService` import:
+
+```rust
+use edgezero_core::app::{App, Hooks, StoresMetadata};
+use edgezero_core::manifest::{BakedManifest, ResolvedLoggingConfig};
+use edgezero_core::router::RouterService;
+use std::sync::{Arc, LazyLock};
+
+mod manifest_app {
+    edgezero_core::app!(
+        "edgezero.toml", ManifestApp,
+        owns_logging = true, state = 42_u32
+    );
+}
+use manifest_app::ManifestApp;
+
+static MANIFEST_JSON: LazyLock<Arc<str>> = LazyLock::new(|| {
+    Arc::from(ManifestApp::manifest_json().expect("manifest application"))
+});
+
+pub struct HookedApp;
+
+impl Hooks for HookedApp {
+    fn routes() -> Result<RouterService, EdgeError> {
+        Ok(RouterService::builder()
+            .pre_dispatch_hook(ExampleHook)
+            .with_manifest_json(Arc::clone(&MANIFEST_JSON))
+            .with_state(42_u32)
+            // Re-register every manifest route and middleware here, in order.
+            .build())
+    }
+
+    fn manifest() -> BakedManifest { ManifestApp::manifest() }
+    fn manifest_json() -> Option<&'static str> { ManifestApp::manifest_json() }
+    fn stores() -> StoresMetadata { ManifestApp::stores() }
+    fn logging_for(adapter: &str) -> ResolvedLoggingConfig {
+        ManifestApp::logging_for(adapter)
+    }
+    fn owns_logging() -> bool { ManifestApp::owns_logging() }
+    fn name() -> &'static str { ManifestApp::name() }
+    fn configure(app: &mut App) -> Result<(), EdgeError> {
+        ManifestApp::configure(app)
+    }
+}
+```
+
+This outline uses `ExampleHook` from above, with code in `src/lib.rs` and
+`edgezero.toml` at the crate root. Add a direct `async-trait` dependency:
+core does not re-export that crate. The `app!` path is relative to the crate
+root. The wrapper delegates `manifest()` and `manifest_json()` so adapter
+environment resolution and introspection keep the original baked contract.
+Import any names used by the original arguments into the nested module (for
+example, `use super::app_state;` for `state = app_state()`).
+Point every adapter entry point (`run_app::<…>`, `serve_app::<…>`,
+`dispatch_app::<…>`, their `_with_*` variants, and any
+`App::build::<…>(platform)` call inside a custom `serve_custom`/`run_custom`
+callback) at `HookedApp`. Construct manual applications with
+`App::build::<HookedApp>(platform)?`, preserving fallible assembly and platform
+validation. Its `routes()` must explicitly
+re-register **all routes, manifest middleware and configured state**; delegating
+metadata alone does not preserve them. `with_manifest_json` above preserves
+manifest introspection. The lazy static wraps the compile-time manifest JSON
+in an `Arc` once per runtime instance, without runtime TOML parsing.
+Cloudflare isolates and reused Spin P3 instances share this cached JSON. Axum's `run_app` and Fastly's `serve_app` build the application once, so
+`routes()` already runs once there. Classic Fastly Compute starts a fresh
+instance per request and pays the initialization cost each time. EdgeZero's
+spin-sdk 7 `#[http_service]` entry points export WASI P3 HTTP components.
+[Spin 4.1 defaults](https://github.com/spinframework/spin/blob/v4.1.0/crates/trigger-http/src/lib.rs)
+allow up to 128 requests per instance and 16 concurrent requests, controlled by
+`--max-instance-reuse-count` and `--max-instance-concurrent-reuse-count`.
+Fresh instances still pay the initialization cost; reuse is not guaranteed.
+The macro embeds its JSON at compile time and exposes it through
+`Hooks::manifest_json()`. Registering hooks directly through `app!` is tracked in
+[issue #434](https://github.com/IABTechLab/edgezero/issues/434).
+This manual duplication must stay synchronized with `app!` and the manifest,
+including matching `.with_state(...)` to the original macro's state argument.
+The complete executable example and regression tests are in
+`crates/edgezero-macros/tests/hooked_app.rs`. The store-free ingress fixture is
+not a metadata-preserving example for manifest applications.
+
+Consult [adapter ingress capabilities](./adapters/overview#inbound-request-fidelity)
+before classifying a request using its target or duplicate headers.
+
 ## Next Steps
 
 - Learn about [Handlers & Extractors](/guide/handlers) for processing requests

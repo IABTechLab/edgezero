@@ -12,11 +12,6 @@ pub struct CloudflareRequestContext {
 
 impl CloudflareRequestContext {
     #[inline]
-    pub(crate) fn context_handle(&self) -> Arc<Context> {
-        Arc::clone(&self.ctx)
-    }
-
-    #[inline]
     #[must_use]
     pub fn ctx(&self) -> &Context {
         &self.ctx
@@ -35,9 +30,9 @@ impl CloudflareRequestContext {
     }
 
     #[inline]
-    pub fn insert(request: &mut Request, env: Env, ctx: Context) {
+    pub fn insert(request: &mut Request, env: Env, ctx: Arc<Context>) {
         request.extensions_mut().insert(Self {
-            ctx: Arc::new(ctx),
+            ctx,
             env: Arc::new(env),
         });
     }

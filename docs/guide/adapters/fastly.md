@@ -121,7 +121,7 @@ pub fn main() -> Result<(), fastly::Error> {
 
 The request closure runs once before admission for each request that reaches
 preparation; insert whatever typed values your handlers need, then read them via a custom extractor or
-`ctx.request().extensions().get::<Ja4>()`. The optional state returned by
+`ctx.extensions().get::<Ja4>()`. The optional state returned by
 `run_app_with_hooks` is available only after EdgeZero reaches its strongest
 terminal delivery boundary. Detached admission responses skip the response
 closure and return `None`.
@@ -359,7 +359,7 @@ use edgezero_adapter_fastly::context::FastlyRequestContext;
 
 async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
     // Access Fastly context from extensions
-    if let Some(fastly_ctx) = FastlyRequestContext::get(ctx.request()) {
+    if let Some(fastly_ctx) = ctx.extensions().get::<FastlyRequestContext>() {
         let client_ip = fastly_ctx.client_ip;
         // ...
     }
@@ -465,8 +465,8 @@ idle waiting is billed too. Limits do not guarantee reuse; any request may start
 fresh sandbox. The fixtures pin standalone Viceroy 0.21.0; any observed per-guest
 request ceiling belongs to that runtime and run, not to the SDK request limit.
 `edgezero serve` runs `fastly compute serve`, whose bundled Viceroy can differ.
-Record the executable and observed reuse rather than assuming a local ceiling
-establishes deployed behavior.
+Record the executable and observed reuse; recheck local ceilings when pins
+change. Neither local runtime establishes deployed behavior.
 Lifetime and memory checks occur between callbacks and cannot interrupt
 blocked application work. Before using a local memory limit, verify that the
 guest's memory-snapshot call succeeds: an unsupported snapshot conservatively
@@ -716,6 +716,47 @@ results do not establish deployed eviction frequency, endpoint-handle validity,
 resource accounting, or performance. Named endpoint delivery must be verified
 separately from echoed stdout. Roll back by restoring the original single-request
 entry point and removing retained state, not merely setting a request limit of one.
+
+## Early ingress snapshots
+
+Call `request::capture_request_ingress(&req)` immediately after acquiring the
+native request and before URL-based shortcuts or native mutation. It borrows
+the same request without round-tripping handles. With Fastly SDK 0.13.1,
+safe raw-target acquisition is unavailable: the snapshot records `NotExposed`
+first, then uses the SDK runtime URL only to recover the canonical origin.
+This URL access can normalize the path; it never establishes original-target
+preservation. Client requests need one valid Host consistent with the runtime
+authority, including equivalent default ports. Origin provenance is
+`RuntimeUri`; absent TLS metadata does not establish an HTTP scheme. Synthetic
+requests and missing, duplicate, invalid or inconsistent Host have no origin.
+
+The canonical send-owning path captures ingress before its raw-request
+preparation closure. Use `run_app_with_hooks` or
+`request::send_request_with_registries_and_hooks` for native preparation without
+losing that earlier snapshot. The latter preserves manifest store IDs through
+logical resource-link aliases and uses each logical config store ID as its
+entry key. Scratch extensions cannot replace the captured ingress metadata.
+A standalone snapshot does not add a response-returning dispatch API or
+independently establish the provenance of caller-supplied metadata.
+
+The historical Viceroy observations imported from main `87456c70` retain tested
+ordinary repeated fields and FF header octets. Rerun the ingress fixture on the
+merged candidate before treating these observations as current-run evidence.
+Identical repeated Content-Length fields fold into one; conflicting lengths are
+rejected with 400 before application dispatch. These parser observations do not
+establish preservation for every incoming request. The probes also
+demonstrate that a normalized native shortcut can receive
+`/reserved/../native` as `/native`. The router hook cannot intercept a shortcut
+taken earlier. Original-target support and safe shortcut exclusion remain
+blocked on the SDK accessor; client/TLS preservation must be proved on the
+appropriate ingress. See [the capability matrix](./overview#inbound-request-fidelity).
+
+Fastly exposes `get_original_header_names()` and `get_original_header_count()`.
+These provide original-name ordering and a total count, but cannot associate
+original fields with converted values. Local Viceroy can lowercase and deduplicate
+names, so global order is `Unknown`, pending production verification. Aggregate
+count equality cannot prove per-header multiplicity; no per-header guarantees
+are inferred from it.
 
 ## Next Steps
 

@@ -988,6 +988,205 @@ unpinned = { path = "somewhere" }
         assert_eq!(dependency_requirement(&parsed, "absent"), None);
     }
 
+    fn locked_package<'value>(
+        lock: &'value toml::Value,
+        name: &str,
+    ) -> Result<&'value toml::Value, String> {
+        let entries = lock
+            .get("package")
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| "missing lock packages".to_owned())?;
+        let mut matches = entries
+            .iter()
+            .filter(|entry| entry["name"].as_str() == Some(name));
+        let entry = matches
+            .next()
+            .ok_or_else(|| format!("missing {name} lock entry"))?;
+        if matches.next().is_some() {
+            return Err(format!("duplicate {name} lock entry"));
+        }
+        if entry.get("version").and_then(toml::Value::as_str).is_none() {
+            return Err(format!("missing {name} lock version"));
+        }
+        Ok(entry)
+    }
+
+    fn fidelity_dependency_contract(
+        root: &toml::Value,
+        root_lock: &toml::Value,
+        fixture: &toml::Value,
+        fixture_lock: &toml::Value,
+    ) -> Result<(), String> {
+        let dependencies = fixture
+            .get("dependencies")
+            .ok_or_else(|| "missing fixture dependencies".to_owned())?;
+        for name in ["fastly", "worker", "wasm-bindgen", "spin-sdk"] {
+            let expected = locked_package(root_lock, name)?;
+            let actual = locked_package(fixture_lock, name)?;
+            let requirement = dependency_requirement(dependencies, name)
+                .and_then(|value| value.strip_prefix('='))
+                .map(str::trim);
+            if requirement != expected["version"].as_str() {
+                return Err(format!(
+                    "{name} requires the exact workspace-locked version"
+                ));
+            }
+            for field in ["version", "source", "checksum"] {
+                if actual.get(field) != expected.get(field) {
+                    return Err(format!("{name} lock {field} differs"));
+                }
+            }
+        }
+        if dependency_git_source(dependencies, "spin-sdk")
+            != dependency_git_source(root, "spin-sdk")
+        {
+            return Err("Spin SDK Git source or revision differs".to_owned());
+        }
+        let builder = fixture
+            .get("package")
+            .and_then(|package| package.get("metadata"))
+            .and_then(|metadata| metadata.get("request-fidelity"))
+            .and_then(|metadata| metadata.get("worker-build"))
+            .and_then(toml::Value::as_str);
+        if builder != locked_package(root_lock, "worker")?["version"].as_str() {
+            return Err("worker-build metadata differs".to_owned());
+        }
+        Ok(())
+    }
+
+    fn fidelity_contract_inputs() -> (toml::Value, toml::Value, toml::Value, toml::Value) {
+        (
+            workspace_dependencies(include_str!("../../../Cargo.toml")),
+            toml::from_str(include_str!("../../../Cargo.lock")).expect("workspace lock"),
+            toml::from_str(include_str!(
+                "../../../tests/fixtures/request-fidelity/Cargo.toml"
+            ))
+            .expect("fidelity manifest"),
+            toml::from_str(include_str!(
+                "../../../tests/fixtures/request-fidelity/Cargo.lock"
+            ))
+            .expect("fidelity lock"),
+        )
+    }
+
+    #[test]
+    fn request_fidelity_dependencies_track_the_edgezero_workspace() {
+        let (root, root_lock, fixture, fixture_lock) = fidelity_contract_inputs();
+        fidelity_dependency_contract(&root, &root_lock, &fixture, &fixture_lock)
+            .expect("fidelity dependency identities");
+    }
+
+    #[test]
+    fn request_fidelity_dependency_contract_rejects_missing_duplicate_and_drifted_pins() {
+        let (root, root_lock, fixture, fixture_lock) = fidelity_contract_inputs();
+        for name in ["fastly", "worker", "wasm-bindgen", "spin-sdk"] {
+            for requirement in [None, Some("^99.0.0"), Some("=99.0.0"), Some("^0.13.1")] {
+                let mut changed = fixture.clone();
+                if let Some(value) = requirement {
+                    changed["dependencies"][name]["version"] =
+                        toml::Value::String(value.to_owned());
+                    changed["dependencies"][name]
+                        .as_table_mut()
+                        .unwrap()
+                        .insert(
+                            "test_version".to_owned(),
+                            toml::Value::String(format!(
+                                "={}",
+                                locked_package(&root_lock, name).unwrap()["version"]
+                                    .as_str()
+                                    .unwrap()
+                            )),
+                        );
+                } else {
+                    changed["dependencies"].as_table_mut().unwrap().remove(name);
+                }
+                assert!(
+                    fidelity_dependency_contract(&root, &root_lock, &changed, &fixture_lock)
+                        .is_err(),
+                    "{name}: {requirement:?}"
+                );
+            }
+            for change_root in [false, true] {
+                for field in ["version", "source", "checksum", "missing", "duplicate"] {
+                    let mut root_changed = root_lock.clone();
+                    let mut fixture_changed = fixture_lock.clone();
+                    let lock = if change_root {
+                        &mut root_changed
+                    } else {
+                        &mut fixture_changed
+                    };
+                    let entries = lock["package"].as_array_mut().unwrap();
+                    let index = entries
+                        .iter()
+                        .position(|entry| entry["name"].as_str() == Some(name))
+                        .unwrap();
+                    match field {
+                        "missing" => {
+                            entries.remove(index);
+                        }
+                        "duplicate" => {
+                            entries.push(entries[index].clone());
+                        }
+                        _ => {
+                            entries[index]
+                                .as_table_mut()
+                                .unwrap()
+                                .insert(field.to_owned(), toml::Value::String("drift".to_owned()));
+                        }
+                    }
+                    assert!(
+                        fidelity_dependency_contract(
+                            &root,
+                            &root_changed,
+                            &fixture,
+                            &fixture_changed
+                        )
+                        .is_err(),
+                        "{name}: root={change_root}, {field}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn request_fidelity_dependency_contract_rejects_missing_metadata_and_sources() {
+        let (root, root_lock, fixture, fixture_lock) = fidelity_contract_inputs();
+        for key in ["git", "rev"] {
+            let mut changed = fixture.clone();
+            changed["dependencies"]["spin-sdk"]
+                .as_table_mut()
+                .unwrap()
+                .remove(key);
+            assert!(
+                fidelity_dependency_contract(&root, &root_lock, &changed, &fixture_lock).is_err()
+            );
+        }
+        for key in ["worker-build", "request-fidelity"] {
+            let mut changed = fixture.clone();
+            if key == "worker-build" {
+                changed["package"]["metadata"]["request-fidelity"]
+                    .as_table_mut()
+                    .unwrap()
+                    .remove(key);
+            } else {
+                changed["package"]["metadata"]
+                    .as_table_mut()
+                    .unwrap()
+                    .remove(key);
+            }
+            assert!(
+                fidelity_dependency_contract(&root, &root_lock, &changed, &fixture_lock).is_err()
+            );
+        }
+        for text in [
+            "[dependencies]\nworker = \"=0.8.5\"\nworker = \"^0.8.5\"",
+            "[package.metadata.request-fidelity]\nworker-build = \"0.8.5\"\nworker-build = \"0.8.5\"",
+        ] {
+            toml::from_str::<toml::Value>(text).expect_err("duplicate dependency or tool pin");
+        }
+    }
+
     #[test]
     fn dependency_git_source_detects_drift_without_changing_version_checks() {
         let pinned: toml::Value = toml::from_str(
