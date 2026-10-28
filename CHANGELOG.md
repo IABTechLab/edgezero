@@ -117,6 +117,9 @@ their scope when introduced; the current summary supersedes their then-pending A
   collection-stamped arrivals and early C bodies hidden behind late connection closure.
   Keep unresolved outcomes distinct from proof of the required source timing; no public API,
   transport or capability changes are introduced.
+- Calibrate that probe with one bounded, same-client request while A can make progress.
+  Keep the original observation/CPU targets independent of calibration, validate native
+  payload-write causality, and reject uncertain timing without relaxing acceptance bounds.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

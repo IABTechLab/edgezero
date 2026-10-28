@@ -483,6 +483,67 @@ No frozen requirement, interface, dependency pin, capability or acceptance bindi
 Inventory remains 32 ready/479 planned and unqualified. No deployment, candidate freeze or
 hosted qualification is authorized by these local probes.
 
+### D6 Same-Client Calibration Checkpoint (2026-10-28)
+
+The requester approved one bounded fixture-only calibration Send after the `44baaf3b`
+checkpoint. This approval does not change the original scenario targets, frozen requirements,
+interfaces, G4 measurement-approval status, runtime pins or qualification gates.
+
+The CPU guest now consumes its origin, then sends one request through the same injected client.
+It carries the captured origin-head return sample and its own earlier request-construction
+sample, keeps the 64-byte buffered cap and 1-second timeout, and adds an absolute
+request-start-relative 520 ms safety deadline. The bodyless `204` completion is sampled before reporting work.
+The source publishes a separate calibrated scheduling anchor before holding that response,
+and A/B/C boundedly await it rather than falling back to the cold anchor. Five fixed roles
+produce at most 19 events under the existing worker, connection and 32-event limits.
+
+The causal upper bound intersects the original and calibration receipts; the lower bound uses
+the actual origin-head write and captured guest observation. The midpoint only schedules
+A180/B530/C900. Every possible offset must still place B's complete actual write inside the
+CPU interval and the original 530 +/-5 ms target. Receipt reconstruction retains the complete
+batch-invocation epoch bracket, strict arrival before 534 ms, and elapsed below 500 ms.
+
+The initial calibration response hold to `500 ms + U` shifted the original next500 target
+on three runtimes. Keep those failed runs under `/private/tmp/edgezero-calibration-20261028`.
+The corrected setup holds calibration to `450 ms + U`, proves A's complete arrival interval
+inside that Send, then uses the existing timer to reach the unchanged next500 target. No
+prescribed completion occurs during this unrelated wait before B530. CPU520..560, the
+34/534 ms batch boundaries and all original receipt tolerances remain unchanged.
+
+Independent review reproduced a further false positive: calibration receipt could precede
+the origin payload write. Source and validator now require native ordering against a pre-write
+chunk sample. A post-flush timestamp is unsuitable because source-thread preemption could put
+that sample after a legitimate receipt. This is necessary ordering, not proof of peer receipt.
+Red/green tests cover the false positive and the earlier-control refinement. The 229 harness
+tests (one ignored) and 48 qualification-enabled guest tests pass; narrow hostile-evidence
+cases retain missing/duplicate/mismatched samples, exact release boundaries, wide clock bounds,
+strict cutoff equality and the finite CPU-work checks.
+All five root Rust gates pass, including 2,568 workspace tests (one ignored). Strict native and
+three-target fixture Clippy, formatting, docs lint, legacy/docs/inventory guards, and the 36
+evidence-checker regressions pass. Independent guest, host and documentation reviews are clear.
+
+Final local working-tree characterizations remain separate from qualification:
+
+| Local Runtime | B Write Interval In Guest Time | CPU Case |
+| ------------- | ------------------------------ | -------- |
+| Axum | 531.190..537.288 ms | Fail: source window not proved |
+| Repaired Viceroy 0.21.0 | 530.010..537.326 ms | Fail: source window not proved |
+| Spin 4.1.0 | 530.770..537.093 ms | Fail: source window not proved |
+| workerd 2026-09-10 | 528.539..532.639 ms | Pass, unqualified |
+
+Artifacts: `/private/tmp/edgezero-calibration-final-20261028/{axum,viceroy,spin,workerd}`.
+All four full seven-case suites exit 1. The four controls pass on each target; the previous
+slow/fast timing misses remain, independently of CPU results. All B slots remain unresolved.
+An earlier intermediate Axum CPU pass is retained, not substituted for its final failed run.
+Neither a passing local case nor a failed fixture timing precondition establishes hosted
+qualification or a production outbound defect.
+
+The shared origin still polls accept with a 5 ms delay, contributing fixture-side uncertainty.
+A bounded readiness/wake replacement has been proposed separately and is not implemented or
+approved by this checkpoint. Same-client use does not guarantee connection reuse or sufficient
+precision. Keep that fixture gap and native SDK body-entry evidence open. Inventory remains
+32 ready / 479 planned, unqualified; no deployment, candidate freeze or capability promotion.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

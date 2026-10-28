@@ -93,6 +93,19 @@ impl Probe {
         }
         Ok(request)
     }
+
+    fn calibration_request(
+        &self,
+        timeline: &Timeline,
+        head_observed: MonotonicInstant,
+    ) -> Result<OutboundRequest, EdgeError> {
+        self.request("calibration", timeline)?
+            .header(
+                "x-fixture-origin-head-us",
+                timeline.elapsed_us(head_observed).to_string(),
+            )
+            .map(|request| request.deadline(timeline.deadline_at(520)))
+    }
 }
 
 fn invalid() -> EdgeError {
@@ -411,6 +424,23 @@ async fn run(
         let at = timeline.clock.now();
         report.origin = Some(response_report(Ok(response)).await);
         timeline.event("origin-body", at, timeline.clock.now(), Value::Null);
+        let request = probe.calibration_request(timeline, ended)?;
+        let head_observed_us = timeline.elapsed_us(ended);
+        let at = timeline.clock.now();
+        let result = client.send(request).await;
+        let ended = timeline.clock.now();
+        let outcome = response_report(result).await;
+        let failure = outcome.get("error").cloned();
+        timeline.event(
+            "calibration-send",
+            at,
+            ended,
+            json!({"origin_head_observed_us":head_observed_us,"outcome":outcome}),
+        );
+        if let Some(error) = failure {
+            report.error = Some(error);
+            return Ok(());
+        }
         timeline.wait_until(ctx, 500).await?;
         next(&mut batch, report, timeline).await;
         timeline.wait_until(ctx, 520).await?;
@@ -657,6 +687,37 @@ mod tests {
                 .unwrap()
                 .case,
             "cpu-stretch"
+        );
+    }
+
+    #[test]
+    fn cpu_calibration_uses_the_same_bounded_request_and_absolute_safety_deadline() {
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let timeline = Timeline::new(time.clock(), start);
+        let probe = Probe::parse("cpu-stretch", &headers("cpu-stretch")).unwrap();
+        time.advance_to(start + Duration::from_micros(105123));
+        let parts = probe
+            .calibration_request(&timeline, start + Duration::from_micros(100456))
+            .unwrap()
+            .into_parts();
+        assert_eq!(parts.uri.to_string(), format!("{}/calibration", probe.base));
+        assert_eq!(parts.headers["x-fixture-at-us"], "105123");
+        assert_eq!(parts.headers["x-fixture-origin-head-us"], "100456");
+        assert_eq!(parts.headers.get_all("x-fixture-at-us").iter().count(), 1);
+        assert_eq!(parts.timeout, Some(Duration::from_secs(1)));
+        assert_eq!(
+            parts.deadline.unwrap().instant(),
+            timeline.deadline_at(520).instant()
+        );
+        assert!(matches!(
+            parts.response_mode,
+            ResponseMode::Buffered { max_bytes: 64 }
+        ));
+        time.advance_to(start + Duration::from_millis(510));
+        assert_eq!(
+            timeline.deadline_at(534).instant(),
+            start + Duration::from_millis(534)
         );
     }
 

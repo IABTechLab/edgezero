@@ -42,7 +42,8 @@ impl Case {
 
     fn permits(self, role: &str) -> bool {
         match self {
-            Self::Slow | Self::Cpu => matches!(role, "origin" | "a" | "b" | "c"),
+            Self::Slow => matches!(role, "origin" | "a" | "b" | "c"),
+            Self::Cpu => matches!(role, "origin" | "a" | "b" | "c" | "calibration"),
             Self::Fast => matches!(role, "origin" | "a" | "b" | "c" | "mediator"),
             Self::Begin => role == "origin",
             Self::Batch => matches!(role, "a" | "b" | "c" | "quiet"),
@@ -59,6 +60,7 @@ pub(super) struct Lifetime {
     case: Case,
     anchor: Option<Instant>,
     scenario_anchor: Option<Instant>,
+    calibration: Option<Calibration>,
     roles: HashSet<String>,
     active: usize,
     events: Vec<Value>,
@@ -97,6 +99,7 @@ pub(super) fn register(shared: &Shared, token: &str, case: &str) -> Result<()> {
             case,
             anchor: None,
             scenario_anchor: None,
+            calibration: None,
             roles: HashSet::new(),
             active: 0,
             events: Vec::new(),
@@ -171,6 +174,7 @@ struct Exchange<'a> {
     case: Case,
     anchor: Instant,
     scenario_anchor: Option<Instant>,
+    calibration_wait: Option<Instant>,
     received: Instant,
 }
 
@@ -190,7 +194,19 @@ impl Exchange<'_> {
             event["scheduled_us"] = json!(offset(scheduled, self.anchor));
             if let Some(anchor) = self.scenario_anchor {
                 event["scenario_scheduled_us"] = json!(offset(scheduled, anchor));
-                event["schedule_basis"] = json!("origin-receipt-minus-guest-at-us");
+                event["schedule_basis"] =
+                    json!(if matches!(self.case, Case::Cpu) && self.role != "origin" {
+                        if self.role == "calibration" {
+                            "calibrated-upper-bound"
+                        } else {
+                            "calibrated-causal-midpoint"
+                        }
+                    } else {
+                        "origin-receipt-minus-guest-at-us"
+                    });
+                if self.role == "calibration" {
+                    event["scenario_scheduled_us"] = json!(450000);
+                }
             } else {
                 event["schedule_basis"] = json!("request-receipt");
             }
@@ -225,6 +241,78 @@ fn wait_until(shared: &Shared, deadline: Instant) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Calibration {
+    anchor: Instant,
+    wait_until: Instant,
+}
+
+fn calibrate(lifetime: &Lifetime) -> Result<Option<Calibration>> {
+    let find = |role: &str, op: &str| {
+        lifetime
+            .events
+            .iter()
+            .find(|entry| entry["role"] == role && entry["op"] == op)
+    };
+    let (Some(head), Some(payload), Some(request), Some(initial)) = (
+        find("origin", "head"),
+        find("origin", "chunk"),
+        find("calibration", "request"),
+        find("origin", "request"),
+    ) else {
+        return Ok(None);
+    };
+    let number = |value: &Value, field: &str| {
+        value[field]
+            .as_i64()
+            .map(i128::from)
+            .ok_or("invalid calibration sample")
+    };
+    let lower =
+        number(head, "write_started_us")? - number(request, "origin_head_observed_us")? - 1000;
+    let upper = (number(request, "at_us")? - number(request, "guest_at_us")?)
+        .min(number(initial, "at_us")? - number(initial, "guest_at_us")?)
+        + 1000;
+    require(
+        number(request, "at_us")? >= number(payload, "write_started_us")?,
+        "calibration precedes the origin payload write",
+    )?;
+    require(lower <= upper, "contradictory calibration clock bounds")?;
+    let anchor = lifetime.anchor.ok_or("lifetime not started")?;
+    let at = |micros: i128| -> Result<Instant> {
+        let duration = Duration::from_micros(u64::try_from(micros.unsigned_abs())?);
+        if micros >= 0 {
+            anchor.checked_add(duration)
+        } else {
+            anchor.checked_sub(duration)
+        }
+        .ok_or_else(|| "invalid calibration clock offset".into())
+    };
+    Ok(Some(Calibration {
+        anchor: at(lower + (upper - lower) / 2)?,
+        wait_until: at(450000 + upper)?,
+    }))
+}
+
+fn guest_clock(fields: &[(String, String)], name: &str) -> Result<u64> {
+    let mut values = fields
+        .iter()
+        .filter(|(field, _)| field == name)
+        .map(|(_, value)| value);
+    let value = values.next().ok_or("missing lifetime guest clock")?;
+    require(
+        values.next().is_none()
+            && !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit()),
+        "invalid lifetime guest clock",
+    )?;
+    let value = value
+        .parse::<u64>()
+        .map_err(|_| "invalid lifetime guest clock")?;
+    require(value <= 15_000_000, "invalid lifetime guest clock")?;
+    Ok(value)
+}
+
 pub(super) fn serve(
     socket: &mut TcpStream,
     target: &str,
@@ -247,21 +335,17 @@ pub(super) fn serve(
         require(*case == lifetime.case.name(), "lifetime case mismatch")?;
         require(lifetime.case.permits(role), "unknown lifetime role")?;
         let anchor = lifetime.anchor.ok_or("lifetime not started")?;
-        let values: Vec<_> = fields
-            .iter()
-            .filter(|(name, _)| name == "x-fixture-at-us")
-            .map(|(_, value)| value.as_str())
-            .collect();
-        require(
-            values.len() == 1
-                && !values[0].is_empty()
-                && values[0].bytes().all(|byte| byte.is_ascii_digit()),
-            "invalid lifetime guest clock",
-        )?;
-        let guest_at = values[0]
-            .parse::<u64>()
-            .map_err(|_| "invalid lifetime guest clock")?;
-        require(guest_at <= 15_000_000, "invalid lifetime guest clock")?;
+        let guest_at = guest_clock(fields, "x-fixture-at-us")?;
+        let observed = if matches!(lifetime.case, Case::Cpu) && *role == "calibration" {
+            let observed = guest_clock(fields, "x-fixture-origin-head-us")?;
+            require(
+                observed <= guest_at,
+                "calibration precedes head observation",
+            )?;
+            Some(observed)
+        } else {
+            None
+        };
         require(!lifetime.roles.contains(*role), "duplicate lifetime role")?;
         if matches!(lifetime.case, Case::Slow | Case::Fast | Case::Cpu) && *role == "origin" {
             lifetime.scenario_anchor = Some(
@@ -276,10 +360,14 @@ pub(super) fn serve(
             case: lifetime.case,
             anchor,
             scenario_anchor: lifetime.scenario_anchor,
+            calibration_wait: None,
             received: head_received,
         };
         let mut event = exchange.event("request", exchange.received, None);
         event["guest_at_us"] = json!(guest_at);
+        if let Some(observed) = observed {
+            event["origin_head_observed_us"] = json!(observed);
+        }
         if matches!(lifetime.case, Case::Slow | Case::Fast | Case::Cpu) && *role == "origin" {
             event["alignment"] = json!({
                 "basis":"origin-receipt-minus-guest-at-us",
@@ -367,7 +455,18 @@ fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
         if state.stop {
             return Ok(false);
         }
-        if let Some(anchor) = state.lifetimes[exchange.token].scenario_anchor {
+        let lifetime = state.lifetimes.get_mut(exchange.token).unwrap();
+        if matches!(exchange.case, Case::Cpu) && exchange.role != "origin" {
+            if lifetime.calibration.is_none() {
+                lifetime.calibration = calibrate(lifetime)?;
+            }
+            if let Some(calibration) = lifetime.calibration {
+                exchange.scenario_anchor = Some(calibration.anchor);
+                exchange.calibration_wait = Some(calibration.wait_until);
+                shared.wake.notify_all();
+                return Ok(true);
+            }
+        } else if let Some(anchor) = lifetime.scenario_anchor {
             exchange.scenario_anchor = Some(anchor);
             return Ok(true);
         }
@@ -383,6 +482,21 @@ fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
 }
 
 fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> Result<bool> {
+    if matches!(exchange.case, Case::Cpu) && exchange.role == "calibration" {
+        let scheduled = exchange
+            .calibration_wait
+            .ok_or("missing calibration wait")?;
+        if !wait_until(shared, scheduled) {
+            return Ok(false);
+        }
+        let started = Instant::now();
+        socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")?;
+        socket.flush()?;
+        let mut event = exchange.event("head", Instant::now(), Some(scheduled));
+        event["write_started_us"] = json!(offset(started, exchange.anchor));
+        record(shared, exchange, event)?;
+        return Ok(true);
+    }
     if exchange.case.held() {
         if shared.lock().lifetimes[exchange.token].released {
             return Ok(false);
@@ -461,6 +575,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         if !wait_until(shared, at) {
             return Ok(false);
         }
+        let write_started = Instant::now();
         if chunked {
             write!(socket, "{:X}\r\n", bytes.len())?;
         }
@@ -471,6 +586,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         socket.flush()?;
         let mut event = exchange.event("chunk", Instant::now(), Some(at));
         event["bytes"] = json!(bytes);
+        event["write_started_us"] = json!(offset(write_started, exchange.anchor));
         record(shared, exchange, event)?;
     }
     if chunked {
@@ -488,6 +604,48 @@ mod tests {
     fn registration_accepts_the_same_ascii_token_alphabet_as_the_guest() {
         let shared = Shared::default();
         register(&shared, "Run_1-a", "begin-progress").unwrap();
+    }
+
+    #[test]
+    fn calibration_separates_midpoint_scheduling_from_the_upper_wait_bound() {
+        let shared = Shared::default();
+        register(&shared, "calibration", "cpu-stretch").unwrap();
+        mark_start(&shared, "calibration").unwrap();
+        let mut state = shared.lock();
+        let lifetime = state.lifetimes.get_mut("calibration").unwrap();
+        let anchor = lifetime.anchor.unwrap();
+        lifetime.events = vec![
+            json!({"op":"request","role":"origin","at_us":9000,"guest_at_us":2000}),
+            json!({"op":"head","role":"origin","write_started_us":100000}),
+            json!({"op":"chunk","role":"origin","write_started_us":100150}),
+        ];
+        assert!(calibrate(lifetime).unwrap().is_none());
+        lifetime.events.push(json!({"op":"request","role":"calibration","at_us":101600,"guest_at_us":100600,"origin_head_observed_us":100500}));
+        let calibration = calibrate(lifetime).unwrap().unwrap();
+        assert_eq!(offset(calibration.anchor, anchor), 250);
+        assert_eq!(offset(calibration.wait_until, anchor), 452000);
+        lifetime.events[3]["at_us"] = json!(97000);
+        assert!(calibrate(lifetime).is_err());
+    }
+
+    #[test]
+    fn calibration_clock_fields_are_bounded_and_unambiguous() {
+        for name in ["x-fixture-at-us", "x-fixture-origin-head-us"] {
+            for value in ["0", "15000000"] {
+                assert!(guest_clock(&[(name.into(), value.into())], name).is_ok());
+            }
+            for value in ["", "-1", "+1", "1,2", "15000001", "18446744073709551616"] {
+                assert!(guest_clock(&[(name.into(), value.into())], name).is_err());
+            }
+            assert!(guest_clock(&[], name).is_err());
+            assert!(
+                guest_clock(
+                    &[(name.into(), "1".into()), (name.into(), "1".into())],
+                    name
+                )
+                .is_err()
+            );
+        }
     }
 
     fn connect(
@@ -529,8 +687,8 @@ mod tests {
         let origins = WireOrigins::start().unwrap();
         origins.register_lifetime("cpu", "cpu-stretch").unwrap();
         origins.mark_lifetime_start("cpu").unwrap();
-        let sockets: Vec<_> = [
-            ("origin", "2000"),
+        let mut sockets: Vec<_> = [
+            ("origin", "0"),
             ("a", "34000"),
             ("b", "34000"),
             ("c", "34000"),
@@ -538,16 +696,21 @@ mod tests {
         .into_iter()
         .map(|(role, at)| connect(&origins, "cpu", "cpu-stretch", role, at))
         .collect();
+        assert_eq!(read(sockets.remove(0)), b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nO\r\n0\r\n\r\n");
+        let anchor = origins.shared.lock().lifetimes["cpu"].anchor.unwrap();
+        let observed = offset(Instant::now(), anchor);
+        let mut calibration = TcpStream::connect(("127.0.0.1", origins.port(0))).unwrap();
+        calibration.set_read_timeout(Some(IO_BUDGET)).unwrap();
+        write!(calibration, "GET /lifetimes/cpu/cpu-stretch/calibration HTTP/1.1\r\nx-fixture-at-us: {}\r\nx-fixture-origin-head-us: {observed}\r\n\r\n", offset(Instant::now(), anchor)).unwrap();
+        assert_eq!(
+            read(calibration),
+            b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+        );
         for (index, socket) in sockets.into_iter().enumerate() {
-            let bytes = read(socket);
-            if index == 0 {
-                assert_eq!(bytes, b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nO\r\n0\r\n\r\n");
-            } else {
-                let mut expected =
-                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n".to_vec();
-                expected.push(b'A' + index as u8 - 1);
-                assert_eq!(bytes, expected);
-            }
+            let mut expected =
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n".to_vec();
+            expected.push(b'A' + index as u8);
+            assert_eq!(read(socket), expected);
         }
         let events = origins.take_lifetime_events("cpu").unwrap();
         for (role, at) in [
@@ -575,6 +738,15 @@ mod tests {
             assert_eq!(phases, ["request", "head", "chunk", "closed"]);
             assert_eq!(event(&events, role, "closed")["reason"], "complete");
         }
+        assert_eq!(events.as_array().unwrap().len(), 19);
+        assert_eq!(
+            event(&events, "calibration", "head")["scenario_scheduled_us"],
+            450000
+        );
+        assert_eq!(
+            event(&events, "b", "head")["schedule_basis"],
+            "calibrated-causal-midpoint"
+        );
         origins.finish().unwrap();
     }
 

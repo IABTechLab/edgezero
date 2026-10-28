@@ -937,8 +937,21 @@ qualified pass. For quiet-window proofs, a head-write-start/guest-head-observati
 conservatively compares receipts without pretending the clocks are synchronized. The 5 ms
 measurement guard makes that proof stricter, and is not an extra deadline allowance.
 
-The CPU case records a causal interval for `host - guest` from request-send/receipt and
-head-write/observation boundaries. Its 1 ms clock-rounding guard expands uncertainty, not the
+The CPU case makes exactly one bounded calibration Send through the same injected client after
+consuming the origin. It carries the actual origin-head observation and request-send samples,
+uses a 64-byte buffered cap, a 1-second timeout and an absolute 520 ms safety deadline, and
+expects a bodyless `204`. The source publishes calibration before waiting to send that reply;
+A/B/C cannot fall back to the initial cold scheduling anchor. The reply is held to `450 ms + U`,
+where `U` is the causal offset upper bound, leaving the existing timer to reach the unchanged
+500 ms observation target. A's whole receipt interval must lie inside this EdgeZero Send.
+Five fixed roles produce at most 19 events within the existing 32-event bound and owned worker
+limits. Missing or contradictory calibration fails; no extra transport or production hook is used.
+
+The CPU case records a causal interval for `host - guest` from the original and calibration
+request-send/receipt boundaries and the actual origin-head write/observation. Calibration receipt
+cannot precede the origin payload's pre-write sample; a post-flush timestamp cannot safely prove
+that ordering. The midpoint is only a source scheduling estimate for A180/B530/C900, not proof.
+Its 1 ms clock-rounding guard expands uncertainty, not the
 accepted timing targets. The complete actual B write must fit the busy interval and 530 +/-5 ms
 for every offset in that interval; choosing a convenient point estimate is not proof. Receipt
 arrival still must be strictly before the original 534 ms cutoff. The report explicitly records
@@ -946,6 +959,9 @@ the equal-rate assumption and does not claim synchronized clocks. Receipt recons
 core's batch epoch by the complete measured invocation, not its pre-call timestamp; every
 possible arrival must satisfy the cutoff and delivery boundaries. A cold-connection interval
 that is too wide fails the probe, even when B is correctly unresolved.
+Same-client calibration does not promise connection reuse or a sufficiently narrow interval.
+The current shared origin's 5 ms accept polling is also fixture-side uncertainty, not provider
+behavior; source timing and hosted qualification remain open when these bounds do not fit.
 
 CPU work is synchronous and bounded by ten million iterations, with rejection on backwards,
 frozen or already-expired windows. The iteration cap is a finite work bound, not a wall-clock

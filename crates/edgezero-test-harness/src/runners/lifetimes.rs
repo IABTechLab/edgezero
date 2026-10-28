@@ -60,7 +60,7 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
                 .as_array()
                 .and_then(|events| cpu_clock_bounds(events, &origin).ok())
                 .map(|[lower, upper]| {
-                    json!({"basis":"causal-request-and-head-bounds",
+                    json!({"basis":"causal-calibration-and-head-bounds",
                     "lower_us":lower,"upper_us":upper,"rounding_guard_us":1000,
                     "same_rate_assumed":true,"clock_sync_proven":false})
                 })
@@ -129,7 +129,8 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
         .collect::<std::result::Result<_, _>>()?;
     roles.sort_unstable();
     let expected: &[&str] = match case {
-        "slow-origin" | "cpu-stretch" => &["a", "b", "c", "origin"],
+        "slow-origin" => &["a", "b", "c", "origin"],
+        "cpu-stretch" => &["a", "b", "c", "calibration", "origin"],
         "fast-origin" => &["a", "b", "c", "mediator", "origin"],
         "begin-progress" => &["origin"],
         "batch-progress" => &["a", "b", "c", "quiet"],
@@ -319,12 +320,30 @@ fn cpu_clock_bounds(events: &[Value], origin: &Value) -> Result<[i128; 2]> {
     let request = role_event(origin, "origin", "request")?;
     let head = role_event(origin, "origin", "head")?;
     let observed = event(events, "origin-head")?;
+    let body = event(events, "origin-body")?;
+    let calibration = event(events, "calibration-send")?;
+    let calibrated = role_event(origin, "calibration", "request")?;
+    let payload = role_event(origin, "origin", "chunk")?;
+    let observed_us = number(observed, "at_us")? + number(observed, "duration_us")?;
+    require(
+        calibration["result"]["origin_head_observed_us"] == observed_us
+            && calibrated["origin_head_observed_us"] == observed_us
+            && number(body, "at_us")? >= observed_us
+            && number(calibrated, "guest_at_us")?
+                >= number(body, "at_us")? + number(body, "duration_us")?
+            && number(calibrated, "guest_at_us")? <= number(calibration, "at_us")?,
+        "calibration does not follow the observed origin body",
+    )?;
+    require(
+        number(calibrated, "at_us")? >= number(payload, "write_started_us")?,
+        "calibration reached the host before the origin payload write",
+    )?;
     // With offset = host - guest, sending precedes receipt in each direction.
-    let lower = i128::from(number(head, "write_started_us")?)
-        - i128::from(number(observed, "at_us")? + number(observed, "duration_us")?)
-        - 1000;
-    let upper =
-        i128::from(number(request, "at_us")?) - i128::from(number(request, "guest_at_us")?) + 1000;
+    let lower = i128::from(number(head, "write_started_us")?) - i128::from(observed_us) - 1000;
+    let upper = (i128::from(number(request, "at_us")?)
+        - i128::from(number(request, "guest_at_us")?))
+    .min(i128::from(number(calibrated, "at_us")?) - i128::from(number(calibrated, "guest_at_us")?))
+        + 1000;
     require(lower <= upper, "contradictory CPU clock bounds")?;
     Ok([lower, upper])
 }
@@ -340,6 +359,7 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
                 "batch-start",
                 "origin-head",
                 "origin-body",
+                "calibration-send",
                 "next",
                 "cpu-stretch",
                 "collect",
@@ -399,15 +419,44 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
     let [lower, upper] = cpu_clock_bounds(events, origin)?;
     let origin = origin.as_array().unwrap();
     require(
-        origin.len() <= 16
+        origin.len() <= 19
             && origin.iter().all(|entry| {
-                matches!(entry["role"].as_str(), Some("origin" | "a" | "b" | "c"))
-                    && matches!(
-                        entry["op"].as_str(),
-                        Some("request" | "head" | "chunk" | "closed")
-                    )
+                matches!(
+                    entry["role"].as_str(),
+                    Some("origin" | "a" | "b" | "c" | "calibration")
+                ) && matches!(
+                    entry["op"].as_str(),
+                    Some("request" | "head" | "chunk" | "closed")
+                )
             }),
         "unexpected CPU origin evidence",
+    )?;
+    let calibration = event(events, "calibration-send")?;
+    let calibrated_end = number(calibration, "at_us")? + number(calibration, "duration_us")?;
+    require(
+        calibrated_end <= 500000,
+        "calibration missed the pre-CPU wait",
+    )?;
+    let phases: Vec<_> = origin
+        .iter()
+        .filter(|entry| entry["role"] == "calibration")
+        .map(|entry| entry["op"].as_str().unwrap())
+        .collect();
+    let request = role_event(origin, "calibration", "request")?;
+    let head = role_event(origin, "calibration", "head")?;
+    let closed = role_event(origin, "calibration", "closed")?;
+    require(
+        calibration["result"]["outcome"] == json!({"status":204,"bytes":[]})
+            && phases == ["request", "head", "closed"]
+            && closed["reason"] == "complete"
+            && number(request, "at_us")? <= number(head, "write_started_us")?
+            && number(head, "write_started_us")? <= number(head, "at_us")?
+            && number(head, "at_us")? <= number(closed, "at_us")?
+            && i128::from(number(head, "write_started_us")?) - upper >= 450000
+            && i128::from(number(head, "write_started_us")?) - upper
+                <= i128::from(calibrated_end) + 1000
+            && calibrated_end <= number(next, "at_us")?,
+        "calibration response did not preserve its bounded wait",
     )?;
     let c_closed = role_event(origin, "c", "closed")?;
     let c_complete = c_closed["reason"] == "complete";
@@ -533,7 +582,9 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
                         && i128::from(earliest_arrival) >= earliest
                         && latest_arrival < 534000
                         && if index == 0 {
-                            latest_arrival <= next_ended
+                            earliest_arrival >= number(calibration, "at_us").unwrap_or(u64::MAX)
+                                && latest_arrival <= calibrated_end
+                                && latest_arrival <= next_ended
                         } else {
                             earliest_arrival >= start && latest_arrival <= end
                         }
@@ -857,6 +908,8 @@ mod tests {
                 {"op":"batch-start","at_us":34000,"duration_us":100,"result":{"cutoff_at_us":534000}},
                 {"op":"origin-head","at_us":34100,"duration_us":66400,"result":"ok"},
                 {"op":"origin-body","at_us":100500,"duration_us":100,"result":null},
+                {"op":"calibration-send","at_us":100600,"duration_us":352400,
+                    "result":{"origin_head_observed_us":100500,"outcome":{"status":204,"bytes":[]}}},
                 {"op":"next","at_us":500000,"duration_us":100,"result":"Item"},
                 {"op":"cpu-stretch","at_us":520000,"duration_us":40000,
                     "result":{"iterations":4000,"max_iterations":10000000}},
@@ -877,10 +930,13 @@ mod tests {
             {"op":"request","role":"a","at_us":35000,"guest_at_us":34000},
             {"op":"request","role":"b","at_us":35010,"guest_at_us":34000},
             {"op":"request","role":"c","at_us":35020,"guest_at_us":34000},
+            {"op":"request","role":"calibration","at_us":101600,"guest_at_us":100600,"origin_head_observed_us":100500},
             {"op":"head","role":"origin","at_us":100100,"write_started_us":100000},
-            {"op":"chunk","role":"origin","at_us":100200,"bytes":[79]},
+            {"op":"chunk","role":"origin","at_us":100200,"write_started_us":100150,"bytes":[79]},
             {"op":"head","role":"a","at_us":180100,"write_started_us":180000},
             {"op":"chunk","role":"a","at_us":180200,"bytes":[65]},
+            {"op":"head","role":"calibration","at_us":452100,"write_started_us":452000},
+            {"op":"closed","role":"calibration","at_us":452300,"reason":"complete"},
             {"op":"head","role":"b","at_us":530100,"write_started_us":530000},
             {"op":"chunk","role":"b","at_us":530200,"bytes":[66]},
             {"op":"closed","role":"origin","at_us":100300,"reason":"complete"},
@@ -915,9 +971,9 @@ mod tests {
             ("/slots/2", json!("Resolved")),
             ("/termination", json!("Completed")),
             ("/events/1/result/cutoff_at_us", json!(1060000)),
-            ("/events/5/result/iterations", json!(0)),
-            ("/events/5/at_us", json!(519999)),
-            ("/events/5/duration_us", json!(39999)),
+            ("/events/6/result/iterations", json!(0)),
+            ("/events/6/at_us", json!(519999)),
+            ("/events/6/duration_us", json!(39999)),
         ] {
             let (mut report, origin) = cpu_sample(true);
             *report.pointer_mut(path).unwrap() = value;
@@ -1094,6 +1150,13 @@ mod tests {
     fn cpu_stretch_accepts_tolerated_write_uncertainty_but_not_a_late_receipt() {
         let (mut report, mut origin) = cpu_sample(false);
         report["events"][2]["duration_us"] = json!(63900);
+        report["events"][4]["result"]["origin_head_observed_us"] = json!(98000);
+        origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["role"] == "calibration" && entry["op"] == "request")
+            .unwrap()["origin_head_observed_us"] = json!(98000);
         for entry in origin
             .as_array_mut()
             .unwrap()
@@ -1117,6 +1180,95 @@ mod tests {
             .push(json!({"index":1,"via":"collect","elapsed_us":500000,
             "outcome":{"status":200,"bytes":[66]}}));
         report["slots"][1] = json!("Resolved");
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+    }
+
+    #[test]
+    fn cpu_calibration_rejects_missing_duplicate_mismatched_or_early_evidence() {
+        for mutation in 0..9 {
+            let (mut report, mut origin) = cpu_sample(false);
+            let entries = origin.as_array_mut().unwrap();
+            let index = entries
+                .iter()
+                .position(|entry| entry["role"] == "calibration" && entry["op"] == "request")
+                .unwrap();
+            match mutation {
+                0 => { entries.remove(index); }
+                1 => entries.push(entries[index].clone()),
+                2 => entries[index]["origin_head_observed_us"] = json!(100499),
+                3 => entries[index]["guest_at_us"] = json!(100599),
+                4 => entries[index]["at_us"] = json!(97000),
+                5 => report["events"][4]["result"]["origin_head_observed_us"] = json!(100499),
+                6 => report["events"][4]["result"]["outcome"]["bytes"] = json!([75]),
+                7 => {
+                    entries.iter_mut().find(|entry| entry["role"] == "calibration" && entry["op"] == "head").unwrap()["write_started_us"] = json!(451999);
+                }
+                8 => entries.push(json!({"op":"chunk","role":"calibration","at_us":452200,"token":"sample","case":"cpu-stretch","bytes":[]})),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_calibration_tightens_cold_bounds_without_using_a_point_estimate() {
+        let (report, mut origin) = cpu_sample(false);
+        origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["role"] == "origin" && entry["op"] == "request")
+            .unwrap()["at_us"] = json!(10000);
+        assert_eq!(
+            cpu_clock_bounds(report["events"].as_array().unwrap(), &origin).unwrap(),
+            [-1500, 2000]
+        );
+        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["role"] == "calibration" && entry["op"] == "request")
+            .unwrap()["at_us"] = json!(109600);
+        assert_eq!(
+            cpu_clock_bounds(report["events"].as_array().unwrap(), &origin).unwrap(),
+            [-1500, 9000]
+        );
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+    }
+
+    #[test]
+    fn cpu_calibration_finishes_before_the_original_observation_target() {
+        let (mut report, mut origin) = cpu_sample(false);
+        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        report["events"][5]["at_us"] = json!(453000);
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        report["events"][5]["at_us"] = json!(500000);
+        report["events"][4]["at_us"] = json!(200000);
+        report["events"][4]["duration_us"] = json!(253000);
+        let request = origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["role"] == "calibration" && entry["op"] == "request")
+            .unwrap();
+        request["guest_at_us"] = json!(200000);
+        request["at_us"] = json!(201000);
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+    }
+
+    #[test]
+    fn cpu_calibration_cannot_reach_the_host_before_the_origin_payload() {
+        let (report, mut origin) = cpu_sample(false);
+        origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["role"] == "calibration" && entry["op"] == "request")
+            .unwrap()["at_us"] = json!(100100);
         assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
     }
 
