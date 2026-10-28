@@ -1,11 +1,13 @@
 use super::*;
 use crate::net::WireOrigins;
 
-const CASES: [&str; 4] = [
+const CASES: [&str; 6] = [
     "slow-origin",
     "fast-origin",
     "begin-progress",
     "batch-progress",
+    "pending-head-cutoff",
+    "pending-body-cutoff",
 ];
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
@@ -33,10 +35,17 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
             &token,
             &[("x-fixture-backend", &backend)],
         );
+        let response_returned = Instant::now();
+        let released = if pending_cutoff(case) {
+            origins.release_lifetime(&token, response_returned)
+        } else {
+            Ok(())
+        };
         let origin = origins.take_lifetime_events(&token)?;
         let mut report = Value::Null;
         let result = (|| -> Result<()> {
             let reply = reply.as_ref().map_err(|error| error.to_string())?;
+            released.as_ref().map_err(|error| error.to_string())?;
             require(
                 reply["status"] == 200,
                 "lifetime guest returned an error response",
@@ -48,7 +57,9 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
         records.push(json!({"event":"lifetime-case","case":case,"token":token,
             "status":if result.is_ok(){"pass"}else{"fail"},
             "error":result.as_ref().err().map(ToString::to_string),"report":report,
-            "origin":origin,"client":reply.as_ref().ok().map(|reply| json!({
+            "origin":origin,"body_phase_evidence":if case == "pending-body-cutoff" {
+                Some("host-head-written-only")
+            } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
                 "header_ns":reply["header_ns"],"headers":reply["headers"]})),"qualification":false}))?;
         if let Err(error) = result {
@@ -57,6 +68,10 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
     }
     require(failures.is_empty(), failures.join("; "))?;
     Ok(CASES.len())
+}
+
+fn pending_cutoff(case: &str) -> bool {
+    matches!(case, "pending-head-cutoff" | "pending-body-cutoff")
 }
 
 fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<()> {
@@ -105,12 +120,16 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
         "fast-origin" => &["a", "b", "c", "mediator", "origin"],
         "begin-progress" => &["origin"],
         "batch-progress" => &["a", "b", "c", "quiet"],
+        "pending-head-cutoff" | "pending-body-cutoff" => &["a", "b", "c"],
         _ => return Err("unknown lifetime case".into()),
     };
     require(
         roles == expected,
         "missing, duplicate or foreign origin receipt",
     )?;
+    if pending_cutoff(case) {
+        return validate_pending_cutoff(case, report, events, origin);
+    }
     if case == "begin-progress" || case == "batch-progress" {
         let start = number(event(events, "quiet-start")?, "at_us")?;
         let end = number(event(events, "quiet-end")?, "at_us")?;
@@ -268,6 +287,127 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
             "mediator deadline was extended",
         )
     }
+}
+
+fn validate_pending_cutoff(
+    case: &str,
+    report: &Value,
+    events: &[Value],
+    origin: &Value,
+) -> Result<()> {
+    validate_items(report, &[], &[], &["Unresolved"; 3], "Cutoff")?;
+    require(
+        report.get("origin") == Some(&Value::Null)
+            && report.get("mediator") == Some(&Value::Null)
+            && events.len() == 3,
+        "unexpected operation in pending cutoff probe",
+    )?;
+    let batch = event(events, "batch-start")?;
+    let next = event(events, "next")?;
+    let collected = event(events, "collect")?;
+    within(number(batch, "at_us")?, 34_000, "batch start missed 34 ms")?;
+    require(
+        batch["result"]["cutoff_at_us"] == 200_000,
+        "pending cutoff was restarted",
+    )?;
+    let first = number(&next["result"], "first_poll_us")?;
+    let returned = number(next, "at_us")? + number(next, "duration_us")?;
+    require(
+        next["result"]["state"] == "Cutoff"
+            && next["result"]["pending_polls"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            && first >= number(next, "at_us")?
+            && first < 200_000
+            && number(next, "at_us")? >= number(batch, "at_us")? + number(batch, "duration_us")?
+            && (200_000..=205_000).contains(&returned)
+            && number(collected, "at_us")? >= returned
+            && number(collected, "duration_us")? < 5_000
+            && collected["result"] == "ok",
+        "next did not wait for the original cutoff within 205 ms",
+    )?;
+    let origin = origin.as_array().unwrap();
+    require(
+        origin.iter().all(|entry| {
+            matches!(
+                entry["op"].as_str(),
+                Some("request" | "head" | "waiting" | "release" | "closed")
+            )
+        }),
+        "unexpected body data or origin event during cutoff wait",
+    )?;
+    let release = event(origin, "release")?;
+    let response_returned = number(release, "response_returned_us")?;
+    require(
+        response_returned <= number(release, "at_us")?,
+        "fixture released before the response returned",
+    )?;
+    let release_index = origin
+        .iter()
+        .position(|entry| entry["op"] == "release")
+        .unwrap();
+    require(release["role"] == "control", "invalid fixture release")?;
+    for role in ["a", "b", "c"] {
+        let position = |op: &str| {
+            origin
+                .iter()
+                .position(|entry| entry["role"] == role && entry["op"] == op)
+                .ok_or("missing origin phase")
+        };
+        let entries: Vec<_> = origin
+            .iter()
+            .filter(|entry| entry["role"] == role)
+            .cloned()
+            .collect();
+        let request = event(&entries, "request")?;
+        let waiting = event(&entries, "waiting")?;
+        let closed = event(&entries, "closed")?;
+        require(
+            position("request")? < position("waiting")?
+                && position("waiting")? < release_index
+                && release_index < position("closed")?
+                && number(request, "at_us")? <= number(waiting, "at_us")?
+                && number(waiting, "at_us")? <= number(release, "at_us")?
+                && number(waiting, "at_us")? <= response_returned
+                && number(closed, "at_us")? >= number(release, "at_us")?
+                && closed["reason"] == "fixture_released",
+            "origin was not held until explicit fixture release",
+        )?;
+        let heads: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry["op"] == "head")
+            .collect();
+        if case == "pending-body-cutoff" {
+            require(
+                heads.len() == 1,
+                "pending-body probe lacks one written head",
+            )?;
+            let head = heads[0];
+            require(
+                head["content_length"] == 1
+                    && position("request")? < position("head")?
+                    && position("head")? < position("waiting")?
+                    && number(head, "write_started_us")? >= number(request, "at_us")?
+                    && number(head, "write_started_us")? <= number(head, "at_us")?
+                    && number(head, "at_us")? <= number(waiting, "at_us")?,
+                "pending-body head was not written before waiting",
+            )?;
+        } else {
+            require(
+                heads.is_empty(),
+                "pending-head probe unexpectedly sent headers",
+            )?;
+        }
+    }
+    require(
+        origin.len()
+            == if case == "pending-body-cutoff" {
+                13
+            } else {
+                10
+            },
+        "missing or extra pending origin evidence",
+    )
 }
 
 fn number(value: &Value, field: &str) -> Result<u64> {
@@ -455,6 +595,203 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_cutoff_sample(case: &str) -> (Value, Value) {
+        let report = json!({"schema":1,"case":case,"token":"sample","qualification":false,
+            "events":[
+                {"op":"batch-start","at_us":34000,"duration_us":100,
+                    "result":{"cutoff_at_us":200000}},
+                {"op":"next","at_us":34100,"duration_us":166100,
+                    "result":{"state":"Cutoff","first_poll_us":34110,"pending_polls":1}},
+                {"op":"collect","at_us":200200,"duration_us":0,"result":"ok"}
+            ],"items":[],"slots":["Unresolved","Unresolved","Unresolved"],"termination":"Cutoff",
+            "error":null,"origin":null,"mediator":null});
+        let mut origin = Vec::new();
+        for role in ["a", "b", "c"] {
+            origin.push(json!({"op":"request","role":role,"at_us":35000,"guest_at_us":34000}));
+            if case == "pending-body-cutoff" {
+                origin.push(json!({"op":"head","role":role,"at_us":36000,
+                    "write_started_us":35900,"content_length":1}));
+            }
+            origin.push(json!({"op":"waiting","role":role,"at_us":37000}));
+        }
+        origin.push(json!({"op":"release","role":"control","at_us":210000}));
+        origin.last_mut().unwrap()["response_returned_us"] = json!(209000);
+        for role in ["a", "b", "c"] {
+            origin.push(json!({"op":"closed","role":role,"at_us":211000,
+                "reason":"fixture_released"}));
+        }
+        for event in &mut origin {
+            event["token"] = json!("sample");
+            event["case"] = json!(case);
+        }
+        (report, json!(origin))
+    }
+
+    #[test]
+    fn pending_head_and_body_cutoff_evidence_requires_actual_blocked_exchange() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            let (report, origin) = pending_cutoff_sample(case);
+            validate(case, "sample", &report, &origin).unwrap();
+        }
+    }
+
+    #[test]
+    fn pending_cutoff_rejects_early_late_unpolled_and_resolved_outcomes() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            let (report, origin) = pending_cutoff_sample(case);
+            for (path, value) in [
+                ("/events/0/result/cutoff_at_us", json!(234000)),
+                ("/events/1/duration_us", json!(165899)),
+                ("/events/1/duration_us", json!(170901)),
+                ("/events/1/result/state", json!("error")),
+                ("/events/1/result/pending_polls", json!(0)),
+                ("/events/1/result/first_poll_us", json!(200000)),
+                ("/events/2/at_us", json!(199999)),
+                ("/events/2/duration_us", json!(5000)),
+                ("/slots/0", json!("Resolved")),
+                ("/termination", json!("Completed")),
+                ("/error", json!({"status":504})),
+                ("/items", json!([{"index":0}])),
+            ] {
+                let mut changed = report.clone();
+                *changed.pointer_mut(path).unwrap() = value;
+                assert!(
+                    validate(case, "sample", &changed, &origin).is_err(),
+                    "{case}: {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_cutoff_rejects_missing_heads_body_data_and_premature_release() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            let (report, origin) = pending_cutoff_sample(case);
+            for op in ["request", "waiting", "release", "closed"] {
+                let mut changed = origin.clone();
+                let values = changed.as_array_mut().unwrap();
+                let index = values.iter().position(|entry| entry["op"] == op).unwrap();
+                values.remove(index);
+                assert!(
+                    validate(case, "sample", &report, &changed).is_err(),
+                    "{case}: {op}"
+                );
+            }
+            let mut changed = origin.clone();
+            let release = changed
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["op"] == "release")
+                .unwrap();
+            release["at_us"] = json!(36000);
+            assert!(validate(case, "sample", &report, &changed).is_err());
+            let mut changed = origin.clone();
+            changed
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"op":"chunk","role":"a",
+                "token":"sample","case":case,"at_us":50000,"bytes":[65]}));
+            assert!(validate(case, "sample", &report, &changed).is_err());
+            let mut changed = origin.clone();
+            if case == "pending-body-cutoff" {
+                changed
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|entry| entry["op"] != "head");
+            } else {
+                changed
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"op":"head","role":"a",
+                    "token":"sample","case":case,"at_us":36000}));
+            }
+            assert!(validate(case, "sample", &report, &changed).is_err());
+        }
+    }
+
+    #[test]
+    fn pending_cutoff_rejects_release_before_wait_even_when_timestamps_tie() {
+        let (report, mut origin) = pending_cutoff_sample("pending-body-cutoff");
+        let entries = origin.as_array_mut().unwrap();
+        for entry in entries.iter_mut() {
+            if entry["op"] == "waiting" {
+                entry["at_us"] = json!(210000);
+            } else if entry["op"] == "release" {
+                entry["response_returned_us"] = json!(210000);
+            }
+        }
+        validate("pending-body-cutoff", "sample", &report, &origin).unwrap();
+        let entries = origin.as_array_mut().unwrap();
+        let index = entries
+            .iter()
+            .position(|entry| entry["op"] == "release")
+            .unwrap();
+        let release = entries.remove(index);
+        let index = entries
+            .iter()
+            .position(|entry| entry["op"] == "waiting")
+            .unwrap();
+        entries.insert(index, release);
+        assert!(validate("pending-body-cutoff", "sample", &report, &origin).is_err());
+    }
+
+    #[test]
+    fn pending_cutoff_rejects_origin_waiting_only_after_guest_response_returned() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            for role in ["a", "b", "c"] {
+                for move_whole_phase in [false, true] {
+                    let (report, mut origin) = pending_cutoff_sample(case);
+                    for entry in origin
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .filter(|entry| entry["role"] == role)
+                    {
+                        match entry["op"].as_str().unwrap() {
+                            "waiting" => entry["at_us"] = json!(209500),
+                            "request" if move_whole_phase => entry["at_us"] = json!(209300),
+                            "head" if move_whole_phase => {
+                                entry["write_started_us"] = json!(209350);
+                                entry["at_us"] = json!(209400);
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert!(validate(case, "sample", &report, &origin).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_cutoff_requires_a_valid_response_boundary_before_release() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            for boundary in [
+                Value::Null,
+                json!(-1),
+                json!("209000"),
+                json!(0),
+                json!(210001),
+            ] {
+                let (report, mut origin) = pending_cutoff_sample(case);
+                let release = origin
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|entry| entry["op"] == "release")
+                    .unwrap();
+                origin[release]["response_returned_us"] = boundary;
+                assert!(validate(case, "sample", &report, &origin).is_err());
+                origin[release]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("response_returned_us");
+                assert!(validate(case, "sample", &report, &origin).is_err());
+            }
+        }
+    }
 
     fn sample(case: &str) -> (Value, Value) {
         let mut report = json!({"schema":1,"case":case,"token":"sample","qualification":false,

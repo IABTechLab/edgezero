@@ -107,6 +107,11 @@ their scope when introduced; the current summary supersedes their then-pending A
   Preserve actual host writes, guest observations, original cutoffs, typed failures and mixed
   collection states. Reject late or incomplete evidence; keep timeline misses and provider
   progress failures visible rather than widening tolerances or promoting qualification.
+- Extend those probes with pending-head/body cutoff waits, explicit post-response origin
+  release and malformed-evidence rejection. Capture operation return before report formatting
+  and require origin phases before the actual guest-response return, not just later release.
+  Keep the 200 ms cutoff and 205 ms return target, and distinguish a host-written head from
+  proven SDK body-read entry. Production behavior and qualification levels are unchanged.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

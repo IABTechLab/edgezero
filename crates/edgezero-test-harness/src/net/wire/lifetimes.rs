@@ -9,6 +9,8 @@ enum Case {
     Fast,
     Begin,
     Batch,
+    PendingHead,
+    PendingBody,
 }
 
 impl Case {
@@ -18,6 +20,8 @@ impl Case {
             "fast-origin" => Ok(Self::Fast),
             "begin-progress" => Ok(Self::Begin),
             "batch-progress" => Ok(Self::Batch),
+            "pending-head-cutoff" => Ok(Self::PendingHead),
+            "pending-body-cutoff" => Ok(Self::PendingBody),
             _ => Err("unknown lifetime case".into()),
         }
     }
@@ -28,6 +32,8 @@ impl Case {
             Self::Fast => "fast-origin",
             Self::Begin => "begin-progress",
             Self::Batch => "batch-progress",
+            Self::PendingHead => "pending-head-cutoff",
+            Self::PendingBody => "pending-body-cutoff",
         }
     }
 
@@ -37,7 +43,12 @@ impl Case {
             Self::Fast => matches!(role, "origin" | "a" | "b" | "c" | "mediator"),
             Self::Begin => role == "origin",
             Self::Batch => matches!(role, "a" | "b" | "c" | "quiet"),
+            Self::PendingHead | Self::PendingBody => matches!(role, "a" | "b" | "c"),
         }
+    }
+
+    fn held(self) -> bool {
+        matches!(self, Self::PendingHead | Self::PendingBody)
     }
 }
 
@@ -48,6 +59,7 @@ pub(super) struct Lifetime {
     roles: HashSet<String>,
     active: usize,
     events: Vec<Value>,
+    released: bool,
 }
 
 impl Lifetime {
@@ -85,8 +97,34 @@ pub(super) fn register(shared: &Shared, token: &str, case: &str) -> Result<()> {
             roles: HashSet::new(),
             active: 0,
             events: Vec::new(),
+            released: false,
         },
     );
+    Ok(())
+}
+
+pub(super) fn release(shared: &Shared, token: &str, response_returned: Instant) -> Result<()> {
+    let mut state = shared.lock();
+    let lifetime = state
+        .lifetimes
+        .get_mut(token)
+        .ok_or("unknown lifetime token")?;
+    require(lifetime.case.held(), "lifetime does not use a release gate")?;
+    let anchor = lifetime.anchor.ok_or("lifetime not started")?;
+    require(!lifetime.released, "lifetime already released")?;
+    require(lifetime.events.len() < EVENT_LIMIT, "lifetime event limit")?;
+    let released_at = Instant::now();
+    require(
+        (anchor..=released_at).contains(&response_returned),
+        "invalid response return boundary",
+    )?;
+    lifetime
+        .events
+        .push(json!({"op":"release","role":"control","token":token,
+        "case":lifetime.case.name(),"at_us":offset(released_at,anchor),
+        "response_returned_us":offset(response_returned,anchor)}));
+    lifetime.released = true;
+    shared.wake.notify_all();
     Ok(())
 }
 
@@ -292,6 +330,7 @@ pub(super) fn serve(
         Err(_) if expected_close => "peer_closed_after_cutoff",
         Ok(true) if exchange.role == "mediator" => "silent",
         Ok(true) => "complete",
+        Ok(false) if exchange.case.held() && !shared.lock().stop => "fixture_released",
         Ok(false) => "stopped",
         Err(_) => "error",
     });
@@ -341,6 +380,30 @@ fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
 }
 
 fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> Result<bool> {
+    if exchange.case.held() {
+        if shared.lock().lifetimes[exchange.token].released {
+            return Ok(false);
+        }
+        if matches!(exchange.case, Case::PendingBody) {
+            let started = Instant::now();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n")?;
+            socket.flush()?;
+            let mut head = exchange.event("head", Instant::now(), None);
+            head["write_started_us"] = json!(offset(started, exchange.anchor));
+            head["content_length"] = json!(1);
+            record(shared, exchange, head)?;
+        }
+        record(
+            shared,
+            exchange,
+            exchange.event("waiting", Instant::now(), None),
+        )?;
+        shared.wait(GATE_BUDGET, |state| {
+            state.stop || state.lifetimes[exchange.token].released
+        })?;
+        return Ok(false);
+    }
     let ms = |value| Duration::from_millis(value);
     let absolute = |value| exchange.scenario_anchor.unwrap() + ms(value);
     let received = |value| exchange.received + ms(value);
@@ -366,7 +429,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
                 Case::Slow => absolute([180, 320, 900][index]),
                 Case::Fast => absolute([180, 320, 400][index]),
                 Case::Batch => received([20, 40, 60][index]),
-                Case::Begin => unreachable!(),
+                Case::Begin | Case::PendingHead | Case::PendingBody => unreachable!(),
             };
             (at, vec![(at, [b"A".as_slice(), b"B", b"C"][index])])
         }
@@ -454,6 +517,114 @@ mod tests {
             .iter()
             .find(|event| event["role"] == role && event["op"] == op)
             .unwrap()
+    }
+
+    #[test]
+    fn pending_origins_withhold_body_and_eof_until_explicit_release() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            let origins = WireOrigins::start().unwrap();
+            origins.register_lifetime("held", case).unwrap();
+            origins.mark_lifetime_start("held").unwrap();
+            let socket = connect(&origins, "held", case, "a", "34000");
+            let (send, receive) = std::sync::mpsc::channel();
+            let reader = thread::spawn(move || send.send(read(socket)).unwrap());
+            origins
+                .shared
+                .wait(IO_BUDGET, |state| {
+                    state.lifetimes["held"]
+                        .events
+                        .iter()
+                        .any(|event| event["op"] == "waiting")
+                })
+                .unwrap();
+            assert!(matches!(
+                receive.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            let response_returned = Instant::now();
+            origins.release_lifetime("held", response_returned).unwrap();
+            let bytes = receive.recv_timeout(IO_BUDGET).unwrap();
+            reader.join().unwrap();
+            if case == "pending-body-cutoff" {
+                assert_eq!(
+                    bytes,
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n"
+                );
+            } else {
+                assert!(bytes.is_empty());
+            }
+            let events = origins.take_lifetime_events("held").unwrap();
+            assert_eq!(event(&events, "a", "closed")["reason"], "fixture_released");
+            assert_eq!(event(&events, "control", "release")["case"], case);
+            let anchor = origins.shared.lock().lifetimes["held"].anchor.unwrap();
+            assert_eq!(
+                event(&events, "control", "release")["response_returned_us"],
+                offset(response_returned, anchor),
+            );
+            assert!(origins.release_lifetime("held", Instant::now()).is_err());
+            origins.finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn pending_origin_release_rejects_boundaries_outside_the_active_lifetime() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            let origins = WireOrigins::start().unwrap();
+            origins.register_lifetime("boundary", case).unwrap();
+            origins.mark_lifetime_start("boundary").unwrap();
+            let anchor = origins.shared.lock().lifetimes["boundary"].anchor.unwrap();
+            assert!(
+                origins
+                    .release_lifetime("boundary", anchor - Duration::from_millis(1))
+                    .is_err()
+            );
+            assert!(
+                origins
+                    .release_lifetime("boundary", Instant::now() + Duration::from_secs(1))
+                    .is_err()
+            );
+            origins
+                .release_lifetime("boundary", Instant::now())
+                .unwrap();
+            let events = origins.take_lifetime_events("boundary").unwrap();
+            assert_eq!(events.as_array().unwrap().len(), 1);
+            origins.finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn pending_origin_release_before_dispatch_and_shutdown_are_bounded() {
+        for case in ["pending-head-cutoff", "pending-body-cutoff"] {
+            let mut origins = WireOrigins::start().unwrap();
+            origins.register_lifetime("early", case).unwrap();
+            assert!(origins.release_lifetime("unknown", Instant::now()).is_err());
+            assert!(origins.release_lifetime("early", Instant::now()).is_err());
+            origins.mark_lifetime_start("early").unwrap();
+            origins.release_lifetime("early", Instant::now()).unwrap();
+            assert!(read(connect(&origins, "early", case, "a", "34000")).is_empty());
+            let events = origins.take_lifetime_events("early").unwrap();
+            assert_eq!(events[0]["op"], "release");
+            assert_eq!(event(&events, "a", "closed")["reason"], "fixture_released");
+
+            origins.register_lifetime("stop", case).unwrap();
+            origins.mark_lifetime_start("stop").unwrap();
+            let socket = connect(&origins, "stop", case, "b", "34000");
+            origins
+                .shared
+                .wait(IO_BUDGET, |state| {
+                    state.lifetimes["stop"]
+                        .events
+                        .iter()
+                        .any(|event| event["op"] == "waiting")
+                })
+                .unwrap();
+            origins.shutdown();
+            read(socket);
+            let events = origins.take_lifetime_events("stop").unwrap();
+            assert_eq!(event(&events, "b", "closed")["reason"], "stopped");
+            assert!(origins.shared.lock().workers.is_empty());
+            origins.finish().unwrap();
+        }
     }
 
     #[test]

@@ -34,7 +34,12 @@ impl Probe {
     fn parse(case: &str, headers: &HeaderMap) -> Result<Self, EdgeError> {
         if !matches!(
             case,
-            "slow-origin" | "fast-origin" | "begin-progress" | "batch-progress"
+            "slow-origin"
+                | "fast-origin"
+                | "begin-progress"
+                | "batch-progress"
+                | "pending-head-cutoff"
+                | "pending-body-cutoff"
         ) {
             return Err(invalid());
         }
@@ -117,13 +122,14 @@ impl Timeline {
         (self.start + Duration::from_millis(millis)).saturating_duration_since(self.clock.now())
     }
 
-    fn observation_cutoff(&self) -> Deadline {
-        Deadline::at_instant(self.start + Duration::from_millis(534))
+    fn deadline_at(&self, millis: u64) -> Deadline {
+        Deadline::at_instant(self.start + Duration::from_millis(millis))
     }
 
-    fn event(&mut self, op: &str, at: MonotonicInstant, result: Value) {
-        self.events.push(json!({"op":op,"at_us":self.elapsed_us(at),
-            "duration_us":micros(self.clock.now().saturating_duration_since(at)),"result":result}));
+    fn event(&mut self, op: &str, at: MonotonicInstant, ended: MonotonicInstant, result: Value) {
+        let started_us = self.elapsed_us(at);
+        self.events.push(json!({"op":op,"at_us":started_us,
+            "duration_us":self.elapsed_us(ended).saturating_sub(started_us),"result":result}));
     }
 
     async fn wait_until(&self, ctx: &RequestContext, millis: u64) -> Result<(), EdgeError> {
@@ -200,9 +206,11 @@ async fn record_slots(report: &mut Report, slots: Vec<OutboundCollectedSlot>) {
 async fn collect(batch: OutboundBatch, report: &mut Report, timeline: &mut Timeline) {
     let at = timeline.clock.now();
     let result = batch.collect().await;
+    let ended = timeline.clock.now();
     timeline.event(
         "collect",
         at,
+        ended,
         json!(if result.is_ok() { "ok" } else { "error" }),
     );
     let slots = match result {
@@ -227,9 +235,11 @@ async fn check(
 ) -> Result<bool, EdgeError> {
     let at = timeline.clock.now();
     let result = batch.check();
+    let ended = timeline.clock.now();
     timeline.event(
         "check",
         at,
+        ended,
         json!(match &result {
             Ok(OutboundBatchCheck::Item(_)) => "Item",
             Ok(OutboundBatchCheck::Finished(_)) => "Finished",
@@ -254,6 +264,12 @@ async fn run(
     report: &mut Report,
     timeline: &mut Timeline,
 ) -> Result<(), EdgeError> {
+    if matches!(
+        probe.case.as_str(),
+        "pending-head-cutoff" | "pending-body-cutoff"
+    ) {
+        return pending_cutoff(ctx, probe, client, report, timeline).await;
+    }
     let origin = if probe.case == "batch-progress" {
         None
     } else {
@@ -261,24 +277,28 @@ async fn run(
         let request = probe.request("origin", timeline)?;
         let at = timeline.clock.now();
         let result = client.begin(request).await;
+        let ended = timeline.clock.now();
         timeline.event(
             "begin",
             at,
+            ended,
             json!(if result.is_ok() { "scheduled" } else { "error" }),
         );
         Some(result?)
     };
     if probe.case == "begin-progress" {
         let at = timeline.clock.now();
-        timeline.event("quiet-start", at, Value::Null);
+        timeline.event("quiet-start", at, at, Value::Null);
         super::progress::pause(ctx, Duration::from_millis(100))?.await;
         let at = timeline.clock.now();
-        timeline.event("quiet-end", at, Value::Null);
+        timeline.event("quiet-end", at, at, Value::Null);
         let at = timeline.clock.now();
         let result = origin.ok_or_else(invalid)?.collect().await;
+        let ended = timeline.clock.now();
         timeline.event(
             "origin-head",
             at,
+            ended,
             json!(if result.is_ok() { "ok" } else { "error" }),
         );
         report.origin = Some(response_report(result).await);
@@ -290,18 +310,19 @@ async fn run(
         .into_iter()
         .map(|role| probe.request(role, timeline))
         .collect::<Result<Vec<_>, _>>()?;
-    let observation_cutoff = timeline.observation_cutoff();
+    let observation_cutoff = timeline.deadline_at(534);
     let at = timeline.clock.now();
     let mut batch = client.start_batch_until(requests, observation_cutoff);
-    timeline.event("batch-start", at, Value::Null);
+    let ended = timeline.clock.now();
+    timeline.event("batch-start", at, ended, Value::Null);
 
     if probe.case == "batch-progress" {
         let request = probe.request("quiet", timeline)?;
         let at = timeline.clock.now();
-        timeline.event("quiet-start", at, Value::Null);
+        timeline.event("quiet-start", at, at, Value::Null);
         let result = client.send(request).await;
         let at = timeline.clock.now();
-        timeline.event("quiet-end", at, Value::Null);
+        timeline.event("quiet-end", at, at, Value::Null);
         let quiet = response_report(result).await;
         if let Some(error) = quiet.get("error") {
             report.error = Some(error.clone());
@@ -312,9 +333,11 @@ async fn run(
 
     let at = timeline.clock.now();
     let result = origin.ok_or_else(invalid)?.collect().await;
+    let ended = timeline.clock.now();
     timeline.event(
         "origin-head",
         at,
+        ended,
         json!(if result.is_ok() { "ok" } else { "error" }),
     );
     let response = result?;
@@ -334,21 +357,25 @@ async fn run(
         collect(batch, report, timeline).await;
         let at = timeline.clock.now();
         report.origin = Some(response_report(Ok(response)).await);
-        timeline.event("origin-body", at, Value::Null);
+        let ended = timeline.clock.now();
+        timeline.event("origin-body", at, ended, Value::Null);
         return Ok(());
     }
 
     let at = timeline.clock.now();
     report.origin = Some(response_report(Ok(response)).await);
-    timeline.event("origin-body", at, Value::Null);
+    let ended = timeline.clock.now();
+    timeline.event("origin-body", at, ended, Value::Null);
     if let Err(error) = check(&mut batch, report, timeline).await {
         report.error = Some(error_report(&error));
     }
     let at = timeline.clock.now();
     let result = batch.next().await;
+    let ended = timeline.clock.now();
     timeline.event(
         "next",
         at,
+        ended,
         json!(match &result {
             Ok(OutboundBatchNext::Item(_)) => "Item",
             Ok(OutboundBatchNext::Finished(_)) => "Finished",
@@ -371,9 +398,11 @@ async fn run(
     let at = timeline.clock.now();
     let remaining = observation_cutoff.instant().saturating_duration_since(at);
     let result = client.send(request).await;
+    let ended = timeline.clock.now();
     timeline.event(
         "mediator-send",
         at,
+        ended,
         json!(if result.is_ok() { "ok" } else { "error" }),
     );
     let mut mediator =
@@ -383,6 +412,70 @@ async fn run(
         Err(error) => mediator["error"] = error_report(&error),
     }
     report.mediator = Some(mediator);
+    Ok(())
+}
+
+async fn pending_cutoff(
+    ctx: &RequestContext,
+    probe: &Probe,
+    client: &HttpClient,
+    report: &mut Report,
+    timeline: &mut Timeline,
+) -> Result<(), EdgeError> {
+    use std::future::Future;
+
+    timeline.wait_until(ctx, 34).await?;
+    let requests = ["a", "b", "c"]
+        .into_iter()
+        .map(|role| probe.request(role, timeline))
+        .collect::<Result<Vec<_>, _>>()?;
+    let observation_cutoff = timeline.deadline_at(200);
+    let at = timeline.clock.now();
+    let mut batch = client.start_batch_until(requests, observation_cutoff);
+    let ended = timeline.clock.now();
+    timeline.event(
+        "batch-start",
+        at,
+        ended,
+        json!({"cutoff_at_us":timeline.elapsed_us(observation_cutoff.instant())}),
+    );
+    let at = timeline.clock.now();
+    let mut first_poll = None;
+    let mut pending_polls = 0_u64;
+    let (result, ended) = {
+        let mut next = std::pin::pin!(batch.next());
+        let result = futures::future::poll_fn(|context| {
+            first_poll.get_or_insert_with(|| timeline.elapsed_us(timeline.clock.now()));
+            let outcome = next.as_mut().poll(context);
+            if outcome.is_pending() {
+                pending_polls = pending_polls.saturating_add(1);
+            }
+            outcome
+        })
+        .await;
+        (result, timeline.clock.now())
+    };
+    let state = match &result {
+        Ok(OutboundBatchNext::Finished(termination)) => format!("{termination:?}"),
+        Ok(OutboundBatchNext::Item(_)) => "Item".to_owned(),
+        Err(_) => "error".to_owned(),
+    };
+    timeline.event(
+        "next",
+        at,
+        ended,
+        json!({"state":state,"first_poll_us":first_poll,
+        "pending_polls":pending_polls}),
+    );
+    match result {
+        Ok(OutboundBatchNext::Item(item)) => {
+            let (index, slot) = item.into_parts();
+            record_item(report, index, slot, "next").await;
+        }
+        Ok(OutboundBatchNext::Finished(_)) => {}
+        Err(error) => report.error = Some(error_report(&error)),
+    }
+    collect(batch, report, timeline).await;
     Ok(())
 }
 
@@ -451,6 +544,8 @@ mod tests {
             "fast-origin",
             "begin-progress",
             "batch-progress",
+            "pending-head-cutoff",
+            "pending-body-cutoff",
         ] {
             let probe = Probe::parse(case, &headers(case)).unwrap();
             assert_eq!(probe.case, case);
@@ -518,6 +613,30 @@ mod tests {
     }
 
     #[test]
+    fn timeline_excludes_reporting_work_after_the_operation_returns() {
+        for ended_us in [200_000, 200_002, 204_999, 205_001] {
+            let time = TestTime::default();
+            let start = time.clock().now();
+            let mut timeline = Timeline::new(time.clock(), start);
+            let at = start + Duration::from_nanos(34_000_999);
+            time.advance_to(start + Duration::from_micros(ended_us));
+            let returned = time.clock().now();
+            timeline.event("next", at, returned, {
+                time.advance_to(start + Duration::from_millis(500));
+                json!({"state":"Cutoff"})
+            });
+            assert_eq!(timeline.elapsed_us(returned), ended_us);
+            let observed_end = timeline.events[0]["at_us"].as_u64().unwrap()
+                + timeline.events[0]["duration_us"].as_u64().unwrap();
+            assert_eq!(observed_end, ended_us);
+            assert_eq!(
+                (200_000..=205_000).contains(&observed_end),
+                ended_us <= 205_000
+            );
+        }
+    }
+
+    #[test]
     fn timeline_keeps_two_thirty_four_and_fixed_five_thirty_four_without_clock_loops() {
         let time = TestTime::default();
         let start = time.clock().now();
@@ -528,20 +647,25 @@ mod tests {
         time.advance_to(start + Duration::from_millis(34));
         let at = time.clock().now();
         time.advance_to(start + Duration::from_micros(34_017));
-        timeline.event("batch-start", at, Value::Null);
+        timeline.event("batch-start", at, time.clock().now(), Value::Null);
         assert_eq!(
             timeline.events,
             [json!({"op":"batch-start","at_us":34000,"duration_us":17,"result":null})]
         );
         time.advance_to(start + Duration::from_millis(400));
         assert_eq!(
-            timeline.observation_cutoff().instant(),
+            timeline.deadline_at(534).instant(),
             start + Duration::from_millis(534)
         );
         assert_eq!(timeline.remaining(534), Duration::from_millis(134));
         time.advance_to(start + Duration::from_millis(710));
         assert_eq!(timeline.remaining(701), Duration::ZERO);
         assert_eq!(timeline.elapsed_us(time.clock().now()), 710_000);
+        assert_eq!(
+            timeline.deadline_at(200).instant(),
+            start + Duration::from_millis(200)
+        );
+        assert!(timeline.deadline_at(200).is_expired_at(time.clock().now()));
     }
 
     #[test]

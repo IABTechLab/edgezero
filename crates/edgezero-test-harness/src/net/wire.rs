@@ -124,6 +124,10 @@ impl WireOrigins {
         lifetimes::take_events(&self.shared, token)
     }
 
+    pub fn release_lifetime(&self, token: &str, response_returned: Instant) -> Result<()> {
+        lifetimes::release(&self.shared, token, response_returned)
+    }
+
     pub fn arm(&self, name: &str) {
         let mut state = self.shared.lock();
         if name.is_empty()

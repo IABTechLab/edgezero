@@ -386,6 +386,47 @@ proxy 503 sequence after unread cancellation; it does not restore eager producti
 accept 503 as a baseline, or claim unread-body cancellation evidence. The full ignored
 generated-project matrix and hosted qualification were not rerun by this merge checkpoint.
 
+### D6 Pending Cutoff Probe Checkpoint (2026-10-28)
+
+Resume the parked lifetime-probe work above main-integration commit `f822e408`. The existing
+Rust harness and production-client fixture now run six cases, adding pending response heads
+and host-written heads with permanently withheld bodies. Both keep the original request-start
+200 ms cutoff, require a genuinely Pending `next()` poll and `Cutoff` by 205 ms, and preserve
+three unresolved slots. Origins remain held until the complete guest response returns to the
+host runner, then release and join through the existing bounded collector.
+
+Two independently reproduced red regressions are repaired: host validation no longer accepts
+an origin phase reached only after guest-response return but before later fixture release;
+guest timing captures operation return before result formatting. The one private Timeline API
+uses explicit endpoints throughout, including fractional-microsecond reconstruction. Negative
+tests cover missing/invalid boundaries, every role and both cases, whole phases shifted past
+return, premature release, and tied timestamps with reordered events. Existing strict bounds
+and the original four case assertions remain unchanged.
+
+One local characterization per adapter records these guest return offsets from request start:
+
+| Local Runtime | Pending Head | Pending Body |
+| ------------- | ------------ | ------------ |
+| Axum | 202.668 ms | 201.179 ms |
+| Repaired Viceroy 0.21.0 | 201.182 ms | 201.194 ms |
+| Spin 4.1.0 / signed SDK revision | 202.133 ms | 202.983 ms |
+| workerd 2026-09-10 / Wrangler 4.131.0 | 202 ms | 204 ms |
+
+Every run has four passing cases and two failing original slow/fast timeline cases; all four
+suite exits remain 1. These are not passing six-case inventories. Complete local artifacts are
+under `/private/tmp/edgezero-d6-return-boundaries-20261028/{axum,viceroy,spin,workerd}`. Host
+response-return and release offsets stay in their own clock domain. Unit tests pass 212 shared
+harness cases (one ignored) and 43 qualification-enabled fixture cases; both scoped strict
+Clippy checks pass. Existing CI already executes those test groups; no per-case jobs are added.
+Final verification also passes the five primary Rust gates, fixture strict Clippy on all three
+WASM targets, formatting across all affected workspaces, and the legacy/docs/inventory guards.
+
+Pending-body evidence stays explicitly `host-head-written-only`, not proof that the SDK
+received the head or entered a body read. Full criterion 16, the other D6 scenarios and strict
+timeline closure remain open. No production outbound implementation, dependency pin, frozen
+requirement/interface or acceptance binding changes; the inventory stays 32 ready and 479
+planned, unqualified. No deployment, candidate freeze or capability promotion is implied.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

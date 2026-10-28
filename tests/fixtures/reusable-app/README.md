@@ -901,11 +901,25 @@ The local workerd run is distinct from Node guest fixtures and from hosted cance
 The same suite accepts `fastly`, `cloudflare` or `spin` with the explicit local tooling above.
 It exercises EZ-6 scenarios 1, 2, 4 and 5 through the injected production client: slow origin,
 fast origin with a silent mediator, Begin followed by an unrelated 100 ms timer, and an
-unobserved batch during a separate 300 ms send. It does not implement CPU-stretch scenario 3
+unobserved batch during a separate 300 ms send. Two additional probes exercise a waiting
+`next()` against the original request-start-relative 200 ms cutoff, requiring `Cutoff` by
+205 ms and all three slots unresolved. One origin withholds headers; the other writes a head
+declaring one body byte but withholds both that byte and EOF. The suite runs six cases.
+It does not implement CPU-stretch scenario 3
 or the remaining response-owned, cleanup, cap and reusable-sandbox acceptance scenarios.
 
 Each case records actual guest operation entry/duration, per-slot arrival elapsed, exact
 collection states, typed errors, and independently observed host receipts/head/chunk writes.
+Batched operation endpoints are captured before report formatting; microsecond offsets retain
+the measured endpoint rather than separately truncating the duration. Pending probes capture
+the host's complete guest-response return before explicitly releasing origins. Every receipt,
+head write and waiting phase must precede that boundary, and closure must follow release.
+Equal timestamps do not override the required event-index ordering.
+
+The pending-body record explicitly reports `body_phase_evidence: host-head-written-only`.
+Writing the host's head does not prove the SDK consumed it or entered a body read before the
+cutoff. These probes do not close the complete scenario 16 acceptance leg or certify host
+cancellation. Release ends the fixture's hold; it is not evidence of provider teardown.
 Bodies are capped at 64 bytes. The existing bounded origin collector/parser and joined worker
 ownership are reused; registrations, roles and event counts are finite, and unexpected or late
 worker failures prevent a passing inventory. The suite runs all four cases even when an earlier
