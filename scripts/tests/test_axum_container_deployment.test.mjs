@@ -23,7 +23,11 @@ docker() {
       *) return 97 ;;
     esac
   elif [[ "$1" == inspect ]]; then
-    echo true
+    if [[ "$*" == *State.ExitCode* ]]; then
+      echo "$STOP_EXIT"
+    else
+      echo "$RESTRICTIONS"
+    fi
   elif [[ "$1" != exec ]]; then
     return 97
   fi
@@ -49,7 +53,8 @@ function runSmoke(t, overrides = {}, name = 'container-probe') {
   const result = spawnSync('bash', [script, 'localhost/app@sha256:' + 'a'.repeat(64), name], {
     encoding: 'utf8', timeout: 5000,
     env: { ...process.env, BASH_ENV: bashEnv, TMPDIR: directory, MOCK_DIR: directory,
-      FAIL_PHASE: '', WRONG_BODY_PHASE: '', EXPECTED_NAME: name, ...overrides },
+      FAIL_PHASE: '', WRONG_BODY_PHASE: '', EXPECTED_NAME: name, STOP_EXIT: '0',
+      RESTRICTIONS: '10001:10001 true [ALL] [no-new-privileges:true]', ...overrides },
   });
   assert.ifError(result.error);
   return { ...result, events: readFileSync(join(directory, 'events'), 'utf8').trim().split('\n') };
@@ -85,6 +90,24 @@ for (const phase of ['initial', 'restart']) {
     assert.notEqual(result.status, 0);
     assert.doesNotMatch(result.stdout, /PASS:/);
     if (phase === 'initial') assert.ok(!result.events.includes('compose start'));
+    assert.equal(result.events.at(-1), 'compose down');
+  });
+}
+
+for (const STOP_EXIT of ['137', '1', '']) {
+  test(`Compose smoke rejects unclean stop (${STOP_EXIT}) before restart`, t => {
+    const result = runSmoke(t, { STOP_EXIT });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /did not stop cleanly/);
+    assert.ok(!result.events.includes('compose start'));
+    assert.equal(result.events.at(-1), 'compose down');
+  });
+}
+for (const RESTRICTIONS of ['0:0 true [ALL] [no-new-privileges:true]', '10001:10001 false [ALL] [no-new-privileges:true]', '10001:10001 true [] [no-new-privileges:true]', '10001:10001 true [ALL] []']) {
+  test(`Compose smoke rejects insecure configuration: ${RESTRICTIONS}`, t => {
+    const result = runSmoke(t, { RESTRICTIONS });
+    assert.notEqual(result.status, 0);
+    assert.ok(!result.events.includes('compose start'));
     assert.equal(result.events.at(-1), 'compose down');
   });
 }

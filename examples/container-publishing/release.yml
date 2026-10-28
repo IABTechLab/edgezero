@@ -1,6 +1,8 @@
-# Copy with tools.env, verify_artifacts.mjs, publish.sh and the handoff helper.
+# Copy with tools.env, prepare_inputs.mjs, audit_lock.mjs, verify_artifacts.mjs,
+# publish.sh and the handoff helper.
 # The application supplies .ci/test-container.sh IMAGE_REF PLATFORM, its own
-# committed Cargo.lock, declared toolchain, and digest-pinned Dockerfile.
+# committed Cargo.lock and declared toolchain. Custom bases stay digest-pinned;
+# the scaffold's distroless runtime tag intentionally floats (see publishing guide).
 name: Application container release
 
 on:
@@ -43,39 +45,7 @@ jobs:
           git archive --format=tar "$GITHUB_SHA" > "$RUNNER_TEMP/source.tar"
           mkdir "$RUNNER_TEMP/context"
           tar -C "$RUNNER_TEMP/context" -xf "$RUNNER_TEMP/source.tar" --no-same-owner
-          node --input-type=module - "$RUNNER_TEMP/context" "$RUNNER_TEMP/source.tar" <<'JS'
-          import { createHash } from 'node:crypto';
-          import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-          import { join } from 'node:path';
-          const [app, source] = process.argv.slice(2);
-          const hashFile = path => createHash('sha256').update(readFileSync(path)).digest('hex');
-          const files = [];
-          function walk(directory, prefix = '') {
-            for (const name of readdirSync(directory)) {
-              const relative = prefix + name;
-              const path = join(directory, name);
-              const stat = lstatSync(path);
-              if (stat.isDirectory()) walk(path, relative + '/');
-              else if (stat.isFile()) files.push(relative);
-              else throw new Error('Release source must not contain links or special files');
-            }
-          }
-          walk(app);
-          const context = createHash('sha256');
-          for (const name of files.sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
-            context.update(name).update('\0').update(readFileSync(join(app, name))).update('\0');
-          }
-          const inputs = {
-            revision: process.env.GITHUB_SHA, dirty: false,
-            dependency_mode: 'application-owned-committed-lock',
-            source_sha256: hashFile(source), context_sha256: context.digest('hex'),
-            lock_sha256: hashFile(join(app, 'Cargo.lock')),
-            dockerfile_sha256: hashFile(join(app, 'Dockerfile')),
-            base_images: [...readFileSync(join(app, 'Dockerfile'), 'utf8').matchAll(/^FROM (\S+)/gm)].map(m => m[1]),
-            toolchain: readFileSync(join(app, '.tool-versions'), 'utf8'),
-          };
-          writeFileSync(join(app, 'fixture-inputs.json'), JSON.stringify(inputs, null, 2) + '\n');
-          JS
+          node examples/container-publishing/prepare_inputs.mjs "$RUNNER_TEMP/context" "$RUNNER_TEMP/source.tar"
           tar -C "$RUNNER_TEMP" -cf "$RUNNER_TEMP/context.tar" context
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -133,6 +103,7 @@ jobs:
             ${{ runner.temp }}/accepted/scanner.json
             ${{ runner.temp }}/accepted/sbom.json
             ${{ runner.temp }}/accepted/provenance.json
+            ${{ runner.temp }}/accepted/rust-advisories.json
           if-no-files-found: error
           retention-days: 7
 

@@ -5,11 +5,12 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { contextHash } from '../axum_container_helpers.mjs';
+import { hashContext } from '../../examples/container-publishing/prepare_inputs.mjs';
 
 const root = new URL('../../', import.meta.url);
 const workflow = readFileSync(new URL('examples/container-publishing/release.yml', root), 'utf8');
-const preparation = workflow.match(/node --input-type=module - .* <<'JS'\n([\s\S]*?)\n          JS/)[1]
-  .replace(/^          /gm, '');
+const preparation = new URL('examples/container-publishing/prepare_inputs.mjs', root);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 
 function scratch(t) {
@@ -19,8 +20,8 @@ function scratch(t) {
 }
 
 function prepare(app, source) {
-  return spawnSync(process.execPath, ['--input-type=module', '-', app, source], {
-    input: preparation, encoding: 'utf8', env: { ...process.env, GITHUB_SHA: 'a'.repeat(40) },
+  return spawnSync(process.execPath, [preparation.pathname, app, source], {
+    encoding: 'utf8', env: { ...process.env, GITHUB_SHA: 'a'.repeat(40) },
   });
 }
 
@@ -39,6 +40,7 @@ test('application preparation hashes exactly the sorted committed context bytes'
   for (const [name, data] of Object.entries(files)) writeFileSync(join(app, name), data);
   const source = join(directory, 'source.tar');
   writeFileSync(source, 'immutable git archive bytes');
+  const fixtureHash = contextHash(app);
   const result = prepare(app, source);
   assert.equal(result.status, 0, result.stderr);
   const inputs = JSON.parse(readFileSync(join(app, 'fixture-inputs.json')));
@@ -47,6 +49,9 @@ test('application preparation hashes exactly the sorted committed context bytes'
     context.update(name + '\0' + files[name] + '\0');
   }
   assert.equal(inputs.context_sha256, context.digest('hex'));
+  assert.equal(inputs.context_sha256, fixtureHash);
+  assert.equal(inputs.context_sha256, hashContext(Object.entries(files)));
+  assert.notEqual(prepare(app, source).status, 0, 'reserved receipt must not enter its own context hash');
   assert.equal(inputs.source_sha256, sha256(readFileSync(source)));
   assert.equal(inputs.lock_sha256, sha256(files['Cargo.lock']));
   assert.equal(inputs.dockerfile_sha256, sha256(files.Dockerfile));
@@ -123,4 +128,18 @@ test('publisher merges child blobs without changing bytes and records exact inde
   assert.equal(descriptor.size, index.length);
   writeFileSync(join(work, 'arm64/blobs/sha256', sha256(shared)), 'conflicting blob');
   assert.notEqual(runMerge().status, 0);
+});
+
+test('container helper CI has one suite owner and derives framework Node pins', () => {
+  const native = readFileSync(new URL('.github/workflows/axum-container.yml', root), 'utf8');
+  const actions = readFileSync(new URL('.github/workflows/deploy-action.yml', root), 'utf8');
+  assert.doesNotMatch(native, /- docs\//);
+  assert.equal(native.split('node --test scripts/tests/test_axum_container*.test.mjs').length - 1, 1);
+  assert.ok(native.includes('AXUM_PREPARED_CONTEXT='));
+  assert.ok(!actions.includes('node --test scripts/tests/test_axum_container*.test.mjs'));
+  for (const source of [native, actions]) {
+    assert.ok(!source.includes('node-version: "24.12.0"'));
+    assert.ok(source.includes('steps.node-version.outputs.node-version'));
+  }
+  assert.equal(native.split('- scripts/package*.json').length - 1, 2);
 });

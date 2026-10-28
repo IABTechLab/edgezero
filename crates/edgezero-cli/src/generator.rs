@@ -1121,10 +1121,18 @@ mod tests {
                     .split(" AS runtime\n")
                     .nth(1)
                     .expect("runtime stage");
-                assert!(runtime.contains("apt-get upgrade -y --no-install-recommends"));
-                assert!(runtime.contains(
-                    "apt-get install -y --no-install-recommends ca-certificates libgcc-s1"
-                ));
+                assert!(
+                    dockerfile.contains("FROM gcr.io/distroless/cc-debian12:nonroot AS runtime")
+                );
+                assert!(!runtime.contains("apt-get"));
+                assert!(
+                    dockerfile
+                        .find("--no-install-recommends cmake")
+                        .expect("builder tools")
+                        < dockerfile.find("COPY . .").expect("source copy")
+                );
+                assert!(!dockerfile.contains("--mount=type=cache"));
+                assert!(runtime.contains("STOPSIGNAL SIGINT\nENTRYPOINT [\"/usr/local/bin/app\"]"));
                 assert!(dockerfile.contains("USER 10001:10001"));
                 assert!(dockerfile.contains("ENTRYPOINT [\"/usr/local/bin/app\"]"));
                 assert!(dockerfile.contains("EDGEZERO__ADAPTER__HOST=0.0.0.0"));
@@ -1159,6 +1167,8 @@ mod tests {
             )
             .expect("render README");
         assert!(readme.contains("docker build -t app:local ."));
+        assert!(readme.contains("https://iabtechlab.github.io/edgezero/guide/adapters/axum"));
+        assert!(!readme.contains("stackpop"));
         assert!(readme.contains("-p 127.0.0.1:8787:8787 app:local"));
         assert!(readme.contains("`_123app-adapter-axum`"));
     }

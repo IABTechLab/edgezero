@@ -4,6 +4,10 @@ ARG RUST_VERSION={{rust_version}}
 FROM rust:${RUST_VERSION}-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 ARG RUST_VERSION
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
+# AWS-LC may build bundled native sources. These tools stay in the builder.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
 
@@ -36,10 +40,6 @@ actual=$(rustup run "$RUST_VERSION" rustc --version | awk '{print $2}')
 test "$actual" = "$pin" || fail 'the installed builder compiler does not match the application pin'
 SH
 
-# AWS-LC may build bundled native sources. These tools stay in the builder.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake \
-    && rm -rf /var/lib/apt/lists/*
 RUN <<'SH'
 set -eu
 host=$(rustc -vV | awk '$1 == "host:" {print $2}')
@@ -49,16 +49,13 @@ cp "target/$host/release/{{proj_axum}}" /out/app
 strip --strip-debug /out/app
 SH
 
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
-# Apply available Bookworm fixes to packages inherited from the pinned base too.
-RUN apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 \
-    && rm -rf /var/lib/apt/lists/*
+# Follow runtime security updates; each candidate is tested and released by digest.
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 WORKDIR /app
 COPY --from=builder /out/app /usr/local/bin/app
 ENV EDGEZERO__ADAPTER__HOST=0.0.0.0 \
     EDGEZERO__ADAPTER__PORT=8787
 USER 10001:10001
 EXPOSE 8787
+STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/local/bin/app"]

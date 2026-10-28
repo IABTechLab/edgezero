@@ -48,6 +48,12 @@ for (const [name, check] of [
     const lock = fs.readFileSync(path.join(app, 'Cargo.lock'));
     assert.equal(digest(lock), inputs.lock_sha256);
     assert.ok(!lock.equals(fs.readFileSync(path.join(app, 'vendor/edgezero/Cargo.lock'))));
+    const seeded = readToml(path.join(app, 'vendor/edgezero/Cargo.lock')).package;
+    const resolved = parseToml(lock.toString()).package;
+    for (const pkg of resolved.filter(pkg => pkg.source?.startsWith('registry+'))) {
+      assert.ok(seeded.some(pin => pin.name === pkg.name && pin.version === pkg.version && pin.source === pkg.source),
+        `Fixture changed a framework dependency: ${pkg.name}@${pkg.version}`);
+    }
     for (const pkg of readJson(path.join(app, '..', 'metadata.json')).packages) {
       if (pkg.source === null) assert.ok(isWithin(app, fs.realpathSync(pkg.manifest_path)), pkg.name);
     }
@@ -107,7 +113,7 @@ test('TOML rejects duplicate keys, broken values, invalid escapes and unterminat
     '[app]\nname="unterminated', '[app]\nname="bad\\q"',
     '[app]\nname="bad\\uD800"', '[app]\nname=bare',
     '[app]\nname=["x"', '[app]\nname={x="y"', '[app]\nname="x" trailing',
-  ]) assert.throws(() => parseToml(source), /TOML line/);
+  ]) assert.throws(() => parseToml(source), /TOML/);
 });
 
 test('app-name CLI reads TOML and rejects shell-unsafe or missing names', (t) => {
@@ -183,6 +189,14 @@ test('source staging preserves selected source bytes and path-NUL-bytes-NUL hash
   assert.ok(!fs.existsSync(path.join(app, 'vendor/edgezero/target')));
 });
 
+test('source staging tolerates absent generated Git metadata', t => {
+  const { root, app } = sourceFixture(t);
+  fs.rmSync(path.join(app, '.git'), { recursive: true });
+  stageSources(root, app);
+  assert.ok(!fs.existsSync(path.join(app, '.git')));
+  assert.equal(readJson(path.join(app, 'fixture-source.json')).dependency_mode, 'staged-test-sources');
+});
+
 test('source staging rejects symlinks and missing tracked sources', (t) => {
   for (const symlink of [true, false]) {
     const { root, app } = sourceFixture(t);
@@ -240,6 +254,12 @@ test('runtime tar validates native ELF for amd64 and arm64, including linked app
     const file = runtimeTar(t, [tarEntry('usr/local/bin/app', elf(machine))]);
     assert.equal(await validateRuntimeTar(file, platform), `ELF class 2 machine ${machine}`);
   }
+  const absolute = runtimeTar(t, [tarEntry('usr/local/bin/program', elf()), tarEntry('usr/local/bin/app', '', '2', '/usr/local/bin/program')]);
+  assert.match(await validateRuntimeTar(absolute, 'linux/amd64'), /machine 62/);
+  const prefixed = runtimeTar(t, [tarEntry('./usr/local/bin/app', elf())]);
+  assert.match(await validateRuntimeTar(prefixed, 'linux/amd64'), /machine 62/);
+  const prefixedHardlink = runtimeTar(t, [tarEntry('./usr/local/bin/program', elf()), tarEntry('./usr/local/bin/app', '', '1', './usr/local/bin/program')]);
+  assert.match(await validateRuntimeTar(prefixedHardlink, 'linux/amd64'), /machine 62/);
   const linked = runtimeTar(t, [tarEntry('usr/local/bin/program', elf()), tarEntry('usr/local/bin/app', '', '2', 'program')]);
   assert.match(await validateRuntimeTar(linked, 'linux/amd64'), /machine 62/);
   const hardlinked = runtimeTar(t, [tarEntry('usr/local/bin/program', elf()), tarEntry('usr/local/bin/app', '', '1', 'usr/local/bin/program')]);
@@ -287,6 +307,8 @@ test('runtime tar rejects missing, truncated, malformed or wrong-platform execut
     [[tarEntry('usr/local/bin/app', bigEndian)], /ELF64 little-endian/],
     [[tarEntry('usr/local/bin/app', elf(183))], /platform mismatch/],
     [[tarEntry('usr/local/bin/app', '', '2', 'app')], /Cyclic/],
+    [[tarEntry('usr/local/bin/app', '', '2', '/usr/local/bin/app')], /Cyclic/],
+    [[tarEntry('usr/local/bin/app', '', '2', '../../../../missing')], /Missing runtime member/],
   ]) await assert.rejects(validateRuntimeTar(runtimeTar(t, entries), 'linux/amd64'), error);
   const corrupt = tarEntry('usr/local/bin/app', elf());
   corrupt[0] = 0;

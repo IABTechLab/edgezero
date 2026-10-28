@@ -4,9 +4,13 @@ set -euo pipefail
 # Opt-in packaging check for a disposable generated app, NOT a production app.
 # Prepare portable dependencies and the app's own Cargo.lock before calling this.
 # Usage: ./scripts/test_generated_axum_container.sh /path/to/container-probe
-# Requires Docker, Node.js 22+, curl, OpenSSL, readelf and network access for image builds.
+# Requires Docker, Node.js 22+, curl, OpenSSL, readelf, sha256sum and network access.
+# Install the framework helper dependency first: npm ci --prefix scripts
+# CI uses the Node.js version declared in the repository .tool-versions.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HELPERS="$ROOT/scripts/axum_container_helpers.mjs"
+# shellcheck source=../examples/container-publishing/tools.env
+source "$ROOT/examples/container-publishing/tools.env"
 APP_DIR="$(cd "${1:?pass a prepared disposable generated workspace}" && pwd)"
 shift
 BORROWED_IMAGE=""
@@ -131,25 +135,9 @@ readelf -h -l -d "$WORK/app" > "$WORK/elf.log"
 grep -E 'Machine:|interpreter|NEEDED' "$WORK/elf.log"
 test -s "$WORK/os-roots.pem"
 node "$HELPERS" runtime-tar "$WORK/runtime.tar" "$PLATFORM"
-docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
-  --entrypoint sh "$IMAGE" -ec '
-    id; test "$(id -u):$(id -g)" = 10001:10001
-    grep -q "^CapEff:[[:space:]]*0000000000000000$" /proc/self/status
-    grep -q "^NoNewPrivs:[[:space:]]*1$" /proc/self/status
-    if touch /app/forbidden 2>/dev/null; then exit 1; fi
-  ' 2>&1 | tee "$WORK/identity-libraries.log"
-# ldd may return success despite unresolved entries; check its complete output separately.
-docker run --rm --read-only --cap-drop=ALL --entrypoint ldd "$IMAGE" /usr/local/bin/app \
-  | tee "$WORK/ldd.log"
-if grep -q 'not found' "$WORK/ldd.log"; then echo 'Unresolved runtime library' >&2; exit 1; fi
-
-# Explicit tmpfs ownership works; wrong-owner state remains unwritable.
-docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
-  --tmpfs /app/.edgezero:rw,noexec,nosuid,size=1m,uid=10001,gid=10001,mode=0700 \
-  --entrypoint sh "$IMAGE" -ec 'touch /app/.edgezero/check; if touch /app/forbidden 2>/dev/null; then exit 1; fi'
-docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
-  --tmpfs /app/.edgezero:rw,noexec,nosuid,size=1m,uid=0,gid=0,mode=0700 \
-  --entrypoint sh "$IMAGE" -ec '! touch /app/.edgezero/check 2>/dev/null'
+# Distroless contains no diagnostic shell or ldd. ELF inspection above and actual
+# HTTP/TLS execution below check the executable and its library/CA dependencies.
+[[ "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" == 10001:10001 ]]
 
 # A private bridge supports loopback publication. Docker internal networks may not.
 docker network create "$NETWORK" >/dev/null
@@ -169,7 +157,7 @@ CONTAINERS+=("$ID-upstream")
 docker run -d --name "$ID-upstream" --network "$NETWORK" --network-alias upstream \
   --network-alias wrong-host --user "$(id -u):$(id -g)" --read-only --cap-drop=ALL \
   --security-opt=no-new-privileges:true --mount "type=bind,src=$WORK/tls,dst=/tls,readonly" \
-  --workdir /tls --entrypoint openssl "$IMAGE" s_server -quiet -accept 8443 \
+  --workdir /tls --entrypoint openssl "$TLS_TEST_IMAGE" s_server -quiet -accept 8443 \
   -cert /tls/server.crt -key /tls/server.key -WWW >/dev/null
 
 start_app() {
@@ -190,9 +178,14 @@ start_app() {
   done
   "$ready" || { echo "$case_name never served its published port" >&2; exit 1; }
   test "$(cat "$WORK/root-body")" = "$NAME app"
-  docker inspect "$container" --format '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}'
+  [[ "$(docker inspect "$container" --format '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}')" \
+    == '10001:10001 true [ALL] [no-new-privileges:true]' ]]
 }
-start_app trusted https://upstream:8443 --mount "type=bind,src=$WORK/trusted.pem,dst=/etc/ssl/certs/ca-certificates.crt,readonly"
+start_app trusted https://upstream:8443 \
+  --tmpfs /app/.edgezero:rw,noexec,nosuid,size=1m,uid=10001,gid=10001,mode=0700 \
+  --mount "type=bind,src=$WORK/trusted.pem,dst=/etc/ssl/certs/ca-certificates.crt,readonly"
+[[ "$(docker inspect "$ID-trusted" --format '{{index .HostConfig.Tmpfs "/app/.edgezero"}}')" \
+  == 'rw,noexec,nosuid,size=1m,uid=10001,gid=10001,mode=0700' ]]
 # Poll the controlled upstream too; its first request may race server startup.
 for _ in $(seq 1 30); do
   curl --silent --fail --max-time 5 "http://127.0.0.1:$PORT/proxy/index.html" > "$WORK/trusted-body" \
@@ -209,5 +202,5 @@ start_app wrong-host https://wrong-host:8443 --mount "type=bind,src=$WORK/truste
 status="$(curl --silent --max-time 35 -o "$WORK/wrong-host-body" -w '%{http_code}' "http://127.0.0.1:$PORT/proxy/index.html")"
 [[ "$status" =~ ^5[0-9][0-9]$ ]]
 if grep -q 'edgezero controlled TLS' "$WORK/wrong-host-body"; then exit 1; fi
-echo 'PASS: generated app context, native libraries, UID, read-only root, capabilities, mounts, HTTP and controlled TLS.'
+echo 'PASS: generated app context, native libraries, UID, read-only root, capabilities, tmpfs configuration, HTTP and controlled TLS.'
 echo 'Packaging only; no readiness, durable restart, SIGTERM or production certification.'

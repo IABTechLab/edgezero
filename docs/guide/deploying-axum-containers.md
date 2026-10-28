@@ -9,7 +9,7 @@ The examples here prepare Docker and Compose operations. They do not claim
 production readiness, persistent recovery or graceful SIGTERM drain. The current
 generated entrypoint is the development `run_app`; `/` is a packaging response,
 not readiness. Production runtime work must be accepted before the remaining
-[#400](https://github.com/stackpop/edgezero/issues/400) deployment checks.
+[#400](https://github.com/IABTechLab/edgezero/issues/400) deployment checks.
 
 ## No-store Docker and Compose
 
@@ -49,7 +49,7 @@ no-store packaging settings against an already loaded digest:
 ```
 
 The check verifies HTTP, UID, read-only root, capabilities, no-new-privileges,
-stop/start and teardown. It never builds or deletes the supplied image. Plain
+clean exit after stop, restart and teardown. It never builds or deletes the supplied image. Plain
 stop/start is not durable-state or bounded-drain evidence. The Compose 30-second
 stop budget is a placeholder; it must exceed the application's accepted drain
 budget before production use.
@@ -129,7 +129,7 @@ publishing that new digest.
 
 ## Kubernetes
 
-The [Kubernetes guide draft](./deploying-axum-kubernetes.md) selects kind and
+The [Kubernetes guide draft](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/specs/deploying-axum-kubernetes.md) selects kind and
 Envoy Gateway for disposable-cluster verification, with plain manifests and
 separate local stateless, AWS-provider and single-writer redb profiles. The planned
 AWS profile includes AppConfig Agent, Secrets Manager and DynamoDB after accepted

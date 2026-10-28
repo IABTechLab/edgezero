@@ -120,12 +120,12 @@ jobs:
             scripts/*axum_container*.sh \
             examples/container-publishing/publish.sh
 
+      - name: Retrieve Node version
+        id: node-version
+        run: echo "node-version=$(awk '$1 == "nodejs" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "24.12.0"
-
-      - name: Container helper unit tests
-        run: node --test scripts/tests/test_axum_container*.test.mjs
+          node-version: ${{ steps.node-version.outputs.node-version }}
 
       - name: Bash contract tests
         run: .github/actions/deploy-core/tests/run.sh

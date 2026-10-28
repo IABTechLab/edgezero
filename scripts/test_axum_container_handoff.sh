@@ -49,7 +49,7 @@ if [[ "$MODE" == build ]]; then
   docker buildx create --name "$BUILDER" --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" > "$OUTPUT/builder.log"
   docker buildx build --builder "$BUILDER" --platform "$PLATFORM" --provenance=false --sbom=false \
     --label "org.opencontainers.image.revision=$REVISION" \
-    --label "org.opencontainers.image.source=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-stackpop/edgezero}" \
+    --label "org.opencontainers.image.source=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-IABTechLab/edgezero}" \
     --output "type=oci,dest=$OUTPUT/image.tar,name=app" "$INPUT" 2>&1 | tee "$OUTPUT/build.log"
   cp "$INPUT/fixture-inputs.json" "$OUTPUT/inputs.json"
 else
@@ -92,6 +92,19 @@ if [[ "$MODE" == build ]]; then
     APP_NAME="$(node "$ROOT/scripts/axum_container_helpers.mjs" app-name "$INPUT/edgezero.toml")"
     "$ROOT/scripts/test_axum_container_deployment.sh" "$IMAGE" "$APP_NAME"
   fi
+  # Audit exactly the prepared lockfile, without repository/user audit configuration.
+  rust_pin="$(awk '$1 == "rust" { print $2 }' "$INPUT/.tool-versions")"
+  [[ "$rust_pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected exact Rust pin' >&2; exit 1; }
+  rustup toolchain install "$rust_pin" --profile minimal
+  RUSTUP_TOOLCHAIN="$rust_pin" cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" \
+    --locked --root "$WORK/audit-tools"
+  mkdir "$WORK/audit-home"
+  (
+    cd "$WORK"
+    CARGO_HOME="$WORK/audit-home" node "$ROOT/examples/container-publishing/audit_lock.mjs" \
+      "$INPUT/Cargo.lock" "$OUTPUT/inputs.json" "$OUTPUT/rust-advisories.json" \
+      "$WORK/audit-tools/bin/cargo-audit" "$CARGO_AUDIT_VERSION"
+  )
   mkdir "$OUTPUT/scanner-cache"
   docker run --rm --user "$(id -u):$(id -g)" --mount "type=bind,src=$OUTPUT,dst=/work" \
     --mount "type=bind,src=$WORK/oci,dst=/oci,readonly" \

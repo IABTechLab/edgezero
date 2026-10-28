@@ -1,9 +1,8 @@
 # AWS reference deployment and acceptance
 
 - Status: Draft for review. No deployed support claim.
-- Date: 2026-10-14
-- Epic: [#391](https://github.com/stackpop/edgezero/issues/391)
-- Related work: [#400](https://github.com/stackpop/edgezero/issues/400), [#410](https://github.com/stackpop/edgezero/issues/410), [#401](https://github.com/stackpop/edgezero/pull/401) and [#414](https://github.com/stackpop/edgezero/pull/414)
+- Epic: [#391](https://github.com/IABTechLab/edgezero/issues/391)
+- Related work: [#400](https://github.com/IABTechLab/edgezero/issues/400), [#410](https://github.com/IABTechLab/edgezero/issues/410), [#401](https://github.com/IABTechLab/edgezero/pull/401) and [#414](https://github.com/IABTechLab/edgezero/pull/414)
 
 ## Purpose
 
@@ -21,19 +20,16 @@ EdgeZero owns reusable providers, runtime contracts, generic examples and fixtur
 
 The reference demonstrates a deployment mechanism. It does not certify arbitrary applications, unlimited concurrency, end-client receipt, all AWS regions or every target architecture.
 
-## Current evidence
+## Acceptance boundary
 
-Reviewed on 2026-10-14:
+Packaging checks are not production acceptance. Provider integration, required-input
+startup validation, durable-state recovery and bounded shutdown must be accepted
+and exercised through the actual candidate images. Kubernetes and AWS service/IAM
+acceptance require their own execution evidence and authorization.
 
-| Work                                     | Observed state                                                                                                   | Remaining proof                                                                                                 |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| #401 at `68894a05`                       | Draft packaging PR with passing native amd64/arm64 and artifact-handoff CI; Docker/Compose preparation delivered | Accepted-runtime final-image cases, production deployment acceptance, branch conflicts and failing Fastly check |
-| #410 / #414 at published head `b764a883` | Draft AppConfig Agent and Secrets Manager providers, per-ID selection and immutable startup snapshots            | Accepted prerequisite integration and authorized real AWS/IAM acceptance                                        |
-| DynamoDB provider worktree               | Uncommitted ordinary-KV implementation and plan present in `issue-410-native-store-providers`                    | Implementation review, test evidence, publication and real service acceptance                                   |
-| #275 and #406                            | Open draft HTTP and production startup/lifecycle work                                                            | Accepted integration and revalidation through candidate images                                                  |
-| Kubernetes and AWS deployments           | No execution evidence established in this review                                                                 | Disposable-cluster and separately authorized AWS runs                                                           |
-
-These are inspected records, not tests executed for this document. Packaging scans are report-only; strict application-release verification still rejects the recorded candidate. No vulnerability exception is authorized by this draft.
+Commit-specific CI, scan and implementation status belongs in the linked PRs and
+issues, not this design contract. Report-only packaging scans never waive strict
+application-release verification.
 
 ## Proposed decisions
 
@@ -166,14 +162,14 @@ DynamoDB rows do not certify Trusted Server's identity backend. Its conditional 
 
 ## Kubernetes profile decisions
 
-The [Kubernetes guide draft](../../guide/deploying-axum-kubernetes.md) selects kind and Envoy Gateway with Gateway API for the first credential-free disposable-cluster proof. Plain manifests remain the application deployment format. EKS qualification is separate; ECS/Fargate remains the first managed AWS target.
+The [Kubernetes guide draft](../specs/deploying-axum-kubernetes.md) selects kind and Envoy Gateway with Gateway API for the first credential-free disposable-cluster proof. Plain manifests remain the application deployment format. EKS qualification is separate; ECS/Fargate remains the first managed AWS target.
 
 The planned AWS Kubernetes profile includes AppConfig Agent, Secrets Manager and DynamoDB from its first delivery, once the providers are accepted and integrated. This does not make DynamoDB mandatory for stateless applications or change the initial no-store Fargate fixture. Local baseline checks do not contact AWS, and real provider/table acceptance still needs separate authorization.
 
 ## Delivery sequence and likely artifacts
 
 1. Agree this draft's release-input policy, bindings-file delivery, Agent health/authentication wiring and AWS authorization checklist. Keep unresolved choices visible rather than fill examples with invented commands or pins.
-2. Reconcile accepted HTTP/lifecycle/provider contracts. Resolve overlapping lifecycle work in #406/#414 at its owning boundary, not with another implementation in #401. Extend the disposable fixture to validate typed config and secrets before readiness.
+2. Reconcile accepted HTTP/lifecycle/provider contracts at their owning boundaries, rather than adding another runtime implementation to deployment helpers. Extend the disposable fixture to validate typed config and secrets before readiness.
 3. Build and test the candidate final images using #401's existing preparation/handoff checks. Keep the portable consumer proof separate from staged-source fixture builds. A provider-enabled image is a new candidate, not the already-tested packaging artifact.
 4. Draft generic task/service, role and bindings examples under `examples/axum-deployment/ecs-fargate/`; extend `docs/guide/deploying-axum-containers.md` and link the provider guide. Add an ECR publishing option only after its preserving path and metadata checks are specified.
 5. Add bounded opt-in execution/cleanup helpers only where they make acceptance repeatable. Re-running after partial failure must use stable run identities and avoid duplicate resources. Credential-free PR checks must never gain publisher/deployment authority.
@@ -181,7 +177,7 @@ The planned AWS Kubernetes profile includes AppConfig Agent, Secrets Manager and
 7. Add plain Kubernetes manifests and a kind/Envoy Gateway exercise using the same accepted fixture/runtime contract. Default local checks require no AWS credentials. Prepare a separate AWS profile with AppConfig Agent, Secrets Manager and DynamoDB, and preserve the single-writer redb profile required by #400.
 8. Run the DynamoDB-enabled AWS profile after accepted provider integration and separately authorized service access. Qualify Trusted Server's stronger identity contract independently; neither local Kubernetes nor ordinary KV evidence replaces it.
 
-The proposed integration keeps deployment preparation in #401 and provider implementation in #414. Kubernetes preparation may join #401 using the same accepted fixture contract. Implementation, GitHub metadata and issue-closing decisions remain separate from this document draft.
+Deployment preparation and provider implementation have separate acceptance boundaries. Kubernetes preparation must reuse the accepted fixture contract. Implementation, GitHub metadata and issue-closing decisions remain separate from this design draft.
 
 AWS execution can begin without waiting for Kubernetes completion. #400 still cannot close until Docker/Compose, Kubernetes and the selected managed-target requirements are all met. #410 still needs real provider/IAM acceptance; deployment smoke alone does not close its entire contract.
 
@@ -203,23 +199,22 @@ No AWS resources, credentials, publication or runtime tests were used while draf
 
 ## Sources
 
-- [EdgeZero #391, self-hosted runtime epic](https://github.com/stackpop/edgezero/issues/391).
-- [EdgeZero #400, deployment guidance and acceptance](https://github.com/stackpop/edgezero/issues/400).
-- [EdgeZero #410, AWS provider scope](https://github.com/stackpop/edgezero/issues/410), [draft #414](https://github.com/stackpop/edgezero/pull/414) and its [published native AWS guide](https://github.com/stackpop/edgezero/blob/b764a883ce57a323250d9d7a20787dc5937ef90e/docs/guide/native-aws-stores.md).
-- [Draft #401, packaging/release/deployment evidence](https://github.com/stackpop/edgezero/pull/401).
+- [EdgeZero #391, self-hosted runtime epic](https://github.com/IABTechLab/edgezero/issues/391).
+- [EdgeZero #400, deployment guidance and acceptance](https://github.com/IABTechLab/edgezero/issues/400).
+- [EdgeZero #410, AWS provider scope](https://github.com/IABTechLab/edgezero/issues/410), [provider PR #414](https://github.com/IABTechLab/edgezero/pull/414) and its [published native AWS guide](https://github.com/IABTechLab/edgezero/blob/b764a883ce57a323250d9d7a20787dc5937ef90e/docs/guide/native-aws-stores.md).
+- [#401, packaging/release/deployment evidence](https://github.com/IABTechLab/edgezero/pull/401).
 - [AppConfig Agent on ECS](https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-integration-containers-agent-starting-ecs.html).
 - [ECS IAM role responsibilities](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-ecs-iam-role-overview.html).
 - [Fargate task parameters, startup dependencies and termination limits](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html).
 - [ALB health checks and fail-open behavior](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html).
 - [ECS load-balancer connection draining](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/load-balancer-connection-draining.html).
-- DynamoDB implementation context was inspected in uncommitted work on the #414 branch. It is not published or accepted provider evidence.
 
 ## Related documentation
 
 - [Deploying Axum containers](../../guide/deploying-axum-containers.md).
-- [Deploying Axum on Kubernetes](../../guide/deploying-axum-kubernetes.md).
+- [Deploying Axum on Kubernetes](../specs/deploying-axum-kubernetes.md).
 - [Publishing Axum containers](../../guide/publishing-axum-containers.md).
 - [Axum adapter guide](../../guide/adapters/axum.md).
-- [Production lifecycle/configuration work, draft #406](https://github.com/stackpop/edgezero/pull/406).
+- [Production lifecycle/configuration work, #406](https://github.com/IABTechLab/edgezero/pull/406).
 - [Downstream AWS adoption, Trusted Server #1236](https://github.com/IABTechLab/trusted-server/issues/1236).
 - [Downstream image/deployment ownership, Trusted Server #897](https://github.com/IABTechLab/trusted-server/issues/897).

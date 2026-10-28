@@ -1,7 +1,7 @@
 # Deploying Axum applications on Kubernetes
 
 ::: warning Draft, not deployment acceptance
-This guide defines the Kubernetes recipe for [#400](https://github.com/stackpop/edgezero/issues/400). Runnable manifests, controller/image pins and disposable-cluster execution are not delivered yet. The YAML fragments below are design examples, not a complete deployment. Do not treat them as production verification.
+This guide defines the Kubernetes recipe for [#400](https://github.com/IABTechLab/edgezero/issues/400). Runnable manifests, controller/image pins and disposable-cluster execution are not delivered yet. The YAML fragments below are design examples, not a complete deployment. Do not treat them as production verification.
 
 Production entrypoints, probes, startup validation and shutdown must use the accepted runtime contracts. The current container packaging response at `/` is not readiness.
 :::
@@ -48,7 +48,7 @@ flowchart TD
 
 ## Image and runtime prerequisites
 
-Use the [container packaging contract](./deploying-axum-containers.md) and [application-owned publishing contract](./publishing-axum-containers.md). Deploy the accepted native child digest for a homogeneous test cluster, or a verified runtime index whose children support the selected nodes. Never rebuild during deployment.
+Use the [container packaging contract](../../guide/deploying-axum-containers.md) and [application-owned publishing contract](../../guide/publishing-axum-containers.md). Deploy the accepted native child digest for a homogeneous test cluster, or a verified runtime index whose children support the selected nodes. Never rebuild during deployment.
 
 A provider-enabled image is a new candidate if its binary or build inputs differ from the packaging fixture. Build and test it through the same artifact handoff, then retain its own release evidence. Report-only packaging scans do not authorize a deployment release.
 
@@ -241,4 +241,4 @@ Local Kubernetes acceptance can proceed independently of EKS qualification. #400
 - [Envoy Gateway YAML installation](https://gateway.envoyproxy.io/docs/install/install-yaml/), [compatibility matrix](https://gateway.envoyproxy.io/news/releases/matrix/) and [HTTPS secure gateways](https://gateway.envoyproxy.io/docs/tasks/security/secure-gateways/).
 - [kind configuration and local port mappings](https://kind.sigs.k8s.io/docs/user/configuration/).
 - [Kubernetes probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/), [Pod termination](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination) and [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/).
-- [EdgeZero #400](https://github.com/stackpop/edgezero/issues/400), [AWS provider issue #410](https://github.com/stackpop/edgezero/issues/410) and [draft provider PR #414](https://github.com/stackpop/edgezero/pull/414).
+- [EdgeZero #400](https://github.com/IABTechLab/edgezero/issues/400), [AWS provider issue #410](https://github.com/IABTechLab/edgezero/issues/410) and [provider PR #414](https://github.com/IABTechLab/edgezero/pull/414).

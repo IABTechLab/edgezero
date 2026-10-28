@@ -7,14 +7,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGunzip } from 'node:zlib';
 import { readTar } from '../examples/container-publishing/verify_artifacts.mjs';
-import { parseToml } from './axum_container_toml.mjs';
+import { parse as parseToml } from 'smol-toml';
+import { compareNames, hashContext } from '../examples/container-publishing/prepare_inputs.mjs';
 
 export { parseToml };
 const read = (file) => fs.readFileSync(file, 'utf8');
 const json = (file) => JSON.parse(read(file));
 const writeJson = (file, value) => fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const compareNames = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
 export function isWithin(parent, child) {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
@@ -70,7 +70,7 @@ export function stageSources(root, app) {
   }
   const manifest = path.join(app, 'Cargo.toml');
   fs.writeFileSync(manifest, rewriteManifest(read(manifest), vendor));
-  fs.rmSync(path.join(app, '.git'), { recursive: true });
+  fs.rmSync(path.join(app, '.git'), { recursive: true, force: true });
   writeJson(path.join(app, 'fixture-source.json'), {
     revision: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
     source_sha256: sourceHash.digest('hex'),
@@ -84,7 +84,7 @@ export function contextFiles(app) {
   function walk(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const file = path.join(directory, entry.name);
-      // Like pathlib.rglob, do not descend through directory symlinks.
+      // Directory symlinks are not followed; file symlinks hash their target bytes.
       if (entry.isDirectory()) walk(file);
       else if (fs.statSync(file, { throwIfNoEntry: false })?.isFile()) files.push(file);
     }
@@ -93,12 +93,9 @@ export function contextFiles(app) {
   return files.sort((a, b) => compareNames(path.relative(app, a), path.relative(app, b)));
 }
 export function contextHash(app) {
-  const hash = createHash('sha256');
-  for (const file of contextFiles(app)) {
-    hash.update(path.relative(app, file).split(path.sep).join('/')).update('\0')
-      .update(fs.readFileSync(file)).update('\0');
-  }
-  return hash.digest('hex');
+  return hashContext(contextFiles(app).map(file => [
+    path.relative(app, file).split(path.sep).join('/'), fs.readFileSync(file),
+  ]));
 }
 export function recordInputs(app, metadataFile) {
   app = fs.realpathSync(app);
@@ -153,7 +150,7 @@ export async function validateRuntimeTar(file, platform) {
           if (length === 20) break;
         }
       }
-      members.set(member.name, { ...member, header: Buffer.concat(prefixes, length) });
+      members.set(name, { ...member, header: Buffer.concat(prefixes, length) });
     });
   } finally {
     input.destroy();
@@ -166,9 +163,9 @@ export async function validateRuntimeTar(file, platform) {
     visited.add(name);
     const member = members.get(name);
     assert.ok(member, `Missing runtime member: ${name}`);
-    if (member.type === '1') return extract(member.linkname);
+    if (member.type === '1') return extract(member.linkname.replace(/^(?:\.\/|\/)+/, ''));
     if (member.type === '2') {
-      const target = member.linkname.startsWith('/') ? member.linkname :
+      const target = member.linkname.startsWith('/') ? member.linkname.slice(1) :
         path.posix.join(path.posix.dirname(name), member.linkname);
       return extract(path.posix.normalize(target));
     }

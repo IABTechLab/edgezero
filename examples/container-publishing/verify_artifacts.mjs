@@ -13,6 +13,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { hashContext } from './prepare_inputs.mjs';
 
 export const MANIFEST = 'application/vnd.oci.image.manifest.v1+json';
 export const CONFIG = 'application/vnd.oci.image.config.v1+json';
@@ -20,7 +21,7 @@ export const INDEX = 'application/vnd.oci.image.index.v1+json';
 export const LAYERS = new Set(['application/vnd.oci.image.layer.v1.tar', 'application/vnd.oci.image.layer.v1.tar+gzip', 'application/vnd.oci.image.layer.v1.tar+zstd']);
 export const DIGEST = /^sha256:[0-9a-f]{64}(?![\s\S])/;
 export const PLATFORMS = new Set(['linux/amd64', 'linux/arm64']);
-export const SIDECARS = ['inputs.json', 'scan.json', 'scanner.json', 'sbom.json', 'provenance.json'];
+export const SIDECARS = ['inputs.json', 'scan.json', 'scanner.json', 'sbom.json', 'provenance.json', 'rust-advisories.json'];
 const equal = isDeepStrictEqual;
 const utf8 = data => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data);
 const present = value => Boolean(value) && (typeof value !== 'object' || Object.keys(value).length > 0);
@@ -47,7 +48,7 @@ export function load(file) {
   require(fs.statSync(file).size <= 16 * 1024 * 1024, `JSON too large: ${path.basename(file)}`);
   return JSON.parse(utf8(fs.readFileSync(file)));
 }
-// Python json.dumps(..., indent=2) uses ASCII escapes and preserves insertion order.
+// Serialize with ASCII escapes, two-space indentation and insertion-ordered keys.
 // The exact index bytes, including the final newline, identify the release.
 export function serialize(value) {
   return JSON.stringify(value, null, 2).replace(/[\u007f-\uffff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`) + '\n';
@@ -181,15 +182,16 @@ export async function unpack(archive, destination) {
   const magic = Buffer.alloc(6);
   try { fs.readSync(fd, magic); } finally { fs.closeSync(fd); }
   const input = fs.createReadStream(archive);
-  let stream = input, decompressor;
+  let stream = input;
   if (magic[0] === 0x1f && magic[1] === 0x8b) {
     stream = createGunzip();
     input.on('error', error => stream.destroy(error));
     input.pipe(stream);
-  } else if (magic.toString('ascii', 0, 3) === 'BZh' || magic.toString('hex') === 'fd377a585a00') {
-    decompressor = child(magic[0] === 66 ? 'bzip2' : 'xz', ['-dc', '--', path.resolve(archive)]);
-    stream.destroy();
-    stream = decompressor.process.stdout;
+  }
+  // No external decompressors on artifact input.
+  if (magic.toString('ascii', 0, 3) === 'BZh' || magic.toString('hex') === 'fd377a585a00') {
+    input.destroy();
+    throw new Error('Unsupported archive compression');
   }
   const seen = new Set();
   let total = 0;
@@ -221,11 +223,9 @@ export async function unpack(archive, destination) {
         require(fs.statSync(target).size === member.size, 'Truncated archive member');
       }
     });
-    if (decompressor) await decompressor.done;
   } finally {
     stream.destroy();
     input.destroy();
-    if (decompressor && decompressor.process.exitCode === null) decompressor.process.kill();
   }
 }
 
@@ -301,13 +301,30 @@ export function scan_policy(report, exceptions, manifestDigest, today = new Date
   }
   if (policy === 'report-only') console.error(`WARNING: report-only scan: ${counts.HIGH} HIGH, ${counts.CRITICAL} CRITICAL package findings, ${fixable} with fixes. Packaging evidence only; not approved for release.`);
 }
+// Advisory inventory is report-only; OS release policy remains a separate gate.
+export function check_advisories(record, inputs) {
+  require(record.schema === 1 && record.lock_sha256 === inputs.lock_sha256, 'Advisory lockfile/input mismatch');
+  require(record.tool?.name === 'cargo-audit' && typeof record.tool.version === 'string' &&
+    /^[0-9]+\.[0-9]+\.[0-9]+(?![\s\S])/.test(record.tool.version), 'Advisory tool identity missing');
+  const report = record.report;
+  require(typeof report?.database?.['last-commit'] === 'string' && /^[0-9a-f]{40}(?![\s\S])/.test(report.database['last-commit']) &&
+    typeof report.database['last-updated'] === 'string' && !Number.isNaN(Date.parse(report.database['last-updated'])), 'Advisory database identity missing');
+  require(equal(report.settings?.ignore, []) && equal(report.settings?.target_arch, []) && equal(report.settings?.target_os, []) &&
+    report.settings?.severity === null, 'Filtered advisory report');
+  require(Number.isSafeInteger(report.lockfile?.['dependency-count']) && report.lockfile['dependency-count'] > 0, 'Empty advisory inventory');
+  const findings = report.vulnerabilities;
+  require(Array.isArray(findings?.list) && findings.count === findings.list.length &&
+    findings.found === (findings.count > 0), 'Invalid advisory findings');
+}
 export function check_inputs(inputs, revision, runId) {
   require(inputs.revision === revision, 'Input/source revision mismatch');
   require(typeof inputs.dirty === 'boolean', 'Input state missing');
   require(runId === 'local' || !inputs.dirty, 'Dirty source cannot be a trusted release input');
   for (const name of ['source_sha256', 'context_sha256', 'lock_sha256', 'dockerfile_sha256']) require(typeof inputs[name] === 'string' && /^[0-9a-f]{64}(?![\s\S])/.test(inputs[name]), 'Input hash missing');
   require(typeof inputs.toolchain === 'string' && /^rust [0-9]+\.[0-9]+\.[0-9]+$/m.test(inputs.toolchain), 'Toolchain trace missing');
-  require(Array.isArray(inputs.base_images) && inputs.base_images.length && inputs.base_images.every(base => typeof base === 'string' && /^[^\s@]+@sha256:[0-9a-f]{64}(?![\s\S])/.test(base)), 'Pinned base trace missing');
+  // The scaffold deliberately follows this runtime tag; all other bases remain pinned.
+  require(Array.isArray(inputs.base_images) && inputs.base_images.length && inputs.base_images.every(base => typeof base === 'string' &&
+    (base === 'gcr.io/distroless/cc-debian12:nonroot' || /^[^\s@]+@sha256:[0-9a-f]{64}(?![\s\S])/.test(base))), 'Pinned base trace missing');
 }
 export function seal(bundle, revision, runId, platform) {
   require(typeof revision === 'string' && /^[0-9a-f]{40}(?![\s\S])/.test(revision), 'Expected immutable source commit');
@@ -342,6 +359,7 @@ export async function verify(bundle, revision, runId, platform, exceptions, { po
   for (const [name, expected] of Object.entries(receipt.sidecars)) require(checksum(path.join(bundle, name)) === expected, 'Metadata checksum mismatch');
   const inputs = load(path.join(bundle, 'inputs.json'));
   check_inputs(inputs, revision, runId);
+  check_advisories(load(path.join(bundle, 'rust-advisories.json')), inputs);
   const provenance = load(path.join(bundle, 'provenance.json'));
   require(provenance.subject === info.manifest_digest && provenance.revision === revision, 'Provenance subject/source mismatch');
   require(equal(provenance.inputs, inputs) && provenance.run_id === runId, 'Provenance input/run mismatch');
@@ -397,11 +415,8 @@ export async function release_record(source, bundles, metadata, revision, runId,
     });
     await git.done;
   } finally { if (git.process.exitCode === null) git.process.kill(); }
-  const context = createHash('sha256');
-  // Compare Unicode code points, as Python sorted(str) does, rather than UTF-16.
-  const ordered = [...files].sort(([a], [b]) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
-  for (const [name, data] of ordered) context.update(name).update('\0').update(data).update('\0');
-  const expected = { source_sha256: sourceHash.digest('hex'), context_sha256: context.digest('hex'), lock_sha256: hash(files.get('Cargo.lock')), dockerfile_sha256: hash(files.get('Dockerfile')), toolchain: utf8(files.get('.tool-versions')), base_images: [...utf8(files.get('Dockerfile')).matchAll(/^FROM (\S+)/gm)].map(match => match[1]), dirty: false };
+
+  const expected = { source_sha256: sourceHash.digest('hex'), context_sha256: hashContext(files), lock_sha256: hash(files.get('Cargo.lock')), dockerfile_sha256: hash(files.get('Dockerfile')), toolchain: utf8(files.get('.tool-versions')), base_images: [...utf8(files.get('Dockerfile')).matchAll(/^FROM (\S+)/gm)].map(match => match[1]), dirty: false };
   require(/^[0-9]+-[0-9]+(?![\s\S])/.test(runId), 'Invalid release run identity');
   const [run, attempt] = runId.split('-');
   artifact_ids(metadata, run, attempt, revision);

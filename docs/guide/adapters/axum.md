@@ -224,9 +224,11 @@ server to authenticate against.
 `edgezero new` generates a workspace-root `Dockerfile` and `.dockerignore` when
 Axum is registered in the CLI build. The recipe builds only the native Axum
 application binary with `--release --locked`, using a GNU/Linux Rust builder and
-compatible Debian-slim runtime. The base images have reviewed digest pins;
-package installation still needs network access and is not a byte-reproducible
-build claim.
+a shell-free GNU-compatible distroless runtime. The Rust builder has a reviewed
+digest pin; the runtime deliberately follows `gcr.io/distroless/cc-debian12:nonroot`.
+That floating tag and builder package installation require network access and do
+not provide a byte-reproducible build. Release and rollback use the exact tested
+image digest, not a rebuild from the runtime tag.
 
 ### Prepare the application
 
@@ -237,9 +239,9 @@ commit for every EdgeZero crate. For example:
 
 ```toml
 # Replace the placeholder with a reviewed release compatible with this app.
-edgezero-core = { git = "https://github.com/stackpop/edgezero.git", tag = "<approved-release>", default-features = false }
-edgezero-adapter-axum = { git = "https://github.com/stackpop/edgezero.git", tag = "<approved-release>", default-features = false }
-edgezero-cli = { git = "https://github.com/stackpop/edgezero.git", tag = "<approved-release>" }
+edgezero-core = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>", default-features = false }
+edgezero-adapter-axum = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>", default-features = false }
+edgezero-cli = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>" }
 ```
 
 Apply that ref to the other generated EdgeZero adapter entries too. Preserve
@@ -305,27 +307,26 @@ app-owned BuildKit secret/SSH setup, never COPY, ARG or ENV.
 
 Node is not required for the generic template. Applications that embed JS during
 Rust compilation can add a separate pinned asset stage before the Rust builder.
-Trusted Server is one such consumer. Its app-owned extension can start with:
+For example, an application with locked assets under `assets/` can use:
 
 ```dockerfile
-FROM node:24.12.0-bookworm-slim AS assets
-WORKDIR /assets/lib
-COPY crates/trusted-server-js/lib/ ./
-RUN npm ci && npm run build
+FROM node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS assets
+WORKDIR /assets
+COPY assets/package.json assets/package-lock.json ./
+RUN npm ci
+COPY assets/ ./
+RUN npm run build
 
 # In the existing Rust builder, before Cargo compilation:
-# COPY --from=assets /assets/dist /build/crates/trusted-server-js/dist
-# ENV TSJS_SKIP_BUILD=1
+# COPY --from=assets /assets/dist /build/assets/dist
 ```
 
-Choose Node from the consumer's declared pin, retain its npm lockfile, and build
-fresh bundles rather than reuse host dist output. Trusted Server's build.rs
-embeds those bundles; after the explicit asset build, `TSJS_SKIP_BUILD=1` avoids
-an implicit npm retry. Select its native package `trusted-server-adapter-axum`
-and binary `trusted-server-axum`, not its Fastly default member or operator CLI.
-Check bundle completeness and embedded bytes. This customization is guidance,
-not a claim that Trusted Server's bind/config/health behavior or image has been
-validated. Node stays out of the final runtime.
+Choose the version/digest from the application's declared Node pin and retain its
+npm lockfile. Adapt the paths and build command to its asset layout. Its Rust
+build must embed the fresh stage output rather than host-generated bundles and
+must not implicitly rerun npm. Check bundle completeness and embedded bytes.
+Any application-specific build flags, native package names and binary selection
+belong in that application's repository. Node stays out of the final runtime.
 
 ### Packaging verification and limits
 
@@ -333,13 +334,17 @@ From an EdgeZero checkout, the opt-in smoke accepts a **disposable generated
 workspace** after the preparation above:
 
 ```sh
+npm ci --prefix scripts --ignore-scripts
 ./scripts/test_generated_axum_container.sh /path/to/container-probe
 ```
 
-It requires Docker, Node.js 24.12.0, jq, curl, OpenSSL, readelf and preparation network access.
+See the [smoke script prerequisites](https://github.com/IABTechLab/edgezero/blob/main/scripts/test_generated_axum_container.sh)
+for the authoritative tool list. CI uses the Node version in `.tool-versions`;
+this is a tested pin, not a different minimum-version requirement. The separate
+handoff helper additionally needs jq, rustup and Cargo for its advisory inventory.
 It tests actual context exclusions, final filesystem/native libraries, UID,
-read-only root, dropped capabilities, explicit mount permissions, published-port
-HTTP and the real proxy's controlled TLS trust and hostname rejection. It uses
+inspected read-only root/capability restrictions, explicit tmpfs configuration,
+published-port HTTP and the real proxy's controlled TLS trust and hostname rejection. It uses
 private test CA material, not production secrets or public upstreams, and cleans
 up its containers/network/image. Failure diagnostics are retained in a temporary
 directory, with private test keys removed.
@@ -350,12 +355,12 @@ Include all needed workspace manifests and the CLI's optional app-demo source
 path. Resolve that fixture's own lockfile. This local-source evidence is not a
 substitute for a standalone consumer with portable Git references.
 
-These are packaging checks, not production certification. The current runtime
-still needs accepted PR #275 integration and the lifecycle/config work tracked
-by #392/#396 for readiness, required-config failure, durable restart and bounded
-SIGTERM draining. A response from `/` is not application readiness, and exec
-startup alone does not implement signal handling. #399 owns native amd64/arm64
-CI and publishing guidance; #400 owns Docker/Kubernetes/cloud operations.
+These are packaging checks, not production certification. Production acceptance
+still requires readiness, required-config failure, durable restart and bounded
+SIGTERM draining through the accepted runtime. A response from `/` is not
+application readiness, and exec startup alone does not implement signal handling.
+The scaffold uses `STOPSIGNAL SIGINT` for the current development entrypoint's
+graceful path; this does not certify bounded SIGTERM draining.
 Application owners publish their own images. No public EdgeZero image is needed.
 
 See [Publishing Axum containers](../publishing-axum-containers.md) for native

@@ -32,14 +32,11 @@ compose up -d --no-build --pull never
 CONTAINER="$(compose ps -q app)"
 PORT="$(compose port app 8787 | awk -F: '{print $NF}')"
 wait_for_http
-[[ "$(docker inspect "$CONTAINER" --format '{{.HostConfig.ReadonlyRootfs}}')" == true ]]
-docker exec "$CONTAINER" sh -ec '
-  test "$(id -u):$(id -g)" = 10001:10001
-  grep -q "^CapEff:[[:space:]]*0000000000000000$" /proc/self/status
-  grep -q "^NoNewPrivs:[[:space:]]*1$" /proc/self/status
-  ! touch /app/forbidden 2>/dev/null
-'
+[[ "$(docker inspect "$CONTAINER" --format '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}')" \
+  == '10001:10001 true [ALL] [no-new-privileges:true]' ]]
 compose stop
+[[ "$(docker inspect "$CONTAINER" --format '{{.State.ExitCode}}')" == 0 ]] \
+  || { echo 'Container did not stop cleanly' >&2; exit 1; }
 compose start
 PORT="$(compose port app 8787 | awk -F: '{print $NF}')"
 wait_for_http

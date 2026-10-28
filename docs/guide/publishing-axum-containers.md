@@ -46,6 +46,7 @@ They are not runnable children in the runtime index.
 Use a new output directory and a checkout you intend to test:
 
 ```sh
+npm ci --prefix scripts --ignore-scripts
 ./scripts/prepare_generated_axum_container.sh /tmp/axum-context
 ./scripts/test_axum_container_handoff.sh build \
   /tmp/axum-context/container-probe /tmp/axum-amd64 \
@@ -54,8 +55,10 @@ Use a new output directory and a checkout you intend to test:
 
 The fixture stages framework sources under `vendor/edgezero`, preserves generated
 member dependency features and excludes that nested framework workspace from the
-application workspace. It resolves its own lockfile and rejects local packages
-outside the application context. This is explicit test preparation, not a new
+application workspace. It seeds its test-only lockfile from the framework
+lockfile, lets Cargo reconcile fixture members while preserving compatible
+versions, and rejects local packages outside the application context. Consumers
+still prepare their own lockfiles. This is explicit test preparation, not a new
 scaffold dependency-selection option or consumer release recipe.
 
 The build helper uses the existing generated-app HTTP/TLS packaging smoke and the
@@ -65,8 +68,8 @@ It must execute that image, fail on unmet requirements and clean up its containe
 The publisher never executes this script or an application binary.
 
 A successful bundle contains `image.tar`, `receipt.json`, `inputs.json`,
-`scan.json`, `scanner.json`, `sbom.json` and `provenance.json`. Import verifies a
-transferred bundle without rebuilding or running it:
+`scan.json`, `scanner.json`, `sbom.json`, `provenance.json` and
+`rust-advisories.json`. Import verifies a transferred bundle without rebuilding or running it:
 
 ```sh
 ./scripts/test_axum_container_handoff.sh import \
@@ -86,6 +89,8 @@ runs only from `workflow_dispatch` on `refs/heads/main`. Copy it as
 `.github/workflows/release.yml` into the application repository, along with:
 
 - `examples/container-publishing/tools.env`
+- `examples/container-publishing/prepare_inputs.mjs`
+- `examples/container-publishing/audit_lock.mjs`
 - `examples/container-publishing/verify_artifacts.mjs`
 - `examples/container-publishing/publish.sh`
 - `scripts/test_axum_container_handoff.sh`
@@ -93,12 +98,17 @@ runs only from `workflow_dispatch` on `refs/heads/main`. Copy it as
 Keep those relative locations. The helpers require Node.js 24.12.0 and jq, and the
 workflow installs the declared Node.js version. No npm dependencies are needed.
 Commit the app's portable dependency manifests,
-`Cargo.lock`, `.tool-versions`, digest-pinned Dockerfile and executable
+`Cargo.lock`, `.tool-versions`, Dockerfile and executable
 `.ci/test-container.sh`. The context must contain required assets and workspace
 members. This sample uses a committed repository-root context without source
 symlinks or submodule-only contents. `fixture-inputs.json` is reserved for the
-preparation job. Private build credentials and generated assets need a separate
-reviewed application-owned extension, never credentials in COPY, ARG or ENV.
+preparation job. The builder and custom bases must be digest-pinned; the scaffold
+explicitly permits the floating `gcr.io/distroless/cc-debian12:nonroot` runtime.
+This tag may resolve to different base bytes between builds; it is not a
+reproducible-input guarantee. Publication and rollback still use only the exact
+tested child/index digests, never a rebuild. Private build credentials and generated
+assets need a separate reviewed application-owned extension, never credentials in
+COPY, ARG or ENV.
 
 Before enabling the workflow, an owner must:
 
@@ -164,8 +174,8 @@ Repeat for the two child digests. Verify SLSA provenance separately with
 A valid signature from some other workflow/repository is not acceptance.
 
 Keep accepted rollback digests and metadata under an application-owned retention
-policy. Security updates require a reviewed source/base change, a fresh build and
-the same native test/scan/identity gates before publication. Never relabel an old
+policy. Security updates, including newly resolved bytes behind the runtime tag, require
+a fresh build and the same native test/scan/identity gates before publication. Never relabel an old
 accepted child after tests. A failed publication may leave immutable children or
 a version alias without all required attestations. Treat that as incomplete,
 verify the retained bytes and use an explicit owner-approved recovery path. Do
@@ -205,22 +215,22 @@ no automatic waiver path. Review the exact existing candidate bytes and an
 explicit approval path before adapting the workflow for an exception. Do not
 rebuild a waived image and assume the old digest exemption still applies.
 
-The October 7, 2026 scan before the runtime package update reported 55 High and
-4 Critical package findings across 20 CVEs on each architecture. Eight findings
-had available fixes. The runtime recipe now upgrades inherited Bookworm packages
-as well as installing required libraries. A native amd64 scan after this update
-reported 50 High and 1 Critical finding, none with an available fix. Strict
-verification still rejected that same image. No exceptions have been authorized,
-and report-only packaging results do not waive the release policy. The image
-scan found no language-specific files; its SBOM is not a claim
-that every statically linked Rust dependency was independently analyzed.
+## Rust dependency advisory inventory
 
-Both hosted native jobs passed packaging and Compose checks on October 7. The
-[follow-up CI run](https://github.com/stackpop/edgezero/actions/runs/37706921831)
-also passed native amd64/arm64 builds, transferred artifact imports and localhost
-index assembly under the packaging policy. Both scans reported 50 High and
-1 Critical finding, with no available fixes. One separately authorized disposable
-GHCR publish/attestation verification still needs execution evidence. Keep
-[#399](https://github.com/stackpop/edgezero/issues/399) open until that acceptance
-check passes. Production runtime and deployment gates are
-described in [Deploying Axum containers](./deploying-axum-containers.md).
+Each native build job runs pinned `cargo-audit` against the prepared application
+`Cargo.lock` and retains `rust-advisories.json`. The sidecar records the lockfile
+hash, audit tool version, advisory database identity and complete JSON report.
+It is checksummed with the other bundle sidecars and its lockfile binding and
+unfiltered report shape are verified during handoff and publication.
+
+This inventory is report-only: advisory findings are retained, while execution
+errors, missing database identity, ignored/filtered reports and lockfile mismatch
+fail the check. It does not silently extend the OS High/Critical exception policy
+to Rust advisories or certify reachability of every locked crate. Application
+owners must define advisory release policy before claiming complete dependency
+acceptance. The image scanner's SBOM is still not independent analysis of every
+statically linked Rust dependency.
+
+Registry publication/attestation verification and production runtime/deployment
+acceptance require their own retained execution evidence. See
+[Deploying Axum containers](./deploying-axum-containers.md) for those boundaries.

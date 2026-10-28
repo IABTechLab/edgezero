@@ -59,6 +59,12 @@ function fixture(root, arch = 'amd64', revision = REV) {
   put(path.join(layout, 'index.json'), { schemaVersion: 2, mediaType: v.INDEX, manifests: [image] });
   pack(layout, path.join(root, 'image.tar'));
   put(path.join(root, 'inputs.json'), { revision, dirty: false, toolchain: 'rust 1.95.0\n', source_sha256: 'a'.repeat(64), context_sha256: 'b'.repeat(64), lock_sha256: 'c'.repeat(64), dockerfile_sha256: 'd'.repeat(64), base_images: ['debian@sha256:' + 'e'.repeat(64)] });
+  put(path.join(root, 'rust-advisories.json'), {
+    schema: 1, lock_sha256: 'c'.repeat(64), tool: { name: 'cargo-audit', version: '0.22.2' },
+    report: { database: { 'last-commit': 'd'.repeat(40), 'last-updated': '2026-10-28T00:00:00Z' },
+      lockfile: { 'dependency-count': 1 }, settings: { ignore: [], target_arch: [], target_os: [], severity: null },
+      vulnerabilities: { found: false, count: 0, list: [] } },
+  });
   put(path.join(root, 'scan.json'), { SchemaVersion: 2, Metadata: { ImageID: config.digest, DiffIDs: [diffId], OS: { Family: 'debian' } }, Results: [{ Class: 'os-pkgs', Type: 'debian', Target: 'fixture', Vulnerabilities: [] }] });
   put(path.join(root, 'scanner.json'), { Version: 'test', VulnerabilityDB: { UpdatedAt: '2026-10-07' }, SubjectManifestDigest: image.digest });
   put(path.join(root, 'sbom.json'), { bomFormat: 'CycloneDX', specVersion: '1.6', version: 1, components: [{ type: 'library', name: 'transport-fixture' }], metadata: { component: { type: 'container', name: 'fixture', properties: [{ name: 'aquasecurity:trivy:ImageID', value: config.digest }] } } });
@@ -119,6 +125,13 @@ caseTest('invalid base pins and symlink sidecars', async ({ root, seal, verify }
   const original = v.load(path.join(root, 'inputs.json'));
   for (const bases of ['not-a-list', [], ['debian@sha256:garbage'], [5]]) assert.throws(() => v.check_inputs({ ...original, base_images: bases }, REV, '123-1'));
   seal(); fs.renameSync(path.join(root, 'sbom.json'), path.join(root, 'other.json')); fs.symlinkSync(path.join(root, 'other.json'), path.join(root, 'sbom.json')); await assert.rejects(verify());
+});
+caseTest('only the declared distroless runtime may use a floating base tag', ({ root }) => {
+  const inputs = v.load(path.join(root, 'inputs.json'));
+  v.check_inputs({ ...inputs, base_images: [...inputs.base_images, 'gcr.io/distroless/cc-debian12:nonroot'] }, REV, '123-1');
+  for (const base of ['debian:bookworm-slim', 'gcr.io/distroless/cc-debian12:latest', 'gcr.io/distroless/cc-debian12:nonroot\n']) {
+    assert.throws(() => v.check_inputs({ ...inputs, base_images: [base] }, REV, '123-1'), /Pinned base trace missing/);
+  }
 });
 caseTest('SBOM wrong subject and scan wrong filesystem', async ({ root, seal, verify }) => {
   seal(); const bill = v.load(path.join(root, 'sbom.json')); bill.metadata.component.properties[0].value = 'sha256:' + 'f'.repeat(64);
@@ -214,6 +227,7 @@ caseTest('release record recomputes committed source', async ({ root }) => {
     const bundle = path.join(root, 'release-' + arch); fs.mkdirSync(bundle); fixture(bundle, arch, revision);
     const inputs = { ...v.load(path.join(bundle, 'inputs.json')), source_sha256: sha(archive), context_sha256: contextDigest, lock_sha256: v.checksum(path.join(source, 'Cargo.lock')), dockerfile_sha256: v.checksum(path.join(source, 'Dockerfile')) };
     put(path.join(bundle, 'inputs.json'), inputs);
+    put(path.join(bundle, 'rust-advisories.json'), { ...v.load(path.join(bundle, 'rust-advisories.json')), lock_sha256: inputs.lock_sha256 });
     put(path.join(bundle, 'provenance.json'), { ...v.load(path.join(bundle, 'provenance.json')), inputs });
     v.seal(bundle, revision, '123-1', 'linux/' + arch); bundles.push(bundle);
   }
@@ -232,6 +246,7 @@ caseTest('release record recomputes committed source', async ({ root }) => {
   await assert.rejects(v.release_record(source, bundles, data, revision, '123-1', []), /Blocked HIGH/);
   report.Results[0].Vulnerabilities = []; put(path.join(bundles[0], 'scan.json'), report);
   const inputs = v.load(path.join(bundles[0], 'inputs.json')); inputs.lock_sha256 = 'f'.repeat(64);
+  put(path.join(bundles[0], 'rust-advisories.json'), { ...v.load(path.join(bundles[0], 'rust-advisories.json')), lock_sha256: inputs.lock_sha256 });
   put(path.join(bundles[0], 'inputs.json'), inputs); put(path.join(bundles[0], 'provenance.json'), { ...v.load(path.join(bundles[0], 'provenance.json')), inputs });
   v.seal(bundles[0], revision, '123-1', 'linux/amd64'); await assert.rejects(v.release_record(source, bundles, data, revision, '123-1', []), /Prepared context/);
   fs.symlinkSync('Cargo.lock', path.join(source, 'link')); git('add', 'link'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'link');
@@ -245,6 +260,14 @@ caseTest('no attestations in runtime index', ({ root, image }) => {
 });
 caseTest('config platform is authority', ({ root }) => { assert.throws(() => v.describe(path.join(root, 'oci'), 'linux/arm64')); });
 caseTest('provenance subject', ({ root, seal }) => { put(path.join(root, 'provenance.json'), { revision: REV, subject: 'sha256:' + 'b'.repeat(64) }); assert.throws(seal); });
+caseTest('advisory sidecar binds to the prepared lockfile under both policies', async ({ root, seal }) => {
+  const advisory = v.load(path.join(root, 'rust-advisories.json'));
+  put(path.join(root, 'rust-advisories.json'), { ...advisory, lock_sha256: 'f'.repeat(64) });
+  seal();
+  for (const policy of ['strict', 'report-only']) {
+    await assert.rejects(v.verify(root, REV, '123-1', 'linux/amd64', [], { policy }), /Advisory lockfile\/input mismatch/);
+  }
+});
 caseTest('index requires two same-run variants', ({ seal }) => {
   const one = seal(), two = { ...one, platform: 'linux/arm64', manifest_digest: 'sha256:' + 'c'.repeat(64) };
   assert.deepEqual(new Set(v.runtime_index([one, two]).manifests.map(manifest => manifest.platform.architecture)), new Set(['amd64', 'arm64']));
@@ -323,6 +346,9 @@ caseTest('smoke borrowed image not built or deleted', ({ root }) => {
   fs.writeFileSync(path.join(app, 'edgezero.toml'), '[app]\nname="test-app"\n'); fs.writeFileSync(path.join(app, 'Cargo.toml'), '[workspace.dependencies]\n');
   const binaries = path.join(root, 'bin'); fs.mkdirSync(binaries); const log = path.join(root, 'docker-calls');
   fs.writeFileSync(path.join(binaries, 'docker'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$CALLS"\ncase "$*" in\n  'info --format '*) echo x86_64 ;;\n  'image inspect supplied-image --format '*) echo linux/arm64 ;;\nesac\n`, { mode: 0o755 });
+  for (const tool of ['curl', 'openssl', 'readelf', 'sha256sum']) {
+    fs.writeFileSync(path.join(binaries, tool), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  }
   const result = spawnSync('bash', [path.join(ROOT, 'scripts/test_generated_axum_container.sh'), app, '--image', 'supplied-image', '--platform', 'linux/amd64'], { encoding: 'utf8', env: { ...process.env, PATH: binaries + ':' + process.env.PATH, CALLS: log } });
   assert.notEqual(result.status, 0); assert.match(result.stderr, /Image\/platform mismatch/);
   const calls = fs.readFileSync(log, 'utf8'); assert.doesNotMatch(calls, /image rm supplied-image/); assert.doesNotMatch(calls, /-t supplied-image/);
@@ -333,10 +359,9 @@ caseTest('archive compressed formats PAX paths and GNU long names', async ({ roo
   fs.writeFileSync(path.join(root, 'compressed.tar.gz'), gzipSync(raw));
   await v.unpack(path.join(root, 'compressed.tar.gz'), path.join(root, 'gzip'));
   assert.equal(v.describe(path.join(root, 'gzip'), 'linux/amd64').manifest_digest, image.digest);
-  for (const binary of ['bzip2', 'xz']) {
-    const compressed = spawnSync(binary, ['-c'], { input: raw }); assert.equal(compressed.status, 0, compressed.stderr.toString());
-    const archive = path.join(root, binary + '.tar'); fs.writeFileSync(archive, compressed.stdout);
-    await v.unpack(archive, path.join(root, binary)); assert.equal(v.describe(path.join(root, binary), 'linux/amd64').manifest_digest, image.digest);
+  for (const [format, magic] of [['bzip2', Buffer.from('BZh')], ['xz', Buffer.from('fd377a585a00', 'hex')]]) {
+    const archive = path.join(root, format + '.tar'); fs.writeFileSync(archive, magic);
+    await assert.rejects(v.unpack(archive, path.join(root, format)), /Unsupported archive compression/);
   }
   let i = 0;
   for (const entries of [[{ name: 'pax', type: 'x', data: paxRecord('path', 'index.json') }, { name: 'ignored', data: Buffer.from('{}') }], [{ name: 'long', type: 'L', data: Buffer.from('index.json\0') }, { name: 'ignored', data: Buffer.from('{}') }]]) {
@@ -407,7 +432,7 @@ test('shared tar reader drains partial payloads and reports links without extrac
   assert.equal(records.at(-1).prefix, 'end');
 });
 
-test('index serialization matches Python indent=2 bytes', () => {
+test('index serialization preserves exact escaped and indented bytes', () => {
   const receipts = ['amd64', 'arm64'].map((arch, index) => ({ platform: 'linux/' + arch, revision: REV, run_id: '123-1', sidecars: { 'inputs.json': 'same' }, manifest_digest: 'sha256:' + String(index + 1).repeat(64), manifest_size: 123 + index }));
   const expected = `{
   "schemaVersion": 2,
