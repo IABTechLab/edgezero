@@ -6,6 +6,7 @@ use anyhow::Context as _;
 use crate::SpinFullResponse;
 use crate::config_store::SpinConfigStore;
 use crate::context::{SpinRequestContext, parse_client_addr};
+use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
 use crate::proxy::SpinProxyClient;
 use crate::response::from_core_response;
@@ -50,6 +51,7 @@ pub(crate) struct Stores {
 #[inline]
 pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
     let (parts, body) = req.into_parts();
+    let ingress = capture_request_ingress(&parts.uri);
 
     let client_addr = parts
         .headers
@@ -80,6 +82,7 @@ pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
         .body(Body::from(body_bytes.to_vec()))
         .map_err(|err| EdgeError::bad_request(format!("failed to build request: {err}")))?;
 
+    request.extensions_mut().insert(ingress);
     SpinRequestContext::insert(
         &mut request,
         SpinRequestContext {
