@@ -715,6 +715,11 @@ mod tests {
         let mut bytes = Vec::new();
         ready.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, vec![b'x'; 32_769]);
+        // The body may finish before slot zero's request head is parsed; do not cancel that parse.
+        while !origin.shared.lock().slots[0] {
+            assert!(Instant::now() < origin.shared.deadline);
+            thread::yield_now();
+        }
         let snapshot = origin.finish();
         assert_eq!(snapshot["workers_joined"], 2);
         assert_eq!(snapshot["errors"], json!([]));

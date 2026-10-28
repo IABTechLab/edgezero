@@ -16,7 +16,7 @@ const ORIGIN_BODY_BYTES: usize = 256;
 const SOCKET_BUDGET: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug)]
-enum Failure {
+pub(super) enum Failure {
     Eof,
     Reset,
     Timeout,
@@ -27,7 +27,7 @@ enum Failure {
 }
 
 impl Failure {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Eof => "eof",
             Self::Reset => "reset",
@@ -51,9 +51,9 @@ impl From<io::Error> for Failure {
     }
 }
 
-struct DeadlineSocket {
-    socket: TcpStream,
-    deadline: Instant,
+pub(super) struct DeadlineSocket {
+    pub(super) socket: TcpStream,
+    pub(super) deadline: Instant,
 }
 impl Read for DeadlineSocket {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -67,19 +67,29 @@ impl Read for DeadlineSocket {
     }
 }
 
-struct Head {
-    first: String,
-    fields: Vec<(String, String)>,
+pub(super) struct Head {
+    pub(super) first: String,
+    pub(super) fields: Vec<(String, String)>,
 }
 
-fn line(reader: &mut impl BufRead, budget: &mut usize) -> std::result::Result<String, Failure> {
+fn line(
+    reader: &mut impl BufRead,
+    budget: &mut usize,
+    metadata_limit: usize,
+    line_limit: usize,
+) -> std::result::Result<String, Failure> {
     let mut bytes = Vec::new();
     let read = (&mut *reader)
-        .take(METADATA_BYTES.saturating_sub(*budget).saturating_add(1) as u64)
+        .take(
+            metadata_limit
+                .saturating_sub(*budget)
+                .min(line_limit)
+                .saturating_add(1) as u64,
+        )
         .read_until(b'\n', &mut bytes);
     let count = bytes.len();
     *budget += count;
-    if *budget > METADATA_BYTES {
+    if *budget > metadata_limit || count > line_limit {
         return Err(Failure::MetadataLimit);
     }
     if let Err(error) = read {
@@ -114,15 +124,33 @@ fn field_parts(field: &str) -> std::result::Result<(&str, &str), Failure> {
     Ok((name, value.trim_matches([' ', '\t'])))
 }
 
-fn read_head(reader: &mut impl BufRead, budget: &mut usize) -> std::result::Result<Head, Failure> {
-    let first = line(reader, budget)?;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Profile {
+    Overflow,
+    Wire,
+}
+
+pub(super) fn read_head(
+    reader: &mut impl BufRead,
+    budget: &mut usize,
+    profile: Profile,
+) -> std::result::Result<Head, Failure> {
+    let line_limit = if profile == Profile::Wire {
+        4096
+    } else {
+        METADATA_BYTES
+    };
+    let first = line(reader, budget, METADATA_BYTES, line_limit)?;
+    if profile == Profile::Wire {
+        *budget = 0;
+    }
     let mut fields = Vec::new();
     loop {
-        let field = line(reader, budget)?;
+        let field = line(reader, budget, METADATA_BYTES, line_limit)?;
         if field.is_empty() {
             return Ok(Head { first, fields });
         }
-        if fields.len() >= 100 {
+        if profile == Profile::Overflow && fields.len() >= 100 {
             return Err(Failure::MetadataLimit);
         }
         let (name, value) = field_parts(&field)?;
@@ -130,7 +158,7 @@ fn read_head(reader: &mut impl BufRead, budget: &mut usize) -> std::result::Resu
     }
 }
 
-fn framing(head: &Head) -> std::result::Result<(Option<u64>, bool), Failure> {
+pub(super) fn framing(head: &Head) -> std::result::Result<(Option<u64>, bool), Failure> {
     let mut length = None;
     let mut transfers = Vec::new();
     for (name, value) in &head.fields {
@@ -195,21 +223,47 @@ fn payload(
     body: &mut Vec<u8>,
     cap: usize,
     response: bool,
+    profile: Profile,
 ) -> std::result::Result<(), Failure> {
     let (length, chunked) = framing(head)?;
     if chunked {
         loop {
-            let size = line(reader, budget)?;
-            // Extensions are unnecessary for the controlled uploads: fail closed rather than guess.
+            let size = line(
+                reader,
+                budget,
+                METADATA_BYTES,
+                if profile == Profile::Wire {
+                    128
+                } else {
+                    METADATA_BYTES
+                },
+            )?;
+            let size = if profile == Profile::Wire {
+                size.split(';').next().unwrap_or("")
+            } else {
+                &size
+            };
             if size.is_empty() || !size.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(Failure::Invalid);
             }
-            let count = u64::from_str_radix(&size, 16).map_err(|_| Failure::Invalid)?;
+            let count = u64::from_str_radix(size, 16).map_err(|_| Failure::Invalid)?;
             if count == 0 {
                 loop {
-                    let trailer = line(reader, budget)?;
+                    let trailer = line(
+                        reader,
+                        budget,
+                        METADATA_BYTES,
+                        if profile == Profile::Wire {
+                            2
+                        } else {
+                            METADATA_BYTES
+                        },
+                    )?;
                     if trailer.is_empty() {
                         return Ok(());
+                    }
+                    if profile == Profile::Wire {
+                        return Err(Failure::Invalid);
                     }
                     field_parts(&trailer)?;
                 }
@@ -242,12 +296,76 @@ fn payload(
     Ok(())
 }
 
+pub(super) fn capture_wire_body(
+    reader: &mut impl BufRead,
+    head: &Head,
+) -> std::result::Result<(Vec<u8>, Vec<u8>), Failure> {
+    struct Recording<'a, R> {
+        inner: &'a mut R,
+        bytes: Vec<u8>,
+        pending: Vec<u8>,
+        position: usize,
+    }
+    impl<R: BufRead> Read for Recording<'_, R> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let count = available.len().min(bytes.len());
+            bytes[..count].copy_from_slice(&available[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+    impl<R: BufRead> BufRead for Recording<'_, R> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            let remaining = 4097usize.saturating_sub(self.bytes.len());
+            if remaining == 0 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if self.position == self.pending.len() {
+                self.pending.clear();
+                self.position = 0;
+                let available = self.inner.fill_buf()?;
+                self.pending
+                    .extend_from_slice(&available[..available.len().min(remaining)]);
+            }
+            Ok(&self.pending[self.position..])
+        }
+        fn consume(&mut self, count: usize) {
+            self.bytes
+                .extend_from_slice(&self.pending[self.position..self.position + count]);
+            self.position += count;
+            self.inner.consume(count);
+        }
+    }
+    let mut recording = Recording {
+        inner: reader,
+        bytes: Vec::new(),
+        pending: Vec::new(),
+        position: 0,
+    };
+    let mut body = Vec::new();
+    let outcome = payload(
+        &mut recording,
+        head,
+        &mut 0,
+        &mut body,
+        1024,
+        false,
+        Profile::Wire,
+    );
+    if recording.bytes.len() > 4096 {
+        return Err(Failure::CaptureLimit);
+    }
+    outcome?;
+    Ok((body, recording.bytes))
+}
+
 pub(crate) fn inspect(reader: &mut impl BufRead) -> Value {
     let mut budget = 0;
     let mut body = Vec::new();
     let mut receipt = json!({"head":null,"head_bytes":0,"head_state":"unobserved"});
     let result = (|| {
-        let head = match read_head(reader, &mut budget) {
+        let head = match read_head(reader, &mut budget, Profile::Overflow) {
             Ok(head) => head,
             Err(error) => {
                 let seen = budget;
@@ -271,6 +389,7 @@ pub(crate) fn inspect(reader: &mut impl BufRead) -> Value {
             &mut body,
             ORIGIN_BODY_BYTES,
             false,
+            Profile::Overflow,
         )
     })();
     receipt["terminal"] = json!(result.err().map_or("complete", Failure::name));
@@ -429,7 +548,8 @@ pub fn request(
     let deadline = Instant::now() + Duration::from_secs(6);
     let mut reader = BufReader::new(DeadlineSocket { socket, deadline });
     let mut metadata = 0;
-    let response = read_head(&mut reader, &mut metadata).map_err(|failure| failure.name())?;
+    let response = read_head(&mut reader, &mut metadata, Profile::Overflow)
+        .map_err(|failure| failure.name())?;
     let header_ns = started.elapsed().as_nanos();
     let parts: Vec<_> = response.first.split_whitespace().collect();
     require(
@@ -438,8 +558,16 @@ pub fn request(
     )?;
     let status = parts[1].parse::<u16>()?;
     let mut body = Vec::new();
-    payload(&mut reader, &response, &mut metadata, &mut body, 4096, true)
-        .map_err(|failure| failure.name())?;
+    payload(
+        &mut reader,
+        &response,
+        &mut metadata,
+        &mut body,
+        4096,
+        true,
+        Profile::Overflow,
+    )
+    .map_err(|failure| failure.name())?;
     let event = json!({"event":"client_completed","token":token,"status":status,"headers":response.fields,
         "body":String::from_utf8(body)?,"header_ns":header_ns,"complete_ns":started.elapsed().as_nanos(),
         "first_byte_ns":null,"first_byte_timing":"not-measured"});
@@ -454,6 +582,118 @@ mod tests {
 
     fn observed(wire: &[u8]) -> Value {
         inspect(&mut Cursor::new(wire))
+    }
+
+    #[test]
+    fn wire_capture_propagates_buffer_errors_without_refilling_in_consume() {
+        struct FailingBuffer {
+            first: bool,
+        }
+        impl Read for FailingBuffer {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                unreachable!()
+            }
+        }
+        impl BufRead for FailingBuffer {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                if std::mem::take(&mut self.first) {
+                    Ok(b"a")
+                } else {
+                    Err(io::ErrorKind::ConnectionReset.into())
+                }
+            }
+            fn consume(&mut self, amount: usize) {
+                assert_eq!(amount, 1);
+            }
+        }
+        let head = Head {
+            first: "POST /post HTTP/1.1".to_owned(),
+            fields: vec![("content-length".to_owned(), "2".to_owned())],
+        };
+        let result = capture_wire_body(&mut FailingBuffer { first: true }, &head);
+        assert!(matches!(result, Err(Failure::Reset)));
+    }
+
+    #[test]
+    fn wire_head_limits_count_lines_and_headers_separately_and_preserve_duplicates() {
+        let first = format!("GET /{} HTTP/1.1\r\n", "x".repeat(4080));
+        assert_eq!(first.len(), 4096);
+        let mut headers = String::new();
+        for size in [4096, 4096, 4096, 4094] {
+            headers.push_str(&format!("X: {}\r\n", "a".repeat(size - 5)));
+        }
+        headers.push_str("\r\n");
+        assert_eq!(headers.len(), 16 * 1024);
+        let mut budget = 0;
+        let head = read_head(
+            &mut Cursor::new(format!("{first}{headers}")),
+            &mut budget,
+            Profile::Wire,
+        )
+        .unwrap();
+        assert_eq!(budget, 16 * 1024);
+        assert_eq!(head.fields.len(), 4);
+        assert!(head.fields.iter().all(|(name, _)| name == "x"));
+        for wire in [
+            format!("GET /{} HTTP/1.1\r\n\r\n", "x".repeat(4081)),
+            format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "x".repeat(4092)),
+            format!("GET / HTTP/1.1\r\nY: x\r\n{headers}"),
+        ] {
+            assert!(matches!(
+                read_head(&mut Cursor::new(wire), &mut 0, Profile::Wire),
+                Err(Failure::MetadataLimit)
+            ));
+        }
+    }
+
+    #[test]
+    fn wire_body_profile_enforces_payload_chunk_line_and_raw_framing_limits() {
+        for size in [1024, 1025] {
+            let head = Head {
+                first: "POST /post HTTP/1.1".into(),
+                fields: vec![("content-length".into(), size.to_string())],
+            };
+            let result = capture_wire_body(&mut Cursor::new(vec![b'a'; size]), &head);
+            if size == 1024 {
+                let (body, encoded) = result.unwrap();
+                assert_eq!(body, encoded);
+                assert_eq!(body.len(), 1024);
+            } else {
+                assert!(matches!(result, Err(Failure::CaptureLimit)));
+            }
+        }
+        let head = Head {
+            first: "POST /post HTTP/1.1".into(),
+            fields: vec![("transfer-encoding".into(), "chunked".into())],
+        };
+        for size in [128, 129] {
+            let wire = format!("1;{}\r\na\r\n0\r\n\r\n", "x".repeat(size - 4));
+            let result = capture_wire_body(&mut Cursor::new(&wire), &head);
+            if size == 128 {
+                let (body, encoded) = result.unwrap();
+                assert_eq!(body, b"a");
+                assert_eq!(encoded, wire.as_bytes());
+            } else {
+                assert!(matches!(result, Err(Failure::MetadataLimit)));
+            }
+        }
+        for extra in [0, 1] {
+            let wire = format!(
+                "{}1;{}\r\na\r\n0\r\n\r\n",
+                format!("1;{}\r\na\r\n", "x".repeat(123)).repeat(31),
+                "x".repeat(54 + extra)
+            );
+            assert_eq!(wire.len(), 4096 + extra);
+            let result = capture_wire_body(&mut Cursor::new(&wire), &head);
+            if extra == 0 {
+                let (body, encoded) = result.unwrap();
+                assert_eq!(body, vec![b'a'; 32]);
+                assert_eq!(encoded, wire.as_bytes());
+            } else {
+                assert!(matches!(result, Err(Failure::CaptureLimit)));
+            }
+        }
+        assert!(capture_wire_body(&mut Cursor::new(b"0\r\nX: trailer\r\n\r\n"), &head).is_err());
     }
 
     #[test]

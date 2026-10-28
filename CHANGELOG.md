@@ -94,6 +94,11 @@ their scope when introduced; the current summary supersedes their then-pending A
   Run the Spin wire harness in its existing CI job and require the separate Fastly redirect
   inventory without weakening the original progress inventory. These tests do not qualify
   hosted cancellation, successful optimizer transformation or resource guarantees.
+- Run the Spin host wire fixture in the existing Rust harness and remove the Python runner.
+  Preserve all 68 redirect exchanges, 84 correlated origin requests and existing raw-framing
+  and lifecycle controls. Reuse bounded HTTP capture, file-backed runtime logs and process-group
+  teardown; reject late worker failures and unexpected runtime exits before publishing success.
+  Keep one runner and no compatibility wrapper or additional host-language dependency.
 
 ### Main Integration
 

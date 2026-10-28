@@ -840,6 +840,18 @@ converters to make a provider check appear supported. Build/startup failures rem
 failures; tools or runtime evidence the runner explicitly marks unsupported or
 unverified remain exit 2.
 
+The adapter's local Spin wire controls run in the existing Rust harness, using the unchanged
+guest and pinned Spin. The runner builds and stages that guest; there is no separate host-language
+runner or alternate outbound client:
+
+```sh
+cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness
+./scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire
+```
+
+These controls preserve raw request framing, scope/handoff checks and 68 redirect exchanges
+with 84 correlated origin requests. They establish local SDK behavior, not hosted qualification.
+
 Cloudflare and Spin may select different guests during overlap or recovery tests;
 those observations are unverified. A success requires the same instance and the
 specific injected failure. Overlap checks use each request's `before.inflight`

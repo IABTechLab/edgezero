@@ -2,6 +2,7 @@ use crate::evidence::{Result, require};
 pub mod overflow;
 mod readiness;
 pub use readiness::ReadinessOrigin;
+mod wire;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -13,6 +14,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+pub use wire::WireOrigins;
 
 pub type Signal = Arc<(Mutex<bool>, Condvar)>;
 static CLIENT_EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
@@ -489,13 +491,68 @@ pub fn request(
 }
 
 #[derive(Clone, Copy)]
-enum Capture {
+enum Capture<'a> {
     Text,
     Binary,
+    Headers(&'a [(&'a str, &'a str)]),
 }
 
 pub fn binary_request(port: u16, path: &str, token: &str, backend: Option<&str>) -> Result<Value> {
     request_with_framing(port, path, token, backend, None, None, Capture::Binary)
+}
+
+pub fn header_request(
+    port: u16,
+    path: &str,
+    token: &str,
+    headers: &[(&str, &str)],
+) -> Result<Value> {
+    require(
+        path.starts_with('/')
+            && path.len() <= 4096
+            && path.bytes().all(|byte| byte.is_ascii_graphic())
+            && !token.is_empty()
+            && token.len() <= 128
+            && token.bytes().all(|byte| byte.is_ascii_graphic()),
+        "invalid fixture request path or token",
+    )?;
+    let mut size = 0usize;
+    for (name, value) in headers {
+        require(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+                && value.is_ascii()
+                && value
+                    .bytes()
+                    .all(|byte| byte == b'\t' || (32..127).contains(&byte))
+                && ![
+                    "host",
+                    "connection",
+                    "content-length",
+                    "transfer-encoding",
+                    "x-request-token",
+                ]
+                .iter()
+                .any(|reserved| name.eq_ignore_ascii_case(reserved)),
+            "invalid fixture request header",
+        )?;
+        size = size
+            .saturating_add(name.len())
+            .saturating_add(value.len())
+            .saturating_add(4);
+        require(size <= 16 * 1024, "fixture request headers exceed limit")?;
+    }
+    request_with_framing(
+        port,
+        path,
+        token,
+        None,
+        None,
+        None,
+        Capture::Headers(headers),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -538,7 +595,7 @@ fn request_with_framing(
     backend: Option<&str>,
     signal: Option<&Signal>,
     framing: Option<Framing>,
-    capture: Capture,
+    capture: Capture<'_>,
 ) -> Result<Value> {
     let start = Instant::now();
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
@@ -558,6 +615,11 @@ fn request_with_framing(
     )?;
     if let Some(url) = backend {
         write!(stream, "x-fixture-backend: {url}\r\n")?;
+    }
+    if let Capture::Headers(headers) = capture {
+        for (name, value) in headers {
+            write!(stream, "{name}: {value}\r\n")?;
+        }
     }
     write!(stream, "\r\n{body}")?;
     stream.flush()?;
@@ -592,6 +654,7 @@ fn request_with_framing(
     let capture_limit = match capture {
         Capture::Text => usize::MAX,
         Capture::Binary => 256,
+        Capture::Headers(_) => 64 * 1024,
     };
     let outcome = (|| -> Result<()> {
         let mut read_part = |reader: &mut BufReader<TcpStream>, count: usize| -> Result<()> {
@@ -682,7 +745,7 @@ fn request_with_framing(
     let mut event = json!({"event":"client_completed","token":token,"status":status,"headers":headers,"header_ns":header_ns,"first_byte_ns":first_byte_ns.unwrap_or(header_ns),"complete_ns":start.elapsed().as_nanos() as u64});
     match capture {
         Capture::Text => event["body"] = json!(String::from_utf8(bytes)?),
-        Capture::Binary => event["body_bytes"] = json!(bytes),
+        Capture::Binary | Capture::Headers(_) => event["body_bytes"] = json!(bytes),
     }
     CLIENT_EVENTS.lock().unwrap().push(event.clone());
     Ok(event)
@@ -692,6 +755,12 @@ mod tests {
     use super::*;
 
     fn binary_reply(wire: Vec<u8>) -> Result<Value> {
+        captured_reply(wire, |port| {
+            binary_request(port, "/relay", "binary-test", None)
+        })
+    }
+
+    fn captured_reply(wire: Vec<u8>, request: impl FnOnce(u16) -> Result<Value>) -> Result<Value> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
@@ -709,9 +778,102 @@ mod tests {
             }
             socket.write_all(&wire).unwrap();
         });
-        let result = binary_request(port, "/relay", "binary-test", None);
+        let result = request(port);
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn header_request_preserves_custom_and_duplicate_headers_and_binary_response() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let worker = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n\x00\x80\xff").unwrap();
+            head
+        });
+        let response = header_request(
+            port,
+            "/p5",
+            "header-token",
+            &[
+                ("x-origin", "http://127.0.0.1:1234/p5/final"),
+                ("x-duplicate", "first"),
+                ("x-duplicate", "second"),
+            ],
+        )
+        .unwrap();
+        let head = worker.join().unwrap();
+        assert!(head.starts_with("GET /p5 HTTP/1.1\r\n"));
+        assert!(head.contains("x-request-token: header-token\r\n"));
+        assert!(head.contains("x-origin: http://127.0.0.1:1234/p5/final\r\n"));
+        assert!(head.contains("x-duplicate: first\r\nx-duplicate: second\r\n"));
+        assert_eq!(response["body_bytes"], json!([0, 128, 255]));
+    }
+
+    #[test]
+    fn header_request_caps_all_response_framings_at_sixty_four_kib() {
+        for size in [65_536, 65_537] {
+            for framing in ["fixed", "chunked", "close"] {
+                let field = match framing {
+                    "fixed" => format!("Content-Length: {size}\r\n"),
+                    "chunked" => "Transfer-Encoding: chunked\r\n".to_owned(),
+                    _ => String::new(),
+                };
+                let mut wire =
+                    format!("HTTP/1.1 200 OK\r\n{field}Connection: close\r\n\r\n").into_bytes();
+                if framing == "chunked" {
+                    wire.extend(format!("{size:X}\r\n").as_bytes());
+                }
+                wire.extend(std::iter::repeat_n(255, size));
+                if framing == "chunked" {
+                    wire.extend(b"\r\n0\r\n\r\n");
+                }
+                let result = captured_reply(wire, |port| header_request(port, "/p5", "cap", &[]));
+                if size == 65_536 {
+                    assert_eq!(result.unwrap()["body_bytes"], json!(vec![255; size]));
+                } else {
+                    let error = result.unwrap_err();
+                    let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
+                    assert!(partial.reason.contains("capture limit"));
+                    assert!(partial.body.len() <= 65_536);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn header_request_rejects_injection_before_connecting() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for (path, token, headers) in [
+            ("/p5\r\nx-injected: yes", "t", vec![]),
+            ("/p5", "t\r\nx-injected: yes", vec![]),
+            ("/p5", "t", vec![("x-name\r\n", "value")]),
+            ("/p5", "t", vec![("x-name", "value\r\nx-injected: yes")]),
+            ("/p5", "t", vec![("bad name", "value")]),
+            ("/p5", "t", vec![("x-name", "bad\0value")]),
+        ] {
+            assert!(header_request(port, path, token, &headers).is_err());
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
     }
 
     #[test]

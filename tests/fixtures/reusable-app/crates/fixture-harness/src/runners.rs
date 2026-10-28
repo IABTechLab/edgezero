@@ -6,6 +6,7 @@ mod overflow;
 mod progress;
 mod readiness;
 mod response_headers;
+mod wire;
 fn cargo_build() -> Command {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -1185,6 +1186,9 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "outbound-wire" {
+        return wire::run(name, run, records);
+    }
     if args.suite == "synthesized-headers" {
         return response_headers::run(name, run, records);
     }

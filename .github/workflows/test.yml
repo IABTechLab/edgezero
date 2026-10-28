@@ -443,7 +443,11 @@ jobs:
           wasmtime --version
 
       - name: Fetch dependencies (locked)
-        run: cargo fetch --locked
+        run: |
+          cargo fetch --locked
+          if [ "${{ matrix.adapter }}" = spin ]; then
+            cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
+          fi
 
       - name: Run ${{ matrix.adapter }} wasm tests
         env:
@@ -482,8 +486,17 @@ jobs:
           tar -xzf "$install_dir/$archive" -C "$install_dir"
           export PATH="$install_dir:$PATH"
           test "$(spin --version | awk '{print $2}')" = "$version"
-          cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-bodyless-wire
-          python3 crates/edgezero-adapter-spin/tests/outbound_bodyless_wire.py
+          run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/ci-spin-wire"
+          CARGO_NET_OFFLINE=true ./scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output "$run"
+          jq --slurp --exit-status '
+            ([.[] | select(.event == "spin-wire-inventory")]
+              | length == 1 and .[0].status == "pass"
+              and .[0].exchanges == 68 and .[0].origin_requests == 84
+              and .[0].qualification == false)
+            and ([.[] | select(.event == "spin-wire-case")]
+              | length == 68 and ([.[].origin_requests | length] | add) == 84)
+            and all(.[]; .status != "fail")
+          ' "$run/events.jsonl"
 
       - name: Run Cloudflare outbound runtime unit tests
         if: matrix.adapter == 'cloudflare'
@@ -534,11 +547,11 @@ jobs:
             and all(.[]; .status != "fail")
           ' "$run/events.jsonl"
 
-      - name: Preserve Fastly lifecycle evidence
-        if: always() && matrix.adapter == 'fastly'
+      - name: Preserve provider lifecycle evidence
+        if: always() && (matrix.adapter == 'fastly' || matrix.adapter == 'spin')
         uses: actions/upload-artifact@v4
         with:
-          name: fastly-lifecycle-evidence
+          name: ${{ matrix.adapter }}-lifecycle-evidence
           path: tests/fixtures/reusable-app/.runs/
           include-hidden-files: true
           if-no-files-found: ignore

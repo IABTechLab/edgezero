@@ -237,6 +237,15 @@ freeze an exact candidate. The normative requirements and approved Interfaces ar
 
 ### Current Work Queue and Gates
 
+The Spin host wire suite now uses the existing Rust fixture harness's explicit
+`--adapter spin --suite outbound-wire` entrypoint. The former Python runner is removed, without
+compatibility wrappers or another process supervisor.
+The unchanged guest retains 68 exchanges/84 correlated requests, raw framing and scope/handoff
+assertions. Colocated Rust tests cover capture boundaries, duplicate fields, exact bytes, late
+worker failures and process-group shutdown. The existing Spin CI job executes the shared harness
+and checks its complete inventory. This tooling migration does not change production outbound
+behavior, frozen requirements, provider capabilities or qualification status.
+
 1. **G1/Q3 acceptance binding:** replace planned placeholder commands with actual, nonzero
    sentinels and environment-specific assertions/artifacts as each owning task lands. Reconcile
    applicability/approval records separately; mark a leg `ready` only when its complete declared
