@@ -904,9 +904,12 @@ fast origin with a silent mediator, Begin followed by an unrelated 100 ms timer,
 unobserved batch during a separate 300 ms send. Two additional probes exercise a waiting
 `next()` against the original request-start-relative 200 ms cutoff, requiring `Cutoff` by
 205 ms and all three slots unresolved. One origin withholds headers; the other writes a head
-declaring one body byte but withholds both that byte and EOF. The suite runs six cases.
-It does not implement CPU-stretch scenario 3
-or the remaining response-owned, cleanup, cap and reusable-sandbox acceptance scenarios.
+declaring one body byte but withholds both that byte and EOF. The seventh case exercises
+CPU-stretch scenario 3: the guest consumes A before synchronous work from 520 to 560 ms,
+while B is scheduled at 530 ms and C after the original 534 ms cutoff. B is either delivered
+with an on-time recorded arrival or remains unresolved; a delivered elapsed time of 500 ms
+or more is always rejected. The suite still does not implement the remaining response-owned,
+cleanup, cap and reusable-sandbox acceptance scenarios.
 
 Each case records actual guest operation entry/duration, per-slot arrival elapsed, exact
 collection states, typed errors, and independently observed host receipts/head/chunk writes.
@@ -922,7 +925,7 @@ cutoff. These probes do not close the complete scenario 16 acceptance leg or cer
 cancellation. Release ends the fixture's hold; it is not evidence of provider teardown.
 Bodies are capped at 64 bytes. The existing bounded origin collector/parser and joined worker
 ownership are reused; registrations, roles and event counts are finite, and unexpected or late
-worker failures prevent a passing inventory. The suite runs all six cases even when an earlier
+worker failures prevent a passing inventory. The suite runs all seven cases even when an earlier
 case fails, but publishes success only after runtime and origin cleanup succeed.
 
 Host request-send and guest request-start have different origins, particularly on a cold guest.
@@ -933,6 +936,21 @@ observations. The frozen +/-5 ms timeline targets remain checked; misses return 
 qualified pass. For quiet-window proofs, a head-write-start/guest-head-observation causal bound
 conservatively compares receipts without pretending the clocks are synchronized. The 5 ms
 measurement guard makes that proof stricter, and is not an extra deadline allowance.
+
+The CPU case records a causal interval for `host - guest` from request-send/receipt and
+head-write/observation boundaries. Its 1 ms clock-rounding guard expands uncertainty, not the
+accepted timing targets. The complete actual B write must fit the busy interval and 530 +/-5 ms
+for every offset in that interval; choosing a convenient point estimate is not proof. Receipt
+arrival still must be strictly before the original 534 ms cutoff. The report explicitly records
+the equal-rate assumption and does not claim synchronized clocks. Receipt reconstruction brackets
+core's batch epoch by the complete measured invocation, not its pre-call timestamp; every
+possible arrival must satisfy the cutoff and delivery boundaries. A cold-connection interval
+that is too wide fails the probe, even when B is correctly unresolved.
+
+CPU work is synchronous and bounded by ten million iterations, with rejection on backwards,
+frozen or already-expired windows. The iteration cap is a finite work bound, not a wall-clock
+guarantee. This is a local runtime probe only: [deployed Workers clocks advance after I/O](https://developers.cloudflare.com/workers/runtime-apis/performance/),
+so they must not be used to drive an unbounded CPU loop. No hosted CPU timing is certified.
 
 These are local characterization/acceptance probes, not a hosted evidence package. Until the
 complete declared criteria and timing evidence pass, the inventory bindings stay planned.

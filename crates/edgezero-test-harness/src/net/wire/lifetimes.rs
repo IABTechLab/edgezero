@@ -11,6 +11,7 @@ enum Case {
     Batch,
     PendingHead,
     PendingBody,
+    Cpu,
 }
 
 impl Case {
@@ -22,6 +23,7 @@ impl Case {
             "batch-progress" => Ok(Self::Batch),
             "pending-head-cutoff" => Ok(Self::PendingHead),
             "pending-body-cutoff" => Ok(Self::PendingBody),
+            "cpu-stretch" => Ok(Self::Cpu),
             _ => Err("unknown lifetime case".into()),
         }
     }
@@ -34,12 +36,13 @@ impl Case {
             Self::Batch => "batch-progress",
             Self::PendingHead => "pending-head-cutoff",
             Self::PendingBody => "pending-body-cutoff",
+            Self::Cpu => "cpu-stretch",
         }
     }
 
     fn permits(self, role: &str) -> bool {
         match self {
-            Self::Slow => matches!(role, "origin" | "a" | "b" | "c"),
+            Self::Slow | Self::Cpu => matches!(role, "origin" | "a" | "b" | "c"),
             Self::Fast => matches!(role, "origin" | "a" | "b" | "c" | "mediator"),
             Self::Begin => role == "origin",
             Self::Batch => matches!(role, "a" | "b" | "c" | "quiet"),
@@ -260,7 +263,7 @@ pub(super) fn serve(
             .map_err(|_| "invalid lifetime guest clock")?;
         require(guest_at <= 15_000_000, "invalid lifetime guest clock")?;
         require(!lifetime.roles.contains(*role), "duplicate lifetime role")?;
-        if matches!(lifetime.case, Case::Slow | Case::Fast) && *role == "origin" {
+        if matches!(lifetime.case, Case::Slow | Case::Fast | Case::Cpu) && *role == "origin" {
             lifetime.scenario_anchor = Some(
                 head_received
                     .checked_sub(Duration::from_micros(guest_at))
@@ -277,7 +280,7 @@ pub(super) fn serve(
         };
         let mut event = exchange.event("request", exchange.received, None);
         event["guest_at_us"] = json!(guest_at);
-        if matches!(lifetime.case, Case::Slow | Case::Fast) && *role == "origin" {
+        if matches!(lifetime.case, Case::Slow | Case::Fast | Case::Cpu) && *role == "origin" {
             event["alignment"] = json!({
                 "basis":"origin-receipt-minus-guest-at-us",
                 "scenario_anchor_host_offset_us":offset(lifetime.scenario_anchor.unwrap(),anchor),
@@ -300,7 +303,7 @@ pub(super) fn serve(
             Ok(false)
         }
     });
-    let expected_close = matches!(exchange.case, Case::Slow)
+    let expected_close = matches!(exchange.case, Case::Slow | Case::Cpu)
         && exchange.role == "c"
         && exchange
             .scenario_anchor
@@ -355,7 +358,7 @@ pub(super) fn serve(
 }
 
 fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
-    if !matches!(exchange.case, Case::Slow | Case::Fast) {
+    if !matches!(exchange.case, Case::Slow | Case::Fast | Case::Cpu) {
         return Ok(true);
     }
     let deadline = Instant::now() + IO_BUDGET;
@@ -417,6 +420,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
             ],
         ),
         (Case::Fast, "origin") => (absolute(120), vec![(absolute(260), b"O")]),
+        (Case::Cpu, "origin") => (absolute(100), vec![(absolute(100), b"O")]),
         (Case::Begin, "origin") => (received(150), vec![(received(150), b"O")]),
         (Case::Batch, "quiet") => (received(300), Vec::new()),
         (Case::Fast, "mediator") => {
@@ -428,6 +432,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
             let at = match case {
                 Case::Slow => absolute([180, 320, 900][index]),
                 Case::Fast => absolute([180, 320, 400][index]),
+                Case::Cpu => absolute([180, 530, 900][index]),
                 Case::Batch => received([20, 40, 60][index]),
                 Case::Begin | Case::PendingHead | Case::PendingBody => unreachable!(),
             };
@@ -517,6 +522,60 @@ mod tests {
             .iter()
             .find(|event| event["role"] == role && event["op"] == op)
             .unwrap()
+    }
+
+    #[test]
+    fn cpu_stretch_origin_uses_fixed_role_schedules_and_one_byte_bodies() {
+        let origins = WireOrigins::start().unwrap();
+        origins.register_lifetime("cpu", "cpu-stretch").unwrap();
+        origins.mark_lifetime_start("cpu").unwrap();
+        let sockets: Vec<_> = [
+            ("origin", "2000"),
+            ("a", "34000"),
+            ("b", "34000"),
+            ("c", "34000"),
+        ]
+        .into_iter()
+        .map(|(role, at)| connect(&origins, "cpu", "cpu-stretch", role, at))
+        .collect();
+        for (index, socket) in sockets.into_iter().enumerate() {
+            let bytes = read(socket);
+            if index == 0 {
+                assert_eq!(bytes, b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nO\r\n0\r\n\r\n");
+            } else {
+                let mut expected =
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n".to_vec();
+                expected.push(b'A' + index as u8 - 1);
+                assert_eq!(bytes, expected);
+            }
+        }
+        let events = origins.take_lifetime_events("cpu").unwrap();
+        for (role, at) in [
+            ("origin", 100000),
+            ("a", 180000),
+            ("b", 530000),
+            ("c", 900000),
+        ] {
+            assert_eq!(event(&events, role, "head")["scenario_scheduled_us"], at);
+            assert!(
+                event(&events, role, "head")["write_started_us"]
+                    .as_i64()
+                    .unwrap()
+                    >= event(&events, role, "head")["scheduled_us"]
+                        .as_i64()
+                        .unwrap()
+            );
+            let phases: Vec<_> = events
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["role"] == role)
+                .map(|entry| entry["op"].as_str().unwrap())
+                .collect();
+            assert_eq!(phases, ["request", "head", "chunk", "closed"]);
+            assert_eq!(event(&events, role, "closed")["reason"], "complete");
+        }
+        origins.finish().unwrap();
     }
 
     #[test]

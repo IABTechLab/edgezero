@@ -1,13 +1,14 @@
 use super::*;
 use crate::net::WireOrigins;
 
-const CASES: [&str; 6] = [
+const CASES: [&str; 7] = [
     "slow-origin",
     "fast-origin",
     "begin-progress",
     "batch-progress",
     "pending-head-cutoff",
     "pending-body-cutoff",
+    "cpu-stretch",
 ];
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
@@ -54,10 +55,22 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
             report = serde_json::from_slice(&bytes)?;
             validate(case, &token, &report, &origin)
         })();
+        let clock_correlation = if case == "cpu-stretch" {
+            report["events"]
+                .as_array()
+                .and_then(|events| cpu_clock_bounds(events, &origin).ok())
+                .map(|[lower, upper]| {
+                    json!({"basis":"causal-request-and-head-bounds",
+                    "lower_us":lower,"upper_us":upper,"rounding_guard_us":1000,
+                    "same_rate_assumed":true,"clock_sync_proven":false})
+                })
+        } else {
+            None
+        };
         records.push(json!({"event":"lifetime-case","case":case,"token":token,
             "status":if result.is_ok(){"pass"}else{"fail"},
             "error":result.as_ref().err().map(ToString::to_string),"report":report,
-            "origin":origin,"body_phase_evidence":if case == "pending-body-cutoff" {
+            "origin":origin,"clock_correlation":clock_correlation,"body_phase_evidence":if case == "pending-body-cutoff" {
                 Some("host-head-written-only")
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
@@ -116,7 +129,7 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
         .collect::<std::result::Result<_, _>>()?;
     roles.sort_unstable();
     let expected: &[&str] = match case {
-        "slow-origin" => &["a", "b", "c", "origin"],
+        "slow-origin" | "cpu-stretch" => &["a", "b", "c", "origin"],
         "fast-origin" => &["a", "b", "c", "mediator", "origin"],
         "begin-progress" => &["origin"],
         "batch-progress" => &["a", "b", "c", "quiet"],
@@ -129,6 +142,9 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
     )?;
     if pending_cutoff(case) {
         return validate_pending_cutoff(case, report, events, origin);
+    }
+    if case == "cpu-stretch" {
+        return validate_cpu_stretch(report, events, origin);
     }
     if case == "begin-progress" || case == "batch-progress" {
         let start = number(event(events, "quiet-start")?, "at_us")?;
@@ -287,6 +303,244 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
             "mediator deadline was extended",
         )
     }
+}
+
+fn role_event<'a>(origin: &'a [Value], role: &str, op: &str) -> Result<&'a Value> {
+    let mut entries = origin
+        .iter()
+        .filter(|entry| entry["role"] == role && entry["op"] == op);
+    let entry = entries.next().ok_or("missing origin phase")?;
+    require(entries.next().is_none(), "duplicate origin phase")?;
+    Ok(entry)
+}
+
+fn cpu_clock_bounds(events: &[Value], origin: &Value) -> Result<[i128; 2]> {
+    let origin = origin.as_array().ok_or("missing CPU origin events")?;
+    let request = role_event(origin, "origin", "request")?;
+    let head = role_event(origin, "origin", "head")?;
+    let observed = event(events, "origin-head")?;
+    // With offset = host - guest, sending precedes receipt in each direction.
+    let lower = i128::from(number(head, "write_started_us")?)
+        - i128::from(number(observed, "at_us")? + number(observed, "duration_us")?)
+        - 1000;
+    let upper =
+        i128::from(number(request, "at_us")?) - i128::from(number(request, "guest_at_us")?) + 1000;
+    require(lower <= upper, "contradictory CPU clock bounds")?;
+    Ok([lower, upper])
+}
+
+fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Result<()> {
+    require(
+        events
+            .iter()
+            .map(|entry| entry["op"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>()
+            == [
+                "begin",
+                "batch-start",
+                "origin-head",
+                "origin-body",
+                "next",
+                "cpu-stretch",
+                "collect",
+            ],
+        "CPU probe performed an unexpected operation",
+    )?;
+    require(
+        report["origin"] == json!({"status":200,"bytes":[79]}) && report["mediator"].is_null(),
+        "CPU origin outcome changed",
+    )?;
+    within(
+        number(event(events, "begin")?, "at_us")?,
+        2000,
+        "CPU origin begin missed 2 ms",
+    )?;
+    let batch = event(events, "batch-start")?;
+    let batch_started = number(batch, "at_us")?;
+    let batch_ended = batch_started + number(batch, "duration_us")?;
+    require(
+        (34000..=39000).contains(&batch_started),
+        "CPU batch start missed 34 ms",
+    )?;
+    require(
+        batch["result"]["cutoff_at_us"] == 534000,
+        "CPU probe restarted the observation cutoff",
+    )?;
+    let next = event(events, "next")?;
+    let next_ended = number(next, "at_us")? + number(next, "duration_us")?;
+    within(
+        number(next, "at_us")?,
+        500000,
+        "pre-CPU observation missed 500 ms",
+    )?;
+    let busy = event(events, "cpu-stretch")?;
+    let start = number(busy, "at_us")?;
+    let end = start + number(busy, "duration_us")?;
+    let collected = event(events, "collect")?;
+    require(
+        (520000..=525000).contains(&start)
+            && (560000..=565000).contains(&end)
+            && next["result"] == "Item"
+            && next_ended <= start
+            && busy["result"]["max_iterations"] == 10_000_000
+            && busy["result"]["iterations"]
+                .as_u64()
+                .is_some_and(|iterations| (1..=10_000_000).contains(&iterations))
+            && number(collected, "at_us")? >= end
+            && number(collected, "duration_us")? < 5000
+            && collected["result"] == "ok",
+        "CPU work did not span the fixed 520..560 ms interval",
+    )?;
+    within(
+        number(busy, "duration_us")?,
+        40000,
+        "CPU work duration changed",
+    )?;
+    let [lower, upper] = cpu_clock_bounds(events, origin)?;
+    let origin = origin.as_array().unwrap();
+    require(
+        origin.len() <= 16
+            && origin.iter().all(|entry| {
+                matches!(entry["role"].as_str(), Some("origin" | "a" | "b" | "c"))
+                    && matches!(
+                        entry["op"].as_str(),
+                        Some("request" | "head" | "chunk" | "closed")
+                    )
+            }),
+        "unexpected CPU origin evidence",
+    )?;
+    let c_closed = role_event(origin, "c", "closed")?;
+    let c_complete = c_closed["reason"] == "complete";
+    require(
+        matches!(
+            c_closed["reason"].as_str(),
+            Some("complete" | "peer_closed_after_cutoff")
+        ) && i128::from(number(c_closed, "at_us")?) - upper >= 534000,
+        "C did not remain outside the observation cutoff",
+    )?;
+    if !c_complete {
+        let phases: Vec<_> = origin
+            .iter()
+            .filter(|entry| entry["role"] == "c")
+            .map(|entry| entry["op"].as_str().unwrap())
+            .collect();
+        require(
+            phases == ["request", "closed"] || phases == ["request", "head", "closed"],
+            "unexpected C peer-close evidence",
+        )?;
+    }
+    for (role, byte) in [("origin", b'O'), ("a", b'A'), ("b", b'B'), ("c", b'C')]
+        .into_iter()
+        .filter(|(role, _)| *role != "c" || c_complete)
+    {
+        let phases: Vec<_> = origin
+            .iter()
+            .filter(|entry| entry["role"] == role)
+            .map(|entry| entry["op"].as_str().unwrap())
+            .collect();
+        require(
+            phases == ["request", "head", "chunk", "closed"],
+            "CPU origin phase ordering changed",
+        )?;
+        let request = role_event(origin, role, "request")?;
+        let head = role_event(origin, role, "head")?;
+        let chunk = role_event(origin, role, "chunk")?;
+        let closed = role_event(origin, role, "closed")?;
+        require(
+            number(request, "at_us")? <= number(head, "write_started_us")?
+                && number(head, "write_started_us")? <= number(head, "at_us")?
+                && number(head, "at_us")? <= number(chunk, "at_us")?
+                && number(chunk, "at_us")? <= number(closed, "at_us")?
+                && chunk["bytes"] == json!([byte])
+                && closed["reason"] == "complete",
+            "CPU response evidence changed",
+        )?;
+    }
+    if let Some(head) = origin
+        .iter()
+        .find(|entry| entry["role"] == "c" && entry["op"] == "head")
+    {
+        let request = role_event(origin, "c", "request")?;
+        require(
+            number(head, "write_started_us")? >= number(request, "at_us")?
+                && number(head, "at_us")? >= number(head, "write_started_us")?
+                && number(c_closed, "at_us")? >= number(head, "at_us")?
+                && i128::from(number(head, "write_started_us")?) - upper >= 534000,
+            "C response was written before the observation cutoff",
+        )?;
+    }
+    let head = role_event(origin, "b", "head")?;
+    let chunk = role_event(origin, "b", "chunk")?;
+    let write_start = i128::from(number(head, "write_started_us")?);
+    let write_end = i128::from(number(chunk, "at_us")?);
+    require(
+        i128::from(start) + upper <= write_start && write_end <= i128::from(end) + lower,
+        "B response write was not proven inside CPU work",
+    )?;
+    require(
+        write_start - upper >= 525000 && write_end - lower <= 535000,
+        format!(
+            "B response write missed 530 ms: guest interval {}..{} us",
+            write_start - upper,
+            write_end - lower
+        ),
+    )?;
+    let delivered = report["slots"][1] == "Resolved";
+    if delivered {
+        validate_items(
+            report,
+            &[146000],
+            &["next", "collect"],
+            &["AlreadyDelivered", "Resolved", "Unresolved"],
+            "Cutoff",
+        )?;
+        let bidder = &report["items"][1];
+        within(
+            number(bidder, "elapsed_us")?,
+            496000,
+            "B arrival elapsed changed during CPU work",
+        )?;
+    } else {
+        validate_items(
+            report,
+            &[146000],
+            &["next"],
+            &["AlreadyDelivered", "Unresolved", "Unresolved"],
+            "Cutoff",
+        )?;
+    }
+    let a_head_start = i128::from(number(
+        role_event(origin, "a", "head")?,
+        "write_started_us",
+    )?);
+    require(
+        report["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .all(|(index, item)| {
+                number(item, "elapsed_us").is_ok_and(|elapsed| {
+                    // Core samples its epoch inside the measured invocation.
+                    let earliest_arrival = batch_started + elapsed;
+                    let latest_arrival = batch_ended + elapsed;
+                    let earliest = if index == 0 {
+                        a_head_start - upper
+                    } else {
+                        write_start - upper
+                    };
+                    elapsed < 500000
+                        && i128::from(earliest_arrival) >= earliest
+                        && latest_arrival < 534000
+                        && if index == 0 {
+                            latest_arrival <= next_ended
+                        } else {
+                            earliest_arrival >= start && latest_arrival <= end
+                        }
+                })
+            }),
+        "a post-cutoff observation was delivered as an on-time CPU slot",
+    )
 }
 
 fn validate_pending_cutoff(
@@ -595,6 +849,276 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cpu_sample(delivered: bool) -> (Value, Value) {
+        let mut report = json!({"schema":1,"case":"cpu-stretch","token":"sample","qualification":false,
+            "events":[
+                {"op":"begin","at_us":2000,"duration_us":100,"result":"scheduled"},
+                {"op":"batch-start","at_us":34000,"duration_us":100,"result":{"cutoff_at_us":534000}},
+                {"op":"origin-head","at_us":34100,"duration_us":66400,"result":"ok"},
+                {"op":"origin-body","at_us":100500,"duration_us":100,"result":null},
+                {"op":"next","at_us":500000,"duration_us":100,"result":"Item"},
+                {"op":"cpu-stretch","at_us":520000,"duration_us":40000,
+                    "result":{"iterations":4000,"max_iterations":10000000}},
+                {"op":"collect","at_us":560000,"duration_us":100,"result":"ok"}
+            ],"items":[{"index":0,"via":"next","elapsed_us":146000,"outcome":{"status":200,"bytes":[65]}}],
+            "slots":["AlreadyDelivered","Unresolved","Unresolved"],"termination":"Cutoff",
+            "error":null,"origin":{"status":200,"bytes":[79]},"mediator":null});
+        if delivered {
+            report["items"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"index":1,"via":"collect","elapsed_us":496000,
+                "outcome":{"status":200,"bytes":[66]}}));
+            report["slots"][1] = json!("Resolved");
+        }
+        let mut origin = json!([
+            {"op":"request","role":"origin","at_us":3000,"guest_at_us":2000},
+            {"op":"request","role":"a","at_us":35000,"guest_at_us":34000},
+            {"op":"request","role":"b","at_us":35010,"guest_at_us":34000},
+            {"op":"request","role":"c","at_us":35020,"guest_at_us":34000},
+            {"op":"head","role":"origin","at_us":100100,"write_started_us":100000},
+            {"op":"chunk","role":"origin","at_us":100200,"bytes":[79]},
+            {"op":"head","role":"a","at_us":180100,"write_started_us":180000},
+            {"op":"chunk","role":"a","at_us":180200,"bytes":[65]},
+            {"op":"head","role":"b","at_us":530100,"write_started_us":530000},
+            {"op":"chunk","role":"b","at_us":530200,"bytes":[66]},
+            {"op":"closed","role":"origin","at_us":100300,"reason":"complete"},
+            {"op":"closed","role":"a","at_us":180300,"reason":"complete"},
+            {"op":"closed","role":"b","at_us":530300,"reason":"complete"},
+            {"op":"closed","role":"c","at_us":900300,"reason":"peer_closed_after_cutoff"}
+        ]);
+        for entry in origin.as_array_mut().unwrap() {
+            entry["case"] = json!("cpu-stretch");
+            entry["token"] = json!("sample");
+        }
+        (report, origin)
+    }
+
+    #[test]
+    fn cpu_stretch_accepts_on_time_or_unresolved_but_never_collection_stamped_b() {
+        for delivered in [false, true] {
+            let (report, origin) = cpu_sample(delivered);
+            validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_rejects_late_or_foreign_slot_results() {
+        for (path, value) in [
+            ("/items/0/elapsed_us", json!(0)),
+            ("/items/0/elapsed_us", json!(466000)),
+            ("/items/1/elapsed_us", json!(500000)),
+            ("/items/1/elapsed_us", json!(501000)),
+            ("/items/1/elapsed_us", json!(526000)),
+            ("/items/1/index", json!(2)),
+            ("/slots/2", json!("Resolved")),
+            ("/termination", json!("Completed")),
+            ("/events/1/result/cutoff_at_us", json!(1060000)),
+            ("/events/5/result/iterations", json!(0)),
+            ("/events/5/at_us", json!(519999)),
+            ("/events/5/duration_us", json!(39999)),
+        ] {
+            let (mut report, origin) = cpu_sample(true);
+            *report.pointer_mut(path).unwrap() = value;
+            assert!(
+                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_rejects_unproven_actual_write_overlap_and_clock_bounds() {
+        for (op, field, at) in [
+            ("head", "write_started_us", 510000),
+            ("head", "write_started_us", 550000),
+            ("chunk", "at_us", 570000),
+            ("chunk", "at_us", 539000),
+        ] {
+            let (report, mut origin) = cpu_sample(false);
+            let entry = origin
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["role"] == "b" && entry["op"] == op)
+                .unwrap();
+            entry[field] = json!(at);
+            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        }
+        let (mut report, origin) = cpu_sample(false);
+        report["events"][2]["duration_us"] = json!(100000);
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+    }
+
+    #[test]
+    fn cpu_stretch_uses_causal_intervals_not_a_selected_clock_alignment() {
+        for delivered in [false, true] {
+            let (report, mut origin) = cpu_sample(delivered);
+            for entry in origin.as_array_mut().unwrap() {
+                for field in ["at_us", "write_started_us"] {
+                    if let Some(at) = entry[field].as_u64() {
+                        entry[field] = json!(at + 1_000_000);
+                    }
+                }
+            }
+            validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        }
+        for field in ["guest_at_us", "write_started_us"] {
+            let (report, mut origin) = cpu_sample(false);
+            let op = if field == "guest_at_us" {
+                "request"
+            } else {
+                "head"
+            };
+            let entry = origin
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["role"] == "origin" && entry["op"] == op)
+                .unwrap();
+            entry.as_object_mut().unwrap().remove(field);
+            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        }
+        let (mut report, origin) = cpu_sample(false);
+        report["events"][2]["duration_us"] = json!(0);
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+    }
+
+    #[test]
+    fn cpu_stretch_rejects_absolute_arrivals_after_cutoff_or_prior_delivery() {
+        let (mut report, origin) = cpu_sample(true);
+        report["events"][1]["at_us"] = json!(39000);
+        report["events"][2]["at_us"] = json!(39100);
+        report["events"][2]["duration_us"] = json!(61400);
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        for delivered in [false, true] {
+            let (mut report, origin) = cpu_sample(delivered);
+            report["items"][0]["elapsed_us"] = json!(499000);
+            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_bounds_receipt_epoch_by_the_entire_batch_call() {
+        for (duration, accepted) in [(3999, true), (4000, false)] {
+            let (mut report, origin) = cpu_sample(true);
+            report["events"][1]["duration_us"] = json!(duration);
+            report["events"][2]["at_us"] = json!(34000 + duration);
+            report["events"][2]["duration_us"] = json!(66500 - duration);
+            assert_eq!(
+                validate("cpu-stretch", "sample", &report, &origin).is_ok(),
+                accepted,
+                "batch invocation duration {duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_rejects_early_c_writes_hidden_by_a_late_close() {
+        for (reason, chunk) in [
+            ("complete", true),
+            ("peer_closed_after_cutoff", false),
+            ("peer_closed_after_cutoff", true),
+        ] {
+            let (report, mut origin) = cpu_sample(false);
+            let entries = origin.as_array_mut().unwrap();
+            let index = entries
+                .iter()
+                .position(|entry| entry["role"] == "c" && entry["op"] == "closed")
+                .unwrap();
+            entries[index]["reason"] = json!(reason);
+            if chunk {
+                entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":400200,"bytes":[67]}));
+            }
+            entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"head","at_us":400100,"write_started_us":400000}));
+            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_accepts_late_complete_or_partially_written_c() {
+        for complete in [false, true] {
+            let (report, mut origin) = cpu_sample(false);
+            let entries = origin.as_array_mut().unwrap();
+            let index = entries
+                .iter()
+                .position(|entry| entry["role"] == "c" && entry["op"] == "closed")
+                .unwrap();
+            if complete {
+                entries[index]["reason"] = json!("complete");
+                entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":900200,"bytes":[67]}));
+            }
+            entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"head","at_us":900100,"write_started_us":900000}));
+            validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_requires_every_offset_not_a_convenient_midpoint() {
+        let (report, mut origin) = cpu_sample(false);
+        for entry in origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|entry| entry["role"] == "b")
+        {
+            match entry["op"].as_str().unwrap() {
+                "head" => {
+                    entry["write_started_us"] = json!(527000);
+                    entry["at_us"] = json!(527100);
+                }
+                "chunk" => entry["at_us"] = json!(533500),
+                "closed" => entry["at_us"] = json!(533600),
+                _ => {}
+            }
+        }
+        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        for (op, field, at) in [
+            ("chunk", "at_us", 533501),
+            ("head", "write_started_us", 526999),
+        ] {
+            let mut changed = origin.clone();
+            let entry = changed
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["role"] == "b" && entry["op"] == op)
+                .unwrap();
+            entry[field] = json!(at);
+            assert!(validate("cpu-stretch", "sample", &report, &changed).is_err());
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_accepts_tolerated_write_uncertainty_but_not_a_late_receipt() {
+        let (mut report, mut origin) = cpu_sample(false);
+        report["events"][2]["duration_us"] = json!(63900);
+        for entry in origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|entry| entry["role"] == "b")
+        {
+            match entry["op"].as_str().unwrap() {
+                "head" => {
+                    entry["write_started_us"] = json!(534000);
+                    entry["at_us"] = json!(534100);
+                }
+                "chunk" => entry["at_us"] = json!(535500),
+                "closed" => entry["at_us"] = json!(535600),
+                _ => {}
+            }
+        }
+        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        report["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"index":1,"via":"collect","elapsed_us":500000,
+            "outcome":{"status":200,"bytes":[66]}}));
+        report["slots"][1] = json!("Resolved");
+        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+    }
 
     fn pending_cutoff_sample(case: &str) -> (Value, Value) {
         let report = json!({"schema":1,"case":case,"token":"sample","qualification":false,

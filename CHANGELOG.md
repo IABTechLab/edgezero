@@ -112,6 +112,11 @@ their scope when introduced; the current summary supersedes their then-pending A
   and require origin phases before the actual guest-response return, not just later release.
   Keep the 200 ms cutoff and 205 ms return target, and distinguish a host-written head from
   proven SDK body-read entry. Production behavior and qualification levels are unchanged.
+- Add a bounded local CPU-stretch probe with causal clock intervals, actual write-overlap
+  validation and strict receipt cutoff checks. Reject clock stalls, ambiguous timing evidence,
+  collection-stamped arrivals and early C bodies hidden behind late connection closure.
+  Keep unresolved outcomes distinct from proof of the required source timing; no public API,
+  transport or capability changes are introduced.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

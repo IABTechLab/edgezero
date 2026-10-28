@@ -427,6 +427,62 @@ timeline closure remain open. No production outbound implementation, dependency 
 requirement/interface or acceptance binding changes; the inventory stays 32 ready and 479
 planned, unqualified. No deployment, candidate freeze or capability promotion is implied.
 
+### D6 CPU Stretch Characterization And Calibration Gate (2026-10-28)
+
+Add the seventh local lifetime case for existing EZ-6 scenario 3, above `26e9e6b7`. It keeps
+the original batch start/cutoff (34/534 ms), consumes A before bounded synchronous CPU work
+from 520 to 560 ms, then collects. The work has no awaits or I/O, a ten-million-iteration cap,
+and explicit rejection of frozen, backwards or expired clock windows. It uses the application's
+existing clock/client and the same source ownership; no public API or production hook is added.
+
+The validator derives a causal interval for `host - guest`, with an explicit equal-rate
+assumption and 1 ms rounding guard. Every possible offset must place B's complete actual write
+inside both CPU work and the unchanged 530 +/-5 ms target. Scheduled timestamps and a convenient
+point estimate cannot supply that proof. Separately, A retains its 146 +/-5 ms elapsed check;
+delivered B retains 496 +/-5 ms, elapsed strictly below 500 ms and absolute arrival strictly
+before 534 ms. An unresolved B is permitted only with the complete source precondition proved.
+C's complete/partial peer-close paths reject early bodies hidden behind a late connection close.
+Receipt reconstruction brackets core's batch epoch by the full measured call interval; every
+possible arrival must meet the cutoff and delivery boundaries. The pre-call sample is not
+treated as core's exact epoch.
+
+Red/green regressions cover both permitted B branches, expired work windows, receipt chronology,
+collection-stamped A, early C writes, interval extrema, cold epoch shifts, invocation-epoch
+uncertainty and uncertain source timing. Shared harness tests pass 223 cases (one ignored);
+qualification-enabled fixture tests pass 47. Scoped strict Clippy passes natively and on all
+three WASM fixture targets.
+All five primary Rust gates pass, including 2,568 workspace tests (one ignored), after rerunning
+TCP/process tests with their required local permissions. Formatting, docs lint and the
+legacy/docs/inventory guards pass; the 36 evidence-checker regressions also pass.
+
+The first local CPU characterizations remain **failed/unqualified**. The source's initial
+cold-connection alignment is too wide/late to prove the required B write:
+
+| Local Runtime | Mapped B Write Interval | CPU Interval | B Outcome |
+| ------------- | ----------------------- | ------------ | --------- |
+| Axum | 533.322..542.720 ms | 523.207..560 ms | Unresolved |
+| Repaired Viceroy 0.21.0 | 532.918..542.897 ms | 520.164..560 ms | Unresolved |
+| Spin 4.1.0 | 529.763..537.807 ms | 521.943..560 ms | Unresolved |
+| workerd 2026-09-10 | 532.657..539.969 ms | 521..560 ms | Unresolved |
+
+These failed preconditions do not establish a production batch defect. Fastly also records A
+only at the later observation after the fixture's unrelated wait; a CPU acceptance setup must
+keep the pre-CPU wait inside an EdgeZero operation if it requires arrival recording there.
+All four full seven-case runs exit 1: the earlier slow/fast misses remain, four controls pass,
+and CPU source timing fails. Artifacts are under
+`/private/tmp/edgezero-cpu-stretch-20261028/{axum,viceroy,spin,workerd}`.
+
+A bounded fixture-only calibration send through the same client has been proposed in the
+conversation; it is **not implemented or approved by this checkpoint**. It can tighten the
+causal bracket and provide the pre-CPU EdgeZero wait without resetting the batch's deadline.
+Keep the approval/measurement-definition gate explicit rather than relaxing targets. The native
+SDK body-entry evidence gap also remains open: no uniform existing observation seam was found,
+and host-written heads still do not close criterion 16.
+
+No frozen requirement, interface, dependency pin, capability or acceptance binding changes.
+Inventory remains 32 ready/479 planned and unqualified. No deployment, candidate freeze or
+hosted qualification is authorized by these local probes.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

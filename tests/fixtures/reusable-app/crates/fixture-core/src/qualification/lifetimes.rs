@@ -8,6 +8,8 @@ use edgezero_core::{
 use serde_json::{Value, json};
 use std::time::Duration;
 
+const MAX_CPU_ITERATIONS: u64 = 10_000_000;
+
 struct Probe {
     case: String,
     token: String,
@@ -40,6 +42,7 @@ impl Probe {
                 | "batch-progress"
                 | "pending-head-cutoff"
                 | "pending-body-cutoff"
+                | "cpu-stretch"
         ) {
             return Err(invalid());
         }
@@ -257,6 +260,60 @@ async fn check(
     }
 }
 
+async fn next(batch: &mut OutboundBatch, report: &mut Report, timeline: &mut Timeline) {
+    let at = timeline.clock.now();
+    let result = batch.next().await;
+    let ended = timeline.clock.now();
+    timeline.event(
+        "next",
+        at,
+        ended,
+        json!(match &result {
+            Ok(OutboundBatchNext::Item(_)) => "Item",
+            Ok(OutboundBatchNext::Finished(_)) => "Finished",
+            Err(_) => "error",
+        }),
+    );
+    match result {
+        Ok(OutboundBatchNext::Item(item)) => {
+            let (index, slot) = item.into_parts();
+            record_item(report, index, slot, "next").await;
+        }
+        Ok(OutboundBatchNext::Finished(_)) => {}
+        Err(error) => report.error = Some(error_report(&error)),
+    }
+}
+
+fn busy_until(
+    clock: &MonotonicClock,
+    deadline: MonotonicInstant,
+    max_iterations: u64,
+) -> Result<u64, EdgeError> {
+    let mut previous = clock.now();
+    if previous >= deadline {
+        return Err(EdgeError::internal(std::io::Error::other(
+            "CPU probe window already expired",
+        )));
+    }
+    let mut work = 0_u64;
+    for iterations in 0..max_iterations {
+        let now = clock.now();
+        if now < previous {
+            return Err(EdgeError::internal(std::io::Error::other(
+                "CPU probe clock moved backwards",
+            )));
+        }
+        if now >= deadline {
+            return Ok(iterations);
+        }
+        previous = now;
+        work = std::hint::black_box(work.wrapping_mul(1_664_525).wrapping_add(1_013_904_223));
+    }
+    Err(EdgeError::internal(std::io::Error::other(
+        "CPU probe exhausted its finite work bound",
+    )))
+}
+
 async fn run(
     ctx: &RequestContext,
     probe: &Probe,
@@ -314,7 +371,16 @@ async fn run(
     let at = timeline.clock.now();
     let mut batch = client.start_batch_until(requests, observation_cutoff);
     let ended = timeline.clock.now();
-    timeline.event("batch-start", at, ended, Value::Null);
+    timeline.event(
+        "batch-start",
+        at,
+        ended,
+        if probe.case == "cpu-stretch" {
+            json!({"cutoff_at_us":timeline.elapsed_us(observation_cutoff.instant())})
+        } else {
+            Value::Null
+        },
+    );
 
     if probe.case == "batch-progress" {
         let request = probe.request("quiet", timeline)?;
@@ -341,6 +407,30 @@ async fn run(
         json!(if result.is_ok() { "ok" } else { "error" }),
     );
     let response = result?;
+    if probe.case == "cpu-stretch" {
+        let at = timeline.clock.now();
+        report.origin = Some(response_report(Ok(response)).await);
+        timeline.event("origin-body", at, timeline.clock.now(), Value::Null);
+        timeline.wait_until(ctx, 500).await?;
+        next(&mut batch, report, timeline).await;
+        timeline.wait_until(ctx, 520).await?;
+        let at = timeline.clock.now();
+        let result = busy_until(
+            &timeline.clock,
+            timeline.deadline_at(560).instant(),
+            MAX_CPU_ITERATIONS,
+        );
+        let ended = timeline.clock.now();
+        timeline.event(
+            "cpu-stretch",
+            at,
+            ended,
+            json!({"iterations":result.as_ref().ok(),"max_iterations":MAX_CPU_ITERATIONS}),
+        );
+        result?;
+        collect(batch, report, timeline).await;
+        return Ok(());
+    }
     if probe.case == "slow-origin" {
         timeline.wait_until(ctx, 701).await?;
         // Three slots plus one terminal observation; never spin on Pending.
@@ -369,27 +459,7 @@ async fn run(
     if let Err(error) = check(&mut batch, report, timeline).await {
         report.error = Some(error_report(&error));
     }
-    let at = timeline.clock.now();
-    let result = batch.next().await;
-    let ended = timeline.clock.now();
-    timeline.event(
-        "next",
-        at,
-        ended,
-        json!(match &result {
-            Ok(OutboundBatchNext::Item(_)) => "Item",
-            Ok(OutboundBatchNext::Finished(_)) => "Finished",
-            Err(_) => "error",
-        }),
-    );
-    match result {
-        Ok(OutboundBatchNext::Item(item)) => {
-            let (index, slot) = item.into_parts();
-            record_item(report, index, slot, "next").await;
-        }
-        Ok(OutboundBatchNext::Finished(_)) => {}
-        Err(error) => report.error = Some(error_report(&error)),
-    }
+    next(&mut batch, report, timeline).await;
     collect(batch, report, timeline).await;
 
     let request = probe
@@ -509,7 +579,53 @@ mod tests {
     use edgezero_core::http::{Method, StatusCode, request_builder};
     use edgezero_core::{Body, BudgetSource, ContentTypeProvenance, ResponseMode};
     use futures::{StreamExt, executor::block_on};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn cpu_work_stops_at_the_original_target_without_yielding() {
+        let start = TestTime::default().clock().now();
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&calls);
+        let clock = MonotonicClock::new(move || {
+            start + Duration::from_millis(520 + observed.fetch_add(1, Ordering::SeqCst))
+        });
+        assert_eq!(
+            busy_until(&clock, start + Duration::from_millis(560), 1000).unwrap(),
+            39
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 41);
+    }
+
+    #[test]
+    fn cpu_work_is_finite_when_time_is_frozen_or_backwards() {
+        for backwards in [false, true] {
+            let start = TestTime::default().clock().now();
+            let calls = Arc::new(AtomicU64::new(0));
+            let observed = Arc::clone(&calls);
+            let clock = MonotonicClock::new(move || {
+                let count = observed.fetch_add(1, Ordering::SeqCst);
+                start + Duration::from_millis(520 + u64::from(backwards && count == 1))
+            });
+            let error = busy_until(&clock, start + Duration::from_millis(560), 8).unwrap_err();
+            assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(calls.load(Ordering::SeqCst), if backwards { 3 } else { 9 });
+        }
+    }
+
+    #[test]
+    fn cpu_work_rejects_an_already_expired_window() {
+        let time = TestTime::default();
+        let clock = time.clock();
+        let target = clock.now();
+        assert_eq!(
+            busy_until(&clock, target, 8).unwrap_err().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
     fn headers(case: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -532,6 +648,16 @@ mod tests {
             TestTime::default().clock(),
             ContentTypeProvenance::Unknown,
         )
+    }
+
+    #[test]
+    fn cpu_stretch_is_a_fixed_supported_probe() {
+        assert_eq!(
+            Probe::parse("cpu-stretch", &headers("cpu-stretch"))
+                .unwrap()
+                .case,
+            "cpu-stretch"
+        );
     }
 
     #[test]
@@ -575,7 +701,7 @@ mod tests {
 
     #[test]
     fn input_rejects_uncontrolled_ambiguous_or_unimplemented_cases() {
-        for case in ["cpu-stretch", "", "other"] {
+        for case in ["", "other"] {
             assert!(Probe::parse(case, &headers(case)).is_err());
         }
         for target in [
