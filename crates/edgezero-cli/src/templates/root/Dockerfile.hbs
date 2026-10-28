@@ -1,7 +1,7 @@
 # Build from the workspace root after preparing portable dependencies and Cargo.lock.
 # Keep this pin aligned with .tool-versions when updating the application toolchain.
 ARG RUST_VERSION={{rust_version}}
-FROM rust:${RUST_VERSION}-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS builder
+FROM rust:${RUST_VERSION}-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 ARG RUST_VERSION
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 WORKDIR /build

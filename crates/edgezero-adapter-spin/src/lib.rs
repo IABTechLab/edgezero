@@ -7,6 +7,8 @@ pub mod cli;
 pub mod config_store;
 pub mod context;
 mod decompress;
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+mod ingress;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 pub mod key_value_store;
 // `kv_pagination` is the pure paging logic for `SpinKvStore::list_keys_page`.
@@ -108,7 +110,10 @@ pub fn init_logger() -> Result<(), log::SetLoggerError> {
 /// router, store binding, or response translation errors propagate here.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[inline]
-pub async fn run_app<A: Hooks>(req: SpinRequest) -> anyhow::Result<SpinFullResponse> {
+pub async fn run_app<A>(req: SpinRequest) -> anyhow::Result<SpinFullResponse>
+where
+    A: Hooks,
+{
     // Best-effort: every Spin `#[http_service]` re-enters this function, so a
     // second `log::set_logger` call returns Err — drop the result instead of
     // `.expect()` to avoid panicking on every subsequent request. Skipped
@@ -116,9 +121,28 @@ pub async fn run_app<A: Hooks>(req: SpinRequest) -> anyhow::Result<SpinFullRespo
     if !A::owns_logging() {
         drop(init_logger());
     }
-    let env = EnvConfig::from_env();
-    let stores = A::stores();
     let app = A::build_app();
-    request::dispatch_with_registries(&app, req, stores.config, stores.kv, stores.secrets, &env)
+    dispatch_app::<A>(&app, req).await
+}
+
+#[cfg(all(feature = "spin", target_arch = "wasm32"))]
+/// Dispatch a caller-owned app using `A::stores()` for fresh request bindings.
+///
+/// This does not build or cache an app or install logging. The caller must pass
+/// an app built from `A`; `App` erases its construction type, so this pairing
+/// remains a caller precondition. Retain only application-owned values and keep
+/// native handles and pending work request-local. Shared state must support
+/// overlapping invocations.
+///
+/// # Errors
+/// Returns conversion or dispatch errors from the existing adapter boundary.
+#[inline]
+pub async fn dispatch_app<A>(app: &App, req: SpinRequest) -> anyhow::Result<SpinFullResponse>
+where
+    A: Hooks,
+{
+    let stores = A::stores();
+    let env = EnvConfig::from_env();
+    request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)
         .await
 }

@@ -157,7 +157,7 @@ If NetworkPolicy is part of the isolation claim, select and test a CNI that enfo
 
 ## AWS profile with DynamoDB
 
-Use the [AWS reference design](../specs/aws-reference-deployment.md) for provider, release and IAM ownership. The first AWS Kubernetes profile includes AppConfig Agent, Secrets Manager and DynamoDB through their accepted portable interfaces. Do not add Redis or a shared redb volume to bridge these services.
+Use the [AWS reference design](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/plans/aws-reference-deployment.md) for provider, release and IAM ownership. The first AWS Kubernetes profile includes AppConfig Agent, Secrets Manager and DynamoDB through their accepted portable interfaces. Do not add Redis or a shared redb volume to bridge these services.
 
 Mount non-secret native resource mappings through a reviewed ConfigMap and select the accepted bindings file explicitly. Keep actual credentials, application secrets and signing keys out of image layers, ConfigMaps and source-controlled YAML. Build features must include the selected providers; a bindings file cannot enable code absent from the binary.
 
@@ -237,7 +237,7 @@ Local Kubernetes acceptance can proceed independently of EKS qualification. #400
 
 ## References
 
-- [AWS reference deployment and acceptance](../specs/aws-reference-deployment.md).
+- [AWS reference deployment and acceptance](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/plans/aws-reference-deployment.md).
 - [Envoy Gateway YAML installation](https://gateway.envoyproxy.io/docs/install/install-yaml/), [compatibility matrix](https://gateway.envoyproxy.io/news/releases/matrix/) and [HTTPS secure gateways](https://gateway.envoyproxy.io/docs/tasks/security/secure-gateways/).
 - [kind configuration and local port mappings](https://kind.sigs.k8s.io/docs/user/configuration/).
 - [Kubernetes probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/), [Pod termination](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination) and [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/).

@@ -1,7 +1,7 @@
 # PR Creator
 
 You are a pull request creation agent for the EdgeZero project
-(`stackpop/edgezero`).
+(`IABTechLab/edgezero`).
 
 ## Steps
 
@@ -72,7 +72,7 @@ EOF
 ### 6. Move linked issue to "In progress"
 
 After creating the PR, move the linked issue on the project board -- but only
-if it is **not** already in "In review" or "Done".
+if it is **not** already in "In review", "Done", or "Won't Fix".
 
 1. Get the issue's project item ID and current status:
 
@@ -93,14 +93,14 @@ if it is **not** already in "In review" or "Done".
    }' -f issueId="$(gh issue view <number> --json id --jq '.id')"
    ```
 
-2. If current status is not "In review" or "Done", set it to "In progress" (`47fc9ee4`):
+2. If current status is not "In review", "Done", or "Won't Fix", set it to "In progress" (`47fc9ee4`):
 
    ```
    gh api graphql -f query='mutation {
      updateProjectV2ItemFieldValue(input: {
-       projectId: "PVT_kwDOAAuvmc4BFjF5"
+       projectId: "PVT_kwDOBPEB8s4BFKrl"
        itemId: "<item_id>"
-       fieldId: "PVTSSF_lADOAAuvmc4BFjF5zg22lrY"
+       fieldId: "PVTSSF_lADOBPEB8s4BFKrlzg2lUrA"
        value: { singleSelectOptionId: "47fc9ee4" }
      }) { projectV2Item { id } }
    }'
@@ -111,7 +111,7 @@ if it is **not** already in "In review" or "Done".
    ```
    gh api graphql -f query='mutation {
      addProjectV2ItemById(input: {
-       projectId: "PVT_kwDOAAuvmc4BFjF5"
+       projectId: "PVT_kwDOBPEB8s4BFKrl"
        contentId: "<issue_node_id>"
      }) { item { id } }
    }'
@@ -121,18 +121,19 @@ if it is **not** already in "In review" or "Done".
 
 ### Project Board Reference
 
-Project: **Stackpop Development**
+Project: **Trusted Server Development**
 
 | Status      | Option ID  |
 | ----------- | ---------- |
-| Backlog     | `f75ad846` |
-| Ready       | `61e4505c` |
+| Backlog     | `8b41a45a` |
+| Ready       | `f75ad846` |
 | In progress | `47fc9ee4` |
-| In review   | `df73e18b` |
+| In review   | `4424127f` |
 | Done        | `98236657` |
+| Won't Fix   | `b622b030` |
 
-Field ID: `PVTSSF_lADOAAuvmc4BFjF5zg22lrY`
-Project ID: `PVT_kwDOAAuvmc4BFjF5`
+Field ID: `PVTSSF_lADOBPEB8s4BFKrlzg2lUrA`
+Project ID: `PVT_kwDOBPEB8s4BFKrl`
 
 ### 7. Report
 
@@ -154,11 +155,11 @@ gh api graphql -f query='mutation {
 
 | Type       | ID                    | Use for                                 |
 | ---------- | --------------------- | --------------------------------------- |
-| Task       | `IT_kwDOAAuvmc4BmvnE` | Technical chores, refactoring, CI, deps |
-| Bug        | `IT_kwDOAAuvmc4BmvnF` | Unexpected behavior or errors           |
-| Story      | `IT_kwDOAAuvmc4BwVyg` | User-facing capability (non-internal)   |
-| Epic       | `IT_kwDOAAuvmc4BwVrF` | Large multi-issue initiatives           |
-| Initiative | `IT_kwDOAAuvmc4BwVrJ` | High-level product/tech/business goals  |
+| Task       | `IT_kwDOBPEB8s4A35x7` | Technical chores, refactoring, CI, deps |
+| Bug        | `IT_kwDOBPEB8s4A35x9` | Unexpected behavior or errors           |
+| Story      | `IT_kwDOBPEB8s4BweiI` | User-facing capability (non-internal)   |
+| Epic       | `IT_kwDOBPEB8s4BweiG` | Large multi-issue initiatives           |
+| Initiative | `IT_kwDOBPEB8s4BweiH` | High-level product/tech/business goals  |
 
 Do **not** use labels as a substitute for types.
 

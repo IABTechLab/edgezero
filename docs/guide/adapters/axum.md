@@ -160,12 +160,15 @@ for the portable API.
 
 ## Secret Store
 
-A declared `[stores.secrets]` id resolves to an `EnvSecretStore`, which looks up each
-secret name verbatim in the process environment. Axum lists `secrets` in its
-`single_store_kinds`, so only one secrets id may be declared:
+A declared `[stores.secrets]` id resolves to an `EnvSecretStore`, which reads
+secret key `api_key` from the environment variable `EDGEZERO__SECRETS__API_KEY`,
+which is the `EDGEZERO__SECRETS__` prefix plus the key in uppercase. Keys may contain only
+ASCII letters, digits, and `_`. `config validate` rejects other keys, and two keys
+that differ only in case. Axum lists `secrets` in its `single_store_kinds`, so
+only one secrets id may be declared:
 
 ```bash
-API_KEY=mysecret edgezero serve --adapter axum
+EDGEZERO__SECRETS__API_KEY=mysecret edgezero serve --adapter axum
 ```
 
 ## Config Store
@@ -400,6 +403,35 @@ A typical development workflow:
 ::: tip Development Parity
 While Axum provides a convenient development environment, always test on actual edge platforms before deploying. Provider-specific behaviour such as store backends and request context differs on the real targets.
 :::
+
+## Application lifetime
+
+`dev_server::run_app` already constructs one app per server startup and serves
+clones of its router. No additional reuse option is needed. Retained application
+state must support concurrent requests; each request gets its own metadata,
+extensions, and body. Restarting the server creates a fresh app. Native Axum
+measurements are a useful ownership reference but do not establish WASM runtime
+performance or resource lifetimes.
+
+## Ingress provenance
+
+Conversion captures runtime URI parts and retains the original HeaderMap and
+extensions. JSON buffering and non-JSON streaming are unchanged. The standard
+plain HTTP listener supplies a private transport marker. Origin is available
+only with that marker and one valid Host consistent with any URI authority and
+scheme; forwarded headers do not supply a scheme. Generic conversion without
+the marker leaves origin unavailable.
+
+Raw TCP tests retain extension methods, tested path spelling, same-name
+duplicates and FF values. Hyper folds identical Content-Length values and
+rejects conflicting lengths before the hook. Common field multiplicity remains
+`Unknown`, including Content-Length: the runtime binding does not reveal whether
+the parser folded original fields. Global wire order remains unavailable.
+See [the capability matrix](./overview#inbound-request-fidelity).
+
+Origin validation checks HTTP(S) URI authority syntax, including registered
+names and trailing-dot hosts. It does not establish DNS resolution or ownership.
+Consumers that require DNS-label syntax must apply that additional policy.
 
 ## Next Steps
 

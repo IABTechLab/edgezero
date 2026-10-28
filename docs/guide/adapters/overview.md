@@ -13,7 +13,7 @@ Adapters translate provider-specific HTTP primitives into the portable `App` in 
 
 ## Request Conversion
 
-Each adapter exposes an `into_core_request` helper that accepts the provider's request type and returns `edgezero_core::http::Request`. The conversion must:
+Each adapter exposes an `into_core_request` helper that accepts the provider's request type and returns `edgezero_core::http::Request`. The conversion preserves the runtime-visible request subject to the fidelity limits below. It must:
 
 - **Preserve the HTTP method** exactly (`GET`, `POST`, etc.)
 - **Parse the full URI** (path and query string) into an `http::Uri`. Reject invalid URIs with `EdgeError::bad_request`
@@ -27,12 +27,12 @@ Adapters also expose `from_core_response` (or equivalent) to transform an `edgez
 
 - **Map HTTP status codes** verbatim
 - **Copy headers**, respecting casing rules enforced by the provider
-- **Preserve streaming bodies** - `Body::Stream` should be written chunk-by-chunk to the provider output without buffering the entire payload. Only Cloudflare does this today, via `Response::from_stream`. Fastly drains the stream into a `fastly::Body`, Spin collects it into a `Vec<u8>` capped at 16 MiB, and Axum buffers as well
+- **Preserve streaming bodies** - `Body::Stream` should be written chunk-by-chunk to the provider output without buffering the entire payload. Cloudflare does this through standard dispatch via `Response::from_stream`. Fastly's standard `run_app`/`serve_app` paths drain the stream into a `fastly::Body`; custom [`lifecycle::serve_custom`](/guide/adapters/fastly#custom-dispatch-and-streaming) callbacks can stream progressively. Spin collects into a `Vec<u8>` capped at 16 MiB, and Axum buffers as well
 - **Handle encoding helpers** (`decode_gzip_stream`, `decode_brotli_stream`) where a provider requires transparent decompression
 
 ## Dispatch Helper
 
-Adapters surface a dispatch entry point, either a free function or a service builder's `dispatch` method, that bridges from the provider event loop into the shared router (`App::router().oneshot(...)`). It should:
+Adapters surface a dispatch entry point, either a free function or a service builder's `dispatch` method, that bridges from the provider event loop into the shared router (`app.router().oneshot(...)`). It should:
 
 1. Convert the incoming provider request with `into_core_request`
 2. Await the router future
@@ -154,3 +154,128 @@ logical id under both is a collision that `config validate` rejects.
 Fastly is the only adapter implementing `gc_config_entries` and the staging lifecycle
 actions (`DeployStaged`, `EmitVersion`, `Healthcheck`, `Rollback`); the others return
 an unsupported error for those.
+
+## Inbound request fidelity
+
+Adapters insert `edgezero_core::ingress::RequestIngress` into request extensions.
+It records runtime-visible target and adapter-supplied origin facts separately from the
+primary URI and headers. Missing metadata means unknown capability.
+
+`CapturedTarget::Complete` holds the whole captured string, its acquisition
+source and preservation status. Capture has a 16 KiB UTF-8 byte bound; oversize
+input becomes `Unavailable(TooLarge)`, without retaining a prefix. Fastly's
+current safe API reports `Unavailable(NotExposed)`. Metadata has borrowed
+getters and intentionally has no value-bearing `Debug`, `Display` or
+serialization implementation. Do not log or serialize captured values.
+
+`InboundOrigin` validates an HTTP(S) scheme and an authority of at most 1 KiB,
+including IPv6 and port syntax. Parsing validates syntax; the adapter still
+establishes provenance. Runtime URI facts use `RuntimeUri`; Axum's plain HTTP
+listener uses `TransportBinding` plus one consistent Host. Origin-form Axum
+conversion without that binding has no established origin. Ordinary Origin,
+Forwarded and Spin special headers do not establish ingress origin.
+Authorities retain source-provided spelling, including host case and explicit
+default ports and leading-zero ports when exposed. Syntax validation accepts
+port zero without establishing a usable destination. Runtime authority usually
+reflects the client's Host or :authority; adapter provenance does not establish
+operator approval, ownership or an allowlist. Compare configured origins after
+normalizing host case and effective ports.
+
+Fastly records target unavailability before reading its SDK runtime URL for
+origin, and requires a client request with one consistent validated Host.
+This recovers the validated runtime origin without claiming an original path.
+
+`HeaderFidelity` has separate octet, field-multiplicity, same-name-order and
+global-order axes, with per-name overrides. They concern original received
+fields, excluding HTTP framing and header-name spelling. Faithful copying from
+a runtime HeaderMap does not establish original-wire preservation. Unproved
+axes remain `Unknown`. Axum, Cloudflare and Spin report
+`HeaderFidelity::RUNTIME_HEADER_MAP`: octets, multiplicity and same-name order
+are `Unknown`, and global order is `Unavailable`. Fastly reports all four axes
+as `Unknown`, with no per-name overrides. Its original-header names/count APIs
+expose partial evidence, but do not associate original fields with converted
+values. Aggregate count equality cannot prove per-name multiplicity, and full
+global order is not established. Production verification remains pending.
+The matrix below shows observed runtime behavior, not `RequestIngress` guarantees.
+
+The table reflects the checked-in `observations.json`;
+`./scripts/test-request-fidelity.sh all` compares against it exactly.
+These results describe the tested local runtimes; they do not establish
+production-edge behavior.
+
+| Surface                             | Fastly 0.13.1 / Viceroy 0.21.0                                       | worker 0.8.5 / workerd 1.20260415.1                                                       | Axum / Hyper 1.11.1                                                  | Spin SDK 7.0.0 / Spin 4.1.0                                          |
+| ----------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Pre-dispatch hook                   | Executed                                                             | Executed for supported incoming methods                                                   | Executed                                                             | Executed                                                             |
+| Runtime extension method conversion | Byte method preserved                                                | Web Request converter preserves tokens; local wire parser returns 501 for unknown methods | Preserved in tested TCP fixture                                      | Preserved in tested HTTP fixture                                     |
+| Target metadata                     | Not exposed by safe SDK API                                          | Runtime URL; literal and encoded dot spellings normalize                                  | Runtime URI; tested spelling retained                                | Runtime URI; tested spelling retained                                |
+| High-byte Cookie                    | FF retained in tested fixture                                        | Local wire FF becomes U+FFFD before Rust and is copied as runtime UTF-8 EF BF BD          | FF retained in tested TCP fixture                                    | Runtime returns 500 before component for invalid UTF-8               |
+| Repeated control fields             | Tested ordinary duplicates retained; identical Content-Length folded | Fetch combines fields; original counts cannot be recovered; common fidelity Unknown       | Tested ordinary duplicates retained; identical Content-Length folded | Tested ordinary duplicates retained; identical Content-Length folded |
+| Global wire order                   | Not established                                                      | Unavailable                                                                               | Unavailable                                                          | Unavailable                                                          |
+
+Run `./scripts/test-request-fidelity.sh all` for local transport probes. They
+assert pinned observations, including unsupported outcomes; a green regression
+run does not turn an unsupported capability into a preservation guarantee.
+Fastly raw-target support requires a safe borrowed SDK accessor and new ingress
+evidence. Consumers that require original dot spellings or duplicate fields
+must separately resolve Fetch normalization/coalescing and platform rejection
+limits. Consumer authentication and cookie policy remain application responsibilities.
+
+The [pre-dispatch hook](../routing#intercepting-before-dispatch) runs after
+adapter conversion. Fastly, Cloudflare and Spin still buffer bodies; Axum still
+buffers JSON and streams other bodies. Existing store/capability bootstrap and
+outer finalizers retain their behavior.
+
+## Opt-in application retention
+
+Use retention when measurements show that constructing the app is expensive.
+Keep per-request construction when `configure` or `app_state` reads values that
+can change and no refresh policy has been defined.
+
+Application ownership and request scheduling are separate. An `App` can be
+retained by its caller; each adapter still controls how requests arrive:
+
+| Adapter    | Existing default                         | Explicit retention                                                                                                    |
+| ---------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Fastly     | Build for each single-request invocation | `serve_app` with an SDK `Serve`, or [`lifecycle::serve_custom`](/guide/adapters/fastly#custom-dispatch-and-streaming) |
+| Cloudflare | Build on each fetch                      | Concrete application-owned cache and `dispatch_app`                                                                   |
+| Spin       | Build on each invocation                 | Concrete cache and `dispatch_app` on a compatible host                                                                |
+| Axum       | Build once at server startup             | Already retains the router                                                                                            |
+
+Retain owned settings, parsed objects, and bounded caches only when their
+staleness policy is acceptable. Keep native request handles, bodies, store
+registries, pending operations, and response effects request-local. `Send + Sync`
+and cloning do not prove host-resource validity. Shared `Arc` interiors remain
+shared; the framework does not reset them between requests. Registered app state
+continues to overwrite request extensions of the same type.
+
+Applications own refresh, invalidation, key rotation, initialization-failure
+policy, and workload benchmarks. Publish complete snapshots; overlapping requests
+keep the snapshot they acquired. Never put an unkeyed static in a generic cache
+function: that static would be shared between application types. Existing macros,
+manifest settings, and generated entry points retain their lifecycle defaults.
+The Cloudflare response-header correction applies to both default and retained apps.
+
+### Preparing an application for retention
+
+Audit the values captured by handlers, middleware, and registered state before
+opting in. The framework creates fresh request resources but cannot inspect or
+clear application-owned interiors.
+
+| Risk                                       | Application mitigation                                                                                                                                                                                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request data survives into another request | Store identity, authorization results, bodies, and correlation IDs in request-local values or extensions. Use distinct types for request data and registered state; registered state wins on a type collision.                                     |
+| Settings or parsed keys become stale       | Keep them request-scoped until a refresh policy is defined. For retained values, build and validate a complete replacement snapshot, then publish it atomically. Decide whether refresh failure keeps the last valid snapshot or rejects requests. |
+| Caches grow without bound                  | Limit entries and retained bytes, expire or evict entries, and bound origin diversity. A sandbox request limit cannot bound allocation within one request.                                                                                         |
+| Concurrent requests mutate shared state    | Synchronize mutations and acquire an immutable snapshot per request. Release locks before awaiting provider work. Rust's `Send + Sync` bounds do not establish application-level isolation.                                                        |
+| Initialization or required bindings fail   | Surface the error and monitor repeated fresh-instance failures. In custom dispatch, convert a recoverable failure into one response only when the application defines that recovery policy. Bound retries, e.g. with Fastly `Serve` limits.        |
+| Logging is installed twice                 | Choose one owner. With the Fastly helper, set `Hooks::owns_logging()` when application code installs the logger. First-snapshot logging is intentionally fixed; use custom dispatch for another policy.                                            |
+| A stream fails after commitment            | Finish or drop the streaming writer and settle request-owned pending work. Log the partial-response failure; do not attempt a replacement response after sending headers.                                                                          |
+
+Exercise cancellation as well as successful requests. The core regression tests
+drop a suspended request, verify its extension resources are released, and serve
+a fresh request through the same router. This does not cancel application-spawned
+background tasks or prove cleanup after a terminating provider trap.
+
+Roll out retention only after the application's isolation, refresh, and bounded
+memory workload checks pass. Provider eviction can force initialization on any
+request, so correctness must not depend on reaching the configured reuse limit.

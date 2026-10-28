@@ -1,5 +1,7 @@
 # Build-Cache Container Implementation Plan (sub-plan 1 of 4)
 
+**Status:** Historical plan; the deploy-time build model was withdrawn on 2026-09-17
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Publish a pinned, single-manifest `linux/amd64` build container that bakes the exact Rust toolchain + build tools, so `platform-id` for the cached-build feature is an immutable digest.
@@ -8,7 +10,7 @@
 
 **Tech Stack:** Docker (BuildKit), GitHub Actions (`docker/build-push-action`), GHCR, Bash, `jq`.
 
-**Spec:** `docs/specs/edgezero-deploy-build-caching.md` (v6.14, sccache pivot) — §2 (single-producer, hosted-only v1), §3.1 (sccache cache mechanism), §3.6 (image contract: baked Rust + `wasm32-wasip1` + **sccache** + Fastly CLI, read-only/non-root), §5 (digest pin, atomic same-SHA rollout).
+**Spec:** `docs/superpowers/specs/2026-08-17-edgezero-deploy-build-caching-design.md` (v6.14, sccache pivot) — §2 (single-producer, hosted-only v1), §3.1 (sccache cache mechanism), §3.6 (image contract: baked Rust + `wasm32-wasip1` + **sccache** + Fastly CLI, read-only/non-root), §5 (digest pin, atomic same-SHA rollout).
 
 ## Global Constraints
 
@@ -57,7 +59,7 @@ ok(){ printf '  ok   %s\n' "$1"; pass=$((pass+1)); }
 no(){ printf '  FAIL %s\n' "$1"; fail=$((fail+1)); }
 run(){ bash "$CHECK" "$1" >/dev/null 2>&1; }
 
-printf '{"repository":"ghcr.io/stackpop/edgezero-build-app-cli","tag":"v1","digest":"sha256:%064d"}\n' 0 >"$WORK/ok.json"
+printf '{"repository":"ghcr.io/iabtechlab/edgezero-build-app-cli","tag":"v1","digest":"sha256:%064d"}\n' 0 >"$WORK/ok.json"
 run "$WORK/ok.json" && ok "a digest-pinned reference passes" || no "a digest-pinned reference passes"
 
 printf '{"repository":"ghcr.io/x","tag":"v1","digest":"v1"}\n' >"$WORK/tag.json"
@@ -191,7 +193,7 @@ WORKDIR /home/build
 
 ```json
 {
-  "repository": "ghcr.io/stackpop/edgezero-build-app-cli",
+  "repository": "ghcr.io/iabtechlab/edgezero-build-app-cli",
   "tag": "build-container-v1",
   "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 }
@@ -230,7 +232,7 @@ git commit -m "build-cache container: pinned single-arch Dockerfile + image pin 
 
 **Interfaces:**
 - Consumes: `.github/docker/build-app-cli/Dockerfile`, `check-image-pin.sh`.
-- Produces: a GHCR image `ghcr.io/stackpop/edgezero-build-app-cli` whose **manifest digest** is written back to `image.json` on the release tag; consumed by sub-plans 2–4.
+- Produces: a GHCR image `ghcr.io/iabtechlab/edgezero-build-app-cli` whose **manifest digest** is written back to `image.json` on the release tag; consumed by sub-plans 2–4.
 
 - [ ] **Step 1: Write the workflow**
 
@@ -259,7 +261,7 @@ jobs:
         id: push
         run: |
           set -euo pipefail
-          REPO="ghcr.io/stackpop/edgezero-build-app-cli"
+          REPO="ghcr.io/iabtechlab/edgezero-build-app-cli"
           TAG="${GITHUB_REF_NAME}"
           docker buildx build --platform linux/amd64 \
             --provenance=false --sbom=false \
@@ -268,7 +270,7 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
       - name: Verify the pushed image BY DIGEST before recording it
         env:
-          REPO: ghcr.io/stackpop/edgezero-build-app-cli
+          REPO: ghcr.io/iabtechlab/edgezero-build-app-cli
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
@@ -296,7 +298,7 @@ jobs:
           br="build-container-pin-${GITHUB_REF_NAME}"
           git switch -c "$br"
           git add "$f"
-          git -c user.name=edgezero-ci -c user.email=ci@stackpop \
+          git -c user.name=edgezero-ci -c user.email=ci@edgezero.dev \
             commit -m "build container: pin ${GITHUB_REF_NAME} = ${DIGEST}"
           git push -u origin "$br"
           gh pr create --fill --base main --head "$br" \
@@ -325,7 +327,7 @@ Tag `build-container-v1` and push it. The workflow pushes the image, **verifies 
 **One-time GHCR visibility + retention (operator):** GHCR packages are **private on first publish** and there is no clean REST endpoint to flip a container package public, so set the package `edgezero-build-app-cli` to **public** in its GHCR package settings (or set the org's default package visibility) so consumers can **anonymously** pull by digest (spec §3.7), and enable a retention policy that never prunes a digest referenced by a committed `image.json`. Verify anonymous access:
 ```bash
 docker logout ghcr.io
-docker pull "ghcr.io/stackpop/edgezero-build-app-cli@$(jq -r .digest .github/docker/build-app-cli/image.json)"
+docker pull "ghcr.io/iabtechlab/edgezero-build-app-cli@$(jq -r .digest .github/docker/build-app-cli/image.json)"
 ```
 Expected: the pull succeeds without credentials.
 

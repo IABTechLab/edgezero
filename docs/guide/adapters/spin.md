@@ -7,7 +7,15 @@ component-scoped KV / variable stores.
 ## Prerequisites
 
 - Rust toolchain with `wasm32-wasip2` target (`rustup target add wasm32-wasip2`)
-- Spin CLI ([install](https://spinframework.dev/install))
+- Spin CLI **4.1 or newer** ([install](https://spinframework.dev/install)).
+  The workspace's `spin-sdk` imports `wasi:http/types@0.3.0`, which Spin
+  4.0.x does not provide. On an older runtime the component builds and its
+  tests pass, and only `spin up` fails:
+
+  ```
+  Error: component imports instance `wasi:http/types@0.3.0`, but a
+  matching implementation was not found in the linker
+  ```
 
 ## Project Setup
 
@@ -197,7 +205,7 @@ schema and `INSERT … ON CONFLICT DO UPDATE` statement vendored from
 spinframework/spin's `crates/key-value-spin/src/store.rs`. A contract
 test in `edgezero-adapter-spin/src/cli/push_sqlite.rs` asserts
 byte-equality against the upstream string, and the workspace's
-`spin-sdk = "~6.0"` pin blocks any Spin minor bump that would change
+`spin-sdk = "~7.0"` pin blocks any Spin minor bump that would change
 the schema until the operator opts in.
 
 ```bash
@@ -310,13 +318,72 @@ export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run"
 cargo test -p edgezero-adapter-spin --features spin --target wasm32-wasip2 --test contract
 ```
 
-The tests execute the adapter's real `wasm32-wasip2` request path under Wasmtime. The
+These contracts execute under Wasmtime. Incoming conversion is additionally exercised by the actual Spin HTTP fixture. The
 `wasmtime` version CI uses is pinned in `.tool-versions`.
 
 ## Manifest Configuration
 
 Configure the Spin adapter in `edgezero.toml`. See
 [Configuration](/guide/configuration) for the full manifest reference.
+
+## Retaining an application
+
+Use a concrete application-owned `OnceLock<App>` and call
+`edgezero_adapter_spin::dispatch_app::<MyApp>(app, req).await` on each
+invocation. This resolves fresh request resources from `MyApp::stores()` and does
+not install logging, construct an app, or cache native resources. Initialize any
+application logging before the cache's synchronous app constructor. Do not use a
+generic unkeyed static or hold a lock across an await.
+
+```rust
+use edgezero_core::app::{App, Hooks};
+use spin_sdk::{http::{IntoResponse, Request}, http_service};
+use std::sync::OnceLock;
+
+static APP: OnceLock<App> = OnceLock::new();
+
+#[http_service]
+async fn handle(req: Request) -> anyhow::Result<impl IntoResponse> {
+    let app = APP.get_or_init(MyApp::build_app);
+    edgezero_adapter_spin::dispatch_app::<MyApp>(app, req).await
+}
+```
+
+The pinned SDK 7 macro exports a P3 HTTP interface. The `wasm32-wasip2` Rust target
+name does not establish the component's HTTP lifecycle. Verify the emitted
+interface and host together. spin-sdk 7 requires Spin 4.1 or later. See Spin's
+[instance-reuse documentation](https://spinframework.dev/v4/http-trigger#controlling-instance-reuse)
+for the reuse and concurrency controls your host version supports.
+
+Test both sequential reuse and overlapping invocations in the same instance.
+Different guest instances are not evidence of concurrent isolation. Keep
+request/response bodies and pending operations invocation-local. Existing
+response buffering and stream collection limits still apply. Restore `run_app`
+and remove the cache to roll back; default generated entry points are unchanged.
+
+## Runtime ingress metadata
+
+Conversion captures SDK URI parts before rebuilding the core request. Origin
+comes from HTTP(S) URI scheme/authority, with runtime provenance.
+`spin-full-url`, `spin-client-addr`, Origin and forwarding headers do not become
+adapter-supplied ingress-origin facts. Runtime URI authority still identifies the client-requested host; it does not establish operator approval or ownership. Existing context fields and store/body behavior
+remain unchanged.
+
+The Spin 4.1 HTTP component fixture verifies methods, tested target spelling,
+duplicates and hook ordering through the actual converter. Spin 4.1's request
+preparation requires UTF-8 header values; a Cookie containing FF returns 500
+before the component starts. This needs an upstream runtime fix and cannot be
+restored inside EdgeZero. Same-name runtime values are copied byte-for-byte,
+while original-wire fidelity remains conservative and global order unavailable.
+Spin 4.1 consumes chunked framing and removes `Transfer-Encoding` before
+component invocation: the `chunked` and `te-cl` probes expose no such field to
+the hook. The component cannot reconstruct that transport framing.
+
+Pure metadata tests execute on the host. The WASM contract suite runs with
+`wasmtime run`. The full WASM library test artifact
+also imports Spin-specific host interfaces, so plain Wasmtime cannot execute
+that artifact. The real Spin HTTP fixture supplies runtime conversion evidence.
+See [the capability matrix](./overview#inbound-request-fidelity).
 
 ## Next Steps
 

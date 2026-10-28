@@ -82,9 +82,9 @@ pub async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
 
 This path takes bindings verbatim and does not resolve `EDGEZERO__STORES__*`
 selectors, so prefer `run_app` unless you are mocking a backend.
-`run_app` dispatches through an internal registry-based path; unlike Fastly's
-`dispatch_with_registries`, it is not part of the Cloudflare adapter's public
-API.
+`run_app` delegates to the public `dispatch_app::<A>` registry-aware path.
+Use [application retention](#retaining-an-application) with that function when the
+caller owns a prebuilt app and wants fresh per-request store bindings.
 
 ## Building
 
@@ -309,6 +309,77 @@ Configure the Cloudflare adapter in `edgezero.toml`. See [Configuration](/guide/
 | Storage           | KV, Durable Objects, R2  | KV Store, Object Store              |
 | Logging           | `console.log`            | Log endpoints                       |
 | CLI               | Wrangler                 | Fastly CLI                          |
+
+## Retaining an application
+
+For explicit retention, keep a cache owned by one concrete application and
+select its `Hooks` type with `dispatch_app::<MyApp>` on every fetch:
+
+```rust
+use edgezero_core::app::{App, Hooks};
+use std::sync::OnceLock;
+
+static APP: OnceLock<App> = OnceLock::new();
+
+#[worker::event(fetch)]
+async fn fetch(req: worker::Request, env: worker::Env, ctx: worker::Context)
+    -> worker::Result<worker::Response>
+{
+    edgezero_adapter_cloudflare::dispatch_app::<MyApp>(
+        APP.get_or_init(MyApp::build_app), req, env, ctx,
+    ).await
+}
+```
+
+Repeated response headers such as multiple `Set-Cookie` values are preserved;
+the first application value replaces any body-generated default. This correction
+also applies to existing `run_app` users.
+
+`dispatch_app::<MyApp>` reads `MyApp::stores()` and does not initialize logging
+or construct an app. Pass an app built from the same `Hooks` type. The caller owns
+initialization before construction. It resolves configuration and bindings for
+each invocation; never retain `Env`, `Context`, request bodies, or registries in
+this cache. The initializer is synchronous and must not recursively access the
+cache or block waiting for async initialization. Apps needing fallible or async
+initialization own that state machine and publish only a complete snapshot.
+
+Fetch invocations may overlap. Verify isolation while two requests are actually
+in flight in the same instance. A serialized test or two separate instances does
+not establish this property. Restore the existing `run_app` entry point to remove
+explicit retention. The generated default remains unchanged.
+
+## Runtime request fidelity
+
+Inbound conversion reads `req.inner().method()` rather than the closed Workers
+method enum. Valid runtime extension tokens retain their spelling.
+`Headers.entries()` values follow workerd's UTF-8 string convention and are copied through `HeaderValue::from_bytes(value.as_bytes())`. Invalid runtime HeaderValues produce bounded conversion errors. Conversion never comma-splits combined fields. Browser ByteString construction is not evidence of Worker wire-byte preservation.
+
+Ingress captures `req.inner().url()` before additional parsing. It records a
+runtime URL and validated runtime origin. Fetch can already have normalized dot
+segments and combined repeated fields; those changes cannot be reversed by
+EdgeZero. Header fidelity remains conservative.
+
+Browser converter tests cover custom methods, high bytes, metadata and service
+hook dispatch. Locked local workerd transport tests additionally distinguish
+pre-Worker rejections: its HTTP parser returns 501 for extension methods.
+Real Worker tests assert valid UTF-8 values C3 A9 and C4 80 survive conversion. Local wire FF becomes U+FFFD in Web Headers before Rust, so its runtime UTF-8 copy EF BF BD cannot prove original bytes. Common octet and multiplicity fidelity is `Unknown`: the observed transformations do not prove every particular field changed. Local absolute-form and duplicate Content-Length requests return 500 without a hook verdict. These transport/runtime limits remain separate from runtime-to-core conversion correctness.
+See [the capability matrix](./overview#inbound-request-fidelity).
+
+Captured runtime-target preservation is `Unknown`. Fetch URL normalization is
+a known runtime capability, but the original request target is unavailable, so
+a transformation cannot be established for each individual incoming request.
+
+### Conversion compatibility
+
+Unknown method tokens are retained rather than coerced to GET, so they no longer
+match a GET route. Invalid runtime header values fail conversion with a bounded
+`EdgeError::bad_request`. Direct converter callers receive that error;
+`run_app`, `dispatch_app` and `CloudflareService` surface it as `worker::Error`,
+which the standard fetch wrapper returns as HTTP 500.
+Method, URL, URI and header conversion errors use bounded messages without parse
+details. Primary routing still uses the existing SDK URL conversion, including
+Unicode percent encoding and backslash normalization; ingress target metadata is
+captured separately before that conversion.
 
 ## Next Steps
 

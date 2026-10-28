@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
-const GENERATED_RUST_VERSION: &str = "1.95.0";
+const GENERATED_RUST_VERSION: &str = "1.98.1";
 
 /// Errors produced by `edgezero new`.
 #[derive(Debug, Error)]
@@ -274,7 +274,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
         "worker = { version = \"0.8\", default-features = false, features = [\"http\"] }"
             .to_owned(),
     );
-    deps.insert("fastly".to_owned(), "fastly = \"0.12\"".to_owned());
+    deps.insert("fastly".to_owned(), "fastly = \"0.13\"".to_owned());
     deps.insert("once_cell".to_owned(), "once_cell = \"1\"".to_owned());
     deps.insert(
         "tokio".to_owned(),
@@ -283,7 +283,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     deps.insert("tracing".to_owned(), "tracing = \"0.1\"".to_owned());
     deps.insert(
         "spin-sdk".to_owned(),
-        "spin-sdk = { version = \"6\", default-features = false }".to_owned(),
+        "spin-sdk = { version = \"7\", default-features = false }".to_owned(),
     );
     // Core depends on `validator` for `#[derive(Validate)]` on the
     // generated `<Name>Config` struct. Pinned to the same
@@ -291,7 +291,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     // the generated core crate resolves cleanly.
     deps.insert(
         "validator".to_owned(),
-        "validator = { version = \"0.20\", features = [\"derive\"] }".to_owned(),
+        "validator = { version = \"0.21\", features = [\"derive\"] }".to_owned(),
     );
     deps
 }
@@ -301,7 +301,7 @@ fn resolve_cli_dependency(
     repo_root: &Path,
     workspace_dependencies: &mut BTreeMap<String, String>,
 ) -> String {
-    const CLI_GIT_FALLBACK: &str = "edgezero-cli = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-cli\" }";
+    const CLI_GIT_FALLBACK: &str = "edgezero-cli = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-cli\" }";
 
     let ResolvedDependency {
         name,
@@ -338,7 +338,7 @@ fn resolve_core_dependency(
         &layout.out_dir,
         repo_root,
         "crates/edgezero-core",
-        "edgezero-core = { git = \"https://git@github.com/stackpop/edgezero.git\", package = \"edgezero-core\", default-features = false }",
+        "edgezero-core = { git = \"https://github.com/IABTechLab/edgezero.git\", package = \"edgezero-core\", default-features = false }",
         &[],
     );
 
@@ -662,11 +662,11 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
     let has = |id: &str| adapter_ids.iter().any(|adapter| adapter == id);
     let mut lines: Vec<String> = Vec::new();
     if has("cloudflare") {
-        lines.push("nodejs 24.12.0".to_owned());
+        lines.push("nodejs 24.20.0".to_owned());
     }
     if has("fastly") {
-        lines.push("fastly 15.1.0".to_owned());
-        lines.push("viceroy 0.17.0".to_owned());
+        lines.push("fastly 16.0.0".to_owned());
+        lines.push("viceroy 0.21.0".to_owned());
     }
     lines.push(format!("rust {GENERATED_RUST_VERSION}"));
     // Sort + dedup so the file is stable regardless of adapter
@@ -675,9 +675,14 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
     lines.dedup();
     let mut body = lines.join("\n");
     if has("spin") {
-        body.push_str(
-            "\n\n# Spin is not asdf-managed in this scaffold; install via\n# https://spinframework.dev/install\n",
-        );
+        body.push_str(concat!(
+            "\n\n# Spin is not asdf-managed in this scaffold; install via\n",
+            "# https://spinframework.dev/install\n",
+            "# Requires Spin 4.1 or newer: spin-sdk 7 imports\n",
+            "# wasi:http/types@0.3.0, which Spin 4.0.x does not provide.\n",
+            "# On an older runtime the component builds and its tests\n",
+            "# pass, then the wasm linker rejects it at startup.\n",
+        ));
     } else {
         body.push('\n');
     }
@@ -820,6 +825,7 @@ fn initialize_git_repo(out_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::path_mutation_guard;
     use edgezero_core::app_config::app_name_prefix;
     use edgezero_core::test_env::PathPrepend as PathOverride;
     use std::path::Path;
@@ -884,13 +890,105 @@ mod tests {
     // ---------- build_tool_versions ----------
 
     #[test]
+    fn seeded_dependencies_track_the_edgezero_workspace() {
+        // The seeds above are hardcoded, but a generated crate takes
+        // `edgezero-core` as a path/version dependency and re-derives
+        // `#[derive(Validate)]` against whatever `validator` the workspace
+        // resolves. If the two majors drift apart the generated app fails to
+        // compile with a confusing "trait bound not satisfied" error, so the
+        // shared crates are checked against the root manifest here.
+        let root_manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"));
+        let seeds = seed_workspace_dependencies();
+        for crate_name in ["validator", "axum", "fastly", "worker", "simple_logger"] {
+            let want = root_manifest
+                .lines()
+                .find(|line| line.starts_with(&format!("{crate_name} = ")))
+                .unwrap_or_else(|| panic!("root Cargo.toml must declare {crate_name}"));
+            let want_version = extract_version(want)
+                .unwrap_or_else(|| panic!("no version in root {crate_name} line: {want}"));
+            let got = seeds
+                .get(crate_name)
+                .unwrap_or_else(|| panic!("scaffold must seed {crate_name}"));
+            let got_version = extract_version(got)
+                .unwrap_or_else(|| panic!("no version in seeded {crate_name} line: {got}"));
+            assert_eq!(
+                got_version, want_version,
+                "scaffold seeds {crate_name} {got_version}, workspace uses {want_version}"
+            );
+        }
+
+        // `spin-sdk` is spelled `~7.0` in the workspace and `7` in the seed,
+        // so only the major is comparable. It is worth comparing anyway: a
+        // major mismatch here is the one that survives every compile-time
+        // check and dies at `spin up` with a WIT linker error.
+        let want_spin = root_manifest
+            .lines()
+            .find(|line| line.starts_with("spin-sdk = "))
+            .and_then(extract_version)
+            .map(major_of)
+            .expect("root Cargo.toml must declare spin-sdk");
+        let got_spin = seeds
+            .get("spin-sdk")
+            .and_then(|line| extract_version(line))
+            .map(major_of)
+            .expect("scaffold must seed spin-sdk");
+        assert_eq!(
+            got_spin, want_spin,
+            "scaffold seeds spin-sdk major {got_spin}, workspace uses {want_spin}"
+        );
+    }
+
+    /// Leading major from a requirement string, ignoring any range
+    /// operator — `~7.0`, `^7.1`, `7` and `=7.0.1` all yield `7`.
+    fn major_of(version: &str) -> &str {
+        version
+            .trim_start_matches(['~', '^', '=', '>', '<', ' '])
+            .split('.')
+            .next()
+            .unwrap_or(version)
+    }
+
+    /// Pull the `version = "X"` (or bare `crate = "X"`) value out of a
+    /// dependency line, for comparing a seeded pin against the workspace.
+    fn extract_version(line: &str) -> Option<&str> {
+        let after = line.split_once("version = \"").map_or_else(
+            || line.split_once("= \"").map(|(_, rest)| rest),
+            |(_, rest)| Some(rest),
+        )?;
+        after.split_once('"').map(|(version, _)| version)
+    }
+
+    #[test]
+    fn build_tool_versions_pins_track_repo_tool_versions() {
+        // Every version `build_tool_versions` emits is hardcoded above, and a
+        // scaffolded app is expected to build and deploy on the same tools this
+        // repo uses. Without this check they drift silently: the repo bumps
+        // `.tool-versions` and newly generated apps keep pinning superseded
+        // releases. Checks the adapter-gated pins too, so a bump to any of them
+        // has to touch both files.
+        let repo_tool_versions =
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.tool-versions"));
+        let got = build_tool_versions(&["cloudflare".to_owned(), "fastly".to_owned()]);
+        for tool in ["rust", "nodejs", "fastly", "viceroy"] {
+            let want = repo_tool_versions
+                .lines()
+                .find(|line| line.starts_with(&format!("{tool} ")))
+                .unwrap_or_else(|| panic!("repo .tool-versions must pin {tool}"));
+            assert!(
+                got.contains(want),
+                "scaffold pins a different {tool} than the repo: scaffold={got:?} repo={want:?}"
+            );
+        }
+    }
+
+    #[test]
     fn build_tool_versions_pins_rust_only_with_no_adapters() {
         // The scaffolder always picks at least axum in practice,
         // but the empty case is the trust boundary: zero adapters
         // produces a stable file containing exactly the
         // rust-toolchain pin and a trailing newline.
         let out = build_tool_versions(&[]);
-        assert_eq!(out, "rust 1.95.0\n");
+        assert_eq!(out, "rust 1.98.1\n");
     }
 
     #[test]
@@ -899,8 +997,8 @@ mod tests {
         // version we tested wrangler against (the same nodejs the
         // repo's own `.tool-versions` pins).
         let out = build_tool_versions(&["cloudflare".to_owned()]);
-        assert!(out.contains("nodejs 24.12.0"), "must pin nodejs: {out}");
-        assert!(out.contains("rust 1.95.0"), "always pin rust: {out}");
+        assert!(out.contains("nodejs 24.20.0"), "must pin nodejs: {out}");
+        assert!(out.contains("rust 1.98.1"), "always pin rust: {out}");
         assert!(
             !out.contains("fastly"),
             "no fastly pin without fastly adapter: {out}"
@@ -916,9 +1014,9 @@ mod tests {
         // project doesn't end up with a fastly-CLI install
         // requirement.
         let out = build_tool_versions(&["fastly".to_owned()]);
-        assert!(out.contains("fastly 15.1.0"), "must pin fastly: {out}");
-        assert!(out.contains("viceroy 0.17.0"), "must pin viceroy: {out}");
-        assert!(out.contains("rust 1.95.0"));
+        assert!(out.contains("fastly 16.0.0"), "must pin fastly: {out}");
+        assert!(out.contains("viceroy 0.21.0"), "must pin viceroy: {out}");
+        assert!(out.contains("rust 1.98.1"));
         assert!(
             !out.contains("nodejs"),
             "no nodejs pin without cloudflare adapter: {out}"
@@ -931,7 +1029,7 @@ mod tests {
         // needed — same as the "no adapters" shape but exercised
         // through the realistic axum-only case.
         let out = build_tool_versions(&["axum".to_owned()]);
-        assert_eq!(out, "rust 1.95.0\n");
+        assert_eq!(out, "rust 1.98.1\n");
     }
 
     #[test]
@@ -941,7 +1039,7 @@ mod tests {
         // we can't honour — explain why with an inline hint so the
         // operator isn't left guessing.
         let out = build_tool_versions(&["spin".to_owned()]);
-        assert!(out.contains("rust 1.95.0"));
+        assert!(out.contains("rust 1.98.1"));
         assert!(
             !out.contains("spin "),
             "must NOT pin spin via asdf shape: {out}"
@@ -968,10 +1066,10 @@ mod tests {
         let out = build_tool_versions(&adapters);
         // Each pin appears exactly once.
         for pin in [
-            "nodejs 24.12.0",
-            "fastly 15.1.0",
-            "viceroy 0.17.0",
-            "rust 1.95.0",
+            "nodejs 24.20.0",
+            "fastly 16.0.0",
+            "viceroy 0.21.0",
+            "rust 1.98.1",
         ] {
             assert_eq!(
                 out.matches(pin).count(),
@@ -1138,7 +1236,7 @@ mod tests {
                 .args(["-c", check])
                 .current_dir(temp.path())
                 .env("PATH", &path)
-                .env("RUST_VERSION", GENERATED_RUST_VERSION)
+                .env("RUST_VERSION", "1.95.0") // Synthetic pin used by the cases above.
                 .env("MOCK_RUST_VERSION", installed)
                 .output()
                 .expect("run container check");
@@ -1199,6 +1297,16 @@ mod tests {
         let dockerfile = fs::read_to_string(project_dir.join("Dockerfile")).expect("Dockerfile");
         assert!(dockerfile.contains(&format!("ARG RUST_VERSION={GENERATED_RUST_VERSION}")));
         assert!(build_tool_versions(&[]).contains(GENERATED_RUST_VERSION));
+        let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README");
+        assert!(
+            readme.contains("Fastly uses the logical key")
+                && readme.contains("`app_config` for production, staging, and local Viceroy"),
+            "generated README must document the one Fastly logical config key"
+        );
+        assert!(
+            !readme.contains("app_config_staging"),
+            "generated README must not advertise the removed staging key"
+        );
         assert!(project_dir.join("crates/demo-app-core/src/lib.rs").exists());
         assert!(
             project_dir.join("crates/demo-app-cli/Cargo.toml").exists(),
@@ -1481,6 +1589,7 @@ mod tests {
 
     #[test]
     fn generate_new_scaffolds_workspace_layout() {
+        let _path_lock = path_mutation_guard().lock().expect("path guard");
         let temp = TempDir::new().expect("temp dir");
         let bin_dir = temp.path().join("bin");
         write_git_stub(&bin_dir);

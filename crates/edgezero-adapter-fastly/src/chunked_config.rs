@@ -19,6 +19,7 @@
 //! }
 //! ```
 
+use base16ct::lower::encode_string;
 use sha2::{Digest as _, Sha256};
 
 /// Per-entry value limit enforced by Fastly Config Store. Used by the CLI writer
@@ -157,7 +158,7 @@ pub(crate) enum GcRootValue {
 
 /// Compute the lowercase-hex SHA-256 of `bytes`.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    encode_string(&Sha256::digest(bytes))
 }
 
 /// Prepare the physical Config Store entries for a single logical
@@ -1149,7 +1150,7 @@ fn chunk_key_parts(root_key: &str, key: &str) -> Option<(String, usize)> {
     let (sha, index) = rest.rsplit_once('.')?;
     // Canonical shape ONLY — this gates a destructive delete, so it must match
     // exactly what `prepare_fastly_config_entries` emits and nothing else:
-    // - a 64-char LOWERCASE hex SHA-256 (`format!("{:x}", Sha256::digest(..))`),
+    // - a 64-char LOWERCASE hex SHA-256 (`base16ct::lower::encode_string(&Sha256::digest(..))`),
     // - a canonical decimal index (no leading zeros; `usize` `Display`).
     // Anything else (short/uppercase hash, `00`, `007`) is foreign or
     // hand-edited and must never become a delete candidate.
@@ -2799,10 +2800,9 @@ mod tests {
         let entries = prepare_fastly_config_entries("app_config", &envelope).unwrap();
         let (_, pointer_json) = entries.last().unwrap();
         let mut pointer: FastlyChunkPointer = serde_json::from_str(pointer_json).unwrap();
-        pointer.chunks[0].key =
-            pointer.chunks[0]
-                .key
-                .replacen("app_config", "app_config_staging", 1);
+        pointer.chunks[0].key = pointer.chunks[0]
+            .key
+            .replacen("app_config", "foreign_config", 1);
         let raw = serde_json::to_string(&pointer).unwrap();
 
         let err = prior_chunk_keys("app_config", &raw).expect_err("foreign chunk should warn");

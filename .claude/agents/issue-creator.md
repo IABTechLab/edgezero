@@ -1,7 +1,7 @@
 # Issue Creator
 
 You are an issue creation agent for the EdgeZero project
-(`stackpop/edgezero`).
+(`IABTechLab/edgezero`).
 
 ## Steps
 
@@ -11,11 +11,11 @@ Choose the appropriate type based on the work:
 
 | Type       | ID                    | Use for                                 |
 | ---------- | --------------------- | --------------------------------------- |
-| Task       | `IT_kwDOAAuvmc4BmvnE` | Technical chores, refactoring, CI, deps |
-| Bug        | `IT_kwDOAAuvmc4BmvnF` | Unexpected behavior or errors           |
-| Story      | `IT_kwDOAAuvmc4BwVyg` | User-facing capability (non-internal)   |
-| Epic       | `IT_kwDOAAuvmc4BwVrF` | Large multi-issue initiatives           |
-| Initiative | `IT_kwDOAAuvmc4BwVrJ` | High-level product/tech/business goals  |
+| Task       | `IT_kwDOBPEB8s4A35x7` | Technical chores, refactoring, CI, deps |
+| Bug        | `IT_kwDOBPEB8s4A35x9` | Unexpected behavior or errors           |
+| Story      | `IT_kwDOBPEB8s4BweiI` | User-facing capability (non-internal)   |
+| Epic       | `IT_kwDOBPEB8s4BweiG` | Large multi-issue initiatives           |
+| Initiative | `IT_kwDOBPEB8s4BweiH` | High-level product/tech/business goals  |
 
 ### 2. Draft issue content
 
@@ -57,13 +57,13 @@ gh issue view <number> --json id --jq '.id'
 
 ### 5. Add to project board
 
-Add the issue to the **Stackpop Development** project (defaults to
+Add the issue to the **Trusted Server Development** project (defaults to
 Backlog -- no status change needed):
 
 ```
 gh api graphql -f query='mutation {
   addProjectV2ItemById(input: {
-    projectId: "PVT_kwDOAAuvmc4BFjF5"
+    projectId: "PVT_kwDOBPEB8s4BFKrl"
     contentId: "<issue_node_id>"
   }) { item { id } }
 }'

@@ -1,14 +1,18 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Display;
 use std::io::Read as _;
+use std::str::from_utf8;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use edgezero_core::app::{App, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::ConfigStoreHandle;
-use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::{Extensions, Request, request_builder};
+use edgezero_core::http::header::HOST;
+use edgezero_core::http::{Extensions, HeaderValue, Request, Uri, request_builder};
+use edgezero_core::ingress::{
+    CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, RequestIngress, TargetUnavailable,
+};
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::proxy::ProxyHandle;
 use edgezero_core::secret_store::SecretHandle;
@@ -123,6 +127,7 @@ impl<'app> FastlyService<'app> {
     /// the underlying handler returns an error.
     #[inline]
     pub fn dispatch(self, req: FastlyRequest) -> Result<FastlyResponse, FastlyError> {
+        let ingress = capture_request_ingress(&req);
         let config_store = match self.config {
             ConfigSource::Handle(handle) => Some(handle),
             ConfigSource::Name(name) => match FastlyConfigStore::try_open(&name) {
@@ -151,6 +156,7 @@ impl<'app> FastlyService<'app> {
                 secrets,
                 ..Default::default()
             },
+            ingress,
             |_req, _extensions| {},
         )
     }
@@ -197,14 +203,15 @@ impl<'app> FastlyService<'app> {
     /// at request time, the dispatcher logs the warning once and
     /// proceeds without it.
     ///
-    /// Env-overlay limitation: this bare-handle path does not resolve
-    /// `EDGEZERO__STORES__CONFIG__*` selectors and binds the config registry's
-    /// default key to `"default"`. Use [`runtime_env_config`](crate::runtime_env_config)
-    /// with [`dispatch_with_registries`] when a custom entry point needs the
-    /// same `__NAME` / `__KEY` resolution as [`run_app`](crate::run_app).
+    /// This bare-handle path binds the config registry's default key to
+    /// `"default"`. Manifest-driven [`run_app`](crate::run_app) instead opens
+    /// the logical resource-link alias and uses its deterministic target key.
     #[must_use]
     #[inline]
-    pub fn with_config<S: Into<String>>(mut self, name: S) -> Self {
+    pub fn with_config<S>(mut self, name: S) -> Self
+    where
+        S: Into<String>,
+    {
         self.config = ConfigSource::Name(name.into());
         self
     }
@@ -213,9 +220,8 @@ impl<'app> FastlyService<'app> {
     /// caller has already opened (or mocked) the backend. Mutually
     /// exclusive with `with_config(name)` -- the last call wins.
     /// Like [`Self::with_config`], this binds the config registry's default key
-    /// to `"default"` and does not apply the [`EnvConfig`] overlay. Use
-    /// [`runtime_env_config`](crate::runtime_env_config) with
-    /// [`dispatch_with_registries`] for manifest-driven selector resolution.
+    /// to `"default"`. Manifest-driven [`run_app`](crate::run_app) derives its
+    /// binding from baked store metadata instead.
     #[must_use]
     #[inline]
     pub fn with_config_handle(mut self, handle: ConfigStoreHandle) -> Self {
@@ -230,7 +236,10 @@ impl<'app> FastlyService<'app> {
     /// fail loudly.
     #[must_use]
     #[inline]
-    pub fn with_kv<S: Into<String>>(mut self, name: S) -> Self {
+    pub fn with_kv<S>(mut self, name: S) -> Self
+    where
+        S: Into<String>,
+    {
         self.kv = Some(KvSource {
             name: name.into(),
             required: false,
@@ -249,8 +258,9 @@ impl<'app> FastlyService<'app> {
     /// Handlers reading `ctx.secret_store_default()?.require_str(key)`
     /// open a Fastly Secret Store literally named `"default"`. Use
     /// the manifest-aware `run_app` if your account uses a
-    /// different store name -- it routes through the env-overlay
-    /// resolution path instead.
+    /// different store name -- it opens each `[stores.secrets]` id
+    /// baked into the app as a resource-link alias, and a managed
+    /// deploy links the selected physical store under that alias.
     #[must_use]
     #[inline]
     pub fn with_secrets(mut self) -> Self {
@@ -264,6 +274,13 @@ fn dispatch_core_request(
     mut core_request: Request,
     stores: Stores,
 ) -> Result<FastlyResponse, FastlyError> {
+    insert_store_registries(&mut core_request, stores);
+    let response = executor::block_on(app.router().oneshot(core_request))
+        .map_err(|err| map_edge_error(&err))?;
+    from_core_response(response).map_err(|err| map_edge_error(&err))
+}
+
+fn insert_store_registries(core_request: &mut Request, stores: Stores) {
     // Hard-cutoff: legacy bare handles are no longer
     // inserted into request extensions. `with_config_handle`
     // still accepts a `ConfigStoreHandle`, but the dispatcher
@@ -282,9 +299,6 @@ fn dispatch_core_request(
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = executor::block_on(app.router().oneshot(core_request))
-        .map_err(|err| map_edge_error(&err))?;
-    from_core_response(response).map_err(|err| map_edge_error(&err))
 }
 
 /// Run an app-provided closure against a scratch `Extensions` populated from the
@@ -303,6 +317,7 @@ fn dispatch_with_handles<F>(
     app: &App,
     req: FastlyRequest,
     stores: Stores,
+    ingress: RequestIngress,
     extend: F,
 ) -> Result<FastlyResponse, FastlyError>
 where
@@ -310,22 +325,27 @@ where
 {
     // Read raw-request signals into a scratch bag BEFORE conversion consumes `req`.
     let scratch = apply_request_extend(&req, extend);
-    let mut core_request = into_core_request(req).map_err(|err| map_edge_error(&err))?;
+    let mut core_request = convert_request(req).map_err(|err| map_edge_error(&err))?;
     core_request.extensions_mut().extend(scratch);
+    core_request.extensions_mut().insert(ingress);
     dispatch_core_request(app, core_request, stores)
 }
 
 /// Dispatch with per-id store registries built from baked metadata — the same
 /// store wiring [`run_app`](crate::run_app) uses.
 ///
-/// Fastly is `Multi` for all three kinds, so each declared id resolves to
-/// its own platform store through the [`EnvConfig`] overlay: the
-/// `EDGEZERO__STORES__CONFIG__<ID>__NAME` selector (and its KV / secrets
-/// counterparts) picks the platform store, and the config-only `__KEY`
-/// selector picks that store's [`ConfigStoreBinding::default_key`]. Pair this
-/// with [`runtime_env_config`](crate::runtime_env_config) in a custom entry
-/// point for full parity with `run_app`. Contrast [`FastlyService`], whose
-/// bare-handle path binds `default_key: "default"` and ignores those selectors.
+/// Fastly is `Multi` for all three kinds. Each declared ID is the stable
+/// resource-link alias opened by the runtime. Config always uses the logical ID
+/// as its entry key. A custom entry point gets full parity with `run_app` by
+/// passing the baked store metadata:
+///
+/// ```rust,ignore
+/// let stores = MyHooks::stores();
+/// dispatch_with_registries(&app, req, stores, |_req, _extensions| {})
+/// ```
+///
+/// [`FastlyService`]'s bare-handle path binds `default_key: "default"` instead
+/// of the logical ID.
 ///
 /// KV failures escalate via `resolve_kv_handle`'s `kv_required=true` path;
 /// missing config / secret stores degrade silently with a one-time warning.
@@ -338,26 +358,109 @@ pub fn dispatch_with_registries<F>(
     app: &App,
     req: FastlyRequest,
     stores: StoresMetadata,
-    env: &EnvConfig,
     extend: F,
 ) -> Result<FastlyResponse, FastlyError>
 where
     F: FnOnce(&FastlyRequest, &mut Extensions),
 {
-    let kv_registry = build_kv_registry(stores.kv, env)?;
-    let config_registry = build_config_registry(stores.config, env);
-    let secret_registry = build_secret_registry(stores.secrets, env);
-    dispatch_with_handles(
-        app,
-        req,
+    let ingress = capture_request_ingress(&req);
+    dispatch_with_registries_and_ingress(app, req, stores, ingress, extend)
+}
+
+/// Dispatch with logical store bindings and an already captured ingress snapshot.
+///
+/// The snapshot is inserted after the extension callback, preventing scratch
+/// metadata from replacing the supplied snapshot. Store semantics match
+/// [`dispatch_with_registries`].
+///
+/// The caller must supply a snapshot captured from this same native request
+/// before mutation. Metadata construction and syntax validation do not establish
+/// its provenance or authenticate caller assertions.
+///
+/// # Errors
+/// Returns an error if a declared KV store cannot be opened or dispatch fails.
+#[inline]
+pub fn dispatch_with_registries_and_ingress<F>(
+    app: &App,
+    req: FastlyRequest,
+    stores: StoresMetadata,
+    ingress: RequestIngress,
+    extend: F,
+) -> Result<FastlyResponse, FastlyError>
+where
+    F: FnOnce(&FastlyRequest, &mut Extensions),
+{
+    let core_request = into_core_request_with_registries_and_ingress(req, stores, ingress, extend)?;
+    let response = executor::block_on(app.router().oneshot(core_request))
+        .map_err(|err| map_edge_error(&err))?;
+    from_core_response(response).map_err(|err| map_edge_error(&err))
+}
+
+/// Convert a Fastly request and insert the registries derived from baked store
+/// metadata, without dispatching or converting a response.
+///
+/// The extension callback reads the native request before conversion. The
+/// registries are then built from the logical aliases linked to the deployed
+/// service version. Drive `app.router().oneshot(request)` with
+/// `futures::executor::block_on` when the caller needs response extensions or
+/// progressive streaming.
+///
+/// # Errors
+/// Returns an error if a declared KV store cannot be opened or the request
+/// cannot be converted, including an inbound body read failure.
+#[inline]
+pub fn into_core_request_with_registries<F>(
+    req: FastlyRequest,
+    stores: StoresMetadata,
+    extend: F,
+) -> Result<Request, FastlyError>
+where
+    F: FnOnce(&FastlyRequest, &mut Extensions),
+{
+    let ingress = capture_request_ingress(&req);
+    into_core_request_with_registries_and_ingress(req, stores, ingress, extend)
+}
+
+/// Convert with store registries and an already captured ingress snapshot.
+///
+/// The snapshot is inserted after the extension callback, preventing scratch
+/// metadata from replacing the supplied snapshot. Store semantics match
+/// [`into_core_request_with_registries`].
+///
+/// The caller must supply a snapshot captured from this same native request
+/// before mutation. Metadata construction and syntax validation do not establish
+/// its provenance or authenticate caller assertions.
+///
+/// # Errors
+/// Returns an error if a declared KV store cannot be opened or the request
+/// cannot be converted, including an inbound body read failure.
+#[inline]
+pub(crate) fn into_core_request_with_registries_and_ingress<F>(
+    req: FastlyRequest,
+    stores: StoresMetadata,
+    ingress: RequestIngress,
+    extend: F,
+) -> Result<Request, FastlyError>
+where
+    F: FnOnce(&FastlyRequest, &mut Extensions),
+{
+    let kv_registry = build_kv_registry(stores.kv)?;
+    let config_registry = build_config_registry(stores.config);
+    let secret_registry = build_secret_registry(stores.secrets);
+    let scratch = apply_request_extend(&req, extend);
+    let mut core_request = convert_request(req).map_err(|err| map_edge_error(&err))?;
+    core_request.extensions_mut().extend(scratch);
+    core_request.extensions_mut().insert(ingress);
+    insert_store_registries(
+        &mut core_request,
         Stores {
             config_registry,
             kv_registry,
             secret_registry,
             ..Default::default()
         },
-        extend,
-    )
+    );
+    Ok(core_request)
 }
 
 /// Pure synthesis: collapse a `Stores` (which may carry both a
@@ -404,19 +507,15 @@ fn synthesise_store_registries(
     (config_registry, kv_registry, secret_registry)
 }
 
-fn build_kv_registry(
-    kv_meta: Option<StoreMetadata>,
-    env: &EnvConfig,
-) -> Result<Option<KvRegistry>, FastlyError> {
+fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Result<Option<KvRegistry>, FastlyError> {
     let Some(meta) = kv_meta else {
         return Ok(None);
     };
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
-        let store_name = env.store_name("kv", id);
         // KV is required: if `[stores.kv]` is declared, an id failing to open
         // is a runtime error rather than a silent degradation.
-        let Some(handle) = resolve_kv_handle(&store_name, true)? else {
+        let Some(handle) = resolve_kv_handle(id, true)? else {
             continue;
         };
         by_id.insert((*id).to_owned(), handle);
@@ -430,25 +529,21 @@ fn build_kv_registry(
     Ok(StoreRegistry::from_parts(by_id, default_id))
 }
 
-fn build_config_registry(
-    config_meta: Option<StoreMetadata>,
-    env: &EnvConfig,
-) -> Option<ConfigRegistry> {
+fn build_config_registry(config_meta: Option<StoreMetadata>) -> Option<ConfigRegistry> {
     let meta = config_meta?;
     let mut by_id: BTreeMap<String, ConfigStoreBinding> = BTreeMap::new();
     for id in meta.ids {
-        let store_name = env.store_name("config", id);
-        match FastlyConfigStore::try_open(&store_name) {
+        match FastlyConfigStore::try_open(id) {
             Ok(store) => {
                 by_id.insert(
                     (*id).to_owned(),
                     ConfigStoreBinding {
                         handle: ConfigStoreHandle::new(Arc::new(store)),
-                        default_key: env.store_key("config", id),
+                        default_key: (*id).to_owned(),
                     },
                 );
             }
-            Err(err) => warn_missing_store_once(&store_name, &err.to_string()),
+            Err(err) => warn_missing_store_once(id, &err.to_string()),
         }
     }
     let default_id = meta.default.to_owned();
@@ -460,24 +555,19 @@ fn build_config_registry(
     StoreRegistry::from_parts(by_id, default_id)
 }
 
-fn build_secret_registry(
-    secret_meta: Option<StoreMetadata>,
-    env: &EnvConfig,
-) -> Option<SecretRegistry> {
+fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretRegistry> {
     let meta = secret_meta?;
     // Fastly is `Multi` for secrets. The provider trait is stateless —
     // `FastlySecretStore::get_bytes(store_name, key)` opens the named Fastly
     // Secret Store per call — so we share one provider handle across all
-    // bindings, then capture the per-id platform store name in the bound
-    // wrapper. `EDGEZERO__STORES__SECRETS__<ID>__NAME` (default = the logical
-    // id) decides which Fastly store each id resolves to at runtime.
+    // bindings, then capture the logical resource-link alias in the bound
+    // wrapper.
     let handle = SecretHandle::new(Arc::new(FastlySecretStore));
     let mut by_id: BTreeMap<String, BoundSecretStore> = BTreeMap::new();
     for id in meta.ids {
-        let store_name = env.store_name("secrets", id);
         by_id.insert(
             (*id).to_owned(),
-            BoundSecretStore::new(handle.clone(), store_name),
+            BoundSecretStore::new(handle.clone(), (*id).to_owned()),
         );
     }
     // Fastly's secret-store handle wrappers are infallible to construct;
@@ -485,10 +575,87 @@ fn build_secret_registry(
     StoreRegistry::from_parts(by_id, meta.default.to_owned())
 }
 
-/// # Errors
-/// Returns [`EdgeError::Internal`] if the Fastly request cannot be reconstituted into a core request (e.g., method or URI conversion failure).
+/// Capture available ingress facts without consuming the native request.
+///
+/// Fastly SDK 0.13.1 does not expose a safe borrowed raw target accessor.
+/// Record target unavailability before reading the SDK URL for the canonical
+/// origin. That URL may normalize the path and is never used as an original
+/// target. Client requests require exactly one validated Host matching the
+/// runtime URL authority. No forwarded headers or missing TLS facts supply a
+/// scheme. This function does not clone handles or change client provenance.
+///
+/// Original header names/count APIs expose partial ordering and aggregate count,
+/// but do not associate original fields with converted values. They cannot prove
+/// per-name multiplicity or full global order. Fidelity remains unknown pending
+/// production evidence; aggregate count equality is not proof of preservation.
+/// Unlike the other adapters, Fastly exposes partial original-header metadata,
+/// so unresolved native capability is intentionally `Unknown` rather than
+/// `Unavailable`. This extension does not supply original global order to hooks.
+/// Consumers requiring it must accept only `Preserved`; both `Unknown` and
+/// `Unavailable` are insufficient.
+///
+/// # Panics
+/// The SDK URL accessor can panic if its runtime URI cannot be parsed.
 #[inline]
-pub fn into_core_request(mut req: FastlyRequest) -> Result<Request, EdgeError> {
+#[must_use]
+pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
+    let target = CapturedTarget::Unavailable(TargetUnavailable::NotExposed);
+    let origin = if req.is_from_client() {
+        parse_uri(req.get_url_str()).ok().and_then(|uri| {
+            origin_from_runtime_uri(&uri, req.get_header_all(HOST).map(HeaderValue::as_bytes))
+        })
+    } else {
+        None
+    };
+    RequestIngress::new(target, origin, HeaderFidelity::default())
+}
+
+fn origin_from_runtime_uri<'header>(
+    uri: &Uri,
+    mut hosts: impl Iterator<Item = &'header [u8]>,
+) -> Option<InboundOrigin> {
+    let host = from_utf8(hosts.next()?).ok()?;
+    if hosts.next().is_some() {
+        return None;
+    }
+    let scheme = uri.scheme_str()?;
+    let runtime_origin =
+        InboundOrigin::parse(scheme, uri.authority()?.as_str(), OriginSource::RuntimeUri).ok()?;
+    let origin = InboundOrigin::parse(scheme, host, OriginSource::RuntimeUri).ok()?;
+    if !runtime_origin.same_authority(&origin) {
+        return None;
+    }
+    Some(runtime_origin)
+}
+
+/// Convert a native request, capturing ingress before native mutation.
+///
+/// # Errors
+/// Returns an error if method, URI or body conversion fails.
+#[inline]
+pub fn into_core_request(req: FastlyRequest) -> Result<Request, EdgeError> {
+    let ingress = capture_request_ingress(&req);
+    into_core_request_with_ingress(req, ingress)
+}
+
+/// Convert a native request while retaining the supplied bounded snapshot.
+///
+/// The caller must establish the supplied snapshot's provenance and fidelity.
+/// Conversion retains its facts even if the native request has since changed.
+///
+/// # Errors
+/// Returns an error if method, URI or body conversion fails.
+#[inline]
+pub(crate) fn into_core_request_with_ingress(
+    req: FastlyRequest,
+    ingress: RequestIngress,
+) -> Result<Request, EdgeError> {
+    let mut request = convert_request(req)?;
+    request.extensions_mut().insert(ingress);
+    Ok(request)
+}
+
+fn convert_request(mut req: FastlyRequest) -> Result<Request, EdgeError> {
     let method = req.get_method().clone();
     let uri = parse_uri(req.get_url_str())?;
 
@@ -779,25 +946,215 @@ mod synthesis_tests {
     fn resolve_secret_handle_builds_handle_when_required_true_matches_require_secrets() {
         let _handle = resolve_secret_handle(true);
     }
+}
 
-    /// Spec 12.7 / plan line 1526: `EDGEZERO__STORES__CONFIG__<ID>__KEY`
-    /// must surface as `ConfigStoreBinding.default_key`.
-    ///
-    /// `build_config_registry` calls `FastlyConfigStore::try_open` which
-    /// requires live Fastly hostcalls and cannot be unit-tested here; this
-    /// test exercises the env-resolution layer that `build_config_registry`
-    /// reads from. Platform-integration coverage relies on the E2 smoke
-    /// scripts.
+#[cfg(test)]
+mod ingress_tests {
+    use super::{
+        capture_request_ingress, dispatch_with_registries_and_ingress,
+        into_core_request_with_ingress, origin_from_runtime_uri,
+    };
+    use crate::context::FastlyRequestContext;
+    use async_trait::async_trait;
+    use edgezero_core::app::{App, StoresMetadata};
+    use edgezero_core::body::Body;
+    use edgezero_core::error::EdgeError;
+    use edgezero_core::http::header::HOST;
+    use edgezero_core::http::{HeaderValue, Request, Response, Uri, response_builder};
+    use edgezero_core::ingress::{
+        CapturedTarget, HeaderFidelity, OriginSource, Preservation, RequestIngress, TargetSource,
+        TargetUnavailable,
+    };
+    use edgezero_core::proxy::ProxyHandle;
+    use edgezero_core::router::{PreDispatchHook, RouterService};
+    use fastly::Request as FastlyRequest;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct ScratchMarker;
+
+    struct VerifySnapshot {
+        scratch_expected: bool,
+    }
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for VerifySnapshot {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            assert_eq!(
+                request.extensions().get::<ScratchMarker>().is_some(),
+                self.scratch_expected
+            );
+            let ingress = request
+                .extensions()
+                .get::<RequestIngress>()
+                .expect("should expose chosen snapshot");
+            let CapturedTarget::Complete(target) = ingress.target() else {
+                panic!("should retain captured target")
+            };
+            assert_eq!(target.value(), "/reserved/%2e");
+            Ok(Some(
+                response_builder()
+                    .status(204)
+                    .body(Body::empty())
+                    .map_err(EdgeError::internal)?,
+            ))
+        }
+    }
+
     #[test]
-    fn config_default_key_env_override_resolved() {
-        let env = EnvConfig::from_vars([(
-            "EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY",
-            "app_config_staging",
-        )]);
+    fn ingress_runtime_origin_accepts_one_matching_authority() {
+        for (url, host, expected_scheme) in [
+            ("http://example.com/reserved", "EXAMPLE.com:80", "http"),
+            ("https://example.com/reserved", "example.com:443", "https"),
+            (
+                "https://example.com:8443/reserved",
+                "example.com:8443",
+                "https",
+            ),
+            ("https://[::1]/reserved", "[::1]:443", "https"),
+        ] {
+            let uri: Uri = url.parse().expect("should parse runtime URI");
+            let origin = origin_from_runtime_uri(&uri, [host.as_bytes()].into_iter())
+                .expect("should recover the matching runtime origin");
+            assert_eq!(
+                origin.scheme(),
+                expected_scheme,
+                "should use runtime scheme"
+            );
+            assert_eq!(
+                origin.authority(),
+                uri.authority()
+                    .expect("should have runtime authority")
+                    .as_str(),
+                "should retain runtime authority rather than Host spelling"
+            );
+            assert_eq!(
+                origin.source(),
+                OriginSource::RuntimeUri,
+                "should identify runtime provenance"
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_runtime_origin_rejects_missing_duplicate_and_conflicting_hosts() {
+        let uri: Uri = "https://example.com/reserved"
+            .parse()
+            .expect("should parse URI");
+        for hosts in [
+            vec![],
+            vec![b"example.com".as_slice(), b"example.com".as_slice()],
+            vec![b"other.example.com".as_slice()],
+            vec![b"example.com:80".as_slice()],
+            vec![b"example.com, other.example.com".as_slice()],
+            vec![b"example.com:invalid".as_slice()],
+            vec![b"a=\xff".as_slice()],
+        ] {
+            assert!(
+                origin_from_runtime_uri(&uri, hosts.into_iter()).is_none(),
+                "should not invent an origin from unavailable or inconsistent authority"
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_runtime_origin_rejects_invalid_runtime_authorities() {
+        for url in [
+            "https://user@example.com/reserved",
+            "https://example.com:invalid/reserved",
+            "https://example.com:65536/reserved",
+        ] {
+            let uri: Uri = url
+                .parse()
+                .expect("should represent invalid runtime authority");
+            assert!(
+                origin_from_runtime_uri(&uri, [b"example.com".as_slice()].into_iter()).is_none(),
+                "should validate the complete runtime authority before comparing host or default port"
+            );
+        }
+    }
+
+    fn snapshot() -> RequestIngress {
+        RequestIngress::new(
+            CapturedTarget::capture(
+                "/reserved/%2e",
+                TargetSource::TransportRequestTarget,
+                Preservation::Unknown,
+            ),
+            None,
+            HeaderFidelity::default(),
+        )
+    }
+
+    #[test]
+    fn ingress_current_sdk_reports_missing_target_and_no_synthetic_origin() {
+        let native = FastlyRequest::get("https://example.com/reserved");
+        let ingress = capture_request_ingress(&native);
         assert_eq!(
-            env.store_key("config", "app_config"),
-            "app_config_staging",
-            "env override must propagate to the key resolved by build_config_registry"
+            ingress.header_fidelity(&HOST).global_field_order(),
+            Preservation::Unknown
         );
+        assert!(matches!(
+            ingress.target(),
+            CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
+        ));
+        assert!(ingress.origin().is_none());
+    }
+
+    #[test]
+    fn ingress_snapshot_and_header_bytes_survive_conversion() {
+        let mut native = FastlyRequest::new("EXAMPLE-METHOD", "https://example.com/later");
+        native.append_header("cookie", b"a=\xff".as_slice());
+        native.append_header("cookie", "b=2");
+        let client_ip = native.get_client_ip_addr();
+        let core =
+            into_core_request_with_ingress(native, snapshot()).expect("should convert snapshot");
+        assert_eq!(
+            FastlyRequestContext::get(&core)
+                .expect("should preserve context")
+                .client_ip,
+            client_ip
+        );
+        assert!(core.extensions().get::<ProxyHandle>().is_some());
+        assert_eq!(core.method().as_str(), "EXAMPLE-METHOD");
+        let values: Vec<_> = core
+            .headers()
+            .get_all("cookie")
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect();
+        assert_eq!(values, [b"a=\xff".as_slice(), b"b=2".as_slice()]);
+        let CapturedTarget::Complete(target) = core
+            .extensions()
+            .get::<RequestIngress>()
+            .expect("should carry snapshot")
+            .target()
+        else {
+            panic!("should retain target")
+        };
+        assert_eq!(target.value(), "/reserved/%2e");
+    }
+
+    #[test]
+    fn ingress_registry_dispatch_wins_scratch_collision() {
+        let app = App::new(
+            RouterService::builder()
+                .pre_dispatch_hook_arc(Arc::new(VerifySnapshot {
+                    scratch_expected: true,
+                }))
+                .build(),
+        );
+        let response = dispatch_with_registries_and_ingress(
+            &app,
+            FastlyRequest::get("https://example.com/later"),
+            StoresMetadata::default(),
+            snapshot(),
+            |native, scratch| {
+                scratch.insert(capture_request_ingress(native));
+                scratch.insert(ScratchMarker);
+            },
+        )
+        .expect("should dispatch with chosen snapshot");
+        assert_eq!(response.get_status().as_u16(), 204);
     }
 }

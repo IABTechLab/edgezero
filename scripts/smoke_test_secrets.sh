@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Spin CLI floor check, shared with the other smoke tests.
+# shellcheck source-path=SCRIPTDIR
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/spin_version_guard.sh"
+
 # Smoke-test the secret-store demo handlers by starting an adapter, running
 # checks, and tearing it down automatically.
 #
@@ -10,6 +14,10 @@ set -euo pipefail
 #   ./scripts/smoke_test_secrets.sh fastly
 #   ./scripts/smoke_test_secrets.sh cloudflare
 #   ./scripts/smoke_test_secrets.sh spin
+#
+# Note (axum): the env-backed secret store reads key K from
+# EDGEZERO__SECRETS__<K uppercased>, so SMOKE_SECRET is passed as
+# EDGEZERO__SECRETS__SMOKE_SECRET.
 #
 # Note (spin): Spin variable names are lowercase.  SpinSecretStore normalises
 # the key to lowercase before lookup, so "SMOKE_SECRET" maps to the Spin
@@ -89,7 +97,9 @@ start_server() {
       echo "==> Building app-demo (axum)..."
       (cd "$DEMO_DIR" && cargo build -p app-demo-adapter-axum 2>&1)
       echo "==> Starting Axum adapter on port $PORT..."
-      (cd "$DEMO_DIR" && cargo run -p app-demo-adapter-axum 2>&1) &
+      (cd "$DEMO_DIR" && \
+        EDGEZERO__SECRETS__SMOKE_SECRET="$SMOKE_SECRET_VALUE" \
+        cargo run -p app-demo-adapter-axum 2>&1) &
       SERVER_PID=$!
       ;;
     fastly)
@@ -116,10 +126,7 @@ start_server() {
       ;;
     spin)
       PORT=3000
-      command -v spin >/dev/null 2>&1 || {
-        echo "Spin CLI is required. Install from https://developer.fermyon.com/spin/v3/install" >&2
-        exit 1
-      }
+      spin_meets_floor || exit 1
       echo "==> Building Spin WASM (wasm32-wasip2)..."
       (cd "$DEMO_DIR" && cargo build --target wasm32-wasip2 --release -p app-demo-adapter-spin 2>&1)
       echo "==> Starting Spin on port $PORT..."

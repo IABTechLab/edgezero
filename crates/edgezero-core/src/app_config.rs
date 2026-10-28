@@ -139,6 +139,10 @@ impl SecretFieldsRecursionGuard {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
 impl Drop for SecretFieldsRecursionGuard {
     #[inline]
     fn drop(&mut self) {
@@ -300,9 +304,10 @@ impl EnvLookup {
 /// Returns `Err(ValidationErrors)` if any non-secret field fails its
 /// validator. Returns `Ok(())` if only secret-field validators fail.
 #[inline]
-pub fn validate_excluding_secrets<C: validator::Validate + AppConfigMeta>(
-    cfg: &C,
-) -> Result<(), validator::ValidationErrors> {
+pub fn validate_excluding_secrets<C>(cfg: &C) -> Result<(), validator::ValidationErrors>
+where
+    C: validator::Validate + AppConfigMeta,
+{
     let result = cfg.validate();
     let Err(mut errors) = result else {
         return Ok(());
@@ -1583,5 +1588,32 @@ greeting = "hello"
             optional: false,
         };
         assert_eq!(array.dotted_path(), "partners[*].api_key");
+    }
+}
+
+#[cfg(test)]
+mod retained_guard_tests {
+    use super::{SECRET_FIELDS_DEPTH, SecretFieldsRecursionGuard};
+    use std::panic::catch_unwind;
+
+    #[test]
+    fn recursion_guard_resets_after_scope_and_unwind() {
+        fn nested_scope() {
+            let _outer = SecretFieldsRecursionGuard::enter();
+            let _inner = SecretFieldsRecursionGuard::enter();
+            SECRET_FIELDS_DEPTH.with(|depth| assert_eq!(depth.get(), 2));
+        }
+        nested_scope();
+        SECRET_FIELDS_DEPTH.with(|depth| assert_eq!(depth.get(), 0));
+        assert!(
+            catch_unwind(|| {
+                let _guard = SecretFieldsRecursionGuard::enter();
+                panic!("injected initialization failure");
+            })
+            .is_err()
+        );
+        SECRET_FIELDS_DEPTH.with(|depth| assert_eq!(depth.get(), 0));
+        let _fresh = SecretFieldsRecursionGuard::enter();
+        SECRET_FIELDS_DEPTH.with(|depth| assert_eq!(depth.get(), 1));
     }
 }
