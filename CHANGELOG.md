@@ -99,6 +99,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   and lifecycle controls. Reuse bounded HTTP capture, file-backed runtime logs and process-group
   teardown; reject late worker failures and unexpected runtime exits before publishing success.
   Keep one runner and no compatibility wrapper or additional host-language dependency.
+- Reuse the Rust wire matrix for local Cloudflare workerd/origin redirect checks through the
+  standard request-context client. Preserve the Spin inventory and require exact provider-specific
+  source errors. Cover cleanup before runtime startup and distinguish confirmed requested SIGTERM
+  wrapper exits from premature runtime exits. These local checks do not qualify hosted behavior.
 
 ### Main Integration
 

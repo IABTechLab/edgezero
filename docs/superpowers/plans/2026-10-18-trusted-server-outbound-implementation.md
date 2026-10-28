@@ -235,6 +235,28 @@ acceptance binding and consumer/hosted qualification. The G1 inventory remains e
 500 planned and `qualified: false`; these controls do not activate incomplete declared legs or
 freeze an exact candidate. The normative requirements and approved Interfaces are unchanged.
 
+### P5 Local Workerd Follow Checkpoint (2026-10-27)
+
+The existing Rust `outbound-wire` suite now also selects Cloudflare. Its fixture-only
+`/progress/redirect` action uses the canonical request-context client, without a replacement Fetch
+or another outbound transport. One matrix and the same bounded origins exercise both providers.
+Local workerd 2026-09-10 with Wrangler 4.131.0, worker 0.8.5 and the existing compatibility settings
+passes 68 exchanges/84 ordered origin requests. Spin retains the same 68/84 inventory and its four
+bodyless, upload, scope and SDK-terminal handoff controls. Exact coding/cap parity, unread
+intermediate-head progress, two-origin behavior, stopped/limited final bodies and streamed final
+responses are checked. Truncated reads retain exact provider-specific reasons; workerd's observed
+sanitized cause is pinned by negative validation controls rather than accepted as arbitrary text.
+
+Startup and teardown use the existing staged build, runtime and process supervisor. Cleanup begins
+before local binding setup and handles an absent runtime/origin without discarding the primary
+failure. Controlled Rust regressions reject premature exits, including 143; a wrapper's 143 is
+accepted only following a confirmed sent TERM. Missing tools cannot publish a passing inventory.
+The matching locked wasm-bindgen CLI was rebuilt offline in a temporary directory, not installed
+globally or repinned. No deployment, SDK/runtime pin change, capability promotion, candidate freeze
+or hosted qualification occurs. Successful native optimizer redirects, conditional idle-policy
+coverage, complete criterion-level binding and consumer/hosted acceptance remain open. The G1
+inventory remains eleven ready legs, 500 planned and `qualified: false`.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

@@ -852,6 +852,24 @@ cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.
 These controls preserve raw request framing, scope/handoff checks and 68 redirect exchanges
 with 84 correlated origin requests. They establish local SDK behavior, not hosted qualification.
 
+The same Rust matrix also runs Cloudflare's production client through the standard application
+entrypoint and local workerd, without replacing `fetch`:
+
+```sh
+./scripts/smoke_test_reusable_app.sh --adapter cloudflare --suite outbound-wire
+```
+
+Set the explicit absolute Cloudflare build-tool overrides listed above and
+`MINIFLARE_WORKERD_PATH` to the local workerd executable. The runner records that executable's
+identity and version and the effective compatibility settings; it uses loopback origins,
+`dev --local`, synthetic local bindings and disabled metrics. Missing tools are unsupported
+exit 2, never a passing inventory. No implicit download, deployment or remote binding is used.
+Require all 68 exchanges and 84 ordered origin requests, exact bytes, encoding/cap parity,
+unread intermediate-body progress, final stream behavior and stop/hop metadata. Truncated-body
+errors must be Cloudflare `Transport` at `ResponseBodyRead`, not Spin's `Protocol` classification.
+Both runners share cleanup, including pre-startup failures, and publish success only afterward.
+The local workerd run is distinct from Node guest fixtures and from hosted cancellation evidence.
+
 Cloudflare and Spin may select different guests during overlap or recovery tests;
 those observations are unverified. A success requires the same instance and the
 specific injected failure. Overlap checks use each request's `before.inflight`

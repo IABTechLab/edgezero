@@ -96,6 +96,7 @@ pub fn router(
             Method::HEAD,
             super::response_headers::probe,
         )
+        .get("/progress/redirect", super::redirect::probe)
         .get("/progress/{case}", progress)
         .post("/progress/{case}", progress)
         .post("/progress/overflow/{case}", super::overflow::probe)

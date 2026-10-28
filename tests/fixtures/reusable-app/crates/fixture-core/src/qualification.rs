@@ -3,6 +3,7 @@
 pub mod framing;
 mod overflow;
 pub mod progress;
+mod redirect;
 pub mod response_headers;
 
 use std::pin::Pin;

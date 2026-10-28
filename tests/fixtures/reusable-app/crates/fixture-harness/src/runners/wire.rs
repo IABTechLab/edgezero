@@ -30,6 +30,8 @@ fn error_is(report: &Value, kind: &str, reason: &str) -> Result<()> {
 }
 
 struct Matrix<'a> {
+    adapter: &'static str,
+    endpoint: &'static str,
     port: u16,
     origins: &'a WireOrigins,
     records: &'a mut Records,
@@ -57,7 +59,7 @@ impl Matrix<'_> {
         let uri = format!("http://127.0.0.1:{}{path}", self.origins.port(0));
         let response = net::header_request(
             self.port,
-            "/p5",
+            self.endpoint,
             &token(),
             &[
                 ("x-origin", &uri),
@@ -77,7 +79,7 @@ impl Matrix<'_> {
         let observed = self.origins.take_requests();
         let expected = expected.unwrap_or_else(|| vec![(self.origins.port(0), path.to_owned())]);
         if observed != expected {
-            self.records.push(json!({"event":"spin-wire-receipt-failure","status":"fail",
+            self.records.push(json!({"event":format!("{}-wire-receipt-failure", self.adapter),"status":"fail",
                 "path":path,"mode":mode,"observed":observed,"expected":expected,"qualification":false}))?;
         }
         require(
@@ -87,10 +89,11 @@ impl Matrix<'_> {
         let report: Value = serde_json::from_slice(&body(&response)?)?;
         self.exchanges += 1;
         self.dispatches += observed.len();
-        self.records
-            .push(json!({"event":"spin-wire-case","path":path,"mode":mode,
+        self.records.push(
+            json!({"event":format!("{}-wire-case", self.adapter),"path":path,"mode":mode,
             "streamed":streamed,"encoded_cap":encoded,"origin_requests":observed,
-            "report":report,"qualification":false}))?;
+            "report":report,"qualification":false}),
+        )?;
         Ok(report)
     }
 
@@ -213,13 +216,7 @@ impl Matrix<'_> {
                     match kind {
                         "pending" => error_is(&report, "gateway_timeout", "PerCallTimeout")?,
                         "error" => {
-                            error_is(&report, "bad_gateway", "Protocol")?;
-                            require(
-                                report["outcome"]["error"]["provider"]
-                                    .as_str()
-                                    .is_some_and(|detail| detail.contains("ResponseBodyRead")),
-                                "lost source-error provider phase",
-                            )?;
+                            source_error(&report, self.adapter)?;
                         }
                         "emptybr" => error_is(&report, "bad_gateway", "Decode(Brotli)")?,
                         _ => error_is(&report, "response_too_large", "BufferedBody")?,
@@ -307,9 +304,31 @@ impl Matrix<'_> {
         }
         require(
             self.exchanges == 68 && self.dispatches == 84,
-            "incomplete Spin wire matrix",
+            "incomplete provider wire matrix",
         )
     }
+}
+
+fn source_error_reason(adapter: &str) -> &'static str {
+    if adapter == "cloudflare" {
+        "Transport"
+    } else {
+        "Protocol"
+    }
+}
+
+fn source_error(report: &Value, adapter: &str) -> Result<()> {
+    error_is(report, "bad_gateway", source_error_reason(adapter))?;
+    let provider = report["outcome"]["error"]["provider"].as_str();
+    require(
+        provider.is_some_and(|detail| detail.contains("ResponseBodyRead")),
+        "lost source-error provider phase",
+    )?;
+    require(
+        adapter != "cloudflare"
+            || provider == Some("Cloudflare { phase: ResponseBodyRead, cause: Unknown }"),
+        "unexpected workerd source-error cause",
+    )
 }
 
 fn component_text(directory: &Path) -> Result<String> {
@@ -399,6 +418,9 @@ fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Proc
 }
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
+    if name == "cloudflare" {
+        return cloudflare(run, records);
+    }
     require(name == "spin", "wire suite requires Spin")?;
     let repo = root().join("../../..").canonicalize()?;
     let executable = executable("SPIN_BIN", "spin").ok_or("Spin runtime unavailable")?;
@@ -462,6 +484,8 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         let running = process.insert(Process::start(&mut command, &log, port)?);
         controls(port, &origins, &component_logs, running)?;
         let mut matrix = Matrix {
+            adapter: "spin",
+            endpoint: "/p5",
             port,
             origins: &origins,
             records,
@@ -472,8 +496,94 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         running.check_running()?;
         Ok((matrix.exchanges, matrix.dispatches))
     })();
+    let (exchanges, dispatches) = finish_wire(
+        "spin",
+        &mut process,
+        Some(origins),
+        &state,
+        records,
+        outcome,
+    )?;
+    records.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":exchanges,"origin_requests":dispatches,
+        "bodyless_controls":4,"upload_controls":1,"scope_controls":1,"handoff_controls":1,"qualification":false}))
+}
+
+fn cloudflare(run: &Path, records: &mut Records) -> Result<()> {
+    let Some(workerd) = executable("MINIFLARE_WORKERD_PATH", "workerd") else {
+        return records.push(json!({"status":"unsupported","adapter":"cloudflare",
+            "reason":"set MINIFLARE_WORKERD_PATH to the local workerd executable","qualification":false}));
+    };
+    let version = Command::new(&workerd).arg("--version").output()?;
+    require(version.status.success(), "workerd version probe failed")?;
+    records.push(json!({"event":"workerd-runtime","adapter":"cloudflare",
+        "version":String::from_utf8(version.stdout)?.trim(),"artifact":artifact(&workerd)?,"qualification":false}))?;
+    let revision = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root())
+        .output()?;
+    require(
+        revision.status.success(),
+        "cannot determine wire source revision",
+    )?;
+    let revision = String::from_utf8(revision.stdout)?;
+    let state = run.join("retained/worker-state");
+    let log = run.join("cloudflare-wire.log");
+    let mut process = None;
+    let mut origins = None;
+    let outcome: Result<Option<(usize, usize)>> = (|| {
+        let Some((mut command, port)) =
+            progress::build("cloudflare", run, records, revision.trim(), "outbound-wire")?
+        else {
+            return Ok(None);
+        };
+        command
+            .env("MINIFLARE_WORKERD_PATH", workerd)
+            .env("WRANGLER_SEND_METRICS", "false")
+            .env("WRANGLER_LOG_PATH", run.join("wrangler-logs"));
+        records.push(
+            json!({"event":"workerd-configuration","adapter":"cloudflare",
+            "configuration":fs::read_to_string(run.join("wrangler.toml"))?,"qualification":false}),
+        )?;
+        let origins = origins.insert(WireOrigins::start()?);
+        let running = process.insert(Process::start(&mut command, &log, port)?);
+        let mut matrix = Matrix {
+            adapter: "cloudflare",
+            endpoint: "/progress/redirect",
+            port,
+            origins,
+            records,
+            exchanges: 0,
+            dispatches: 0,
+        };
+        matrix.run()?;
+        running.check_running()?;
+        Ok(Some((matrix.exchanges, matrix.dispatches)))
+    })();
+    let Some((exchanges, dispatches)) = finish_wire(
+        "cloudflare",
+        &mut process,
+        origins,
+        &state,
+        records,
+        outcome,
+    )?
+    else {
+        return Ok(());
+    };
+    records.push(json!({"event":"cloudflare-wire-inventory","status":"pass",
+        "exchanges":exchanges,"origin_requests":dispatches,"qualification":false}))
+}
+
+fn finish_wire<T>(
+    adapter: &str,
+    process: &mut Option<Process>,
+    origins: Option<WireOrigins>,
+    state: &Path,
+    records: &mut Records,
+    outcome: Result<T>,
+) -> Result<T> {
     let process_result = process.as_mut().map_or(Ok(()), Process::finish);
-    let origin_result = origins.finish();
+    let origin_result = origins.map_or(Ok(()), WireOrigins::finish);
     let state_result: Result<()> = if state.exists() {
         fs::remove_dir_all(state).map_err(Into::into)
     } else {
@@ -485,20 +595,67 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         ("state", &state_result),
     ] {
         if let Err(error) = result {
-            records.push(
-                json!({"status":"fail","adapter":"spin","stage":stage,"error":error.to_string()}),
-            )?;
+            records.push(json!({"status":"fail","adapter":adapter,"stage":stage,
+                "error":error.to_string(),"qualification":false}))?;
         }
     }
-    let (exchanges, dispatches) = outcome?;
+    let inventory = outcome?;
     process_result.and(origin_result).and(state_result)?;
-    records.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":exchanges,"origin_requests":dispatches,
-        "bodyless_controls":4,"upload_controls":1,"scope_controls":1,"handoff_controls":1,"qualification":false}))
+    Ok(inventory)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_startup_failure_removes_partial_state_and_preserves_primary_error() {
+        let run = std::env::temp_dir().join(format!("wire-cleanup-{}", token()));
+        let state = run.join("retained/worker-state");
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("partial-value"), b"synthetic").unwrap();
+        let mut records = Records {
+            path: run.join("events.jsonl"),
+            values: Vec::new(),
+        };
+        let outcome: Result<()> = Err("build failed before runtime startup".into());
+        let error =
+            finish_wire("cloudflare", &mut None, None, &state, &mut records, outcome).unwrap_err();
+        assert_eq!(error.to_string(), "build failed before runtime startup");
+        assert!(!state.exists());
+        assert!(records.values.is_empty());
+        fs::remove_dir_all(run).unwrap();
+    }
+
+    #[test]
+    fn source_error_expectations_are_provider_specific() {
+        assert_eq!(source_error_reason("spin"), "Protocol");
+        assert_eq!(source_error_reason("cloudflare"), "Transport");
+    }
+
+    #[test]
+    fn workerd_source_errors_require_the_observed_typed_reason_phase_and_cause() {
+        let valid = json!({"outcome":{"error":{"kind":"bad_gateway","status":502,
+            "reason":"Transport","provider":"Cloudflare { phase: ResponseBodyRead, cause: Unknown }"}}});
+        source_error(&valid, "cloudflare").unwrap();
+        for (field, value) in [
+            ("reason", json!("Protocol")),
+            ("provider", Value::Null),
+            (
+                "provider",
+                json!("Cloudflare { phase: Fetch, cause: Unknown }"),
+            ),
+            (
+                "provider",
+                json!("Cloudflare { phase: ResponseBodyRead, cause: TypeError }"),
+            ),
+            ("status", json!(500)),
+        ] {
+            let mut changed = valid.clone();
+            changed["outcome"]["error"][field] = value;
+            assert!(source_error(&changed, "cloudflare").is_err(), "{changed}");
+        }
+    }
 
     #[test]
     fn handoff_retains_exact_bytes_and_all_results() {

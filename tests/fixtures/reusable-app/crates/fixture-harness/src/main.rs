@@ -94,8 +94,8 @@ impl Args {
             "Fastly receive suites require --adapter fastly",
         )?;
         require(
-            a.suite != "outbound-wire" || a.adapter == "spin",
-            "outbound-wire requires --adapter spin",
+            a.suite != "outbound-wire" || matches!(a.adapter.as_str(), "spin" | "cloudflare"),
+            "outbound-wire requires --adapter spin or cloudflare",
         )?;
         require(
             a.requests > 0 && a.repetitions > 0,
@@ -198,6 +198,25 @@ pub fn checked(command: &mut Command) -> Result<()> {
 /// Process groups of live runtimes, killed by the Ctrl-C handler because a
 /// terminal SIGINT reaches only the harness's own foreground group.
 static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SignalOutcome {
+    Sent,
+    Absent,
+}
+
+fn requested_termination(status: ExitStatus, term_sent: bool) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(15) || (term_sent && status.code() == Some(128 + 15))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (status, term_sent);
+        false
+    }
+}
 fn wait_for_exit(child: &mut Child, deadline: Instant) -> Result<Option<ExitStatus>> {
     loop {
         if let Some(status) = child.try_wait()? {
@@ -210,7 +229,7 @@ fn wait_for_exit(child: &mut Child, deadline: Instant) -> Result<Option<ExitStat
         thread::sleep(remaining.min(Duration::from_millis(10)));
     }
 }
-fn signal_group(id: u32, signal: &str, deadline: Instant) -> Result<()> {
+fn signal_group(id: u32, signal: &str, deadline: Instant) -> Result<SignalOutcome> {
     #[cfg(unix)]
     let target = format!("-{id}");
     #[cfg(not(unix))]
@@ -222,7 +241,7 @@ fn signal_group(id: u32, signal: &str, deadline: Instant) -> Result<()> {
         deadline,
     )
 }
-fn signal_group_command(command: &mut Command, deadline: Instant) -> Result<()> {
+fn signal_group_command(command: &mut Command, deadline: Instant) -> Result<SignalOutcome> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     require(
         !remaining.is_zero(),
@@ -260,7 +279,7 @@ fn signal_group_command(command: &mut Command, deadline: Instant) -> Result<()> 
             }
         };
         if status.success() {
-            return Ok(());
+            return Ok(SignalOutcome::Sent);
         }
         require(
             captured,
@@ -274,7 +293,8 @@ fn signal_group_command(command: &mut Command, deadline: Instant) -> Result<()> 
         require(
             diagnostic.to_ascii_lowercase().contains("no such process"),
             format!("process-group signal failed: {status}: {diagnostic}"),
-        )
+        )?;
+        Ok(SignalOutcome::Absent)
     })();
     if captured {
         // Diagnostics must not determine whether a successfully sent signal is confirmed.
@@ -380,9 +400,13 @@ impl Process {
         }
         let id = self.0.id();
         let term_deadline = Instant::now() + Duration::from_secs(5);
-        if let Err(error) = signal_group(id, "-TERM", term_deadline) {
-            failures.push(error.to_string());
-        }
+        let term_sent = match signal_group(id, "-TERM", term_deadline) {
+            Ok(outcome) => outcome == SignalOutcome::Sent,
+            Err(error) => {
+                failures.push(error.to_string());
+                false
+            }
+        };
         let mut status = match wait_for_exit(&mut self.0, term_deadline) {
             Ok(status) => status,
             Err(error) => {
@@ -397,7 +421,7 @@ impl Process {
         let kill_deadline = Instant::now() + Duration::from_secs(5);
         #[cfg(unix)]
         let group_cleaned = match signal_group(id, "-KILL", kill_deadline) {
-            Ok(()) => true,
+            Ok(_) => true,
             Err(error) => {
                 failures.push(error.to_string());
                 false
@@ -419,13 +443,7 @@ impl Process {
         }
         match status {
             Some(status) => {
-                #[cfg(unix)]
-                let terminated = {
-                    use std::os::unix::process::ExitStatusExt;
-                    status.signal() == Some(15)
-                };
-                #[cfg(not(unix))]
-                let terminated = false;
+                let terminated = requested_termination(status, term_sent);
                 if !status.success() && !terminated {
                     failures.push(format!(
                         "runtime exited unexpectedly during shutdown: {status}"
@@ -602,12 +620,16 @@ mod argument_tests {
     use super::Args;
 
     #[test]
-    fn outbound_wire_suite_is_explicit_and_spin_only() {
+    fn outbound_wire_suite_is_explicit_and_selects_one_supported_provider() {
         for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
             let result = Args::parse_from(
                 ["--adapter", adapter, "--suite", "outbound-wire"].map(str::to_owned),
             );
-            assert_eq!(result.is_ok(), adapter == "spin", "{adapter}");
+            assert_eq!(
+                result.is_ok(),
+                matches!(adapter, "spin" | "cloudflare"),
+                "{adapter}"
+            );
         }
         assert!(Args::parse_from(["--suite", "outbound-wire"].map(str::to_owned)).is_err());
     }
@@ -704,7 +726,11 @@ mod process_tests {
         let path = PathBuf::from(std::env::var_os("EDGEZERO_PROCESS_TEST_DIR").unwrap());
         if mode != "term-signal" {
             let ignore = matches!(mode.as_str(), "ignore-term" | "descendant-worker");
-            let code = if mode == "bad-shutdown" { 7 } else { 0 };
+            let code = match mode.as_str() {
+                "bad-shutdown" => 7,
+                "term-status" => 143,
+                _ => 0,
+            };
             ctrlc::set_handler(move || {
                 if !ignore {
                     std::process::exit(code);
@@ -762,11 +788,14 @@ mod process_tests {
         }
         if mode == "signal-capture" {
             let fixture = Fixture(path.clone());
-            signal_group_command(
-                &mut fixture.command("signal-orphan"),
-                Instant::now() + Duration::from_secs(2),
-            )
-            .unwrap();
+            assert_eq!(
+                signal_group_command(
+                    &mut fixture.command("signal-orphan"),
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .unwrap(),
+                SignalOutcome::Absent
+            );
             std::mem::forget(fixture);
             fs::write(path.join("signal-captured"), b"complete").unwrap();
         }
@@ -805,6 +834,7 @@ mod process_tests {
                 std::process::exit(1);
             }
             "exit-nonzero" => std::process::exit(7),
+            "exit-term-status" => std::process::exit(143),
             _ => loop {
                 thread::sleep(Duration::from_secs(1));
             },
@@ -813,7 +843,7 @@ mod process_tests {
 
     #[test]
     fn outbound_wire_process_rejects_premature_zero_and_nonzero_exits() {
-        for mode in ["exit-zero", "exit-nonzero"] {
+        for mode in ["exit-zero", "exit-nonzero", "exit-term-status"] {
             let fixture = Fixture::new();
             let mut process = fixture.spawn(mode);
             fixture.ready();
@@ -912,7 +942,7 @@ mod process_tests {
 
     #[test]
     fn outbound_wire_process_accepts_requested_zero_or_sigterm_and_keeps_file_logs() {
-        for mode in ["graceful", "term-signal"] {
+        for mode in ["graceful", "term-signal", "term-status"] {
             let fixture = Fixture::new();
             let mut process = fixture.spawn(mode);
             fixture.ready();
@@ -920,10 +950,17 @@ mod process_tests {
             process.finish().unwrap();
             process.finish().unwrap();
             let status = process.0.try_wait().unwrap().unwrap();
-            assert!(status.success() || status.signal() == Some(15));
+            assert!(status.success() || status.signal() == Some(15) || status.code() == Some(143));
             let output = fs::read_to_string(fixture.0.join("runtime.log")).unwrap();
             assert!(output.contains("helper-stdout") && output.contains("helper-stderr"));
         }
+    }
+
+    #[test]
+    fn shell_term_exit_requires_a_confirmed_sent_signal() {
+        let status = ExitStatus::from_raw(143 << 8);
+        assert!(requested_termination(status, true));
+        assert!(!requested_termination(status, false));
     }
 
     #[test]
