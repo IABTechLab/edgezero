@@ -125,6 +125,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   fallback after failed wakes without adding production dependencies or relaxing timing gates.
 - Expose underlying version-probe failures in request-fidelity test assertions instead of
   hiding a subprocess error behind an expected-version assertion.
+- Add the fourth-slot per-call timeout lifetime case through the existing production clients.
+  Preserve the original slow-origin case, 300 ms timeout provenance, completed siblings and
+  exact cutoff collection states. Record timeout-contract diagnostics separately without
+  waiving source timing failures or claiming hosted qualification.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

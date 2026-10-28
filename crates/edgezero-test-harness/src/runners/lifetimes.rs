@@ -1,8 +1,9 @@
 use super::*;
 use crate::net::WireOrigins;
 
-const CASES: [&str; 7] = [
+const CASES: [&str; 8] = [
     "slow-origin",
+    "timeout-before-cutoff",
     "fast-origin",
     "begin-progress",
     "batch-progress",
@@ -67,10 +68,15 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
         } else {
             None
         };
+        let timeout_contract = (case == "timeout-before-cutoff").then(|| {
+            let result = validate_timeout_before_cutoff(&report, &origin);
+            json!({"status":if result.is_ok(){"pass"}else{"fail"},
+                "error":result.err().map(|error|error.to_string())})
+        });
         records.push(json!({"event":"lifetime-case","case":case,"token":token,
             "status":if result.is_ok(){"pass"}else{"fail"},
             "error":result.as_ref().err().map(ToString::to_string),"report":report,
-            "origin":origin,"clock_correlation":clock_correlation,"body_phase_evidence":if case == "pending-body-cutoff" {
+            "origin":origin,"clock_correlation":clock_correlation,"timeout_contract":timeout_contract,"body_phase_evidence":if case == "pending-body-cutoff" {
                 Some("host-head-written-only")
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
@@ -130,6 +136,7 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
     roles.sort_unstable();
     let expected: &[&str] = match case {
         "slow-origin" => &["a", "b", "c", "origin"],
+        "timeout-before-cutoff" => &["a", "b", "c", "d", "origin"],
         "cpu-stretch" => &["a", "b", "c", "calibration", "origin"],
         "fast-origin" => &["a", "b", "c", "mediator", "origin"],
         "begin-progress" => &["origin"],
@@ -235,7 +242,7 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
         "batch start missed 34 ms",
     )?;
     validate_timeline(case, events, origin)?;
-    if case == "slow-origin" {
+    if matches!(case, "slow-origin" | "timeout-before-cutoff") {
         let check = events
             .iter()
             .find(|entry| entry["op"] == "check")
@@ -249,6 +256,9 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
             report["origin"] == json!({"status":200,"bytes":[79,111,33]}),
             "slow origin body changed",
         )?;
+        if case == "timeout-before-cutoff" {
+            return validate_timeout_before_cutoff(report, origin);
+        }
         validate_items(
             report,
             &[146_000, 286_000],
@@ -304,6 +314,79 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
             "mediator deadline was extended",
         )
     }
+}
+
+fn validate_timeout_before_cutoff(report: &Value, origin: &Value) -> Result<()> {
+    require(
+        report["slots"]
+            == json!([
+                "AlreadyDelivered",
+                "AlreadyDelivered",
+                "Unresolved",
+                "AlreadyDelivered"
+            ])
+            && report["termination"] == "Cutoff"
+            && report["mediator"].is_null(),
+        "per-call timeout lost siblings or batch cutoff",
+    )?;
+    let items = report["items"].as_array().ok_or("missing lifetime items")?;
+    require(items.len() == 3, "missing or extra timeout-case items")?;
+    let events = report["events"]
+        .as_array()
+        .ok_or("missing timeout-case events")?;
+    let checks: Vec<_> = events
+        .iter()
+        .filter(|entry| entry["op"] == "check")
+        .collect();
+    require(
+        checks.len() == 4
+            && checks.iter().take(3).all(|check| check["result"] == "Item")
+            && checks[3]["result"] == "Finished",
+        "timeout-case cutoff was not observed after all three items",
+    )?;
+    for (item, index, elapsed, outcome) in [
+        (&items[0], 0, 146000, json!({"status":200,"bytes":[65]})),
+        (&items[1], 1, 286000, json!({"status":200,"bytes":[66]})),
+        (
+            &items[2],
+            3,
+            300000,
+            json!({"error":{"kind":"gateway_timeout","status":504,"reason":"PerCallTimeout"}}),
+        ),
+    ] {
+        require(
+            item["index"] == index && item["via"] == "check" && item["outcome"] == outcome,
+            "wrong timeout-case item identity, observation or outcome",
+        )?;
+        within(
+            number(item, "elapsed_us")?,
+            elapsed,
+            "timeout-case arrival elapsed changed",
+        )?;
+    }
+    let origin = origin.as_array().unwrap();
+    let phases: Vec<_> = origin
+        .iter()
+        .filter(|entry| entry["role"] == "d")
+        .map(|entry| entry["op"].as_str().unwrap_or(""))
+        .collect();
+    let request = role_event(origin, "d", "request")?;
+    let closed = role_event(origin, "d", "closed")?;
+    let initial = role_event(origin, "origin", "request")?;
+    let aligned = initial["alignment"]["scenario_anchor_host_offset_us"]
+        .as_i64()
+        .ok_or("missing scenario alignment")?;
+    let scheduled = number(closed, "scheduled_us")?;
+    require(
+        phases == ["request", "closed"]
+            && closed["reason"] == "silent"
+            && closed["scenario_scheduled_us"] == 1500000
+            && closed["schedule_basis"] == "origin-receipt-minus-guest-at-us"
+            && number(request, "at_us")? <= scheduled
+            && i128::from(scheduled) - i128::from(aligned) == 1500000
+            && number(closed, "at_us")? >= scheduled,
+        "fourth bidder was not silent past the cutoff",
+    )
 }
 
 fn role_event<'a>(origin: &'a [Value], role: &str, op: &str) -> Result<&'a Value> {
@@ -799,8 +882,63 @@ fn validate_items(
     Ok(())
 }
 
+fn validate_late_c(origin: &[Value], aligned: i128) -> Result<()> {
+    let phases: Vec<_> = origin
+        .iter()
+        .filter(|entry| entry["role"] == "c")
+        .map(|entry| entry["op"].as_str().unwrap_or(""))
+        .collect();
+    let request = role_event(origin, "c", "request")?;
+    let closed = role_event(origin, "c", "closed")?;
+    let scheduled = u64::try_from(aligned + 900000)?;
+    require(
+        number(request, "at_us")? <= number(closed, "at_us")?
+            && number(closed, "at_us")? >= scheduled,
+        "C source closed before its late response schedule",
+    )?;
+    match closed["reason"].as_str() {
+        Some("complete") => require(
+            phases == ["request", "head", "chunk", "closed"],
+            "missing or extra late C response evidence",
+        )?,
+        Some("peer_closed_after_cutoff") => require(
+            phases == ["request", "closed"] || phases == ["request", "head", "closed"],
+            "unexpected late C peer-close evidence",
+        )?,
+        _ => return Err("C source did not complete or observe a late peer close".into()),
+    }
+    for entry in origin.iter().filter(|entry| {
+        entry["role"] == "c" && matches!(entry["op"].as_str(), Some("head" | "chunk"))
+    }) {
+        let actual = number(entry, "at_us")?;
+        require(
+            entry["scenario_scheduled_us"] == 900000
+                && number(entry, "scheduled_us")? == scheduled
+                && entry["schedule_basis"] == "origin-receipt-minus-guest-at-us"
+                && actual >= scheduled
+                && actual <= number(closed, "at_us")?,
+            "late C source schedule or phase order changed",
+        )?;
+        within(actual, scheduled, "late C origin scheduling target missed")?;
+        if entry["op"] == "head" {
+            let started = number(entry, "write_started_us")?;
+            require(
+                started >= scheduled && started <= actual && started >= number(request, "at_us")?,
+                "C response head began before its late schedule",
+            )?;
+        } else {
+            require(
+                entry["bytes"] == json!([67])
+                    && actual >= number(role_event(origin, "c", "head")?, "at_us")?,
+                "late C payload changed or preceded its head",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()> {
-    let slow = case == "slow-origin";
+    let slow = matches!(case, "slow-origin" | "timeout-before-cutoff");
     let head = event(events, "origin-head")?;
     within(
         number(head, "at_us")? + number(head, "duration_us")?,
@@ -893,6 +1031,9 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
         for (entry, byte) in chunks.iter().zip(bytes) {
             require(entry["bytes"] == json!([byte]), "origin chunk bytes differ")?;
         }
+    }
+    if slow {
+        validate_late_c(origin, aligned)?;
     }
     Ok(())
 }
@@ -1572,16 +1713,16 @@ mod tests {
                 ("a", 180000, vec![(180000, 65)]),
                 ("b", 320000, vec![(320000, 66)]),
             ];
-            for (role, head, chunks) in
-                scripts
-                    .into_iter()
-                    .chain((!slow).then_some(("c", 400000, vec![(400000, 67)])))
-            {
+            for (role, head, chunks) in scripts.into_iter().chain(std::iter::once((
+                "c",
+                if slow { 900000 } else { 400000 },
+                vec![(if slow { 900000 } else { 400000 }, 67)],
+            ))) {
                 origin
                     .as_array_mut()
                     .unwrap()
                     .push(json!({"op":"head","role":role,
-                    "at_us":head+1000,"scheduled_us":head+1000,"scenario_scheduled_us":head,
+                    "at_us":head+1000,"write_started_us":head+1000,"scheduled_us":head+1000,"scenario_scheduled_us":head,
                     "schedule_basis":"origin-receipt-minus-guest-at-us"}));
                 for (time, byte) in chunks {
                     origin.as_array_mut().unwrap().push(
@@ -1589,6 +1730,13 @@ mod tests {
                         "at_us":time+1000,"scheduled_us":time+1000,"scenario_scheduled_us":time,
                         "schedule_basis":"origin-receipt-minus-guest-at-us"}),
                     );
+                }
+                if role == "c" {
+                    origin
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"op":"closed","role":"c",
+                        "at_us":head+1001,"reason":"complete"}));
                 }
             }
         }
@@ -1615,6 +1763,199 @@ mod tests {
             let mut duplicate = origin.clone();
             duplicate.as_array_mut().unwrap().push(origin[0].clone());
             assert!(validate(case, "sample", &report, &duplicate).is_err());
+        }
+    }
+
+    fn timeout_sample() -> (Value, Value) {
+        let (mut report, mut origin) = sample("slow-origin");
+        report["case"] = json!("timeout-before-cutoff");
+        report["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"index":3,"via":"check",
+            "elapsed_us":300000,"outcome":{"error":{"kind":"gateway_timeout",
+                "status":504,"reason":"PerCallTimeout"}}}));
+        report["slots"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("AlreadyDelivered"));
+        report["events"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["op"] == "check")
+            .unwrap()["result"] = json!("Item");
+        report["events"].as_array_mut().unwrap().extend([
+            json!({"op":"check","at_us":701001,"duration_us":0,"result":"Item"}),
+            json!({"op":"check","at_us":701002,"duration_us":0,"result":"Item"}),
+            json!({"op":"check","at_us":701003,"duration_us":0,"result":"Finished"}),
+        ]);
+        report["events"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_key(|entry| number(entry, "at_us").unwrap());
+        origin.as_array_mut().unwrap().extend([
+            json!({"op":"request","role":"d","at_us":35030,"guest_at_us":34000}),
+            json!({"op":"closed","role":"d","at_us":1501000,"scheduled_us":1501000,
+                "scenario_scheduled_us":1500000,"reason":"silent",
+                "schedule_basis":"origin-receipt-minus-guest-at-us"}),
+        ]);
+        for entry in origin.as_array_mut().unwrap() {
+            entry["token"] = json!("sample");
+            entry["case"] = json!("timeout-before-cutoff");
+        }
+        (report, origin)
+    }
+
+    #[test]
+    fn timeout_before_cutoff_preserves_siblings_and_per_call_timeout_provenance() {
+        let (report, origin) = timeout_sample();
+        validate("timeout-before-cutoff", "sample", &report, &origin).unwrap();
+        for (field, value) in [
+            ("index", json!(2)),
+            ("via", json!("collect")),
+            ("elapsed_us", json!(500000)),
+            (
+                "outcome",
+                json!({"error":{"kind":"gateway_timeout","status":504,"reason":"BatchCutoff"}}),
+            ),
+            (
+                "outcome",
+                json!({"error":{"kind":"gateway_timeout","status":504,"reason":"RequestDeadline"}}),
+            ),
+            ("outcome", json!({"status":200,"bytes":[68]})),
+        ] {
+            let mut invalid = report.clone();
+            invalid["items"][2][field] = value;
+            assert!(
+                validate("timeout-before-cutoff", "sample", &invalid, &origin).is_err(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            (
+                "slots",
+                json!([
+                    "AlreadyDelivered",
+                    "AlreadyDelivered",
+                    "Unresolved",
+                    "Unresolved"
+                ]),
+            ),
+            ("termination", json!("Completed")),
+            ("items", json!([])),
+        ] {
+            let mut invalid = report.clone();
+            invalid[field] = value;
+            assert!(validate("timeout-before-cutoff", "sample", &invalid, &origin).is_err());
+        }
+        let mut invalid = origin.clone();
+        invalid
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"op":"head","role":"d","at_us":200000,
+            "token":"sample","case":"timeout-before-cutoff"}));
+        assert!(validate("timeout-before-cutoff", "sample", &report, &invalid).is_err());
+        let mut invalid = origin.clone();
+        invalid
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["role"] != "d");
+        assert!(validate("timeout-before-cutoff", "sample", &report, &invalid).is_err());
+    }
+
+    #[test]
+    fn timeout_before_cutoff_diagnostics_do_not_waive_failed_source_timing() {
+        let (mut report, origin) = timeout_sample();
+        report["events"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["op"] == "origin-head")
+            .unwrap()["duration_us"] = json!(676000);
+        validate_timeout_before_cutoff(&report, &origin).unwrap();
+        assert!(validate("timeout-before-cutoff", "sample", &report, &origin).is_err());
+        let (mut report, origin) = timeout_sample();
+        let check = report["events"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["op"] == "check")
+            .unwrap();
+        check["result"] = json!("Finished");
+        assert!(validate_timeout_before_cutoff(&report, &origin).is_err());
+    }
+
+    #[test]
+    fn slow_origin_requires_late_c_evidence_even_when_c_is_unresolved() {
+        for case in ["slow-origin", "timeout-before-cutoff"] {
+            let (report, origin) = if case == "slow-origin" {
+                sample(case)
+            } else {
+                timeout_sample()
+            };
+            validate(case, "sample", &report, &origin).unwrap();
+            for mutation in 0..4 {
+                let mut changed = origin.clone();
+                let entries = changed.as_array_mut().unwrap();
+                match mutation {
+                    0 => entries.retain(|entry| entry["role"] != "c" || entry["op"] != "closed"),
+                    1 => {
+                        entries
+                            .iter_mut()
+                            .find(|entry| entry["role"] == "c" && entry["op"] == "chunk")
+                            .unwrap()["at_us"] = json!(500000);
+                    }
+                    2 => {
+                        let chunk = entries
+                            .iter()
+                            .find(|entry| entry["role"] == "c" && entry["op"] == "chunk")
+                            .unwrap()
+                            .clone();
+                        entries.push(chunk);
+                    }
+                    3 => entries.retain(|entry| entry["role"] != "c" || entry["op"] == "request"),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    validate(case, "sample", &report, &changed).is_err(),
+                    "{case} mutation {mutation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slow_origin_accepts_only_late_c_peer_closes_without_early_payload() {
+        for keep_head in [false, true] {
+            let (report, mut origin) = timeout_sample();
+            let entries = origin.as_array_mut().unwrap();
+            entries.retain(|entry| {
+                entry["role"] != "c"
+                    || entry["op"] != "chunk" && (keep_head || entry["op"] != "head")
+            });
+            let closed = entries
+                .iter_mut()
+                .find(|entry| entry["role"] == "c" && entry["op"] == "closed")
+                .unwrap();
+            closed["reason"] = json!("peer_closed_after_cutoff");
+            validate("timeout-before-cutoff", "sample", &report, &origin).unwrap();
+            if keep_head {
+                let mut early = origin.clone();
+                early
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|entry| entry["role"] == "c" && entry["op"] == "head")
+                    .unwrap()["write_started_us"] = json!(800000);
+                assert!(validate("timeout-before-cutoff", "sample", &report, &early).is_err());
+            }
+            let entries = origin.as_array_mut().unwrap();
+            entries
+                .iter_mut()
+                .find(|entry| entry["role"] == "c" && entry["op"] == "closed")
+                .unwrap()["at_us"] = json!(800000);
+            assert!(validate("timeout-before-cutoff", "sample", &report, &origin).is_err());
         }
     }
 

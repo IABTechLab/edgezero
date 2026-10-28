@@ -37,6 +37,7 @@ impl Probe {
         if !matches!(
             case,
             "slow-origin"
+                | "timeout-before-cutoff"
                 | "fast-origin"
                 | "begin-progress"
                 | "batch-progress"
@@ -81,8 +82,13 @@ impl Probe {
         let uri = format!("{}/{role}", self.base)
             .parse()
             .map_err(|_| invalid())?;
+        let timeout = match role {
+            "origin" => Duration::from_secs(15),
+            "d" if self.case == "timeout-before-cutoff" => Duration::from_millis(300),
+            _ => Duration::from_secs(1),
+        };
         let mut request = OutboundRequest::new(Method::GET, uri)?
-            .timeout(Duration::from_secs(if role == "origin" { 15 } else { 1 }))
+            .timeout(timeout)
             .max_response_bytes(64)
             .header(
                 "x-fixture-at-us",
@@ -378,8 +384,10 @@ async fn run(
     timeline.wait_until(ctx, 34).await?;
     let requests = ["a", "b", "c"]
         .into_iter()
+        .chain((probe.case == "timeout-before-cutoff").then_some("d"))
         .map(|role| probe.request(role, timeline))
         .collect::<Result<Vec<_>, _>>()?;
+    let max_checks = requests.len() + 1;
     let observation_cutoff = timeline.deadline_at(534);
     let at = timeline.clock.now();
     let mut batch = client.start_batch_until(requests, observation_cutoff);
@@ -461,10 +469,10 @@ async fn run(
         collect(batch, report, timeline).await;
         return Ok(());
     }
-    if probe.case == "slow-origin" {
+    if matches!(probe.case.as_str(), "slow-origin" | "timeout-before-cutoff") {
         timeline.wait_until(ctx, 701).await?;
-        // Three slots plus one terminal observation; never spin on Pending.
-        for _ in 0..4 {
+        // One check per slot plus terminal observation; never spin on Pending.
+        for _ in 0..max_checks {
             match check(&mut batch, report, timeline).await {
                 Ok(true) => {}
                 Ok(false) => break,
@@ -687,6 +695,37 @@ mod tests {
                 .unwrap()
                 .case,
             "cpu-stretch"
+        );
+    }
+
+    #[test]
+    fn timeout_before_cutoff_only_shortens_the_fourth_bidder_per_call_timeout() {
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let timeline = Timeline::new(time.clock(), start);
+        let probe =
+            Probe::parse("timeout-before-cutoff", &headers("timeout-before-cutoff")).unwrap();
+        time.advance_to(start + Duration::from_millis(34));
+        for role in ["origin", "a", "b", "c", "d"] {
+            let parts = probe.request(role, &timeline).unwrap().into_parts();
+            let millis = match role {
+                "origin" => 15_000,
+                "d" => 300,
+                _ => 1_000,
+            };
+            assert_eq!(parts.timeout, Some(Duration::from_millis(millis)));
+            assert!(parts.deadline.is_none());
+            assert_eq!(parts.headers["x-fixture-at-us"], "34000");
+        }
+        assert_eq!(timeline.remaining(534), Duration::from_millis(500));
+        let ordinary = Probe::parse("slow-origin", &headers("slow-origin")).unwrap();
+        assert_eq!(
+            ordinary
+                .request("d", &timeline)
+                .unwrap()
+                .into_parts()
+                .timeout,
+            Some(Duration::from_secs(1))
         );
     }
 

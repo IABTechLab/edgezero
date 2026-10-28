@@ -904,11 +904,17 @@ fast origin with a silent mediator, Begin followed by an unrelated 100 ms timer,
 unobserved batch during a separate 300 ms send. Two additional probes exercise a waiting
 `next()` against the original request-start-relative 200 ms cutoff, requiring `Cutoff` by
 205 ms and all three slots unresolved. One origin withholds headers; the other writes a head
-declaring one body byte but withholds both that byte and EOF. The seventh case exercises
+declaring one body byte but withholds both that byte and EOF. A seventh case exercises
 CPU-stretch scenario 3: the guest consumes A before synchronous work from 520 to 560 ms,
 while B is scheduled at 530 ms and C after the original 534 ms cutoff. B is either delivered
 with an on-time recorded arrival or remains unresolved; a delivered elapsed time of 500 ms
-or more is always rejected. The suite still does not implement the remaining response-owned,
+or more is always rejected. The eighth case extends the slow-origin scenario with a fourth
+bidder D whose per-call timeout is 300 ms and whose origin sends no response. Late checks must
+return indices 0, 1 and 3 with elapsed 146, 286 and 300 ms, preserving D's typed `PerCallTimeout`
+504 before `Cutoff`. C stays unresolved; the other three positions are `AlreadyDelivered`.
+The original three-slot slow-origin case remains separate. D's source closes silently at
+scenario 1500 ms; this bounded fixture cleanup is not evidence of SDK cancellation.
+The suite still does not implement the remaining response-owned,
 cleanup, cap and reusable-sandbox acceptance scenarios.
 
 Each case records actual guest operation entry/duration, per-slot arrival elapsed, exact
@@ -925,15 +931,18 @@ cutoff. These probes do not close the complete scenario 16 acceptance leg or cer
 cancellation. Release ends the fixture's hold; it is not evidence of provider teardown.
 Bodies are capped at 64 bytes. The existing bounded origin collector/parser and joined worker
 ownership are reused; registrations, roles and event counts are finite, and unexpected or late
-worker failures prevent a passing inventory. The suite runs all seven cases even when an earlier
+worker failures prevent a passing inventory. The suite runs all eight cases even when an earlier
 case fails, but publishes success only after runtime and origin cleanup succeed.
 
 Host request-send and guest request-start have different origins, particularly on a cold guest.
-The two timeline cases explicitly record a separate scheduling alignment derived from the first
+The slow/fast timeline cases, including the fourth-slot variant, record a scheduling alignment derived from the first
 origin receipt and its guest send timestamp. Transit uncertainty remains unknown and
 `clock_sync_proven` remains false. Scheduled timestamps never replace actual writes or guest
 observations. The frozen +/-5 ms timeline targets remain checked; misses return exit 1, not a
-qualified pass. For quiet-window proofs, a head-write-start/guest-head-observation causal bound
+qualified pass. The fourth-slot case also records `timeout_contract` with its own status/error,
+even when an earlier source-timing check fails. That diagnostic subresult cannot pass the whole
+case, close its acceptance leg or prove prompt native timer wakeup.
+For quiet-window proofs, a head-write-start/guest-head-observation causal bound
 conservatively compares receipts without pretending the clocks are synchronized. The 5 ms
 measurement guard makes that proof stricter, and is not an extra deadline allowance.
 

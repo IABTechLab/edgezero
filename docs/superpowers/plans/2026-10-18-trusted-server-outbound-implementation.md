@@ -617,6 +617,56 @@ concrete cross-test cancellation or overwrite. A possible transient spawn failur
 hypothesis until CI exposes the actual error; do not report the CI failure fixed from a local
 pass or silently replace the integration test. Fresh hosted checks remain required.
 
+### D6 Fourth-Slot Timeout Acceptance Checkpoint (2026-10-28)
+
+Continue the approved D6 acceptance implementation with EZ-6 criterion 14, without changing the
+original three-slot slow-origin case. The distinct `timeout-before-cutoff` case preserves origin
+Begin at 2 ms, batch start 34 ms, cutoff 534 ms, A/B/C schedules and the chunked origin. Only a
+fourth slot D receives a 300 ms per-call timeout; no absolute request deadline replaces it.
+D's source sends no bytes and closes boundedly at scenario 1500 ms. Late checks must return
+indices 0, 1 and 3 with elapsed 146/286/300 ms, exact `PerCallTimeout`/504 for D, then `Cutoff`.
+Collection preserves three `AlreadyDelivered` positions and unresolved C. Existing worker,
+connection, event, body and I/O bounds remain unchanged; no additional transport or scheduler.
+
+Tests first fail for the absent case, then cover request construction, source silence, typed
+timeout provenance, non-consecutive identity and lossless collection. A separate diagnostic
+`timeout_contract` subresult is evaluated even if strict source timing fails; overall acceptance
+still requires both and never substitutes scheduled time for actual observations. Review found
+missing late-C validation in both slow cases; a red missing-terminal mutation then drove exact
+900 ms head/payload/terminal checks, including supported late peer-close shapes without early
+payload. Independent specification, source/cleanup and code-quality reviews are clear.
+
+All five root Rust gates pass, including 2,568 tests in 32 binaries (one ignored). The complete
+TCP-enabled harness has 243 passing tests (one ignored), the qualification guest has 49, and
+strict harness/guest Clippy, formatting, docs lint/format, legacy/docs/inventory guards and 36
+evidence-checker regressions pass. An initial sandboxed full harness run denied existing TCP
+binds; the unchanged loopback-enabled rerun passes.
+
+Final reviewed local runs preserve the entire eight-case suite and all strict timing checks:
+
+| Local Runtime | Timeout Contract Diagnostic | Complete Fourth-Slot Case | Complete Suite |
+| ------------- | --------------------------- | ------------------------- | -------------- |
+| Axum | Pass | Fail: origin EOF at 1305.325 ms | Exit 1 |
+| Repaired Viceroy 0.21.0 | Pass | Fail: B source write 5.033 ms late | Exit 1 |
+| Spin 4.1.0 | Pass | Pass, unqualified | Exit 1 |
+| workerd 2026-09-10 | Pass | Fail: origin EOF at 1306 ms | Exit 1 |
+
+D's elapsed is exactly 300 ms on all four, with `PerCallTimeout`, indices 0/1/3 and the required
+lossless collection states. All four quiet/pending-cutoff controls pass on every target. Slow
+origin still fails on every target; CPU passes locally on Axum/repaired Viceroy/Spin and fails
+the B write-interval precondition on workerd. Artifacts remain at
+`/private/tmp/edgezero-timeout-reviewed-20261028/{axum,viceroy,spin,workerd}`. Earlier Axum and
+stock-Viceroy characterizations are kept separately; no passing earlier sample replaces a final
+failure. These observations do not qualify criterion 14 or promote any inventory leg.
+
+An isolated native diagnostic reproduced condition-variable wake overshoot of 0.630..5.040 ms
+over twelve waits, enough to invalidate a strict source-write target before any transport
+comparison. This is not proof of a production defect or a reason to relax the frozen targets.
+No further timer workaround is added. Actual SDK body-entry evidence still requires a proved
+observation of the same buffered batch; native call-site inspection is not that witness.
+G1 remains 32 ready / 479 planned and unqualified; no candidate freeze, deployment, requirement
+change, capability promotion or provider/runtime pin change is authorized by this checkpoint.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

@@ -480,6 +480,11 @@ fixture. Fix only the corresponding adapter implementation when a parity case fa
 
 ## Task D6: Lifetime and Late-Collection Qualification
 
+The [fourth-slot timeout checkpoint](2026-10-18-trusted-server-outbound-implementation.md#d6-fourth-slot-timeout-acceptance-checkpoint-2026-10-28)
+adds criterion 14 to the existing eight-case local suite. Its all-target timeout diagnostics pass,
+but strict source timing and full lifetime/hosted qualification remain open; no parent task or
+inventory leg is closed by that subresult.
+
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
 `runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.
 

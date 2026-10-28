@@ -6,6 +6,7 @@ const EVENT_LIMIT: usize = 32;
 #[derive(Clone, Copy)]
 enum Case {
     Slow,
+    Timeout,
     Fast,
     Begin,
     Batch,
@@ -18,6 +19,7 @@ impl Case {
     fn parse(case: &str) -> Result<Self> {
         match case {
             "slow-origin" => Ok(Self::Slow),
+            "timeout-before-cutoff" => Ok(Self::Timeout),
             "fast-origin" => Ok(Self::Fast),
             "begin-progress" => Ok(Self::Begin),
             "batch-progress" => Ok(Self::Batch),
@@ -31,6 +33,7 @@ impl Case {
     fn name(self) -> &'static str {
         match self {
             Self::Slow => "slow-origin",
+            Self::Timeout => "timeout-before-cutoff",
             Self::Fast => "fast-origin",
             Self::Begin => "begin-progress",
             Self::Batch => "batch-progress",
@@ -43,6 +46,7 @@ impl Case {
     fn permits(self, role: &str) -> bool {
         match self {
             Self::Slow => matches!(role, "origin" | "a" | "b" | "c"),
+            Self::Timeout => matches!(role, "origin" | "a" | "b" | "c" | "d"),
             Self::Cpu => matches!(role, "origin" | "a" | "b" | "c" | "calibration"),
             Self::Fast => matches!(role, "origin" | "a" | "b" | "c" | "mediator"),
             Self::Begin => role == "origin",
@@ -347,7 +351,11 @@ pub(super) fn serve(
             None
         };
         require(!lifetime.roles.contains(*role), "duplicate lifetime role")?;
-        if matches!(lifetime.case, Case::Slow | Case::Fast | Case::Cpu) && *role == "origin" {
+        if matches!(
+            lifetime.case,
+            Case::Slow | Case::Timeout | Case::Fast | Case::Cpu
+        ) && *role == "origin"
+        {
             lifetime.scenario_anchor = Some(
                 head_received
                     .checked_sub(Duration::from_micros(guest_at))
@@ -368,7 +376,11 @@ pub(super) fn serve(
         if let Some(observed) = observed {
             event["origin_head_observed_us"] = json!(observed);
         }
-        if matches!(lifetime.case, Case::Slow | Case::Fast | Case::Cpu) && *role == "origin" {
+        if matches!(
+            lifetime.case,
+            Case::Slow | Case::Timeout | Case::Fast | Case::Cpu
+        ) && *role == "origin"
+        {
             event["alignment"] = json!({
                 "basis":"origin-receipt-minus-guest-at-us",
                 "scenario_anchor_host_offset_us":offset(lifetime.scenario_anchor.unwrap(),anchor),
@@ -391,7 +403,7 @@ pub(super) fn serve(
             Ok(false)
         }
     });
-    let expected_close = matches!(exchange.case, Case::Slow | Case::Cpu)
+    let expected_close = matches!(exchange.case, Case::Slow | Case::Timeout | Case::Cpu)
         && exchange.role == "c"
         && exchange
             .scenario_anchor
@@ -409,7 +421,11 @@ pub(super) fn serve(
                 )
             });
     let close = socket.shutdown(Shutdown::Both);
-    let scheduled_close = if matches!(exchange.case, Case::Fast) && exchange.role == "mediator" {
+    let silent = matches!(
+        (exchange.case, exchange.role),
+        (Case::Fast, "mediator") | (Case::Timeout, "d")
+    );
+    let scheduled_close = if silent {
         exchange
             .scenario_anchor
             .map(|anchor| anchor + Duration::from_millis(1500))
@@ -419,7 +435,7 @@ pub(super) fn serve(
     let mut event = exchange.event("closed", Instant::now(), scheduled_close);
     event["reason"] = json!(match &outcome {
         Err(_) if expected_close => "peer_closed_after_cutoff",
-        Ok(true) if exchange.role == "mediator" => "silent",
+        Ok(true) if silent => "silent",
         Ok(true) => "complete",
         Ok(false) if exchange.case.held() && !shared.lock().stop => "fixture_released",
         Ok(false) => "stopped",
@@ -446,7 +462,10 @@ pub(super) fn serve(
 }
 
 fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
-    if !matches!(exchange.case, Case::Slow | Case::Fast | Case::Cpu) {
+    if !matches!(
+        exchange.case,
+        Case::Slow | Case::Timeout | Case::Fast | Case::Cpu
+    ) {
         return Ok(true);
     }
     let deadline = Instant::now() + IO_BUDGET;
@@ -525,7 +544,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
     let absolute = |value| exchange.scenario_anchor.unwrap() + ms(value);
     let received = |value| exchange.received + ms(value);
     let (head_at, chunks): (Instant, Vec<(Instant, &[u8])>) = match (exchange.case, exchange.role) {
-        (Case::Slow, "origin") => (
+        (Case::Slow | Case::Timeout, "origin") => (
             absolute(700),
             vec![
                 (absolute(700), b"O"),
@@ -537,14 +556,14 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         (Case::Cpu, "origin") => (absolute(100), vec![(absolute(100), b"O")]),
         (Case::Begin, "origin") => (received(150), vec![(received(150), b"O")]),
         (Case::Batch, "quiet") => (received(300), Vec::new()),
-        (Case::Fast, "mediator") => {
+        (Case::Fast, "mediator") | (Case::Timeout, "d") => {
             // Stay silent beyond both the auction cutoff and the 1000 ms per-call timer.
             return Ok(wait_until(shared, absolute(1500)));
         }
         (case, role @ ("a" | "b" | "c")) => {
             let index = usize::from(role.as_bytes()[0] - b'a');
             let at = match case {
-                Case::Slow => absolute([180, 320, 900][index]),
+                Case::Slow | Case::Timeout => absolute([180, 320, 900][index]),
                 Case::Fast => absolute([180, 320, 400][index]),
                 Case::Cpu => absolute([180, 530, 900][index]),
                 Case::Batch => received([20, 40, 60][index]),
@@ -604,6 +623,43 @@ mod tests {
     fn registration_accepts_the_same_ascii_token_alphabet_as_the_guest() {
         let shared = Shared::default();
         register(&shared, "Run_1-a", "begin-progress").unwrap();
+    }
+
+    #[test]
+    fn timeout_before_cutoff_origin_never_sends_a_fourth_bidder_response() {
+        let origins = WireOrigins::start().unwrap();
+        origins
+            .register_lifetime("timeout", "timeout-before-cutoff")
+            .unwrap();
+        origins.mark_lifetime_start("timeout").unwrap();
+        let origin = connect(
+            &origins,
+            "timeout",
+            "timeout-before-cutoff",
+            "origin",
+            "2000",
+        );
+        let silent = connect(&origins, "timeout", "timeout-before-cutoff", "d", "34000");
+        assert!(read(origin).ends_with(b"1\r\n!\r\n0\r\n\r\n"));
+        assert!(read(silent).is_empty());
+        let events = origins.take_lifetime_events("timeout").unwrap();
+        let phases: Vec<_> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["role"] == "d")
+            .map(|entry| entry["op"].as_str().unwrap())
+            .collect();
+        assert_eq!(phases, ["request", "closed"]);
+        let closed = event(&events, "d", "closed");
+        assert_eq!(closed["reason"], "silent");
+        assert_eq!(closed["scenario_scheduled_us"], 1_500_000);
+        assert!(closed["at_us"].as_i64().unwrap() >= closed["scheduled_us"].as_i64().unwrap());
+        assert_eq!(
+            event(&events, "origin", "head")["scenario_scheduled_us"],
+            700_000
+        );
+        origins.finish().unwrap();
     }
 
     #[test]
