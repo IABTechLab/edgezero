@@ -123,6 +123,8 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Replace test-origin accept sleeps with harness-only readiness and explicit shutdown wakes.
   Preserve connection/worker limits and I/O budgets; prove stop/admission races and bounded
   fallback after failed wakes without adding production dependencies or relaxing timing gates.
+- Expose underlying version-probe failures in request-fidelity test assertions instead of
+  hiding a subprocess error behind an expected-version assertion.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

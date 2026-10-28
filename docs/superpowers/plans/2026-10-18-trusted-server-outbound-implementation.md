@@ -602,6 +602,21 @@ qualification remain open. Inventory remains 32 ready / 479 planned, unqualified
 requirement/interface, capability, production code or SDK/runtime pin changes; no deployment,
 candidate freeze or qualification promotion.
 
+### CI Diagnostic Follow-Up To Readiness Checkpoint (2026-10-28)
+
+At `d3f48564`, workspace CI job `123098227714` in run `40768269499` failed in the pre-existing
+request-fidelity runner's `version_diagnostic_includes_expected_and_actual` test, before the new
+shared-harness tests ran. The assertion hid the returned error. Missing `expected-pin` shows
+that command execution failed before version comparison, but the log does not establish the
+underlying OS/process error. The exact nonzero test passes locally; all 20 runner tests pass
+locally with one ignored, as do its formatting and strict Clippy checks.
+
+Add the error's debug representation to both assertions, without changing their conditions,
+subprocess execution, version policy, retries or cancellation. Independent reviews found no
+concrete cross-test cancellation or overwrite. A possible transient spawn failure remains a
+hypothesis until CI exposes the actual error; do not report the CI failure fixed from a local
+pass or silently replace the integration test. Fresh hosted checks remain required.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

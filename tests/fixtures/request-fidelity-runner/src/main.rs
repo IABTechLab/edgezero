@@ -1429,8 +1429,8 @@ mod tests {
             &cancelled,
         )
         .expect_err("wrong tool version");
-        assert!(error.to_string().contains("expected-pin"));
-        assert!(error.to_string().contains("9.9.9"));
+        assert!(error.to_string().contains("expected-pin"), "{error:?}");
+        assert!(error.to_string().contains("9.9.9"), "{error:?}");
     }
 
     #[test]
