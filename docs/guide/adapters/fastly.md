@@ -435,16 +435,16 @@ from an unavailable first snapshot. Warnings through the log facade may be lost
 before a logger is installed; absence of a warning does not establish a healthy
 configuration read.
 
-SDK 0.12.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
+SDK 0.13.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
 `with_max_memory`. A value of zero disables the request-count or memory limit;
 it does not request zero callbacks or zero memory use. The lifetime limit is
 measured from `Serve` construction, including time before the first callback.
 `with_timeout` bounds only the idle wait for the next request; it does not bound
 handler or backend time. If your service is billed by memory × wall-clock time,
 idle waiting is billed too. Limits do not guarantee reuse; any request may start a
-fresh sandbox. The standalone Viceroy 0.17.0 pinned for the fixtures admits at most
-six requests per guest even with a larger SDK request limit. `edgezero serve` runs
-`fastly compute serve`, whose bundled Viceroy can differ. Neither local ceiling
+fresh sandbox. The fixtures pin standalone Viceroy 0.21.0. Local request ceilings depend on
+the runtime version and must be checked when pins change. `edgezero serve` runs
+`fastly compute serve`, whose bundled Viceroy can differ. Neither local runtime
 establishes deployed behavior.
 Lifetime and memory checks occur between callbacks and cannot interrupt
 blocked application work. Before using a local memory limit, verify that the
@@ -600,6 +600,45 @@ results do not establish deployed eviction frequency, endpoint-handle validity,
 resource accounting, or performance. Named endpoint delivery must be verified
 separately from echoed stdout. Roll back by restoring the original single-request
 entry point and removing retained state, not merely setting a request limit of one.
+
+## Early ingress snapshots
+
+Call `request::capture_request_ingress(&req)` immediately after acquiring the
+native request and before URL-based shortcuts or native mutation. It borrows
+the same request without round-tripping handles. With Fastly SDK 0.13.1,
+safe raw-target acquisition is unavailable: the snapshot records `NotExposed`
+first, then uses the SDK runtime URL only to recover the canonical origin.
+This URL access can normalize the path; it never establishes original-target
+preservation. Client requests need one valid Host consistent with the runtime
+authority, including equivalent default ports. Origin provenance is
+`RuntimeUri`; absent TLS metadata does not establish an HTTP scheme. Synthetic
+requests and missing, duplicate, invalid or inconsistent Host have no origin.
+
+Use `request::dispatch_with_registries_and_ingress(app, req, stores, ingress, extend)`
+to retain that snapshot after later native mutations. The registry dispatcher
+preserves manifest store IDs through logical resource-link aliases and uses
+each logical config store ID as its entry key. It inserts
+the snapshot after scratch extensions, so a callback cannot accidentally
+replace it. Ordinary runners and existing converters capture once and delegate.
+Supplied metadata and fidelity are caller assertions; syntax validation does
+not independently establish their provenance.
+
+Viceroy probes retain tested ordinary repeated fields and FF header octets.
+Identical repeated Content-Length fields fold into one; conflicting lengths are
+rejected with 400 before application dispatch. These parser observations do not
+establish preservation for every incoming request. The probes also
+demonstrate that a normalized native shortcut can receive
+`/reserved/../native` as `/native`. The router hook cannot intercept a shortcut
+taken earlier. Original-target support and safe shortcut exclusion remain
+blocked on the SDK accessor; client/TLS preservation must be proved on the
+appropriate ingress. See [the capability matrix](./overview#inbound-request-fidelity).
+
+Fastly exposes `get_original_header_names()` and `get_original_header_count()`.
+These provide original-name ordering and a total count, but cannot associate
+original fields with converted values. Local Viceroy can lowercase and deduplicate
+names, so global order is `Unknown`, pending production verification. Aggregate
+count equality cannot prove per-header multiplicity; no per-header guarantees
+are inferred from it.
 
 ## Next Steps
 
