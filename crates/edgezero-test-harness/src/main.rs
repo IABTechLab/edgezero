@@ -50,7 +50,7 @@ impl Args {
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "edgezero-test-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
+                    "edgezero-test-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|outbound-lifetimes|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
                 );
                 std::process::exit(0);
             }
@@ -84,6 +84,7 @@ impl Args {
                 "outbound-progress",
                 "outbound-overflow",
                 "outbound-wire",
+                "outbound-lifetimes",
                 "response-framing",
                 "synthesized-headers",
             ]
@@ -98,8 +99,9 @@ impl Args {
             "Fastly receive suites require --adapter fastly",
         )?;
         require(
-            a.suite != "outbound-wire" || (adapter_selected && a.adapter != "all"),
-            "outbound-wire requires one explicit adapter",
+            !matches!(a.suite.as_str(), "outbound-wire" | "outbound-lifetimes")
+                || (adapter_selected && a.adapter != "all"),
+            "wire and lifetime suites require one explicit adapter",
         )?;
         require(
             a.requests > 0 && a.repetitions > 0,
@@ -696,6 +698,17 @@ mod layout_tests {
 #[cfg(test)]
 mod argument_tests {
     use super::Args;
+
+    #[test]
+    fn outbound_lifetimes_selects_exactly_one_explicit_provider() {
+        for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
+            let result = Args::parse_from(
+                ["--adapter", adapter, "--suite", "outbound-lifetimes"].map(str::to_owned),
+            );
+            assert_eq!(result.is_ok(), adapter != "all", "{adapter}");
+        }
+        assert!(Args::parse_from(["--suite", "outbound-lifetimes"].map(str::to_owned)).is_err());
+    }
 
     #[test]
     fn outbound_wire_suite_is_explicit_and_selects_one_supported_provider() {

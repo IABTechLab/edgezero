@@ -7,6 +7,7 @@ applications. Unit and adapter contract tests remain in their owning crates.
 ```sh
 cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
 scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-wire
+scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-lifetimes
 ```
 
 The shell entrypoint selects this runner; fixture applications, their target directory,

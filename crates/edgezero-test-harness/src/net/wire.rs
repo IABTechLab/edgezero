@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod lifetimes;
+
 const GZIP_TEN: &[u8] = &[
     31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 76, 132, 1, 0, 240, 205, 17, 76, 10, 0, 0, 0,
 ];
@@ -33,6 +35,7 @@ struct State {
     gates: HashMap<String, bool>,
     bidders: [bool; 3],
     release_bidders: bool,
+    lifetimes: HashMap<String, lifetimes::Lifetime>,
 }
 
 #[derive(Default)]
@@ -109,6 +112,18 @@ impl WireOrigins {
         self.ports[index]
     }
 
+    pub fn register_lifetime(&self, token: &str, case: &str) -> Result<()> {
+        lifetimes::register(&self.shared, token, case)
+    }
+
+    pub fn mark_lifetime_start(&self, token: &str) -> Result<()> {
+        lifetimes::mark_start(&self.shared, token)
+    }
+
+    pub fn take_lifetime_events(&self, token: &str) -> Result<Value> {
+        lifetimes::take_events(&self.shared, token)
+    }
+
     pub fn arm(&self, name: &str) {
         let mut state = self.shared.lock();
         if name.is_empty()
@@ -158,6 +173,14 @@ impl WireOrigins {
         }
         if !state.requests.is_empty() {
             errors.push(format!("{} undrained P5 requests", state.requests.len()));
+        }
+        for (token, lifetime) in &state.lifetimes {
+            if lifetime.undrained() != 0 {
+                errors.push(format!(
+                    "{} undrained lifetime events for {token}",
+                    lifetime.undrained()
+                ));
+            }
         }
         require(errors.is_empty(), errors.join("; "))
     }
@@ -256,13 +279,45 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
         socket: socket.try_clone()?,
         deadline: Instant::now() + IO_BUDGET,
     });
+    let head_started = Instant::now();
     let head = read_head(&mut reader, &mut 0, Profile::Wire).map_err(|error| error.name())?;
+    let head_received = Instant::now();
     let parts: Vec<_> = head.first.split(' ').collect();
     require(
         head.first.is_ascii() && parts.len() == 3 && matches!(parts[2], "HTTP/1.0" | "HTTP/1.1"),
         "invalid wire request line",
     )?;
     let (method, target) = (parts[0], parts[1]);
+    if target.starts_with("/lifetimes/") {
+        require(
+            method == "GET"
+                && !head
+                    .fields
+                    .iter()
+                    .any(|(name, _)| name == "transfer-encoding")
+                && head
+                    .fields
+                    .iter()
+                    .filter(|(name, _)| name == "content-length")
+                    .count()
+                    <= 1
+                && head
+                    .fields
+                    .iter()
+                    .filter(|(name, _)| name == "content-length")
+                    .all(|(_, value)| value == "0")
+                && reader.buffer().is_empty(),
+            "invalid lifetime method or framing",
+        )?;
+        return lifetimes::serve(
+            &mut socket,
+            target,
+            &head.fields,
+            shared,
+            head_started,
+            head_received,
+        );
+    }
     if target.starts_with("/p5/") {
         require(
             method == "GET"
@@ -621,6 +676,14 @@ mod tests {
         assert!(
             state.requests.is_empty(),
             "rejected request produced a P5 receipt"
+        );
+    }
+
+    #[test]
+    fn lifetime_routes_reject_unregistered_tokens() {
+        assert_rejected_without_receipt(
+            b"GET /lifetimes/missing/begin-progress/origin HTTP/1.1\r\nx-fixture-at-us: 2\r\n\r\n",
+            "unknown lifetime token",
         );
     }
 

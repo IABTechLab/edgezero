@@ -103,6 +103,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   standard request-context client. Preserve the Spin inventory and require exact provider-specific
   source errors. Cover cleanup before runtime startup and distinguish confirmed requested SIGTERM
   wrapper exits from premature runtime exits. These local checks do not qualify hosted behavior.
+- Add fixed Begin/Batch lifetime probes to the same Rust harness and production-client guests.
+  Preserve actual host writes, guest observations, original cutoffs, typed failures and mixed
+  collection states. Reject late or incomplete evidence; keep timeline misses and provider
+  progress failures visible rather than widening tolerances or promoting qualification.
 
 ### Main Integration
 

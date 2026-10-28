@@ -2,6 +2,7 @@ use crate::{evidence::*, net::Backend, *};
 use std::collections::{BTreeSet, HashMap, HashSet};
 mod assembly;
 mod framing;
+mod lifetimes;
 mod overflow;
 mod progress;
 mod readiness;
@@ -246,6 +247,9 @@ fn custom_initialization_contract(
 }
 
 pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "outbound-lifetimes" {
+        return lifetimes::run("fastly", run, records);
+    }
     let Some(exe) = executable("VICEROY_BIN", "viceroy") else {
         return records.push(json!({"status":"unsupported","reason":"Viceroy unavailable"}));
     };
@@ -1189,6 +1193,9 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "outbound-lifetimes" {
+        return lifetimes::run(name, run, records);
+    }
     if args.suite == "outbound-wire" {
         return wire::run(name, run, records);
     }

@@ -44,6 +44,17 @@ struct State {
     dispatch_returned: Option<Arc<AtomicBool>>,
 }
 
+pub(super) fn pause(
+    ctx: &RequestContext,
+    duration: Duration,
+) -> Result<LocalBoxFuture<'static, ()>, EdgeError> {
+    let state = ctx
+        .extensions()
+        .get::<Arc<State>>()
+        .ok_or_else(probe_failure)?;
+    Ok(state.runtime.pause(duration))
+}
+
 struct HandlerReturned(Arc<AtomicBool>);
 
 struct FramingObserver;
@@ -97,6 +108,7 @@ pub fn router(
             super::response_headers::probe,
         )
         .get("/progress/redirect", super::redirect::probe)
+        .get("/progress/lifetimes/{case}", super::lifetimes::probe)
         .get("/progress/{case}", progress)
         .post("/progress/{case}", progress)
         .post("/progress/overflow/{case}", super::overflow::probe)
@@ -567,6 +579,23 @@ mod tests {
             .header("x-fixture-backend", target)
             .body(Body::empty())
             .unwrap()
+    }
+
+    #[test]
+    fn lifetime_pause_reuses_only_the_configured_runtime_timer() {
+        let runtime = Fake::default();
+        let mut ctx =
+            RequestContext::new(request("empty", "http://127.0.0.1:1"), Default::default());
+        assert!(pause(&ctx, Duration::from_millis(100)).is_err());
+        ctx.extensions_mut().insert(Arc::new(State {
+            runtime: Arc::new(runtime.clone()),
+            host_signal: Value::Null,
+            dispatch_returned: None,
+        }));
+        let timer = pause(&ctx, Duration::from_millis(100)).unwrap();
+        assert!(runtime.0.lock().unwrap().is_empty());
+        block_on(timer);
+        assert_eq!(*runtime.0.lock().unwrap(), ["wait"]);
     }
 
     #[test]

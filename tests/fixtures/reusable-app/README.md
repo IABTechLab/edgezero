@@ -889,6 +889,39 @@ errors must be Cloudflare `Transport` at `ResponseBodyRead`, not Spin's `Protoco
 Both runners share cleanup, including pre-startup failures, and publish success only afterward.
 The local workerd run is distinct from Node guest fixtures and from hosted cancellation evidence.
 
+## Begin And Batch Lifetime Probes
+
+```sh
+./scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-lifetimes
+```
+
+The same suite accepts `fastly`, `cloudflare` or `spin` with the explicit local tooling above.
+It exercises EZ-6 scenarios 1, 2, 4 and 5 through the injected production client: slow origin,
+fast origin with a silent mediator, Begin followed by an unrelated 100 ms timer, and an
+unobserved batch during a separate 300 ms send. It does not implement CPU-stretch scenario 3
+or the remaining response-owned, cleanup, cap and reusable-sandbox acceptance scenarios.
+
+Each case records actual guest operation entry/duration, per-slot arrival elapsed, exact
+collection states, typed errors, and independently observed host receipts/head/chunk writes.
+Bodies are capped at 64 bytes. The existing bounded origin collector/parser and joined worker
+ownership are reused; registrations, roles and event counts are finite, and unexpected or late
+worker failures prevent a passing inventory. The suite runs all four cases even when an earlier
+case fails, but publishes success only after runtime and origin cleanup succeed.
+
+Host request-send and guest request-start have different origins, particularly on a cold guest.
+The two timeline cases explicitly record a separate scheduling alignment derived from the first
+origin receipt and its guest send timestamp. Transit uncertainty remains unknown and
+`clock_sync_proven` remains false. Scheduled timestamps never replace actual writes or guest
+observations. The frozen +/-5 ms timeline targets remain checked; misses return exit 1, not a
+qualified pass. For quiet-window proofs, a head-write-start/guest-head-observation causal bound
+conservatively compares receipts without pretending the clocks are synchronized. The 5 ms
+measurement guard makes that proof stricter, and is not an extra deadline allowance.
+
+These are local characterization/acceptance probes, not a hosted evidence package. Until the
+complete declared criteria and timing evidence pass, the inventory bindings stay planned.
+No candidate freeze, provider capability promotion, deployment, or optional idle-body adoption
+is implied. Run artifacts preserve failures as well as successes.
+
 Cloudflare and Spin may select different guests during overlap or recovery tests;
 those observations are unverified. A success requires the same instance and the
 specific injected failure. Overlap checks use each request's `before.inflight`

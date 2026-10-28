@@ -285,6 +285,34 @@ its explicit tool/runtime setup, separately from the passing local command. Rema
 registration, consumer and hosted acceptance work stays open in the owning tasks;
 this relocation does not mark the complete adoption plan finished.
 
+### Begin/Batch Lifetime Probe Checkpoint (2026-10-27)
+
+The standalone Rust harness now has `--suite outbound-lifetimes`, using the same bounded
+origin collector, parser, process supervision and production-client guests as the redirect
+suite. It implements the four fixed EZ-6 scenarios 1, 2, 4 and 5, with independently measured
+receipts and writes, guest entry/completion times, original cutoffs, typed mediator failures
+and exact mixed collection states. CPU-stretch and the other lifetime scenarios remain open.
+Clock alignment is explicit, transit uncertainty remains unknown, and schedule timestamps
+never substitute for actual observations. Quiet-window proofs use a conservative causal bound,
+not an assumed common host/guest clock origin. Cleanup failures prevent passing inventories.
+
+Local characterization above `b5f94c70` found that all four adapters pass the Begin/unobserved
+batch progress cases. Slow/fast timeline runs do **not** pass their strict timing targets;
+those misses remain failures. Spin additionally loses the slow-origin batch: the producer's
+first poll occurs only after the origin head, after the original cutoff, so no bidder request
+is sent. Temporary instrumentation reproduced the cause at the existing SDK boundary:
+`wit-bindgen 0.57.1` drains newly spawned tasks after returning Pending without arranging
+another poll before waiting on the old host operation. The temporary prints were removed.
+Current upstream code drains that work before sleeping; integration of a compatible audited
+fix is a separate dependency decision, not a reason to drive producers from observers,
+add another executor, extend deadlines or weaken the outbound requirements.
+
+The existing redirect regression and fixture/harness unit checks remain separate from these
+failed acceptance runs. No new leg is marked ready: the inventory remains 32 ready and 479
+planned, with qualification false. Candidate freeze, hosted evidence, provider capability
+promotion and optional idle-body adoption remain unchanged. The SDK repair and exact timing
+evidence are required before these scenarios can close their owning D6/Q3 work.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

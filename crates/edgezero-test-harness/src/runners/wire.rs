@@ -419,9 +419,9 @@ fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Proc
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     match name {
-        "cloudflare" => return cloudflare(run, records),
-        "axum" => return progress_wire("axum", run, records, None),
-        "fastly" => return progress_wire("fastly", run, records, None),
+        "cloudflare" => return progress_wire("cloudflare", run, records),
+        "axum" => return progress_wire("axum", run, records),
+        "fastly" => return progress_wire("fastly", run, records),
         _ => {}
     }
     require(name == "spin", "wire suite requires Spin")?;
@@ -511,24 +511,56 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         "bodyless_controls":4,"upload_controls":1,"scope_controls":1,"handoff_controls":1,"qualification":false}))
 }
 
-fn cloudflare(run: &Path, records: &mut Records) -> Result<()> {
-    let Some(workerd) = executable("MINIFLARE_WORKERD_PATH", "workerd") else {
-        return records.push(json!({"status":"unsupported","adapter":"cloudflare",
-            "reason":"set MINIFLARE_WORKERD_PATH to the local workerd executable","qualification":false}));
-    };
-    let version = Command::new(&workerd).arg("--version").output()?;
-    require(version.status.success(), "workerd version probe failed")?;
-    records.push(json!({"event":"workerd-runtime","adapter":"cloudflare",
-        "version":String::from_utf8(version.stdout)?.trim(),"artifact":artifact(&workerd)?,"qualification":false}))?;
-    progress_wire("cloudflare", run, records, Some(workerd))
+fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Result<()> {
+    let result = progress_suite(
+        name,
+        "outbound-wire",
+        run,
+        records,
+        |port, origins, records| {
+            let mut matrix = Matrix {
+                adapter: name,
+                endpoint: "/progress/redirect",
+                port,
+                origins,
+                records,
+                exchanges: 0,
+                dispatches: 0,
+            };
+            matrix.run()?;
+            Ok((matrix.exchanges, matrix.dispatches))
+        },
+    )?;
+    if let Some((exchanges, dispatches)) = result {
+        records.push(
+            json!({"event":format!("{name}-wire-inventory"),"status":"pass",
+            "exchanges":exchanges,"origin_requests":dispatches,"qualification":false}),
+        )?;
+    }
+    Ok(())
 }
 
-fn progress_wire(
-    name: &'static str,
+pub(super) fn progress_suite<T>(
+    name: &str,
+    suite: &str,
     run: &Path,
     records: &mut Records,
-    workerd: Option<PathBuf>,
-) -> Result<()> {
+    check: impl FnOnce(u16, &WireOrigins, &mut Records) -> Result<T>,
+) -> Result<Option<T>> {
+    let workerd = if name == "cloudflare" {
+        let Some(workerd) = executable("MINIFLARE_WORKERD_PATH", "workerd") else {
+            records.push(json!({"status":"unsupported","adapter":"cloudflare",
+                "reason":"set MINIFLARE_WORKERD_PATH to the local workerd executable","qualification":false}))?;
+            return Ok(None);
+        };
+        let version = Command::new(&workerd).arg("--version").output()?;
+        require(version.status.success(), "workerd version probe failed")?;
+        records.push(json!({"event":"workerd-runtime","adapter":"cloudflare",
+            "version":String::from_utf8(version.stdout)?.trim(),"artifact":artifact(&workerd)?,"qualification":false}))?;
+        Some(workerd)
+    } else {
+        None
+    };
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root())
@@ -543,12 +575,12 @@ fn progress_wire(
     } else {
         run.join("retained/worker-state")
     };
-    let log = run.join(format!("{name}-wire.log"));
+    let log = run.join(format!("{name}-{suite}.log"));
     let mut process = None;
     let mut origins = None;
-    let outcome: Result<Option<(usize, usize)>> = (|| {
+    let outcome: Result<Option<T>> = (|| {
         let Some((mut command, port)) =
-            progress::build(name, run, records, revision.trim(), "outbound-wire")?
+            progress::build(name, run, records, revision.trim(), suite)?
         else {
             return Ok(None);
         };
@@ -564,28 +596,11 @@ fn progress_wire(
         }
         let origins = origins.insert(WireOrigins::start()?);
         let running = process.insert(Process::start(&mut command, &log, port)?);
-        let mut matrix = Matrix {
-            adapter: name,
-            endpoint: "/progress/redirect",
-            port,
-            origins,
-            records,
-            exchanges: 0,
-            dispatches: 0,
-        };
-        matrix.run()?;
+        let result = check(port, origins, records)?;
         running.check_running()?;
-        Ok(Some((matrix.exchanges, matrix.dispatches)))
+        Ok(Some(result))
     })();
-    let Some((exchanges, dispatches)) =
-        finish_wire(name, &mut process, origins, &state, records, outcome)?
-    else {
-        return Ok(());
-    };
-    records.push(
-        json!({"event":format!("{name}-wire-inventory"),"status":"pass",
-        "exchanges":exchanges,"origin_requests":dispatches,"qualification":false}),
-    )
+    finish_wire(name, &mut process, origins, &state, records, outcome)
 }
 
 fn finish_wire<T>(
@@ -639,6 +654,37 @@ mod tests {
         assert!(!state.exists());
         assert!(records.values.is_empty());
         fs::remove_dir_all(run).unwrap();
+    }
+
+    #[test]
+    fn late_origin_failure_is_not_hidden_by_success_or_primary_check_failure() {
+        for primary in [None, Some("primary lifetime check failed")] {
+            let run = std::env::temp_dir().join(format!("wire-late-cleanup-{}", token()));
+            let state = run.join("worker-state");
+            fs::create_dir_all(&state).unwrap();
+            let mut records = Records {
+                path: run.join("events.jsonl"),
+                values: Vec::new(),
+            };
+            let origins = WireOrigins::start().unwrap();
+            origins.arm("invalid++");
+            let outcome = primary.map_or(Ok(()), |error| Err(error.into()));
+            let error = finish_wire(
+                "axum",
+                &mut None,
+                Some(origins),
+                &state,
+                &mut records,
+                outcome,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), primary.unwrap_or("invalid P5 gate name"));
+            assert!(!state.exists());
+            assert_eq!(records.values.len(), 1);
+            assert_eq!(records.values[0]["stage"], "origin");
+            assert_eq!(records.values[0]["status"], "fail");
+            fs::remove_dir_all(run).unwrap();
+        }
     }
 
     #[test]
