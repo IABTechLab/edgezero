@@ -960,8 +960,16 @@ core's batch epoch by the complete measured invocation, not its pre-call timesta
 possible arrival must satisfy the cutoff and delivery boundaries. A cold-connection interval
 that is too wide fails the probe, even when B is correctly unresolved.
 Same-client calibration does not promise connection reuse or a sufficiently narrow interval.
-The current shared origin's 5 ms accept polling is also fixture-side uncertainty, not provider
-behavior; source timing and hosted qualification remain open when these bounds do not fit.
+The shared test origin uses harness-only Mio 1.2.1 readiness rather than a 5 ms accept sleep.
+Both listeners and their single [wakers](https://docs.rs/mio/1.2.1/mio/struct.Waker.html) are
+registered before either collector starts. Collectors drain accepts through `WouldBlock` and
+recheck sticky stop under the accounting mutex before admitting work. Stop releases gates and
+wakes both collectors outside that mutex; each collector retains its wake owner until joined.
+A 50 ms poll timeout backs up failed/missed stop wakes, not normal socket readiness. It is not
+a realtime or whole-shutdown guarantee: workers retain their existing 5-second I/O and 6-second
+gate budgets. The 128 cumulative/eight-active connection limits remain global to both listeners,
+and shutdown wakes create no TCP requests. These are test-origin bounds, not deployed-app claims.
+Source timing and hosted qualification remain open when actual write/receipt bounds do not fit.
 
 CPU work is synchronous and bounded by ten million iterations, with rejection on backwards,
 frozen or already-expired windows. The iteration cap is a finite work bound, not a wall-clock

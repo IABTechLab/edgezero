@@ -544,6 +544,64 @@ approved by this checkpoint. Same-client use does not guarantee connection reuse
 precision. Keep that fixture gap and native SDK body-entry evidence open. Inventory remains
 32 ready / 479 planned, unqualified; no deployment, candidate freeze or capability promotion.
 
+### D6 Readiness-Driven Test Origin Checkpoint (2026-10-28)
+
+The requester approved replacing the test origin's accept polling after `0d09236a`.
+Use one private readiness owner per listener: a registered nonblocking Mio listener, `Poll`,
+two-event buffer and one shared waker. Both are prepared before spawning either collector.
+Mio `=1.2.1` is pinned only in the isolated, non-published harness workspace, with default
+features disabled. Its lock adds only Mio/WASI; production and guest dependency graphs and
+SDK/runtime pins are unchanged. There is no alternative collector or synthetic TCP wake path.
+
+Drain accepts through `WouldBlock`, handle interrupted turns, and recheck sticky stop under the
+accounting mutex before admitting/spawning work. Stop releases existing gates, drains both
+wake handles once and attempts every wake outside the mutex, retaining fixed failure categories.
+Each collector holds its own wake owner through exit. A 50 ms poll fallback prevents indefinite
+waiting after a missed/failed wake; it is not a realtime or whole-shutdown guarantee. Preserve
+the two collectors, 128 cumulative/eight-active limits, 5-second I/O and 6-second gate budgets,
+collector-before-worker joins and late-error validation. Partial startup cleanup remains owned
+by `Drop`; forced failure of the second OS thread spawn was reviewed, not directly injected.
+
+Colocated tests cover queued readiness/draining, wake-before-poll and wait races, idle
+finish/drop with zero synthetic connections, stop winning after accept, both global limits,
+partial headers and failed wake fallback. The bounded waiting-collector count is published
+after the last stop check and before an unconditional poll. This lets the failed-wake test
+place both collectors beyond that check rather than passing through an early-stop shortcut.
+Both fallback tests have watchdog channels, real-waker rescue and joins. Removing the poll
+timeout made both fail cleanly at approximately two seconds; restoring 50 ms returns green.
+The 238 harness tests (one ignored), strict Clippy and formatting pass. Existing CI jobs already
+fetch/build/test this workspace; no per-case workflow list or production test mode was added.
+All five root Rust gates pass, including 2,568 workspace tests (one ignored), along with 48
+qualification-enabled guest tests, docs lint/format, legacy/docs/inventory guards and the 36
+evidence-checker regressions. Independent source and documentation reviews are clear.
+
+All four ordinary outbound-wire suites pass: 68 exchanges and 84 correlated origin requests
+per target, with raw framing, lifecycle and resource assertions unchanged. Artifacts are under
+`/private/tmp/edgezero-ready-wire-20261028/{axum,viceroy,spin,workerd}`. This is local regression
+evidence, not hosted qualification.
+
+Final working-tree lifetime characterizations remain mixed and retain the strict targets:
+
+| Local Runtime | Fast Origin | CPU B Write Interval | CPU Case |
+| ------------- | ----------- | -------------------- | -------- |
+| Axum | Pass | 532.829..535.181 ms | Fail |
+| Repaired Viceroy 0.21.0 | Pass | 526.077..535.802 ms | Fail |
+| Spin 4.1.0 | Fail | 531.678..534.442 ms | Pass, unqualified |
+| workerd 2026-09-10 | Fail | 531.097..535.313 ms | Fail |
+
+All four controls pass on every target; slow-origin misses remain on every target. All four
+complete seven-case suites exit 1, and every B slot stays unresolved. Preserve the actual
+all-offset intervals instead of selecting passing earlier samples or relaxing tolerances.
+Artifacts are under `/private/tmp/edgezero-ready-accept-final-20261028/{axum,viceroy,spin,workerd}`;
+earlier pre-review runs remain separately under `/private/tmp/edgezero-ready-accept-20261028`.
+Removing artificial accept delay does not establish sufficient clock precision or a scheduler
+guarantee, nor does a failed source-timing precondition establish a production outbound defect.
+
+The fixture-polling work is implemented, but D6 timing/native SDK body-entry evidence and hosted
+qualification remain open. Inventory remains 32 ready / 479 planned, unqualified. No frozen
+requirement/interface, capability, production code or SDK/runtime pin changes; no deployment,
+candidate freeze or qualification promotion.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

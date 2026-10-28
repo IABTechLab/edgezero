@@ -120,6 +120,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Calibrate that probe with one bounded, same-client request while A can make progress.
   Keep the original observation/CPU targets independent of calibration, validate native
   payload-write causality, and reject uncertain timing without relaxing acceptance bounds.
+- Replace test-origin accept sleeps with harness-only readiness and explicit shutdown wakes.
+  Preserve connection/worker limits and I/O budgets; prove stop/admission races and bounded
+  fallback after failed wakes without adding production dependencies or relaxing timing gates.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

@@ -9,6 +9,7 @@ resolver = "2"
 
 [dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }
+mio = { version = "=1.2.1", default-features = false, features = ["net", "os-poll"] }
 serde_json = "1"
 
 [lints.rust]

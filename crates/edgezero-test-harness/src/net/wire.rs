@@ -1,5 +1,7 @@
 use super::overflow::{DeadlineSocket, Profile, capture_wire_body, read_head};
 use crate::evidence::{Result, require};
+use accept::Acceptor;
+use mio::Waker;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -10,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod accept;
 mod lifetimes;
 
 const GZIP_TEN: &[u8] = &[
@@ -28,6 +31,8 @@ struct State {
     stop: bool,
     accepted: usize,
     active: usize,
+    waiting_collectors: usize,
+    accept_wakers: Vec<Arc<Waker>>,
     workers: Vec<thread::JoinHandle<()>>,
     errors: Vec<String>,
     wire: VecDeque<Value>,
@@ -52,6 +57,25 @@ impl Shared {
     fn error(&self, error: impl ToString) {
         self.lock().errors.push(error.to_string());
         self.wake.notify_all();
+    }
+
+    fn stop(&self, mut wake: impl FnMut(&Waker) -> io::Result<()>) {
+        let wakers = {
+            let mut state = self.lock();
+            state.stop = true;
+            state.bidders.fill(true);
+            state.release_bidders = true;
+            for released in state.gates.values_mut() {
+                *released = true;
+            }
+            self.wake.notify_all();
+            std::mem::take(&mut state.accept_wakers)
+        };
+        for waker in wakers {
+            if wake(&waker).is_err() {
+                self.error("wire collector wake failed");
+            }
+        }
     }
 
     fn release(&self, name: &str) -> Result<()> {
@@ -90,19 +114,19 @@ impl WireOrigins {
         let first = TcpListener::bind(("127.0.0.1", 0))?;
         let second = TcpListener::bind(("127.0.0.1", 0))?;
         let ports = [first.local_addr()?.port(), second.local_addr()?.port()];
-        first.set_nonblocking(true)?;
-        second.set_nonblocking(true)?;
+        let acceptors = [Acceptor::new(first)?, Acceptor::new(second)?];
         let mut origins = Self {
             ports,
             shared: Arc::new(Shared::default()),
             collectors: Vec::new(),
         };
-        for (index, listener) in [first, second].into_iter().enumerate() {
+        origins.shared.lock().accept_wakers = acceptors.iter().map(Acceptor::waker).collect();
+        for (index, acceptor) in acceptors.into_iter().enumerate() {
             let shared = Arc::clone(&origins.shared);
             origins.collectors.push(
                 thread::Builder::new()
                     .name(format!("spin-wire-origin-{index}"))
-                    .spawn(move || collect(listener, ports[index], ports[1], &shared))?,
+                    .spawn(move || collect(acceptor, ports[index], ports[1], &shared))?,
             );
         }
         Ok(origins)
@@ -190,16 +214,7 @@ impl WireOrigins {
     }
 
     fn shutdown(&mut self) {
-        {
-            let mut state = self.shared.lock();
-            state.stop = true;
-            state.bidders.fill(true);
-            state.release_bidders = true;
-            for released in state.gates.values_mut() {
-                *released = true;
-            }
-            self.shared.wake.notify_all();
-        }
+        self.shared.stop(Waker::wake);
         for collector in self.collectors.drain(..) {
             if collector.join().is_err() {
                 self.shared.error("wire collector panicked");
@@ -220,60 +235,77 @@ impl Drop for WireOrigins {
     }
 }
 
-fn collect(listener: TcpListener, port: u16, second: u16, shared: &Arc<Shared>) {
+fn collect(mut acceptor: Acceptor, port: u16, second: u16, shared: &Arc<Shared>) {
     loop {
         if shared.lock().stop {
             break;
         }
-        match listener.accept() {
-            Ok((socket, _)) => {
-                let mut state = shared.lock();
-                state.accepted += 1;
-                if state.accepted > CONNECTION_LIMIT || state.active >= ACTIVE_LIMIT {
-                    state.errors.push("wire origin connection limit".to_owned());
-                    state.stop = true;
-                    shared.wake.notify_all();
-                    continue;
-                }
-                state.active += 1;
-                let observed = Arc::clone(shared);
-                match thread::Builder::new()
-                    .name("spin-wire-request".to_owned())
-                    .spawn(move || {
-                        let outcome = serve(socket, port, second, &observed);
-                        let mut state = observed.lock();
-                        if let Err(error) = outcome {
-                            state.errors.push(error.to_string());
-                        }
-                        state.active -= 1;
-                        observed.wake.notify_all();
-                    }) {
-                    Ok(worker) => state.workers.push(worker),
-                    Err(error) => {
-                        state.active -= 1;
-                        state.errors.push(error.to_string());
-                        shared.wake.notify_all();
-                    }
-                }
-            }
+        match acceptor.accept() {
+            Ok(socket) => spawn_request(socket, port, second, shared),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                let state = shared.lock();
-                if state.stop {
+                {
+                    let mut state = shared.lock();
+                    if state.stop {
+                        break;
+                    }
+                    state.waiting_collectors += 1;
+                    shared.wake.notify_all();
+                }
+                let result = acceptor.wait();
+                {
+                    let mut state = shared.lock();
+                    state.waiting_collectors -= 1;
+                    shared.wake.notify_all();
+                }
+                if let Err(error) = result {
+                    shared.error(error);
+                    shared.stop(Waker::wake);
                     break;
                 }
-                drop(
-                    shared
-                        .wake
-                        .wait_timeout(state, Duration::from_millis(5))
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
             }
             Err(error) => {
                 shared.error(error);
+                shared.stop(Waker::wake);
                 break;
             }
         }
     }
+}
+
+fn spawn_request(socket: TcpStream, port: u16, second: u16, shared: &Arc<Shared>) {
+    let mut state = shared.lock();
+    if state.stop {
+        return;
+    }
+    state.accepted += 1;
+    if state.accepted > CONNECTION_LIMIT || state.active >= ACTIVE_LIMIT {
+        state.errors.push("wire origin connection limit".to_owned());
+        state.stop = true;
+        drop(state);
+        shared.stop(Waker::wake);
+        return;
+    }
+    state.active += 1;
+    let observed = Arc::clone(shared);
+    match thread::Builder::new()
+        .name("spin-wire-request".to_owned())
+        .spawn(move || {
+            let outcome = serve(socket, port, second, &observed);
+            let mut state = observed.lock();
+            if let Err(error) = outcome {
+                state.errors.push(error.to_string());
+            }
+            state.active -= 1;
+            observed.wake.notify_all();
+        }) {
+        Ok(worker) => state.workers.push(worker),
+        Err(error) => {
+            state.active -= 1;
+            state.errors.push(error.to_string());
+        }
+    }
+    shared.wake.notify_all();
 }
 
 fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Result<()> {
@@ -776,6 +808,158 @@ mod tests {
                 assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
             }
         }
+    }
+
+    #[test]
+    fn idle_finish_and_drop_wake_both_collectors_without_fake_connections() {
+        for finish in [false, true] {
+            let origins = WireOrigins::start().unwrap();
+            let shared = Arc::clone(&origins.shared);
+            let ports = origins.ports;
+            if finish {
+                origins.finish().unwrap();
+            } else {
+                drop(origins);
+            }
+            let state = shared.lock();
+            assert!(state.stop);
+            assert_eq!(state.accepted, 0);
+            assert_eq!(state.active, 0);
+            assert_eq!(state.waiting_collectors, 0);
+            assert!(state.workers.is_empty());
+            assert!(state.errors.is_empty());
+            assert!(state.accept_wakers.is_empty());
+            for port in ports {
+                assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn stop_winning_after_accept_prevents_accounting_and_worker_spawn() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let shared = Arc::new(Shared::default());
+        shared.stop(mio::Waker::wake);
+        spawn_request(socket, port, port, &shared);
+        let state = shared.lock();
+        assert_eq!(state.accepted, 0);
+        assert_eq!(state.active, 0);
+        assert!(state.workers.is_empty());
+        assert!(state.errors.is_empty());
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_wakes_are_reported_and_fallback_still_joins_both_collectors() {
+        use std::sync::mpsc;
+        let origins = WireOrigins::start().unwrap();
+        let shared = Arc::clone(&origins.shared);
+        let rescue = shared.lock().accept_wakers.clone();
+        shared
+            .wait(IO_BUDGET, |state| state.waiting_collectors == 2)
+            .unwrap();
+        let mut attempts = 0;
+        shared.stop(|_| {
+            attempts += 1;
+            Err(io::Error::other("injected wake failure"))
+        });
+        assert_eq!(attempts, 2);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done_tx.send(origins.finish()).unwrap();
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        if result.is_err() {
+            for wake in rescue {
+                let _ = wake.wake();
+            }
+        }
+        worker.join().unwrap();
+        let error = result.unwrap().unwrap_err().to_string();
+        assert_eq!(error.matches("wire collector wake failed").count(), 2);
+        let state = shared.lock();
+        assert_eq!(state.accepted, 0);
+        assert_eq!(state.active, 0);
+        assert!(state.workers.is_empty());
+    }
+
+    #[test]
+    fn readiness_keeps_the_global_active_connection_limit() {
+        let origins = WireOrigins::start().unwrap();
+        let clients: Vec<_> = (0..ACTIVE_LIMIT)
+            .map(|index| TcpStream::connect(("127.0.0.1", origins.port(index % 2))).unwrap())
+            .collect();
+        origins
+            .shared
+            .wait(IO_BUDGET, |state| state.active == ACTIVE_LIMIT)
+            .unwrap();
+        let ninth = TcpStream::connect(("127.0.0.1", origins.port(0))).unwrap();
+        origins.shared.wait(IO_BUDGET, |state| state.stop).unwrap();
+        assert_eq!(origins.shared.lock().accepted, ACTIVE_LIMIT + 1);
+        assert_eq!(origins.shared.lock().workers.len(), ACTIVE_LIMIT);
+        drop(ninth);
+        drop(clients);
+        assert!(
+            origins
+                .finish()
+                .unwrap_err()
+                .to_string()
+                .contains("wire origin connection limit")
+        );
+    }
+
+    #[test]
+    fn readiness_keeps_the_global_cumulative_connection_limit() {
+        let origins = WireOrigins::start().unwrap();
+        for index in 0..CONNECTION_LIMIT {
+            assert!(
+                exchange(&origins, index % 2, b"GET /get HTTP/1.1\r\n\r\n")
+                    .starts_with(b"HTTP/1.1 204")
+            );
+            origins.take_wire().unwrap();
+            origins
+                .shared
+                .wait(IO_BUDGET, |state| state.active == 0)
+                .unwrap();
+        }
+        let extra = TcpStream::connect(("127.0.0.1", origins.port(1))).unwrap();
+        origins.shared.wait(IO_BUDGET, |state| state.stop).unwrap();
+        assert_eq!(origins.shared.lock().accepted, CONNECTION_LIMIT + 1);
+        assert_eq!(origins.shared.lock().active, 0);
+        drop(extra);
+        assert!(
+            origins
+                .finish()
+                .unwrap_err()
+                .to_string()
+                .contains("wire origin connection limit")
+        );
+    }
+
+    #[test]
+    fn partial_headers_retain_their_io_deadline_during_shutdown() {
+        use std::sync::mpsc;
+        let origins = WireOrigins::start().unwrap();
+        let shared = Arc::clone(&origins.shared);
+        let mut client = TcpStream::connect(("127.0.0.1", origins.port(0))).unwrap();
+        client.write_all(b"GET /get HTTP/1.1\r\n").unwrap();
+        shared.wait(IO_BUDGET, |state| state.active == 1).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done_tx.send(origins.finish()).unwrap();
+        });
+        let result = done_rx.recv_timeout(IO_BUDGET + Duration::from_secs(2));
+        drop(client);
+        worker.join().unwrap();
+        assert!(result.unwrap().is_err());
+        assert_eq!(shared.lock().active, 0);
+        assert!(shared.lock().workers.is_empty());
     }
 
     #[test]
