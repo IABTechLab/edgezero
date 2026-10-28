@@ -35,9 +35,15 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-`run_app` installs `simple_logger` (unless `owns_logging = true`), builds the app, and reads bind /
-store / logging config at runtime from `EDGEZERO__*` environment
-variables (see [the migration guide](../manifest-store-migration.md)).
+`run_app` installs `simple_logger` unless `owns_logging = true`, builds the app, and reads bind,
+store, and logging config at runtime from `EDGEZERO__*` environment
+variables. See [the migration guide](../manifest-store-migration.md).
+
+Incoming proxy trust defaults to no trusted networks. Managed hosting strips raw forwarding
+headers before admission and exposes checked ingress metadata instead. See
+[Axum diagnostics and trusted proxies](/guide/axum-diagnostics) for configuration, migration,
+request records, and work snapshots.
+
 The portable store metadata baked into `App` by the `app!` macro
 drives which logical stores are exposed; no `edgezero.toml` needs to
 be loaded by the runtime.
@@ -209,6 +215,53 @@ field-section accounting or raw framing-rejection policy. Admission still receiv
 `IngressHeadAccounting::HostManaged` and `IngressFraming::HostManaged`; both raw-ingress
 capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
 
+## Buffered JSON body limits
+
+Every standard Axum hosting path defaults framework-managed JSON buffering to 2 MiB,
+exactly 2,097,152 bytes. Valid JSON at the effective limit succeeds; one byte over returns
+HTTP 413. Malformed JSON within the limit remains HTTP 400.
+
+For standalone development or production, select decimal integer bytes at startup:
+
+```bash
+EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES=4194304 cargo run -p my-app-adapter-axum
+```
+
+The value must be positive and representable by the collector. Zero, signs, whitespace,
+suffixes, fractions, overflowing values, and non-Unicode values fail startup before application
+configuration or readiness. There is no unlimited sentinel, CLI flag, or manifest setting.
+The selected value is captured once per run.
+
+For explicit production embedding or a router-only server, use the fallible builder:
+
+```rust
+use edgezero_adapter_axum::dev_server::{AxumDevServer, AxumRunOptions};
+
+let options = AxumRunOptions::new("127.0.0.1:8787".parse()?)?
+    .with_json_body_limit_bytes(4 * 1024 * 1024)?;
+let server = AxumDevServer::new(router).with_json_body_limit_bytes(4 * 1024 * 1024)?;
+```
+
+Explicit options and router builders do not merge ambient settings. `AxumRunOptions::from_env`
+is the deliberate environment-driven alternative. The low-level `into_core_request` converter
+attaches the finite default without reading this environment setting.
+
+Ordinary `Json` and `ValidatedJson` use the selected ceiling, including overrides above the
+portable 8 MiB fallback. Explicit JSON caps take the minimum of the caller cap and native ceiling.
+JSON helpers enforce it regardless of Content-Type; generic buffered helpers enforce it for the
+original `application/json` or `application/*+json` ingress classification. Ordinary Form retains
+its 1 MiB caller cap. Header/extension mutation and context reconstruction cannot loosen policy.
+
+Native-managed JSON deserialization failures return HTTP 400 with the fixed text
+`invalid JSON payload`. Custom renderers receive that same fixed error, not serde detail.
+Legacy/unmanaged JSON errors and application-authored `EdgeError` messages retain their
+existing behavior. See [privacy limits](/guide/axum-diagnostics#timing-failures-and-privacy-limits).
+
+Taken streams and proxy forwarding receive no new aggregate size cap. Manual body collection
+keeps its supplied cap and existing 400 overflow behavior. The ceiling bounds logical buffered
+body bytes, not parsed JSON allocations, host buffers, concurrent requests, or process memory.
+It does not promise client receipt or keep-alive reuse after rejection.
+
 ## Outbound HTTP
 
 The Axum adapter injects `AxumOutboundClient`, backed by `reqwest`. Application handlers use the
@@ -231,11 +284,15 @@ EOF remains `HostHandoff`, not proof of socket flush or client receipt.
 
 ## Logging
 
-The Axum adapter's `run_app` helper installs `simple_logger` at the level read from
-`EDGEZERO__LOGGING__LEVEL`, falling back to `info` when the variable is unset or
-unparseable. It does not read `edgezero.toml`, and `echo_stdout` has no effect on
-the runtime. To install a different logger, set `owns_logging = true` on your `app!`
-declaration so `run_app` skips its own logger, then install yours in `main` **before** `run_app`.
+The development `run_app` helper installs `simple_logger` at the level read from
+`EDGEZERO__LOGGING__LEVEL`, falling back to `info` when that variable is unset or unparseable.
+Production `AxumRunOptions` rejects an invalid supplied level. Neither reads `edgezero.toml`
+for logger setup, and `echo_stdout` has no runtime effect.
+
+To install your own logger, set `owns_logging = true` in the `app!` declaration and initialize
+it once in `main` before entering the runner. Ownership controls installation, not framework
+facade output. Safe native request and lifecycle records use target `edgezero::native`.
+
 Logger setup now precedes application configuration, and setup failures are returned rather than
 ignored. For embedding startup validation, `run_app_with_preflight::<App, _>(check)` runs `check`
 after logging is ready and before configuration or listener binding. The bundled `edgezero demo`
@@ -256,13 +313,17 @@ simple_logger::SimpleLogger::new()
 // Then call run_app::<App>() with owns_logging = true.
 ```
 
-Wiring
-`edgezero_core::app::App::build::<App>(edgezero_adapter_axum::AXUM_PLATFORM)` and `AxumDevServer` by hand remains the fallback if you also need
-to control the bind address or store setup.
+Request records are on by default. `EDGEZERO__LOGGING__REQUEST_RECORDS` accepts exactly
+`true` or `false`; invalid supplied values fail startup in development and production.
+`AxumRunOptions::with_request_records(false)` and `AxumDevServer::with_request_records(false)`
+suppress only default native request logs. Application/native observers, lifecycle records,
+counts, and snapshots remain active. Explicit builders do not merge ambient record settings.
 
-::: tip Logging status
-`run_app` wires logging automatically; custom entrypoints should install a logger explicitly.
-:::
+Use `with_diagnostics` to attach a `NativeDiagnosticsHandle` for snapshots or an optional
+native request observer. No exporter or public metrics endpoint is installed. See
+[logger ownership](/guide/axum-diagnostics#records-and-logger-ownership) and
+[snapshots and metrics](/guide/axum-diagnostics#snapshots-and-optional-metrics) for examples
+and the synchronous sink limitations.
 
 ## Testing
 
@@ -517,6 +578,7 @@ performance or resource lifetimes.
 
 ## Next Steps
 
+- Configure [native diagnostics and trusted proxies](/guide/axum-diagnostics)
 - Deploy to [Fastly Compute](/guide/adapters/fastly) for production
 - Deploy to [Cloudflare Workers](/guide/adapters/cloudflare) as an alternative
 - Explore [Configuration](/guide/configuration) for manifest options

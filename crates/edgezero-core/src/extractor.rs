@@ -14,9 +14,10 @@ use validator::Validate;
 use crate::app_config::{AppConfigMeta, SecretField, SecretKind, SecretPathSegment};
 use crate::blob_envelope::{BlobEnvelope, BlobEnvelopeError};
 use crate::config_store::{ConfigExtractionLimits, ConfigStoreError, ConfigStoreHandle};
-use crate::context::{DEFAULT_INBOUND_FORM_BYTES, DEFAULT_INBOUND_JSON_BYTES, RequestContext};
+use crate::context::{DEFAULT_INBOUND_FORM_BYTES, RequestContext};
 use crate::error::{EdgeError, StoreExtractionReason};
 use crate::http::HeaderMap;
+use crate::ingress::CheckedEffectiveHost;
 use crate::secret_store::SecretError;
 use crate::store_registry::{
     BoundConfigStore, BoundKvStore, BoundSecretStore, ConfigRegistry, ConfigStoreBinding,
@@ -39,7 +40,7 @@ where
 {
     #[inline]
     async fn from_request(ctx: &RequestContext) -> Result<Self, EdgeError> {
-        ctx.json_within(DEFAULT_INBOUND_JSON_BYTES).await.map(Json)
+        ctx.json_within(ctx.json_body_default()).await.map(Json)
     }
 }
 
@@ -247,6 +248,10 @@ pub struct ForwardedHost(pub String);
 impl FromRequest for ForwardedHost {
     #[inline]
     async fn from_request(ctx: &RequestContext) -> Result<Self, EdgeError> {
+        if let Some(checked) = ctx.extensions().get::<CheckedEffectiveHost>() {
+            return Ok(Self(checked.authority().unwrap_or("localhost").to_owned()));
+        }
+        // Legacy unmanaged paths retain their existing raw-header behavior.
         let headers = ctx.headers();
         let host = headers
             .get("x-forwarded-host")
@@ -2324,6 +2329,56 @@ mod tests {
     }
 
     // ForwardedHost extractor tests
+    #[test]
+    fn forwarded_host_checked_value_precedes_both_raw_headers() {
+        use crate::ingress::CheckedHostSource;
+        let mut request = request_builder()
+            .uri("/test")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .headers_mut()
+            .insert("host", HeaderValue::from_static("direct.example"));
+        request.headers_mut().insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("spoofed.example"),
+        );
+        request
+            .extensions_mut()
+            .insert(CheckedEffectiveHost::from_ingress(
+                Some("verified.example:8443".parse().expect("authority")),
+                CheckedHostSource::TrustedForwarded,
+            ));
+        let ctx = RequestContext::new(request, PathParams::default());
+        let host = block_on(ForwardedHost::from_request(&ctx)).expect("host");
+        assert_eq!(host.0, "verified.example:8443");
+    }
+
+    #[test]
+    fn forwarded_host_checked_unavailable_never_falls_through_to_raw_headers() {
+        use crate::ingress::CheckedHostSource;
+        let mut request = request_builder()
+            .uri("/test")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .headers_mut()
+            .insert("host", HeaderValue::from_static("direct.example"));
+        request.headers_mut().insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("spoofed.example"),
+        );
+        request
+            .extensions_mut()
+            .insert(CheckedEffectiveHost::from_ingress(
+                None,
+                CheckedHostSource::Unavailable,
+            ));
+        let ctx = RequestContext::new(request, PathParams::default());
+        let host = block_on(ForwardedHost::from_request(&ctx)).expect("host");
+        assert_eq!(host.0, "localhost");
+    }
+
     #[test]
     fn forwarded_host_extractor_uses_x_forwarded_host_first() {
         let mut request = request_builder()

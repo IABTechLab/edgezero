@@ -52,6 +52,10 @@ export default defineConfig({
           { text: 'Axum (Native)', link: '/guide/adapters/axum' },
           { text: 'Native AWS stores', link: '/guide/native-aws-stores' },
           { text: 'DynamoDB KV', link: '/guide/dynamodb-kv' },
+          {
+            text: 'Axum diagnostics and trusted proxies',
+            link: '/guide/axum-diagnostics',
+          },
         ],
       },
       {

@@ -242,7 +242,7 @@ mod spin_impl {
     use async_stream::stream;
     use async_trait::async_trait;
     use bytes::Bytes;
-    use edgezero_core::body::{Body, BodyStream};
+    use edgezero_core::body::{Body, BodyContent, BodyStream};
     #[cfg(feature = "test-utils")]
     use edgezero_core::error::BudgetSource;
     use edgezero_core::error::{BadGatewayReason, EdgeError};
@@ -562,9 +562,9 @@ mod spin_impl {
             ..
         } = writer;
         let mut total = 0_u64;
-        let mut source = match body {
-            Body::Once(bytes) => once(async move { Ok(bytes) }).boxed_local(),
-            Body::Stream(source) => source,
+        let mut source = match body.into_content() {
+            BodyContent::Once(bytes) => once(async move { Ok(bytes) }).boxed_local(),
+            BodyContent::Stream(source) => source,
         };
 
         // `BodyWriter` configures `result_writer` to publish a typed host error on drop.

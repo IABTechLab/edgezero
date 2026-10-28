@@ -168,6 +168,9 @@ pub enum EdgeError {
     NotFound { path: String },
     #[error("not implemented: {message}")]
     NotImplemented { message: String },
+    /// Framework-managed request buffering exceeded its effective cap. HTTP 413.
+    #[error("{message}")]
+    PayloadTooLarge { message: String },
     #[error("{message}")]
     RequestHeaderFieldsTooLarge { message: String },
     #[error("{message}")]
@@ -259,7 +262,8 @@ impl EdgeError {
     pub fn inner(&self) -> Option<&AnyError> {
         match self {
             EdgeError::Internal { source } => Some(source),
-            EdgeError::BadGateway { .. }
+            EdgeError::PayloadTooLarge { .. }
+            | EdgeError::BadGateway { .. }
             | EdgeError::BadRequest { .. }
             | EdgeError::ConfigOutOfDate { .. }
             | EdgeError::GatewayTimeout { .. }
@@ -286,6 +290,67 @@ impl EdgeError {
         }
     }
 
+    pub(crate) fn into_response_with_message(
+        self,
+        fixed_message: Option<&'static str>,
+    ) -> Result<Response, EdgeError> {
+        let required_headers = self.required_response_headers()?;
+        let kind = self.kind();
+        // `ConfigOutOfDate { field_path: String::new(), .. }` (the missing-blob
+        // path) must OMIT the `field_path` JSON key entirely, not emit
+        // `"field_path": ""`. Per spec 6.3.1.
+        let field_path_opt: Option<&str> = match &self {
+            EdgeError::ConfigOutOfDate { field_path, .. } if !field_path.is_empty() => {
+                Some(field_path.as_str())
+            }
+            EdgeError::StoreExtraction {
+                field_path: Some(field_path),
+                ..
+            } => Some(field_path.as_str()),
+            EdgeError::PayloadTooLarge { .. }
+            | EdgeError::BadGateway { .. }
+            | EdgeError::BadRequest { .. }
+            | EdgeError::ConfigOutOfDate { .. }
+            | EdgeError::GatewayTimeout { .. }
+            | EdgeError::Internal { .. }
+            | EdgeError::MethodNotAllowed { .. }
+            | EdgeError::NotFound { .. }
+            | EdgeError::NotImplemented { .. }
+            | EdgeError::RequestHeaderFieldsTooLarge { .. }
+            | EdgeError::RequestTimeout { .. }
+            | EdgeError::ResponseTooLarge { .. }
+            | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::StoreExtraction { .. }
+            | EdgeError::UriTooLong { .. }
+            | EdgeError::Validation { .. } => None,
+        };
+        let status = self.status();
+        let message = fixed_message.map_or_else(|| self.wire_message(), str::to_owned);
+
+        let mut payload = json!({
+            "error": {
+                "status": status.as_u16(),
+                "kind": kind,
+                "message": message,
+            },
+        });
+        if let Some(field_path) = field_path_opt
+            && let Some(error_obj) = payload
+                .get_mut("error")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            error_obj.insert("field_path".into(), json!(field_path));
+        }
+
+        let body = json_or_text(&payload);
+        let mut response = response_with_body(status, body)?;
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response.headers_mut().extend(required_headers);
+        Ok(response)
+    }
+
     /// Returns the stable public category without provider or application diagnostics.
     #[must_use]
     #[inline]
@@ -299,6 +364,7 @@ impl EdgeError {
             EdgeError::MethodNotAllowed { .. } => "method_not_allowed",
             EdgeError::NotFound { .. } => "not_found",
             EdgeError::NotImplemented { .. } => "not_implemented",
+            EdgeError::PayloadTooLarge { .. } => "payload_too_large",
             EdgeError::RequestHeaderFieldsTooLarge { .. } => "request_header_fields_too_large",
             EdgeError::RequestTimeout { .. } => "request_timeout",
             EdgeError::ResponseTooLarge { .. } => "response_too_large",
@@ -314,6 +380,7 @@ impl EdgeError {
     pub fn message(&self) -> String {
         match self {
             EdgeError::BadGateway { message, .. }
+            | EdgeError::PayloadTooLarge { message }
             | EdgeError::BadRequest { message }
             | EdgeError::ConfigOutOfDate { message, .. }
             | EdgeError::GatewayTimeout { message, .. }
@@ -356,6 +423,13 @@ impl EdgeError {
     #[inline]
     pub fn not_implemented<S: Into<String>>(message: S) -> Self {
         EdgeError::NotImplemented {
+            message: message.into(),
+        }
+    }
+
+    #[inline]
+    pub fn payload_too_large<S: Into<String>>(message: S) -> Self {
+        Self::PayloadTooLarge {
             message: message.into(),
         }
     }
@@ -433,6 +507,7 @@ impl EdgeError {
             EdgeError::NotFound { .. } => StatusCode::NOT_FOUND,
             EdgeError::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
             EdgeError::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
+            EdgeError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             EdgeError::StoreExtraction { reason, .. } => reason.wire_status(),
             EdgeError::UriTooLong { .. } => StatusCode::URI_TOO_LONG,
             EdgeError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -478,7 +553,8 @@ impl EdgeError {
     pub fn store_extraction_reason(&self) -> Option<StoreExtractionReason> {
         match self {
             Self::StoreExtraction { reason, .. } => Some(*reason),
-            Self::BadGateway { .. }
+            Self::PayloadTooLarge { .. }
+            | Self::BadGateway { .. }
             | Self::BadRequest { .. }
             | Self::ConfigOutOfDate { .. }
             | Self::GatewayTimeout { .. }
@@ -513,6 +589,7 @@ impl EdgeError {
         match self {
             EdgeError::BadGateway { .. } => "bad gateway".to_owned(),
             EdgeError::GatewayTimeout { .. } => "gateway timeout".to_owned(),
+            EdgeError::PayloadTooLarge { .. } => "request body too large".to_owned(),
             EdgeError::Internal { .. } => "internal server error".to_owned(),
             EdgeError::ResponseTooLarge { .. } => {
                 "upstream response exceeded configured limits".to_owned()
@@ -556,60 +633,7 @@ impl From<ConfigStoreError> for EdgeError {
 impl IntoResponse for EdgeError {
     #[inline]
     fn into_response(self) -> Result<Response, EdgeError> {
-        let required_headers = self.required_response_headers()?;
-        let kind = self.kind();
-        // `ConfigOutOfDate { field_path: String::new(), .. }` (the missing-blob
-        // path) must OMIT the `field_path` JSON key entirely, not emit
-        // `"field_path": ""`. Per spec 6.3.1.
-        let field_path_opt: Option<&str> = match &self {
-            EdgeError::ConfigOutOfDate { field_path, .. } if !field_path.is_empty() => {
-                Some(field_path.as_str())
-            }
-            EdgeError::StoreExtraction {
-                field_path: Some(field_path),
-                ..
-            } => Some(field_path.as_str()),
-            EdgeError::BadGateway { .. }
-            | EdgeError::BadRequest { .. }
-            | EdgeError::ConfigOutOfDate { .. }
-            | EdgeError::GatewayTimeout { .. }
-            | EdgeError::Internal { .. }
-            | EdgeError::MethodNotAllowed { .. }
-            | EdgeError::NotFound { .. }
-            | EdgeError::NotImplemented { .. }
-            | EdgeError::RequestHeaderFieldsTooLarge { .. }
-            | EdgeError::RequestTimeout { .. }
-            | EdgeError::ResponseTooLarge { .. }
-            | EdgeError::ServiceUnavailable { .. }
-            | EdgeError::StoreExtraction { .. }
-            | EdgeError::UriTooLong { .. }
-            | EdgeError::Validation { .. } => None,
-        };
-        let status = self.status();
-        let message = self.wire_message();
-
-        let mut payload = json!({
-            "error": {
-                "status": status.as_u16(),
-                "kind": kind,
-                "message": message,
-            },
-        });
-        if let Some(field_path) = field_path_opt
-            && let Some(error_obj) = payload
-                .get_mut("error")
-                .and_then(serde_json::Value::as_object_mut)
-        {
-            error_obj.insert("field_path".into(), json!(field_path));
-        }
-
-        let body = json_or_text(&payload);
-        let mut response = response_with_body(status, body)?;
-        response
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        response.headers_mut().extend(required_headers);
-        Ok(response)
+        self.into_response_with_message(None)
     }
 }
 
@@ -945,6 +969,7 @@ mod tests {
             | EdgeError::ServiceUnavailable { .. }
             | EdgeError::StoreExtraction { .. }
             | EdgeError::UriTooLong { .. }
+            | EdgeError::PayloadTooLarge { .. }
             | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
         }
     }

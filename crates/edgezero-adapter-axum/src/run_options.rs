@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::env::{var_os, vars_os};
 use std::ffi::OsString;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::time::{Duration, Instant};
@@ -16,6 +17,46 @@ use crate::native_bindings::{
     NativeBindingsLimits, NativeConfigBinding, NativeStoreBindings, NativeStoreBindingsInput,
 };
 
+use crate::diagnostics::NativeDiagnosticsHandle;
+use crate::proxy::TrustedProxyPolicy;
+
+/// Validated native JSON buffering ceiling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct JsonBodyLimit(NonZeroUsize);
+
+impl JsonBodyLimit {
+    pub(crate) const DEFAULT: Self =
+        Self(NonZeroUsize::new(0x0020_0000).expect("positive default"));
+
+    pub(crate) fn from_config(env: &EnvConfig) -> anyhow::Result<Self> {
+        let Some(raw) = env.get(&["adapter", "json_body_limit_bytes"]) else {
+            return Ok(Self::DEFAULT);
+        };
+        if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Self::invalid());
+        }
+        Self::new(raw.parse::<usize>().map_err(|_error| Self::invalid())?)
+    }
+
+    pub(crate) fn get(self) -> NonZeroUsize {
+        self.0
+    }
+
+    fn invalid() -> anyhow::Error {
+        failure(
+            "settings",
+            "JSON_BODY_LIMIT_BYTES",
+            "invalid positive representable integer bytes",
+        )
+    }
+    pub(crate) fn new(limit: usize) -> anyhow::Result<Self> {
+        NonZeroUsize::new(limit)
+            .filter(|value| value.get() <= isize::MAX.unsigned_abs())
+            .map(Self)
+            .ok_or_else(Self::invalid)
+    }
+}
+
 /// Validated explicit production hosting options. Construction never selects a
 /// policy from build profile, cwd or container detection. Explicit constructors
 /// do not merge environment values; only `from_env` reads hosting environment.
@@ -28,10 +69,14 @@ pub struct AxumRunOptions {
     bootstrap_values: BTreeMap<String, BootstrapValue>,
     config_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    diagnostics: NativeDiagnosticsHandle,
     env: EnvConfig,
     grace: Duration,
+    json_body_limit: JsonBodyLimit,
     level: LevelFilter,
     non_unicode_overrides: Vec<Vec<String>>,
+    request_records: bool,
+    trusted_proxy_policy: TrustedProxyPolicy,
 }
 
 #[derive(Clone)]
@@ -89,6 +134,10 @@ impl AxumRunOptions {
 
     pub(crate) fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()
+    }
+
+    pub(crate) fn diagnostics(&self) -> NativeDiagnosticsHandle {
+        self.diagnostics.clone()
     }
 
     pub(crate) fn env_config(&self) -> &EnvConfig {
@@ -218,6 +267,8 @@ impl AxumRunOptions {
                 .map_err(|_error| failure("settings", "LOGGING__LEVEL", "invalid level"))?;
         }
         options.grace = shutdown_grace(&env)?;
+        options.json_body_limit = JsonBodyLimit::from_config(&env)?;
+        (options.trusted_proxy_policy, options.request_records) = native_settings(&env)?;
         if let Some(root) = env.get(&["adapter", "config_dir"]) {
             options = options.with_config_dir(root)?;
         }
@@ -241,6 +292,10 @@ impl AxumRunOptions {
         Ok(options)
     }
 
+    pub(crate) fn json_body_limit(&self) -> JsonBodyLimit {
+        self.json_body_limit
+    }
+
     pub(crate) fn logging_level(&self) -> LevelFilter {
         self.level
     }
@@ -262,6 +317,10 @@ impl AxumRunOptions {
             addr,
             config_dir: None,
             data_dir: None,
+            diagnostics: NativeDiagnosticsHandle::new(),
+            json_body_limit: JsonBodyLimit::DEFAULT,
+            request_records: true,
+            trusted_proxy_policy: TrustedProxyPolicy::no_trust(),
             env: EnvConfig::default(),
             grace: Duration::from_secs(10),
             level: LevelFilter::Info,
@@ -269,8 +328,16 @@ impl AxumRunOptions {
         })
     }
 
+    pub(crate) fn request_records(&self) -> bool {
+        self.request_records
+    }
+
     pub(crate) fn shutdown_grace(&self) -> Duration {
         self.grace
+    }
+
+    pub(crate) fn trusted_proxy_policy(&self) -> TrustedProxyPolicy {
+        self.trusted_proxy_policy.clone()
     }
 
     #[cfg(test)]
@@ -464,10 +531,36 @@ impl AxumRunOptions {
         Ok(self)
     }
 
+    /// Shares native counters and the optional observer with this runner.
+    #[inline]
+    #[must_use]
+    pub fn with_diagnostics(mut self, diagnostics: NativeDiagnosticsHandle) -> Self {
+        self.diagnostics = diagnostics;
+        self
+    }
+
+    /// Selects the ceiling for framework-managed JSON buffering, in bytes.
+    ///
+    /// # Errors
+    /// Rejects zero and values above the collector's representable capacity.
+    #[inline]
+    pub fn with_json_body_limit_bytes(mut self, limit: usize) -> anyhow::Result<Self> {
+        self.json_body_limit = JsonBodyLimit::new(limit)?;
+        Ok(self)
+    }
+
     #[inline]
     #[must_use]
     pub fn with_logging_level(mut self, level: LevelFilter) -> Self {
         self.level = level;
+        self
+    }
+
+    /// Enables only default native request logs; observers and accounting remain active.
+    #[inline]
+    #[must_use]
+    pub fn with_request_records(mut self, enabled: bool) -> Self {
+        self.request_records = enabled;
         self
     }
 
@@ -481,6 +574,40 @@ impl AxumRunOptions {
         self.grace = grace;
         Ok(self)
     }
+
+    /// Installs an explicit immutable incoming-proxy policy without reading the environment.
+    #[inline]
+    #[must_use]
+    pub fn with_trusted_proxy_policy(mut self, policy: TrustedProxyPolicy) -> Self {
+        self.trusted_proxy_policy = policy;
+        self
+    }
+}
+
+pub(crate) fn native_settings(env: &EnvConfig) -> anyhow::Result<(TrustedProxyPolicy, bool)> {
+    let policy = TrustedProxyPolicy::from_values(
+        env.get(&["adapter", "trusted_proxy_cidrs"]),
+        env.get(&["adapter", "forwarding_header_family"]),
+    )
+    .map_err(|_error| {
+        failure(
+            "settings",
+            "TRUSTED_PROXY_POLICY",
+            "invalid literal networks or forwarding family",
+        )
+    })?;
+    let records = match env.get(&["logging", "request_records"]) {
+        None | Some("true") => true,
+        Some("false") => false,
+        Some(_) => {
+            return Err(failure(
+                "settings",
+                "LOGGING__REQUEST_RECORDS",
+                "invalid boolean",
+            ));
+        }
+    };
+    Ok((policy, records))
 }
 
 pub(crate) fn failure(stage: &str, subject: &str, category: &str) -> anyhow::Error {
@@ -499,6 +626,10 @@ fn fixed_setting(path: &[String]) -> Option<&'static str> {
         ["adapter", "shutdown_grace_seconds"] => Some("SHUTDOWN_GRACE_SECONDS"),
         ["logging", "level"] => Some("LOGGING__LEVEL"),
         ["store_bindings_file"] => Some("STORE_BINDINGS_FILE"),
+        ["adapter", "trusted_proxy_cidrs"] => Some("TRUSTED_PROXY_CIDRS"),
+        ["adapter", "forwarding_header_family"] => Some("FORWARDING_HEADER_FAMILY"),
+        ["logging", "request_records"] => Some("LOGGING__REQUEST_RECORDS"),
+        ["adapter", "json_body_limit_bytes"] => Some("JSON_BODY_LIMIT_BYTES"),
         _ => None,
     }
 }
@@ -916,6 +1047,106 @@ mod tests {
             .output()
             .expect("non-Unicode locator fixture");
         assert!(output.status.success());
+    }
+
+    #[test]
+    fn native_settings_defaults_explicit_builders_and_strict_values() {
+        let defaults = AxumRunOptions::from_vars(Vec::<(String, String)>::new()).expect("defaults");
+        assert!(defaults.request_records());
+        assert_eq!(
+            defaults.trusted_proxy_policy(),
+            TrustedProxyPolicy::no_trust()
+        );
+        let configured = AxumRunOptions::from_vars([
+            ("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "127.0.0.2/32"),
+            ("EDGEZERO__ADAPTER__FORWARDING_HEADER_FAMILY", "forwarded"),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", "false"),
+        ])
+        .expect("configured");
+        assert!(!configured.request_records());
+        assert_ne!(
+            configured.trusted_proxy_policy(),
+            TrustedProxyPolicy::no_trust()
+        );
+        let explicit = AxumRunOptions::new(defaults.addr())
+            .expect("explicit")
+            .with_request_records(false)
+            .with_trusted_proxy_policy(configured.trusted_proxy_policy());
+        assert!(!explicit.request_records());
+        assert_eq!(
+            explicit.trusted_proxy_policy(),
+            configured.trusted_proxy_policy()
+        );
+        assert!(
+            explicit
+                .env_config()
+                .get(&["adapter", "trusted_proxy_cidrs"])
+                .is_none()
+        );
+        for (key, value) in [
+            ("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "127.0.0.2"),
+            ("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "sentinel-policy"),
+            (
+                "EDGEZERO__ADAPTER__FORWARDING_HEADER_FAMILY",
+                "sentinel-family",
+            ),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", "TRUE"),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", "false "),
+            ("EDGEZERO__LOGGING__REQUEST_RECORDS", ""),
+        ] {
+            let error = AxumRunOptions::from_vars([(key, value)])
+                .err()
+                .expect("invalid supplied setting");
+            assert_eq!(error.chain().count(), 1);
+            assert!(!error.to_string().contains("sentinel"));
+        }
+    }
+
+    #[test]
+    fn json_body_limit_is_positive_decimal_and_representable() {
+        let key = "EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES";
+        let defaults = AxumRunOptions::from_vars(Vec::<(String, String)>::new()).expect("defaults");
+        assert_eq!(defaults.json_body_limit.get().get(), 0x0020_0000);
+        for bytes in [
+            1,
+            64,
+            9 * 1024 * 1024,
+            usize::try_from(isize::MAX).expect("maximum"),
+        ] {
+            let options = AxumRunOptions::from_vars([(key, bytes.to_string())]).expect("valid");
+            assert_eq!(options.json_body_limit.get().get(), bytes);
+            assert_eq!(
+                defaults
+                    .clone()
+                    .with_json_body_limit_bytes(bytes)
+                    .expect("builder")
+                    .json_body_limit
+                    .get()
+                    .get(),
+                bytes
+            );
+        }
+        for raw in [
+            "",
+            "0",
+            "-1",
+            "+1",
+            " 64",
+            "64 ",
+            "1.5",
+            "2MiB",
+            "sentinel-limit",
+            "9999999999999999999999999999999999",
+        ] {
+            let error = AxumRunOptions::from_vars([(key, raw)])
+                .err()
+                .expect("invalid");
+            assert!(error.to_string().contains("JSON_BODY_LIMIT_BYTES"));
+            assert!(!format!("{error:?}").contains("sentinel"));
+            assert_eq!(error.chain().count(), 1);
+        }
+        assert!(defaults.clone().with_json_body_limit_bytes(0).is_err());
+        assert!(defaults.with_json_body_limit_bytes(usize::MAX).is_err());
     }
 
     #[test]

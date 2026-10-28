@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 
 use axum::http::Response;
 use bytes::Bytes;
-use edgezero_core::body::{Body, BodyStream};
+use edgezero_core::body::{Body, BodyContent, BodyStream};
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{Method, Response as CoreResponse, StatusCode};
 use edgezero_core::response_egress::{
@@ -28,6 +28,8 @@ use tokio::sync::Notify;
 use tokio::task::yield_now;
 use tokio::time::Instant as TokioInstant;
 use tokio::time::timeout;
+
+use crate::diagnostics::SelectedStatus;
 
 const INTERNAL_FALLBACK_BODY: &[u8] = b"internal server error";
 const TIMEOUT_FALLBACK_BODY: &[u8] = b"response write deadline exceeded";
@@ -276,13 +278,13 @@ impl AxumEgressBody {
             return Err(Box::new(attempt));
         }
         let (source, inferred_length) = if transmits_body {
-            match body {
-                Body::Once(bytes) if bytes.is_empty() => (ResponseSource::Done, Some(0)),
-                Body::Once(bytes) => {
+            match body.into_content() {
+                BodyContent::Once(bytes) if bytes.is_empty() => (ResponseSource::Done, Some(0)),
+                BodyContent::Once(bytes) => {
                     let length = u64::try_from(bytes.len()).ok();
                     (ResponseSource::Once(Some(bytes)), length)
                 }
-                Body::Stream(stream) => (ResponseSource::Stream(stream), None),
+                BodyContent::Stream(stream) => (ResponseSource::Stream(stream), None),
             }
         } else {
             drop(body);
@@ -499,11 +501,8 @@ impl HttpBody for AxumEgressBody {
                 }
                 Poll::Ready(Some(Ok(Frame::data(bytes))))
             }
-            Poll::Ready(Some(Err(error))) => {
-                log::warn!(
-                    "response-egress Axum body source failed after commit: {}",
-                    response_egress_source_error_category(&error)
-                );
+            Poll::Ready(Some(Err(_error))) => {
+                // The native terminal owner records this once, including request-log opt-out.
                 this.source = ResponseSource::Done;
                 this.fail(ResponseEgressOutcome::SourceError);
                 Poll::Ready(Some(Err(AxumBodyError(ResponseEgressOutcome::SourceError))))
@@ -527,9 +526,13 @@ impl HttpBody for AxumEgressBody {
 
 /// Converts one owned core envelope into the private body used by `EdgeZero`'s Hyper server.
 pub(crate) async fn prepare_egress_response(
-    egress: ResponseEgressEnvelope,
+    mut egress: ResponseEgressEnvelope,
     connection: &EgressConnection,
+    selected: Option<&SelectedStatus>,
 ) -> Response<AxumEgressBody> {
+    if let Some(slot) = selected {
+        slot.select(egress.response_mut().status());
+    }
     let request_method = egress.request_method().clone();
     match egress.begin() {
         Ok((prepared, policy, attempt, clock)) => {
@@ -540,6 +543,7 @@ pub(crate) async fn prepare_egress_response(
                     attempt,
                     &clock,
                     connection,
+                    selected,
                 );
             }
             let validated = match validate_empty_stream(
@@ -552,7 +556,14 @@ pub(crate) async fn prepare_egress_response(
             {
                 Ok(validated) => validated,
                 Err(cause) => {
-                    return prepare_fallback(&request_method, cause, attempt, &clock, connection);
+                    return prepare_fallback(
+                        &request_method,
+                        cause,
+                        attempt,
+                        &clock,
+                        connection,
+                        selected,
+                    );
                 }
             };
             match start_prepared(
@@ -562,6 +573,7 @@ pub(crate) async fn prepare_egress_response(
                 clock.clone(),
                 EgressKind::Application,
                 connection,
+                selected,
             ) {
                 Ok(response) => response,
                 Err(returned_attempt) => {
@@ -576,13 +588,21 @@ pub(crate) async fn prepare_egress_response(
                         *returned_attempt,
                         &clock,
                         connection,
+                        selected,
                     )
                 }
             }
         }
         Err(failure) => {
             let (attempt, clock, cause) = failure.into_parts();
-            prepare_fallback(&request_method, cause, attempt, &clock, connection)
+            prepare_fallback(
+                &request_method,
+                cause,
+                attempt,
+                &clock,
+                connection,
+                selected,
+            )
         }
     }
 }
@@ -639,10 +659,14 @@ fn start_prepared(
     clock: MonotonicClock,
     kind: EgressKind,
     connection: &EgressConnection,
+    selected: Option<&SelectedStatus>,
 ) -> Result<Response<AxumEgressBody>, Box<ResponseEgressAttempt>> {
     let declared_length = prepared.declared_length();
     let transmits_body = prepared.transmits_body();
     let (parts, core_body) = prepared.into_response().into_parts();
+    if let Some(slot) = selected {
+        slot.select(parts.status);
+    }
     match AxumEgressBody::owned(
         core_body,
         declared_length,
@@ -664,10 +688,17 @@ fn prepare_fallback(
     mut attempt: ResponseEgressAttempt,
     clock: &MonotonicClock,
     connection: &EgressConnection,
+    selected: Option<&SelectedStatus>,
 ) -> Response<AxumEgressBody> {
     if !attempt.begin_fallback(cause) {
+        if let Some(slot) = selected {
+            slot.select(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         attempt.terminate(ResponseEgressOutcome::ConversionError, clock.now());
         return detached_fallback(request_method, ResponseEgressOutcome::ConversionError);
+    }
+    if let Some(slot) = selected {
+        slot.select(fallback_parts(cause).0);
     }
     let started_at = clock.now();
     let Some(fallback_deadline) = started_at.checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
@@ -687,6 +718,7 @@ fn prepare_fallback(
         clock.clone(),
         EgressKind::Fallback,
         connection,
+        selected,
     ) {
         Ok(response) => response,
         Err(mut returned_attempt) => {
@@ -739,7 +771,8 @@ mod tests {
     use edgezero_core::body::Body;
     use edgezero_core::http::{HeaderMap, Method, StatusCode, Version, response_builder};
     use edgezero_core::response_egress::{
-        ResponseEgressAttempt, ResponseEgressCompletion, ResponseEgressHead,
+        RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET, ResponseEgressAttempt, ResponseEgressBodyKind,
+        ResponseEgressCompletion, ResponseEgressFallbackDisposition, ResponseEgressHead,
         ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressOutcome,
         ResponseEgressReport,
     };
@@ -751,13 +784,91 @@ mod tests {
     use futures_util::stream::{pending, poll_fn as poll_stream};
     use http_body::Body as _;
 
+    use super::SelectedStatus;
     use super::{
         AxumEgressBody, EgressConnection, EgressKind, INTERNAL_FALLBACK_BODY,
         TIMEOUT_FALLBACK_BODY, prepare_fallback, start_prepared,
     };
+    use crate::diagnostics::{
+        NativeDiagnosticsHandle, NativeDiagnosticsSnapshot, NativeRequestObserver,
+        NativeRequestOutcome, NativeRequestRecord, NativeSession,
+    };
+
+    #[derive(Default)]
+    struct NativeFallbackProbe {
+        completion_calls: Arc<AtomicUsize>,
+        diagnostics: NativeDiagnosticsHandle,
+        native: RecordingNativeObserver,
+        observer: RecordingObserver,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingNativeObserver(Arc<Mutex<Vec<NativeRequestRecord>>>);
 
     #[derive(Clone, Default)]
     struct RecordingObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
+
+    impl NativeFallbackProbe {
+        fn attempt(
+            &self,
+            now: MonotonicInstant,
+            clock: MonotonicClock,
+        ) -> (ResponseEgressAttempt, SelectedStatus) {
+            let session = NativeSession::new(
+                self.diagnostics
+                    .clone()
+                    .with_request_observer(self.native.clone()),
+                false,
+            )
+            .expect("native session");
+            let guard = session
+                .request(&Method::GET, now, clock.clone(), None)
+                .expect("native request");
+            let (native_completion, selected) = guard.completion();
+            selected.select(StatusCode::OK);
+            let calls = Arc::clone(&self.completion_calls);
+            let app_completion = ResponseEgressCompletion::new(move |_report| {
+                calls.fetch_add(1, Ordering::SeqCst);
+            });
+            let headers = HeaderMap::new();
+            let head = ResponseEgressHead::new(
+                StatusCode::OK,
+                Version::HTTP_11,
+                &headers,
+                None,
+                now,
+                None,
+            );
+            (
+                ResponseEgressAttempt::new(
+                    &head,
+                    now,
+                    app_completion.join(native_completion),
+                    ResponseEgressObserverHandle::new(self.observer.clone()),
+                    clock,
+                ),
+                selected,
+            )
+        }
+
+        fn record(&self) -> NativeRequestRecord {
+            assert_eq!(self.completion_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(self.observer.0.lock().expect("app reports").len(), 1);
+            assert_eq!(
+                self.diagnostics.snapshot(),
+                NativeDiagnosticsSnapshot::default()
+            );
+            let records = self.native.0.lock().expect("native records");
+            assert_eq!(records.len(), 1);
+            records.first().expect("one native record").clone()
+        }
+    }
+
+    impl NativeRequestObserver for RecordingNativeObserver {
+        fn observe(&self, record: &NativeRequestRecord) {
+            self.0.lock().expect("native records").push(record.clone());
+        }
+    }
 
     impl ResponseEgressObserver for RecordingObserver {
         fn complete(&self, report: &ResponseEgressReport) {
@@ -923,6 +1034,130 @@ mod tests {
         assert!(connection.is_empty());
     }
 
+    #[test]
+    fn native_duplicate_live_fallback_selects_detached_500_before_terminal_record() {
+        let probe = NativeFallbackProbe::default();
+        let now = MonotonicInstant::now();
+        let clock = MonotonicClock::new(move || now);
+        let (mut attempt, selected) = probe.attempt(now, clock.clone());
+        assert!(attempt.begin_fallback(ResponseEgressOutcome::DeadlineExceeded));
+        selected.select(StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(probe.diagnostics.snapshot().active_requests, 1);
+        let connection = EgressConnection::default();
+        let response = prepare_fallback(
+            &Method::GET,
+            ResponseEgressOutcome::ConversionError,
+            attempt,
+            &clock,
+            &connection,
+            Some(&selected),
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let record = probe.record();
+        assert_eq!(record.status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+        assert_eq!(
+            record.outcome,
+            NativeRequestOutcome::Egress(ResponseEgressOutcome::DeadlineExceeded)
+        );
+        assert_eq!(record.body_kind, Some(ResponseEgressBodyKind::Fallback));
+        assert_eq!(
+            record.fallback_disposition,
+            Some(ResponseEgressFallbackDisposition::Aborted)
+        );
+        assert_eq!(record.bytes_written, Some(0));
+        drop(response);
+        assert_eq!(probe.record().request_id, record.request_id);
+        assert!(connection.is_empty());
+    }
+
+    #[test]
+    fn native_already_terminal_fallback_cannot_rewrite_the_prior_200_record() {
+        let probe = NativeFallbackProbe::default();
+        let now = MonotonicInstant::now();
+        let clock = MonotonicClock::new(move || now);
+        let (mut attempt, selected) = probe.attempt(now, clock.clone());
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(now));
+        let original = probe.record();
+        assert_eq!(original.status, Some(StatusCode::OK));
+        let connection = EgressConnection::default();
+        let response = prepare_fallback(
+            &Method::GET,
+            ResponseEgressOutcome::DeadlineExceeded,
+            attempt,
+            &clock,
+            &connection,
+            Some(&selected),
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        drop(response);
+        let retained = probe.record();
+        assert_eq!(retained.request_id, original.request_id);
+        assert_eq!(retained.status, original.status);
+        assert_eq!(retained.duration, original.duration);
+        assert_eq!(
+            retained.outcome,
+            NativeRequestOutcome::Egress(ResponseEgressOutcome::Completed)
+        );
+        assert_eq!(
+            retained.body_kind,
+            Some(ResponseEgressBodyKind::Application)
+        );
+        assert_eq!(retained.fallback_disposition, None);
+        assert_eq!(retained.bytes_written, Some(0));
+        assert!(connection.is_empty());
+    }
+
+    #[test]
+    fn native_failed_fallback_registration_retains_500_or_504_before_aborted_record() {
+        for (cause, status) in [
+            (
+                ResponseEgressOutcome::ConversionError,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ResponseEgressOutcome::DeadlineExceeded,
+                StatusCode::GATEWAY_TIMEOUT,
+            ),
+        ] {
+            let probe = NativeFallbackProbe::default();
+            let now = MonotonicInstant::now();
+            let expired = now
+                .checked_add(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
+                .expect("fallback deadline");
+            // Preparation samples now, registration sees expiry, then settlement keeps that instant.
+            let clock = scripted_clock(vec![now, expired, expired]);
+            let (attempt, selected) = probe.attempt(now, clock.clone());
+            assert_eq!(probe.diagnostics.snapshot().active_requests, 1);
+            let connection = EgressConnection::default();
+            let response = prepare_fallback(
+                &Method::GET,
+                cause,
+                attempt,
+                &clock,
+                &connection,
+                Some(&selected),
+            );
+            assert_eq!(response.status(), status);
+            let record = probe.record();
+            assert_eq!(record.status, Some(status));
+            assert_eq!(record.outcome, NativeRequestOutcome::Egress(cause));
+            assert_eq!(
+                record.duration,
+                Some(RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET)
+            );
+            assert_eq!(record.body_kind, Some(ResponseEgressBodyKind::Fallback));
+            assert_eq!(
+                record.fallback_disposition,
+                Some(ResponseEgressFallbackDisposition::Aborted)
+            );
+            assert_eq!(record.bytes_written, Some(0));
+            drop(response);
+            assert_eq!(probe.record().request_id, record.request_id);
+            assert!(connection.is_empty());
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn response_egress_post_ready_deadline_precedence() {
         let observer = RecordingObserver::default();
@@ -998,6 +1233,7 @@ mod tests {
                 attempt(&observer, started_at),
                 &clock,
                 &connection,
+                None,
             );
             let status = if cause == ResponseEgressOutcome::DeadlineExceeded {
                 StatusCode::GATEWAY_TIMEOUT
@@ -1073,6 +1309,7 @@ mod tests {
             clock,
             EgressKind::Application,
             &connection,
+            None,
         ) else {
             panic!("registered response");
         };
