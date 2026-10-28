@@ -44,7 +44,7 @@ impl ProbeRuntime for Runtime {
     fn start(&self, target: String) -> Result<Job, EdgeError> {
         let job = self.perform(target);
         let (send, receive) = oneshot::channel();
-        spin_sdk::wasip3::spawn(async move {
+        spin_sdk::wasip3::spawn_local(async move {
             let _ = send.send(job.await);
         });
         Ok(Box::pin(async move {
@@ -209,7 +209,7 @@ fn sdk_response_control(
     let (writer, contents, body_result) = BodyWriter::new();
     let (response, transmission) =
         edgezero_adapter_spin::SpinResponse::new(fields, Some(contents), body_result);
-    spin_sdk::wasip3::spawn(async move {
+    spin_sdk::wasip3::spawn_local(async move {
         let BodyWriter {
             mut stream_writer,
             result_writer,

@@ -29,7 +29,7 @@ edgezero-adapter-fastly = { path = "../../crates/edgezero-adapter-fastly" }
 edgezero-adapter-spin = { path = "../../crates/edgezero-adapter-spin" }
 edgezero-cli = { path = "../../crates/edgezero-cli" }
 edgezero-core = { path = "../../crates/edgezero-core" }
-spin-sdk = { version = "=7.0.0", default-features = false }
+spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk.git", rev = "e65ff90dadf4173b08b14194e878ad3acd555337", default-features = false }
 fastly = "=0.13.1"
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 log = "0.4"

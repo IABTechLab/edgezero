@@ -313,6 +313,41 @@ planned, with qualification false. Candidate freeze, hosted evidence, provider c
 promotion and optional idle-body adoption remain unchanged. The SDK repair and exact timing
 evidence are required before these scenarios can close their owning D6/Q3 work.
 
+### Spin SDK Eager Progress Dependency Checkpoint (2026-10-27)
+
+The user requested a Stackpop SDK fork and upstream contribution rather than vendoring.
+The coordinated dependency is now SDK 7 from `stackpop/spin-rust-sdk` at signed revision
+`e65ff90dadf4173b08b14194e878ad3acd555337`; the proposed upstream repair is
+[spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).
+The [dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) records its exact
+scope, regression and verification. WASIp3 0.9.0 retains WASI 0.3.0 interfaces and selects the
+corrected wit-bindgen 0.62.0 executor. The task queue makes progress without observer-driven
+producers, another executor, compatibility aliases or a transport workaround.
+
+Root, demo, reusable fixture and scaffold pins use the same Git source/revision; all three
+application lockfiles resolve that SDK and macro. Active calls migrate to `spawn_local`.
+Generator guards compare source and revision as well as package version. SDK validation
+reproduces the exact regression failing on the old dependency chain, then passing with the
+upgrade; its workspace tests, doctests and WASM builds pass. Upstream Rust 1.94 CI remains
+separate from local Rust 1.98.1 verification, and generated gRPC Clippy warnings reproduce on
+unchanged upstream. The private task-context guard does not dereference executor internals.
+
+Local candidate characterization removes the slow-origin batch starvation and retains the
+existing Spin wire and eager ownership controls. Strict timeline target misses remain failures;
+this checkpoint does not close D6/Q3 or promote hosted cancellation, scheduler guarantees or
+resource accounting. Original deadlines/cutoffs and all outbound requirements remain unchanged.
+The frozen requirements/Interfaces and inventory are unchanged: 32 ready, 479 planned,
+qualification false. No deployment is authorized by this dependency repair.
+
+Final adoption checks pass all five root Rust gates, both affected Spin WASM Clippy combinations,
+35 contracts, 21 SDK-resource cases and the eager component on exact Wasmtime 48.0.2. Demo core
+(60), fixture core (42), generated core (33), generated Spin build/strict Clippy, dependency and
+documentation guards pass. The full ignored generated-workspace matrix was not rerun locally.
+Spin 4.1 wire checks pass 68 exchanges/84 receipts; the four lifetime cases remain two passes
+and two strict timing failures. A pre-existing trailing worker diagnostic was reproduced after
+requested shutdown with identical guest artifacts; retain that caveat, not a clean-hosted-
+shutdown claim. These checks do not change any acceptance binding or qualification gate.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

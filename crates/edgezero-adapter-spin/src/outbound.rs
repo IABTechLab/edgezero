@@ -403,7 +403,7 @@ mod spin_impl {
         RequestOptionsError, Response, Scheme,
     };
     use spin_sdk::wasip3::http_compat::BodyWriter;
-    use spin_sdk::wasip3::spawn;
+    use spin_sdk::wasip3::spawn_local;
     use spin_sdk::wasip3::wit_bindgen::{FutureReader, FutureWriter, StreamReader, StreamResult};
     use spin_sdk::wasip3::wit_future;
 
@@ -675,7 +675,7 @@ mod spin_impl {
             let future = self.dispatch_head(request);
             super::scheduling::schedule_exchange(
                 async move { future.await?.finish().await }.boxed_local(),
-                spawn,
+                spawn_local,
             )
         }
 
@@ -731,7 +731,7 @@ mod spin_impl {
                     )
                 })
                 .collect();
-            super::scheduling::schedule_prepared_batch(context, exchanges, spawn)
+            super::scheduling::schedule_prepared_batch(context, exchanges, spawn_local)
         }
     }
 
@@ -1098,7 +1098,7 @@ mod spin_impl {
             let head = self.dispatch_head(request);
             super::scheduling::schedule_exchange(
                 async move { head.await?.finish().await }.boxed_local(),
-                spawn,
+                spawn_local,
             )
         }
 
@@ -1123,7 +1123,7 @@ mod spin_impl {
                     )
                 })
                 .collect();
-            super::scheduling::schedule_prepared_batch(context, slots, spawn)
+            super::scheduling::schedule_prepared_batch(context, slots, spawn_local)
         }
     }
 

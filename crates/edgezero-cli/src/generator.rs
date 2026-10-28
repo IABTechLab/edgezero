@@ -281,7 +281,12 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     deps.insert("tracing".to_owned(), "tracing = \"0.1\"".to_owned());
     deps.insert(
         "spin-sdk".to_owned(),
-        "spin-sdk = { version = \"=7.0.0\", default-features = false }".to_owned(),
+        concat!(
+            "spin-sdk = { version = \"=7.0.0\", ",
+            "git = \"https://github.com/stackpop/spin-rust-sdk.git\", ",
+            "rev = \"e65ff90dadf4173b08b14194e878ad3acd555337\", default-features = false }",
+        )
+        .to_owned(),
     );
     // Core depends on `validator` for `#[derive(Validate)]` on the
     // generated `<Name>Config` struct. Pinned to the same
@@ -843,6 +848,20 @@ mod tests {
             .or_else(|| dependency.get("version")?.as_str())
     }
 
+    fn dependency_git_source<'manifest>(
+        dependencies: &'manifest toml::Value,
+        name: &str,
+    ) -> (
+        Option<&'manifest toml::Value>,
+        Option<&'manifest toml::Value>,
+    ) {
+        let dependency = dependencies.get(name);
+        (
+            dependency.and_then(|value| value.get("git")),
+            dependency.and_then(|value| value.get("rev")),
+        )
+    }
+
     fn workspace_dependencies(manifest: &str) -> toml::Value {
         let parsed: toml::Value = toml::from_str(manifest).expect("valid Cargo manifest");
         parsed["workspace"]["dependencies"].clone()
@@ -871,6 +890,13 @@ mod tests {
                 Some(want),
                 "{name} seed drifted"
             );
+            if name == "spin-sdk" {
+                assert_eq!(
+                    dependency_git_source(&seed, name),
+                    dependency_git_source(&root, name),
+                    "{name} seed source drifted"
+                );
+            }
         }
     }
 
@@ -906,6 +932,13 @@ mod tests {
                     dependency_requirement(&root, name),
                     "{name} differs in an independent workspace"
                 );
+                if name == "spin-sdk" {
+                    assert_eq!(
+                        dependency_git_source(&dependencies, name),
+                        dependency_git_source(&root, name),
+                        "{name} source differs in an independent workspace"
+                    );
+                }
             }
         }
         let smoke = include_str!(concat!(
@@ -953,6 +986,68 @@ unpinned = { path = "somewhere" }
         assert_ne!(dependency_requirement(&parsed, "spin-sdk"), Some("7"));
         assert_eq!(dependency_requirement(&parsed, "unpinned"), None);
         assert_eq!(dependency_requirement(&parsed, "absent"), None);
+    }
+
+    #[test]
+    fn dependency_git_source_detects_drift_without_changing_version_checks() {
+        let pinned: toml::Value = toml::from_str(
+            r#"
+spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk", rev = "0123456789abcdef0123456789abcdef01234567" }
+"#,
+        )
+        .expect("valid pinned dependency");
+        let source = dependency_git_source(&pinned, "spin-sdk");
+        assert_eq!(
+            source,
+            (pinned["spin-sdk"].get("git"), pinned["spin-sdk"].get("rev"))
+        );
+        let reordered: toml::Value = toml::from_str(
+            r#"
+[spin-sdk]
+rev = "0123456789abcdef0123456789abcdef01234567"
+version = "=7.0.0"
+git = "https://github.com/stackpop/spin-rust-sdk"
+"#,
+        )
+        .expect("valid reordered dependency");
+        assert_eq!(dependency_git_source(&reordered, "spin-sdk"), source);
+        for (field, replacement) in [
+            (
+                "git",
+                Some("https://github.com/spinframework/spin-rust-sdk"),
+            ),
+            ("rev", Some("89abcdef0123456789abcdef0123456789abcdef01")),
+            ("git", None),
+            ("rev", None),
+        ] {
+            let mut drifted = pinned.clone();
+            let dependency = drifted["spin-sdk"]
+                .as_table_mut()
+                .expect("dependency table");
+            if let Some(value) = replacement {
+                dependency.insert(field.to_owned(), toml::Value::String(value.to_owned()));
+            } else {
+                dependency.remove(field);
+            }
+            assert_eq!(
+                dependency_requirement(&drifted, "spin-sdk"),
+                dependency_requirement(&pinned, "spin-sdk"),
+                "source drift must not change the version fixture"
+            );
+            assert_ne!(
+                dependency_git_source(&drifted, "spin-sdk"),
+                source,
+                "{field}"
+            );
+        }
+        let registry: toml::Value = toml::from_str("spin-sdk = \"=7.0.0\"").unwrap();
+        assert_eq!(
+            dependency_requirement(&registry, "spin-sdk"),
+            dependency_requirement(&pinned, "spin-sdk")
+        );
+        assert_eq!(dependency_git_source(&registry, "spin-sdk"), (None, None));
+        assert_ne!(dependency_git_source(&registry, "spin-sdk"), source);
+        assert_eq!(dependency_git_source(&registry, "absent"), (None, None));
     }
 
     #[test]
@@ -1493,9 +1588,22 @@ unpinned = { path = "somewhere" }
             )),
             "generated Cloudflare adapter must use the current SDK release"
         );
-        assert!(
-            cargo_toml.contains("spin-sdk = { version = \"=7.0.0\", default-features = false }"),
-            "generated Spin adapter must use the current SDK major"
+        let generated = workspace_dependencies(cargo_toml);
+        let root = workspace_dependencies(include_str!("../../../Cargo.toml"));
+        assert_eq!(
+            dependency_requirement(&generated, "spin-sdk"),
+            dependency_requirement(&root, "spin-sdk"),
+            "generated Spin adapter must use the current SDK version"
+        );
+        assert_eq!(
+            dependency_git_source(&generated, "spin-sdk"),
+            dependency_git_source(&root, "spin-sdk"),
+            "generated Spin adapter must use the exact SDK source and revision"
+        );
+        assert_eq!(
+            generated["spin-sdk"]["default-features"].as_bool(),
+            Some(false),
+            "generated Spin adapter must keep SDK default features disabled"
         );
     }
 

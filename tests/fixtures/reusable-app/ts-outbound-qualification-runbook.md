@@ -63,22 +63,22 @@ Every `UNSET` blocks the dependent step; an operator must supply and review fact
 them from a successful command. Preserve separate source, build-input, binary and deployment
 identities. Record unavailable provider revisions as typed, reasoned unknowns.
 
-| Field                          | Required External Record                                                                                                                               |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Q3 freeze and local acceptance | UNSET: freeze reference, clean 40-character candidate SHA, authoritative per-leg local evidence                                                        |
-| Baseline and prerequisite      | UNSET: full immutable identities resolving TS baseline `a9037770a` and prerequisite PR 1123 `4c5ca8ae5`                                                |
-| Reviewed source subjects       | UNSET: requirements/inventory digests, approved Interfaces digest, reviewed changes since historical approval packet                                   |
-| G4 decisions                   | UNSET: separate API, primitive/B, H(K), applicability and measurement decision IDs, scope, exact subject digest, approver, date and evidence reference |
-| Build identities               | UNSET: lockfiles/build-input SHA-256, commands/features/target, runner image, binary and packaged/deployed artifact SHA-256                            |
-| Runtime identities             | UNSET: actual SDK/CLI/runtime revisions, compatibility date/flags, deployment/service identity and POP where observable                                |
-| Execution ownership            | UNSET: named EdgeZero preparer and actual TS maintainer/operator, dated ownership acknowledgement, reachable runbook/work-item link                    |
-| Package acceptance             | UNSET: TS acceptance date, accepted external runbook/package digest and candidate/build identities                                                     |
-| Staging authorization          | UNSET: issuer, date, evidence reference, isolated service and permitted actions; no production traffic/stores                                          |
-| Entitlements and origins       | UNSET: required feature entitlements, controlled origins, approved delays/failure modes and non-secret settings references                             |
-| Execution mapping              | UNSET: each G1 leg, actual command/cwd, unique sentinel, expected assertions/case counts, samples/thresholds where required, artifact and owner        |
-| Measurement approvals          | UNSET: M1/M2/M5/M7 comparison definitions, thresholds, sampling/randomization, 14b control and H(K) numerical rule/domain/maximum/tolerance            |
+| Field                          | Required External Record                                                                                                                                 |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q3 freeze and local acceptance | UNSET: freeze reference, clean 40-character candidate SHA, authoritative per-leg local evidence                                                          |
+| Baseline and prerequisite      | UNSET: full immutable identities resolving TS baseline `a9037770a` and prerequisite PR 1123 `4c5ca8ae5`                                                  |
+| Reviewed source subjects       | UNSET: requirements/inventory digests, approved Interfaces digest, reviewed changes since historical approval packet                                     |
+| G4 decisions                   | UNSET: separate API, primitive/B, H(K), applicability and measurement decision IDs, scope, exact subject digest, approver, date and evidence reference   |
+| Build identities               | UNSET: lockfiles/build-input SHA-256, commands/features/target, runner image, binary and packaged/deployed artifact SHA-256                              |
+| Runtime identities             | UNSET: actual SDK/CLI/runtime revisions, compatibility date/flags, deployment/service identity and POP where observable                                  |
+| Execution ownership            | UNSET: named EdgeZero preparer and actual TS maintainer/operator, dated ownership acknowledgement, reachable runbook/work-item link                      |
+| Package acceptance             | UNSET: TS acceptance date, accepted external runbook/package digest and candidate/build identities                                                       |
+| Staging authorization          | UNSET: issuer, date, evidence reference, isolated service and permitted actions; no production traffic/stores                                            |
+| Entitlements and origins       | UNSET: required feature entitlements, controlled origins, approved delays/failure modes and non-secret settings references                               |
+| Execution mapping              | UNSET: each G1 leg, actual command/cwd, unique sentinel, expected assertions/case counts, samples/thresholds where required, artifact and owner          |
+| Measurement approvals          | UNSET: M1/M2/M5/M7 comparison definitions, thresholds, sampling/randomization, 14b control and H(K) numerical rule/domain/maximum/tolerance              |
 | Image performance comparison   | UNSET: matched TS/SDK-only controls, asset/profile corpus, cache classification, GET/HEAD/S3 groups, instrumentation, samples and acceptance/noise rules |
-| Handoff and retention          | UNSET: sanitized artifact manifest, independent review, durable non-expiring retention and consumer confirmation                                       |
+| Handoff and retention          | UNSET: sanitized artifact manifest, independent review, durable non-expiring retention and consumer confirmation                                         |
 
 Use the frozen values from the external record; never substitute the current `HEAD`:
 
@@ -122,7 +122,9 @@ plan; compilation, routing sentinels and local smoke are not hosted outbound acc
 
 Worktree tool pins are Rust 1.98.1, Node 24.20.0, Fastly CLI 16.0.0, Spin 4.1.0,
 standalone Viceroy 0.21.0 and Wasmtime 48.0.2. SDK requirements are Fastly 0.13.1,
-worker 0.8.5 and spin-sdk 7.0.0. Record actual executable identities rather than borrowing
+worker 0.8.5 and spin-sdk 7.0.0 from `stackpop/spin-rust-sdk` at
+`e65ff90dadf4173b08b14194e878ad3acd555337` (`wasip3 0.9.0` / `wit-bindgen 0.62.0`).
+Record actual executable identities rather than borrowing
 historical paths. Local fixture runners accept `VICEROY_BIN`, `SPIN_BIN`, `WRANGLER_BIN` and
 `WORKER_BUILD_BIN`; Cloudflare also requires explicit absolute `WASM_BINDGEN_BIN`,
 `ESBUILD_BIN` and `WASM_OPT_BIN`. Preserve `WRANGLER_SEND_METRICS=false` and a scoped

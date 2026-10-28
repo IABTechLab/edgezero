@@ -394,7 +394,7 @@ mod platform {
     use spin_sdk::time::sleep;
     use spin_sdk::wasip3::http::types::{ErrorCode, Fields};
     use spin_sdk::wasip3::http_compat::{BodyResult, BodyWriter};
-    use spin_sdk::wasip3::spawn;
+    use spin_sdk::wasip3::spawn_local;
     use spin_sdk::wit_bindgen::rt::async_support::{
         FutureRead, FutureWrite, FutureWriteCancel, FutureWriter, StreamResult, StreamWrite,
         StreamWriter,
@@ -453,7 +453,7 @@ mod platform {
         }
 
         fn spawn(&mut self, task: LocalBoxFuture<'static, ()>) {
-            spawn(task);
+            spawn_local(task);
         }
     }
 

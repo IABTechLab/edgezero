@@ -236,8 +236,11 @@ schema and `INSERT … ON CONFLICT DO UPDATE` statement vendored from
 spinframework/spin's `crates/key-value-spin/src/store.rs`. A contract
 test in `edgezero-adapter-spin/src/cli/push_sqlite.rs` asserts
 byte-equality against the upstream Spin 4.1.0 strings. The workspace's
-exact `spin-sdk = "=7.0.0"` pin makes every SDK upgrade explicit, and
-the CLI warns when the installed Spin runtime major is outside the
+exact SDK 7 Git revision, shared with the demo, reusable fixture and generator,
+makes every SDK upgrade explicit. The
+[dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) records the executor
+repair and upstream PR; callers use the SDK's `wasip3::spawn_local` re-export.
+The CLI warns when the installed Spin runtime major is outside the
 schema-verified 2.x through 4.x range.
 
 ```bash

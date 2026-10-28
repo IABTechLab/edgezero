@@ -107,6 +107,14 @@ their scope when introduced; the current summary supersedes their then-pending A
   Preserve actual host writes, guest observations, original cutoffs, typed failures and mixed
   collection states. Reject late or incomplete evidence; keep timeline misses and provider
   progress failures visible rather than widening tolerances or promoting qualification.
+- Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
+  `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
+  [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).
+  Hard-migrate SDK spawn calls to `spawn_local`, using WASIp3 0.9.0 / wit-bindgen 0.62.0
+  through one SDK executor. Align the root, demo, reusable fixture and generated manifests;
+  compare Git source and revision as well as package version in dependency guards.
+  Preserve absolute deadlines, cutoffs and all limits; scheduler-latency and hosted qualification
+  remain separate gates. See the [dependency audit](docs/audits/2026-10-27-spin-sdk-eager-progress.md).
 
 ### Main Integration
 

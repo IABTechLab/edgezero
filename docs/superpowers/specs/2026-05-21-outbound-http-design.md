@@ -7044,8 +7044,13 @@ separate flate dependency audit.
 `fastly-shared = "=0.13.1"`, `fastly-sys = "=0.13.1"`, and
 `log-fastly = "=0.13.1"` in the workspace manifests that own those dependencies, refresh
 both the root and excluded app-demo lockfiles, and assert both resolved graphs. Spin uses the
-SDK's `wasip3` re-export rather than a second direct dependency; the locked SDK 7 graph selects
-`wasip3 0.7.1+wasi-0.3.0`. Adapter manifests inherit the corresponding workspace dependency
+SDK's `wasip3` re-export rather than a second direct dependency. SDK 7 is pinned to
+`https://github.com/stackpop/spin-rust-sdk.git` at
+`e65ff90dadf4173b08b14194e878ad3acd555337`, selecting `wasip3 0.9.0+wasi-0.3.0` and the
+corrected `wit-bindgen 0.62.0` executor. See the
+[SDK dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) and
+[upstream change](https://github.com/spinframework/spin-rust-sdk/pull/169).
+Use `spawn_local` without a compatibility alias or another executor. Adapter manifests inherit the corresponding workspace dependency
 rather than declaring a broader compatible range. Viceroy is pinned to 0.21.0 because older
 repository/local releases reject imports emitted by Fastly SDK 0.13.1 before tests execute. An
 SDK enum/table or raw bridge may not be published from a graph that can silently select a later
