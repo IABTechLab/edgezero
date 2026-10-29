@@ -505,6 +505,15 @@ inapplicable to this case and retains all original nine cases. Complete suites s
 timing gates; inventory bindings, criteria 21/23, native body-entry and hosted qualification remain
 open. Neither the local passes nor unit owner counts certify provider teardown or client delivery.
 
+The [response-cleanup checkpoint](2026-10-18-trusted-server-outbound-implementation.md#d6-response-cleanup-checkpoint-2026-10-29)
+adds the Fastly normal-completion/same-client isolation part of
+criterion 21: the original callback sibling completes and fresh post-delivery work succeeds after
+canonical response cleanup. Companion actual-route core units inject terminal outcomes/drop
+while retaining pending jobs and wrappers; they are not adapter failure-detection evidence.
+Remaining criterion 21 adapter/runtime failure paths, actual SDK resource/poll witnesses and
+both-wrapper criterion 23 remain open. See the master checkpoint and fixture README for exact
+local runs, bounded protocol and explicit fixture-close limitations. No inventory leg is promoted.
+
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
 `runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.
 

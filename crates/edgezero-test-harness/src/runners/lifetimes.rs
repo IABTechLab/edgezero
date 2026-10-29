@@ -1,5 +1,6 @@
 use super::*;
 use crate::net::WireOrigins;
+mod cleanup;
 
 const CASES: [&str; 9] = [
     "slow-origin",
@@ -19,7 +20,15 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         "outbound-lifetimes",
         run,
         records,
-        |port, origins, records| checks(name, port, origins, records),
+        |port, origins, records| {
+            checks(
+                name,
+                port,
+                origins,
+                &run.join(format!("{name}-outbound-lifetimes.log")),
+                records,
+            )
+        },
     )?;
     if let Some(count) = count {
         records.push(json!({"event":"lifetime-inventory","adapter":name,
@@ -28,7 +37,13 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 
-fn checks(adapter: &str, port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usize> {
+fn checks(
+    adapter: &str,
+    port: u16,
+    origins: &WireOrigins,
+    log: &Path,
+    records: &mut Records,
+) -> Result<usize> {
     let mut failures = Vec::new();
     let handoff = matches!(adapter, "axum" | "cloudflare" | "spin");
     if !handoff {
@@ -143,6 +158,12 @@ fn checks(adapter: &str, port: u16, origins: &WireOrigins, records: &mut Records
                 "header_ns":reply["header_ns"],"headers":reply["headers"]})),"qualification":false}))?;
         if let Err(error) = result {
             failures.push(format!("{case}: {error}"));
+        }
+    }
+    if adapter == "fastly" {
+        executed += 1;
+        if let Err(error) = cleanup::check(port, origins, log, records) {
+            failures.push(format!("response-cleanup: {error}"));
         }
     }
     require(failures.is_empty(), failures.join("; "))?;

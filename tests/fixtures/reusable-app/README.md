@@ -951,6 +951,34 @@ resource retention, single consumption and exactly-once terminal family release.
 Fastly records this criterion as inapplicable and still runs all original nine cases. The suite
 does not yet implement the remaining cleanup and reusable-sandbox acceptance scenarios.
 
+Fastly adds `response-cleanup` for the normal-completion isolation part of EZ-6 criterion 21.
+One real client starts a callback-owned begun request before a response-owned Begin and original
+three-slot batch. Public handles remain outside the streamed response while canonical egress
+completes. A sixth, bounded same-client `ready` Send returns only after the source has observed
+all five original requests waiting; it is a causal setup barrier, not an application workaround.
+The native client then validates the complete response and a canonical `cleaned` terminal record
+before releasing the source. The body scope is closed, its retained handles return typed scope
+errors, and the callback sibling remains pending. That original sibling subsequently returns K,
+the same client sends fresh post-delivery work returning P, and callback return closes its scope.
+
+The private fixture protocol uses three ordered, newline-terminated records: `cleaned`,
+`continued`, `returned`. Records are at most 2048 bytes, and the native log reader is capped at
+1 MiB. Wrong/duplicate/foreign records and trailing protocol fragments fail validation; no
+silently skipped malformed JSON can open the source gate. Seven source roles produce 25 events
+plus one native response/terminal-observation boundary, within the existing limits. Native
+write-start timestamps prove the successful callback and post-delivery replies follow release.
+The four body-owned source sockets close by explicit fixture release; this is not observed host
+cancellation. Each per-request timeout and the batch observation interval remain three seconds,
+without renewal.
+
+A companion actual-route unit keeps four gated resource owners and the response attempt/body
+alive across injected terminal outcomes, proving immediate release, receiver cancellation,
+frozen producer polls and exactly one report before later wrapper drops. Attempt drop has its
+own `TransportError` row. These are core terminal-injection and mock-owner proofs, not evidence
+that an adapter detects disconnect, deadline, source failure or explicit cancellation, or that
+SDK/host teardown is certified. Full criterion 21, criterion 23 and hosted qualification remain
+open. No production API, executor, transport or runtime pin changes.
+
 The caps source uses the pinned native harness encoder, not a new guest dependency. Eight
 flushed 16 KiB plaintext pieces produce one gzip member, with a logical encoded size at most
 129 KiB. Actual payload remains in the final scheduled write. Counted writes retain partial

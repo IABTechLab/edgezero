@@ -861,6 +861,77 @@ unqualified; criterion 20's inventory legs are not promoted by a partial parent 
 criteria 21/23, actual native pending-body witnesses, strict timing closure, candidate freeze and
 authorized hosted qualification remain open. No deployment is authorized.
 
+### D6 Response Cleanup Checkpoint (2026-10-29)
+
+Add the Fastly normal-completion/same-client isolation portion of EZ-6 criterion 21 to the
+existing lifetime suite. Use the real client and existing `run_custom` serving callback, with
+non-nested executor phases around the canonical request/response service. Begin a callback-owned
+exchange first; start one response-owned Begin and the original three-slot batch under an exact
+provisional body owner. Keep their public handles outside the streamed response through egress.
+One bounded same-client readiness Send waits until all five original source requests are waiting,
+establishing the precondition before egress. This is fixture orchestration, not consumer policy
+or another transport. Request timeouts and the batch cutoff interval remain three seconds;
+buffered results and inspected bodies are capped at 64 bytes, and the retained stream is never
+drained. The existing prepare hook injects the same client into the canonical request.
+
+After canonical response completion, verify one terminal report, closed body ownership, typed
+scope errors on the retained body-owned Begin/Batch, and a still-pending live callback sibling.
+Only after the native client validates the complete response and canonical `cleaned` evidence
+does the source gate open. The original callback exchange then returns K, the same client sends
+fresh post-delivery work returning P, and callback return closes its scope. Require all three
+ordered protocol records: `cleaned`, `continued`, `returned`. Keep records at most 2048 bytes and
+the native log reader at most 1 MiB. Exact canonical JSON rejects malformed, duplicate, foreign,
+reordered, extra and truncated protocol records; partial third records may remain pending, but
+an incomplete fourth/prefix cannot pass final validation. Critical gate decisions do not use the
+existing permissive runtime-log parser. Source and client failures remain separate and recorded.
+
+Seven source roles produce 25 events plus one native response/cleanup-observation boundary,
+within unchanged 32-event/eight-active/128-cumulative budgets. Use actual write-start causality:
+all five pending receipts precede readiness, the complete response and validated cleanup precede
+release, and callback/post-delivery payloads follow it. The four body-owned sockets close only
+because the fixture releases them. Their `fixture_released` events do not prove guest or host
+cancellation, and the typed post-terminal handle errors do not independently count SDK drops.
+
+Extend the existing actual-route fixture unit, retaining its successful native/signalled handoff
+paths. Inject Completed, ClientDisconnected, DeadlineExceeded, SourceError and RequestCancelled
+while the writing attempt, body wrapper and original jobs remain retained. Assert four preexisting
+resource-owner releases, one Begin cancellation, one batch-group release, one family release,
+cancelled receivers, no further inner producer polls and one terminal report before dropping the
+attempt itself. Later attempt/body/sender drops cannot defer or duplicate cleanup. The separate
+implicit attempt-drop row records TransportError. These are core terminal-injection/mock-resource
+proofs, not evidence that an adapter detects those failure paths or bounds SDK/host teardown.
+
+The initial full harness run exposed a test-only readiness assumption: one listener wake does
+not guarantee three immediate nonblocking accepts. Retain that failure log, and fix only the
+test to retry WouldBlock/Interrupted under one absolute two-second deadline, preserving explicit
+listener readiness in both phases, drain-to-WouldBlock and peer-address assertions. Production
+Acceptor and all source timing bounds are unchanged. Three focused repetitions and the full
+normal-parallel harness then pass. No sleeps or larger timing allowance are introduced.
+
+Final local artifacts are `/private/tmp/edgezero-cleanup-reviewed/{axum,viceroy,spin,workerd}`.
+The Fastly cleanup case passes on repaired Viceroy 0.21.0; the prior asynchronous handoff case
+passes on Axum, Spin 4.1.0 and workerd. All full suites remain exit 1: Axum 7/10, Viceroy 7/10,
+Spin 7/10, workerd 6/10. Axum misses slow/fourth-slot/fast source schedules. Viceroy misses slow/
+fast source heads and the CPU B-write interval (530.578..535.658 ms). Spin misses slow/fourth-slot
+source schedules; workerd misses slow/fourth-slot schedules and fast batch observation. Both also
+report `inconsistent caps write progress`: measured late pieces include 5.039 ms on Spin and
+11.482/61.875 ms on workerd against the unchanged 5 ms bound. That shared error need not imply
+only a cadence failure. The earlier `/private/tmp/edgezero-cleanup-local-viceroy` cleanup pass/full-suite
+failure and `/private/tmp/edgezero-cleanup-harness-tests.log` readiness failure remain retained;
+no later passing observation substitutes for them.
+
+All five root Rust gates pass: 2,568 tests across 32 binaries, one existing ignored. The reviewed
+harness passes 267 tests (one ignored), fixture-core passes 55, and strict harness/fixture-core/
+four-entrypoint Clippy passes. Guest/source, protocol/specification and unit/code-quality reviews
+preserve the explicit limits above. Docs lint/format, legacy/docs/inventory guards, all 51 Node
+guard regressions, shared dependency pins and decoder/map audits pass.
+No production API, scheduler, transport, SDK/runtime pin, capability, frozen requirement or
+deployment change. The demo and generator need no migration for this fixture-only addition.
+G1 stays 33 ready / 478 planned across 255 criteria / 511 legs, unqualified. Full criterion 21's
+adapter units and observable disconnect/deadline/source/cancellation runtime paths, both Fastly
+wrapper sequences in criterion 23, native body-entry witnesses, strict timing closure, candidate
+freeze and authorized hosted/consumer qualification remain open. This does not close D6.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

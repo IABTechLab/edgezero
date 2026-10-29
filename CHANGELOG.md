@@ -147,6 +147,14 @@ their scope when introduced; the current summary supersedes their then-pending A
   preserve primary/partial client failures through cleanup. Fastly keeps all nine existing cases
   and records handoff as inapplicable. Local handoff passes do not waive full-suite timing failures,
   activate inventory legs or qualify hosted behavior. No production API or runtime-pin changes.
+- Add a local Fastly normal-completion isolation probe: retain response-owned Begin/Batch handles
+  through canonical egress, then successfully collect an already-pending callback sibling and
+  send fresh work through the same real client. Bound and validate causal source/log witnesses;
+  distinguish fixture-driven socket closure from provider cancellation. Extend the actual-route
+  core unit with terminal-injection/drop rows that release pending owners before retained
+  wrappers drop and prevent further producer polls. Fix a test-only accept-readiness assumption
+  with bounded retries, preserving readiness, drain and peer assertions. Adapter failure paths,
+  SDK teardown, strict timing and hosted qualification remain separate; no production API changes.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

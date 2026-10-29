@@ -61,35 +61,52 @@ mod tests {
         (Acceptor::new(listener).unwrap(), port)
     }
 
+    fn wait_for_listener(acceptor: &mut Acceptor, deadline: Instant) {
+        loop {
+            assert!(Instant::now() < deadline, "listener readiness timed out");
+            acceptor.wait().unwrap();
+            if acceptor
+                .events
+                .iter()
+                .any(|event| event.token() == LISTENER)
+            {
+                return;
+            }
+        }
+    }
+
+    fn accept_until(acceptor: &mut Acceptor, deadline: Instant) -> TcpStream {
+        loop {
+            assert!(Instant::now() < deadline, "queued accept timed out");
+            match acceptor.accept() {
+                Ok(stream) => return stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_for_listener(acceptor, deadline)
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => panic!("queued accept failed: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn queued_connections_drain_and_new_arrivals_have_their_own_readiness() {
         let (mut acceptor, port) = listener();
         let clients: Vec<_> = (0..3)
             .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
             .collect();
-        acceptor.wait().unwrap();
-        assert!(
-            acceptor
-                .events
-                .iter()
-                .any(|event| event.token() == LISTENER)
-        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        wait_for_listener(&mut acceptor, deadline);
         let streams: Vec<_> = (0..clients.len())
-            .map(|_| acceptor.accept().unwrap())
+            .map(|_| accept_until(&mut acceptor, deadline))
             .collect();
         assert_eq!(
             acceptor.accept().unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
         let next = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        acceptor.wait().unwrap();
-        assert!(
-            acceptor
-                .events
-                .iter()
-                .any(|event| event.token() == LISTENER)
-        );
-        let stream = acceptor.accept().unwrap();
+        wait_for_listener(&mut acceptor, deadline);
+        let stream = accept_until(&mut acceptor, deadline);
         assert_eq!(stream.peer_addr().unwrap(), next.local_addr().unwrap());
         drop(streams);
     }

@@ -19,6 +19,7 @@ enum Case {
     Cpu,
     Caps,
     Handoff,
+    Cleanup,
 }
 
 impl Case {
@@ -34,6 +35,7 @@ impl Case {
             "cpu-stretch" => Ok(Self::Cpu),
             "caps-while-waiting" => Ok(Self::Caps),
             "response-handoff" => Ok(Self::Handoff),
+            "response-cleanup" => Ok(Self::Cleanup),
             _ => Err("unknown lifetime case".into()),
         }
     }
@@ -50,6 +52,7 @@ impl Case {
             Self::Cpu => "cpu-stretch",
             Self::Caps => "caps-while-waiting",
             Self::Handoff => "response-handoff",
+            Self::Cleanup => "response-cleanup",
         }
     }
 
@@ -64,11 +67,18 @@ impl Case {
             Self::PendingHead | Self::PendingBody => matches!(role, "a" | "b" | "c"),
             Self::Caps => matches!(role, "a" | "b" | "c"),
             Self::Handoff => matches!(role, "origin" | "a" | "b" | "c"),
+            Self::Cleanup => matches!(
+                role,
+                "origin" | "a" | "b" | "c" | "callback" | "ready" | "post"
+            ),
         }
     }
 
     fn held(self) -> bool {
-        matches!(self, Self::PendingHead | Self::PendingBody | Self::Handoff)
+        matches!(
+            self,
+            Self::PendingHead | Self::PendingBody | Self::Handoff | Self::Cleanup
+        )
     }
 }
 
@@ -667,9 +677,32 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         record(shared, exchange, event)?;
         return Ok(true);
     }
-    if exchange.case.held() {
+    if matches!(exchange.case, Case::Cleanup) && exchange.role == "ready" {
+        shared.wait(GATE_BUDGET, |state| {
+            state.stop
+                || state.lifetimes[exchange.token]
+                    .events
+                    .iter()
+                    .filter(|event| event["op"] == "waiting")
+                    .count()
+                    == 5
+        })?;
+        require(!shared.lock().stop, "cleanup barrier stopped")?;
+        let started = Instant::now();
+        socket.write_all(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        socket.flush()?;
+        let mut event = exchange.event("head", Instant::now(), None);
+        event["write_started_us"] = json!(offset(started, exchange.anchor));
+        record(shared, exchange, event)?;
+        return Ok(true);
+    }
+    if exchange.case.held() && !(matches!(exchange.case, Case::Cleanup) && exchange.role == "post")
+    {
         let handoff = matches!(exchange.case, Case::Handoff);
-        if !handoff && shared.lock().lifetimes[exchange.token].released {
+        let cleanup = matches!(exchange.case, Case::Cleanup);
+        if !handoff && !cleanup && shared.lock().lifetimes[exchange.token].released {
             return Ok(false);
         }
         if matches!(exchange.case, Case::PendingBody) {
@@ -690,7 +723,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         shared.wait(GATE_BUDGET, |state| {
             state.stop || state.lifetimes[exchange.token].released
         })?;
-        if !handoff || shared.lock().stop {
+        if (!handoff && !(cleanup && exchange.role == "callback")) || shared.lock().stop {
             return Ok(false);
         }
     }
@@ -698,6 +731,20 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
     let absolute = |value| exchange.scenario_anchor.unwrap() + ms(value);
     let received = |value| exchange.received + ms(value);
     let (head_at, chunks): (Instant, Vec<(Instant, &[u8])>) = match (exchange.case, exchange.role) {
+        (Case::Cleanup, "callback" | "post") => {
+            let at = Instant::now();
+            (
+                at,
+                vec![(
+                    at,
+                    if exchange.role == "callback" {
+                        b"K"
+                    } else {
+                        b"P"
+                    },
+                )],
+            )
+        }
         (Case::Handoff, role) => {
             let at = Instant::now();
             let bytes: &[u8] = match role {
@@ -733,7 +780,11 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
                 Case::Cpu => absolute([180, 530, 900][index]),
                 Case::Batch => received([20, 40, 60][index]),
                 Case::Caps => received([0, 20, 40][index]),
-                Case::Begin | Case::PendingHead | Case::PendingBody | Case::Handoff => {
+                Case::Begin
+                | Case::PendingHead
+                | Case::PendingBody
+                | Case::Handoff
+                | Case::Cleanup => {
                     unreachable!()
                 }
             };
@@ -758,7 +809,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
     let mut event = exchange.event(
         "head",
         Instant::now(),
-        (!matches!(exchange.case, Case::Handoff)).then_some(head_at),
+        (!matches!(exchange.case, Case::Handoff | Case::Cleanup)).then_some(head_at),
     );
     event["write_started_us"] = json!(offset(write_started, exchange.anchor));
     record(shared, exchange, event)?;
@@ -778,7 +829,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         let mut event = exchange.event(
             "chunk",
             Instant::now(),
-            (!matches!(exchange.case, Case::Handoff)).then_some(at),
+            (!matches!(exchange.case, Case::Handoff | Case::Cleanup)).then_some(at),
         );
         event["bytes"] = json!(bytes);
         event["write_started_us"] = json!(offset(write_started, exchange.anchor));
@@ -794,6 +845,71 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_source_barrier_precedes_egress_and_only_callback_work_can_complete() {
+        let origins = WireOrigins::start().unwrap();
+        origins
+            .register_lifetime("cleanup", "response-cleanup")
+            .unwrap();
+        origins.mark_lifetime_start("cleanup").unwrap();
+        let pending = ["origin", "a", "b", "c", "callback"].map(|role| {
+            (
+                role,
+                connect(&origins, "cleanup", "response-cleanup", role, "0"),
+            )
+        });
+        let ready = read(connect(
+            &origins,
+            "cleanup",
+            "response-cleanup",
+            "ready",
+            "0",
+        ));
+        assert!(ready.starts_with(b"HTTP/1.1 204"));
+        assert!(ready.ends_with(b"\r\n\r\n"));
+        for (_, socket) in &pending {
+            socket
+                .set_read_timeout(Some(Duration::from_millis(10)))
+                .unwrap();
+            assert!(
+                matches!(socket.peek(&mut [0]), Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
+            );
+            socket.set_read_timeout(Some(IO_BUDGET)).unwrap();
+        }
+        origins.release_lifetime("cleanup", Instant::now()).unwrap();
+        for (role, socket) in pending {
+            let body = read(socket);
+            if role == "callback" {
+                assert!(body.ends_with(b"K"));
+            } else {
+                assert!(
+                    body.is_empty(),
+                    "body-owned work must not receive a response"
+                );
+            }
+        }
+        assert!(
+            read(connect(
+                &origins,
+                "cleanup",
+                "response-cleanup",
+                "post",
+                "0"
+            ))
+            .ends_with(b"P")
+        );
+        let events = origins.take_lifetime_events("cleanup").unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 25);
+        let ready = event(&events, "ready", "head")["at_us"].as_u64().unwrap();
+        for role in ["origin", "a", "b", "c", "callback"] {
+            assert!(event(&events, role, "waiting")["at_us"].as_u64().unwrap() <= ready);
+        }
+        for role in ["origin", "a", "b", "c"] {
+            assert_eq!(event(&events, role, "closed")["reason"], "fixture_released");
+        }
+        origins.finish().unwrap();
+    }
 
     #[test]
     fn response_handoff_holds_all_heads_until_the_client_prefix_and_then_succeeds() {

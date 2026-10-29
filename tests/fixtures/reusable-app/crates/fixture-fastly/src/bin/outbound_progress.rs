@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "outbound_progress/cleanup.rs"]
+mod cleanup;
+
 struct Runtime;
 
 impl ProbeRuntime for Runtime {
@@ -63,6 +66,9 @@ fn main() -> Result<(), fastly::Error> {
     fastly::init();
     fixture_core::init_fixture_logging(telemetry)?;
     let mut request = fastly::Request::from_client();
+    if request.get_path() == "/progress/lifetimes/response-cleanup" {
+        return cleanup::run(request);
+    }
     if let Some(case) = request.get_path().strip_prefix("/progress/reference/") {
         let source = fixture_core::qualification::framing::source(case)?;
         let (parts, body) = source.into_parts();

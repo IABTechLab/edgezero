@@ -782,9 +782,25 @@ mod tests {
         family: Arc<std::sync::atomic::AtomicUsize>,
         groups: Arc<std::sync::atomic::AtomicUsize>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        polls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     struct FamilyDrop(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[derive(Clone, Default)]
+    struct TerminalReports(Arc<std::sync::Mutex<Vec<edgezero_core::ResponseEgressOutcome>>>);
+
+    impl edgezero_core::response_egress::ResponseEgressObserver for TerminalReports {
+        fn complete(&self, report: &edgezero_core::ResponseEgressReport) {
+            self.0.lock().unwrap().push(report.outcome);
+        }
+    }
+
+    enum HandoffEnd {
+        Collect,
+        Terminal(edgezero_core::ResponseEgressOutcome),
+        Drop,
+    }
     impl Drop for FamilyDrop {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -812,14 +828,20 @@ mod tests {
                 "c" => b'C',
                 _ => panic!("unexpected handoff job"),
             };
-            let (send, receive) = futures::channel::oneshot::channel();
+            let (send, mut receive) = futures::channel::oneshot::channel();
             assert!(self.jobs.lock().unwrap().insert(role, send).is_none());
             let resources = Arc::clone(&self.resources);
             let owner = edgezero_core::OutboundExchangeOwner::new(move || {
                 resources.fetch_add(1, Ordering::SeqCst);
             });
+            let polls = Arc::clone(&self.polls);
             Box::pin(async move {
-                receive.await.map_err(|_| invalid())?;
+                std::future::poll_fn(move |cx| {
+                    polls.fetch_add(1, Ordering::SeqCst);
+                    futures::FutureExt::poll_unpin(&mut receive, cx)
+                })
+                .await
+                .map_err(|_| invalid())?;
                 let source = futures::stream::once(async move { Ok(Bytes::from(vec![payload])) })
                     .boxed_local();
                 edgezero_core::OutboundHead::new(
@@ -934,7 +956,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_cleanup_revokes_pending_jobs_before_retained_body_drop() {
+        use edgezero_core::ResponseEgressOutcome;
+        for outcome in [
+            ResponseEgressOutcome::Completed,
+            ResponseEgressOutcome::ClientDisconnected,
+            ResponseEgressOutcome::DeadlineExceeded,
+            ResponseEgressOutcome::SourceError,
+            ResponseEgressOutcome::RequestCancelled,
+        ] {
+            pending_terminal_cleanup(Some(outcome));
+        }
+        pending_terminal_cleanup(None);
+    }
+
+    fn pending_terminal_cleanup(outcome: Option<edgezero_core::ResponseEgressOutcome>) {
+        handoff_route_until(true, outcome.map_or(HandoffEnd::Drop, HandoffEnd::Terminal));
+    }
+
     fn handoff_route(has_return_signal: bool) {
+        handoff_route_until(has_return_signal, HandoffEnd::Collect);
+    }
+
+    fn handoff_route_until(has_return_signal: bool, end: HandoffEnd) {
         use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
         use edgezero_core::{
             IngressDispatchOutcome, IngressFraming, IngressHeadAccounting, ResponseEgressOutcome,
@@ -955,6 +1000,7 @@ mod tests {
             family: Arc::new(AtomicUsize::new(0)),
             groups: Arc::new(AtomicUsize::new(0)),
             calls: Arc::new(AtomicUsize::new(0)),
+            polls: Arc::new(AtomicUsize::new(0)),
         };
         let returned = Arc::new(super::super::progress::DispatchReturn::default());
         let router = super::super::progress::router(
@@ -964,6 +1010,8 @@ mod tests {
         );
         let mut app = App::new(router);
         app.set_monotonic_clock(time.clock());
+        let reports = TerminalReports::default();
+        app.set_response_egress_observer(reports.clone());
         let mut request = request_builder()
             .uri("/progress/lifetimes/response-handoff")
             .body(Body::empty())
@@ -1026,6 +1074,65 @@ mod tests {
             "original origin remains gated after the prefix"
         );
         assert_eq!(client.jobs.lock().unwrap().len(), 4);
+        if !matches!(end, HandoffEnd::Collect) {
+            let jobs = std::mem::take(&mut *client.jobs.lock().unwrap());
+            assert!(jobs.values().all(|sender| !sender.is_canceled()));
+            let polls = client.polls.load(Ordering::SeqCst);
+            let mut retained_attempt = Some(attempt);
+            let expected = match end {
+                HandoffEnd::Terminal(outcome) => {
+                    let attempt = retained_attempt.as_mut().unwrap();
+                    assert!(attempt.terminate(outcome, clock.now()));
+                    assert!(!attempt.terminate(ResponseEgressOutcome::Unspecified, clock.now()));
+                    outcome
+                }
+                HandoffEnd::Drop => {
+                    drop(retained_attempt.take());
+                    ResponseEgressOutcome::TransportError
+                }
+                HandoffEnd::Collect => unreachable!(),
+            };
+            let counts = || {
+                [
+                    client.resources.load(Ordering::SeqCst),
+                    client.cancelled.load(Ordering::SeqCst),
+                    client.groups.load(Ordering::SeqCst),
+                    client.family.load(Ordering::SeqCst),
+                ]
+            };
+            assert_eq!(
+                counts(),
+                [4, 1, 1, 1],
+                "terminal revokes all work before retained body drop"
+            );
+            assert_eq!(*reports.0.lock().unwrap(), [expected]);
+            assert!(jobs.values().all(|sender| sender.is_canceled()));
+            assert!(matches!(
+                body.next().now_or_never(),
+                Some(None) | Some(Some(Err(EdgeError::Internal { .. })))
+            ));
+            assert_eq!(
+                client.polls.load(Ordering::SeqCst),
+                polls,
+                "terminal prevents further producer polls"
+            );
+            drop(retained_attempt);
+            assert_eq!(
+                counts(),
+                [4, 1, 1, 1],
+                "attempt drop cannot defer or repeat terminal cleanup"
+            );
+            drop(body);
+            drop(jobs);
+            assert_eq!(
+                counts(),
+                [4, 1, 1, 1],
+                "later wrapper/handle drops cannot release twice"
+            );
+            assert_eq!(*reports.0.lock().unwrap(), [expected]);
+            assert_eq!(client.calls.load(Ordering::SeqCst), 4);
+            return;
+        }
         time.advance_to(start + Duration::from_millis(50));
         for (_, sender) in std::mem::take(&mut *client.jobs.lock().unwrap()) {
             sender.send(()).unwrap();
