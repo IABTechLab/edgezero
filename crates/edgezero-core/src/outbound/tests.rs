@@ -1943,6 +1943,60 @@ fn batch_next_yields_completion_order_and_collection_restores_input_order() {
 }
 
 #[test]
+fn two_slot_batches_separate_completion_and_input_index_order() {
+    let time = TestTime::new(MonotonicInstant::now());
+    let observation_cutoff = time.pair().clock().deadline_after(Duration::from_secs(1));
+    let client = HttpClient::with_client(MockClient {
+        batch_calls: AtomicUsize::new(0),
+        send_calls: AtomicUsize::new(0),
+        time,
+    });
+    let requests = || {
+        vec![
+            OutboundRequest::get("https://example.com/one").expect("one"),
+            OutboundRequest::new(Method::DELETE, Uri::from_static("https://example.com/two"))
+                .expect("two"),
+        ]
+    };
+    let mut batch = client.start_batch_until(requests(), observation_cutoff);
+    let OutboundBatchNext::Item(first) = block_on(batch.next()).expect("valid batch driver") else {
+        panic!("slot one completes first");
+    };
+    assert_eq!(first.index(), 1);
+    assert_eq!(first.result().elapsed, Duration::from_millis(1));
+    assert!(matches!(
+        first.result().outcome,
+        Err(EdgeError::BadGateway { .. })
+    ));
+    let OutboundBatchNext::Item(second) = block_on(batch.next()).expect("valid batch driver")
+    else {
+        panic!("slot zero completes second");
+    };
+    assert_eq!(second.index(), 0);
+    assert_eq!(second.result().elapsed, Duration::from_millis(2));
+    second.result().outcome.as_ref().expect("slot zero success");
+    assert!(matches!(
+        block_on(batch.next()).expect("valid batch driver"),
+        OutboundBatchNext::Finished(OutboundBatchTermination::Completed)
+    ));
+
+    let collected = block_on(client.send_all_until(requests(), observation_cutoff))
+        .expect("equivalent batch collection");
+    assert_eq!(collected.termination(), OutboundBatchTermination::Completed);
+    let [
+        OutboundCollectedSlot::Resolved(zero),
+        OutboundCollectedSlot::Resolved(one),
+    ] = collected.slots()
+    else {
+        panic!("exactly two input-aligned resolved slots");
+    };
+    assert_eq!(zero.elapsed, Duration::from_millis(2));
+    zero.outcome.as_ref().expect("slot zero success");
+    assert_eq!(one.elapsed, Duration::from_millis(1));
+    assert!(matches!(one.outcome, Err(EdgeError::BadGateway { .. })));
+}
+
+#[test]
 fn batch_next_is_cancellation_safe_and_cancel_reports_unresolved_indices() {
     fn poll_next_once(batch: &mut OutboundBatch) -> Poll<Result<OutboundBatchNext, EdgeError>> {
         let next = batch.next();

@@ -618,6 +618,7 @@ mod tests {
     use futures_util::task::{ArcWake, waker_ref};
     use futures_util::{StreamExt as _, stream};
 
+    use crate::compression::{ContentEncoding, PassthroughReason, classify_content_encoding};
     use crate::http::{HeaderMap, HeaderValue, Method, StatusCode};
     use crate::{
         BodyStream, BudgetSource, ContentTypeProvenance, DispatchBudget, EdgeError, MonotonicClock,
@@ -1409,31 +1410,132 @@ mod tests {
 
     #[test]
     fn bodyless_and_declared_reset_bodies_bypass_payload_processing() {
-        for (method, status) in [
-            (Method::HEAD, StatusCode::OK),
-            (Method::GET, StatusCode::NO_CONTENT),
-            (Method::GET, StatusCode::NOT_MODIFIED),
-            (Method::GET, StatusCode::RESET_CONTENT),
-        ] {
-            let mut captured = context(ResponseMode::Buffered { max_bytes: 0 });
-            captured.request_method = method;
-            let mut headers = HeaderMap::new();
-            headers.insert("content-length", HeaderValue::from_static("99"));
-            headers.insert("content-encoding", HeaderValue::from_static("br"));
-            let body = stream::poll_fn(|_| panic!("suppression never reads payload")).boxed_local();
-            let releases = Rc::new(Cell::new(0));
-            let head = OutboundHead::new(status, input(headers), body, captured, owner(&releases))
-                .expect("head");
-            if status == StatusCode::RESET_CONTENT {
-                assert_eq!(head.headers()["content-length"], "0");
+        for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 0 },
+                ResponseMode::Streamed,
+            ] {
+                for (method, status) in [
+                    (Method::HEAD, StatusCode::OK),
+                    (Method::GET, StatusCode::NO_CONTENT),
+                    (Method::GET, StatusCode::NOT_MODIFIED),
+                    (Method::GET, StatusCode::RESET_CONTENT),
+                ] {
+                    let mut captured = context(mode);
+                    captured.request_method = method;
+                    captured.body_policy.response_decoding = decoding;
+                    captured.body_policy.max_encoded_response_bytes = Some(0);
+                    captured.body_policy.max_decoded_response_bytes = Some(0);
+                    captured.body_policy.max_decoder_bytes = 0;
+                    let mut headers = HeaderMap::new();
+                    headers.insert("content-length", HeaderValue::from_static("1073741824"));
+                    headers.insert("content-encoding", HeaderValue::from_static("br"));
+                    let source_drops = Rc::new(Cell::new(0));
+                    let lease = SourceLease(Rc::clone(&source_drops));
+                    let body = stream::poll_fn(move |_| {
+                        let _lease = &lease;
+                        panic!("suppression never reads payload");
+                    })
+                    .boxed_local();
+                    let releases = Rc::new(Cell::new(0));
+                    let head =
+                        OutboundHead::new(status, input(headers), body, captured, owner(&releases))
+                            .expect("head");
+                    assert_eq!(
+                        head.normalization.body_disposition,
+                        if status == StatusCode::RESET_CONTENT {
+                            ResponseBodyDisposition::ResetContent {
+                                declared_body: true,
+                            }
+                        } else {
+                            ResponseBodyDisposition::FramingBodyless
+                        }
+                    );
+                    let response =
+                        block_on(head.finish()).expect("suppressed before all payload caps");
+                    assert_eq!(releases.get(), 1, "owner released before collection");
+                    assert_eq!(source_drops.get(), 1, "source released before collection");
+                    match status {
+                        StatusCode::NO_CONTENT => {
+                            assert!(!response.headers().contains_key("content-length"));
+                        }
+                        StatusCode::RESET_CONTENT => {
+                            assert_eq!(response.headers()["content-length"], "0");
+                        }
+                        _ => assert_eq!(response.headers()["content-length"], "1073741824"),
+                    }
+                    assert_eq!(response.headers()["content-encoding"], "br");
+                    assert!(
+                        block_on(response.into_bytes_bounded(0))
+                            .expect("empty")
+                            .is_empty()
+                    );
+                    assert_eq!(releases.get(), 1);
+                }
             }
-            let response = block_on(head.finish()).expect("suppressed");
-            assert!(
-                block_on(response.into_bytes_bounded(0))
-                    .expect("empty")
-                    .is_empty()
-            );
-            assert_eq!(releases.get(), 1);
+        }
+    }
+
+    #[test]
+    fn head_undeclared_reset_body_settles_once_without_payload_caps() {
+        for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 0 },
+                ResponseMode::Streamed,
+            ] {
+                for length in [None, Some("0")] {
+                    let mut captured = context(mode);
+                    captured.body_policy.response_decoding = decoding;
+                    captured.body_policy.max_encoded_response_bytes = Some(0);
+                    captured.body_policy.max_decoded_response_bytes = Some(0);
+                    captured.body_policy.max_decoder_bytes = 0;
+                    let mut headers = HeaderMap::new();
+                    if let Some(value) = length {
+                        headers.insert("content-length", HeaderValue::from_static(value));
+                    }
+                    headers.insert("content-encoding", HeaderValue::from_static("br"));
+                    let polls = Rc::new(Cell::new(0_usize));
+                    let counted = Rc::clone(&polls);
+                    let source_drops = Rc::new(Cell::new(0));
+                    let lease = SourceLease(Rc::clone(&source_drops));
+                    let source = stream::poll_fn(move |_| {
+                        let _lease = &lease;
+                        counted.set(counted.get().saturating_add(1));
+                        assert_eq!(counted.get(), 1, "reset settles only one source item");
+                        Poll::Ready(Some(Ok(Bytes::from_static(b"discarded, not decoded"))))
+                    })
+                    .boxed_local();
+                    let releases = Rc::new(Cell::new(0));
+                    let head = OutboundHead::new(
+                        StatusCode::RESET_CONTENT,
+                        input(headers),
+                        source,
+                        captured,
+                        owner(&releases),
+                    )
+                    .expect("reset head");
+                    assert_eq!(head.headers()["content-length"], "0");
+                    assert_eq!(
+                        head.normalization.body_disposition,
+                        ResponseBodyDisposition::ResetContent {
+                            declared_body: false
+                        }
+                    );
+                    assert_eq!(polls.get(), 0);
+                    let response = block_on(head.finish()).expect("single ready-item settlement");
+                    assert_eq!(releases.get(), 1, "owner released before collection");
+                    assert_eq!(source_drops.get(), 1, "source released before collection");
+                    assert_eq!(response.headers()["content-length"], "0");
+                    assert_eq!(response.headers()["content-encoding"], "br");
+                    assert!(
+                        block_on(response.into_bytes_bounded(0))
+                            .expect("empty reset")
+                            .is_empty()
+                    );
+                    assert_eq!(polls.get(), 1);
+                    assert_eq!(releases.get(), 1);
+                }
+            }
         }
     }
 
@@ -1724,6 +1826,187 @@ mod tests {
     }
 
     #[test]
+    fn original_coding_preserves_normalization_precedence() {
+        for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 32 },
+                ResponseMode::Streamed,
+            ] {
+                for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                    for nominated in [false, true] {
+                        for cap in [1, 2] {
+                            let mut captured = context(mode);
+                            captured.body_policy.response_decoding = decoding;
+                            captured.body_policy.max_decoded_response_bytes = Some(cap);
+                            let mut headers = HeaderMap::new();
+                            if nominated {
+                                headers.insert(
+                                    "connection",
+                                    HeaderValue::from_static(
+                                        "content-encoding, content-length, etag",
+                                    ),
+                                );
+                                headers
+                                    .insert("content-encoding", HeaderValue::from_static("gzip"));
+                                headers.insert(
+                                    "content-length",
+                                    HeaderValue::from_static("malformed"),
+                                );
+                                headers.insert("etag", HeaderValue::from_static("\"removed\""));
+                            }
+                            headers.insert(
+                                "last-modified",
+                                HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
+                            );
+                            let releases = Rc::new(Cell::new(0));
+                            let head = OutboundHead::new(
+                                status,
+                                input(headers),
+                                stream::iter([Ok(Bytes::from_static(b"ab"))]).boxed_local(),
+                                captured,
+                                owner(&releases),
+                            )
+                            .expect("normalization precedes malformed nominated framing");
+                            assert_eq!(
+                                classify_content_encoding(head.headers()),
+                                ContentEncoding::Identity
+                            );
+                            for name in ["connection", "content-encoding", "content-length", "etag"]
+                            {
+                                assert!(!head.headers().contains_key(name), "{name}");
+                            }
+                            let result = block_on(async {
+                                let response = head.finish().await?;
+                                for name in
+                                    ["connection", "content-encoding", "content-length", "etag"]
+                                {
+                                    assert!(
+                                        !response.headers().contains_key(name),
+                                        "{name} stays absent"
+                                    );
+                                }
+                                assert_eq!(
+                                    response.headers()["last-modified"],
+                                    "Wed, 21 Oct 2015 07:28:00 GMT"
+                                );
+                                response.into_bytes_bounded(32).await
+                            });
+                            if cap == 1 {
+                                assert!(matches!(
+                                    result,
+                                    Err(EdgeError::ResponseTooLarge {
+                                        reason: ResponseLimitReason::DecodedBody,
+                                        ..
+                                    })
+                                ));
+                            } else {
+                                assert_eq!(result.expect("exact decoded cap"), b"ab".as_slice());
+                            }
+                            assert_eq!(releases.get(), 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn head_opaque_fields_keep_passthrough_without_restoring_etag() {
+        for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 32 },
+                ResponseMode::Streamed,
+            ] {
+                for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                    for opaque_coding in [false, true] {
+                        let mut captured = context(mode);
+                        captured.body_policy.response_decoding = decoding;
+                        captured.body_policy.max_decoded_response_bytes =
+                            Some(if opaque_coding { 1 } else { 2 });
+                        let mut headers = HeaderMap::new();
+                        headers.insert(
+                            "etag",
+                            HeaderValue::from_bytes(&[0xff]).expect("opaque ETag"),
+                        );
+                        headers.insert("content-length", HeaderValue::from_static("2"));
+                        if opaque_coding {
+                            headers.insert(
+                                "content-encoding",
+                                HeaderValue::from_bytes(&[0xff]).expect("opaque coding"),
+                            );
+                        }
+                        let releases = Rc::new(Cell::new(0));
+                        let head = OutboundHead::new(
+                            status,
+                            input(headers),
+                            stream::iter([Ok(Bytes::from_static(b"ab"))]).boxed_local(),
+                            captured,
+                            owner(&releases),
+                        )
+                        .expect("opaque representation fields");
+                        assert!(!head.headers().contains_key("etag"));
+                        assert_eq!(
+                            classify_content_encoding(head.headers()),
+                            if opaque_coding {
+                                ContentEncoding::Passthrough(PassthroughReason::Malformed)
+                            } else {
+                                ContentEncoding::Identity
+                            }
+                        );
+                        let response = block_on(head.finish()).expect("final head");
+                        assert!(!response.headers().contains_key("etag"));
+                        assert_eq!(response.headers()["content-length"], "2");
+                        if opaque_coding {
+                            assert_eq!(response.headers()["content-encoding"].as_bytes(), &[0xff]);
+                        } else {
+                            assert!(!response.headers().contains_key("content-encoding"));
+                        }
+                        assert_eq!(
+                            block_on(response.into_bytes_bounded(32)).expect("body"),
+                            b"ab".as_slice()
+                        );
+                        assert_eq!(releases.get(), 1);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn head_surviving_malformed_length_fails_before_payload() {
+        for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 32 },
+                ResponseMode::Streamed,
+            ] {
+                for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                    let mut captured = context(mode);
+                    captured.body_policy.response_decoding = decoding;
+                    let mut headers = HeaderMap::new();
+                    headers.insert("content-length", HeaderValue::from_static("malformed"));
+                    let releases = Rc::new(Cell::new(0));
+                    let result = OutboundHead::new(
+                        status,
+                        input(headers),
+                        stream::poll_fn(|_| panic!("framing errors never read payload"))
+                            .boxed_local(),
+                        captured,
+                        owner(&releases),
+                    );
+                    assert!(matches!(
+                        result,
+                        Err(EdgeError::BadGateway {
+                            reason: crate::BadGatewayReason::Protocol,
+                            ..
+                        })
+                    ));
+                    assert_eq!(releases.get(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn head_finalization_retains_coding_choices_and_partial_response_rules() {
         let mut compressor = GzEncoder::new(Vec::new(), Compression::fast());
         compressor.write_all(b"body").expect("encode");
@@ -1742,6 +2025,18 @@ mod tests {
                         "content-length",
                         HeaderValue::from_str(&encoded.len().to_string()).expect("length"),
                     );
+                    let representation_fields = [
+                        ("etag", "\"strong\""),
+                        ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                        ("vary", "Accept-Encoding"),
+                        ("content-range", "bytes 0-3/8"),
+                        ("accept-ranges", "bytes"),
+                        ("cache-control", "public, max-age=60"),
+                        ("content-digest", "sha-256=:c2hhMjU2:"),
+                    ];
+                    for (name, value) in representation_fields {
+                        headers.insert(name, HeaderValue::from_static(value));
+                    }
                     let releases = Rc::new(Cell::new(0));
                     let head = OutboundHead::new(
                         status,
@@ -1759,6 +2054,16 @@ mod tests {
                         original
                     );
                     assert_eq!(response.headers().contains_key("content-length"), original);
+                    if original {
+                        assert_eq!(response.headers()["content-encoding"], "gzip");
+                        assert_eq!(
+                            response.headers()["content-length"],
+                            encoded.len().to_string()
+                        );
+                        for (name, value) in representation_fields {
+                            assert_eq!(response.headers()[name], value, "{name}");
+                        }
+                    }
                     let body = block_on(response.into_bytes_bounded(32)).expect("body");
                     assert_eq!(
                         body.as_ref(),

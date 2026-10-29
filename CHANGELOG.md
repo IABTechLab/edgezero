@@ -62,6 +62,12 @@ their scope when introduced; the current summary supersedes their then-pending A
   observation cutoff, without starting expired provider work. Make supplied fixtures return
   cutoff rather than premature EOF for exact-cutoff requests. Race Fastly's pending response
   source against its write deadline without cancelling callback-owned siblings.
+- Add core acceptance proofs through actual forwarding and shared-head boundaries: empty-chunk
+  settlement, unread expired requests, dispatch-lazy POST, taken/failed inbound bodies and literal
+  two-slot completion versus input order. Preserve existing three-slot and normalization tables.
+- Exercise normalization, opaque fields, independent identity caps, original/206 representation
+  fields and bodyless/205 source release under both decoding choices and response modes. Bind
+  reviewed core proofs without promoting provider qualification or optional metadata changes.
 
 ### Explicit Redirect Following
 

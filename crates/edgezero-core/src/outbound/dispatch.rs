@@ -261,7 +261,9 @@ mod tests {
     use futures_util::future::poll_fn;
     use futures_util::{FutureExt as _, StreamExt as _, stream};
 
+    use crate::context::RequestContext;
     use crate::http::{HeaderMap, Method, StatusCode, Uri, request_builder};
+    use crate::params::PathParams;
     use crate::{
         Body, Deadline, EdgeError, HttpClient, IndependentOutboundProgress, MonotonicClock,
         MonotonicInstant, OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest,
@@ -565,6 +567,246 @@ mod tests {
             .body(Body::from_stream(stream::empty()));
         block_on(fake.client(false).send(request)).expect("empty streamed forwarding");
         assert_eq!(fake.dispatches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn forwarded_zero_length_chunks_dispatch_bodiless_send_and_begin() {
+        for mode in [OutboundSendMode::Send, OutboundSendMode::Begin] {
+            let fake = Fake::new();
+            let client = fake.client(false);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&polls);
+            let inbound = request_builder()
+                .method(Method::GET)
+                .uri("/inbound")
+                .body(Body::from_stream(stream::poll_fn(move |_| {
+                    let index = counted.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready((index < 2).then(|| Ok(Bytes::new())))
+                })))
+                .expect("inbound request");
+            let context = RequestContext::new(inbound, PathParams::default());
+            let request = OutboundRequest::from_request(
+                context.into_request().expect("unread request"),
+                Uri::from_static("https://example.com/"),
+            )
+            .expect("forwarding request");
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            if mode == OutboundSendMode::Send {
+                block_on(client.send(request)).expect("empty GET send");
+            } else {
+                let mut beginning = client.begin(request);
+                let mut task = Context::from_waker(Waker::noop());
+                for expected_polls in [1, 2] {
+                    assert!(beginning.as_mut().poll(&mut task).is_pending());
+                    assert_eq!(polls.load(Ordering::SeqCst), expected_polls);
+                    assert_eq!(fake.dispatches.load(Ordering::SeqCst), 0);
+                }
+                let Poll::Ready(outcome) = beginning.as_mut().poll(&mut task) else {
+                    panic!("EOF completes empty-body settlement");
+                };
+                let pending = outcome.expect("empty GET begin");
+                assert_eq!(fake.uploads.lock().expect("uploads").len(), 1);
+                block_on(pending.collect()).expect("begun response");
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), 3, "two empty chunks and EOF");
+            assert_eq!(fake.dispatches.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *fake.uploads.lock().expect("uploads"),
+                vec![Upload {
+                    body: Bytes::new(),
+                    method: Method::GET,
+                    mode,
+                    streamed: false,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn forwarded_post_polls_only_after_transport_dispatch() {
+        let fake = Fake::new();
+        let client = fake.client(false);
+        let dispatches = Arc::clone(&fake.dispatches);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let mut chunks = [b"a".as_slice(), b"".as_slice(), b"bc".as_slice()].into_iter();
+        let inbound = request_builder()
+            .method(Method::POST)
+            .uri("/inbound")
+            .body(Body::from_stream(stream::poll_fn(move |_| {
+                assert_eq!(dispatches.load(Ordering::SeqCst), 1, "transport entered");
+                counted.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(chunks.next().map(|bytes| Ok(Bytes::from_static(bytes))))
+            })))
+            .expect("inbound request");
+        let context = RequestContext::new(inbound, PathParams::default());
+        let forwarded = OutboundRequest::from_request(
+            context.into_request().expect("unread request"),
+            Uri::from_static("https://example.com/"),
+        )
+        .expect("forward request");
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        let sending = client.send(forwarded);
+        assert_eq!(polls.load(Ordering::SeqCst), 0, "construction stays lazy");
+        block_on(sending).expect("streamed POST send");
+        assert_eq!(polls.load(Ordering::SeqCst), 4, "three chunks and EOF");
+        assert_eq!(
+            *fake.uploads.lock().expect("uploads"),
+            vec![Upload {
+                body: Bytes::from_static(b"abc"),
+                method: Method::POST,
+                mode: OutboundSendMode::Send,
+                streamed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn forwarded_expired_absolute_deadline_leaves_source_unread() {
+        let fake = Fake::new();
+        let client = fake.client(false);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let inbound = request_builder()
+            .method(Method::GET)
+            .uri("/inbound")
+            .body(Body::from_stream(stream::poll_fn(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Poll::Pending
+            })))
+            .expect("inbound request");
+        let context = RequestContext::new(inbound, PathParams::default());
+        let request = OutboundRequest::from_request(
+            context.into_request().expect("unread request"),
+            Uri::from_static("https://example.com/"),
+        )
+        .expect("forward request")
+        .deadline(Deadline::at_instant(fake.pair().clock().now()));
+        assert!(matches!(
+            block_on(client.send(request)),
+            Err(EdgeError::GatewayTimeout {
+                cause: crate::BudgetSource::RequestDeadline,
+                ..
+            })
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.timers.load(Ordering::SeqCst), 0);
+        assert!(fake.uploads.lock().expect("uploads").is_empty());
+    }
+
+    #[test]
+    fn forwarded_buffered_and_taken_bodies_need_no_extra_reads() {
+        for taken in [false, true] {
+            let fake = Fake::new();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&polls);
+            let body = if taken {
+                Body::from_stream(stream::poll_fn(move |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Poll::Pending
+                }))
+            } else {
+                Body::from(Bytes::new())
+            };
+            let inbound = request_builder()
+                .method(Method::GET)
+                .uri("/inbound")
+                .body(body)
+                .expect("inbound request");
+            let context = RequestContext::new(inbound, PathParams::default());
+            if taken {
+                drop(context.take_body().expect("transfer unread source"));
+            }
+            let request = OutboundRequest::from_request(
+                context.into_request().expect("forwardable context"),
+                Uri::from_static("https://example.com/"),
+            )
+            .expect("forward request");
+            block_on(fake.client(false).send(request)).expect("empty forwarded GET");
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(fake.dispatches.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *fake.uploads.lock().expect("uploads"),
+                vec![Upload {
+                    body: Bytes::new(),
+                    method: Method::GET,
+                    mode: OutboundSendMode::Send,
+                    streamed: false,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn failed_inbound_read_stops_forwarding_with_preserved_error() {
+        use crate::{
+            BadGatewayReason, BudgetSource, FastlyFailureCause, ProviderFailureDetail,
+            ProviderFailurePhase,
+        };
+
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::ConnectionRefused,
+        };
+        for source in [
+            EdgeError::bad_request_with_detail("fixed request rejection", detail),
+            EdgeError::bad_gateway_with_detail(
+                "fixed read failure",
+                BadGatewayReason::Transport,
+                detail,
+            ),
+            EdgeError::gateway_timeout_with_detail(
+                "fixed timeout",
+                BudgetSource::PerCallTimeout,
+                detail,
+            ),
+            EdgeError::internal_with_detail(anyhow::anyhow!("fixed internal error"), detail),
+        ] {
+            let fake = Fake::new();
+            let expected_kind = source.kind();
+            let expected_status = source.status();
+            let expected_message = source.message();
+            let expected_display = source.to_string();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&polls);
+            let mut error = Some(source);
+            let inbound = request_builder()
+                .method(Method::GET)
+                .uri("/inbound")
+                .body(Body::from_stream(stream::poll_fn(move |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(error.take().map(Err))
+                })))
+                .expect("inbound request");
+            let context = RequestContext::new(inbound, PathParams::default());
+            let first = block_on(context.body_bytes(32)).expect_err("initial read failure");
+            let forward = || -> Result<_, EdgeError> {
+                let request = OutboundRequest::from_request(
+                    context.into_request()?,
+                    Uri::from_static("https://example.com/"),
+                )?;
+                block_on(fake.client(false).send(request))
+            };
+            let last = forward().expect_err("poisoned context cannot be forwarded");
+            for observed in [first, last] {
+                assert_eq!(observed.kind(), expected_kind);
+                assert_eq!(observed.status(), expected_status);
+                assert_eq!(observed.message(), expected_message);
+                assert_eq!(observed.to_string(), expected_display);
+                assert_eq!(observed.provider_failure_detail(), Some(&detail));
+                if let EdgeError::BadGateway { reason, .. } = observed {
+                    assert_eq!(reason, BadGatewayReason::Transport);
+                }
+                if let EdgeError::GatewayTimeout { cause, .. } = observed {
+                    assert_eq!(cause, BudgetSource::PerCallTimeout);
+                }
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+            assert_eq!(fake.dispatches.load(Ordering::SeqCst), 0);
+            assert_eq!(fake.timers.load(Ordering::SeqCst), 0);
+            assert!(fake.uploads.lock().expect("uploads").is_empty());
+        }
     }
 
     #[test]

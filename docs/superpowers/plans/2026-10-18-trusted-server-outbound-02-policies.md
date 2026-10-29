@@ -28,8 +28,12 @@ The [core policy conformance checkpoint](2026-10-18-trusted-server-outbound-impl
 binds seven complete core legs after filling the literal connect, range, facade-upload and marker
 proof gaps. Existing private fixtures and the single grouped guard are reused; no production
 interface, source requirement or provider acceptance is changed. Complete codec/cap bundles are
-required, not one nearby test per criterion. G1 remains unqualified at 44 ready / 467 planned;
-remaining bodyless/metadata cases and all corresponding provider legs stay open.
+required, not one nearby test per criterion. The subsequent
+[forwarding and shared-head checkpoint](2026-10-18-trusted-server-outbound-implementation.md#forwarding-and-shared-head-acceptance-checkpoint-2026-10-29)
+adds EZ-1 core criterion 07, EZ-3 core criterion 04's two-slot ordering clause and EZ-5 core
+criterion 11's normalization/body-disposition matrix. G1 remains unqualified at 47 ready / 464
+planned. Conditional metadata changes, known-origin registration scheduling and all corresponding
+provider legs stay open; these core bindings do not close P2 or P3.
 
 ## Interfaces: Proposed Hard-Cut Contract
 

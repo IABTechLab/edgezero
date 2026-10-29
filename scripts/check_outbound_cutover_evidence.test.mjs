@@ -531,7 +531,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 467,
+    planned: 464,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -725,7 +725,7 @@ test("core batch and marker bindings guard exact tests without promoting adapter
   assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
   assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
   const selected = checker.readySentinels(manifest, "unit/core");
-  assert.equal(selected.length, 68);
+  assert.equal(selected.length, 80);
   for (const name of names) assert.ok(selected.includes(name));
   const bindings = [
     ["EZ-6/acceptance/15", [
@@ -798,6 +798,61 @@ test("core policy conformance binds complete proofs without promoting provider l
   }
 });
 
+test("forwarding ordering and normalization core proofs bind only their reviewed legs", () => {
+  const manifest = JSON.parse(readFileSync(new URL(
+    "../tests/fixtures/reusable-app/outbound-cutover-cases.json", import.meta.url,
+  ), "utf8"));
+  assert.match(manifest.status, /464 other legs remain planned/);
+  assert.match(manifest.status, /EZ-1 core acceptance 07/);
+  assert.match(manifest.status, /EZ-3 core acceptance 04/);
+  const bindings = [
+    ["EZ-1/acceptance/07", [
+      "outbound::dispatch::tests::forwarded_zero_length_chunks_dispatch_bodiless_send_and_begin",
+      "outbound::dispatch::tests::forwarded_post_polls_only_after_transport_dispatch",
+      "outbound::dispatch::tests::forwarded_expired_absolute_deadline_leaves_source_unread",
+      "outbound::dispatch::tests::forwarded_buffered_and_taken_bodies_need_no_extra_reads",
+      "outbound::dispatch::tests::failed_inbound_read_stops_forwarding_with_preserved_error",
+    ]],
+    ["EZ-3/acceptance/04", ["outbound::tests::two_slot_batches_separate_completion_and_input_index_order"]],
+    ["EZ-5/acceptance/11", [
+      "outbound::head::tests::original_coding_preserves_normalization_precedence",
+      "outbound::head::tests::head_opaque_fields_keep_passthrough_without_restoring_etag",
+      "outbound::head::tests::head_surviving_malformed_length_fails_before_payload",
+      "outbound::head::tests::head_finalization_retains_coding_choices_and_partial_response_rules",
+      "outbound::head::tests::bodyless_and_declared_reset_bodies_bypass_payload_processing",
+      "outbound::head::tests::head_undeclared_reset_body_settles_once_without_payload_caps",
+    ]],
+  ];
+  const selected = checker.readySentinels(manifest, "unit/core");
+  for (const [caseId, names] of bindings) {
+    const rows = manifest.cases.filter((row) => row.case_id === caseId);
+    const core = rows.find((row) => row.environment === "unit/core");
+    assert.ok(core, caseId);
+    assert.equal(core.implementation, "ready", caseId);
+    assert.equal(core.applicability, "blocking", caseId);
+    assert.equal(core.approval, null, caseId);
+    assert.equal(core.condition, null, caseId);
+    assert.equal(core.command,
+      "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::", caseId);
+    assert.equal(core.artifact_path, "outbound/unit/core/raw.log", caseId);
+    assert.deepEqual([core.sentinel, ...(core.additional_sentinels ?? [])], names, caseId);
+    for (const name of names) assert.ok(selected.includes(name), name);
+    for (const row of rows.filter((row) => row !== core)) {
+      assert.equal(row.implementation, "planned", `${caseId}@${row.environment}`);
+    }
+  }
+  for (const caseId of ["EZ-5/acceptance/11b", "EZ-5/acceptance/12"]) {
+    const rows = manifest.cases.filter((row) => row.case_id === caseId);
+    assert.ok(rows.length > 0, caseId);
+    for (const row of rows) {
+      assert.equal(row.implementation, "planned", `${caseId}@${row.environment}`);
+      assert.equal(row.applicability, "conditional", `${caseId}@${row.environment}`);
+      assert.equal(manifest.decisions.find((d) => d.id === row.approval)?.status,
+        "pending", `${caseId}@${row.environment}`);
+    }
+  }
+});
+
 test("redirect runtime bindings retain exact output paths and leave unproved legs planned", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -862,13 +917,13 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 44);
+  assert.equal(ready.length, 47);
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
-        (c.environment === "unit/core" && ["EZ-4/acceptance/01", "EZ-5/acceptance/01",
-          "EZ-5/acceptance/02", "EZ-5/acceptance/03", "EZ-5/acceptance/10",
+        (c.environment === "unit/core" && ["EZ-1/acceptance/07", "EZ-3/acceptance/04", "EZ-4/acceptance/01", "EZ-5/acceptance/01",
+          "EZ-5/acceptance/02", "EZ-5/acceptance/03", "EZ-5/acceptance/10", "EZ-5/acceptance/11",
           "EZ-6/acceptance/13", "EZ-6/acceptance/15", "EZ-6/acceptance/17", "EZ-6/acceptance/22",
           "EZ-7/acceptance/01", "EZ-7/acceptance/02", "EZ-7/acceptance/03"].includes(c.case_id)) ||
         (c.case_id.startsWith("EZ-23/acceptance/") &&

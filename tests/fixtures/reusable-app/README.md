@@ -105,9 +105,12 @@ existing Axum CI job. EZ-9 core criteria 01-15 bind all 51 redirect tests, and E
 EZ-6 core criteria 13/15/17 bind facade upload rules, cutoff-equality and recorded-undelivered
 cancellation. EZ-7 core criteria 01/02/03 bind marker limits, same-handle inheritance and
 upstream-marker preservation. EZ-4 core criterion 01 binds connect-setting carriage; EZ-5 core
-criteria 01/02/03/10 bind original coding, encoded/final limits, exact partial ranges and identity
-limits. EZ-9 runtime criteria 16/17 bind the complete four-adapter wire matrix. There are 44 ready
-legs and 467 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
+criteria 01/02/03/10/11 bind original coding, encoded/final limits, exact partial ranges, identity
+limits and shared-head normalization/body disposition. EZ-1 core criterion 07 binds forwarding
+with empty chunks, expired budgets, dispatch-lazy POST, buffered/taken and failed-read controls.
+EZ-3 core criterion 04 binds the literal two-slot completion/input-order clause, not Fastly's
+known-origin registration SHOULD. EZ-9 runtime criteria 16/17 bind the complete four-adapter wire
+matrix. There are 47 ready legs and 464 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
 for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
@@ -118,7 +121,7 @@ The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
 
-The core legs discover all 68 bound primary/additional sentinels before running one outbound suite:
+The core legs discover all 80 bound primary/additional sentinels before running one outbound suite:
 
 ```sh
 scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::
@@ -131,6 +134,12 @@ recorder's 64-byte drain is only a fixture bound. The off-configured marker hand
 through Send, Begin and exactly two inherited batch slots. Coding bundles preserve exact range
 headers and independently exercise encoded, decoded and final caps. These bindings do not close
 their provider legs or authorize pending scripted-client or representation-metadata changes.
+
+Shared-head controls inject provider-inexpressible fields before normalization; they do not
+certify provider raw-header fidelity. Both decoding choices and response modes retain normalization
+precedence, opaque coding passthrough and identity decoded caps. HEAD/304/204 and both 205
+dispositions preserve suppression and release source/owner resources before collection. Conditional
+metadata criteria 11b/12 remain planned, independently of the core criterion 11 binding.
 
 Core criterion 22 uses exactly three slots under Completed, Cutoff and an original typed driver
 failure, with both fresh collection and check/next/collect. Terminal production is held until

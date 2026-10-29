@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-11, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10, EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 467 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-11, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11, EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 464 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -1022,11 +1022,17 @@
       "owner": "EdgeZero",
       "task": "P2",
       "substep": "EZ-1-acceptance-07-unit-core",
-      "sentinel": "ez_1_acceptance_07_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_1_acceptance_07_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::dispatch::tests::forwarded_zero_length_chunks_dispatch_bodiless_send_and_begin",
+      "additional_sentinels": [
+        "outbound::dispatch::tests::forwarded_post_polls_only_after_transport_dispatch",
+        "outbound::dispatch::tests::forwarded_expired_absolute_deadline_leaves_source_unread",
+        "outbound::dispatch::tests::forwarded_buffered_and_taken_bodies_need_no_extra_reads",
+        "outbound::dispatch::tests::failed_inbound_read_stops_forwarding_with_preserved_error"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "Environment is unit. A GET whose streamed body yields only zero-length chunks and then ends is sent bodiless. A GET with a streamed body and an already expired deadline fails with 504, and the body is not read. A POST with a streamed body, and a GET with an empty buffered body, read nothing extra. A taken body forwards empty. A body whose read failed forwards the same error.",
-      "artifact_path": "outbound/EZ-1/acceptance/07/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3023,11 +3029,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-04-unit-core",
-      "sentinel": "ez_3_acceptance_04_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_04_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::two_slot_batches_separate_completion_and_input_index_order",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "Given a batch ordered new, known, new, known, then both known-origin slots SHOULD be sent before the first registration, the run records the order, and collection restores input-index order. Unit, given slot 1 finishes before slot 0, `next` returns indices 1 then 0 while the collected vector remains indexed 0 then 1.\n\nViceroy 0.21.0:",
-      "artifact_path": "outbound/EZ-3/acceptance/04/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4753,11 +4759,18 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-5-acceptance-11-unit-core",
-      "sentinel": "ez_5_acceptance_11_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_5_acceptance_11_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::head::tests::original_coding_preserves_normalization_precedence",
+      "additional_sentinels": [
+        "outbound::head::tests::head_opaque_fields_keep_passthrough_without_restoring_etag",
+        "outbound::head::tests::head_surviving_malformed_length_fails_before_payload",
+        "outbound::head::tests::head_finalization_retains_coding_choices_and_partial_response_rules",
+        "outbound::head::tests::bodyless_and_declared_reset_bodies_bypass_payload_processing",
+        "outbound::head::tests::head_undeclared_reset_body_settles_once_without_payload_caps"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit and each adapter's actual normalization/response-policy path, both decoding choices and both response modes.** `Connection: content-encoding, content-length, etag` removes those fields before coding/length interpretation; a nominated malformed length does not become a framing error, and removed fields are never restored. A separate non-UTF-8 `ETag` is dropped. Missing or nominated-away coding is classified as identity and retains its decoded cap. Malformed surviving `Content-Length` still fails, and non-UTF-8 `Content-Encoding` retains F's passthrough classification rather than being silently dropped. Valid surviving representation fields remain unchanged in original mode and on a 206. A 204 still removes length and suppresses its body; a 205 still normalizes length to zero and preserves F's declared-body evidence and disposition; HEAD/304 keep bodyless handling without payload-cap rejection or body polling. EZ-5.9's separately adopted metadata change is the only permitted HEAD/304 difference. Keep F's `response_normalization_precedence_table` assertions unchanged. Provider-inexpressible raw fields are injected at the adapter-visible/shared-head unit boundary; provider-visible controls retain the existing header-fidelity limitations. These cases make no new raw-header fidelity claim.",
-      "artifact_path": "outbound/EZ-5/acceptance/11/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {

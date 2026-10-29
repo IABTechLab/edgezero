@@ -12,7 +12,7 @@
 
 ## Status and Authority
 
-### Current Delivery Dashboard (2026-10-27)
+### Current Delivery Dashboard (2026-10-29)
 
 Reconciled against the current hard-cut working tree above `f4d660b1`, including live prepared
 dispatch/head finalization, GET/HEAD settlement, eager drivers and identity-bound batch receipts.
@@ -55,9 +55,10 @@ Keep three different status questions separate:
   readiness of that leg's declared command/sentinel, not overall feature implementation.
   EZ-23 local criteria 01-11 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
   `ready`; core policy, receipt/cutoff/cancellation and marker checkpoints activate EZ-4 core
-  criterion 01, EZ-5 core criteria 01/02/03/10, EZ-6 core criteria 13/15/17/22 and EZ-7 core
-  criteria 01/02/03: 44 legs, with 467 still
-  `planned`. G1/Q3 binding work remains unfinished, not evidence that 467 features are absent. Only the explicitly bound
+  criterion 01, EZ-5 core criteria 01/02/03/10/11, EZ-6 core criteria 13/15/17/22 and EZ-7 core
+  criteria 01/02/03. The [forwarding and shared-head checkpoint](#forwarding-and-shared-head-acceptance-checkpoint-2026-10-29)
+  also binds EZ-1 core criterion 07 and EZ-3 core criterion 04's ordering clause: 47 legs, with 464 still
+  `planned`. G1/Q3 binding work remains unfinished, not evidence that 464 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -1203,6 +1204,59 @@ changes. The normative requirements and frozen interfaces remain unchanged. EZ-1
 forwarding matrix, EZ-5 bodyless/conditional metadata cases, every affected provider leg, SDK/poll
 witnesses, strict runtime failures, candidate freeze and authorized hosted/consumer qualification
 remain open. No parent task or provider guarantee closes through these core bindings.
+
+### Forwarding And Shared-Head Acceptance Checkpoint (2026-10-29)
+
+Continue P2/P3 and G1/Q3 with three existing core acceptance legs. Independent forwarding and
+normalization investigations found missing transport/head assertions, not a need for another
+implementation path. Reuse the private dispatch recorder, injected batch clock and shared-head
+fixtures. Production APIs, provider behavior, frozen requirements/interfaces and SDK pins stay
+unchanged. The existing three-slot ordering and F normalization-precedence tables stay intact.
+
+EZ-1 criterion 07 forwards through `RequestContext::into_request` and `OutboundRequest::from_request`.
+Two empty chunks and EOF become an actually empty buffered transport upload through Send and
+Begin. Begin explicitly yields between empty chunks before dispatch. A forwarded POST polls its
+source only after transport entry and retains its exact three chunks' payload. An already-expired
+absolute outbound deadline produces an attributed 504 with no source, timer or transport work.
+Empty buffered and taken bodies forward empty without extra reads. A poisoned context fails
+before outbound conversion/dispatch with the stored category, status, typed fields, message,
+display and provider detail intact; boxed-error identity is not asserted across a sticky snapshot.
+The recorder's 64-byte bound remains fixture-only evidence, not a production allocation claim.
+
+EZ-3 criterion 04's core clause uses exactly two slots and an injected clock: `next` delivers
+indices 1 then 0 with elapsed values 1 ms then 2 ms, followed by explicit Completed. An equivalent
+batch collects exactly two input-aligned slots with elapsed values 2 ms then 1 ms and distinguishable
+outcomes. This does not prove Fastly's separate known-origin-before-registration SHOULD.
+
+EZ-5 criterion 11 enters raw fields through `OutboundHead::new`, not a manually normalized copy.
+Both decoding choices, both response modes and 200/206 paths cover nominated coding/length/ETag,
+malformed nominated length, absent coding, identity decoded-cap overflow and exact-cap success,
+opaque ETag/coding, surviving malformed length and unchanged surviving representation fields.
+The bodyless matrix retains 1 GiB representation lengths where appropriate despite zero payload
+caps and decoder budget. 204 removes length, positive-length 205 preserves declared-body evidence
+while normalizing length to zero, and HEAD/304 remain unread. Absent/zero-length 205 settles one
+ready source item without decoding. Source and owner release are checked before body collection.
+These injected headers establish no new provider raw-header-fidelity guarantee. EZ-5.9 and EZ-5.10
+remain separately unadopted; conditional criteria 11b/12 and all adapter legs stay planned.
+
+The binding regression fails first while the three rows are planned, then passes with only
+their implementation, command, sentinel bundle and artifact bindings changed. All 255 criteria,
+511 legs and source/decision metadata remain unchanged. The inventory now has 47 ready / 464
+planned legs, still `qualified: false`. All 80 primary/additional core sentinels share the existing
+single grouped command; no CI job or command list is added.
+
+Fresh verification passes all five root Rust gates, including 2,582 workspace tests in 32
+binaries (one existing ignored), strict workspace Clippy and the Spin target check. The guarded
+core execution discovers all 80 names and passes 309 tests; all 53 evidence/guard regressions
+pass. The demo passes 66 tests in nine binaries. Documentation format/lint/build, docs/legacy
+contract checks, manifest validation and diff checks pass. Independent spec and quality/binding
+reviews are clear. Requirements, frozen interfaces, source/decision metadata and F's precedence
+table compare unchanged; only the informational inventory status and three core binding bundles
+are updated.
+
+This test-only checkpoint does not close a parent task, provider leg, candidate freeze or
+hosted/consumer qualification. Historical strict runtime failures, SDK/poll witnesses and raw
+resource-accounting limitations remain open rather than being relabelled by core test results.
 
 ### Current Work Queue and Gates
 
