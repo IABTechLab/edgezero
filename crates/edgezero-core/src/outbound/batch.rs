@@ -940,6 +940,7 @@ fn driver_error(message: &'static str) -> EdgeError {
 
 #[cfg(test)]
 mod tests {
+    use std::array;
     use std::cell::{Cell, RefCell};
     use std::error::Error as _;
     use std::rc::Rc;
@@ -948,8 +949,8 @@ mod tests {
     use std::time::Duration;
 
     use futures::executor::block_on;
-    use futures_util::FutureExt as _;
     use futures_util::stream;
+    use futures_util::{FutureExt as _, StreamExt as _};
 
     use super::{
         OutboundBatch, OutboundBatchCheck, OutboundBatchContext, OutboundBatchDriverEvent,
@@ -1068,6 +1069,93 @@ mod tests {
             panic!("expected resolved slot");
         };
         assert_eq!(result.elapsed, Duration::from_millis(elapsed));
+    }
+
+    fn owned_receipt_event(
+        fixture: &Fixture,
+        index: usize,
+        releases: &[Rc<Cell<usize>>],
+        polls: &Rc<Cell<usize>>,
+    ) -> OutboundBatchDriverEvent {
+        let counter = Rc::clone(releases.get(index).expect("slot release counter"));
+        let owner = OutboundExchangeOwner::new(move || {
+            counter.set(counter.get().checked_add(1).expect("release count fits"));
+        });
+        let observed = Rc::clone(polls);
+        let mut payload = Some(bytes::Bytes::from(vec![
+            *b"ABC".get(index).expect("slot byte"),
+        ]));
+        let body = Body::from_stream(stream::poll_fn(move |_cx| {
+            let _keep_owner = &owner;
+            observed.set(observed.get().checked_add(1).expect("poll count fits"));
+            Poll::Ready(payload.take().map(Ok))
+        }));
+        OutboundBatchDriverEvent::Item {
+            index,
+            completed_at: fixture.at(*[10, 20, 30].get(index).expect("slot elapsed")),
+            outcome: Ok(fixture.response(body)),
+        }
+    }
+
+    fn assert_original_driver_error(error: &EdgeError, identity: &Arc<()>) {
+        let EdgeError::Internal { source, .. } = error else {
+            panic!("original typed driver error");
+        };
+        assert!(Arc::ptr_eq(
+            &source
+                .downcast_ref::<OriginalError>()
+                .expect("original source")
+                .0,
+            identity
+        ));
+    }
+
+    fn assert_collected_receipts(slots: &[OutboundCollectedSlot], mixed: bool, completed: bool) {
+        assert_eq!(slots.len(), 3);
+        for (slot, elapsed) in slots.iter().take(2).zip([10, 20]) {
+            if mixed {
+                assert!(matches!(slot, OutboundCollectedSlot::AlreadyDelivered));
+            } else {
+                assert_resolved(slot, elapsed);
+            }
+        }
+        if completed {
+            assert_resolved(slots.get(2).expect("third slot"), 30);
+        } else {
+            assert!(matches!(
+                slots.get(2),
+                Some(OutboundCollectedSlot::Unresolved)
+            ));
+        }
+    }
+
+    fn assert_merged_receipts(
+        slots: Vec<OutboundCollectedSlot>,
+        completed: bool,
+        releases: &[Rc<Cell<usize>>],
+    ) {
+        assert_eq!(slots.len(), 3);
+        for ((index, slot), elapsed) in slots.into_iter().enumerate().zip([10, 20, 30]) {
+            let counter = releases.get(index).expect("slot release counter");
+            if !completed && index == 2 {
+                assert!(matches!(slot, OutboundCollectedSlot::Unresolved));
+                assert_eq!(counter.get(), 0, "no owner existed for unresolved slot");
+                continue;
+            }
+            assert_resolved(&slot, elapsed);
+            let OutboundCollectedSlot::Resolved(result) = slot else {
+                panic!("merged collection owns each delivered result");
+            };
+            let body = block_on(
+                result
+                    .outcome
+                    .expect("original response")
+                    .into_bytes_bounded(1),
+            )
+            .expect("original body");
+            assert_eq!(body.as_ref(), &[*b"ABC".get(index).expect("slot byte")]);
+            assert_eq!(counter.get(), 1, "one original body owner released");
+        }
     }
 
     #[test]
@@ -1777,66 +1865,185 @@ mod tests {
 
     #[test]
     fn batch_collections_preserve_identity_until_consumed() {
+        for terminal in [
+            Ok(OutboundBatchTermination::Completed),
+            Ok(OutboundBatchTermination::Cutoff),
+            Err(()),
+        ] {
+            for mixed in [false, true] {
+                assert_three_slot_collection(terminal, mixed);
+            }
+        }
+        for failure in [false, true] {
+            assert_four_slot_collection(failure);
+        }
+    }
+
+    fn assert_three_slot_collection(terminal: Result<OutboundBatchTermination, ()>, mixed: bool) {
         let fixture = Fixture::new();
         fixture.advance(101);
-        for failure in [false, true] {
-            let mut events = vec![
-                fixture.event(0, 10),
-                fixture.event(1, 20),
-                fixture.event(2, 30),
-            ];
-            if failure {
-                events.push(OutboundBatchDriverEvent::Failed(EdgeError::bad_gateway(
-                    "original driver failure",
-                )));
-            } else {
-                events.push(OutboundBatchDriverEvent::Cutoff);
+        let releases: [Rc<Cell<usize>>; 3] = array::from_fn(|_| Rc::new(Cell::new(0)));
+        let polls = Rc::new(Cell::new(0_usize));
+        let event = |index| owned_receipt_event(&fixture, index, &releases, &polls);
+        let error_identity = Arc::new(());
+        let mut terminal_event = Some(match terminal {
+            Ok(OutboundBatchTermination::Completed) => event(2),
+            Ok(OutboundBatchTermination::Cutoff) => OutboundBatchDriverEvent::Cutoff,
+            Err(()) => OutboundBatchDriverEvent::Failed(EdgeError::internal(anyhow::Error::new(
+                OriginalError(Arc::clone(&error_identity)),
+            ))),
+        });
+        let gate = Rc::new(Cell::new(!mixed));
+        let terminal_seen = Rc::new(Cell::new(false));
+        let arm = Rc::clone(&gate);
+        let seen = Rc::clone(&terminal_seen);
+        let tail = stream::poll_fn(move |_cx| {
+            if !arm.get() {
+                return Poll::Pending;
             }
-            let mut batch = fixture.batch(4, events);
-            let mut accumulator = batch.accumulator();
+            if terminal_event.is_some() {
+                seen.set(true);
+            }
+            Poll::Ready(terminal_event.take())
+        });
+        let mut batch = OutboundBatch::from_driver(
+            fixture.context(3),
+            stream::iter([event(0), event(1)]).chain(tail),
+            OutboundExchangeOwner::new(|| {}),
+        );
+        let mut accumulator = batch.accumulator();
+        if mixed {
             let receipt = checked_item(&mut batch);
             assert_eq!(receipt.index(), 0);
             receipt
                 .result()
                 .outcome
                 .as_ref()
-                .expect("inspected response");
-            accumulator
-                .insert(receipt)
-                .expect("intact inspected receipt");
+                .expect("inspect without consuming");
+            accumulator.insert(receipt).expect("intact checked receipt");
             let next_receipt = next_item(&mut batch);
             assert_eq!(next_receipt.index(), 1);
-            accumulator.insert(next_receipt).expect("next receipt");
-            if failure {
-                let result = block_on(batch.collect()).expect_err("driver failure");
-                assert!(
-                    result
-                        .error()
-                        .to_string()
-                        .contains("original driver failure")
-                );
-                assert_eq!(result.slots().len(), 4);
-                let merged = accumulator.merge_failure(result).expect("failure merge");
-                let (error, slots) = merged.into_parts();
-                assert!(error.to_string().contains("original driver failure"));
-                assert_resolved(slots.first().expect("merged receipt"), 10);
-                assert_resolved(slots.get(1).expect("remaining result"), 20);
-                assert_resolved(slots.get(2).expect("collected result"), 30);
-                assert!(matches!(
-                    slots.get(3),
-                    Some(OutboundCollectedSlot::Unresolved)
-                ));
-            } else {
-                let result = block_on(batch.collect()).expect("cutoff");
-                assert_eq!(result.slots().len(), 4);
-                assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
-                let (slots, termination) = accumulator
-                    .merge_success(result)
-                    .expect("success merge")
-                    .into_parts();
-                assert_resolved(slots.first().expect("merged receipt"), 10);
-                assert_eq!(termination, OutboundBatchTermination::Cutoff);
+            accumulator
+                .insert(next_receipt)
+                .expect("intact next receipt");
+            assert!(
+                !terminal_seen.get(),
+                "terminal is not observed before both deliveries"
+            );
+        }
+        gate.set(true);
+        let collection = block_on(batch.collect());
+        assert!(terminal_seen.get());
+        let collected = match &collection {
+            Ok(result) => {
+                assert_eq!(Some(result.termination()), terminal.ok());
+                result.slots()
             }
+            Err(failure) => {
+                terminal.expect_err("expected original driver failure");
+                assert_original_driver_error(failure.error(), &error_identity);
+                failure.slots()
+            }
+        };
+        assert_collected_receipts(
+            collected,
+            mixed,
+            terminal == Ok(OutboundBatchTermination::Completed),
+        );
+        assert_eq!(
+            polls.get(),
+            0,
+            "inspection and collection do not consume bodies"
+        );
+        assert!(releases.iter().all(|count| count.get() == 0));
+        let merged = match collection {
+            Ok(result) => {
+                let restored = accumulator.merge_success(result).expect("success merge");
+                assert_eq!(Some(restored.termination()), terminal.ok());
+                restored.into_parts().0
+            }
+            Err(failure) => {
+                let (error, partials) = accumulator
+                    .merge_failure(failure)
+                    .expect("failure merge")
+                    .into_parts();
+                assert_original_driver_error(&error, &error_identity);
+                partials
+            }
+        };
+        assert_merged_receipts(
+            merged,
+            terminal == Ok(OutboundBatchTermination::Completed),
+            &releases,
+        );
+    }
+
+    fn assert_four_slot_collection(failure: bool) {
+        let fixture = Fixture::new();
+        fixture.advance(101);
+        let mut events = vec![
+            fixture.event(0, 10),
+            fixture.event(1, 20),
+            fixture.event(2, 30),
+        ];
+        if failure {
+            events.push(OutboundBatchDriverEvent::Failed(EdgeError::bad_gateway(
+                "original driver failure",
+            )));
+        } else {
+            events.push(OutboundBatchDriverEvent::Cutoff);
+        }
+        let mut batch = fixture.batch(4, events);
+        let mut accumulator = batch.accumulator();
+        let receipt = checked_item(&mut batch);
+        assert_eq!(receipt.index(), 0);
+        receipt
+            .result()
+            .outcome
+            .as_ref()
+            .expect("inspected response");
+        accumulator
+            .insert(receipt)
+            .expect("intact inspected receipt");
+        let next_receipt = next_item(&mut batch);
+        assert_eq!(next_receipt.index(), 1);
+        accumulator.insert(next_receipt).expect("next receipt");
+        if failure {
+            let result = block_on(batch.collect()).expect_err("driver failure");
+            assert!(
+                result
+                    .error()
+                    .to_string()
+                    .contains("original driver failure")
+            );
+            assert_eq!(result.slots().len(), 4);
+            assert_resolved(result.slots().get(2).expect("newly collected partial"), 30);
+            let merged = accumulator.merge_failure(result).expect("failure merge");
+            let (error, slots) = merged.into_parts();
+            assert!(error.to_string().contains("original driver failure"));
+            assert_resolved(slots.first().expect("merged receipt"), 10);
+            assert_resolved(slots.get(1).expect("remaining result"), 20);
+            assert_resolved(slots.get(2).expect("collected result"), 30);
+            assert!(matches!(
+                slots.get(3),
+                Some(OutboundCollectedSlot::Unresolved)
+            ));
+        } else {
+            let result = block_on(batch.collect()).expect("cutoff");
+            assert_eq!(result.slots().len(), 4);
+            assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
+            let (slots, termination) = accumulator
+                .merge_success(result)
+                .expect("success merge")
+                .into_parts();
+            assert_resolved(slots.first().expect("merged receipt"), 10);
+            assert_resolved(slots.get(1).expect("remaining result"), 20);
+            assert_resolved(slots.get(2).expect("collected result"), 30);
+            assert!(matches!(
+                slots.get(3),
+                Some(OutboundCollectedSlot::Unresolved)
+            ));
+            assert_eq!(termination, OutboundBatchTermination::Cutoff);
         }
     }
 
@@ -1934,14 +2141,20 @@ mod tests {
         assert!(rejected.error().to_string().contains("already inserted"));
         assert!(accumulator.slots.first().expect("unchanged slot").is_some());
         let (_, mut malformed) = rejected.into_parts();
+        assert_eq!(malformed.index(), 0);
         malformed.index = 1;
-        assert!(
-            accumulator
-                .insert(malformed)
-                .expect_err("invalid index")
-                .error()
-                .to_string()
-                .contains("out-of-range")
+        let rejected_index = accumulator.insert(malformed).expect_err("invalid index");
+        assert!(rejected_index.error().to_string().contains("out-of-range"));
+        let (_, retained_duplicate) = rejected_index.into_parts();
+        let (index, result) = retained_duplicate.into_parts();
+        assert_eq!(index, 1);
+        assert_eq!(result.elapsed, Duration::ZERO);
+        assert_eq!(
+            result
+                .outcome
+                .expect_err("unchanged rejected receipt")
+                .message(),
+            "duplicate"
         );
         let mut collection = block_on(batch.collect()).expect("collection");
         collection.slots = vec![OutboundCollectedSlot::Resolved(OutboundSlotResult::new(
@@ -1964,6 +2177,42 @@ mod tests {
                 .to_string()
                 .contains("invalid slot count")
         );
+        let (_, retained_accumulator, retained_collection) = rejected_length.into_parts();
+        let conflicting = retained_collection.expect("unchanged conflicting collection");
+        assert_eq!(conflicting.slots().len(), 2);
+        let OutboundCollectedSlot::Resolved(conflict) =
+            conflicting.slots().first().expect("conflicting slot")
+        else {
+            panic!("conflicting input was preserved");
+        };
+        assert_eq!(conflict.elapsed, Duration::ZERO);
+        assert_eq!(
+            conflict
+                .outcome
+                .as_ref()
+                .expect_err("original conflict")
+                .message(),
+            "conflicting result"
+        );
+        assert!(matches!(
+            conflicting.slots().get(1),
+            Some(OutboundCollectedSlot::Unresolved)
+        ));
+        let original = retained_accumulator
+            .slots
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("original receipt");
+        assert_eq!(original.elapsed, Duration::from_millis(10));
+        let body = block_on(
+            original
+                .outcome
+                .expect("original response")
+                .into_bytes_bounded(64),
+        )
+        .expect("original body");
+        assert_eq!(body.as_ref(), b"original response");
     }
 
     #[test]

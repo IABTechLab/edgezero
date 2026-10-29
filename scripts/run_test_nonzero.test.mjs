@@ -67,46 +67,50 @@ const inventory = JSON.parse(
     "utf8",
   ),
 );
-const required = inventory.cases
-  .filter(
-    (c) => c.environment === "axum/native-tcp" && c.implementation === "ready",
-  )
-  .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
+for (const [environment, mode] of [
+  ["axum/native-tcp", "--include-ignored"],
+  ["unit/core", null],
+]) {
+  const required = inventory.cases
+    .filter(
+      (c) => c.environment === environment && c.implementation === "ready",
+    )
+    .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
 
-test("inventory guard executes the whole suite once with all required tests", () => {
-  const result = run("--include-ignored", [...required, "unrelated::test"], 0, [
-    "--inventory",
-    "axum/native-tcp",
-  ]);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.match(/executed/g)?.length, 1);
-});
+  test(`${environment} inventory guard executes the whole suite once`, () => {
+    const result = run(mode, [...required, "unrelated::test"], 0, [
+      "--inventory",
+      environment,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.match(/executed/g)?.length, 1);
+  });
 
-test("inventory guard rejects each missing required test before execution", () => {
-  for (const name of required) {
-    const result = run(
-      "--include-ignored",
-      required.filter((test) => test !== name),
-      0,
-      ["--inventory", "axum/native-tcp"],
+  test(`${environment} inventory guard rejects every missing required test`, () => {
+    for (const name of required) {
+      const result = run(
+        mode,
+        required.filter((test) => test !== name),
+        0,
+        ["--inventory", environment],
+      );
+      assert.equal(result.status, 1, `${name}: ${result.stderr}`);
+      assert.match(result.stderr, /required sentinel test not listed/);
+      assert.doesNotMatch(result.stdout, /executed/);
+    }
+  });
+
+  test(`${environment} inventory guard preserves suite failure`, () => {
+    assert.equal(
+      run(mode, required, 42, ["--inventory", environment]).status,
+      42,
     );
-    assert.equal(result.status, 1, `${name}: ${result.stderr}`);
-    assert.match(result.stderr, /required sentinel test not listed/);
-    assert.doesNotMatch(result.stdout, /executed/);
-  }
-});
+  });
+}
 
-test("inventory guard rejects unknown environments and preserves suite failure", () => {
-  const unknown = run("--include-ignored", required, 0, [
-    "--inventory",
-    "unknown",
-  ]);
+test("inventory guard rejects unknown environments", () => {
+  const unknown = run(null, [], 0, ["--inventory", "unknown"]);
   assert.equal(unknown.status, 1, unknown.stderr);
   assert.match(unknown.stderr, /no ready test sentinels/);
   assert.doesNotMatch(unknown.stdout, /executed/);
-  assert.equal(
-    run("--include-ignored", required, 42, ["--inventory", "axum/native-tcp"])
-      .status,
-    42,
-  );
 });

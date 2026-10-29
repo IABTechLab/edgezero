@@ -150,9 +150,10 @@ jobs:
           cargo test --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-core --features qualification
           node --test scripts/qualify_response_egress.test.mjs
 
-      - name: Shared redirect policy contracts
+      - name: Shared outbound policy contracts
         if: matrix.suite == 'workspace'
-        run: scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests
+        run: >-
+          scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::
 
       - name: Check Axum lifecycle fixture
         if: matrix.suite == 'axum'

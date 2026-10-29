@@ -134,6 +134,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   the original typed slot failure rather than a report-reader error, and prove early return in
   the source's host clock. Bound native encoding and partial-write evidence without adding guest
   dependencies or relaxing existing timing and qualification gates.
+- Bind the core mixed-observation acceptance leg to real receipt/accumulator tests. Strengthen
+  the three-slot Completed/Cutoff/typed-failure matrix, preserving bodies and original errors;
+  discover all redirect and receipt sentinels before one existing grouped CI run. Adapter and
+  hosted legs remain open, and command readiness does not imply qualification.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

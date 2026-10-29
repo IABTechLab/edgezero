@@ -491,6 +491,11 @@ proof of return before the compressed source completes. Final Axum/Viceroy/Spin 
 workerd retains a strict source-cadence failure. Complete suites remain nonzero; D6 and hosted
 qualification stay open.
 
+The core-only receipt checkpoint binds EZ-6 criterion 22 to the existing grouped outbound test
+execution, including exact three-slot Completed/Cutoff/typed-failure and fresh/mixed collection,
+lossless receipt recovery and invalid merges. The four adapter legs and criteria 20/21/23 remain
+planned; this does not complete the runtime or parent D6 task.
+
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
 `runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.
 

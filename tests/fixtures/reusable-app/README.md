@@ -100,10 +100,11 @@ setting a leg to `ready`. No staging deployment or approval is inferred from thi
 Specifically, `implementation: planned | ready` means the declared leg's command/sentinel is
 planned or implemented and executable with its full assertions. It does not mean the corresponding
 feature is absent or qualified. EZ-23 local criteria 01-11 bind guarded Cargo tests and the
-existing Axum CI job. EZ-9 core criteria 01-15 bind all 51 redirect tests through one inventory
-guard, and runtime criteria 16/17 bind the complete four-adapter wire matrix. There are 32 ready
-legs and 479 planned. EZ-23 criteria 12/13 stay planned for their begun-request and consumer-owned
-gaps. G1/Q3 must still reconcile the other executable bindings.
+existing Axum CI job. EZ-9 core criteria 01-15 bind all 51 redirect tests, and EZ-6 core criterion
+22 binds five mixed-observation/receipt-recovery tests through the same inventory guard.
+EZ-9 runtime criteria 16/17 bind the complete four-adapter wire matrix. There are 33 ready
+legs and 478 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
+for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
 
@@ -113,11 +114,19 @@ The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
 
-The EZ-9 core legs likewise discover every bound primary/additional sentinel before running:
+The core legs discover all 56 bound primary/additional sentinels before running one outbound suite:
 
 ```sh
-scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests
+scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::
 ```
+
+Core criterion 22 uses exactly three slots under Completed, Cutoff and an original typed driver
+failure, with both fresh collection and check/next/collect. Terminal production is held until
+both mixed receipts transfer. Assertions distinguish `AlreadyDelivered` from unresolved, merge
+the original receipts without consuming bodies, preserve error identity and release each body
+owner once. Companion tests cover foreign/missing receipts and duplicate/conflicting inputs.
+The shared raw Cargo output path is `outbound/unit/core/raw.log`; old redirect-only logs are not
+relabelled as evidence for this broadened command. Readiness is not exact-candidate qualification.
 
 Runtime commands select `--suite outbound-wire` and write their JSONL to
 `.runs/outbound/redirect/{environment}/events.jsonl`. Each adapter must complete 68 exchanges and

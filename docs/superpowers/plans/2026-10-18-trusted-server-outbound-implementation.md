@@ -756,6 +756,56 @@ witnesses, remaining response-owned/cleanup/reuse scenarios and strict timing ev
 open. G1 remains 32 ready / 479 planned and unqualified. No frozen requirement/interface change,
 capability promotion, candidate freeze, deployment or provider/runtime pin change is authorized.
 
+### D6 Core Receipt Acceptance Binding (2026-10-28)
+
+Activate only `EZ-6/acceptance/22@unit/core`, replacing its placeholder with five existing
+receipt/accumulator tests. Strengthen the identity test to six literal-three-slot runs:
+Completed, Cutoff and an original typed driver failure, each with fresh collection and with
+check(0)/next(1)/collect. Gate terminal production until both mixed receipts transfer; an
+immediately ready failed driver would not prove failure after delivery. Retain the separate
+out-of-order delivery test unchanged, and preserve the earlier four-slot cutoff/failure runs,
+including merging a newly collected third partial with the two previously delivered receipts.
+
+Assert the exact pre-merge `AlreadyDelivered` positions, third-slot state and original error
+identity before and after merge. No body is consumed during receipt inspection/collection;
+each original payload is read once after merge and its owner releases once. Companion tests
+prove missing/foreign recovery and retain both inputs through duplicate, conflicting-slot and
+invalid-index/count rejection, including the original payload and conflicting error. Shared
+test-only setup/assertion helpers keep individual proofs within the existing lint limits.
+No production API, behavior, transport, scheduler, dependency or runtime pin changes.
+
+The inventory guard discovers 56 exact core sentinels: the original 51 redirect proofs plus
+five receipt proofs. Broaden the one existing CI execution to `--lib outbound::`, and align
+all fifteen redirect bindings with the shared `outbound/unit/core/raw.log` output. Do not add
+per-test CI commands, a second guard or an exporter. The old redirect-only filter is verified
+to fail before execution because it omits all five batch sentinels. The new binding regression
+first fails on the planned placeholder, then passes after activation. Parametric guard tests
+retain Axum coverage and reject every missing core sentinel, execute once and preserve the
+original suite exit status.
+
+Final reviewed verification passes all five root Rust gates, including 2,568 tests across 32
+binaries with one existing ignored. The grouped outbound guard executes 296 tests; 37 evidence
+checker and 14 nonzero-guard tests pass, including omission of every required core sentinel.
+Root formatting and strict Clippy, workflow/modified-script/inventory formatting, docs lint/format,
+legacy/docs/inventory guards and dependency/decoder/map audits pass. The first sandboxed workspace
+run denied existing Axum TCP binds; its unchanged loopback-enabled rerun and final reviewed run
+pass. Specification, tooling and code-quality reviews are clear after adding explicit merged
+cardinality and post-merge termination assertions and retaining the earlier four-slot proofs.
+Local logs are `/private/tmp/edgezero-d6-mixed-*`; none is a frozen-candidate or hosted record.
+
+Readiness is now 33 ready / 478 planned across the unchanged 255 criteria / 511 legs. It is
+not qualification or applicability approval. All four runtime legs of criterion 22 remain
+planned; prior logs are not relabelled as evidence for the broadened command. This checkpoint
+does not close D6, criteria 20/21/23, native pending-body witnesses, strict timing failures or
+hosted qualification. No candidate freeze or deployment is authorized.
+
+Read-only ownership review confirms why those existing legs remain open: retaining work through
+handoff is not successful collection of both a pending begun origin and batch inside the body;
+shared callback-scope unit coverage is not the complete two-wrapper/Viceroy sequence. A native
+pending-body witness must observe the actual SDK read future, or Fastly's distinctly labelled
+body-readiness wait, not the outer batch wait or a synthetic yield. No blocking read fallback
+or additional production observer is introduced by this core-only binding.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

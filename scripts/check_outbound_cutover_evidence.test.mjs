@@ -531,10 +531,10 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 479,
+    planned: 478,
   });
   const command =
-    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::redirect_tests";
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
   const bindings = [
     [
       "01",
@@ -674,11 +674,7 @@ test("redirect core criteria bind every required test before one module executio
     assert.equal(c.approval, null, criterion);
     assert.equal(c.condition, null, criterion);
     assert.equal(c.command, command, criterion);
-    assert.equal(
-      c.artifact_path,
-      "outbound/redirect/unit/core/raw.log",
-      criterion,
-    );
+    assert.equal(c.artifact_path, "outbound/unit/core/raw.log", criterion);
     const expected = names.map((name) => `outbound::redirect_tests::${name}`);
     assert.deepEqual(
       [c.sentinel, ...(c.additional_sentinels ?? [])],
@@ -688,9 +684,64 @@ test("redirect core criteria bind every required test before one module executio
     for (const sentinel of expected) required.add(sentinel);
   }
   assert.equal(required.size, 51);
-  assert.deepEqual(checker.readySentinels(manifest, "unit/core"), [
-    ...required,
-  ]);
+  assert.deepEqual(
+    checker
+      .readySentinels(manifest, "unit/core")
+      .filter((name) => name.startsWith("outbound::redirect_tests::")),
+    [...required],
+  );
+});
+
+test("mixed batch core binding guards every receipt proof without promoting adapter legs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const rows = manifest.cases.filter(
+    (entry) => entry.case_id === "EZ-6/acceptance/22",
+  );
+  assert.equal(rows.length, 5);
+  const core = rows.find((entry) => entry.environment === "unit/core");
+  const names = [
+    "batch_collections_preserve_identity_until_consumed",
+    "mixed_batch_collection_preserves_delivery_state",
+    "batch_accumulator_rejects_foreign_or_missing_items",
+    "batch_recovery_returns_exact_nonclone_inputs",
+    "accumulator_rejects_duplicate_index_count_and_conflict_before_mutation",
+  ].map((name) => `outbound::batch::tests::${name}`);
+  assert.equal(core.implementation, "ready");
+  assert.equal(core.applicability, "blocking");
+  assert.equal(core.approval, null);
+  assert.equal(core.condition, null);
+  assert.equal(
+    core.command,
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+  );
+  assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
+  assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
+  const selected = checker.readySentinels(manifest, "unit/core");
+  assert.equal(selected.length, 56);
+  for (const name of names) assert.ok(selected.includes(name));
+  const source = readFileSync(
+    new URL("../crates/edgezero-core/src/outbound/batch.rs", import.meta.url),
+    "utf8",
+  );
+  for (const name of names) {
+    assert.ok(source.includes(`fn ${name.split("::").at(-1)}()`), name);
+  }
+  for (const row of rows.filter((entry) => entry !== core)) {
+    assert.equal(row.implementation, "planned", row.environment);
+  }
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  assert.ok(workflow.includes(`run: >-\n          ${core.command}\n`));
 });
 
 test("redirect runtime bindings retain exact output paths and leave unproved legs planned", () => {
@@ -757,11 +808,12 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 32);
+  assert.equal(ready.length, 33);
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
+        (c.case_id === "EZ-6/acceptance/22" && c.environment === "unit/core") ||
         (c.case_id.startsWith("EZ-23/acceptance/") &&
           Number(c.case_id.split("/").at(-1)) <= 11),
     ),
