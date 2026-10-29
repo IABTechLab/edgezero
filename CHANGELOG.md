@@ -138,6 +138,15 @@ their scope when introduced; the current summary supersedes their then-pending A
   the three-slot Completed/Cutoff/typed-failure matrix, preserving bodies and original errors;
   discover all redirect and receipt sentinels before one existing grouped CI run. Adapter and
   hosted legs remain open, and command readiness does not imply qualification.
+- Add response-handoff lifetime evidence on local Axum, workerd and Spin. Keep one pending begun
+  origin and original batch under the exact attached response owner, and release source heads
+  only after the client validates a bounded canonical prelude and the dispatch/scope witnesses.
+  Collect the original jobs in the response body; test preexisting resource retention, no replay,
+  strict arrival cutoffs, valid late collection and exactly-once terminal family release.
+  Harden the shared fixture reader against ambiguous framing and premature prefix notification;
+  preserve primary/partial client failures through cleanup. Fastly keeps all nine existing cases
+  and records handoff as inapplicable. Local handoff passes do not waive full-suite timing failures,
+  activate inventory legs or qualify hosted behavior. No production API or runtime-pin changes.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

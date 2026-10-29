@@ -494,7 +494,16 @@ qualification stay open.
 The core-only receipt checkpoint binds EZ-6 criterion 22 to the existing grouped outbound test
 execution, including exact three-slot Completed/Cutoff/typed-failure and fresh/mixed collection,
 lossless receipt recovery and invalid merges. The four adapter legs and criteria 20/21/23 remain
-planned; this does not complete the runtime or parent D6 task.
+planned at that checkpoint; this does not complete the runtime or parent D6 task.
+
+The [response-handoff checkpoint](2026-10-18-trusted-server-outbound-implementation.md#d6-response-handoff-checkpoint-2026-10-29)
+adds local criterion 20 coverage on Axum, workerd and Spin, with one exact body owner retaining
+the original pending origin and batch across dispatch. A bounded, client-validated prelude gates
+all source heads and payloads; body collection then succeeds. Native ownership tests retain
+preexisting resources and release family ownership only at terminal egress. Fastly is explicitly
+inapplicable to this case and retains all original nine cases. Complete suites still fail strict
+timing gates; inventory bindings, criteria 21/23, native body-entry and hosted qualification remain
+open. Neither the local passes nor unit owner counts certify provider teardown or client delivery.
 
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
 `runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.

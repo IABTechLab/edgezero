@@ -927,8 +927,29 @@ A ninth case, `caps-while-waiting`, keeps the three-slot 34/534 ms batch. A rece
 decoded gzip response over 300 ms, with a 1 MiB decoded cap, 64 KiB buffered cap and 256 KiB
 encoded cap. B/C return one byte after 20/40 ms. Collection must preserve both healthy slots
 and A's original `BufferedBody`/502 slot error before the source can complete.
-The suite still does not implement the remaining response-owned, cleanup and reusable-sandbox
-acceptance scenarios.
+A tenth case, `response-handoff` (EZ-6 criterion 20), applies only to Axum, workerd and Spin.
+It starts the original streamed origin and three-slot batch under one provisional response-body
+owner, confirms both are pending, and attaches that exact owner to a streamed NDJSON response.
+The body collects the same handles; it does not replay requests. Before any origin head, data
+or EOF is released, the native client must validate the complete canonical prelude, response
+status/media type, token, pending flags, closed callback scope and live body scope. Cloudflare
+and Spin also wait for a fixture-only wakeable signal set after EdgeZero dispatch returns;
+Axum uses its native handoff and closed callback scope. This names the dispatch boundary, not
+literal exported callback return or confirmed hosted client delivery.
+
+The prelude is at most 512 bytes including newline; the final report is at most 16 KiB including
+newline, with exactly two records. The existing bounded HTTP reader observes the prefix across
+fixed, chunked and close-delimited responses, before awaiting a larger chunk or gated tail.
+Ambiguous lengths, CL+TE and unsupported/duplicate transfer codings fail before notification.
+Only a validated prelude opens the shared source latch. Four original roles return O/A/B/C;
+the source records 22 events, plus the runner's complete-response boundary, within the existing
+32-event/eight-active/128-cumulative limits. Successful recorded arrivals must share a batch
+epoch after the pending check and strictly before the original cutoff. Later collection does
+not invalidate on-time arrivals. Unit tests cover both native and signalled handoff, existing
+resource retention, single consumption and exactly-once terminal family release.
+
+Fastly records this criterion as inapplicable and still runs all original nine cases. The suite
+does not yet implement the remaining cleanup and reusable-sandbox acceptance scenarios.
 
 The caps source uses the pinned native harness encoder, not a new guest dependency. Eight
 flushed 16 KiB plaintext pieces produce one gzip member, with a logical encoded size at most
@@ -962,8 +983,10 @@ cancellation. Release ends the fixture's hold; it is not evidence of provider te
 Report-body reads are capped at 64 bytes; the caps slot has the separate limits above.
 The existing bounded origin collector/parser and joined worker
 ownership are reused; registrations, roles and event counts are finite, and unexpected or late
-worker failures prevent a passing inventory. The suite runs all nine cases even when an earlier
-case fails, but publishes success only after runtime and origin cleanup succeed.
+worker failures prevent a passing inventory. The suite runs every applicable case even when an
+earlier case fails, but publishes success only after runtime and origin cleanup succeed.
+Drain errors are recorded separately from primary client failures, including interrupted prefix
+captures. Shared teardown records client completions and runtime logs even on failure.
 
 Host request-send and guest request-start have different origins, particularly on a cold guest.
 The slow/fast timeline cases, including the fourth-slot variant, record a scheduling alignment derived from the first

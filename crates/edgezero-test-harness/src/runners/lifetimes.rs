@@ -14,7 +14,13 @@ const CASES: [&str; 9] = [
 ];
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
-    let count = wire::progress_suite(name, "outbound-lifetimes", run, records, checks)?;
+    let count = wire::progress_suite(
+        name,
+        "outbound-lifetimes",
+        run,
+        records,
+        |port, origins, records| checks(name, port, origins, records),
+    )?;
     if let Some(count) = count {
         records.push(json!({"event":"lifetime-inventory","adapter":name,
             "status":"pass","cases":count,"qualification":false}))?;
@@ -22,9 +28,21 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 
-fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usize> {
+fn checks(adapter: &str, port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usize> {
     let mut failures = Vec::new();
-    for case in CASES {
+    let handoff = matches!(adapter, "axum" | "cloudflare" | "spin");
+    if !handoff {
+        records.push(
+            json!({"event":"lifetime-case-inapplicable","case":"response-handoff","adapter":adapter,
+            "reason":"EZ-6 criterion 20 targets Axum, workerd and Spin","qualification":false}),
+        )?;
+    }
+    let mut executed = 0;
+    for case in CASES
+        .into_iter()
+        .chain(handoff.then_some("response-handoff"))
+    {
+        executed += 1;
         let token = token();
         origins.register_lifetime(&token, case)?;
         let backend = format!(
@@ -32,11 +50,28 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
             origins.port(0)
         );
         let source_anchor = origins.mark_lifetime_start(&token)?;
+        let prefix_bytes = if case == "response-handoff" {
+            serde_json::to_vec(&handoff_prelude(
+                &token,
+                if adapter == "axum" { None } else { Some(true) },
+            ))?
+            .len()
+                + 1
+        } else {
+            0
+        };
+        let notify = |status, headers: &[Value], bytes: &[u8]| {
+            observe_handoff_prefix(origins, adapter, &token, status, headers, bytes)
+        };
         let reply = net::header_request(
             port,
             &format!("/progress/lifetimes/{case}"),
             &token,
             &[("x-fixture-backend", &backend)],
+            (case == "response-handoff").then_some(net::PrefixObserver {
+                bytes: prefix_bytes,
+                notify: &notify,
+            }),
         );
         let response_returned = Instant::now();
         let released = if pending_cutoff(case) {
@@ -44,8 +79,10 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
         } else {
             Ok(())
         };
-        let mut origin = origins.take_lifetime_events(&token)?;
-        if case == "caps-while-waiting" {
+        let source = origins.take_lifetime_events(&token);
+        let source_error = source.as_ref().err().map(ToString::to_string);
+        let mut origin = source.unwrap_or(Value::Null);
+        if origin.is_array() && matches!(case, "caps-while-waiting" | "response-handoff") {
             let returned = response_returned
                 .checked_duration_since(source_anchor)
                 .ok_or("invalid response-return clock")?;
@@ -61,12 +98,20 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
             let reply = reply.as_ref().map_err(|error| error.to_string())?;
             released.as_ref().map_err(|error| error.to_string())?;
             require(
+                source_error.is_none(),
+                source_error.clone().unwrap_or_default(),
+            )?;
+            require(
                 reply["status"] == 200,
                 "lifetime guest returned an error response",
             )?;
             let bytes: Vec<u8> = serde_json::from_value(reply["body_bytes"].clone())?;
-            report = serde_json::from_slice(&bytes)?;
-            validate(case, &token, &report, &origin)
+            report = decode_report(adapter, case, &token, &bytes)?;
+            validate(case, &token, &report, &origin)?;
+            if case == "response-handoff" {
+                validate_handoff_dispatch(adapter, &report)?;
+            }
+            Ok(())
         })();
         let clock_correlation = if case == "cpu-stretch" {
             report["events"]
@@ -88,7 +133,10 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
         records.push(json!({"event":"lifetime-case","case":case,"token":token,
             "status":if result.is_ok(){"pass"}else{"fail"},
             "error":result.as_ref().err().map(ToString::to_string),"report":report,
-            "origin":origin,"clock_correlation":clock_correlation,"timeout_contract":timeout_contract,"body_phase_evidence":if case == "pending-body-cutoff" {
+            "origin":origin,"source_error":source_error,"client_error":reply.as_ref().err().map(ToString::to_string),
+            "partial_client":reply.as_ref().err().and_then(|error|error.downcast_ref::<net::InterruptedResponse>())
+                .map(|partial|json!({"status":partial.status,"body_bytes":partial.body,"reason":partial.reason})),
+            "clock_correlation":clock_correlation,"timeout_contract":timeout_contract,"body_phase_evidence":if case == "pending-body-cutoff" {
                 Some("host-head-written-only")
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
@@ -98,7 +146,92 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
         }
     }
     require(failures.is_empty(), failures.join("; "))?;
-    Ok(CASES.len())
+    Ok(executed)
+}
+
+fn handoff_prelude(token: &str, dispatch_returned: Option<bool>) -> Value {
+    json!({"schema":1,"case":"response-handoff","token":token,"phase":"pending-handoff",
+        "origin_pending":true,"batch_pending":true,"slots":3,"cutoff_at_us":534000,"qualification":false,
+        "callback_scope_closed":true,"body_scope_live":true,"dispatch_returned":dispatch_returned})
+}
+
+fn validate_handoff_prefix(
+    adapter: &str,
+    token: &str,
+    status: u16,
+    headers: &[Value],
+    bytes: &[u8],
+) -> Result<()> {
+    let types: Vec<_> = headers
+        .iter()
+        .filter(|header| {
+            header[0]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("content-type"))
+        })
+        .collect();
+    require(
+        status == 200 && types.len() == 1 && types[0][1] == "application/x-ndjson",
+        "handoff prefix has an invalid response head",
+    )?;
+    validate_handoff_prelude(adapter, token, bytes)
+}
+
+fn observe_handoff_prefix(
+    origins: &WireOrigins,
+    adapter: &str,
+    token: &str,
+    status: u16,
+    headers: &[Value],
+    bytes: &[u8],
+) -> Result<()> {
+    let observed = Instant::now();
+    validate_handoff_prefix(adapter, token, status, headers, bytes)?;
+    origins.release_lifetime(token, observed)
+}
+
+fn validate_handoff_prelude(adapter: &str, token: &str, bytes: &[u8]) -> Result<()> {
+    let returned = match adapter {
+        "axum" => None,
+        "cloudflare" | "spin" => Some(true),
+        _ => return Err("handoff case is inapplicable to this adapter".into()),
+    };
+    let mut expected = serde_json::to_vec(&handoff_prelude(token, returned))?;
+    expected.push(b'\n');
+    require(
+        bytes.len() <= 512 && bytes == expected,
+        "invalid canonical handoff prefix or dispatch witness",
+    )
+}
+
+fn decode_report(adapter: &str, case: &str, token: &str, bytes: &[u8]) -> Result<Value> {
+    if case != "response-handoff" {
+        return Ok(serde_json::from_slice(bytes)?);
+    }
+    let mut lines = bytes.split(|byte| *byte == b'\n');
+    let prefix = lines.next().ok_or("missing handoff prefix")?;
+    let report = lines.next().ok_or("missing handoff report")?;
+    require(
+        prefix.len() < 512
+            && report.len() < 16 * 1024
+            && lines.next() == Some([].as_slice())
+            && lines.next().is_none(),
+        "invalid handoff report framing or bound",
+    )?;
+    validate_handoff_prelude(adapter, token, &bytes[..prefix.len() + 1])?;
+    Ok(serde_json::from_slice(report)?)
+}
+
+fn validate_handoff_dispatch(adapter: &str, report: &Value) -> Result<()> {
+    let expected = match adapter {
+        "axum" => Value::Null,
+        "cloudflare" | "spin" => json!(true),
+        _ => return Err("handoff case is inapplicable to this adapter".into()),
+    };
+    require(
+        report["handoff"].get("dispatch_returned") == Some(&expected),
+        "handoff lacks the adapter dispatch-return witness",
+    )
 }
 
 fn pending_cutoff(case: &str) -> bool {
@@ -155,12 +288,16 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
         "batch-progress" => &["a", "b", "c", "quiet"],
         "pending-head-cutoff" | "pending-body-cutoff" => &["a", "b", "c"],
         "caps-while-waiting" => &["a", "b", "c"],
+        "response-handoff" => &["a", "b", "c", "origin"],
         _ => return Err("unknown lifetime case".into()),
     };
     require(
         roles == expected,
         "missing, duplicate or foreign origin receipt",
     )?;
+    if case == "response-handoff" {
+        return validate_handoff(report, events, origin);
+    }
     if pending_cutoff(case) {
         return validate_pending_cutoff(case, report, events, origin);
     }
@@ -330,6 +467,171 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
             "mediator deadline was extended",
         )
     }
+}
+
+fn validate_handoff(report: &Value, events: &[Value], origin: &Value) -> Result<()> {
+    require(
+        report["termination"] == "Completed"
+            && report["slots"] == json!(["Resolved", "Resolved", "Resolved"])
+            && report["origin"] == json!({"status":200,"bytes":[79]})
+            && report["mediator"].is_null()
+            && report["handoff"]["prelude"]
+                == handoff_prelude(
+                    report["token"].as_str().ok_or("missing handoff token")?,
+                    report["handoff"]["dispatch_returned"].as_bool(),
+                )
+            && report["handoff"]["callback_scope_closed"] == true
+            && report["handoff"]["body_scope_live"] == true
+            && report["handoff"]["origin_streamed"] == true
+            && report["handoff"]
+                .get("dispatch_returned")
+                .is_some_and(|value| matches!(value, Value::Null | Value::Bool(true))),
+        "handoff lost pending response ownership or successful results",
+    )?;
+    let ops: Vec<_> = events.iter().map(|entry| entry["op"].as_str()).collect();
+    require(
+        ops == [
+            "begin",
+            "batch-start",
+            "handoff-pending",
+            "origin-head",
+            "origin-body",
+            "collect",
+        ]
+        .map(Some),
+        "handoff did not collect inside the response body",
+    )?;
+    let begin = event(events, "begin")?;
+    let batch = event(events, "batch-start")?;
+    let pending = event(events, "handoff-pending")?;
+    let head = event(events, "origin-head")?;
+    let body = event(events, "origin-body")?;
+    let collected = event(events, "collect")?;
+    within(number(begin, "at_us")?, 2000, "handoff begin missed 2 ms")?;
+    within(number(batch, "at_us")?, 34000, "handoff batch missed 34 ms")?;
+    for pair in events.windows(2) {
+        require(
+            number(&pair[1], "at_us")?
+                >= number(&pair[0], "at_us")? + number(&pair[0], "duration_us")?,
+            "handoff operations overlap or were backdated",
+        )?;
+    }
+    require(
+        begin["result"] == "scheduled"
+            && batch["result"]["cutoff_at_us"] == 534000
+            && pending["result"] == json!({"origin":"Pending","batch":"Pending"})
+            && number(pending, "duration_us")? < 5000
+            && head["result"] == "ok"
+            && body["result"].is_null()
+            && collected["result"] == "ok",
+        "handoff pending check or original budget changed",
+    )?;
+    let returned_at = number(collected, "at_us")? + number(collected, "duration_us")?;
+    let items = report["items"].as_array().ok_or("missing handoff slots")?;
+    require(items.len() == 3, "missing handoff outcome")?;
+    let mut earliest_epoch = number(batch, "at_us")?;
+    let mut latest_epoch = number(batch, "at_us")? + number(batch, "duration_us")?;
+    for (index, item) in items.iter().enumerate() {
+        require(
+            item["index"] == index
+                && item["via"] == "collect"
+                && item["slot_error"] == false
+                && item["outcome"] == json!({"status":200,"bytes":[65+index]})
+                && number(item, "elapsed_us")? < 500000,
+            "handoff replayed, lost or failed a slot",
+        )?;
+        let elapsed = number(item, "elapsed_us")?;
+        earliest_epoch = earliest_epoch.max(
+            (number(pending, "at_us")? + number(pending, "duration_us")?).saturating_sub(elapsed),
+        );
+        latest_epoch = latest_epoch.min(
+            returned_at
+                .min(533999)
+                .checked_sub(elapsed)
+                .ok_or("handoff arrival exceeds collection")?,
+        );
+    }
+    require(
+        earliest_epoch <= latest_epoch,
+        "handoff arrivals cannot share an on-time epoch after the pending check",
+    )?;
+    let origin = origin.as_array().ok_or("missing handoff source")?;
+    require(
+        origin.len() == 23
+            && origin.iter().all(|entry| {
+                entry.get("error").is_none()
+                    && matches!(
+                        entry["role"].as_str(),
+                        Some("origin" | "a" | "b" | "c" | "control")
+                    )
+                    && matches!(
+                        entry["op"].as_str(),
+                        Some(
+                            "request"
+                                | "waiting"
+                                | "head"
+                                | "chunk"
+                                | "closed"
+                                | "client-prefix-observed"
+                                | "release"
+                                | "response-returned"
+                        )
+                    )
+            }),
+        "unexpected handoff source evidence",
+    )?;
+    let prefix = role_event(origin, "control", "client-prefix-observed")?;
+    let release = role_event(origin, "control", "release")?;
+    let returned = role_event(origin, "control", "response-returned")?;
+    let position = |role: &str, op: &str| {
+        origin
+            .iter()
+            .position(|entry| entry["role"] == role && entry["op"] == op)
+            .ok_or("missing handoff phase")
+    };
+    let release_index = position("control", "release")?;
+    let ended = number(returned, "at_us")?;
+    require(
+        origin
+            .iter()
+            .filter(|entry| entry["role"] == "control")
+            .count()
+            == 3
+            && position("control", "client-prefix-observed")? < release_index
+            && release_index < position("control", "response-returned")?
+            && release["prefix_observed_us"] == prefix["at_us"]
+            && release.get("response_returned_us").is_none()
+            && number(prefix, "at_us")? <= number(release, "at_us")?
+            && number(release, "at_us")? <= ended
+            && returned["observer"] == "harness",
+        "handoff gate lacks a causal client-prefix witness",
+    )?;
+    for (index, role) in ["origin", "a", "b", "c"].into_iter().enumerate() {
+        let request = role_event(origin, role, "request")?;
+        let waiting = role_event(origin, role, "waiting")?;
+        let head = role_event(origin, role, "head")?;
+        let chunk = role_event(origin, role, "chunk")?;
+        let closed = role_event(origin, role, "closed")?;
+        require(
+            position(role, "request")? < position(role, "waiting")?
+                && position(role, "waiting")? < position(role, "head")?
+                && release_index < position(role, "head")?
+                && position(role, "head")? < position(role, "chunk")?
+                && position(role, "chunk")? < position(role, "closed")?
+                && number(request, "at_us")? <= number(waiting, "at_us")?
+                && number(waiting, "at_us")? <= number(head, "write_started_us")?
+                && number(head, "write_started_us")? >= number(release, "at_us")?
+                && number(head, "write_started_us")? <= number(head, "at_us")?
+                && number(chunk, "write_started_us")? >= number(head, "at_us")?
+                && number(chunk, "write_started_us")? <= number(chunk, "at_us")?
+                && number(chunk, "write_started_us")? <= ended
+                && number(chunk, "at_us")? <= number(closed, "at_us")?
+                && chunk["bytes"] == json!([if index == 0 { 79 } else { 64 + index }])
+                && closed["reason"] == "complete",
+            "handoff source answered before release or lost its exact payload",
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_caps(report: &Value, events: &[Value], origin: &Value) -> Result<()> {
@@ -1266,6 +1568,308 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn handoff_sample() -> (Value, Value) {
+        let prelude = json!({"schema":1,"case":"response-handoff","token":"handoff","phase":"pending-handoff",
+            "origin_pending":true,"batch_pending":true,"slots":3,"cutoff_at_us":534000,"qualification":false,
+            "callback_scope_closed":true,"body_scope_live":true,"dispatch_returned":null});
+        let report = json!({"schema":1,"case":"response-handoff","token":"handoff","qualification":false,
+        "error":null,"origin":{"status":200,"bytes":[79]},"mediator":null,
+        "slots":["Resolved","Resolved","Resolved"],"termination":"Completed",
+        "handoff":{"prelude":prelude,"callback_scope_closed":true,"body_scope_live":true,"origin_streamed":true,"dispatch_returned":null},
+        "items":[
+            {"index":0,"via":"collect","elapsed_us":12000,"slot_error":false,"outcome":{"status":200,"bytes":[65]}},
+            {"index":1,"via":"collect","elapsed_us":14000,"slot_error":false,"outcome":{"status":200,"bytes":[66]}},
+            {"index":2,"via":"collect","elapsed_us":16000,"slot_error":false,"outcome":{"status":200,"bytes":[67]}}
+        ],"events":[
+            {"op":"begin","at_us":2000,"duration_us":50,"result":"scheduled"},
+            {"op":"batch-start","at_us":34000,"duration_us":100,"result":{"cutoff_at_us":534000}},
+            {"op":"handoff-pending","at_us":34100,"duration_us":10,"result":{"origin":"Pending","batch":"Pending"}},
+            {"op":"origin-head","at_us":34300,"duration_us":10000,"result":"ok"},
+            {"op":"origin-body","at_us":44300,"duration_us":2000,"result":null},
+            {"op":"collect","at_us":46300,"duration_us":10000,"result":"ok"}
+        ]});
+        let mut origin = Vec::new();
+        for (index, role) in ["origin", "a", "b", "c"].into_iter().enumerate() {
+            for (op, at) in [
+                ("request", 5000 + index * 1000),
+                ("waiting", 6000 + index * 1000),
+            ] {
+                origin.push(json!({"op":op,"role":role,"at_us":at}));
+            }
+        }
+        origin.push(json!({"op":"client-prefix-observed","role":"control","at_us":40000}));
+        origin.push(
+            json!({"op":"release","role":"control","at_us":40100,"prefix_observed_us":40000}),
+        );
+        for (index, role) in ["origin", "a", "b", "c"].into_iter().enumerate() {
+            origin.push(json!({"op":"head","role":role,"at_us":41100+index*100,"write_started_us":41000+index*100}));
+            origin.push(json!({"op":"chunk","role":role,"at_us":42100+index*100,"write_started_us":42000+index*100,"bytes":[if index==0{79}else{64+index}]}));
+            origin.push(
+                json!({"op":"closed","role":role,"at_us":43000+index*100,"reason":"complete"}),
+            );
+        }
+        origin.push(
+            json!({"op":"response-returned","role":"control","at_us":60000,"observer":"harness"}),
+        );
+        for entry in &mut origin {
+            entry["token"] = json!("handoff");
+            entry["case"] = json!("response-handoff");
+        }
+        (report, json!(origin))
+    }
+
+    #[test]
+    fn response_handoff_requires_pending_original_work_and_post_prefix_success() {
+        let (report, origin) = handoff_sample();
+        validate("response-handoff", "handoff", &report, &origin).unwrap();
+        for path in [
+            "callback_scope_closed",
+            "body_scope_live",
+            "origin_streamed",
+        ] {
+            let mut changed = report.clone();
+            changed["handoff"][path] = json!(false);
+            assert!(
+                validate("response-handoff", "handoff", &changed, &origin).is_err(),
+                "{path}"
+            );
+        }
+        for slot in 0..3 {
+            let mut changed = report.clone();
+            changed["slots"][slot] = json!("Unresolved");
+            assert!(validate("response-handoff", "handoff", &changed, &origin).is_err());
+            let mut changed = report.clone();
+            changed["items"][slot]["slot_error"] = json!(true);
+            assert!(validate("response-handoff", "handoff", &changed, &origin).is_err());
+        }
+    }
+
+    #[test]
+    fn handoff_requires_causal_on_time_arrivals_but_not_on_time_collection() {
+        let (report, origin) = handoff_sample();
+        let mut changed = report.clone();
+        for item in changed["items"].as_array_mut().unwrap() {
+            item["elapsed_us"] = json!(0);
+        }
+        assert!(validate("response-handoff", "handoff", &changed, &origin).is_err());
+        let mut late = report.clone();
+        late["events"][5]["at_us"] = json!(800000);
+        validate("response-handoff", "handoff", &late, &origin).unwrap();
+        late["items"][2]["elapsed_us"] = json!(499999);
+        validate("response-handoff", "handoff", &late, &origin).unwrap();
+        late["events"][1]["at_us"] = json!(34001);
+        late["events"][2]["at_us"] = json!(34101);
+        assert!(validate("response-handoff", "handoff", &late, &origin).is_err());
+    }
+
+    #[test]
+    fn handoff_prefix_errors_never_open_the_gate_and_dispatch_order_is_not_inferred_late() {
+        let origins = WireOrigins::start().unwrap();
+        origins
+            .register_lifetime("handoff", "response-handoff")
+            .unwrap();
+        origins.mark_lifetime_start("handoff").unwrap();
+        let fields = vec![json!(["Content-Type", "application/x-ndjson"])];
+        let mut valid = serde_json::to_vec(&handoff_prelude("handoff", Some(true))).unwrap();
+        valid.push(b'\n');
+        for field in [
+            "origin_pending",
+            "batch_pending",
+            "callback_scope_closed",
+            "body_scope_live",
+            "dispatch_returned",
+        ] {
+            let mut altered = handoff_prelude("handoff", Some(true));
+            altered[field] = json!(false);
+            let mut bytes = serde_json::to_vec(&altered).unwrap();
+            bytes.push(b'\n');
+            assert!(
+                observe_handoff_prefix(&origins, "cloudflare", "handoff", 200, &fields, &bytes)
+                    .is_err(),
+                "{field}"
+            );
+        }
+        for (key, value) in [
+            ("token", json!("foreign")),
+            ("case", json!("slow-origin")),
+            ("schema", json!(2)),
+            ("slots", json!(2)),
+            ("cutoff_at_us", json!(535000)),
+            ("unexpected", json!(true)),
+        ] {
+            let mut altered = handoff_prelude("handoff", Some(true));
+            altered[key] = value;
+            let mut bytes = serde_json::to_vec(&altered).unwrap();
+            bytes.push(b'\n');
+            assert!(
+                observe_handoff_prefix(&origins, "cloudflare", "handoff", 200, &fields, &bytes)
+                    .is_err()
+            );
+        }
+        // Duplicate keys intentionally cannot be expressed by json!.
+        let duplicated = format!(
+            "{{\"schema\":1,{}",
+            std::str::from_utf8(&valid[1..]).unwrap()
+        );
+        for bytes in [
+            &valid[..valid.len() - 1],
+            duplicated.as_bytes(),
+            b"{}\n",
+            b"not json\n",
+        ] {
+            assert!(
+                observe_handoff_prefix(&origins, "cloudflare", "handoff", 200, &fields, bytes)
+                    .is_err()
+            );
+        }
+        for headers in [
+            vec![],
+            vec![json!(["content-type", "application/json"])],
+            vec![fields[0].clone(), fields[0].clone()],
+        ] {
+            assert!(
+                observe_handoff_prefix(&origins, "cloudflare", "handoff", 200, &headers, &valid)
+                    .is_err()
+            );
+        }
+        assert!(
+            observe_handoff_prefix(&origins, "cloudflare", "handoff", 503, &fields, &valid)
+                .is_err()
+        );
+        assert_eq!(origins.take_lifetime_events("handoff").unwrap(), json!([]));
+        observe_handoff_prefix(&origins, "cloudflare", "handoff", 200, &fields, &valid).unwrap();
+        assert_eq!(
+            origins
+                .take_lifetime_events("handoff")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            observe_handoff_prefix(&origins, "cloudflare", "handoff", 200, &fields, &valid)
+                .is_err()
+        );
+        origins.finish().unwrap();
+        let (mut report, _) = handoff_sample();
+        assert!(validate_handoff_dispatch("cloudflare", &report).is_err());
+        report["handoff"]["dispatch_returned"] = json!(true);
+        validate_handoff_dispatch("cloudflare", &report).unwrap();
+        validate_handoff_dispatch("spin", &report).unwrap();
+        assert!(validate_handoff_dispatch("axum", &report).is_err());
+        report["handoff"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dispatch_returned");
+        assert!(validate_handoff_dispatch("axum", &report).is_err());
+        assert!(validate_handoff_dispatch("spin", &report).is_err());
+    }
+
+    #[test]
+    fn handoff_source_witness_rejects_early_reordered_missing_or_failed_phases() {
+        let (report, origin) = handoff_sample();
+        for index in 0..origin.as_array().unwrap().len() {
+            let mut changed = origin.clone();
+            changed.as_array_mut().unwrap().remove(index);
+            assert!(
+                validate("response-handoff", "handoff", &report, &changed).is_err(),
+                "missing {index}"
+            );
+        }
+        for role in ["origin", "a", "b", "c"] {
+            for op in ["head", "chunk"] {
+                let mut changed = origin.clone();
+                let entry = changed
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|entry| entry["role"] == role && entry["op"] == op)
+                    .unwrap();
+                entry["write_started_us"] = json!(40099);
+                assert!(
+                    validate("response-handoff", "handoff", &report, &changed).is_err(),
+                    "early {role} {op}"
+                );
+            }
+            let mut changed = origin.clone();
+            let entry = changed
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["role"] == role && entry["op"] == "closed")
+                .unwrap();
+            entry["reason"] = json!("peer_closed_after_cutoff");
+            assert!(validate("response-handoff", "handoff", &report, &changed).is_err());
+        }
+        let mut tied = origin.clone();
+        for entry in tied
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|entry| entry["op"] != "request" && entry["op"] != "waiting")
+        {
+            entry["at_us"] = json!(40000);
+            if entry.get("write_started_us").is_some() {
+                entry["write_started_us"] = json!(40000);
+            }
+        }
+        validate("response-handoff", "handoff", &report, &tied).unwrap();
+        tied.as_array_mut().unwrap().swap(8, 9);
+        assert!(validate("response-handoff", "handoff", &report, &tied).is_err());
+        let mut late = origin.clone();
+        for entry in late
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|entry| matches!(entry["op"].as_str(), Some("request" | "waiting")))
+        {
+            entry["at_us"] = json!(40500);
+        }
+        validate("response-handoff", "handoff", &report, &late).unwrap();
+        let mut cleanup = origin.clone();
+        for entry in cleanup
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|entry| entry["op"] == "closed")
+        {
+            entry["at_us"] = json!(61000);
+        }
+        validate("response-handoff", "handoff", &report, &cleanup).unwrap();
+    }
+
+    #[test]
+    fn handoff_ndjson_report_has_two_bounded_records_and_no_silent_truncation() {
+        let (mut report, _) = handoff_sample();
+        let mut prefix = serde_json::to_vec(&handoff_prelude("handoff", None)).unwrap();
+        prefix.push(b'\n');
+        let encode = |report: &Value| {
+            let mut bytes = prefix.clone();
+            bytes.extend(serde_json::to_vec(report).unwrap());
+            bytes.push(b'\n');
+            bytes
+        };
+        assert_eq!(
+            decode_report("axum", "response-handoff", "handoff", &encode(&report)).unwrap(),
+            report
+        );
+        assert!(decode_report("spin", "response-handoff", "handoff", &encode(&report)).is_err());
+        let normal = encode(&report);
+        for bytes in [&normal[..normal.len() - 1], &prefix, b"{}\n"] {
+            assert!(decode_report("axum", "response-handoff", "handoff", bytes).is_err());
+        }
+        let mut extra = normal.clone();
+        extra.extend(b"{}\n");
+        assert!(decode_report("axum", "response-handoff", "handoff", &extra).is_err());
+        report["padding"] = json!("");
+        let base = serde_json::to_vec(&report).unwrap().len();
+        report["padding"] = json!("x".repeat(16 * 1024 - 1 - base));
+        decode_report("axum", "response-handoff", "handoff", &encode(&report)).unwrap();
+        report["padding"] = json!("x".repeat(16 * 1024 - base));
+        assert!(decode_report("axum", "response-handoff", "handoff", &encode(&report)).is_err());
+    }
 
     fn caps_sample() -> (Value, Value) {
         let report = json!({"schema":1,"case":"caps-while-waiting","token":"sample","qualification":false,

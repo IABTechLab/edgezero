@@ -18,6 +18,7 @@ enum Case {
     PendingBody,
     Cpu,
     Caps,
+    Handoff,
 }
 
 impl Case {
@@ -32,6 +33,7 @@ impl Case {
             "pending-body-cutoff" => Ok(Self::PendingBody),
             "cpu-stretch" => Ok(Self::Cpu),
             "caps-while-waiting" => Ok(Self::Caps),
+            "response-handoff" => Ok(Self::Handoff),
             _ => Err("unknown lifetime case".into()),
         }
     }
@@ -47,6 +49,7 @@ impl Case {
             Self::PendingBody => "pending-body-cutoff",
             Self::Cpu => "cpu-stretch",
             Self::Caps => "caps-while-waiting",
+            Self::Handoff => "response-handoff",
         }
     }
 
@@ -60,11 +63,12 @@ impl Case {
             Self::Batch => matches!(role, "a" | "b" | "c" | "quiet"),
             Self::PendingHead | Self::PendingBody => matches!(role, "a" | "b" | "c"),
             Self::Caps => matches!(role, "a" | "b" | "c"),
+            Self::Handoff => matches!(role, "origin" | "a" | "b" | "c"),
         }
     }
 
     fn held(self) -> bool {
-        matches!(self, Self::PendingHead | Self::PendingBody)
+        matches!(self, Self::PendingHead | Self::PendingBody | Self::Handoff)
     }
 }
 
@@ -121,7 +125,7 @@ pub(super) fn register(shared: &Shared, token: &str, case: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn release(shared: &Shared, token: &str, response_returned: Instant) -> Result<()> {
+pub(super) fn release(shared: &Shared, token: &str, observed: Instant) -> Result<()> {
     let mut state = shared.lock();
     let lifetime = state
         .lifetimes
@@ -130,17 +134,31 @@ pub(super) fn release(shared: &Shared, token: &str, response_returned: Instant) 
     require(lifetime.case.held(), "lifetime does not use a release gate")?;
     let anchor = lifetime.anchor.ok_or("lifetime not started")?;
     require(!lifetime.released, "lifetime already released")?;
-    require(lifetime.events.len() < EVENT_LIMIT, "lifetime event limit")?;
+    let handoff = matches!(lifetime.case, Case::Handoff);
+    require(
+        lifetime.events.len() + if handoff { 2 } else { 1 } <= EVENT_LIMIT,
+        "lifetime event limit",
+    )?;
     let released_at = Instant::now();
     require(
-        (anchor..=released_at).contains(&response_returned),
+        (anchor..=released_at).contains(&observed),
         "invalid response return boundary",
     )?;
-    lifetime
-        .events
-        .push(json!({"op":"release","role":"control","token":token,
-        "case":lifetime.case.name(),"at_us":offset(released_at,anchor),
-        "response_returned_us":offset(response_returned,anchor)}));
+    if handoff {
+        lifetime.events.push(
+            json!({"op":"client-prefix-observed","role":"control","token":token,
+            "case":lifetime.case.name(),"at_us":offset(observed,anchor)}),
+        );
+    }
+    let mut event = json!({"op":"release","role":"control","token":token,
+    "case":lifetime.case.name(),"at_us":offset(released_at,anchor),
+    });
+    event[if handoff {
+        "prefix_observed_us"
+    } else {
+        "response_returned_us"
+    }] = json!(offset(observed, anchor));
+    lifetime.events.push(event);
     lifetime.released = true;
     shared.wake.notify_all();
     Ok(())
@@ -650,7 +668,8 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         return Ok(true);
     }
     if exchange.case.held() {
-        if shared.lock().lifetimes[exchange.token].released {
+        let handoff = matches!(exchange.case, Case::Handoff);
+        if !handoff && shared.lock().lifetimes[exchange.token].released {
             return Ok(false);
         }
         if matches!(exchange.case, Case::PendingBody) {
@@ -671,12 +690,25 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         shared.wait(GATE_BUDGET, |state| {
             state.stop || state.lifetimes[exchange.token].released
         })?;
-        return Ok(false);
+        if !handoff || shared.lock().stop {
+            return Ok(false);
+        }
     }
     let ms = |value| Duration::from_millis(value);
     let absolute = |value| exchange.scenario_anchor.unwrap() + ms(value);
     let received = |value| exchange.received + ms(value);
     let (head_at, chunks): (Instant, Vec<(Instant, &[u8])>) = match (exchange.case, exchange.role) {
+        (Case::Handoff, role) => {
+            let at = Instant::now();
+            let bytes: &[u8] = match role {
+                "origin" => b"O",
+                "a" => b"A",
+                "b" => b"B",
+                "c" => b"C",
+                _ => unreachable!(),
+            };
+            (at, vec![(at, bytes)])
+        }
         (Case::Slow | Case::Timeout, "origin") => (
             absolute(700),
             vec![
@@ -701,7 +733,9 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
                 Case::Cpu => absolute([180, 530, 900][index]),
                 Case::Batch => received([20, 40, 60][index]),
                 Case::Caps => received([0, 20, 40][index]),
-                Case::Begin | Case::PendingHead | Case::PendingBody => unreachable!(),
+                Case::Begin | Case::PendingHead | Case::PendingBody | Case::Handoff => {
+                    unreachable!()
+                }
             };
             (at, vec![(at, [b"A".as_slice(), b"B", b"C"][index])])
         }
@@ -721,7 +755,11 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
     let write_started = Instant::now();
     socket.write_all(head)?;
     socket.flush()?;
-    let mut event = exchange.event("head", Instant::now(), Some(head_at));
+    let mut event = exchange.event(
+        "head",
+        Instant::now(),
+        (!matches!(exchange.case, Case::Handoff)).then_some(head_at),
+    );
     event["write_started_us"] = json!(offset(write_started, exchange.anchor));
     record(shared, exchange, event)?;
     for (at, bytes) in chunks {
@@ -737,7 +775,11 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
             socket.write_all(b"\r\n")?;
         }
         socket.flush()?;
-        let mut event = exchange.event("chunk", Instant::now(), Some(at));
+        let mut event = exchange.event(
+            "chunk",
+            Instant::now(),
+            (!matches!(exchange.case, Case::Handoff)).then_some(at),
+        );
         event["bytes"] = json!(bytes);
         event["write_started_us"] = json!(offset(write_started, exchange.anchor));
         record(shared, exchange, event)?;
@@ -752,6 +794,77 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_handoff_holds_all_heads_until_the_client_prefix_and_then_succeeds() {
+        let origins = WireOrigins::start().unwrap();
+        origins
+            .register_lifetime("handoff", "response-handoff")
+            .unwrap();
+        origins.mark_lifetime_start("handoff").unwrap();
+        let sockets = ["origin", "a", "b", "c"].map(|role| {
+            (
+                role,
+                connect(
+                    &origins,
+                    "handoff",
+                    "response-handoff",
+                    role,
+                    if role == "origin" { "2000" } else { "34000" },
+                ),
+            )
+        });
+        origins
+            .shared
+            .wait(IO_BUDGET, |state| {
+                state.lifetimes["handoff"]
+                    .events
+                    .iter()
+                    .filter(|event| event["op"] == "waiting")
+                    .count()
+                    == 4
+            })
+            .unwrap();
+        for (_, socket) in &sockets {
+            socket
+                .set_read_timeout(Some(Duration::from_millis(10)))
+                .unwrap();
+            let error = socket.peek(&mut [0]).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ));
+            socket.set_read_timeout(Some(IO_BUDGET)).unwrap();
+        }
+        origins.release_lifetime("handoff", Instant::now()).unwrap();
+        for (role, socket) in sockets {
+            let bytes = read(socket);
+            if role == "origin" {
+                assert!(bytes.ends_with(b"1\r\nO\r\n0\r\n\r\n"));
+            } else {
+                assert_eq!(
+                    *bytes.last().unwrap(),
+                    role.as_bytes()[0].to_ascii_uppercase()
+                );
+            }
+        }
+        let events = origins.take_lifetime_events("handoff").unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 22);
+        let prefix = event(&events, "control", "client-prefix-observed");
+        let release = event(&events, "control", "release");
+        assert_eq!(release["prefix_observed_us"], prefix["at_us"]);
+        assert!(release["response_returned_us"].is_null());
+        for role in ["origin", "a", "b", "c"] {
+            assert!(
+                event(&events, role, "head")["write_started_us"]
+                    .as_u64()
+                    .unwrap()
+                    >= release["at_us"].as_u64().unwrap()
+            );
+            assert_eq!(event(&events, role, "closed")["reason"], "complete");
+        }
+        origins.finish().unwrap();
+    }
 
     #[test]
     fn caps_source_sends_one_bounded_gzip_member_over_the_full_trickle_window() {

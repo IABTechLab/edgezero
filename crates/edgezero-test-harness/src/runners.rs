@@ -53,13 +53,13 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 /// Teardown shared by every runtime run. The runtime lives inside `outcome`'s
 /// computation, so it has stopped by now: record client completions and guest
 /// logs, then a failure carrying `fields` and `failure` context.
-fn settle(
+fn settle<T>(
     records: &mut Records,
     log: &Path,
     fields: Value,
     failure: Value,
-    outcome: Result<()>,
-) -> Result<()> {
+    outcome: Result<T>,
+) -> Result<T> {
     records.collect_clients(fields.clone())?;
     for event in logs(log) {
         records.push(annotate(event, fields.clone()))?;

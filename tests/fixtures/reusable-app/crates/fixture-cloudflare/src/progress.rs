@@ -2,13 +2,7 @@ use edgezero_core::EdgeError;
 use fixture_core::qualification::progress::{self, Job, ProbeRuntime, ProgressHooks};
 use futures::{channel::oneshot, future::LocalBoxFuture};
 use serde_json::json;
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 struct Runtime;
 
@@ -96,7 +90,7 @@ pub async fn dispatch(
     }
     // Inspect the original object without cloning or consuming its body.
     let signal = json!({"source":"workerd-before-conversion", "body_absent":request.inner().body().is_none()});
-    let returned = Arc::new(AtomicBool::new(false));
+    let returned = Arc::new(progress::DispatchReturn::default());
     let app = progress::application(
         Arc::new(Runtime),
         signal,
@@ -106,7 +100,7 @@ pub async fn dispatch(
     .map_err(|_| worker::Error::RustError("progress probe configuration failed".into()))?;
     let response =
         edgezero_adapter_cloudflare::dispatch_app::<ProgressHooks>(&app, request, env, ctx).await;
-    returned.store(true, Ordering::SeqCst);
+    returned.mark_returned();
     if let Some((case, token)) = &probe {
         worker::console_log!(
             "{}",

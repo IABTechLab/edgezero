@@ -1,12 +1,19 @@
+use bytes::Bytes;
 use edgezero_core::context::RequestContext;
 use edgezero_core::http::{HeaderMap, Method, Response, Uri, response_builder};
 use edgezero_core::{
-    Body, Deadline, EdgeError, HttpClient, MonotonicClock, MonotonicInstant, OutboundBatch,
-    OutboundBatchCheck, OutboundBatchNext, OutboundCollectedSlot, OutboundRequest,
-    OutboundResponse, OutboundSlotResult, action,
+    Body, Deadline, EdgeError, HttpClient, IndependentOutboundProgress, MonotonicClock,
+    MonotonicInstant, OutboundBatch, OutboundBatchCheck, OutboundBatchNext, OutboundCollectedSlot,
+    OutboundRequest, OutboundResponse, OutboundScope, OutboundScopeOwner, OutboundSlotResult,
+    action,
 };
+use futures::StreamExt as _;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{
+    rc::Rc,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 const MAX_CPU_ITERATIONS: u64 = 10_000_000;
 
@@ -30,6 +37,7 @@ struct Report {
     error: Option<Value>,
     origin: Option<Value>,
     mediator: Option<Value>,
+    handoff: Option<Value>,
 }
 
 impl Probe {
@@ -45,6 +53,7 @@ impl Probe {
                 | "pending-body-cutoff"
                 | "cpu-stretch"
                 | "caps-while-waiting"
+                | "response-handoff"
         ) {
             return Err(invalid());
         }
@@ -183,7 +192,7 @@ impl Report {
     fn json(&self, probe: &Probe, timeline: &Timeline) -> Value {
         json!({"schema":1,"case":probe.case,"token":probe.token,"qualification":false,
             "events":timeline.events,"items":self.items,"slots":self.slots,
-            "termination":self.termination,"error":self.error,"origin":self.origin,"mediator":self.mediator})
+            "termination":self.termination,"error":self.error,"origin":self.origin,"mediator":self.mediator,"handoff":self.handoff})
     }
 }
 
@@ -600,6 +609,125 @@ async fn pending_cutoff(
     Ok(())
 }
 
+fn handoff_prelude(token: &str, cutoff_at_us: u64, dispatch_returned: Option<bool>) -> Value {
+    json!({"schema":1,"case":"response-handoff","token":token,"phase":"pending-handoff",
+        "origin_pending":true,"batch_pending":true,"slots":3,"cutoff_at_us":cutoff_at_us,"qualification":false,
+        "callback_scope_closed":true,"body_scope_live":true,"dispatch_returned":dispatch_returned})
+}
+
+async fn response_handoff(
+    ctx: &RequestContext,
+    probe: Probe,
+    client: HttpClient,
+    mut timeline: Timeline,
+) -> Result<Response, EdgeError> {
+    let callback = OutboundScope::capture(Rc::new(IndependentOutboundProgress));
+    let owner = OutboundScopeOwner::response_body();
+    let body_scope = owner.scope();
+    let dispatched = super::progress::dispatch_returned(ctx);
+    timeline.wait_until(ctx, 2).await?;
+    let request = probe.request("origin", &timeline)?;
+    let at = timeline.clock.now();
+    let mut origin = owner.with(|| client.begin(request)).await?;
+    timeline.event("begin", at, timeline.clock.now(), json!("scheduled"));
+    timeline.wait_until(ctx, 34).await?;
+    let requests = ["a", "b", "c"]
+        .into_iter()
+        .map(|role| probe.request(role, &timeline))
+        .collect::<Result<Vec<_>, _>>()?;
+    let observation_cutoff = timeline.deadline_at(534);
+    let at = timeline.clock.now();
+    let mut batch = owner.with(|| client.start_batch_until(requests, observation_cutoff));
+    timeline.event(
+        "batch-start",
+        at,
+        timeline.clock.now(),
+        json!({"cutoff_at_us":timeline.elapsed_us(observation_cutoff.instant())}),
+    );
+    let at = timeline.clock.now();
+    if origin.is_ready() || !matches!(batch.check()?, OutboundBatchCheck::Pending) {
+        return Err(EdgeError::internal(std::io::Error::other(
+            "handoff work was already terminal",
+        )));
+    }
+    timeline.event(
+        "handoff-pending",
+        at,
+        timeline.clock.now(),
+        json!({"origin":"Pending","batch":"Pending"}),
+    );
+    let prelude = Arc::new(OnceLock::new());
+    let prefix_snapshot = Arc::clone(&prelude);
+    let prefix_callback = callback.clone();
+    let prefix_owner = body_scope.clone();
+    let prefix_dispatch = dispatched.clone();
+    let prefix_token = probe.token.clone();
+    let cutoff_at_us = timeline.elapsed_us(observation_cutoff.instant());
+    let prefix = futures::stream::once(async move {
+        if let Some(signal) = &prefix_dispatch {
+            signal.wait().await;
+        }
+        if prefix_callback.check().is_ok() || prefix_owner.check().is_err() {
+            return Err(EdgeError::internal(std::io::Error::other(
+                "handoff prelude preceded accepted dispatch return",
+            )));
+        }
+        let value = handoff_prelude(
+            &prefix_token,
+            cutoff_at_us,
+            prefix_dispatch.as_ref().map(|signal| signal.is_returned()),
+        );
+        let mut bytes = serde_json::to_vec(&value).map_err(EdgeError::internal)?;
+        bytes.push(b'\n');
+        if bytes.len() > 512 {
+            return Err(invalid());
+        }
+        prefix_snapshot.set(value).map_err(|_| invalid())?;
+        Ok(Bytes::from(bytes))
+    });
+    let source = prefix.chain(
+        futures::stream::once(async move {
+            let mut report = Report::default();
+            let at = timeline.clock.now();
+            let result = origin.collect().await;
+            timeline.event("origin-head", at, timeline.clock.now(), json!(if result.is_ok(){"ok"}else{"error"}));
+            let mut origin_streamed = false;
+            match result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body = response.into_body();
+                    origin_streamed = body.is_stream();
+                    let at = timeline.clock.now();
+                    report.origin = Some(match body.into_bytes_bounded(64).await {
+                        Ok(bytes) => json!({"status":status,"bytes":bytes.to_vec()}),
+                        Err(error) => json!({"error":error_report(&error)}),
+                    });
+                    timeline.event("origin-body", at, timeline.clock.now(), Value::Null);
+                }
+                Err(error) => {
+                    report.error = Some(error_report(&error));
+                    report.origin = Some(json!({"error":error_report(&error)}));
+                }
+            }
+            collect(batch, &mut report, &mut timeline).await;
+            let snapshot = prelude.get().ok_or_else(invalid)?;
+            report.handoff = Some(json!({"prelude":snapshot,"origin_streamed":origin_streamed,
+                "callback_scope_closed":callback.check().is_err(),"body_scope_live":body_scope.check().is_ok(),
+                "dispatch_returned":dispatched.as_ref().map(|flag| flag.is_returned())}));
+            let mut bytes = serde_json::to_vec(&report.json(&probe, &timeline)).map_err(EdgeError::internal)?;
+            bytes.push(b'\n');
+            if bytes.len() > 16 * 1024 { return Err(invalid()); }
+            Ok(Bytes::from(bytes))
+        }),
+    );
+    owner.attach(
+        response_builder()
+            .header("content-type", "application/x-ndjson")
+            .body(Body::from_stream(source))
+            .map_err(EdgeError::internal)?,
+    )
+}
+
 #[action]
 pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
     let case = ctx.path_params().get("case").ok_or_else(invalid)?;
@@ -610,6 +738,9 @@ pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
         ))
     })?;
     let mut timeline = Timeline::new(ctx.monotonic_clock(), ctx.request_start());
+    if probe.case == "response-handoff" {
+        return response_handoff(&ctx, probe, client, timeline).await;
+    }
     let mut report = Report::default();
     if let Err(error) = run(&ctx, &probe, &client, &mut report, &mut timeline).await
         && report.error.is_none()
@@ -637,6 +768,314 @@ mod tests {
         atomic::{AtomicU64, Ordering},
     };
     use std::{cell::Cell, rc::Rc};
+
+    #[derive(Clone)]
+    struct HandoffClient {
+        time: TestTime,
+        jobs: Arc<
+            std::sync::Mutex<
+                std::collections::BTreeMap<String, futures::channel::oneshot::Sender<()>>,
+            >,
+        >,
+        resources: Arc<std::sync::atomic::AtomicUsize>,
+        cancelled: Arc<std::sync::atomic::AtomicUsize>,
+        family: Arc<std::sync::atomic::AtomicUsize>,
+        groups: Arc<std::sync::atomic::AtomicUsize>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct FamilyDrop(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for FamilyDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl HandoffClient {
+        fn queue(
+            &self,
+            request: edgezero_core::OutboundDispatchRequest,
+        ) -> edgezero_core::OutboundFuture<OutboundResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            drop(
+                request
+                    .scope()
+                    .provider_state(|| FamilyDrop(Arc::clone(&self.family)))
+                    .unwrap(),
+            );
+            let (parts, context) = request.into_parts();
+            let role = parts.uri.path().rsplit('/').next().unwrap().to_owned();
+            let payload = match role.as_str() {
+                "origin" => b'O',
+                "a" => b'A',
+                "b" => b'B',
+                "c" => b'C',
+                _ => panic!("unexpected handoff job"),
+            };
+            let (send, receive) = futures::channel::oneshot::channel();
+            assert!(self.jobs.lock().unwrap().insert(role, send).is_none());
+            let resources = Arc::clone(&self.resources);
+            let owner = edgezero_core::OutboundExchangeOwner::new(move || {
+                resources.fetch_add(1, Ordering::SeqCst);
+            });
+            Box::pin(async move {
+                receive.await.map_err(|_| invalid())?;
+                let source = futures::stream::once(async move { Ok(Bytes::from(vec![payload])) })
+                    .boxed_local();
+                edgezero_core::OutboundHead::new(
+                    StatusCode::OK,
+                    edgezero_core::OutboundHeaderInput::new(
+                        "fixture",
+                        HeaderMap::new(),
+                        edgezero_core::OutboundHeaderFidelity::AdapterVisibleFields,
+                    ),
+                    source,
+                    context,
+                    owner,
+                )?
+                .finish()
+                .await
+            })
+        }
+    }
+
+    impl edgezero_core::OutboundHttpClient for HandoffClient {
+        fn progress(&self) -> Rc<dyn edgezero_core::OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+        fn time(&self) -> edgezero_core::OutboundTime {
+            self.time.pair()
+        }
+        fn validate_supported_options(
+            &self,
+            _: &OutboundRequest,
+            _: edgezero_core::OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            Ok(())
+        }
+        fn dispatch_head(
+            &self,
+            _: edgezero_core::OutboundDispatchRequest,
+        ) -> edgezero_core::OutboundFuture<edgezero_core::OutboundHead> {
+            Box::pin(async { Err(invalid()) })
+        }
+        fn begin(
+            &self,
+            request: edgezero_core::OutboundDispatchRequest,
+        ) -> Result<edgezero_core::OutboundPending, EdgeError> {
+            let future = self.queue(request);
+            let cancelled = Arc::clone(&self.cancelled);
+            let jobs = Arc::clone(&self.jobs);
+            Ok(edgezero_core::OutboundPending::new(
+                future,
+                edgezero_core::OutboundExchangeOwner::new(move || {
+                    jobs.lock().unwrap().remove("origin");
+                    cancelled.fetch_add(1, Ordering::SeqCst);
+                }),
+            ))
+        }
+        fn start_batch_until(&self, batch: edgezero_core::OutboundPreparedBatch) -> OutboundBatch {
+            let (context, requests) = batch.into_slots();
+            let time = self.time.clock();
+            let futures = requests
+                .into_iter()
+                .map(|(index, request)| {
+                    let response = self.queue(request);
+                    let clock = time.clone();
+                    async move {
+                        let outcome = response.await;
+                        edgezero_core::OutboundBatchDriverEvent::Item {
+                            index,
+                            completed_at: clock.now(),
+                            outcome,
+                        }
+                    }
+                })
+                .collect::<futures::stream::FuturesUnordered<_>>();
+            let jobs = Arc::clone(&self.jobs);
+            let groups = Arc::clone(&self.groups);
+            OutboundBatch::from_driver(
+                context,
+                futures,
+                edgezero_core::OutboundExchangeOwner::new(move || {
+                    let mut jobs = jobs.lock().unwrap();
+                    for role in ["a", "b", "c"] {
+                        jobs.remove(role);
+                    }
+                    groups.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+        }
+    }
+
+    struct HandoffRuntime(TestTime);
+    impl super::super::progress::ProbeRuntime for HandoffRuntime {
+        fn adapter(&self) -> &'static str {
+            "unit"
+        }
+        fn perform(&self, _: String) -> super::super::progress::Job {
+            Box::pin(async { Err(invalid()) })
+        }
+        fn start(&self, _: String) -> Result<super::super::progress::Job, EdgeError> {
+            Err(invalid())
+        }
+        fn pause(&self, duration: Duration) -> futures::future::LocalBoxFuture<'static, ()> {
+            let time = self.0.clone();
+            Box::pin(async move {
+                time.advance_to(time.clock().now() + duration);
+            })
+        }
+    }
+
+    #[test]
+    fn handoff_route_keeps_original_jobs_past_dispatch_and_releases_at_terminal() {
+        for has_return_signal in [false, true] {
+            handoff_route(has_return_signal);
+        }
+    }
+
+    fn handoff_route(has_return_signal: bool) {
+        use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
+        use edgezero_core::{
+            IngressDispatchOutcome, IngressFraming, IngressHeadAccounting, ResponseEgressOutcome,
+            app::App,
+        };
+        use futures::FutureExt as _;
+        use std::{
+            collections::BTreeMap,
+            sync::{Mutex, atomic::AtomicUsize},
+        };
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let client = HandoffClient {
+            time: time.clone(),
+            jobs: Arc::new(Mutex::new(BTreeMap::new())),
+            resources: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicUsize::new(0)),
+            family: Arc::new(AtomicUsize::new(0)),
+            groups: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let returned = Arc::new(super::super::progress::DispatchReturn::default());
+        let router = super::super::progress::router(
+            Arc::new(HandoffRuntime(time.clone())),
+            Value::Null,
+            has_return_signal.then(|| Arc::clone(&returned)),
+        );
+        let mut app = App::new(router);
+        app.set_monotonic_clock(time.clock());
+        let mut request = request_builder()
+            .uri("/progress/lifetimes/response-handoff")
+            .body(Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers("response-handoff");
+        request
+            .extensions_mut()
+            .insert(HttpClient::with_client(client.clone()));
+        let callback = OutboundScopeOwner::callback();
+        let outcome = block_on(callback.run(app.dispatch_ingress(
+            request,
+            start,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        )))
+        .unwrap();
+        let IngressDispatchOutcome::Response(envelope) = outcome else {
+            panic!("handoff response")
+        };
+        assert_eq!(
+            client
+                .jobs
+                .lock()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["a", "b", "c", "origin"]
+        );
+        let (prepared, _, mut attempt, clock) = callback
+            .with(|| envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength))
+            .unwrap_or_else(|failure| {
+                let (_, _, cause) = failure.into_parts();
+                panic!("handoff preparation failed: {cause:?}");
+            });
+        assert!(attempt.begin_writing());
+        callback.close();
+        drop(callback);
+        assert_eq!(client.cancelled.load(Ordering::SeqCst), 0);
+        assert_eq!(client.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(client.jobs.lock().unwrap().len(), 4);
+        let mut body = prepared.into_response().into_body().into_stream().unwrap();
+        if has_return_signal {
+            assert!(
+                body.next().now_or_never().is_none(),
+                "no prefix before dispatch-return notification"
+            );
+        }
+        assert_eq!(client.resources.load(Ordering::SeqCst), 0);
+        assert_eq!(client.family.load(Ordering::SeqCst), 0);
+        returned.mark_returned();
+        let prefix = block_on(body.next()).unwrap().unwrap();
+        let prelude: Value = serde_json::from_slice(&prefix).unwrap();
+        assert_eq!(
+            prelude,
+            handoff_prelude("Run_1-a", 534000, has_return_signal.then_some(true))
+        );
+        assert!(
+            body.next().now_or_never().is_none(),
+            "original origin remains gated after the prefix"
+        );
+        assert_eq!(client.jobs.lock().unwrap().len(), 4);
+        time.advance_to(start + Duration::from_millis(50));
+        for (_, sender) in std::mem::take(&mut *client.jobs.lock().unwrap()) {
+            sender.send(()).unwrap();
+        }
+        let bytes = block_on(body.next()).unwrap().unwrap();
+        let report: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report["origin"], json!({"status":200,"bytes":[79]}));
+        assert_eq!(report["termination"], "Completed");
+        assert_eq!(report["slots"], json!(["Resolved", "Resolved", "Resolved"]));
+        assert_eq!(report["handoff"]["prelude"], prelude);
+        assert_eq!(report["error"], Value::Null);
+        for (index, item) in report["items"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(item["index"], index);
+            assert_eq!(item["outcome"], json!({"status":200,"bytes":[65+index]}));
+            assert_eq!(item["slot_error"], false);
+            assert_eq!(item["elapsed_us"], 16000);
+        }
+        for field in [
+            "callback_scope_closed",
+            "body_scope_live",
+            "origin_streamed",
+        ] {
+            assert_eq!(report["handoff"][field], true, "{field}");
+        }
+        assert_eq!(
+            report["handoff"]["dispatch_returned"],
+            json!(has_return_signal.then_some(true))
+        );
+        assert!(block_on(body.next()).is_none());
+        assert_eq!(client.cancelled.load(Ordering::SeqCst), 0);
+        assert_eq!(client.resources.load(Ordering::SeqCst), 4);
+        assert_eq!(client.groups.load(Ordering::SeqCst), 1);
+        assert_eq!(client.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            client.family.load(Ordering::SeqCst),
+            0,
+            "EOF is not the egress terminal"
+        );
+        assert!(attempt.account_bytes(
+            u64::try_from(prefix.len() + bytes.len()).unwrap(),
+            clock.now()
+        ));
+        assert!(attempt.complete(clock.now()));
+        assert!(!attempt.complete(clock.now()));
+        assert_eq!(
+            attempt.into_terminal_report().outcome,
+            ResponseEgressOutcome::Completed
+        );
+        assert_eq!(client.family.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn cpu_work_stops_at_the_original_target_without_yielding() {
@@ -690,6 +1129,30 @@ mod tests {
                 .unwrap(),
         );
         headers
+    }
+
+    #[test]
+    fn response_handoff_preserves_existing_request_budgets_and_caps() {
+        let time = TestTime::default();
+        let timeline = Timeline::new(time.clock(), time.clock().now());
+        let probe = Probe::parse("response-handoff", &headers("response-handoff")).unwrap();
+        for role in ["origin", "a", "b", "c"] {
+            let parts = probe.request(role, &timeline).unwrap().into_parts();
+            assert_eq!(
+                parts.timeout,
+                Some(Duration::from_secs(if role == "origin" { 15 } else { 1 }))
+            );
+            assert!(parts.deadline.is_none());
+            if role == "origin" {
+                assert!(matches!(parts.response_mode, ResponseMode::Streamed));
+                assert_eq!(parts.max_decoded_response_bytes, Some(64));
+            } else {
+                assert!(matches!(
+                    parts.response_mode,
+                    ResponseMode::Buffered { max_bytes: 64 }
+                ));
+            }
+        }
     }
 
     fn response(body: Body) -> OutboundResponse {

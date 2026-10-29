@@ -54,8 +54,8 @@ Keep three different status questions separate:
   criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
   readiness of that leg's declared command/sentinel, not overall feature implementation.
   EZ-23 local criteria 01-11 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
-  `ready`: 32 legs, with 479 still `planned`. G1/Q3 binding work remains unfinished, not evidence
-  that 479 features are absent. Only the explicitly bound
+  `ready`; the core receipt checkpoint also activates EZ-6 criterion 22: 33 legs, with 478 still
+  `planned`. G1/Q3 binding work remains unfinished, not evidence that 478 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -805,6 +805,61 @@ shared callback-scope unit coverage is not the complete two-wrapper/Viceroy sequ
 pending-body witness must observe the actual SDK read future, or Fastly's distinctly labelled
 body-readiness wait, not the outer batch wait or a synthetic yield. No blocking read fallback
 or additional production observer is introduced by this core-only binding.
+
+### D6 Response Handoff Checkpoint (2026-10-29)
+
+Implement EZ-6 criterion 20 in the existing lifetime fixture and native runner, without changing
+production outbound APIs, ownership, SDK/runtime pins or frozen requirements. One provisional
+response-body owner starts the original streamed origin at 2 ms and the three-slot batch at
+34 ms with the original 534 ms observation cutoff and per-request caps/timeouts. Before handler
+return both are pending. Attach that exact owner to the NDJSON response and collect both
+original handles inside its body; no replay, extra witness fetch, scheduler or production hook.
+
+All four origin heads, data and EOF wait behind one source latch. The native client's existing
+HTTP reader validates the complete canonical prelude, status/media type, token, pending flags,
+closed callback and live body scope before opening it. Cloudflare/Spin's existing fixture return
+flag is now a wakeable signal marked after `dispatch_app` returns; the prefix awaits that exact
+boundary. Axum's native handoff and closed callback provide its witness. This is EdgeZero
+dispatch return, not literal exported callback return or confirmed hosted delivery.
+
+Bound the prelude to 512 bytes and final report to 16 KiB, each including newline; require exactly
+two records. Reuse fixed/chunked/close-delimited capture, stop at the complete prefix even within
+a larger HTTP chunk, reject ambiguous framing before notification and retain original partial
+captures on rejection. Four source roles produce 22 events plus one runner return boundary,
+within unchanged event/connection/worker budgets. Verify actual write-start order after release,
+not just completed writes. Allow late request receipts and socket cleanup. One common batch
+epoch must put every successful arrival after the pending check and strictly before the original
+cutoff; collection after that cutoff remains valid for already recorded on-time arrivals.
+
+The actual-route unit covers native and signalled entrypoints with four preexisting resource
+owners, original handles/call counts, no cancellation/replay, EOF before family release and one
+terminal family release. Negative controls reject forged/duplicate/missing preludes, wrong
+dispatch/scope evidence, premature/failed/reordered source phases, impossible arrival histories
+and bounded-record overflow. Source-drain errors cannot replace the primary client failure or
+omit its case/partial evidence. Reuse shared settlement to retain client completions and logs
+after runtime/origin cleanup. No alternate parser, executor or transport is introduced.
+
+Reviewed local artifacts are `/private/tmp/edgezero-handoff-reviewed/{axum,viceroy,spin,workerd}`.
+The handoff case passes on Axum, Spin 4.1.0 and local workerd; repaired Viceroy 0.21.0 explicitly
+reports it inapplicable under criterion 20 and executes the original nine cases. Full suites
+remain nonzero: Axum 5/10, Viceroy 5/9, Spin 6/10 and workerd 5/10. All four miss strict slow/fast
+or fourth-slot source schedules. Axum/workerd also miss arrival targets in CPU-stretch. All four
+cap cases retain the original typed `BufferedBody` failure and healthy siblings but fail source
+cadence: first late pieces are 6.181, 6.781, 9.605 and 5.916 ms late respectively against the
+unchanged 5 ms bound. A passing timeout diagnostic or handoff cannot pass those complete suites.
+Earlier artifacts under `/private/tmp/edgezero-handoff-initial` and
+`/private/tmp/edgezero-handoff-final` remain retained, including the earlier Spin 205 ms cutoff
+miss; no passing retry substitutes for a failed observation.
+
+Verification: all five root Rust gates pass (2,568 tests across 32 binaries, one existing ignored),
+263 native harness tests pass (one ignored), 54 fixture-core tests pass, and strict harness/core/
+four-entrypoint Clippy passes. All 51 evidence-checker/nonzero-guard tests, docs lint/format,
+legacy/docs/inventory guards, shared pins and decoder/map dependency audits pass. The independently
+reviewed helper and evidence fixes add no production behavior.
+All commands remain local-only. G1 stays 33 ready / 478 planned across 255 criteria / 511 legs,
+unqualified; criterion 20's inventory legs are not promoted by a partial parent suite. D6,
+criteria 21/23, actual native pending-body witnesses, strict timing closure, candidate freeze and
+authorized hosted qualification remain open. No deployment is authorized.
 
 ### Current Work Queue and Gates
 

@@ -487,7 +487,15 @@ pub fn request(
     backend: Option<&str>,
     signal: Option<&Signal>,
 ) -> Result<Value> {
-    request_with_framing(port, path, token, backend, signal, None, Capture::Text)
+    request_with_framing(
+        port,
+        path,
+        token,
+        backend,
+        signal.map(BodyObserver::Signal),
+        None,
+        Capture::Text,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -501,12 +509,77 @@ pub fn binary_request(port: u16, path: &str, token: &str, backend: Option<&str>)
     request_with_framing(port, path, token, backend, None, None, Capture::Binary)
 }
 
+type PrefixNotification<'a> = dyn Fn(u16, &[Value], &[u8]) -> Result<()> + 'a;
+
+#[derive(Clone, Copy)]
+pub struct PrefixObserver<'a> {
+    pub bytes: usize,
+    pub notify: &'a PrefixNotification<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum BodyObserver<'a> {
+    Signal(&'a Signal),
+    Prefix(PrefixObserver<'a>),
+}
+
+struct BodyObservation<'a>(Option<BodyObserver<'a>>);
+
+impl BodyObserver<'_> {
+    fn bytes(self) -> usize {
+        match self {
+            Self::Signal(_) => 1,
+            Self::Prefix(prefix) => prefix.bytes,
+        }
+    }
+
+    fn notify(self, status: u16, headers: &[Value], bytes: &[u8]) -> Result<()> {
+        match self {
+            Self::Signal(signal) => {
+                release(signal);
+                Ok(())
+            }
+            Self::Prefix(prefix) => (prefix.notify)(status, headers, &bytes[..prefix.bytes]),
+        }
+    }
+}
+
+impl BodyObservation<'_> {
+    fn read_limit(&self, bytes: usize, capacity: usize) -> usize {
+        self.0.map_or(capacity, |observer| {
+            capacity.min(observer.bytes().saturating_sub(bytes))
+        })
+    }
+
+    fn observe(&mut self, status: u16, headers: &[Value], bytes: &[u8]) -> Result<()> {
+        if self
+            .0
+            .is_some_and(|observer| bytes.len() >= observer.bytes())
+        {
+            self.0.take().unwrap().notify(status, headers, bytes)?;
+        }
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<()> {
+        require(
+            !matches!(self.0, Some(BodyObserver::Prefix(_))),
+            "response ended before observed prefix",
+        )
+    }
+}
+
 pub fn header_request(
     port: u16,
     path: &str,
     token: &str,
     headers: &[(&str, &str)],
+    prefix: Option<PrefixObserver<'_>>,
 ) -> Result<Value> {
+    require(
+        prefix.is_none_or(|observer| (1..=512).contains(&observer.bytes)),
+        "invalid fixture prefix bound",
+    )?;
     require(
         path.starts_with('/')
             && path.len() <= 4096
@@ -549,7 +622,7 @@ pub fn header_request(
         path,
         token,
         None,
-        None,
+        prefix.map(BodyObserver::Prefix),
         None,
         Capture::Headers(headers),
     )
@@ -593,7 +666,7 @@ fn request_with_framing(
     path: &str,
     token: &str,
     backend: Option<&str>,
-    signal: Option<&Signal>,
+    observer: Option<BodyObserver<'_>>,
     framing: Option<Framing>,
     capture: Capture<'_>,
 ) -> Result<Value> {
@@ -641,15 +714,22 @@ fn request_with_framing(
             .ok_or("malformed HTTP header")?;
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-length") {
+            require(length.is_none(), "duplicate response Content-Length")?;
             length = Some(value.parse::<usize>()?);
         }
         if name.eq_ignore_ascii_case("transfer-encoding") {
-            chunked = value.to_ascii_lowercase().contains("chunked");
+            require(
+                !chunked && value.eq_ignore_ascii_case("chunked"),
+                "unsupported or duplicate response Transfer-Encoding",
+            )?;
+            chunked = true;
         }
         headers.push(json!([name, value]));
     }
+    require(!(chunked && length.is_some()), "ambiguous response framing")?;
     let header_ns = start.elapsed().as_nanos() as u64;
     let mut first_byte_ns = None;
+    let mut observation = BodyObservation(observer);
     let mut bytes = Vec::new();
     let capture_limit = match capture {
         Capture::Text => usize::MAX,
@@ -670,18 +750,17 @@ fn request_with_framing(
             bytes.push(first[0]);
             if first_byte_ns.is_none() {
                 first_byte_ns = Some(start.elapsed().as_nanos() as u64);
-                if let Some(signal) = signal {
-                    release(signal);
-                }
             }
+            observation.observe(status, &headers, &bytes)?;
             let mut remaining = count - 1;
             let mut buffer = [0u8; 8192];
             while remaining > 0 {
-                let size = remaining.min(buffer.len());
+                let size = observation.read_limit(bytes.len(), remaining.min(buffer.len()));
                 let read = reader.read(&mut buffer[..size])?;
                 require(read > 0, "truncated HTTP body")?;
                 bytes.extend_from_slice(&buffer[..read]);
                 remaining -= read;
+                observation.observe(status, &headers, &bytes)?;
             }
             Ok(())
         };
@@ -712,15 +791,14 @@ fn request_with_framing(
             if reader.read(&mut first)? != 0 {
                 bytes.push(first[0]);
                 first_byte_ns = Some(start.elapsed().as_nanos() as u64);
-                if let Some(signal) = signal {
-                    release(signal);
-                }
+                observation.observe(status, &headers, &bytes)?;
                 let mut buffer = [0u8; 8192];
                 loop {
                     let capacity = capture_limit
                         .saturating_sub(bytes.len())
                         .saturating_add(1)
                         .min(buffer.len());
+                    let capacity = observation.read_limit(bytes.len(), capacity);
                     let read = reader.read(&mut buffer[..capacity])?;
                     if read == 0 {
                         break;
@@ -730,10 +808,11 @@ fn request_with_framing(
                         "response exceeds fixture capture limit",
                     )?;
                     bytes.extend_from_slice(&buffer[..read]);
+                    observation.observe(status, &headers, &bytes)?;
                 }
             }
         }
-        Ok(())
+        observation.finish()
     })();
     if let Err(error) = outcome {
         return Err(Box::new(InterruptedResponse {
@@ -761,6 +840,13 @@ mod tests {
     }
 
     fn captured_reply(wire: Vec<u8>, request: impl FnOnce(u16) -> Result<Value>) -> Result<Value> {
+        served_reply(move |socket| socket.write_all(&wire).unwrap(), request)
+    }
+
+    fn served_reply(
+        serve: impl FnOnce(&mut TcpStream) + Send + 'static,
+        request: impl FnOnce(u16) -> Result<Value>,
+    ) -> Result<Value> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
@@ -776,11 +862,270 @@ mod tests {
                     break;
                 }
             }
-            socket.write_all(&wire).unwrap();
+            serve(&mut socket);
         });
         let result = request(port);
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn header_prefix_observer_receives_the_validated_head_and_exact_prefix_once() {
+        use std::cell::Cell;
+        let prelude = format!("{}\n", json!({"phase":"pending"}));
+        let tail = format!("{}\n", json!({"done":true}));
+        for framing in ["fixed", "chunked", "close"] {
+            let body = format!("{prelude}{tail}");
+            let head = match framing {
+                "fixed" => format!("Content-Length: {}\r\n", body.len()),
+                "chunked" => "Transfer-Encoding: chunked\r\n".to_owned(),
+                _ => String::new(),
+            };
+            let payload = if framing == "chunked" {
+                format!("{:X}\r\n{body}\r\n0\r\n\r\n", body.len())
+            } else {
+                body.clone()
+            };
+            let wire = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n{head}\r\n{payload}"
+            )
+            .into_bytes();
+            let observed = Cell::new(0);
+            let notify = |status, headers: &[Value], bytes: &[u8]| {
+                assert_eq!(status, 200);
+                assert!(headers.contains(&json!(["Content-Type", "application/x-ndjson"])));
+                assert_eq!(bytes, prelude.as_bytes());
+                observed.set(observed.get() + 1);
+                Ok(())
+            };
+            let response = captured_reply(wire, |port| {
+                header_request(
+                    port,
+                    "/p5",
+                    "prefix",
+                    &[],
+                    Some(PrefixObserver {
+                        bytes: prelude.len(),
+                        notify: &notify,
+                    }),
+                )
+            })
+            .unwrap();
+            assert_eq!(observed.get(), 1, "missing {framing} prefix witness");
+            assert_eq!(response["body_bytes"], json!(body.into_bytes()));
+        }
+    }
+
+    #[test]
+    fn prefix_observation_releases_a_gated_tail_without_waiting_for_the_http_chunk() {
+        use std::{cell::Cell, sync::mpsc};
+        let prelude = format!("{}\n", json!({"phase":"pending"}));
+        let tail = format!("{}\n", json!({"done":true}));
+        for framing in ["fixed", "chunked", "split-chunks", "close"] {
+            let body = format!("{prelude}{tail}");
+            let (notify_tail, wait_for_prefix) = mpsc::sync_channel(1);
+            let observed = Cell::new(0);
+            let notify = |_, _: &[Value], bytes: &[u8]| {
+                assert_eq!(bytes, prelude.as_bytes());
+                observed.set(observed.get() + 1);
+                notify_tail.send(()).unwrap();
+                Ok(())
+            };
+            let prefix_bytes = prelude.clone();
+            let tail_bytes = tail.clone();
+            let body_len = body.len();
+            let result = served_reply(
+                move |socket| {
+                    let head = match framing {
+                        "fixed" => format!("Content-Length: {body_len}\r\n"),
+                        "chunked" | "split-chunks" => "Transfer-Encoding: chunked\r\n".into(),
+                        _ => String::new(),
+                    };
+                    write!(socket, "HTTP/1.1 200 OK\r\n{head}\r\n").unwrap();
+                    let split = prefix_bytes.len() / 2;
+                    if framing == "chunked" {
+                        write!(socket, "{body_len:X}\r\n").unwrap();
+                    } else if framing == "split-chunks" {
+                        write!(socket, "{split:X}\r\n").unwrap();
+                    }
+                    socket.write_all(&prefix_bytes.as_bytes()[..split]).unwrap();
+                    // The incomplete prefix must not open the gate.
+                    assert!(matches!(
+                        wait_for_prefix.try_recv(),
+                        Err(mpsc::TryRecvError::Empty)
+                    ));
+                    if framing == "split-chunks" {
+                        write!(socket, "\r\n{:X}\r\n", body_len - split).unwrap();
+                    }
+                    socket.write_all(&prefix_bytes.as_bytes()[split..]).unwrap();
+                    wait_for_prefix
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    socket.write_all(tail_bytes.as_bytes()).unwrap();
+                    if matches!(framing, "chunked" | "split-chunks") {
+                        socket.write_all(b"\r\n0\r\n\r\n").unwrap();
+                    }
+                },
+                |port| {
+                    header_request(
+                        port,
+                        "/p5",
+                        "gated-prefix",
+                        &[],
+                        Some(PrefixObserver {
+                            bytes: prelude.len(),
+                            notify: &notify,
+                        }),
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(observed.get(), 1, "{framing}");
+            assert_eq!(result["body_bytes"], json!(body.into_bytes()));
+        }
+    }
+
+    #[test]
+    fn prefix_bounds_are_checked_before_connect_and_short_bodies_never_notify() {
+        use std::cell::Cell;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let observed = Cell::new(0);
+        let notify = |_, _: &[Value], _: &[u8]| {
+            observed.set(observed.get() + 1);
+            Ok(())
+        };
+        for bytes in [0, 513] {
+            assert!(
+                header_request(
+                    port,
+                    "/p5",
+                    "bound",
+                    &[],
+                    Some(PrefixObserver {
+                        bytes,
+                        notify: &notify
+                    })
+                )
+                .is_err()
+            );
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        for body in [
+            "Content-Length: 0\r\n\r\n",
+            "Content-Length: 2\r\n\r\nx",
+            "Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+            "\r\nx",
+        ] {
+            let error = captured_reply(format!("HTTP/1.1 200 OK\r\n{body}").into_bytes(), |port| {
+                header_request(
+                    port,
+                    "/p5",
+                    "short",
+                    &[],
+                    Some(PrefixObserver {
+                        bytes: 2,
+                        notify: &notify,
+                    }),
+                )
+            })
+            .unwrap_err();
+            assert!(error.downcast_ref::<InterruptedResponse>().is_some());
+        }
+        assert_eq!(observed.get(), 0);
+        let result = captured_reply(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: 512\r\n\r\n{}",
+                "x".repeat(512)
+            )
+            .into_bytes(),
+            |port| {
+                header_request(
+                    port,
+                    "/p5",
+                    "exact",
+                    &[],
+                    Some(PrefixObserver {
+                        bytes: 512,
+                        notify: &notify,
+                    }),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result["body_bytes"].as_array().unwrap().len(), 512);
+        assert_eq!(observed.get(), 1);
+    }
+
+    #[test]
+    fn rejected_prefix_stops_capture_without_reading_the_tail() {
+        use std::cell::Cell;
+        let observed = Cell::new(0);
+        let notify = |_, _: &[Value], bytes: &[u8]| -> Result<()> {
+            assert_eq!(bytes, b"abc");
+            observed.set(observed.get() + 1);
+            Err("rejected prefix".into())
+        };
+        let error = captured_reply(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcdef".to_vec(),
+            |port| {
+                header_request(
+                    port,
+                    "/p5",
+                    "reject",
+                    &[],
+                    Some(PrefixObserver {
+                        bytes: 3,
+                        notify: &notify,
+                    }),
+                )
+            },
+        )
+        .unwrap_err();
+        let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
+        assert_eq!(partial.body, b"abc");
+        assert_eq!(partial.reason, "rejected prefix");
+        assert_eq!(observed.get(), 1);
+    }
+
+    #[test]
+    fn ambiguous_response_framing_cannot_notify_the_prefix_observer() {
+        use std::cell::Cell;
+        let notified = Cell::new(0);
+        let notify = |_, _: &[Value], _: &[u8]| {
+            notified.set(notified.get() + 1);
+            Ok(())
+        };
+        for framing in [
+            "Content-Length: 1\r\nContent-Length: 1",
+            "Content-Length: 2\r\nContent-Length: 1",
+            "Content-Length: 1\r\nTransfer-Encoding: chunked",
+            "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked",
+            "Transfer-Encoding: not-chunked",
+            "Transfer-Encoding: gzip, chunked",
+        ] {
+            let wire =
+                format!("HTTP/1.1 200 OK\r\n{framing}\r\n\r\n1\r\nx\r\n0\r\n\r\n").into_bytes();
+            assert!(
+                captured_reply(wire, |port| header_request(
+                    port,
+                    "/p5",
+                    "ambiguous",
+                    &[],
+                    Some(PrefixObserver {
+                        bytes: 1,
+                        notify: &notify
+                    }),
+                ))
+                .is_err(),
+                "{framing}"
+            );
+        }
+        assert_eq!(notified.get(), 0);
     }
 
     #[test]
@@ -814,6 +1159,7 @@ mod tests {
                 ("x-duplicate", "first"),
                 ("x-duplicate", "second"),
             ],
+            None,
         )
         .unwrap();
         let head = worker.join().unwrap();
@@ -842,7 +1188,8 @@ mod tests {
                 if framing == "chunked" {
                     wire.extend(b"\r\n0\r\n\r\n");
                 }
-                let result = captured_reply(wire, |port| header_request(port, "/p5", "cap", &[]));
+                let result =
+                    captured_reply(wire, |port| header_request(port, "/p5", "cap", &[], None));
                 if size == 65_536 {
                     assert_eq!(result.unwrap()["body_bytes"], json!(vec![255; size]));
                 } else {
@@ -868,7 +1215,7 @@ mod tests {
             ("/p5", "t", vec![("bad name", "value")]),
             ("/p5", "t", vec![("x-name", "bad\0value")]),
         ] {
-            assert!(header_request(port, path, token, &headers).is_err());
+            assert!(header_request(port, path, token, &headers, None).is_err());
             assert_eq!(
                 listener.accept().unwrap_err().kind(),
                 std::io::ErrorKind::WouldBlock

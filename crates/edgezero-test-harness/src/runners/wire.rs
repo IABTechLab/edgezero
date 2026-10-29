@@ -67,6 +67,7 @@ impl Matrix<'_> {
                 ("x-p5-stream", if streamed { "true" } else { "false" }),
                 ("x-p5-encoded-cap", if encoded { "true" } else { "false" }),
             ],
+            None,
         );
         if let Some(name) = gate {
             self.origins.release(name);
@@ -364,8 +365,13 @@ fn component_text(directory: &Path) -> Result<String> {
 fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Process) -> Result<()> {
     for name in ["get", "head", "get-settled", "head-settled", "post"] {
         let uri = format!("http://127.0.0.1:{}/{name}", origins.port(0));
-        let reply =
-            net::header_request(port, &format!("/{name}"), &token(), &[("x-origin", &uri)])?;
+        let reply = net::header_request(
+            port,
+            &format!("/{name}"),
+            &token(),
+            &[("x-origin", &uri)],
+            None,
+        )?;
         require(reply["status"] == 200, "wire control guest failed")?;
         let captured = origins.take_wire()?;
         require(
@@ -395,11 +401,11 @@ fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Proc
         }
     }
     require(
-        net::header_request(port, "/scope", &token(), &[])?["status"] == 200,
+        net::header_request(port, "/scope", &token(), &[], None)?["status"] == 200,
         "canonical scope control failed",
     )?;
     let uri = format!("http://127.0.0.1:{}", origins.port(0));
-    let reply = net::header_request(port, "/handoff", &token(), &[("x-origin", &uri)])?;
+    let reply = net::header_request(port, "/handoff", &token(), &[("x-origin", &uri)], None)?;
     require(reply["status"] == 200, "handoff guest failed")?;
     handoff(&body(&reply)?)?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -600,7 +606,14 @@ pub(super) fn progress_suite<T>(
         running.check_running()?;
         Ok(Some(result))
     })();
-    finish_wire(name, &mut process, origins, &state, records, outcome)
+    let outcome = finish_wire(name, &mut process, origins, &state, records, outcome);
+    settle(
+        records,
+        &log,
+        json!({"adapter":name,"suite":suite}),
+        json!({}),
+        outcome,
+    )
 }
 
 fn finish_wire<T>(

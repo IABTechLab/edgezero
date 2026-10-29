@@ -14,6 +14,7 @@ use edgezero_core::{Body, EdgeError, action};
 use futures::{
     StreamExt,
     future::{LocalBoxFuture, join_all, poll_fn},
+    task::AtomicWaker,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -38,10 +39,43 @@ impl Hooks for ProgressHooks {
     }
 }
 
+#[derive(Default)]
+pub struct DispatchReturn {
+    returned: AtomicBool,
+    waiting: AtomicWaker,
+}
+
+impl DispatchReturn {
+    pub fn mark_returned(&self) {
+        if !self.returned.swap(true, Ordering::SeqCst) {
+            self.waiting.wake();
+        }
+    }
+
+    pub fn is_returned(&self) -> bool {
+        self.returned.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait(&self) {
+        poll_fn(|context| {
+            if self.is_returned() {
+                return std::task::Poll::Ready(());
+            }
+            self.waiting.register(context.waker());
+            if self.is_returned() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+}
+
 struct State {
     runtime: Arc<dyn ProbeRuntime>,
     host_signal: Value,
-    dispatch_returned: Option<Arc<AtomicBool>>,
+    dispatch_returned: Option<Arc<DispatchReturn>>,
 }
 
 pub(super) fn pause(
@@ -53,6 +87,12 @@ pub(super) fn pause(
         .get::<Arc<State>>()
         .ok_or_else(probe_failure)?;
     Ok(state.runtime.pause(duration))
+}
+
+pub(super) fn dispatch_returned(ctx: &RequestContext) -> Option<Arc<DispatchReturn>> {
+    ctx.extensions()
+        .get::<Arc<State>>()
+        .and_then(|state| state.dispatch_returned.clone())
 }
 
 struct HandlerReturned(Arc<AtomicBool>);
@@ -83,7 +123,7 @@ impl Drop for HandlerReturned {
 pub fn router(
     runtime: Arc<dyn ProbeRuntime>,
     host_signal: Value,
-    dispatch_returned: Option<Arc<AtomicBool>>,
+    dispatch_returned: Option<Arc<DispatchReturn>>,
 ) -> RouterService {
     RouterService::builder()
         .with_state(Arc::new(State {
@@ -118,7 +158,7 @@ pub fn router(
 pub fn application(
     runtime: Arc<dyn ProbeRuntime>,
     host_signal: Value,
-    dispatch_returned: Option<Arc<AtomicBool>>,
+    dispatch_returned: Option<Arc<DispatchReturn>>,
     platform: edgezero_core::PlatformMetadata,
 ) -> Result<App, EdgeError> {
     let mut app = App::with_name_and_platform(
@@ -285,7 +325,7 @@ async fn progress(ctx: RequestContext) -> Result<Response, EdgeError> {
             json!({"adapter":state.runtime.adapter(), "case":case, "token":token, "slots":slots,
             "consumer_polls_before_window_end":polls.load(Ordering::SeqCst), "sizes":sizes,"pause_ns":pause_ns,
             "handler_returned":returned.load(Ordering::SeqCst),
-            "dispatch_returned":state.dispatch_returned.as_ref().map(|r|r.load(Ordering::SeqCst)),
+            "dispatch_returned":state.dispatch_returned.as_ref().map(|r|r.is_returned()),
             "revision":option_env!("EDGEZERO_QUALIFICATION_REVISION").unwrap_or("unrecorded"), "qualification":false}),
         )
     };
@@ -505,7 +545,7 @@ fn response_control(state: Arc<State>, case: String, token: String) -> Result<Re
             first_state
                 .dispatch_returned
                 .as_ref()
-                .map(|r| r.load(Ordering::SeqCst)),
+                .map(|r| r.is_returned()),
         ));
         Ok(Bytes::from_static(b" "))
     });
@@ -519,7 +559,7 @@ fn response_control(state: Arc<State>, case: String, token: String) -> Result<Re
             first_poll.get().copied().ok_or_else(probe_failure)?;
         let report = json!({"adapter":state.runtime.adapter(),"case":case,"token":token,"pause_ns":pause_ns,
             "handler_returned_at_first_poll":first_handler,"dispatch_returned_at_first_poll":first_dispatch,
-            "handler_returned":returned.load(Ordering::SeqCst),"dispatch_returned":state.dispatch_returned.as_ref().map(|r|r.load(Ordering::SeqCst)),
+            "handler_returned":returned.load(Ordering::SeqCst),"dispatch_returned":state.dispatch_returned.as_ref().map(|r|r.is_returned()),
             "revision":option_env!("EDGEZERO_QUALIFICATION_REVISION").unwrap_or("unrecorded"),"qualification":false});
         Ok(Bytes::from(report.to_string()))
     });
@@ -539,6 +579,35 @@ mod tests {
     use futures::executor::block_on;
     use std::rc::Rc;
     use std::sync::Mutex;
+
+    #[test]
+    fn dispatch_return_waiter_is_pending_until_marked_and_wakes_once() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Wake, Waker},
+        };
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let signal = DispatchReturn::default();
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let mut context = Context::from_waker(&waker);
+        let mut waiting = Box::pin(signal.wait());
+        assert!(waiting.as_mut().poll(&mut context).is_pending());
+        assert!(!signal.is_returned());
+        signal.mark_returned();
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert_eq!(waiting.as_mut().poll(&mut context), Poll::Ready(()));
+        drop(waiting);
+        signal.mark_returned();
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(signal.is_returned());
+        assert_eq!(block_on(signal.wait()), ());
+    }
 
     #[derive(Clone, Default)]
     struct Fake(Arc<Mutex<Vec<String>>>);
@@ -1028,7 +1097,7 @@ mod tests {
     fn response_controls_do_not_dispatch_or_poll_the_tail_inside_the_handler() {
         for case in ["response-owned-ready", "response-owned-timer-only"] {
             let runtime = Fake::default();
-            let dispatched = Arc::new(AtomicBool::new(false));
+            let dispatched = Arc::new(DispatchReturn::default());
             let router = router(
                 Arc::new(runtime.clone()),
                 json!({}),
@@ -1038,7 +1107,7 @@ mod tests {
                 block_on(router.oneshot(request(case, "https://example.com/unused"))).unwrap();
             assert_eq!(response.status(), 200);
             assert!(runtime.0.lock().unwrap().is_empty());
-            dispatched.store(true, Ordering::SeqCst);
+            dispatched.mark_returned();
             let (payload, body_owner) = response.into_body().into_parts();
             let BodyPayload::Stream(mut stream) = payload else {
                 panic!("control must stream")

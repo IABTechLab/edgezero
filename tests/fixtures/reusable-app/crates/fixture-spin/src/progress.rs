@@ -9,10 +9,7 @@ use http_body::Body as _;
 use serde_json::json;
 use spin_sdk::http::body::IncomingBodyExt as _;
 use std::{
-    sync::{
-        Arc, Once,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Once},
     time::Duration,
 };
 
@@ -104,7 +101,7 @@ pub async fn dispatch(
     let hint = request.body().size_hint();
     let signal = json!({"source":"spin-sdk-after-conversion", "size_hint_lower":hint.lower(),
         "size_hint_upper":hint.upper(), "end_stream":request.body().is_end_stream(), "raw_framing_evidence":false});
-    let returned = Arc::new(AtomicBool::new(false));
+    let returned = Arc::new(progress::DispatchReturn::default());
     let app = progress::application(
         Arc::new(Runtime),
         signal,
@@ -112,7 +109,7 @@ pub async fn dispatch(
         edgezero_adapter_spin::SPIN_PLATFORM,
     )?;
     let response = edgezero_adapter_spin::dispatch_app::<ProgressHooks>(&app, request).await;
-    returned.store(true, Ordering::SeqCst);
+    returned.mark_returned();
     eprintln!(
         "{}",
         json!({"event":"progress-dispatch-returned","qualification":false})
