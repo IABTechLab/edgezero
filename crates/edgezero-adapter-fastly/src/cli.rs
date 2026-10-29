@@ -26,11 +26,16 @@ use crate::chunked_config::{
 };
 use ctor::ctor;
 use edgezero_adapter::cli_support::{
-    find_manifest_upwards, find_workspace_root, path_distance, read_package_name, run_native_cli,
+    find_manifest_upwards, find_workspace_root, native_auth_status, path_distance,
+    read_package_name, run_native_cli,
 };
+use edgezero_adapter::process;
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterDeployContext, AdapterPushContext, DeployOwnership,
-    DeployStoreIds, ProvisionStores, ReadConfigEntry, ResolvedStoreId, register_adapter,
+    ActionOutcome, ActiveVersionOutcome, Adapter, AdapterAction, AdapterDeployContext,
+    AdapterPushContext, BuildOutcome, DeployOutcome, DeployOwnership, DeployStoreIds,
+    DeployedVersionState, GcCandidate, GcFailure, GcReport, HealthcheckOutcome, ProvisionAction,
+    ProvisionEntry, ProvisionReport, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
+    RollbackOutcome, StoreKind, register_adapter,
 };
 use edgezero_adapter::release::{VerifiedApplicationRelease, verify_application_release};
 use edgezero_adapter::scaffold::{
@@ -893,29 +898,78 @@ fn build_managed_deploy_plan(
     })
 }
 
+/// A failure once a draft version exists is still an `Ok` outcome, carrying
+/// that version and the failure, so the caller can inspect or recover it.
 fn deploy_managed_with_context(
     context: &AdapterDeployContext,
     args: &[String],
-) -> Result<(), String> {
+) -> Result<DeployOutcome, String> {
     let plan = build_managed_deploy_plan(context, args)?;
-    execute_managed_deploy_plan(&plan)
+    let mut progress = ManagedProgress::default();
+    let executed = execute_managed_deploy_plan(&plan, &mut progress);
+    managed_deploy_outcome(plan.service_id, plan.package_sha256, &progress, executed)
 }
 
-fn execute_managed_deploy_plan(plan: &ManagedDeployPlan) -> Result<(), String> {
-    execute_managed_deploy_plan_with_emit(plan, &mut |line| log::info!("{line}"))
+/// Maps a managed deploy's result onto its outcome. A failure before any
+/// draft exists stays an `Err`: nothing was created.
+fn managed_deploy_outcome(
+    service_id: String,
+    package_sha256: String,
+    progress: &ManagedProgress,
+    executed: Result<u64, String>,
+) -> Result<DeployOutcome, String> {
+    let (version, version_state, failure) = match executed {
+        Ok(version) => (version, DeployedVersionState::Published, None),
+        Err(error) => {
+            let Some(version) = progress.version else {
+                return Err(error);
+            };
+            let state = if progress.publish_attempted {
+                DeployedVersionState::Unknown
+            } else {
+                DeployedVersionState::Draft
+            };
+            (version, state, Some(error))
+        }
+    };
+    Ok(DeployOutcome {
+        failure,
+        package_sha256: Some(package_sha256),
+        service_id: Some(service_id),
+        version: Some(version),
+        version_state: Some(version_state),
+    })
+}
+
+/// How far a managed deploy got before it returned.
+#[derive(Debug, Default)]
+struct ManagedProgress {
+    /// The editable draft version, once one exists.
+    version: Option<u64>,
+    /// Whether the stage or activate request was sent.
+    publish_attempted: bool,
+}
+
+/// Returns the staged or activated version.
+fn execute_managed_deploy_plan(
+    plan: &ManagedDeployPlan,
+    progress: &mut ManagedProgress,
+) -> Result<u64, String> {
+    execute_managed_deploy_plan_with_emit(plan, progress, &mut |line| log::info!("{line}"))
 }
 
 fn execute_managed_deploy_plan_with_emit(
     plan: &ManagedDeployPlan,
+    progress: &mut ManagedProgress,
     emit: &mut dyn FnMut(&str),
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let cwd = plan
         .release
         .adapter_manifest()
         .parent()
         .ok_or_else(|| "verified Fastly manifest has no parent directory".to_owned())?;
     emit(&format!("package-sha256={}", plan.package_sha256));
-    let version = prepare_managed_version(plan, cwd, emit)?;
+    let version = prepare_managed_version(plan, cwd, progress, emit)?;
 
     if let Some(comment) = plan.arguments.comment.as_deref() {
         run_fastly_status(
@@ -986,6 +1040,7 @@ fn execute_managed_deploy_plan_with_emit(
 
     revalidate_managed_draft(plan, version, &expected_links, &expected_configuration, cwd)?;
 
+    progress.publish_attempted = true;
     match plan.target {
         PublishTarget::Staging => run_fastly_status(
             &[
@@ -1002,7 +1057,8 @@ fn execute_managed_deploy_plan_with_emit(
             plan.token.as_str(),
         )
         .map(|_status| ()),
-    }
+    }?;
+    Ok(version)
 }
 
 struct CapturedFastlyCommand {
@@ -1014,6 +1070,7 @@ struct CapturedFastlyCommand {
 fn prepare_managed_version(
     plan: &ManagedDeployPlan,
     cwd: &Path,
+    progress: &mut ManagedProgress,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64, String> {
     let package = plan.release.package().to_str().ok_or_else(|| {
@@ -1023,17 +1080,18 @@ fn prepare_managed_version(
     let version = match &plan.version_source {
         EditableVersionSource::CloneActive { active_version } => {
             revalidate_active_source(plan, *active_version, cwd, None)?;
-            clone_managed_source(plan, *active_version, cwd, emit)?
+            clone_managed_source(plan, *active_version, cwd, progress, emit)?
         }
         EditableVersionSource::CloneRetired(snapshot)
         | EditableVersionSource::CloneStaging(snapshot) => {
             revalidate_inactive_source(plan, snapshot, cwd, None)?;
             require_source_configuration(plan, snapshot.version.number)?;
-            clone_managed_source(plan, snapshot.version.number, cwd, emit)?
+            clone_managed_source(plan, snapshot.version.number, cwd, progress, emit)?
         }
         EditableVersionSource::InitialDraft(snapshot) => {
             revalidate_initial_draft_before_update(plan, snapshot, cwd)?;
             let version = snapshot.version.number;
+            progress.version = Some(version);
             emit(&format!("version={version}"));
             version
         }
@@ -1076,6 +1134,7 @@ fn clone_managed_source(
     plan: &ManagedDeployPlan,
     source_version: u64,
     cwd: &Path,
+    progress: &mut ManagedProgress,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64, String> {
     let raw = fastly_api_put_capture(
@@ -1086,6 +1145,7 @@ fn clone_managed_source(
         plan.token.as_str(),
     )?;
     let version = parse_cloned_version(&raw, &plan.service_id, source_version)?;
+    progress.version = Some(version);
     emit(&format!("version={version}"));
 
     match &plan.version_source {
@@ -2034,43 +2094,57 @@ fn owns_managed_deploy(context: &AdapterDeployContext) -> bool {
     reason = "see the explanatory block comment immediately above; fastly's no-op defaults for the three validate_* hooks are intentional and documented. `read_config_entry` and `read_config_entry_local` are both overridden below. `single_store_kinds` IS overridden below (returns `&[]`)."
 )]
 impl Adapter for FastlyCliAdapter {
-    fn deploy(&self, context: &AdapterDeployContext, args: &[String]) -> Result<(), String> {
+    fn deploy(
+        &self,
+        context: &AdapterDeployContext,
+        args: &[String],
+    ) -> Result<ActionOutcome, String> {
         if owns_managed_deploy(context) {
-            deploy_managed_with_context(context, args)
+            deploy_managed_with_context(context, args).map(ActionOutcome::Deploy)
         } else {
             validate_effective_deploy_service_id(context)?;
             scan_reserved_deploy_args(args)?;
-            deploy_with_context(context, args)
+            // `finalize_deploy` resolves the activated version.
+            deploy_with_context(context, args).map(|()| ActionOutcome::Empty)
         }
     }
 
-    fn execute(&self, action: AdapterAction, args: &[String]) -> Result<(), String> {
+    fn execute(&self, action: AdapterAction, args: &[String]) -> Result<ActionOutcome, String> {
         match action {
             // `fastly profile {create|delete|list}` is the native
             // sign-in surface for Fastly Compute. EdgeZero stores no
             // credentials — this is a thin shell-out.
             AdapterAction::AuthLogin => {
                 run_native_cli("fastly", &["profile", "create"], FASTLY_INSTALL_HINT)
+                    .map(|()| ActionOutcome::Empty)
             }
             AdapterAction::AuthLogout => {
                 run_native_cli("fastly", &["profile", "delete"], FASTLY_INSTALL_HINT)
+                    .map(|()| ActionOutcome::Empty)
             }
             AdapterAction::AuthStatus => {
-                run_native_cli("fastly", &["profile", "list"], FASTLY_INSTALL_HINT)
+                native_auth_status("fastly", &["profile", "list"], FASTLY_INSTALL_HINT)
+                    .map(ActionOutcome::AuthStatus)
             }
             AdapterAction::Build => {
                 let artifact = build(args)?;
                 log::info!("[edgezero] Fastly build complete -> {}", artifact.display());
-                Ok(())
+                Ok(ActionOutcome::Build(BuildOutcome {
+                    artifact: Some(artifact),
+                }))
             }
-            AdapterAction::Deploy => deploy(args),
-            AdapterAction::Serve => serve(args),
+            // Production: the adapter's `finalize_deploy` hook resolves the
+            // activated version (deploy output, then the Fastly API).
+            AdapterAction::Deploy => deploy(args).map(|()| ActionOutcome::Empty),
+            AdapterAction::Serve => serve(args).map(|()| ActionOutcome::Empty),
             AdapterAction::DeployStaging => Err(
                 "Fastly staging requires typed deploy context and --application-release".to_owned(),
             ),
-            AdapterAction::EmitVersion => emit_active_version(args),
-            AdapterAction::Healthcheck => healthcheck(args),
-            AdapterAction::Rollback => rollback(args),
+            AdapterAction::EmitVersion => {
+                emit_active_version(args).map(ActionOutcome::ActiveVersion)
+            }
+            AdapterAction::Healthcheck => healthcheck(args).map(ActionOutcome::Healthcheck),
+            AdapterAction::Rollback => rollback(args).map(ActionOutcome::Rollback),
             other => Err(format!("fastly adapter does not support {other:?}")),
         }
     }
@@ -2079,31 +2153,56 @@ impl Adapter for FastlyCliAdapter {
         &self,
         context: &AdapterDeployContext,
         command_output: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<ActionOutcome, String> {
         if context.staging {
-            return Ok(());
+            return Ok(ActionOutcome::Empty);
         }
 
         let Some(service_id) = context.service_id.as_deref() else {
-            return Ok(());
+            return Ok(ActionOutcome::Empty);
         };
         validate_service_id(service_id)?;
-        if let Some(version) = command_output.and_then(parse_fastly_version) {
-            let token = require_token()?;
-            verify_version_active(
-                service_id,
-                version,
-                &token,
-                "after manifest-command deployment",
-            )?;
+        let deployed = |version| {
             log::info!("version={version}");
-            return Ok(());
+            ActionOutcome::Deploy(DeployOutcome {
+                service_id: Some(service_id.to_owned()),
+                version: Some(version),
+                version_state: Some(DeployedVersionState::Published),
+                ..DeployOutcome::default()
+            })
+        };
+        if let Some(version) = command_output.and_then(parse_fastly_version) {
+            // The deploy command reported `version`, but until it is verified
+            // active its state is unknown; keep it so the caller can check it.
+            return Ok(require_token()
+                .and_then(|token| {
+                    verify_version_active(
+                        service_id,
+                        version,
+                        &token,
+                        "after manifest-command deployment",
+                    )
+                })
+                .map_or_else(
+                    |error| {
+                        ActionOutcome::Deploy(DeployOutcome {
+                            failure: Some(error),
+                            service_id: Some(service_id.to_owned()),
+                            version: Some(version),
+                            version_state: Some(DeployedVersionState::Unknown),
+                            ..DeployOutcome::default()
+                        })
+                    },
+                    |()| deployed(version),
+                ));
         }
-        emit_active_version_for(service_id, true).map_err(|error| {
+        // `require_active`: a version was just activated, so "none" is an error.
+        let active = emit_active_version_for(service_id, true).map_err(|error| {
             format!(
                 "deploy succeeded but the activated version could not be resolved from the deploy output or Fastly API: {error}"
             )
-        })
+        })?;
+        Ok(active.version.map_or(ActionOutcome::Empty, deployed))
     }
 
     fn gc_config_entries(
@@ -2115,7 +2214,7 @@ impl Adapter for FastlyCliAdapter {
         _push_ctx: &AdapterPushContext<'_>,
         older_than_secs: u64,
         dry_run: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<GcReport, String> {
         gc_fastly_config_store(store.platform.as_str(), older_than_secs, dry_run)
     }
 
@@ -2178,7 +2277,7 @@ impl Adapter for FastlyCliAdapter {
         _component_selector: Option<&str>,
         stores: &ProvisionStores<'_>,
         dry_run: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<ProvisionReport, String> {
         // Fastly is Multi for every store kind. Each selected physical resource
         // is created through the Fastly CLI. A default logical/physical mapping
         // can be represented by `[setup]`; a distinct physical name requires an
@@ -2208,35 +2307,41 @@ impl Adapter for FastlyCliAdapter {
                 }
             }
         }
-        let mut out = Vec::new();
-        for (kind, ids) in [
-            ("kv", stores.kv),
-            ("config", stores.config),
-            ("secret", stores.secrets),
+        let mut entries = Vec::new();
+        for (kind, store_kind, ids) in [
+            ("kv", StoreKind::Kv, stores.kv),
+            ("config", StoreKind::Config, stores.config),
+            ("secret", StoreKind::Secrets, stores.secrets),
         ] {
             for store in ids {
                 let logical = store.logical.as_str();
                 let name = store.platform.as_str();
                 let setup_can_represent_mapping = logical == name;
                 if dry_run {
-                    if setup_can_represent_mapping {
-                        out.push(format!(
+                    let message = if setup_can_represent_mapping {
+                        format!(
                             "would run `fastly {kind}-store create --name={name}` and append [setup.{kind}_stores.{logical}] to {}",
                             fastly_path.display()
-                        ));
+                        )
                     } else {
-                        out.push(format!(
+                        format!(
                             "would run `fastly {kind}-store create --name={name}` for logical id `{logical}`; the selected service requires an explicit resource link under alias `{logical}`"
-                        ));
-                    }
+                        )
+                    };
+                    entries.push(ProvisionEntry::for_store(
+                        ProvisionAction::WouldCreate,
+                        store_kind,
+                        store,
+                        message,
+                    ));
                     continue;
                 }
                 if setup_can_represent_mapping && setup_block_present(&fastly_path, kind, logical)?
                 {
-                    out.push(format!(
+                    entries.push(ProvisionEntry::for_store(ProvisionAction::AlreadyPresent, store_kind, store, format!(
                         "fastly {kind}-store `{name}` already declared in {}; skipping. To force a fresh remote: delete the [setup.{kind}_stores.{logical}] block AND run `fastly {kind}-store delete --name={name}` (the old remote store lingers otherwise), then re-run provision.",
                         fastly_path.display()
-                    ));
+                    )));
                     continue;
                 }
                 create_fastly_store_in(kind, name, manifest_dir)?;
@@ -2285,13 +2390,20 @@ impl Adapter for FastlyCliAdapter {
                     line.push('\n');
                     line.push_str(&note);
                 }
-                out.push(line);
+                entries.push(ProvisionEntry::for_store(
+                    ProvisionAction::Created,
+                    store_kind,
+                    store,
+                    line,
+                ));
             }
         }
-        if out.is_empty() {
-            out.push("fastly has no declared stores to provision".to_owned());
+        if entries.is_empty() {
+            entries.push(ProvisionEntry::note(
+                "fastly has no declared stores to provision".to_owned(),
+            ));
         }
-        Ok(out)
+        Ok(ProvisionReport { entries })
     }
 
     fn push_config_entries(
@@ -4170,6 +4282,35 @@ fn append_kept_roots_report(out: &mut Vec<String>, kept_roots: &[String], live_c
     }
 }
 
+/// The typed `config gc` report for `plan`, before any delete runs.
+fn gc_report_for(plan: &GcPlan, entries: usize, store_id: &str, dry_run: bool) -> GcReport {
+    GcReport {
+        // A real run that finds nothing to reclaim deleted zero entries; only a
+        // dry run reports `None`.
+        deleted: (!dry_run).then_some(0),
+        entries,
+        failure: None,
+        generations_planned: plan.doomed.len(),
+        kept_roots: plan.kept_roots.clone(),
+        planned: plan
+            .doomed
+            .iter()
+            .flatten()
+            .map(|(key, age)| GcCandidate {
+                age_secs: *age,
+                key: key.clone(),
+            })
+            .collect(),
+        referenced_chunks: plan.live_count,
+        retained_recent: plan.retained_recent,
+        roots: plan.roots,
+        store_id: Some(store_id.to_owned()),
+        text_lines: Vec::new(),
+        unprovable: plan.unprovable,
+        warnings: plan.warnings.clone(),
+    }
+}
+
 /// `config gc` for Fastly: delete chunk entries that no LIVE root pointer
 /// references and that are older than the operator's `older_than_secs`.
 ///
@@ -4184,7 +4325,7 @@ fn gc_fastly_config_store(
     store_name: &str,
     older_than_secs: u64,
     dry_run: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<GcReport, String> {
     // THE destructive boundary enforces its own precondition. The CLI rejects a
     // zero window too, but `gc_config_entries` is a public trait method any
     // caller can reach directly -- a safety rule that lives only in the CLI is
@@ -4203,6 +4344,7 @@ fn gc_fastly_config_store(
         .ok_or_else(|| no_matching_store_error(store_name))?;
     let items = list_config_store_entries(&resolved_id)?;
     let plan = plan_gc_reclamation(&items, unix_now_secs(), older_than_secs)?;
+    let mut report = gc_report_for(&plan, items.len(), &resolved_id, dry_run);
     let GcPlan {
         doomed,
         kept_roots,
@@ -4231,7 +4373,8 @@ fn gc_fastly_config_store(
     }
     if doomed_count == 0 {
         out.push("nothing to reclaim".to_owned());
-        return Ok(out);
+        report.text_lines = out;
+        return Ok(report);
     }
     if dry_run {
         // A dry-run only PLANS: list every candidate and stop. Nothing is
@@ -4246,7 +4389,8 @@ fn gc_fastly_config_store(
             "dry-run: {doomed_count} orphan chunk(s) planned for deletion; re-run with \
              `--yes --older-than <dur>` (a non-zero window is required) to apply"
         ));
-        return Ok(out);
+        report.text_lines = out;
+        return Ok(report);
     }
     // Real run: `doomed_count` is the PLANNED count. Do NOT pre-print each key as
     // "deleting" -- execution stops at a generation's first failure, so some
@@ -4266,9 +4410,41 @@ fn gc_fastly_config_store(
     out.push(format!(
         "reclaimed {deleted} of {doomed_count} orphan chunk entries"
     ));
+    report.deleted = Some(deleted);
     if failed.is_empty() {
-        return Ok(out);
+        report.text_lines = out;
+        return Ok(report);
     }
+    // Partial/total failure is still a REPORT (what was and was not deleted);
+    // the CLI turns `failure` into a non-zero exit.
+    let diagnostic = gc_failure_diagnostic(
+        &out,
+        doomed_count,
+        &failed,
+        &uncertain,
+        &stranded,
+        &resolved_id,
+    )?;
+    report.failure = Some(GcFailure {
+        diagnostic,
+        failed,
+        stranded,
+        uncertain,
+    });
+    report.text_lines = out;
+    Ok(report)
+}
+
+/// The operator-facing text for a `config gc` run whose deletes failed: the
+/// run's report, which deletes failed, and how to recover.
+fn gc_failure_diagnostic(
+    out: &[String],
+    doomed_count: usize,
+    failed: &[String],
+    uncertain: &[String],
+    stranded: &[String],
+    resolved_id: &str,
+) -> Result<String, String> {
     // Partial/total failure must be a non-zero exit so automation can see it.
     let mut diagnostic = format!(
         "{}\nconfig gc: {} of {doomed_count} deletes FAILED ({})",
@@ -4286,7 +4462,7 @@ fn gc_fastly_config_store(
              before returning an error. Re-run `config gc`: it reclaims each affected generation \
              if it is still whole, or reports it as an unprovable fragment (\"left untouched\") if \
              a delete did commit. If reported as a fragment, remove the survivors by hand:\n{}",
-            recovery_commands(&resolved_id, &uncertain)
+            recovery_commands(resolved_id, uncertain)
         )
         .map_err(|err| format!("failed to format the gc diagnostic: {err}"))?;
     }
@@ -4301,11 +4477,11 @@ fn gc_fastly_config_store(
              by hand once you are satisfied they are unreferenced:\n{}",
             stranded.len(),
             stranded.join(", "),
-            recovery_commands(&resolved_id, &stranded),
+            recovery_commands(resolved_id, stranded),
         )
         .map_err(|err| format!("failed to format the gc diagnostic: {err}"))?;
     }
-    Err(diagnostic)
+    Ok(diagnostic)
 }
 
 /// Render copy-pasteable `fastly config-store-entry delete` commands, one per
@@ -5017,6 +5193,10 @@ fn create_config_store_entry_with_cwd(
     if let Some(command_cwd) = cwd {
         command.current_dir(command_cwd);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stdio is fully piped, so the child never writes to our stdout"
+    )]
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -5300,20 +5480,21 @@ pub fn build(extra_args: &[String]) -> Result<PathBuf, String> {
     let cargo_manifest = manifest_dir.join("Cargo.toml");
     let crate_name = read_package_name(&cargo_manifest)?;
 
-    let status = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "--target",
-            "wasm32-wasip1",
-            "--manifest-path",
-            cargo_manifest
-                .to_str()
-                .ok_or("invalid Cargo manifest path")?,
-        ])
-        .args(extra_args)
-        .status()
-        .map_err(|err| format!("failed to run cargo build: {err}"))?;
+    let status = process::status(
+        Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip1",
+                "--manifest-path",
+                cargo_manifest
+                    .to_str()
+                    .ok_or("invalid Cargo manifest path")?,
+            ])
+            .args(extra_args),
+    )
+    .map_err(|err| format!("failed to run cargo build: {err}"))?;
     if !status.success() {
         return Err(format!("cargo build failed with status {status}"));
     }
@@ -5382,11 +5563,12 @@ fn deploy_with_context(
         forwarded.extend(["--service-id".to_owned(), service_id.to_owned()]);
     }
 
-    let status = Command::new("fastly")
-        .args(build_compute_deploy_args(&forwarded))
-        .current_dir(manifest_dir)
-        .status()
-        .map_err(|err| format!("failed to run fastly CLI: {err}"))?;
+    let status = process::status(
+        Command::new("fastly")
+            .args(build_compute_deploy_args(&forwarded))
+            .current_dir(manifest_dir),
+    )
+    .map_err(|err| format!("failed to run fastly CLI: {err}"))?;
     if !status.success() {
         return Err(format!("fastly compute deploy failed with status {status}"));
     }
@@ -5489,12 +5671,13 @@ pub fn serve(extra_args: &[String]) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "fastly manifest has no parent directory".to_owned())?;
 
-    let status = Command::new("fastly")
-        .args(["compute", "serve"])
-        .args(extra_args)
-        .current_dir(manifest_dir)
-        .status()
-        .map_err(|err| format!("failed to run fastly CLI: {err}"))?;
+    let status = process::status(
+        Command::new("fastly")
+            .args(["compute", "serve"])
+            .args(extra_args)
+            .current_dir(manifest_dir),
+    )
+    .map_err(|err| format!("failed to run fastly CLI: {err}"))?;
     if !status.success() {
         return Err(format!("fastly compute serve failed with status {status}"));
     }
@@ -6188,10 +6371,7 @@ where
 /// Run `fastly <args>` in `cwd`, inheriting stdio, and map a non-zero
 /// exit to an error.
 fn run_fastly_status(fastly_args: &[String], cwd: &Path) -> Result<(), String> {
-    let status = Command::new("fastly")
-        .args(fastly_args)
-        .current_dir(cwd)
-        .status()
+    let status = process::status(Command::new("fastly").args(fastly_args).current_dir(cwd))
         .map_err(|err| {
             if err.kind() == ErrorKind::NotFound {
                 format!("`fastly` not found on PATH; {FASTLY_INSTALL_HINT}")
@@ -6223,6 +6403,10 @@ fn run_fastly_status(fastly_args: &[String], cwd: &Path) -> Result<(), String> {
 fn curl_config_capture(config: &str) -> Result<String, String> {
     let connect_timeout = FASTLY_API_CONNECT_TIMEOUT_SECS.to_string();
     let max_time = FASTLY_API_MAX_TIME_SECS.to_string();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stdio is fully piped, so the child never writes to our stdout"
+    )]
     let mut child = Command::new("curl")
         .args([
             "-q",
@@ -6467,44 +6651,42 @@ fn resolve_deploy_manifest_path(context: &AdapterDeployContext) -> Result<PathBu
     find_fastly_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())
 }
 
-/// Production companion to `deploy`: resolve the active service version via the
-/// Fastly API and emit it as a `version=<N>` line.
+/// `active-version`: resolve the active service version via the Fastly API.
+/// The CLI emits it as a `version=<N>` line.
 ///
 /// Distinguishes "confirmed no active version" from an operational failure: a
 /// service with no active version yet (a first-ever deploy) is NOT an error — it
-/// emits an empty `version=` line and succeeds, so the caller records an empty
-/// rollback target. Only a real failure (API/auth error, or a version list that
-/// cannot be parsed) returns `Err`, so the caller can fail closed instead of
-/// silently proceeding without a rollback target.
+/// reports `version: None` (an empty `version=` line) and succeeds, so the caller
+/// records an empty rollback target. Only a real failure (API/auth error, or a
+/// version list that cannot be parsed) returns `Err`, so the caller can fail
+/// closed instead of silently proceeding without a rollback target.
 ///
-/// `--require-active` flips the no-active-version case to an error: it is passed
-/// by the production-`deploy` version fallback, where a version was JUST
-/// activated, so "no active version" is not a valid first-deploy state but an
-/// operational failure the CLI must not report as success.
-fn emit_active_version(args: &[String]) -> Result<(), String> {
+/// `finalize_deploy` calls [`emit_active_version_for`] with `require_active`
+/// set instead: a version was JUST activated there, so "no active version" is an
+/// operational failure, not a valid first-deploy state.
+fn emit_active_version(args: &[String]) -> Result<ActiveVersionOutcome, String> {
     let service_id = resolve_service_id(args)?;
     validate_service_id(&service_id)?;
-    emit_active_version_for(&service_id, arg_flag(args, "--require-active"))
+    emit_active_version_for(&service_id, false)
 }
 
-fn emit_active_version_for(service_id: &str, require_active: bool) -> Result<(), String> {
+fn emit_active_version_for(
+    service_id: &str,
+    require_active: bool,
+) -> Result<ActiveVersionOutcome, String> {
     let token = require_token()?;
     let json = fastly_api_get(&format!("/service/{service_id}/version"), &token)?;
-    if let Some(version) = active_version_or_require(&json, require_active, service_id)? {
-        log::info!("version={version}");
-    } else {
-        // Confirmed no active version (first-ever deploy), and it was not
-        // required. Emit an explicit empty line so the caller records an empty
-        // rollback target and succeeds — distinct from a failure (`Err`).
-        log::info!("version=");
-        log::info!(
-            "service {service_id} has no active version yet; emitting an empty rollback target"
-        );
-    }
-    Ok(())
+    // `None` = confirmed no active version (first-ever deploy) and it was not
+    // required: the CLI emits an explicit empty `version=` so the caller records
+    // an empty rollback target and succeeds — distinct from a failure (`Err`).
+    let version = active_version_or_require(&json, require_active, service_id)?;
+    Ok(ActiveVersionOutcome {
+        service_id: service_id.to_owned(),
+        version,
+    })
 }
 
-/// Resolve the active version and apply the `--require-active` policy.
+/// Resolve the active version and apply the `require_active` policy.
 ///
 /// `Ok(Some(n))` — a version is active. `Ok(None)` — no active version and
 /// `require_active` is false (a first-ever `active-version` call; the caller
@@ -6565,8 +6747,9 @@ fn version_active_verdict(
 
 /// `healthcheck --adapter fastly ...`: probe the domain
 /// (production) or the version's staging IP (`--staging`), retrying up
-/// to `--retry` times. Emits `status-code` / `healthy` and returns
-/// `Err` (non-zero exit) when unhealthy after retries.
+/// to `--retry` times. An unhealthy probe is still `Ok`, with `failure`
+/// set; the CLI emits `status-code` / `healthy` and turns that into a
+/// non-zero exit.
 ///
 /// `--domain`, `--service-id` and `--version` are REQUIRED and validated
 /// on BOTH the production and the staging path. GitHub Actions' `required:
@@ -6578,7 +6761,7 @@ fn version_active_verdict(
 /// On the PRODUCTION path the probe reaches whatever version is live, so when a
 /// token is available `version` is verified ACTIVE before and after the probe
 /// (see [`verify_version_active`]); without a token the check is service-level.
-fn healthcheck(args: &[String]) -> Result<(), String> {
+fn healthcheck(args: &[String]) -> Result<HealthcheckOutcome, String> {
     let domain =
         arg_value(args, "--domain").ok_or_else(|| "healthcheck requires --domain".to_owned())?;
     validate_domain(domain)?;
@@ -6649,29 +6832,49 @@ fn healthcheck(args: &[String]) -> Result<(), String> {
 
     let curl_args = build_curl_probe_args(domain, path, staging_ip.as_deref(), timeout);
     let delay = Duration::from_secs(retry_delay);
-    let outcome = probe_with_retries(retry, || curl_status(&curl_args), || thread::sleep(delay));
-    match outcome {
+    let mut attempts = 0_u32;
+    let outcome = probe_with_retries(
+        retry,
+        || {
+            attempts = attempts.saturating_add(1);
+            curl_status(&curl_args)
+        },
+        || thread::sleep(delay),
+    );
+    // The CLI emits `status-code=<N>` / `healthy=<bool>` from this outcome, and
+    // turns an unhealthy one into a non-zero exit.
+    // `version_verified` means BOTH checks ran, so it is true only on the
+    // healthy arm, the one that runs the "after probing" check.
+    let (version_verified, status_code, failure) = match outcome {
         Ok(code) => {
             // Confirm `version` is STILL active, so a deploy that activated a newer
             // version during the probe+retries is not reported as a healthy `version`.
             if let Some(token) = production_token.as_deref() {
                 verify_version_active(&service_id, version, token, "after probing")?;
             }
-            log::info!("status-code={code}");
-            log::info!("healthy=true");
-            Ok(())
+            (production_token.is_some(), Some(code), None)
         }
-        Err((last_code, msg)) => {
-            if let Some(code) = last_code {
-                log::info!("status-code={code}");
-            }
-            log::info!("healthy=false");
-            Err(format!(
+        Err((last_code, msg)) => (
+            false,
+            last_code,
+            Some(format!(
                 "healthcheck for {domain} failed after {} attempt(s): {msg}",
                 retry.max(1)
-            ))
-        }
-    }
+            )),
+        ),
+    };
+    Ok(HealthcheckOutcome {
+        attempts,
+        domain: domain.to_owned(),
+        failure,
+        path: path.to_owned(),
+        service_id,
+        staging: is_staging,
+        staging_ip,
+        status_code,
+        version,
+        version_verified,
+    })
 }
 
 /// Run a single `curl` health probe, returning the HTTP status. A
@@ -6704,7 +6907,7 @@ fn curl_status(args: &[String]) -> Result<u16, String> {
 /// `rollback --adapter fastly ...`: production activates the explicit
 /// `--rollback-to` version (Fastly cannot infer a previous version);
 /// staging deactivates `<version>`.
-fn rollback(args: &[String]) -> Result<(), String> {
+fn rollback(args: &[String]) -> Result<RollbackOutcome, String> {
     let service_id = resolve_service_id(args)?;
     validate_service_id(&service_id)?;
     let version_str =
@@ -6732,6 +6935,12 @@ fn rollback(args: &[String]) -> Result<(), String> {
                 "[edgezero] Fastly version {version} is an unpublished draft; staging rollback has nothing to deactivate"
             ),
         }
+        Ok(RollbackOutcome {
+            rolled_back_to: None,
+            service_id,
+            staging: true,
+            version,
+        })
     } else {
         // Production rollback re-activates an EXPLICIT target. Fastly's version
         // list has no field distinguishing a previously-live version from a
@@ -6760,9 +6969,14 @@ fn rollback(args: &[String]) -> Result<(), String> {
             &format!("/service/{service_id}/version/{previous}/activate"),
             &token,
         )?;
-        log::info!("rolled-back-to={previous}");
+        // The CLI emits `rolled-back-to=<N>`.
+        Ok(RollbackOutcome {
+            rolled_back_to: Some(previous),
+            service_id,
+            staging: false,
+            version,
+        })
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -7119,18 +7333,81 @@ mod tests {
             ..AdapterDeployContext::default()
         };
 
-        FastlyCliAdapter
+        let outcome = FastlyCliAdapter
             .finalize_deploy(&context, Some("version=8"))
             .expect("active version finalization");
+        assert_eq!(
+            outcome,
+            ActionOutcome::Deploy(DeployOutcome {
+                service_id: Some("SVC1".to_owned()),
+                version: Some(8),
+                version_state: Some(DeployedVersionState::Published),
+                ..DeployOutcome::default()
+            }),
+            "finalization reports the verified service version"
+        );
         assert!(
             marker.exists(),
             "finalization must consult the exact service"
         );
 
-        let error = FastlyCliAdapter
+        let unverified = FastlyCliAdapter
             .finalize_deploy(&context, Some("version=9"))
-            .expect_err("a version from another service or deployment must fail closed");
+            .expect("an unverified version is still reported");
+        let ActionOutcome::Deploy(DeployOutcome {
+            failure: Some(error),
+            version: Some(9),
+            version_state: Some(DeployedVersionState::Unknown),
+            ..
+        }) = unverified
+        else {
+            panic!("a version from another service or deployment must fail closed: {unverified:?}");
+        };
         assert!(error.contains('8') && error.contains('9'), "{error}");
+    }
+
+    #[test]
+    fn managed_deploy_outcome_keeps_a_created_version_on_failure() {
+        let outcome = |progress: &ManagedProgress, executed| {
+            managed_deploy_outcome("SVC1".to_owned(), "abc".to_owned(), progress, executed)
+        };
+
+        let preflight = ManagedProgress::default();
+        assert_eq!(
+            outcome(&preflight, Err("clone failed".to_owned())),
+            Err("clone failed".to_owned()),
+            "a failure before any draft exists reports nothing"
+        );
+
+        let drafted = ManagedProgress {
+            version: Some(42),
+            publish_attempted: false,
+        };
+        assert_eq!(
+            outcome(&drafted, Err("link create failed".to_owned())),
+            Ok(DeployOutcome {
+                failure: Some("link create failed".to_owned()),
+                package_sha256: Some("abc".to_owned()),
+                service_id: Some("SVC1".to_owned()),
+                version: Some(42),
+                version_state: Some(DeployedVersionState::Draft),
+            })
+        );
+
+        let publishing = ManagedProgress {
+            version: Some(42),
+            publish_attempted: true,
+        };
+        let unknown = outcome(&publishing, Err("activate timed out".to_owned())).expect("outcome");
+        assert_eq!(unknown.version_state, Some(DeployedVersionState::Unknown));
+        assert_eq!(unknown.failure.as_deref(), Some("activate timed out"));
+
+        let published = outcome(&publishing, Ok(42)).expect("outcome");
+        assert_eq!(
+            published.version_state,
+            Some(DeployedVersionState::Published)
+        );
+        assert_eq!(published.failure, None);
     }
 
     #[test]
@@ -8553,7 +8830,7 @@ mod tests {
         assert_eq!(active_version_or_require(active, true, "svc"), Ok(Some(5)));
 
         // No active version: tolerated for `active-version` (first deploy), but an
-        // ERROR for the production-deploy fallback (`--require-active`), which
+        // ERROR for the production-deploy fallback (`require_active`), which
         // must never report a deploy with no resolvable version.
         assert_eq!(active_version_or_require(none, false, "svc"), Ok(None));
         active_version_or_require(none, true, "svc")
@@ -8763,6 +9040,17 @@ mod tests {
         assert_eq!(
             between, 2_i32,
             "delay runs between attempts, not after the last"
+        );
+    }
+
+    #[test]
+    fn probe_with_retries_reports_the_last_code_of_a_mixed_run() {
+        let mut codes = [503_u16, 0].into_iter();
+        let result = probe_with_retries(2, || Ok(codes.next().expect("two probes")), || {});
+        assert_eq!(
+            result,
+            Err((Some(0), "unhealthy HTTP status 0".to_owned())),
+            "a `503` then `000` run reports the `000`, as `main` does"
         );
     }
 
@@ -9381,7 +9669,8 @@ build = \"cargo build --release\"
         };
         let out = FastlyCliAdapter
             .provision(dir.path(), Some("fastly.toml"), None, &stores, true)
-            .expect("dry-run succeeds");
+            .expect("dry-run succeeds")
+            .into_messages();
         assert_eq!(out.len(), 3, "dry-run rows: {out:?}");
         assert!(out[0].contains("would run `fastly kv-store create --name=sessions`"));
         assert!(out[1].contains("would run `fastly config-store create --name=app_config`"));
@@ -9498,7 +9787,8 @@ build = \"cargo build --release\"
 
         let lines = FastlyCliAdapter
             .provision(dir.path(), Some("fastly.toml"), None, &stores, false)
-            .expect("selected service can use a distinct physical store");
+            .expect("selected service can use a distinct physical store")
+            .into_messages();
 
         let log = fs::read_to_string(&oplog).expect("provider log");
         assert!(
@@ -9549,7 +9839,8 @@ build = \"cargo build --release\"
         };
         let out = FastlyCliAdapter
             .provision(dir.path(), Some("fastly.toml"), None, &stores, false)
-            .expect("no-store provision is fine");
+            .expect("no-store provision is fine")
+            .into_messages();
         assert_eq!(out, vec!["fastly has no declared stores to provision"]);
     }
 
@@ -9578,7 +9869,8 @@ build = \"cargo build --release\"
 
         let out = FastlyCliAdapter
             .provision(dir.path(), Some("fastly.toml"), None, &stores, false)
-            .expect("skip path succeeds");
+            .expect("skip path succeeds")
+            .into_messages();
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("already declared"), "got: {out:?}");
         assert!(
@@ -10313,6 +10605,160 @@ exit 1
         use std::sync::OnceLock;
         static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
         GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    /// A fake `curl` that answers every health probe with HTTP `code`,
+    /// written as curl's three-digit `%{http_code}` (`0` prints `000`).
+    #[cfg(unix)]
+    fn fake_curl(code: u16) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("curl");
+        fs::write(&script_path, format!("#!/bin/sh\necho {code:03}\n")).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod +x");
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn healthcheck_reports_a_structured_outcome() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        // No token: the production probe is service-level (no API calls).
+        let _token = EnvOverride::remove(FASTLY_API_TOKEN_ENV);
+        let args = |retry: &str| -> Vec<String> {
+            [
+                "--domain",
+                "app.example.com",
+                "--service-id",
+                "SVC1",
+                "--version",
+                "7",
+                "--retry",
+                retry,
+                "--retry-delay",
+                "0",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        };
+
+        let healthy_curl = fake_curl(200);
+        let healthy_path = PathPrepend::new(healthy_curl.path());
+        let healthy = healthcheck(&args("3")).expect("probe runs");
+        assert_eq!(
+            healthy,
+            HealthcheckOutcome {
+                attempts: 1,
+                domain: "app.example.com".to_owned(),
+                failure: None,
+                path: "/".to_owned(),
+                service_id: "SVC1".to_owned(),
+                staging: false,
+                staging_ip: None,
+                status_code: Some(200),
+                version: 7,
+                version_verified: false,
+            }
+        );
+        drop(healthy_path);
+
+        let unhealthy_curl = fake_curl(503);
+        let unhealthy_path = PathPrepend::new(unhealthy_curl.path());
+        let unhealthy =
+            healthcheck(&args("2")).expect("an unhealthy probe is an outcome, not an error");
+        assert!(!unhealthy.healthy());
+        assert_eq!(unhealthy.attempts, 2);
+        assert_eq!(unhealthy.status_code, Some(503));
+        let failure = unhealthy
+            .failure
+            .expect("an unhealthy outcome carries its reason");
+        assert!(
+            failure.contains("failed after 2 attempt(s)"),
+            "keeps the pre-existing message: {failure}"
+        );
+        drop(unhealthy_path);
+
+        // curl's `000` (no HTTP response) stays the text output's
+        // `status-code=0`; the JSON result maps it to `null`.
+        let silent_curl = fake_curl(0);
+        let _silent_path = PathPrepend::new(silent_curl.path());
+        let silent = healthcheck(&args("1")).expect("a silent probe is an outcome");
+        assert!(!silent.healthy());
+        assert_eq!(silent.status_code, Some(0));
+        let silent_failure = silent.failure.expect("carries its reason");
+        assert!(
+            silent_failure.contains("unhealthy HTTP status 0"),
+            "{silent_failure}"
+        );
+    }
+
+    /// `version_verified` claims the version was ACTIVE before AND after the
+    /// probe, so it is true only when both API checks actually ran: an
+    /// unhealthy probe skips the "after" check and must report `false`.
+    #[cfg(unix)]
+    #[test]
+    fn healthcheck_version_verified_only_when_both_checks_ran() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let _token = EnvOverride::set(FASTLY_API_TOKEN_ENV, "test-token");
+        let args: Vec<String> = [
+            "--domain",
+            "app.example.com",
+            "--service-id",
+            "SVC1",
+            "--version",
+            "7",
+            "--retry",
+            "1",
+            "--retry-delay",
+            "0",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        // A fake `curl` serving the versions API (`--config -`, version 7
+        // active) and answering health probes with `code`; each API call is
+        // logged so the test can count the checks.
+        let fake_curl_with_api = |code: u16| {
+            let dir = tempdir().expect("tempdir");
+            let log = dir.path().join("api.log");
+            let script = format!(
+                "#!/bin/sh
+                 case \" $* \" in *\" --config \"*) cat >/dev/null; echo get >> '{log}'; \
+                 printf '%s\\n200' '[{{\"number\":7,\"active\":true,\"locked\":true,\"staging\":false,\"deployed\":true,\"environments\":[]}}]'; exit 0;; esac
+                 echo {code}
+",
+                log = log.display()
+            );
+            let script_path = dir.path().join("curl");
+            fs::write(&script_path, script).expect("write script");
+            let mut perms = fs::metadata(&script_path).expect("meta").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod +x");
+            (dir, log)
+        };
+        let api_calls = |log: &Path| fs::read_to_string(log).unwrap_or_default().lines().count();
+
+        let (unhealthy_curl, unhealthy_log) = fake_curl_with_api(503);
+        let unhealthy_path = PathPrepend::new(unhealthy_curl.path());
+        let unhealthy = healthcheck(&args).expect("an unhealthy probe is an outcome");
+        assert!(!unhealthy.healthy());
+        assert!(
+            !unhealthy.version_verified,
+            "the after-probe check never ran on an unhealthy probe"
+        );
+        assert_eq!(api_calls(&unhealthy_log), 1, "only the before-probe check");
+        drop(unhealthy_path);
+
+        let (healthy_curl, healthy_log) = fake_curl_with_api(200);
+        let _path = PathPrepend::new(healthy_curl.path());
+        let healthy = healthcheck(&args).expect("probe runs");
+        assert!(healthy.healthy());
+        assert!(healthy.version_verified, "both checks ran and passed");
+        assert_eq!(api_calls(&healthy_log), 2, "before and after the probe");
     }
 
     #[cfg(unix)]
@@ -11849,7 +12295,7 @@ echo 'unexpected' >&2; exit 1
     // ---------- config gc (operator-invoked reclamation) ----------
 
     #[cfg(unix)]
-    fn run_gc(dir: &Path, older_than_secs: u64, dry_run: bool) -> Result<Vec<String>, String> {
+    fn gc_report(dir: &Path, older_than_secs: u64, dry_run: bool) -> Result<GcReport, String> {
         FastlyCliAdapter.gc_config_entries(
             dir,
             None,
@@ -11859,6 +12305,16 @@ echo 'unexpected' >&2; exit 1
             older_than_secs,
             dry_run,
         )
+    }
+
+    #[cfg(unix)]
+    fn run_gc(dir: &Path, older_than_secs: u64, dry_run: bool) -> Result<Vec<String>, String> {
+        // Mirror the CLI: a report carrying a failure is an error.
+        let report = gc_report(dir, older_than_secs, dry_run)?;
+        match report.failure {
+            Some(failure) => Err(failure.diagnostic),
+            None => Ok(report.text_lines),
+        }
     }
 
     /// gc never deletes a chunk the LIVE root pointer references, however old.
@@ -12059,6 +12515,73 @@ echo 'unexpected' >&2; exit 1
             !oplog_has(&oplog, &format!("delete {squatter_key}")),
             "a one-chunk 'generation' is never something this writer emitted, so it must not be \
              reclaimed even though it hashes to its own key: `{squatter_key}`; log:\n{log}"
+        );
+    }
+
+    /// `deleted` is `None` only on a dry run: a real run that finds nothing to
+    /// reclaim deleted zero entries, and says so.
+    #[cfg(unix)]
+    #[test]
+    fn gc_report_deleted_is_zero_for_a_real_run_with_nothing_to_reclaim() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let dir = tempdir().expect("tempdir");
+        let oplog = dir.path().join("ops.log");
+        let live = gen_envelope("live");
+        let mut listing = vec![listed_root(TEST_CONFIG_ID, &live, 172_800)];
+        listing.extend(listed_generation(TEST_CONFIG_ID, &live, 172_800));
+        let fake = fake_fastly_gc(TEST_CONFIG_ID, &[], &listing, None, false, &oplog);
+        let _path = PathPrepend::new(fake.path());
+
+        let real = gc_report(dir.path(), 86_400, false).expect("gc runs");
+        assert_eq!(real.deleted, Some(0));
+        assert_eq!(real.failure, None);
+        assert!(real.planned.is_empty());
+
+        let preview = gc_report(dir.path(), 86_400, true).expect("gc runs");
+        assert_eq!(preview.deleted, None, "a dry run deletes nothing at all");
+    }
+
+    /// A failed delete is still a report: `failure` names the failed key, and
+    /// the keys whose outcome is unknown, alongside the recovery text.
+    #[cfg(unix)]
+    #[test]
+    fn gc_report_carries_a_failed_delete() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let dir = tempdir().expect("tempdir");
+        let oplog = dir.path().join("ops.log");
+        let live = gen_envelope("live");
+        let dead = gen_envelope("dead");
+        let dead_chunks = chunk_keys_of(TEST_CONFIG_ID, &dead);
+        let mut listing = vec![listed_root(TEST_CONFIG_ID, &live, 172_800)];
+        listing.extend(listed_generation(TEST_CONFIG_ID, &live, 172_800));
+        listing.extend(listed_generation(TEST_CONFIG_ID, &dead, 604_800));
+        let fake = fake_fastly_gc(
+            TEST_CONFIG_ID,
+            &[],
+            &listing,
+            Some(&dead_chunks[0]),
+            false,
+            &oplog,
+        );
+        let _path = PathPrepend::new(fake.path());
+
+        let report = gc_report(dir.path(), 86_400, false).expect("a failed delete is a report");
+        assert_eq!(report.deleted, Some(0));
+        assert_eq!(report.planned.len(), dead_chunks.len());
+        let failure = report.failure.expect("the failed delete is reported");
+        assert_eq!(failure.failed, vec![dead_chunks[0].clone()]);
+        assert!(
+            failure.stranded.is_empty(),
+            "nothing was deleted before the failure"
+        );
+        assert!(
+            !failure.uncertain.is_empty(),
+            "the failed first delete has an unknown outcome"
+        );
+        assert!(
+            failure.diagnostic.contains("unknown outcome"),
+            "{}",
+            failure.diagnostic
         );
     }
 
