@@ -24,6 +24,13 @@ series; phase 3 supplies adapter integration, not a releasable default-stub peri
 > typed body-error/readiness safety are not waived. The full migration remains pending; this
 > sequencing decision is not approval of alternative signatures or a compatibility helper.
 
+The [core policy conformance checkpoint](2026-10-18-trusted-server-outbound-implementation.md#core-policy-conformance-binding-checkpoint-2026-10-29)
+binds seven complete core legs after filling the literal connect, range, facade-upload and marker
+proof gaps. Existing private fixtures and the single grouped guard are reused; no production
+interface, source requirement or provider acceptance is changed. Complete codec/cap bundles are
+required, not one nearby test per criterion. G1 remains unqualified at 44 ready / 467 planned;
+remaining bodyless/metadata cases and all corresponding provider legs stay open.
+
 ## Interfaces: Proposed Hard-Cut Contract
 
 > **Scope redesign authorized, 2026-10-27:** the requester explicitly reopened EdgeZero's

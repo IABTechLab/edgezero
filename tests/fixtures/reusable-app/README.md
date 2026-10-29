@@ -102,10 +102,12 @@ planned or implemented and executable with its full assertions. It does not mean
 feature is absent or qualified. EZ-23 local criteria 01-11 bind guarded Cargo tests and the
 existing Axum CI job. EZ-9 core criteria 01-15 bind all 51 redirect tests, and EZ-6 core criterion
 22 binds five mixed-observation/receipt-recovery tests through the same inventory guard.
-EZ-6 core criteria 15/17 bind cutoff-equality and recorded-undelivered cancellation; EZ-7 core
-criteria 01/03 bind marker-off exact-cap and upstream-marker preservation. EZ-9 runtime criteria
-16/17 bind the complete four-adapter wire matrix. There are 37 ready
-legs and 474 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
+EZ-6 core criteria 13/15/17 bind facade upload rules, cutoff-equality and recorded-undelivered
+cancellation. EZ-7 core criteria 01/02/03 bind marker limits, same-handle inheritance and
+upstream-marker preservation. EZ-4 core criterion 01 binds connect-setting carriage; EZ-5 core
+criteria 01/02/03/10 bind original coding, encoded/final limits, exact partial ranges and identity
+limits. EZ-9 runtime criteria 16/17 bind the complete four-adapter wire matrix. There are 44 ready
+legs and 467 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
 for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
@@ -116,11 +118,19 @@ The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
 
-The core legs discover all 60 bound primary/additional sentinels before running one outbound suite:
+The core legs discover all 68 bound primary/additional sentinels before running one outbound suite:
 
 ```sh
 scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::
 ```
+
+The core policy bindings cover actual facade calls, not only validation helpers. A one-second
+connect setting retains its full aggregate budget through parts rebuilding and redirect hops.
+Upload controls observe rejected Begin source polls and exact transport payloads; the private
+recorder's 64-byte drain is only a fixture bound. The off-configured marker handle is exercised
+through Send, Begin and exactly two inherited batch slots. Coding bundles preserve exact range
+headers and independently exercise encoded, decoded and final caps. These bindings do not close
+their provider legs or authorize pending scripted-client or representation-metadata changes.
 
 Core criterion 22 uses exactly three slots under Completed, Cutoff and an original typed driver
 failure, with both fresh collection and check/next/collect. Terminal production is held until

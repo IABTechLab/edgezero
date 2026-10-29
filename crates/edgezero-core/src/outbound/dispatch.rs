@@ -259,9 +259,9 @@ mod tests {
     use bytes::Bytes;
     use futures::executor::block_on;
     use futures_util::future::poll_fn;
-    use futures_util::{StreamExt as _, stream};
+    use futures_util::{FutureExt as _, StreamExt as _, stream};
 
-    use crate::http::{HeaderMap, StatusCode};
+    use crate::http::{HeaderMap, Method, StatusCode, Uri, request_builder};
     use crate::{
         Body, Deadline, EdgeError, HttpClient, IndependentOutboundProgress, MonotonicClock,
         MonotonicInstant, OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest,
@@ -276,11 +276,20 @@ mod tests {
         dispatches: Arc<AtomicUsize>,
         state: Arc<Mutex<(MonotonicInstant, Option<Waker>)>>,
         timers: Arc<AtomicUsize>,
+        uploads: Arc<Mutex<Vec<Upload>>>,
     }
 
     struct Client {
         fake: Fake,
         refuse: bool,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Upload {
+        body: Bytes,
+        method: Method,
+        mode: OutboundSendMode,
+        streamed: bool,
     }
 
     #[derive(Debug, thiserror::Error)]
@@ -311,6 +320,7 @@ mod tests {
                 state: Arc::new(Mutex::new((MonotonicInstant::now(), None))),
                 dispatches: Arc::new(AtomicUsize::new(0)),
                 timers: Arc::new(AtomicUsize::new(0)),
+                uploads: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -347,8 +357,17 @@ mod tests {
 
         fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
             self.fake.dispatches.fetch_add(1, Ordering::SeqCst);
-            let (_, context) = request.into_parts();
+            let (parts, context) = request.into_parts();
+            let uploads = Arc::clone(&self.fake.uploads);
             Box::pin(async move {
+                let streamed = parts.body.is_stream();
+                let bytes = parts.body.into_bytes_bounded(64).await?;
+                uploads.lock().expect("upload recording").push(Upload {
+                    body: bytes,
+                    method: parts.method,
+                    mode: context.mode(),
+                    streamed,
+                });
                 OutboundHead::new(
                     StatusCode::OK,
                     OutboundHeaderInput::new(
@@ -546,6 +565,95 @@ mod tests {
             .body(Body::from_stream(stream::empty()));
         block_on(fake.client(false).send(request)).expect("empty streamed forwarding");
         assert_eq!(fake.dispatches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn facade_upload_rules_preserve_forwarded_begin_and_streamed_send() {
+        let fake = Fake::new();
+        let client = fake.client(false);
+        let rejected_polls = Arc::new(AtomicUsize::new(0));
+        let rejected_source = Arc::clone(&rejected_polls);
+        let rejected = OutboundRequest::post("https://example.com/")
+            .expect("request")
+            .body(Body::from_stream(stream::poll_fn(move |_| {
+                rejected_source.fetch_add(1, Ordering::SeqCst);
+                Poll::Pending
+            })));
+        let Err(error) = block_on(client.begin(rejected)) else {
+            panic!("streamed begin must be refused");
+        };
+        assert!(matches!(error, EdgeError::BadRequest { .. }));
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(rejected_polls.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.dispatches.load(Ordering::SeqCst), 0);
+        assert!(fake.uploads.lock().expect("uploads").is_empty());
+
+        let get_polls = Arc::new(AtomicUsize::new(0));
+        let empty_source = Arc::clone(&get_polls);
+        let inbound = request_builder()
+            .method(Method::GET)
+            .uri("/inbound")
+            .body(Body::from_stream(stream::poll_fn(move |_| {
+                empty_source.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(None)
+            })))
+            .expect("inbound request");
+        let forwarded =
+            OutboundRequest::from_request(inbound, Uri::from_static("https://example.com/"))
+                .expect("forward request");
+        assert_eq!(
+            get_polls.load(Ordering::SeqCst),
+            0,
+            "conversion cannot read the source"
+        );
+        let pending = client
+            .begin(forwarded)
+            .now_or_never()
+            .expect("ready begin")
+            .expect("empty forwarded GET");
+        assert_eq!(fake.dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fake.uploads.lock().expect("uploads").len(),
+            1,
+            "transport records before pending collection"
+        );
+        block_on(pending.collect()).expect("begun response");
+        assert_eq!(get_polls.load(Ordering::SeqCst), 1);
+
+        let sent_chunks = Arc::new(AtomicUsize::new(0));
+        let sent_source = Arc::clone(&sent_chunks);
+        let source =
+            stream::iter([b"a".as_slice(), b"".as_slice(), b"bc".as_slice()]).map(move |bytes| {
+                sent_source.fetch_add(1, Ordering::SeqCst);
+                Ok(Bytes::from_static(bytes))
+            });
+        block_on(
+            client.send(
+                OutboundRequest::post("https://example.com/")
+                    .expect("request")
+                    .body(Body::from_stream(source)),
+            ),
+        )
+        .expect("streamed POST send");
+        assert_eq!(sent_chunks.load(Ordering::SeqCst), 3);
+        assert_eq!(fake.dispatches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *fake.uploads.lock().expect("uploads"),
+            vec![
+                Upload {
+                    body: Bytes::new(),
+                    method: Method::GET,
+                    mode: OutboundSendMode::Begin,
+                    streamed: false
+                },
+                Upload {
+                    body: Bytes::from_static(b"abc"),
+                    method: Method::POST,
+                    mode: OutboundSendMode::Send,
+                    streamed: true
+                },
+            ]
+        );
     }
 
     #[test]

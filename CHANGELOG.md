@@ -177,6 +177,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Validate cap timing against original slot termination rather than diagnostic HTTP delivery.
   Use conservative shared clock/epoch bounds, reject contradictory or insufficient evidence,
   and disclose the equal-rate assumption without changing production deadlines or qualification.
+- Add exact connect-setting, partial-range, facade-upload and same-client marker conformance
+  proofs using existing private clients. Bind seven complete core legs through the existing
+  grouped CI guard, preserving all provider legs, frozen source identities and qualification gates.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

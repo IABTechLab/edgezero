@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-11, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-6 core acceptance 15/17/22 and EZ-7 core acceptance 01/03 bind executable guarded commands; 474 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-11, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10, EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 467 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -3250,11 +3250,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-01-unit-core",
-      "sentinel": "ez_4_acceptance_01_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_01_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::redirect_tests::connect_timeout_round_trip_and_follow_preserve_the_aggregate_budget",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "Given a request with a 1 s connect timeout, when it goes through `into_parts` and `from_parts` and through a redirect-hop rebuild, then the connect timeout read back under EZ-4.11 is 1 s. A recording head-first client MUST also observe that setting through the prepared dispatch request without shortening its aggregate budget. Fastly and Spin mapping tests MUST observe the value passed to the provider timeout setter; Axum and Cloudflare retain their documented BestEffort acceptance.",
-      "artifact_path": "outbound/EZ-4/acceptance/01/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3933,11 +3933,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-5-acceptance-01-unit-core",
-      "sentinel": "ez_5_acceptance_01_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_5_acceptance_01_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::original_coding_retains_valid_compressed_bytes_and_representation_fields",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit.** Given gzip, deflate, and br fixtures that declare `Content-Length`, when they are delivered with the original coding and a decoded cap of 1 byte, then the bytes and both headers are unchanged and no cap error occurs.",
-      "artifact_path": "outbound/EZ-5/acceptance/01/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3965,11 +3965,14 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-5-acceptance-02-unit-core",
-      "sentinel": "ez_5_acceptance_02_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_5_acceptance_02_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::original_coding_declared_caps_fail_before_polling",
+      "additional_sentinels": [
+        "outbound::tests::original_coding_observed_caps_and_source_errors_are_preserved"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit.** Given the original coding is kept, when the declared length exceeds the encoded cap, then the request fails with the encoded-cap limit before the body is read. When the encoded bytes exceed the final cap in buffered mode, it fails with the final-cap limit (`ResponseLimitReason::BufferedBody` at F).",
-      "artifact_path": "outbound/EZ-5/acceptance/02/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3997,11 +4000,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-5-acceptance-03-unit-core",
-      "sentinel": "ez_5_acceptance_03_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_5_acceptance_03_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::original_coding_skips_decoder_but_keeps_transport_caps",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit.** Given a 206 with `Content-Encoding: gzip` and `Content-Range: bytes 10-19/100`, in decoding mode, then the response arrives undecoded with all three headers unchanged.",
-      "artifact_path": "outbound/EZ-5/acceptance/03/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4585,11 +4588,16 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-5-acceptance-10-unit-core",
-      "sentinel": "ez_5_acceptance_10_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_5_acceptance_10_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::original_identity_retains_declared_and_observed_decoded_caps",
+      "additional_sentinels": [
+        "outbound::tests::original_coding_retains_valid_compressed_bytes_and_representation_fields",
+        "outbound::tests::original_coding_declared_caps_fail_before_polling",
+        "outbound::tests::original_coding_observed_caps_and_source_errors_are_preserved"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit and each adapter's response-policy path.** An identity payload with decoded cap 10 and encoded/final caps 20 rejects `Content-Length: 11` before polling the source and rejects 11 observed bytes when no length is declared. Both decoding choices return `ResponseLimitReason::DecodedBody`. A 10-byte control succeeds under both choices. A gzip body kept in original mode remains exempt from the decoded cap, while its encoded and final caps still apply.",
-      "artifact_path": "outbound/EZ-5/acceptance/10/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7307,11 +7315,11 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-13-unit-core",
-      "sentinel": "ez_6_acceptance_13_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_13_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::dispatch::tests::facade_upload_rules_preserve_forwarded_begin_and_streamed_send",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "Upload rules. Unit and every adapter. Begin rejects a POST with a streamed body as an invalid request before sending. Begin accepts a bodiless GET built from an inbound request. `send` forwards a POST with a streamed body.",
-      "artifact_path": "outbound/EZ-6/acceptance/13/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9705,11 +9713,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-7-acceptance-02-unit-core",
-      "sentinel": "ez_7_acceptance_02_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_7_acceptance_02_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::client_marker_default_is_shared_by_send_begin_and_two_slot_batch",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit.** Given a client handle set to omit the marker, when the application sends one request with no override, one with an explicit \"on\", one begun request, and one two-slot batch, then only the explicit \"on\" request carries the marker.",
-      "artifact_path": "outbound/EZ-7/acceptance/02/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {

@@ -54,9 +54,10 @@ Keep three different status questions separate:
   criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
   readiness of that leg's declared command/sentinel, not overall feature implementation.
   EZ-23 local criteria 01-11 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
-  `ready`; the receipt/cutoff/cancellation and marker checkpoints activate EZ-6 core criteria
-  15/17/22 and EZ-7 core criteria 01/03: 37 legs, with 474 still
-  `planned`. G1/Q3 binding work remains unfinished, not evidence that 474 features are absent. Only the explicitly bound
+  `ready`; core policy, receipt/cutoff/cancellation and marker checkpoints activate EZ-4 core
+  criterion 01, EZ-5 core criteria 01/02/03/10, EZ-6 core criteria 13/15/17/22 and EZ-7 core
+  criteria 01/02/03: 44 legs, with 467 still
+  `planned`. G1/Q3 binding work remains unfinished, not evidence that 467 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -1141,6 +1142,67 @@ Read-only guest/source, timing, adapter ownership and verification reviews found
 defect in this checkpoint's changes. Full criteria 21/23, native SDK/poll witnesses, all required
 exact-candidate bindings, strict timing and hosted/consumer evidence remain open. No candidate
 freeze or qualification is supplied by this checkpoint.
+
+### Core Policy Conformance Binding Checkpoint (2026-10-29)
+
+Continue G1/Q3 with seven complete core legs, not another transport or an optional scripted-client
+implementation. Independent source/spec reviews find three already-complete coding legs and four
+small proof gaps. Add the missing assertions before binding; do not treat a validation-helper
+test as proof of actual facade dispatch.
+
+Reuse the existing redirect recording client for EZ-4 criterion 01. A literal one-second connect
+setting survives parts round-trip, public readback, plain Send and a two-dispatch Follow. The
+policy checks the rebuilt request and advances paired fake time by 500 ms. Each recorded request
+still has its full 15-second per-call budget and original 20-second absolute deadline. This proves
+carriage and that connect settings do not shorten aggregate budgets, not enforcement of a deadline
+that never governs this test. Provider setter mappings remain separate planned legs.
+
+Reuse the existing raw-coding matrix for EZ-5 criterion 03, retaining every four-byte control and
+adding gzip, ten invalid-gzip bytes, `Content-Range: bytes 10-19/100` and length ten under both
+decoding choices and response modes. Compare all three headers with the pre-normalization input;
+decoder allocation zero and decoded cap one cannot affect the partial payload. Bind already-complete
+criteria 01/02/10 to their full valid-codec, declared/observed encoded/final cap and identity-cap
+sentinel bundles. No metadata-change adoption or bodyless-matrix completion is inferred.
+
+For EZ-6 criterion 13, extend only the existing private settlement client's observability. Its
+bounded 64-byte drain records the original payload, method, mode and stream shape without holding
+a mutex across an await. Actual Begin refuses a streamed POST before source polling or transport
+entry. An unread inbound GET stays unread through conversion, then Begin certifies its empty
+payload; recording precedes pending-result collection. Actual Send delivers `abc` from the original
+three-chunk POST source, including an empty chunk. Exact poll, dispatch and upload counts prevent
+replacement or skipped-work false positives. The 64-byte fixture bound is not production-cap
+evidence. Keep every existing settlement/timer/source-error control.
+
+For EZ-7 criterion 02, use one existing MarkerClient-backed off-configured handle. Inherited Send,
+Begin and exactly two completed batch slots have no marker; only the explicit-on Send has `test`.
+The original mixed-marker matrix stays intact. Successful Begin probes use a direct readiness poll,
+not nested executor entry through a synchronous private fixture.
+
+The binding regression first fails on the planned core rows, then passes with exactly seven
+implementation/command/sentinel/artifact updates. Preserve all 255 criteria, 511 legs, source
+identities, expected text, applicability, conditions and approvals. There are now 44 ready / 467
+planned legs, still unqualified. All eight new unique sentinels join the same guarded core command:
+68 names discovered before one 299-test execution, with no CI job or command-list growth. The strict
+redirect namespace check covers its original 51 tests plus the new connect proof; it is not relaxed
+to permit arbitrary extras. All 52 Node regressions pass.
+
+Final verification passes all five root gates: formatting, strict workspace/all-targets/all-features
+Clippy, 2,572 tests in 32 binaries (one existing ignored), workspace feature compilation and the
+Spin target check. The checked-in demo passes 66 tests in nine binaries. Documentation lint,
+format and build, legacy/docs contract checks, manifest validation and diff checks pass. Independent
+spec, code-quality and binding/evidence reviews are clear. The previous `52719940` hosted CI run
+also completes without reported failures; it is not evidence for a new frozen candidate.
+
+This test-only checkpoint does not rerun or relabel the historical provider timing probes, SDK
+qualification, full provider feature matrices or ignored generated-workspace integration gate.
+Production interfaces, generator and demo code are unchanged; earlier generator verification is
+not presented as a fresh run. The existing strict runtime failures remain failures.
+
+No production API, implementer protocol, SDK/dependency pin, provider capability or runtime policy
+changes. The normative requirements and frozen interfaces remain unchanged. EZ-1's complete
+forwarding matrix, EZ-5 bodyless/conditional metadata cases, every affected provider leg, SDK/poll
+witnesses, strict runtime failures, candidate freeze and authorized hosted/consumer qualification
+remain open. No parent task or provider guarantee closes through these core bindings.
 
 ### Current Work Queue and Gates
 

@@ -1512,6 +1512,79 @@ fn prepared_requests_retain_all_unchanged_caps_and_options() {
 }
 
 #[test]
+fn connect_timeout_round_trip_and_follow_preserve_the_aggregate_budget() {
+    for following in [false, true] {
+        let mut steps = vec![Reply::bytes(StatusCode::OK, b"").step()];
+        if following {
+            steps.insert(
+                0,
+                Reply::bytes(StatusCode::FOUND, b"")
+                    .location("/next")
+                    .step(),
+            );
+        }
+        let fixture = Fixture::new(steps);
+        let deadline = Deadline::at_instant(fixture.time.at(20000));
+        let original = request(Method::GET)
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(15))
+            .deadline(deadline);
+        let parts = original.into_parts();
+        assert_eq!(parts.connect_timeout, Some(Duration::from_secs(1)));
+        let rebuilt = OutboundRequest::from_parts(parts).expect("round trip");
+        assert_eq!(
+            rebuilt.connect_timeout_setting(),
+            Some(Duration::from_secs(1))
+        );
+        if following {
+            let clock = fixture.time.clone();
+            success(block_on(fixture.client.follow(
+                rebuilt,
+                limit(2),
+                move |context| {
+                    assert_eq!(
+                        context
+                            .prepared_request()
+                            .expect("prepared hop")
+                            .connect_timeout_setting(),
+                        Some(Duration::from_secs(1))
+                    );
+                    clock.set(500);
+                    Ok::<_, ()>(OutboundRedirectAction::FollowPrepared)
+                },
+            )));
+        } else {
+            block_on(fixture.client.send(rebuilt)).expect("plain send");
+        }
+        let recording = fixture.state.borrow();
+        assert_eq!(recording.records.len(), if following { 2 } else { 1 });
+        for (record, entered_ms) in recording.records.iter().zip([0, 500]) {
+            assert_eq!(
+                record.mode,
+                if following {
+                    OutboundSendMode::Follow
+                } else {
+                    OutboundSendMode::Send
+                }
+            );
+            assert_eq!(record.entered_at, fixture.time.at(entered_ms));
+            assert_eq!(record.parts.connect_timeout, Some(Duration::from_secs(1)));
+            assert_eq!(record.parts.timeout, Some(Duration::from_secs(15)));
+            assert_eq!(
+                record.parts.deadline.expect("original deadline").instant(),
+                deadline.instant()
+            );
+            assert_eq!(record.budget.duration, Duration::from_secs(15));
+            assert_eq!(record.budget.cause, BudgetSource::PerCallTimeout);
+            assert_eq!(
+                record.budget.deadline.instant(),
+                record.entered_at + Duration::from_secs(15)
+            );
+        }
+    }
+}
+
+#[test]
 fn image_optimizer_options_survive_every_prepared_follow_hop() {
     let fixture = Fixture::new([
         Reply::bytes(StatusCode::FOUND, b"")

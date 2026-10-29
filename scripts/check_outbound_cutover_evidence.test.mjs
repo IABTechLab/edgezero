@@ -531,7 +531,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 474,
+    planned: 467,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -688,7 +688,7 @@ test("redirect core criteria bind every required test before one module executio
     checker
       .readySentinels(manifest, "unit/core")
       .filter((name) => name.startsWith("outbound::redirect_tests::")),
-    [...required],
+    ["outbound::redirect_tests::connect_timeout_round_trip_and_follow_preserve_the_aggregate_budget", ...required],
   );
 });
 
@@ -725,7 +725,7 @@ test("core batch and marker bindings guard exact tests without promoting adapter
   assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
   assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
   const selected = checker.readySentinels(manifest, "unit/core");
-  assert.equal(selected.length, 60);
+  assert.equal(selected.length, 68);
   for (const name of names) assert.ok(selected.includes(name));
   const bindings = [
     ["EZ-6/acceptance/15", [
@@ -763,6 +763,39 @@ test("core batch and marker bindings guard exact tests without promoting adapter
     "utf8",
   );
   assert.ok(workflow.includes(`run: >-\n          ${core.command}\n`));
+});
+
+test("core policy conformance binds complete proofs without promoting provider legs", () => {
+  const manifest = JSON.parse(readFileSync(new URL(
+    "../tests/fixtures/reusable-app/outbound-cutover-cases.json", import.meta.url,
+  ), "utf8"));
+  const bindings = [
+    ["EZ-4/acceptance/01", ["outbound::redirect_tests::connect_timeout_round_trip_and_follow_preserve_the_aggregate_budget"]],
+    ["EZ-5/acceptance/01", ["outbound::tests::original_coding_retains_valid_compressed_bytes_and_representation_fields"]],
+    ["EZ-5/acceptance/02", ["outbound::tests::original_coding_declared_caps_fail_before_polling", "outbound::tests::original_coding_observed_caps_and_source_errors_are_preserved"]],
+    ["EZ-5/acceptance/03", ["outbound::tests::original_coding_skips_decoder_but_keeps_transport_caps"]],
+    ["EZ-5/acceptance/10", ["outbound::tests::original_identity_retains_declared_and_observed_decoded_caps", "outbound::tests::original_coding_retains_valid_compressed_bytes_and_representation_fields", "outbound::tests::original_coding_declared_caps_fail_before_polling", "outbound::tests::original_coding_observed_caps_and_source_errors_are_preserved"]],
+    ["EZ-6/acceptance/13", ["outbound::dispatch::tests::facade_upload_rules_preserve_forwarded_begin_and_streamed_send"]],
+    ["EZ-7/acceptance/02", ["outbound::tests::client_marker_default_is_shared_by_send_begin_and_two_slot_batch"]],
+  ];
+  const command = "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
+  const selected = checker.readySentinels(manifest, "unit/core");
+  for (const [caseId, names] of bindings) {
+    const rows = manifest.cases.filter((row) => row.case_id === caseId);
+    const core = rows.find((row) => row.environment === "unit/core");
+    assert.ok(core, caseId);
+    assert.equal(core.implementation, "ready", caseId);
+    assert.equal(core.applicability, "blocking", caseId);
+    assert.equal(core.approval, null, caseId);
+    assert.equal(core.condition, null, caseId);
+    assert.equal(core.command, command, caseId);
+    assert.equal(core.artifact_path, "outbound/unit/core/raw.log", caseId);
+    assert.deepEqual([core.sentinel, ...(core.additional_sentinels ?? [])], names, caseId);
+    for (const name of names) assert.ok(selected.includes(name), name);
+    for (const row of rows.filter((row) => row !== core)) {
+      assert.equal(row.implementation, "planned", `${caseId}@${row.environment}`);
+    }
+  }
 });
 
 test("redirect runtime bindings retain exact output paths and leave unproved legs planned", () => {
@@ -829,13 +862,15 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 37);
+  assert.equal(ready.length, 44);
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
-        (c.environment === "unit/core" && ["EZ-6/acceptance/15", "EZ-6/acceptance/17", "EZ-6/acceptance/22",
-          "EZ-7/acceptance/01", "EZ-7/acceptance/03"].includes(c.case_id)) ||
+        (c.environment === "unit/core" && ["EZ-4/acceptance/01", "EZ-5/acceptance/01",
+          "EZ-5/acceptance/02", "EZ-5/acceptance/03", "EZ-5/acceptance/10",
+          "EZ-6/acceptance/13", "EZ-6/acceptance/15", "EZ-6/acceptance/17", "EZ-6/acceptance/22",
+          "EZ-7/acceptance/01", "EZ-7/acceptance/02", "EZ-7/acceptance/03"].includes(c.case_id)) ||
         (c.case_id.startsWith("EZ-23/acceptance/") &&
           Number(c.case_id.split("/").at(-1)) <= 11),
     ),

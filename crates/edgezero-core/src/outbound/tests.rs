@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::future::Future as _;
 use std::io::{Error as IoError, ErrorKind, Write as _};
+use std::iter::once;
 use std::mem::take;
 use std::num::NonZeroU64;
 use std::rc::Rc;
@@ -428,6 +429,43 @@ fn proxy_marker_client_resolves_overrides_for_supplied_send_and_batch() {
 }
 
 #[test]
+fn client_marker_default_is_shared_by_send_begin_and_two_slot_batch() {
+    let client = HttpClient::with_client(MarkerClient).with_proxy_marker(false);
+    let inherited = || {
+        let request = OutboundRequest::get("https://example.com").expect("request");
+        assert_eq!(request.proxy_marker_setting(), OutboundProxyMarker::Inherit);
+        request
+    };
+    let response = block_on(client.send(inherited())).expect("inherited send");
+    assert!(!response.headers().contains_key(PROXY_HEADER));
+    let response = block_on(client.send(inherited().proxy_marker(OutboundProxyMarker::On)))
+        .expect("explicit override");
+    assert_eq!(response.headers()[PROXY_HEADER], "test");
+    assert!(!client.proxy_marker_enabled());
+    let pending = client
+        .begin(inherited())
+        .now_or_never()
+        .expect("ready begin")
+        .expect("begun response");
+    let response = block_on(pending.collect()).expect("inherited begin");
+    assert!(!response.headers().contains_key(PROXY_HEADER));
+    let batch = block_on(client.send_all_until(
+        vec![inherited(), inherited()],
+        Deadline::after(Duration::from_secs(1)),
+    ))
+    .expect("two inherited slots");
+    assert_eq!(batch.termination(), OutboundBatchTermination::Completed);
+    assert_eq!(batch.slots().len(), 2);
+    for slot in batch.into_parts().0 {
+        let OutboundCollectedSlot::Resolved(result) = slot else {
+            panic!("resolved slot");
+        };
+        let response = result.outcome.expect("inherited slot");
+        assert!(!response.headers().contains_key(PROXY_HEADER));
+    }
+}
+
+#[test]
 fn proxy_marker_inspector_neither_validates_nor_polls_body() {
     let polls = Rc::new(Cell::new(0_usize));
     let counted = Rc::clone(&polls);
@@ -800,9 +838,14 @@ fn response_decoding_request_option_round_trips() {
 
 #[test]
 fn original_coding_skips_decoder_but_keeps_transport_caps() {
-    for coding in ["gzip", "deflate", "br", "unknown", "gzip, br", "gzip;"] {
+    for (coding, payload, range) in ["gzip", "deflate", "br", "unknown", "gzip, br", "gzip;"]
+        .into_iter()
+        .map(|coding| (coding, b"raw!".as_slice(), "bytes 0-3/8"))
+        .chain(once(("gzip", b"0123456789".as_slice(), "bytes 10-19/100")))
+    {
+        let length = u64::try_from(payload.len()).expect("small fixture");
         for response_mode in [
-            ResponseMode::Buffered { max_bytes: 4 },
+            ResponseMode::Buffered { max_bytes: length },
             ResponseMode::Streamed,
         ] {
             for (choice, status) in [
@@ -812,14 +855,19 @@ fn original_coding_skips_decoder_but_keeps_transport_caps() {
             ] {
                 let mut headers = HeaderMap::new();
                 headers.insert("content-encoding", HeaderValue::from_static(coding));
-                headers.insert("content-length", HeaderValue::from_static("4"));
-                headers.insert("content-range", HeaderValue::from_static("bytes 0-3/8"));
+                headers.insert(
+                    "content-length",
+                    HeaderValue::from_str(&length.to_string()).expect("length"),
+                );
+                headers.insert("content-range", HeaderValue::from_static(range));
                 let original = headers.clone();
-                let source = stream::iter([Ok(Bytes::from_static(b"raw!"))]).boxed_local();
+                normalize_response_headers(&Method::GET, status, &mut headers)
+                    .expect("normalization");
+                let source = stream::iter([Ok(Bytes::from_static(payload))]).boxed_local();
                 let policy = ResponseBodyPolicy {
                     max_decoded_response_bytes: Some(1),
                     max_decoder_bytes: 0,
-                    max_encoded_response_bytes: Some(4),
+                    max_encoded_response_bytes: Some(length),
                     max_chunk_bytes: NonZeroU64::new(2),
                     response_decoding: choice,
                     response_mode,
@@ -836,7 +884,7 @@ fn original_coding_skips_decoder_but_keeps_transport_caps() {
                     assert!(chunk.len() <= 2);
                     bytes.extend_from_slice(&chunk);
                 }
-                assert_eq!(bytes, b"raw!");
+                assert_eq!(bytes, payload);
             }
         }
     }
