@@ -22,11 +22,67 @@ pub fn take_client_events() -> Vec<Value> {
     std::mem::take(&mut *CLIENT_EVENTS.lock().unwrap())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseInterruption {
+    PrematureEof,
+    PeerClosed,
+    ReadIo(std::io::ErrorKind),
+    InvalidFraming,
+    CaptureLimit,
+    ObserverRejected,
+    MissingPrefix,
+}
+
+#[derive(Debug)]
+struct CaptureFault {
+    cause: ResponseInterruption,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl std::fmt::Display for CaptureFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+impl std::error::Error for CaptureFault {}
+
+fn capture_require(valid: bool, cause: ResponseInterruption, message: &'static str) -> Result<()> {
+    if valid {
+        Ok(())
+    } else {
+        Err(Box::new(CaptureFault {
+            cause,
+            source: message.into(),
+        }))
+    }
+}
+
+fn interruption_cause(error: &(dyn std::error::Error + 'static)) -> ResponseInterruption {
+    if let Some(fault) = error.downcast_ref::<CaptureFault>() {
+        return fault.cause;
+    }
+    match error
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind)
+    {
+        Some(std::io::ErrorKind::UnexpectedEof) => ResponseInterruption::PrematureEof,
+        Some(
+            std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe,
+        ) => ResponseInterruption::PeerClosed,
+        Some(kind) => ResponseInterruption::ReadIo(kind),
+        None => ResponseInterruption::InvalidFraming,
+    }
+}
+
 #[derive(Debug)]
 pub struct InterruptedResponse {
     pub status: u16,
+    pub headers: Vec<Value>,
     pub body: Vec<u8>,
     pub reason: String,
+    pub cause: ResponseInterruption,
 }
 impl std::fmt::Display for InterruptedResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -556,14 +612,24 @@ impl BodyObservation<'_> {
             .0
             .is_some_and(|observer| bytes.len() >= observer.bytes())
         {
-            self.0.take().unwrap().notify(status, headers, bytes)?;
+            self.0
+                .take()
+                .unwrap()
+                .notify(status, headers, bytes)
+                .map_err(|source| {
+                    Box::new(CaptureFault {
+                        cause: ResponseInterruption::ObserverRejected,
+                        source,
+                    }) as Box<dyn std::error::Error + Send + Sync>
+                })?;
         }
         Ok(())
     }
 
     fn finish(&self) -> Result<()> {
-        require(
+        capture_require(
             !matches!(self.0, Some(BodyObserver::Prefix(_))),
+            ResponseInterruption::MissingPrefix,
             "response ended before observed prefix",
         )
     }
@@ -738,8 +804,9 @@ fn request_with_framing(
     };
     let outcome = (|| -> Result<()> {
         let mut read_part = |reader: &mut BufReader<TcpStream>, count: usize| -> Result<()> {
-            require(
+            capture_require(
                 count <= capture_limit.saturating_sub(bytes.len()),
+                ResponseInterruption::CaptureLimit,
                 "response exceeds fixture capture limit",
             )?;
             if count == 0 {
@@ -757,7 +824,11 @@ fn request_with_framing(
             while remaining > 0 {
                 let size = observation.read_limit(bytes.len(), remaining.min(buffer.len()));
                 let read = reader.read(&mut buffer[..size])?;
-                require(read > 0, "truncated HTTP body")?;
+                capture_require(
+                    read > 0,
+                    ResponseInterruption::PrematureEof,
+                    "truncated HTTP body",
+                )?;
                 bytes.extend_from_slice(&buffer[..read]);
                 remaining -= read;
                 observation.observe(status, &headers, &bytes)?;
@@ -767,12 +838,22 @@ fn request_with_framing(
         if chunked {
             loop {
                 line.clear();
-                require(reader.read_line(&mut line)? > 0, "truncated chunk header")?;
+                capture_require(
+                    reader.read_line(&mut line)? > 0,
+                    ResponseInterruption::PrematureEof,
+                    "truncated chunk header",
+                )?;
+                require(line.ends_with("\r\n"), "invalid chunk header terminator")?;
                 let count = usize::from_str_radix(line.trim().split(';').next().unwrap_or(""), 16)?;
                 if count == 0 {
                     loop {
                         line.clear();
-                        require(reader.read_line(&mut line)? > 0, "truncated chunk trailer")?;
+                        capture_require(
+                            reader.read_line(&mut line)? > 0,
+                            ResponseInterruption::PrematureEof,
+                            "truncated chunk trailer",
+                        )?;
+                        require(line.ends_with("\r\n"), "invalid chunk trailer terminator")?;
                         if line == "\r\n" {
                             break;
                         }
@@ -780,9 +861,11 @@ fn request_with_framing(
                     break;
                 }
                 read_part(&mut reader, count)?;
-                let mut crlf = [0; 2];
-                reader.read_exact(&mut crlf)?;
-                require(crlf == *b"\r\n", "invalid chunk terminator")?;
+                for expected in *b"\r\n" {
+                    let mut byte = [0];
+                    reader.read_exact(&mut byte)?;
+                    require(byte[0] == expected, "invalid chunk terminator")?;
+                }
             }
         } else if let Some(length) = length {
             read_part(&mut reader, length)?;
@@ -803,8 +886,9 @@ fn request_with_framing(
                     if read == 0 {
                         break;
                     }
-                    require(
+                    capture_require(
                         read <= capture_limit.saturating_sub(bytes.len()),
+                        ResponseInterruption::CaptureLimit,
                         "response exceeds fixture capture limit",
                     )?;
                     bytes.extend_from_slice(&buffer[..read]);
@@ -817,8 +901,10 @@ fn request_with_framing(
     if let Err(error) = outcome {
         return Err(Box::new(InterruptedResponse {
             status,
+            headers,
             body: bytes,
             reason: error.to_string(),
+            cause: interruption_cause(error.as_ref()),
         }));
     }
     let mut event = json!({"event":"client_completed","token":token,"status":status,"headers":headers,"header_ns":header_ns,"first_byte_ns":first_byte_ns.unwrap_or(header_ns),"complete_ns":start.elapsed().as_nanos() as u64});
@@ -1089,6 +1175,7 @@ mod tests {
         let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
         assert_eq!(partial.body, b"abc");
         assert_eq!(partial.reason, "rejected prefix");
+        assert_eq!(partial.cause, ResponseInterruption::ObserverRejected);
         assert_eq!(observed.get(), 1);
     }
 
@@ -1196,6 +1283,7 @@ mod tests {
                     let error = result.unwrap_err();
                     let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
                     assert!(partial.reason.contains("capture limit"));
+                    assert_eq!(partial.cause, ResponseInterruption::CaptureLimit);
                     assert!(partial.body.len() <= 65_536);
                 }
             }
@@ -1331,6 +1419,72 @@ mod tests {
             let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
             assert_eq!(partial.status, 200);
             assert_eq!(partial.body, b"abc");
+        }
+    }
+
+    #[test]
+    fn interrupted_response_distinguishes_peer_end_from_framing_and_read_timeouts() {
+        for (wire, expected) in [
+            (
+                "Content-Length: 5\r\n\r\nabc",
+                ResponseInterruption::PrematureEof,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n",
+                ResponseInterruption::PrematureEof,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\nz\r\n",
+                ResponseInterruption::InvalidFraming,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n3\r\nabcX",
+                ResponseInterruption::InvalidFraming,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r",
+                ResponseInterruption::PrematureEof,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n3\nabc\r\n",
+                ResponseInterruption::InvalidFraming,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nx\n",
+                ResponseInterruption::InvalidFraming,
+            ),
+        ] {
+            let error = binary_reply(
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{wire}").into_bytes(),
+            )
+            .unwrap_err();
+            let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
+            assert_eq!(partial.cause, expected);
+            assert!(
+                partial
+                    .headers
+                    .contains(&json!(["Content-Type", "application/json"]))
+            );
+        }
+        for (kind, expected) in [
+            (
+                std::io::ErrorKind::UnexpectedEof,
+                ResponseInterruption::PrematureEof,
+            ),
+            (
+                std::io::ErrorKind::ConnectionReset,
+                ResponseInterruption::PeerClosed,
+            ),
+            (
+                std::io::ErrorKind::TimedOut,
+                ResponseInterruption::ReadIo(std::io::ErrorKind::TimedOut),
+            ),
+            (
+                std::io::ErrorKind::WouldBlock,
+                ResponseInterruption::ReadIo(std::io::ErrorKind::WouldBlock),
+            ),
+        ] {
+            assert_eq!(interruption_cause(&std::io::Error::from(kind)), expected);
         }
     }
 

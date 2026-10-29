@@ -69,7 +69,7 @@ impl Case {
             Self::Handoff => matches!(role, "origin" | "a" | "b" | "c"),
             Self::Cleanup => matches!(
                 role,
-                "origin" | "a" | "b" | "c" | "callback" | "ready" | "post"
+                "origin" | "a" | "b" | "c" | "callback" | "ready" | "post" | "ack"
             ),
         }
     }
@@ -91,12 +91,37 @@ pub(super) struct Lifetime {
     active: usize,
     events: Vec<Value>,
     released: bool,
+    acknowledged: bool,
 }
 
 impl Lifetime {
     pub(super) fn undrained(&self) -> usize {
         self.events.len()
     }
+}
+
+pub(super) fn acknowledge(shared: &Shared, token: &str, observed: Instant) -> Result<()> {
+    let mut state = shared.lock();
+    require(!state.stop, "cleanup origin stopped")?;
+    let lifetime = state
+        .lifetimes
+        .get_mut(token)
+        .ok_or("unknown lifetime token")?;
+    require(
+        matches!(lifetime.case, Case::Cleanup) && !lifetime.released && !lifetime.acknowledged,
+        "invalid cleanup acknowledgment state",
+    )?;
+    let anchor = lifetime.anchor.ok_or("lifetime not started")?;
+    let now = Instant::now();
+    require(
+        (anchor..=now).contains(&observed) && lifetime.events.len() < EVENT_LIMIT,
+        "invalid cleanup prefix boundary",
+    )?;
+    lifetime.events.push(json!({"op":"prefix-acknowledged","role":"control","case":lifetime.case.name(),"token":token,
+        "at_us":offset(now,anchor),"prefix_observed_us":offset(observed,anchor)}));
+    lifetime.acknowledged = true;
+    shared.wake.notify_all();
+    Ok(())
 }
 
 pub(super) fn register(shared: &Shared, token: &str, case: &str) -> Result<()> {
@@ -130,6 +155,7 @@ pub(super) fn register(shared: &Shared, token: &str, case: &str) -> Result<()> {
             active: 0,
             events: Vec::new(),
             released: false,
+            acknowledged: false,
         },
     );
     Ok(())
@@ -677,15 +703,19 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         record(shared, exchange, event)?;
         return Ok(true);
     }
-    if matches!(exchange.case, Case::Cleanup) && exchange.role == "ready" {
+    if matches!(exchange.case, Case::Cleanup) && matches!(exchange.role, "ready" | "ack") {
         shared.wait(GATE_BUDGET, |state| {
             state.stop
-                || state.lifetimes[exchange.token]
-                    .events
-                    .iter()
-                    .filter(|event| event["op"] == "waiting")
-                    .count()
-                    == 5
+                || if exchange.role == "ack" {
+                    state.lifetimes[exchange.token].acknowledged
+                } else {
+                    state.lifetimes[exchange.token]
+                        .events
+                        .iter()
+                        .filter(|event| event["op"] == "waiting")
+                        .count()
+                        == 5
+                }
         })?;
         require(!shared.lock().stop, "cleanup barrier stopped")?;
         let started = Instant::now();
@@ -845,6 +875,65 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_prefix_acknowledgment_is_distinct_from_original_work_release() {
+        let origins = WireOrigins::start().unwrap();
+        origins
+            .register_lifetime("ack", "response-cleanup")
+            .unwrap();
+        origins.mark_lifetime_start("ack").unwrap();
+        let pending = ["origin", "a", "b", "c", "callback"]
+            .map(|role| connect(&origins, "ack", "response-cleanup", role, "0"));
+        assert!(
+            read(connect(&origins, "ack", "response-cleanup", "ready", "0"))
+                .starts_with(b"HTTP/1.1 204")
+        );
+        origins
+            .acknowledge_cleanup_prefix("ack", Instant::now())
+            .unwrap();
+        assert!(
+            origins
+                .acknowledge_cleanup_prefix("ack", Instant::now())
+                .is_err()
+        );
+        assert!(
+            read(connect(&origins, "ack", "response-cleanup", "ack", "0"))
+                .starts_with(b"HTTP/1.1 204")
+        );
+        for socket in &pending {
+            socket
+                .set_read_timeout(Some(Duration::from_millis(10)))
+                .unwrap();
+            assert!(
+                matches!(socket.peek(&mut [0]),Err(e) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut))
+            );
+            socket.set_read_timeout(Some(IO_BUDGET)).unwrap();
+        }
+        origins.release_lifetime("ack", Instant::now()).unwrap();
+        for socket in pending {
+            read(socket);
+        }
+        read(connect(&origins, "ack", "response-cleanup", "post", "0"));
+        let events = origins.take_lifetime_events("ack").unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 29);
+        let ack = event(&events, "control", "prefix-acknowledged");
+        assert!(
+            event(&events, "ack", "head")["write_started_us"]
+                .as_u64()
+                .unwrap()
+                >= ack["at_us"].as_u64().unwrap()
+        );
+        assert!(
+            event(&events, "callback", "head")["write_started_us"]
+                .as_u64()
+                .unwrap()
+                >= event(&events, "control", "release")["at_us"]
+                    .as_u64()
+                    .unwrap()
+        );
+        origins.finish().unwrap();
+    }
 
     #[test]
     fn cleanup_source_barrier_precedes_egress_and_only_callback_work_can_complete() {

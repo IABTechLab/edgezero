@@ -932,6 +932,80 @@ adapter units and observable disconnect/deadline/source/cancellation runtime pat
 wrapper sequences in criterion 23, native body-entry witnesses, strict timing closure, candidate
 freeze and authorized hosted/consumer qualification remain open. This does not close D6.
 
+### D6 Response Cleanup Failure Checkpoint (2026-10-29)
+
+Extend the existing Fastly cleanup helper, not its production delivery or client APIs. One
+validated private header selects normal completion, intentional source failure or a real
+one-second egress-start-relative write deadline. All retain the original response-owned Begin
+and three-slot batch outside the body; their three-second logical budgets are never renewed.
+Keep the original callback-owned exchange pending through terminal egress, then require its K
+payload and a fresh same-client P exchange before callback return closes that scope.
+
+Failure bodies first emit an exact canonical JSON prefix, bounded to 512 bytes including newline.
+Only a native observer that validates the response head and complete prefix may acknowledge the
+new prefix gate. A bounded same-client ACK Send waits on that gate; acknowledgment never releases
+the original sources. The source case then emits a real error and records its intentional branch.
+The deadline case actually polls the retained original batch to Pending until the response timer
+wins. Canonical delivery must be routed and committed, with the matching typed outcome/error,
+exact accepted prefix byte count, application body, no fallback/framing failures and one report.
+Require application/internal source categorization only for SourceError; require no source failure,
+elapsed at least one second and a still-live original batch cutoff for DeadlineExceeded.
+
+The shared native reader now carries a typed interruption origin and moves its existing head/body
+into partial-response evidence. Premature EOF or recognized peer closure after the exact prefix
+is required for both failed-delivery cases. Reader timeouts, invalid framing, capture overflow,
+observer rejection, missing prefixes and complete HTTP success cannot substitute. Chunk-header
+and trailer CRLF and each data-delimiter byte are validated before accepting an interrupted read.
+The original source gate opens only after this wire evidence and the canonical `cleaned` record
+validate. Normal delivery remains a complete-response case. Both failures require callback and
+post-delivery success just as normal completion does.
+
+One cursor spans all three cases under the unchanged total 1 MiB log ceiling. Advance only through
+validated complete lines, retain partial lines, track observed-length high water and reject
+shrinkage even above the consumed offset. After the shared runner stops and joins the runtime,
+check the final tail for late protocol records/fragments and overflow, including when a primary
+case failed. Record tail errors separately without hiding the primary suite failure. Three review
+regressions first failed: malformed partial chunk delimiters appeared as EOF, unconsumed-tail
+truncation was undetected, and final-case late records escaped validation. Focused negatives and
+the full harness now pass; separate tail baselines and exact error assertions prevent one failure
+mode from masking another. The normal source still has 25 events; failures add three ACK events
+and one acknowledgment, for 29. One native boundary makes 26/30, within the unchanged 32-event,
+eight-active/128-cumulative connection bounds. Fixture release still closes the four body-owned
+source sockets; none of this counts SDK drops or certifies host cancellation.
+
+Final serial local artifacts are `/private/tmp/edgezero-cleanup-faults-reviewed-{axum,fastly,spin,cloudflare}`.
+All three Fastly cleanup cases pass on repaired Viceroy 0.21.0, with both failed responses ending
+in typed premature EOF after the exact prefix and the post-shutdown log-tail check passing.
+The asynchronous handoff case still passes on Axum, Spin 4.1.0 and workerd. All full suites remain
+exit 1, with every failure retained rather than waived:
+
+| Runtime | Cases Passed | Remaining Strict Failures |
+| --- | --- | --- |
+| Axum | 7/10 | Fourth-slot origin head 726.755 ms; fast origin head 126.828 ms; CPU B-write interval 533.363..535.854 ms. |
+| Repaired Viceroy | 11/12 | Slow-origin head 708.790 ms. |
+| Spin | 8/10 | Slow-origin head 712.909 ms; CPU B-write interval 533.715..536.344 ms. |
+| workerd | 7/10 | Slow-origin head 714 ms; bidder A head in the fourth-slot case at 187.157 ms against 182.119 +/- 5 ms; CPU batch start misses 34 ms. |
+
+The initial `/private/tmp/edgezero-cleanup-faults-fastly-1` run also passed all three cleanup cases
+and failed slow-origin head at 706.043 ms. Preserve that earlier failure. Final runtime checks
+used the reviewed reader/cursor and ran serially without competing compilation. No hosted run
+or deployment occurred. Source cadence, guest timing and qualification thresholds are unchanged.
+
+All five standard root gates pass, with `--offline --locked` on Rust compilation/test commands:
+root formatting, strict all-feature/all-target Clippy, workspace tests, all-adapter feature check,
+and Spin WASIp2 check. Workspace tests pass 2,568 tests across 32 binaries with one existing
+ignored test. The first sandboxed workspace run failed solely on denied local TCP listeners;
+the socket-enabled rerun passes. The final harness passes 275 tests with one ignored;
+fixture-core passes 55 and the native guest mode-parser test passes one. Strict harness,
+fixture-core and all four actual-target entrypoint Clippy checks pass. Standalone formatting,
+docs lint/format, legacy/docs/inventory guards, 51 Node guard regressions, shared dependency pins
+and decoder/map audits pass. Native protocol/source
+and guest/ownership reviews preserve the scope above. D6 and full criterion 21 remain open for
+the other adapter failure paths, observable disconnect/cancellation, actual SDK resource/poll
+witnesses, both Fastly wrappers in criterion 23, native pending-body witnesses and strict timing.
+G1 stays 33 ready / 478 planned across 255 criteria / 511 legs, unqualified. No frozen requirement,
+capability, SDK/runtime pin, production implementation, demo or generator change is needed.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

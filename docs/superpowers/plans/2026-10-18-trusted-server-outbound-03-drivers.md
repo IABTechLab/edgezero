@@ -514,6 +514,17 @@ Remaining criterion 21 adapter/runtime failure paths, actual SDK resource/poll w
 both-wrapper criterion 23 remain open. See the master checkpoint and fixture README for exact
 local runs, bounded protocol and explicit fixture-close limitations. No inventory leg is promoted.
 
+The [response-cleanup failure checkpoint](2026-10-18-trusted-server-outbound-implementation.md#d6-response-cleanup-failure-checkpoint-2026-10-29)
+extends that same helper with a real source error and
+a one-second egress deadline while the original three-second batch is pending. A validated client
+prefix opens only a separate ACK gate; the original source remains blocked until exact typed
+terminal evidence and interrupted wire delivery validate. Retained body handles fail as closed,
+while the original callback sibling and fresh same-client work succeed. Three bounded protocol
+records per case, one total-log cursor, observed-length shrink rejection, a post-shutdown tail check
+and typed framing/reader failures prevent false-positive evidence. No public API, SDK/runtime pin
+or requirement changes. These local cases do not close disconnect/cancellation detection, actual
+SDK drops, both wrappers, strict timing or hosted qualification. G1 readiness stays unchanged.
+
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
 `runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.
 

@@ -155,6 +155,13 @@ their scope when introduced; the current summary supersedes their then-pending A
   wrappers drop and prevent further producer polls. Fix a test-only accept-readiness assumption
   with bounded retries, preserving readiness, drain and peer assertions. Adapter failure paths,
   SDK teardown, strict timing and hosted qualification remain separate; no production API changes.
+- Extend that same Fastly cleanup helper with an intentional response source error and a real
+  write deadline while its original batch remains pending. Validate the exact client prefix,
+  peer interruption, matching canonical terminal report and subsequent callback/fresh same-client
+  success. Keep prefix acknowledgment separate from original source release. Reject reader and
+  framing errors as interruption evidence; bound all three cases with one log cursor, observed-length
+  checks and a post-shutdown tail check. Fixture socket closure is not host cancellation or SDK
+  release certification. No production API, runtime pin, capability or timing relaxation.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

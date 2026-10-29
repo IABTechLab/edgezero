@@ -15,21 +15,26 @@ const CASES: [&str; 9] = [
 ];
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
-    let count = wire::progress_suite(
+    let log = run.join(format!("{name}-outbound-lifetimes.log"));
+    let mut cursor = cleanup::LogCursor::default();
+    let outcome = wire::progress_suite(
         name,
         "outbound-lifetimes",
         run,
         records,
-        |port, origins, records| {
-            checks(
-                name,
-                port,
-                origins,
-                &run.join(format!("{name}-outbound-lifetimes.log")),
-                records,
-            )
-        },
-    )?;
+        |port, origins, records| checks(name, port, origins, &log, &mut cursor, records),
+    );
+    // The shared runner has now stopped and joined the runtime, including on case failure.
+    let tail = if name == "fastly" && log.exists() {
+        let result = cleanup::finish(&log, &cursor);
+        records.push(json!({"event":"cleanup-log-tail","adapter":name,"status":if result.is_ok(){"pass"}else{"fail"},
+            "error":result.as_ref().err().map(ToString::to_string),"qualification":false}))?;
+        result
+    } else {
+        Ok(())
+    };
+    let count = outcome?;
+    tail?;
     if let Some(count) = count {
         records.push(json!({"event":"lifetime-inventory","adapter":name,
             "status":"pass","cases":count,"qualification":false}))?;
@@ -42,6 +47,7 @@ fn checks(
     port: u16,
     origins: &WireOrigins,
     log: &Path,
+    cursor: &mut cleanup::LogCursor,
     records: &mut Records,
 ) -> Result<usize> {
     let mut failures = Vec::new();
@@ -161,9 +167,11 @@ fn checks(
         }
     }
     if adapter == "fastly" {
-        executed += 1;
-        if let Err(error) = cleanup::check(port, origins, log, records) {
-            failures.push(format!("response-cleanup: {error}"));
+        for mode in cleanup::CASES {
+            executed += 1;
+            if let Err(error) = cleanup::check(mode, port, origins, log, cursor, records) {
+                failures.push(format!("{}: {error}", mode.name()));
+            }
         }
     }
     require(failures.is_empty(), failures.join("; "))?;

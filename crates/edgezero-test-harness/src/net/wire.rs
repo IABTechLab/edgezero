@@ -152,6 +152,10 @@ impl WireOrigins {
         lifetimes::release(&self.shared, token, observed)
     }
 
+    pub fn acknowledge_cleanup_prefix(&self, token: &str, observed: Instant) -> Result<()> {
+        lifetimes::acknowledge(&self.shared, token, observed)
+    }
+
     pub fn arm(&self, name: &str) {
         let mut state = self.shared.lock();
         if name.is_empty()

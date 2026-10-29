@@ -951,32 +951,52 @@ resource retention, single consumption and exactly-once terminal family release.
 Fastly records this criterion as inapplicable and still runs all original nine cases. The suite
 does not yet implement the remaining cleanup and reusable-sandbox acceptance scenarios.
 
-Fastly adds `response-cleanup` for the normal-completion isolation part of EZ-6 criterion 21.
+Fastly adds three cleanup cases for the local isolation part of EZ-6 criterion 21:
+`response-cleanup`, `response-cleanup-source-error`, and `response-cleanup-write-deadline`.
+All use the existing cleanup route and helper; a required private `x-fixture-cleanup-mode`
+header selects exactly `complete`, `source-error`, or `write-deadline` without a compatibility
+default. Fastly runs twelve cases; the other adapters retain ten including response handoff.
 One real client starts a callback-owned begun request before a response-owned Begin and original
 three-slot batch. Public handles remain outside the streamed response while canonical egress
 completes. A sixth, bounded same-client `ready` Send returns only after the source has observed
 all five original requests waiting; it is a causal setup barrier, not an application workaround.
-The native client then validates the complete response and a canonical `cleaned` terminal record
-before releasing the source. The body scope is closed, its retained handles return typed scope
-errors, and the callback sibling remains pending. That original sibling subsequently returns K,
-the same client sends fresh post-delivery work returning P, and callback return closes its scope.
+The native client validates the canonical JSON prefix and response head. Failure cases acknowledge
+only a separate prefix gate, leaving all original work pending. A bounded same-client `ack` Send
+then lets the body produce an intentional source error, or genuinely poll the retained original
+batch to Pending under a one-second egress-start-relative write deadline. The original batch
+cutoff and per-request timeouts remain three seconds without renewal. The guest requires the
+matching typed terminal error/outcome, exact accepted prefix bytes, one report, no framing/fallback
+failure, and the intentional source-error or actual pending-poll witness. The deadline case must
+finish before the original batch cutoff. ACK failures cannot satisfy the source-error witness.
+
+Normal delivery must complete; failure cases require premature EOF or recognized peer closure
+after the exact prefix. Reader timeouts, malformed framing, capture overflow, rejected observations,
+missing prefixes and ordinary successful HTTP completion cannot stand in for failed delivery.
+Only validated wire termination plus the canonical `cleaned` terminal record opens the original
+source gate. The body scope is closed, its retained handles return typed scope errors, and the
+callback sibling remains pending. That sibling subsequently returns K, the same client sends
+fresh post-delivery work returning P, and callback return closes its scope.
 
 The private fixture protocol uses three ordered, newline-terminated records: `cleaned`,
 `continued`, `returned`. Records are at most 2048 bytes, and the native log reader is capped at
-1 MiB. Wrong/duplicate/foreign records and trailing protocol fragments fail validation; no
-silently skipped malformed JSON can open the source gate. Seven source roles produce 25 events
-plus one native response/terminal-observation boundary, within the existing limits. Native
+1 MiB across all cases, not per case. One cursor retains partial lines and rejects observed log
+shrinkage, including truncation above its consumed offset. A bounded final-tail check after runtime
+shutdown catches late duplicate/foreign records, fragments and overflow from the last case.
+Wrong/reordered records cannot open the source gate. Seven normal-case roles produce 25 events;
+the failure cases add the eighth ACK role and its separate acknowledgment for 29 events. Each has
+one additional native response/terminal-observation boundary, below the unchanged 32-event,
+eight-active and 128-cumulative connection limits. Native
 write-start timestamps prove the successful callback and post-delivery replies follow release.
 The four body-owned source sockets close by explicit fixture release; this is not observed host
-cancellation. Each per-request timeout and the batch observation interval remain three seconds,
-without renewal.
+cancellation or a count of SDK resource drops.
 
 A companion actual-route unit keeps four gated resource owners and the response attempt/body
 alive across injected terminal outcomes, proving immediate release, receiver cancellation,
 frozen producer polls and exactly one report before later wrapper drops. Attempt drop has its
 own `TransportError` row. These are core terminal-injection and mock-owner proofs, not evidence
-that an adapter detects disconnect, deadline, source failure or explicit cancellation, or that
-SDK/host teardown is certified. Full criterion 21, criterion 23 and hosted qualification remain
+that an adapter detects disconnect or explicit cancellation, or that SDK/host teardown is certified.
+The local Fastly source/deadline cases add adapter evidence, not hosted qualification. Full
+criterion 21, criterion 23 and hosted qualification remain
 open. No production API, executor, transport or runtime pin changes.
 
 The caps source uses the pinned native harness encoder, not a new guest dependency. Eight
