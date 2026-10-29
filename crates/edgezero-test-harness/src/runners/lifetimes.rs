@@ -1,7 +1,7 @@
 use super::*;
 use crate::net::WireOrigins;
 
-const CASES: [&str; 8] = [
+const CASES: [&str; 9] = [
     "slow-origin",
     "timeout-before-cutoff",
     "fast-origin",
@@ -10,6 +10,7 @@ const CASES: [&str; 8] = [
     "pending-head-cutoff",
     "pending-body-cutoff",
     "cpu-stretch",
+    "caps-while-waiting",
 ];
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
@@ -30,7 +31,7 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
             "http://127.0.0.1:{}/lifetimes/{token}/{case}",
             origins.port(0)
         );
-        origins.mark_lifetime_start(&token)?;
+        let source_anchor = origins.mark_lifetime_start(&token)?;
         let reply = net::header_request(
             port,
             &format!("/progress/lifetimes/{case}"),
@@ -43,7 +44,18 @@ fn checks(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<usi
         } else {
             Ok(())
         };
-        let origin = origins.take_lifetime_events(&token)?;
+        let mut origin = origins.take_lifetime_events(&token)?;
+        if case == "caps-while-waiting" {
+            let returned = response_returned
+                .checked_duration_since(source_anchor)
+                .ok_or("invalid response-return clock")?;
+            origin
+                .as_array_mut()
+                .ok_or("missing source events")?
+                .push(json!({
+                "op":"response-returned","role":"control","token":token,"case":case,
+                "at_us":u64::try_from(returned.as_micros())?,"observer":"harness"}));
+        }
         let mut report = Value::Null;
         let result = (|| -> Result<()> {
             let reply = reply.as_ref().map_err(|error| error.to_string())?;
@@ -142,6 +154,7 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
         "begin-progress" => &["origin"],
         "batch-progress" => &["a", "b", "c", "quiet"],
         "pending-head-cutoff" | "pending-body-cutoff" => &["a", "b", "c"],
+        "caps-while-waiting" => &["a", "b", "c"],
         _ => return Err("unknown lifetime case".into()),
     };
     require(
@@ -150,6 +163,9 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
     )?;
     if pending_cutoff(case) {
         return validate_pending_cutoff(case, report, events, origin);
+    }
+    if case == "caps-while-waiting" {
+        return validate_caps(report, events, origin);
     }
     if case == "cpu-stretch" {
         return validate_cpu_stretch(report, events, origin);
@@ -314,6 +330,215 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
             "mediator deadline was extended",
         )
     }
+}
+
+fn validate_caps(report: &Value, events: &[Value], origin: &Value) -> Result<()> {
+    require(
+        report["slots"] == json!(["Resolved", "Resolved", "Resolved"])
+            && report["termination"] == "Completed"
+            && report["origin"].is_null()
+            && report["mediator"].is_null()
+            && events.len() == 2,
+        "caps collection lost its completed slots",
+    )?;
+    let batch = event(events, "batch-start")?;
+    let collected = event(events, "collect")?;
+    within(number(batch, "at_us")?, 34000, "caps batch missed 34 ms")?;
+    require(
+        batch["result"]["cutoff_at_us"] == 534000
+            && collected["result"] == "ok"
+            && number(collected, "at_us")?
+                >= number(batch, "at_us")? + number(batch, "duration_us")?,
+        "caps batch changed its original cutoff or collection",
+    )?;
+    let items = report["items"].as_array().ok_or("missing caps items")?;
+    require(items.len() == 3, "missing or extra caps items")?;
+    let collected_at = number(collected, "at_us")? + number(collected, "duration_us")?;
+    let mut latest_epoch = number(batch, "at_us")? + number(batch, "duration_us")?;
+    for (index, item) in items.iter().enumerate() {
+        let expected = if index == 0 {
+            json!({"error":{"kind":"response_too_large","status":502,"reason":"BufferedBody"}})
+        } else {
+            json!({"status":200,"bytes":[b'A'+index as u8]})
+        };
+        require(
+            item["index"] == index
+                && item["via"] == "collect"
+                && item["slot_error"] == (index == 0)
+                && item["outcome"] == expected
+                && (1..500000).contains(&number(item, "elapsed_us")?),
+            "caps error was not an original buffered-limit slot failure",
+        )?;
+        latest_epoch = latest_epoch.min(
+            collected_at
+                .checked_sub(number(item, "elapsed_us")?)
+                .ok_or("caps arrival elapsed exceeds collection time")?,
+        );
+    }
+    require(
+        number(batch, "at_us")? <= latest_epoch,
+        "caps arrival occurred after collection",
+    )?;
+    let origin = origin.as_array().ok_or("missing caps source events")?;
+    require(
+        origin.iter().all(|entry| {
+            matches!(
+                entry["op"].as_str(),
+                Some("request" | "head" | "chunk" | "closed" | "response-returned")
+            ) && entry.get("error").is_none()
+                && matches!(entry["role"].as_str(), Some("a" | "b" | "c" | "control"))
+        }),
+        "unexpected caps source event or failure",
+    )?;
+    let returned = role_event(origin, "control", "response-returned")?;
+    require(
+        returned["observer"] == "harness"
+            && origin
+                .iter()
+                .filter(|entry| entry["role"] == "control")
+                .count()
+                == 1,
+        "invalid response-return observer",
+    )?;
+    let returned = number(returned, "at_us")?;
+    let request = role_event(origin, "a", "request")?;
+    let head = role_event(origin, "a", "head")?;
+    let closed = role_event(origin, "a", "closed")?;
+    let start = number(head, "body_start_us")?;
+    let encoded = number(head, "content_length")?;
+    require(
+        head["content_encoding"] == "gzip"
+            && head["decoded_bytes"] == 131072
+            && (131072..=129 * 1024).contains(&encoded)
+            && number(request, "at_us")? <= number(head, "write_started_us")?
+            && number(head, "write_started_us")? <= number(head, "at_us")?
+            && number(head, "at_us")? == start
+            && returned < start + 300000,
+        "caps result did not precede the source's full trickle window",
+    )?;
+    let ends = head["piece_ends"]
+        .as_array()
+        .ok_or("missing caps piece boundaries")?;
+    require(
+        ends.len() == 8 && ends.last().and_then(Value::as_u64) == Some(encoded),
+        "invalid caps encoding boundaries",
+    )?;
+    let mut previous_end = 0;
+    for end in ends {
+        let end = end.as_u64().ok_or("invalid caps piece boundary")?;
+        require(
+            end >= previous_end + 16384 && end <= encoded,
+            "caps piece cannot contain its decoded payload",
+        )?;
+        previous_end = end;
+    }
+    let chunks: Vec<_> = origin
+        .iter()
+        .filter(|entry| entry["role"] == "a" && entry["op"] == "chunk")
+        .collect();
+    require(
+        (5..=8).contains(&chunks.len()),
+        "missing caps crossing prefix",
+    )?;
+    let mut written_total = 0;
+    let mut decoded = 0;
+    let mut prefix_before_return = false;
+    let mut peer_closed = false;
+    let mut previous_at = start;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let scheduled = start + index as u64 * 300000 / 7;
+        let end = ends[index].as_u64().ok_or("invalid caps end")?;
+        let piece_start = if index == 0 {
+            0
+        } else {
+            ends[index - 1].as_u64().ok_or("invalid caps start")?
+        };
+        let attempted = end - piece_start;
+        let written = number(chunk, "written_bytes")?;
+        let prefix = number(chunk, "decoded_prefix_bytes")?;
+        let io = chunk.get("io_error").ok_or("missing caps I/O outcome")?;
+        require(
+            !peer_closed
+                && chunk["index"] == index
+                && chunk["schedule_basis"] == "body-start"
+                && number(chunk, "scheduled_us")? == scheduled
+                && number(chunk, "write_started_us")? >= scheduled.max(previous_at)
+                && number(chunk, "write_started_us")? <= number(chunk, "at_us")?
+                && number(chunk, "at_us")? <= scheduled + 5000
+                && number(chunk, "attempted_bytes")? == attempted
+                && written <= attempted
+                && number(chunk, "encoded_end")? == written_total + written
+                && prefix >= decoded
+                && prefix <= 65537
+                && prefix <= (index as u64 * 16384 + written).min(65537),
+            "inconsistent caps write progress",
+        )?;
+        if io.is_null() {
+            require(
+                written == attempted && prefix == ((index as u64 + 1) * 16384).min(65537),
+                "incomplete successful caps piece",
+            )?;
+        } else {
+            require(
+                index + 1 == chunks.len()
+                    && matches!(
+                        io.as_str(),
+                        Some("BrokenPipe" | "ConnectionReset" | "ConnectionAborted")
+                    )
+                    && prefix > 65536,
+                "unrelated or premature caps source failure",
+            )?;
+            peer_closed = true;
+        }
+        written_total += written;
+        decoded = prefix;
+        previous_at = number(chunk, "at_us")?;
+        prefix_before_return |= prefix > 65536 && previous_at <= returned;
+    }
+    require(
+        prefix_before_return && number(closed, "at_us")? >= previous_at,
+        "caps failure preceded no confirmed over-cap prefix",
+    )?;
+    if peer_closed {
+        require(
+            closed["reason"] == "peer_closed_after_cap_prefix",
+            "caps peer-close classification changed",
+        )?;
+    } else {
+        require(
+            chunks.len() == 8
+                && written_total == encoded
+                && closed["reason"] == "complete"
+                && number(closed, "at_us")? >= start + 300000,
+            "caps source completed early",
+        )?;
+    }
+    for (index, role) in [(1, "b"), (2, "c")] {
+        let request = role_event(origin, role, "request")?;
+        let head = role_event(origin, role, "head")?;
+        let chunk = role_event(origin, role, "chunk")?;
+        let closed = role_event(origin, role, "closed")?;
+        let scheduled = number(request, "at_us")? + index * 20000;
+        require(
+            number(head, "scheduled_us")? == scheduled
+                && number(head, "write_started_us")? >= scheduled
+                && number(head, "at_us")? >= number(head, "write_started_us")?
+                && number(head, "at_us")? <= scheduled + 5000
+                && number(chunk, "scheduled_us")? == scheduled
+                && number(chunk, "write_started_us")? >= number(head, "at_us")?
+                && number(chunk, "at_us")? >= number(chunk, "write_started_us")?
+                && number(chunk, "at_us")? <= scheduled + 5000
+                && chunk["bytes"] == json!([65 + index])
+                && number(chunk, "at_us")? <= returned
+                && closed["reason"] == "complete"
+                && number(closed, "at_us")? >= number(chunk, "at_us")?,
+            "caps healthy sibling changed",
+        )?;
+    }
+    require(
+        origin.len() == 12 + chunks.len(),
+        "missing or extra caps source evidence",
+    )
 }
 
 fn validate_timeout_before_cutoff(report: &Value, origin: &Value) -> Result<()> {
@@ -1041,6 +1266,233 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn caps_sample() -> (Value, Value) {
+        let report = json!({"schema":1,"case":"caps-while-waiting","token":"sample","qualification":false,
+            "events":[{"op":"batch-start","at_us":34000,"duration_us":100,"result":{"cutoff_at_us":534000}},
+            {"op":"collect","at_us":34100,"duration_us":175900,"result":"ok"}],
+            "slots":["Resolved","Resolved","Resolved"],"termination":"Completed","error":null,"origin":null,"mediator":null,
+            "items":[{"index":0,"via":"collect","elapsed_us":170000,"slot_error":true,"outcome":{"error":{"kind":"response_too_large","status":502,"reason":"BufferedBody"}}},
+            {"index":1,"via":"collect","elapsed_us":20000,"slot_error":false,"outcome":{"status":200,"bytes":[66]}},
+            {"index":2,"via":"collect","elapsed_us":40000,"slot_error":false,"outcome":{"status":200,"bytes":[67]}}]});
+        let mut origin = vec![
+            json!({"op":"request","role":"a","at_us":1000,"guest_at_us":34000}),
+            json!({"op":"head","role":"a","at_us":2000,"write_started_us":1990,"body_start_us":2000,
+            "content_encoding":"gzip","content_length":131200,"decoded_bytes":131072,
+            "piece_ends":[16400,32800,49200,65600,82000,98400,114800,131200]}),
+        ];
+        for index in 0..6 {
+            let scheduled = 2000 + index * 300000 / 7;
+            let written = if index == 5 { 0 } else { 16400 };
+            origin.push(json!({"op":"chunk","role":"a","index":index,"scheduled_us":scheduled,
+                "write_started_us":scheduled,"at_us":scheduled+1,"schedule_basis":"body-start","attempted_bytes":16400,"written_bytes":written,
+                "encoded_end":if index==5 {82000}else{(index+1)*16400},
+                "decoded_prefix_bytes":((index+1)*16384).min(65537),
+                "io_error":if index==5 {Some("BrokenPipe")}else{None}}));
+        }
+        origin.push(json!({"op":"closed","role":"a","at_us":216287,"reason":"peer_closed_after_cap_prefix"}));
+        for (index, role) in [(1, "b"), (2, "c")] {
+            let request = 1000 + index * 10;
+            let at = request + index * 20000;
+            origin.extend([json!({"op":"request","role":role,"at_us":request,"guest_at_us":34000}),
+                json!({"op":"head","role":role,"at_us":at,"write_started_us":at,"scheduled_us":at}),
+                json!({"op":"chunk","role":role,"at_us":at+1,"write_started_us":at+1,"scheduled_us":at,"bytes":[65+index]}),
+                json!({"op":"closed","role":role,"at_us":at+2,"reason":"complete"})]);
+        }
+        origin.push(
+            json!({"op":"response-returned","role":"control","at_us":200000,"observer":"harness"}),
+        );
+        for entry in &mut origin {
+            entry["token"] = json!("sample");
+            entry["case"] = json!("caps-while-waiting");
+        }
+        (report, json!(origin))
+    }
+
+    #[test]
+    fn caps_evidence_requires_the_raw_slot_error_before_source_completion() {
+        let (report, origin) = caps_sample();
+        validate("caps-while-waiting", "sample", &report, &origin).unwrap();
+        for (field, value) in [
+            ("slot_error", json!(false)),
+            ("slot_error", Value::Null),
+            ("via", json!("next")),
+        ] {
+            let mut changed = report.clone();
+            changed["items"][0][field] = value;
+            assert!(validate("caps-while-waiting", "sample", &changed, &origin).is_err());
+        }
+        for reason in ["DecodedBody", "EncodedBody", "Unspecified"] {
+            let mut changed = report.clone();
+            changed["items"][0]["outcome"]["error"]["reason"] = json!(reason);
+            assert!(validate("caps-while-waiting", "sample", &changed, &origin).is_err());
+        }
+    }
+
+    #[test]
+    fn caps_siblings_must_write_before_response_return_but_may_close_later() {
+        let (report, origin) = caps_sample();
+        for role in ["b", "c"] {
+            let mut impossible = origin.clone();
+            for entry in impossible
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .filter(|entry| entry["role"] == role)
+            {
+                for field in ["at_us", "write_started_us", "scheduled_us"] {
+                    if let Some(at) = entry[field].as_u64() {
+                        entry[field] = json!(at + 250000);
+                    }
+                }
+            }
+            assert!(
+                validate("caps-while-waiting", "sample", &report, &impossible).is_err(),
+                "{role}"
+            );
+            let mut late_close = origin.clone();
+            let closed = late_close
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["role"] == role && entry["op"] == "closed")
+                .unwrap();
+            closed["at_us"] = json!(300000);
+            validate("caps-while-waiting", "sample", &report, &late_close).unwrap();
+        }
+    }
+
+    #[test]
+    fn caps_evidence_rejects_bunched_source_writes() {
+        let (report, origin) = caps_sample();
+        let mut bunched = origin.clone();
+        for entry in bunched.as_array_mut().unwrap().iter_mut().filter(|entry| {
+            entry["role"] == "a" && entry["op"] == "chunk" && entry["index"].as_u64().unwrap() < 4
+        }) {
+            let at = 150000 + entry["index"].as_u64().unwrap();
+            entry["write_started_us"] = json!(at);
+            entry["at_us"] = json!(at + 1);
+        }
+        assert!(validate("caps-while-waiting", "sample", &report, &bunched).is_err());
+        let mut late = origin.clone();
+        for entry in late
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|entry| entry["role"] == "b" && entry["op"] != "request")
+        {
+            for field in ["at_us", "write_started_us"] {
+                if let Some(at) = entry[field].as_u64() {
+                    entry[field] = json!(at + 10000);
+                }
+            }
+        }
+        assert!(validate("caps-while-waiting", "sample", &report, &late).is_err());
+    }
+
+    #[test]
+    fn caps_evidence_rejects_impossible_arrival_times() {
+        let (report, origin) = caps_sample();
+        let mut impossible = report.clone();
+        impossible["items"][0]["elapsed_us"] = json!(499999);
+        assert!(validate("caps-while-waiting", "sample", &impossible, &origin).is_err());
+        let mut possible = report.clone();
+        possible["items"][0]["elapsed_us"] = json!(175950);
+        validate("caps-while-waiting", "sample", &possible, &origin).unwrap();
+    }
+
+    #[test]
+    fn caps_evidence_rejects_wrong_results_and_unrelated_partial_write_errors() {
+        let (report, origin) = caps_sample();
+        for (path, value) in [
+            ("/items/0/outcome/error/status", json!(504)),
+            ("/items/0/outcome/error/kind", json!("gateway_timeout")),
+            ("/items/0/index", json!(1)),
+            ("/slots/0", json!("Unresolved")),
+            ("/termination", json!("Cutoff")),
+        ] {
+            let mut changed = report.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(
+                validate("caps-while-waiting", "sample", &changed, &origin).is_err(),
+                "{path}"
+            );
+        }
+        for (field, value) in [
+            ("io_error", json!("TimedOut")),
+            ("io_error", Value::Null),
+            ("written_bytes", json!(16401)),
+            ("encoded_end", json!(1)),
+            ("schedule_basis", json!("request-receipt")),
+            ("decoded_prefix_bytes", json!(65536)),
+        ] {
+            let mut changed = origin.clone();
+            let piece = changed
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["role"] == "a" && entry["index"] == 5)
+                .unwrap();
+            piece[field] = value;
+            assert!(
+                validate("caps-while-waiting", "sample", &report, &changed).is_err(),
+                "{field}"
+            );
+        }
+        let mut unproven = origin.clone();
+        let returned = unproven
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["op"] == "response-returned")
+            .unwrap();
+        returned["at_us"] = json!(173428);
+        let error = validate("caps-while-waiting", "sample", &report, &unproven).unwrap_err();
+        assert!(error.to_string().contains("confirmed over-cap prefix"));
+        let mut early = origin.clone();
+        let head = early
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["role"] == "a" && entry["op"] == "head")
+            .unwrap();
+        head["content_encoding"] = json!("identity");
+        assert!(validate("caps-while-waiting", "sample", &report, &early).is_err());
+    }
+
+    #[test]
+    fn caps_evidence_rejects_late_missing_foreign_and_unproven_source_boundaries() {
+        let (report, origin) = caps_sample();
+        for at in [302000, 400000] {
+            let mut changed = origin.clone();
+            changed.as_array_mut().unwrap().last_mut().unwrap()["at_us"] = json!(at);
+            assert!(validate("caps-while-waiting", "sample", &report, &changed).is_err());
+        }
+        for field in ["observer", "token", "case"] {
+            let mut changed = origin.clone();
+            changed.as_array_mut().unwrap().last_mut().unwrap()[field] = json!("foreign");
+            assert!(validate("caps-while-waiting", "sample", &report, &changed).is_err());
+        }
+        let mut missing = origin.clone();
+        missing.as_array_mut().unwrap().pop();
+        assert!(validate("caps-while-waiting", "sample", &report, &missing).is_err());
+        let mut duplicate = origin.clone();
+        duplicate
+            .as_array_mut()
+            .unwrap()
+            .push(origin.as_array().unwrap().last().unwrap().clone());
+        assert!(validate("caps-while-waiting", "sample", &report, &duplicate).is_err());
+        let mut premature = origin.clone();
+        for entry in premature
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|entry| entry["op"] == "chunk" && entry["role"] == "a")
+        {
+            entry["decoded_prefix_bytes"] = json!(65536);
+        }
+        assert!(validate("caps-while-waiting", "sample", &report, &premature).is_err());
+    }
 
     fn cpu_sample(delivered: bool) -> (Value, Value) {
         let mut report = json!({"schema":1,"case":"cpu-stretch","token":"sample","qualification":false,

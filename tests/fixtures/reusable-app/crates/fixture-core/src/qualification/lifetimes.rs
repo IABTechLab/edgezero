@@ -44,6 +44,7 @@ impl Probe {
                 | "pending-head-cutoff"
                 | "pending-body-cutoff"
                 | "cpu-stretch"
+                | "caps-while-waiting"
         ) {
             return Err(invalid());
         }
@@ -96,6 +97,12 @@ impl Probe {
             )?;
         if role == "origin" {
             request = request.stream_response().max_decoded_response_bytes(64);
+        }
+        if self.case == "caps-while-waiting" && role == "a" {
+            request = request
+                .max_response_bytes(64 * 1024)
+                .max_decoded_response_bytes(1024 * 1024)
+                .max_encoded_response_bytes(256 * 1024);
         }
         Ok(request)
     }
@@ -205,9 +212,10 @@ async fn response_report(response: Result<OutboundResponse, EdgeError>) -> Value
 }
 
 async fn record_item(report: &mut Report, index: usize, slot: OutboundSlotResult, via: &str) {
+    let slot_error = slot.outcome.is_err();
     report.items.push(
         json!({"index":index,"via":via,"elapsed_us":micros(slot.elapsed),
-        "outcome":response_report(slot.outcome).await}),
+        "slot_error":slot_error,"outcome":response_report(slot.outcome).await}),
     );
 }
 
@@ -346,7 +354,7 @@ async fn run(
     ) {
         return pending_cutoff(ctx, probe, client, report, timeline).await;
     }
-    let origin = if probe.case == "batch-progress" {
+    let origin = if matches!(probe.case.as_str(), "batch-progress" | "caps-while-waiting") {
         None
     } else {
         timeline.wait_until(ctx, 2).await?;
@@ -396,12 +404,17 @@ async fn run(
         "batch-start",
         at,
         ended,
-        if probe.case == "cpu-stretch" {
+        if matches!(probe.case.as_str(), "cpu-stretch" | "caps-while-waiting") {
             json!({"cutoff_at_us":timeline.elapsed_us(observation_cutoff.instant())})
         } else {
             Value::Null
         },
     );
+
+    if probe.case == "caps-while-waiting" {
+        collect(batch, report, timeline).await;
+        return Ok(());
+    }
 
     if probe.case == "batch-progress" {
         let request = probe.request("quiet", timeline)?;
@@ -615,7 +628,9 @@ mod tests {
     use crate::outbound_test_support::TestTime;
     use bytes::Bytes;
     use edgezero_core::http::{Method, StatusCode, request_builder};
-    use edgezero_core::{Body, BudgetSource, ContentTypeProvenance, ResponseMode};
+    use edgezero_core::{
+        Body, BudgetSource, ContentTypeProvenance, ResponseLimitReason, ResponseMode,
+    };
     use futures::{StreamExt, executor::block_on};
     use std::sync::{
         Arc,
@@ -758,6 +773,60 @@ mod tests {
             timeline.deadline_at(534).instant(),
             start + Duration::from_millis(534)
         );
+    }
+
+    #[test]
+    fn caps_while_waiting_keeps_independent_limits_and_the_original_budget() {
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let timeline = Timeline::new(time.clock(), start);
+        let probe = Probe::parse("caps-while-waiting", &headers("caps-while-waiting")).unwrap();
+        for role in ["a", "b", "c"] {
+            let parts = probe.request(role, &timeline).unwrap().into_parts();
+            assert_eq!(parts.timeout, Some(Duration::from_secs(1)));
+            assert!(parts.deadline.is_none());
+            let max_bytes = if role == "a" { 64 * 1024 } else { 64 };
+            assert!(
+                matches!(parts.response_mode, ResponseMode::Buffered { max_bytes: actual } if actual == max_bytes)
+            );
+            if role == "a" {
+                assert_eq!(parts.max_decoded_response_bytes, Some(1024 * 1024));
+                assert_eq!(parts.max_encoded_response_bytes, Some(256 * 1024));
+            }
+        }
+        assert_eq!(
+            timeline.deadline_at(534).instant(),
+            start + Duration::from_millis(534)
+        );
+    }
+
+    #[test]
+    fn slot_error_provenance_excludes_the_report_readers_own_limit() {
+        let mut report = Report::default();
+        block_on(record_item(
+            &mut report,
+            0,
+            OutboundSlotResult::new(Duration::ZERO, Ok(response(Body::from(vec![b'x'; 65])))),
+            "collect",
+        ));
+        assert_eq!(
+            report.items[0]["outcome"]["error"]["reason"],
+            "BufferedBody"
+        );
+        assert_eq!(report.items[0]["slot_error"], false);
+        block_on(record_item(
+            &mut report,
+            1,
+            OutboundSlotResult::new(
+                Duration::ZERO,
+                Err(EdgeError::response_too_large_with_reason(
+                    "bounded",
+                    ResponseLimitReason::BufferedBody,
+                )),
+            ),
+            "collect",
+        ));
+        assert_eq!(report.items[1]["slot_error"], true);
     }
 
     #[test]
@@ -927,8 +996,8 @@ mod tests {
         assert_eq!(
             json["items"],
             json!([
-                {"index":0,"via":"check","elapsed_us":146123,"outcome":{"status":200,"bytes":[65]}},
-                {"index":1,"via":"collect","elapsed_us":286456,"outcome":{"error":{"kind":"gateway_timeout","status":504,"reason":"PerCallTimeout"}}}
+                {"index":0,"via":"check","elapsed_us":146123,"slot_error":false,"outcome":{"status":200,"bytes":[65]}},
+                {"index":1,"via":"collect","elapsed_us":286456,"slot_error":true,"outcome":{"error":{"kind":"gateway_timeout","status":504,"reason":"PerCallTimeout"}}}
             ])
         );
         assert_eq!(

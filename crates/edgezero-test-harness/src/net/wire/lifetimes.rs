@@ -1,7 +1,11 @@
 use super::*;
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::{collections::HashSet, net::Shutdown};
 
 const EVENT_LIMIT: usize = 32;
+const CAPS_BUFFER_BYTES: usize = 64 * 1024;
+const CAPS_PIECE_BYTES: usize = 16 * 1024;
+const CAPS_PIECES: usize = 8;
 
 #[derive(Clone, Copy)]
 enum Case {
@@ -13,6 +17,7 @@ enum Case {
     PendingHead,
     PendingBody,
     Cpu,
+    Caps,
 }
 
 impl Case {
@@ -26,6 +31,7 @@ impl Case {
             "pending-head-cutoff" => Ok(Self::PendingHead),
             "pending-body-cutoff" => Ok(Self::PendingBody),
             "cpu-stretch" => Ok(Self::Cpu),
+            "caps-while-waiting" => Ok(Self::Caps),
             _ => Err("unknown lifetime case".into()),
         }
     }
@@ -40,6 +46,7 @@ impl Case {
             Self::PendingHead => "pending-head-cutoff",
             Self::PendingBody => "pending-body-cutoff",
             Self::Cpu => "cpu-stretch",
+            Self::Caps => "caps-while-waiting",
         }
     }
 
@@ -52,6 +59,7 @@ impl Case {
             Self::Begin => role == "origin",
             Self::Batch => matches!(role, "a" | "b" | "c" | "quiet"),
             Self::PendingHead | Self::PendingBody => matches!(role, "a" | "b" | "c"),
+            Self::Caps => matches!(role, "a" | "b" | "c"),
         }
     }
 
@@ -138,7 +146,7 @@ pub(super) fn release(shared: &Shared, token: &str, response_returned: Instant) 
     Ok(())
 }
 
-pub(super) fn mark_start(shared: &Shared, token: &str) -> Result<()> {
+pub(super) fn mark_start(shared: &Shared, token: &str) -> Result<Instant> {
     let mut state = shared.lock();
     require(!state.stop, "wire origin stopped")?;
     let lifetime = state
@@ -146,8 +154,9 @@ pub(super) fn mark_start(shared: &Shared, token: &str) -> Result<()> {
         .get_mut(token)
         .ok_or("unknown lifetime token")?;
     require(lifetime.anchor.is_none(), "lifetime already started")?;
-    lifetime.anchor = Some(Instant::now());
-    Ok(())
+    let anchor = Instant::now();
+    lifetime.anchor = Some(anchor);
+    Ok(anchor)
 }
 
 pub(super) fn take_events(shared: &Shared, token: &str) -> Result<Value> {
@@ -437,6 +446,11 @@ pub(super) fn serve(
         Err(_) if expected_close => "peer_closed_after_cutoff",
         Ok(true) if silent => "silent",
         Ok(true) => "complete",
+        Ok(false)
+            if matches!(exchange.case, Case::Caps)
+                && exchange.role == "a"
+                && !shared.lock().stop =>
+            "peer_closed_after_cap_prefix",
         Ok(false) if exchange.case.held() && !shared.lock().stop => "fixture_released",
         Ok(false) => "stopped",
         Err(_) => "error",
@@ -500,7 +514,126 @@ fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
     }
 }
 
+struct CapsPayload {
+    encoded: Vec<u8>,
+    ends: [usize; CAPS_PIECES],
+}
+
+impl CapsPayload {
+    fn new() -> Result<Self> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::none());
+        let mut ends = [0; CAPS_PIECES];
+        for end in &mut ends {
+            encoder.write_all(&[b'x'; CAPS_PIECE_BYTES])?;
+            encoder.flush()?;
+            *end = encoder.get_ref().len();
+        }
+        let encoded = encoder.finish()?;
+        require(encoded.len() <= 129 * 1024, "caps source encoding bound")?;
+        ends[CAPS_PIECES - 1] = encoded.len();
+        Ok(Self { encoded, ends })
+    }
+}
+
+fn decoded_prefix(encoded: &[u8]) -> Result<usize> {
+    let mut decoder = GzDecoder::new(encoded);
+    let mut scratch = [0; 8192];
+    let mut decoded = 0;
+    while decoded <= CAPS_BUFFER_BYTES {
+        let limit = scratch.len().min(CAPS_BUFFER_BYTES + 1 - decoded);
+        match decoder.read(&mut scratch[..limit]) {
+            Ok(0) => break,
+            Ok(count) => decoded += count,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(decoded)
+}
+
+fn counted_write(writer: &mut impl Write, bytes: &[u8]) -> (usize, io::Result<()>) {
+    let mut written = 0;
+    let mut interrupted = 0;
+    while written < bytes.len() {
+        match writer.write(&bytes[written..]) {
+            Ok(0) => return (written, Err(io::ErrorKind::WriteZero.into())),
+            Ok(count) if count <= bytes.len() - written => written += count,
+            Ok(_) => return (written, Err(io::ErrorKind::InvalidData.into())),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted && interrupted < 32 => {
+                interrupted += 1
+            }
+            Err(error) => return (written, Err(error)),
+        }
+    }
+    (written, writer.flush())
+}
+
+fn respond_caps(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> Result<bool> {
+    let payload = CapsPayload::new()?;
+    let started = Instant::now();
+    write!(
+        socket,
+        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+        payload.encoded.len()
+    )?;
+    socket.flush()?;
+    let body_start = Instant::now();
+    let mut head = exchange.event("head", body_start, None);
+    head["write_started_us"] = json!(offset(started, exchange.anchor));
+    head["body_start_us"] = json!(offset(body_start, exchange.anchor));
+    head["content_encoding"] = json!("gzip");
+    head["content_length"] = json!(payload.encoded.len());
+    head["decoded_bytes"] = json!(CAPS_PIECE_BYTES * CAPS_PIECES);
+    head["piece_ends"] = json!(payload.ends);
+    record(shared, exchange, head)?;
+    let mut start = 0;
+    for (index, end) in payload.ends.into_iter().enumerate() {
+        let scheduled =
+            body_start + Duration::from_micros(index as u64 * 300_000 / (CAPS_PIECES as u64 - 1));
+        if !wait_until(shared, scheduled) {
+            return Ok(false);
+        }
+        let started = Instant::now();
+        let (written, outcome) = counted_write(socket, &payload.encoded[start..end]);
+        let completed = Instant::now();
+        let decoded = decoded_prefix(&payload.encoded[..start + written])?;
+        let mut event = exchange.event("chunk", completed, Some(scheduled));
+        event["schedule_basis"] = json!("body-start");
+        event["index"] = json!(index);
+        event["write_started_us"] = json!(offset(started, exchange.anchor));
+        event["attempted_bytes"] = json!(end - start);
+        event["written_bytes"] = json!(written);
+        event["encoded_end"] = json!(start + written);
+        event["decoded_prefix_bytes"] = json!(decoded);
+        event["io_error"] = json!(
+            outcome
+                .as_ref()
+                .err()
+                .map(|error| format!("{:?}", error.kind()))
+        );
+        record(shared, exchange, event)?;
+        if let Err(error) = outcome {
+            if decoded > CAPS_BUFFER_BYTES
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                )
+            {
+                return Ok(false);
+            }
+            return Err(error.into());
+        }
+        start = end;
+    }
+    Ok(true)
+}
+
 fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> Result<bool> {
+    if matches!(exchange.case, Case::Caps) && exchange.role == "a" {
+        return respond_caps(socket, shared, exchange);
+    }
     if matches!(exchange.case, Case::Cpu) && exchange.role == "calibration" {
         let scheduled = exchange
             .calibration_wait
@@ -567,6 +700,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
                 Case::Fast => absolute([180, 320, 400][index]),
                 Case::Cpu => absolute([180, 530, 900][index]),
                 Case::Batch => received([20, 40, 60][index]),
+                Case::Caps => received([0, 20, 40][index]),
                 Case::Begin | Case::PendingHead | Case::PendingBody => unreachable!(),
             };
             (at, vec![(at, [b"A".as_slice(), b"B", b"C"][index])])
@@ -618,6 +752,129 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caps_source_sends_one_bounded_gzip_member_over_the_full_trickle_window() {
+        let origins = WireOrigins::start().unwrap();
+        origins
+            .register_lifetime("caps", "caps-while-waiting")
+            .unwrap();
+        origins.mark_lifetime_start("caps").unwrap();
+        let mut reader = BufReader::new(connect(
+            &origins,
+            "caps",
+            "caps-while-waiting",
+            "a",
+            "34000",
+        ));
+        let head = read_head(&mut reader, &mut 0, Profile::Wire).unwrap();
+        assert_eq!(head.first, "HTTP/1.1 200 OK");
+        let mut encoded = Vec::new();
+        reader
+            .take(129 * 1024 + 1)
+            .read_to_end(&mut encoded)
+            .unwrap();
+        assert!(encoded.len() <= 129 * 1024);
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(encoded.as_slice())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, vec![b'x'; 128 * 1024]);
+        let events = origins.take_lifetime_events("caps").unwrap();
+        let head = event(&events, "a", "head");
+        assert_eq!(head["content_encoding"], "gzip");
+        let chunks: Vec<_> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["op"] == "chunk")
+            .collect();
+        assert_eq!(chunks.len(), 8);
+        assert_eq!(chunks[0]["schedule_basis"], "body-start");
+        assert_eq!(chunks[3]["decoded_prefix_bytes"], 64 * 1024);
+        assert_eq!(chunks[4]["decoded_prefix_bytes"], 64 * 1024 + 1);
+        assert_eq!(
+            chunks[7]["scheduled_us"].as_u64().unwrap()
+                - chunks[0]["scheduled_us"].as_u64().unwrap(),
+            300_000
+        );
+        assert_eq!(event(&events, "a", "closed")["reason"], "complete");
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn caps_counted_writes_retain_partial_progress_and_bound_interrupted_retries() {
+        struct PrefixWriter {
+            remaining: usize,
+            interrupts: usize,
+            calls: usize,
+            error: io::ErrorKind,
+        }
+        impl Write for PrefixWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                if self.interrupts > 0 {
+                    self.interrupts -= 1;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                if self.remaining == 0 {
+                    return Err(self.error.into());
+                }
+                let written = self.remaining.min(bytes.len());
+                self.remaining -= written;
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::TimedOut,
+        ] {
+            let mut writer = PrefixWriter {
+                remaining: 5,
+                interrupts: 1,
+                calls: 0,
+                error: kind,
+            };
+            let (written, outcome) = counted_write(&mut writer, b"1234567890");
+            assert_eq!(written, 5);
+            assert_eq!(outcome.unwrap_err().kind(), kind);
+            assert_eq!(writer.calls, 3);
+        }
+        let mut writer = PrefixWriter {
+            remaining: 10,
+            interrupts: 100,
+            calls: 0,
+            error: io::ErrorKind::BrokenPipe,
+        };
+        let (written, outcome) = counted_write(&mut writer, b"1234567890");
+        assert_eq!(written, 0);
+        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(writer.calls, 33);
+        let mut writer = std::io::Cursor::new([0_u8; 0]);
+        let (written, outcome) = counted_write(&mut writer, b"x");
+        assert_eq!(written, 0);
+        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::WriteZero);
+    }
+
+    #[test]
+    fn caps_prefix_counts_exact_cap_and_first_excess_without_a_trailer() {
+        let payload = CapsPayload::new().unwrap();
+        assert_eq!(
+            decoded_prefix(&payload.encoded[..payload.ends[3]]).unwrap(),
+            65536
+        );
+        let crossing = payload.ends[4];
+        assert_eq!(decoded_prefix(&payload.encoded[..crossing]).unwrap(), 65537);
+        assert!(crossing < payload.encoded.len());
+        let mut malformed = payload.encoded.clone();
+        malformed[0] = 0;
+        assert!(decoded_prefix(&malformed).is_err());
+    }
 
     #[test]
     fn registration_accepts_the_same_ascii_token_alphabet_as_the_guest() {

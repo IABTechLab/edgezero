@@ -914,8 +914,29 @@ return indices 0, 1 and 3 with elapsed 146, 286 and 300 ms, preserving D's typed
 504 before `Cutoff`. C stays unresolved; the other three positions are `AlreadyDelivered`.
 The original three-slot slow-origin case remains separate. D's source closes silently at
 scenario 1500 ms; this bounded fixture cleanup is not evidence of SDK cancellation.
-The suite still does not implement the remaining response-owned,
-cleanup, cap and reusable-sandbox acceptance scenarios.
+A ninth case, `caps-while-waiting`, keeps the three-slot 34/534 ms batch. A receives a 128 KiB
+decoded gzip response over 300 ms, with a 1 MiB decoded cap, 64 KiB buffered cap and 256 KiB
+encoded cap. B/C return one byte after 20/40 ms. Collection must preserve both healthy slots
+and A's original `BufferedBody`/502 slot error before the source can complete.
+The suite still does not implement the remaining response-owned, cleanup and reusable-sandbox
+acceptance scenarios.
+
+The caps source uses the pinned native harness encoder, not a new guest dependency. Eight
+flushed 16 KiB plaintext pieces produce one gzip member, with a logical encoded size at most
+129 KiB. Actual payload remains in the final scheduled write. Counted writes retain partial
+progress; only recognized peer-close errors after a prefix decoding beyond 64 KiB may be
+classified as expected. Source cadence must meet its unchanged 5 ms ceiling, without early
+writes. Unknown errors, insufficient prefixes and inconsistent counts fail. Existing worker,
+connection and 32-event limits remain unchanged; the caps case records at most twenty events.
+These fixture bounds are not a guest/provider allocation or RSS certificate.
+
+The source's exact stored host anchor also timestamps the complete guest-response return.
+The validator requires an observed over-cap prefix and both healthy payloads before that
+return, and return before the source's 300 ms ending. Socket shutdown may follow return.
+No host/guest clock alignment is assumed. Guest elapsed values must permit a common epoch
+inside the measured batch-invocation interval and no arrival later than collection. Each
+reported item records `slot_error` before bounded report-body consumption, so the reporter's
+own limit cannot masquerade as a production slot failure.
 
 Each case records actual guest operation entry/duration, per-slot arrival elapsed, exact
 collection states, typed errors, and independently observed host receipts/head/chunk writes.
@@ -929,9 +950,10 @@ The pending-body record explicitly reports `body_phase_evidence: host-head-writt
 Writing the host's head does not prove the SDK consumed it or entered a body read before the
 cutoff. These probes do not close the complete scenario 16 acceptance leg or certify host
 cancellation. Release ends the fixture's hold; it is not evidence of provider teardown.
-Bodies are capped at 64 bytes. The existing bounded origin collector/parser and joined worker
+Report-body reads are capped at 64 bytes; the caps slot has the separate limits above.
+The existing bounded origin collector/parser and joined worker
 ownership are reused; registrations, roles and event counts are finite, and unexpected or late
-worker failures prevent a passing inventory. The suite runs all eight cases even when an earlier
+worker failures prevent a passing inventory. The suite runs all nine cases even when an earlier
 case fails, but publishes success only after runtime and origin cleanup succeed.
 
 Host request-send and guest request-start have different origins, particularly on a cold guest.

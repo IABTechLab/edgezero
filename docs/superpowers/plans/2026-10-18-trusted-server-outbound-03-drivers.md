@@ -485,6 +485,12 @@ adds criterion 14 to the existing eight-case local suite. Its all-target timeout
 but strict source timing and full lifetime/hosted qualification remain open; no parent task or
 inventory leg is closed by that subresult.
 
+The [buffered cap checkpoint](2026-10-18-trusted-server-outbound-implementation.md#d6-buffered-cap-acceptance-checkpoint-2026-10-28)
+adds criterion 9 as the ninth local case, with original slot-error provenance and host-clock
+proof of return before the compressed source completes. Final Axum/Viceroy/Spin cases pass;
+workerd retains a strict source-cadence failure. Complete suites remain nonzero; D6 and hosted
+qualification stay open.
+
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
 `runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.
 

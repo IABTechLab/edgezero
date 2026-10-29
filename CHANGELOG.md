@@ -129,6 +129,11 @@ their scope when introduced; the current summary supersedes their then-pending A
   Preserve the original slow-origin case, 300 ms timeout provenance, completed siblings and
   exact cutoff collection states. Record timeout-contract diagnostics separately without
   waiving source timing failures or claiming hosted qualification.
+- Add the compressed-response cap lifetime case to the existing Rust harness and production-client
+  fixtures. Preserve independent decoded/encoded/buffered limits and healthy siblings, require
+  the original typed slot failure rather than a report-reader error, and prove early return in
+  the source's host clock. Bound native encoding and partial-write evidence without adding guest
+  dependencies or relaxing existing timing and qualification gates.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

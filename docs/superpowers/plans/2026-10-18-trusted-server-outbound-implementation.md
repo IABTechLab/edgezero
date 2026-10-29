@@ -699,6 +699,63 @@ observation of the same buffered batch; native call-site inspection is not that 
 G1 remains 32 ready / 479 planned and unqualified; no candidate freeze, deployment, requirement
 change, capability promotion or provider/runtime pin change is authorized by this checkpoint.
 
+### D6 Buffered Cap Acceptance Checkpoint (2026-10-28)
+
+Continue the approved D6 acceptance implementation with EZ-6 criterion 9. The distinct ninth
+`caps-while-waiting` case preserves three slots, batch start 34 ms, cutoff 534 ms and the original
+per-request budgets. A receives 128 KiB decoded gzip over 300 ms under independent 1 MiB decoded,
+64 KiB buffered and 256 KiB encoded limits. B/C return their healthy one-byte responses. Immediate
+collection must preserve both siblings and A's original `ResponseTooLarge`/`BufferedBody`/502.
+Capture `slot_error` before report-body consumption so the reporter's own 64-byte read limit
+cannot manufacture a passing production error. No production outbound implementation changes.
+
+The native-only pinned harness encoder emits one gzip member in eight flushed 16 KiB plaintext
+pieces, with payload in the final scheduled write. Logical encoded size is bounded at 129 KiB;
+this is not a decoder/RSS or provider allocation certificate. Count partial writes exactly and
+bound interrupted retries. Accept recognized peer-close errors only after a successfully written
+prefix decodes beyond 64 KiB. Retain existing worker, connection and 32-event bounds; this case
+records at most twenty events. No guest dependency, transport, scheduler or runtime pin is added.
+
+Source scheduling uses the observed body start. The exact stored host anchor timestamps guest
+response return before worker drain, proving the over-cap prefix and both healthy payloads were
+written before return, and return preceded the source's 300 ms ending. Later socket shutdown is
+allowed. Require guest arrival elapsed values to admit one common epoch inside the measured
+batch-invocation interval, no later than collection. No host/guest clock alignment is inferred.
+
+Tests first fail for the absent case and provenance, then cover source boundaries, round-trip
+payload, exact-cap/first-excess prefixes, partial writes and bounded retries. Independent reviews
+found an incorrect schedule label, bunched source writes, impossible elapsed values and siblings
+written after response return; separate failing mutations drive each correction. Final source,
+guest and validator reviews report no remaining findings. Full harness tests pass 252 with one
+ignored, qualification guest tests pass 51, and all five root Rust gates pass, including 2,568
+tests in 32 binaries with one ignored. Strict harness and all four qualification-entrypoint
+Clippy checks, root/harness/fixture formatting, docs lint/format, legacy/docs/inventory guards,
+shared dependency and decoder/map audits, and 36 evidence-checker regressions pass.
+
+Final reviewed local runs retain the complete nine-case suite and unchanged strict timing:
+
+| Local Runtime | Cap Case | A Elapsed | Return After Body Start | Complete Suite |
+| ------------- | -------- | --------- | ----------------------- | -------------- |
+| Axum | Pass, unqualified | 177.576 ms | 173.272 ms | 8/9; exit 1 |
+| Repaired Viceroy 0.21.0 | Pass, unqualified | 177.294 ms | 172.835 ms | 7/9; exit 1 |
+| Spin 4.1.0 | Pass, unqualified | 177.719 ms | 174.463 ms | 7/9; exit 1 |
+| workerd 2026-09-10 | Fail: source write 5.055 ms late | 178 ms | 174.285 ms | 6/9; exit 1 |
+
+All four return the original typed cap failure with both healthy siblings and peer-close only
+after a confirmed over-cap prefix. That does not waive workerd's failed source cadence. Axum
+also fails the CPU B-write interval; Viceroy fails slow/fast-origin head schedules; Spin fails
+slow-origin head and CPU B-write interval; workerd fails slow-origin head and fourth-slot origin
+EOF timing. Preserve these actual failures instead of replacing them with earlier passing runs.
+Artifacts are `/private/tmp/edgezero-d6-caps-final-20261028/{axum,viceroy,spin,workerd}`; initial
+and intermediate reviewed runs remain separately under `edgezero-d6-caps-runtime-20261028` and
+`edgezero-d6-caps-reviewed-20261028`. The initial workerd preflight without its explicitly selected
+binary remains an unsupported exit 2, not runtime evidence.
+
+This checkpoint does not close D6 or any qualification leg. Native SDK pending-body-entry
+witnesses, remaining response-owned/cleanup/reuse scenarios and strict timing evidence remain
+open. G1 remains 32 ready / 479 planned and unqualified. No frozen requirement/interface change,
+capability promotion, candidate freeze, deployment or provider/runtime pin change is authorized.
+
 ### Current Work Queue and Gates
 
 The Spin host wire suite now uses the existing Rust fixture harness's explicit

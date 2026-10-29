@@ -140,7 +140,7 @@ impl WireOrigins {
         lifetimes::register(&self.shared, token, case)
     }
 
-    pub fn mark_lifetime_start(&self, token: &str) -> Result<()> {
+    pub fn mark_lifetime_start(&self, token: &str) -> Result<Instant> {
         lifetimes::mark_start(&self.shared, token)
     }
 
