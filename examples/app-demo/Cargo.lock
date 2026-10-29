@@ -823,6 +823,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base16ct",
+ "base64",
  "brotli",
  "bytes",
  "chrono",
