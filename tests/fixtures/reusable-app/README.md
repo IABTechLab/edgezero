@@ -102,8 +102,10 @@ planned or implemented and executable with its full assertions. It does not mean
 feature is absent or qualified. EZ-23 local criteria 01-11 bind guarded Cargo tests and the
 existing Axum CI job. EZ-9 core criteria 01-15 bind all 51 redirect tests, and EZ-6 core criterion
 22 binds five mixed-observation/receipt-recovery tests through the same inventory guard.
-EZ-9 runtime criteria 16/17 bind the complete four-adapter wire matrix. There are 33 ready
-legs and 478 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
+EZ-6 core criteria 15/17 bind cutoff-equality and recorded-undelivered cancellation; EZ-7 core
+criteria 01/03 bind marker-off exact-cap and upstream-marker preservation. EZ-9 runtime criteria
+16/17 bind the complete four-adapter wire matrix. There are 37 ready
+legs and 474 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
 for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
@@ -114,7 +116,7 @@ The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
 
-The core legs discover all 56 bound primary/additional sentinels before running one outbound suite:
+The core legs discover all 60 bound primary/additional sentinels before running one outbound suite:
 
 ```sh
 scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::
@@ -955,7 +957,8 @@ Fastly adds three cleanup cases for the local isolation part of EZ-6 criterion 2
 `response-cleanup`, `response-cleanup-source-error`, and `response-cleanup-write-deadline`.
 All use the existing cleanup route and helper; a required private `x-fixture-cleanup-mode`
 header selects exactly `complete`, `source-error`, or `write-deadline` without a compatibility
-default. Fastly runs twelve cases; the other adapters retain ten including response handoff.
+default. Fastly runs twelve timeline/response-cleanup cases plus the eight callback cases below;
+the other adapters retain ten including response handoff.
 One real client starts a callback-owned begun request before a response-owned Begin and original
 three-slot batch. Public handles remain outside the streamed response while canonical egress
 completes. A sixth, bounded same-client `ready` Send returns only after the source has observed
@@ -999,6 +1002,55 @@ The local Fastly source/deadline cases add adapter evidence, not hosted qualific
 criterion 21, criterion 23 and hosted qualification remain
 open. No production API, executor, transport or runtime pin changes.
 
+The same `outbound-lifetimes` command also exercises Fastly callback exit through both existing
+`custom-single-request` and `custom-rebuild-per-request` entrypoints. Internal build selectors
+choose those binaries, not another transport or entrypoint implementation. Each SDK serving loop
+is limited to one request: this does not adopt or prove sandbox reuse. One shared guest probe
+tests normal post-delivery return, post-delivery error, early error and setup failure in each
+wrapper, retaining the original unpolled Send, begun origin and three-slot batch outside the
+callback. Four pending source receipts precede readiness. After-delivery cases additionally start
+and retain post-delivery work on the same client, then confirm its receipt before callback exit.
+The fixture propagates the original callback/setup error from `main` after verifying cleanup;
+it must not consume an expected error and accidentally return success.
+
+Before consuming any retained handle, require closed callback scope, one request-data release,
+zero unpolled-source polls and release of every registered fixture-wrapped native timer. Original
+Begin/Send and optional post-delivery handles return typed Internal; the original batch keeps
+three unresolved slots. Counters remain unchanged after those handles are consumed. These are
+request-data/timer witnesses, not counts of SDK handle drops or proof of frozen SDK polling.
+The probe uses three canonical records (`pending`, `returning`, `closed`), the same shared bounded
+protocol reader, per-runtime total 1 MiB cursors, and post-shutdown tail checks. Original work is
+released only after complete wire evidence plus all three records validate. Early/after-delivery
+cases have 16/22 source events plus one native boundary, below the existing limits.
+
+After delivery, require the unchanged complete canonical response. Before delivery, a typed
+peer close establishes absence of a response head, but an HTTP 500 alone cannot establish its
+origin. Such responses are labelled `UnverifiedHttp500` with
+`no_replacement_response_proven: false`, not accepted as proof that the wrapper sent no replacement.
+Reader timeouts and malformed replies fail. All eight cases are local guest-cleanup
+characterization; full criterion 23 remains planned for its missing SDK/poll/provenance evidence.
+Parent diagnostics preserve simultaneous timeline, response-log and callback failures rather
+than hiding the later failures behind an earlier timing miss.
+
+Adapter-local terminal matrices complement these runtime cases. Axum retains real pending
+origin/batch TCP exchanges through EOF, source failure, connection-deadline signalling and
+transport failure. Its unit driver waits on the actual registered connection deadline, not a
+safety timeout, and checks the terminal report before body/handle drops. Cloudflare's SDK/JS
+matrix consumes a prefix before EOF, source failure, an actual one-second write deadline,
+request AbortSignal or readable cancellation when a further write is eligible. It observes three
+fetch-abort notifications and typed scope failures before consuming the retained handles, with
+stable source/report counts after later drops. This does not prove immediate disconnect
+detection while a source read remains pending or hosted transport teardown.
+
+Spin extends its existing mock-committer matrix with an original pending begun request and
+three-slot batch, in addition to the retained unpolled Send. Four mock resource guards stay live
+through HEAD/EOF until SDK-terminal simulation, or close immediately when fallback is selected.
+Completion observes all four releases and both cancellation notifications before public-handle
+consumption. Later consumption cannot poll the driver or duplicate releases. Source/deadline/
+write/finish failures and coordinator cancellation at each await use the same helper; these are
+core revocation/adapter coordinator units, not real Spin SDK-drop or scheduling evidence.
+Full criterion 21/23 and exact-candidate qualification remain open.
+
 The caps source uses the pinned native harness encoder, not a new guest dependency. Eight
 flushed 16 KiB plaintext pieces produce one gzip member, with a logical encoded size at most
 129 KiB. Actual payload remains in the final scheduled write. Counted writes retain partial
@@ -1010,9 +1062,21 @@ These fixture bounds are not a guest/provider allocation or RSS certificate.
 
 The source's exact stored host anchor also timestamps the complete guest-response return.
 The validator requires an observed over-cap prefix and both healthy payloads before that
-return, and return before the source's 300 ms ending. Socket shutdown may follow return.
-No host/guest clock alignment is assumed. Guest elapsed values must permit a common epoch
-inside the measured batch-invocation interval and no arrival later than collection. Each
+return. The cap deadline applies to the original slot's terminal observation, not delivery
+of the diagnostic HTTP response. Each original request stamp and host receipt bounds the
+unknown host-minus-guest offset from above. Original slot elapsed values must permit one common
+epoch inside the measured batch invocation, with no arrival after collection. Payload write
+starts and native response return constrain that same host epoch for all three slots.
+The worst-case cap terminal upper bound must be strictly before the original 300 ms ending;
+equality, overlap and contradictory bounds fail. Round outward by one microsecond at invocation
+and collection, with the existing additional 1 ms clock guard. Never use a midpoint, assumed
+zero transit, a later source closure or a separately convenient offset per slot.
+
+Correlation records publish the bounds and native HTTP timing with `same_rate_assumed: true`
+and `clock_sync_proven: false`. Unknown clock origins and transit are allowed; arbitrary unequal
+or paused clock rates are not proved by monotonicity. This is conditional local timing evidence,
+not hosted qualification. A late diagnostic response stays recorded and does not redefine when
+the slot failed. Socket shutdown may follow return. Each
 reported item records `slot_error` before bounded report-body consumption, so the reporter's
 own limit cannot masquerade as a production slot failure.
 

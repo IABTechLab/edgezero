@@ -1,7 +1,9 @@
+#[cfg(test)]
+use super::protocol::LOG_LIMIT;
+use super::protocol::{self, LogCursor};
 use super::*;
 
 const PREFIX: &[u8] = b"edgezero-lifetime-cleanup ";
-const LOG_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Mode {
@@ -86,44 +88,13 @@ fn record(mode: Mode, token: &str, stage: &str) -> Value {
         "stage":stage,"evidence":evidence,"qualification":false})
 }
 
+#[cfg(test)]
 fn parse_records(mode: Mode, bytes: &[u8], token: &str) -> Result<Vec<Value>> {
-    require(
-        bytes.len() <= LOG_LIMIT,
-        "cleanup runtime log exceeds bound",
-    )?;
-    let stages = ["cleaned", "continued", "returned"];
-    let mut records = Vec::new();
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        if !line.starts_with(PREFIX) {
-            require(
-                line.ends_with(b"\n") || records.len() < 3 || !PREFIX.starts_with(line),
-                "incomplete extra cleanup protocol prefix",
-            )?;
-            continue;
-        }
-        require(
-            line.len() <= PREFIX.len() + 2049,
-            "cleanup protocol record exceeds bound",
-        )?;
-        if !line.ends_with(b"\n") {
-            require(
-                records.len() < 3,
-                "incomplete extra cleanup protocol record",
-            )?;
-            break;
-        }
-        let stage = stages
-            .get(records.len())
-            .ok_or("extra cleanup protocol record")?;
-        let expected = record(mode, token, stage);
-        let payload = &line[PREFIX.len()..line.len() - 1];
-        require(
-            payload == serde_json::to_vec(&expected)?,
-            "invalid or reordered canonical cleanup record",
-        )?;
-        records.push(expected);
-    }
-    Ok(records)
+    protocol::parse(PREFIX, bytes, &expected_records(mode, token))
+}
+
+fn expected_records(mode: Mode, token: &str) -> [Value; 3] {
+    ["cleaned", "continued", "returned"].map(|stage| record(mode, token, stage))
 }
 
 fn expected_bytes(mode: Mode, token: &str) -> Result<Vec<u8>> {
@@ -286,55 +257,18 @@ fn validate_origin(mode: Mode, origin: &Value, token: &str) -> Result<()> {
     )
 }
 
-#[derive(Default)]
-pub(super) struct LogCursor {
-    offset: u64,
-    observed: std::cell::Cell<u64>,
-}
-
 pub(super) fn finish(log: &Path, cursor: &LogCursor) -> Result<()> {
-    let bytes = read_bytes(log, cursor)?;
-    require(
-        bytes
-            .split_inclusive(|byte| *byte == b'\n')
-            .all(|line| !line.starts_with(PREFIX) && !PREFIX.starts_with(line)),
-        "unexpected cleanup protocol in final runtime log tail",
-    )
+    protocol::finish(log, cursor, PREFIX)
 }
 
-fn read_bytes(log: &Path, cursor: &LogCursor) -> Result<Vec<u8>> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    let mut file = fs::File::open(log)?;
-    let length = file.metadata()?.len();
-    require(
-        length <= LOG_LIMIT as u64 && length >= cursor.observed.get() && length >= cursor.offset,
-        "cleanup log exceeded its total bound or shrank",
-    )?;
-    file.seek(SeekFrom::Start(cursor.offset))?;
-    let remaining = LOG_LIMIT as u64 - cursor.offset;
-    let mut bytes = Vec::new();
-    file.take(remaining + 1).read_to_end(&mut bytes)?;
-    require(
-        bytes.len() as u64 <= remaining && cursor.offset + bytes.len() as u64 >= length,
-        "cleanup runtime log exceeds total bound or shrank during read",
-    )?;
-    cursor.observed.set(cursor.offset + bytes.len() as u64);
-    Ok(bytes)
-}
-
+#[cfg(test)]
 fn read_records(
     mode: Mode,
     log: &Path,
     token: &str,
     cursor: &LogCursor,
 ) -> Result<(Vec<Value>, u64)> {
-    let bytes = read_bytes(log, cursor)?;
-    let records = parse_records(mode, &bytes, token)?;
-    let complete = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1);
-    Ok((records, cursor.offset + complete as u64))
+    protocol::read(log, cursor, PREFIX, &expected_records(mode, token))
 }
 
 fn wait_records(
@@ -344,18 +278,7 @@ fn wait_records(
     count: usize,
     cursor: &LogCursor,
 ) -> Result<(Vec<Value>, u64)> {
-    let started = Instant::now();
-    loop {
-        let (records, end) = read_records(mode, log, token, cursor)?;
-        if records.len() >= count {
-            return Ok((records, end));
-        }
-        require(
-            started.elapsed() < Duration::from_secs(2),
-            "cleanup terminal evidence timed out",
-        )?;
-        thread::sleep(Duration::from_millis(5));
-    }
+    protocol::wait(log, cursor, PREFIX, &expected_records(mode, token), count)
 }
 
 pub(super) fn check(

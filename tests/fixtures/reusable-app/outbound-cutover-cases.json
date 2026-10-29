@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-11, EZ-9 unit acceptance 01-15 plus local runtime 16/17, and EZ-6 unit acceptance 22 bind executable guarded commands; 478 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-11, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-6 core acceptance 15/17/22 and EZ-7 core acceptance 01/03 bind executable guarded commands; 474 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -12,7 +12,7 @@
     {
       "requirement": "G4",
       "status": "Pending",
-      "reason": "Original API approval and the requester's scoped 2026-10-24 timing/native-integration amendment are recorded in docs/audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment. Send-first integration may proceed on the unchanged current trait with UNKNOWN synchronous blocking horizon; timing-only G2/finite-H(K) proof is not a preimplementation gate. Literal B/backend policy/resources remain unapproved; timers/slack and typed body-error/readiness safety are unchanged. Full settlement/Follow/engine/atomic migration and hosted/performance qualification remain open."
+      "reason": "The API-only approval and subsequent scoped interface, paired-time, B31, multiplexer, ownership and dispatch-slack authorizations are recorded in docs/audits/2026-10-18-outbound-api-approval.md. Shared Send/Begin/Batch/Follow integration is locally implemented; those scoped implementation approvals do not supply the remaining resource-policy decisions, finite synchronous Image Optimizer blocking horizon, exact-candidate acceptance or hosted/performance qualification. The blocking horizon remains UNKNOWN; original logical deadlines and error-preserving readiness remain mandatory."
     },
     {
       "requirement": "EZ-2/M1-M7",
@@ -7766,11 +7766,14 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-15-unit-core",
-      "sentinel": "ez_6_acceptance_15_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_15_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::batch::tests::arrival_ledger_preserves_late_collection_and_cancel_safety",
+      "additional_sentinels": [
+        "outbound::tests::batch_ledger_rejects_an_outcome_observed_at_observation_cutoff"
+      ],
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "Arrival at the cutoff. Unit, injected clock. Given a slot whose response is complete exactly at the cutoff, then it is unresolved.",
-      "artifact_path": "outbound/EZ-6/acceptance/15/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8021,11 +8024,11 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-17-unit-core",
-      "sentinel": "ez_6_acceptance_17_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_17_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::batch::tests::cancellation_includes_recorded_but_undelivered_indices",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "Cancellation report. Unit and every adapter. Given a batch with one slot recorded but not delivered and one still in flight, when it is cancelled, then both indices are reported as undelivered.",
-      "artifact_path": "outbound/EZ-6/acceptance/17/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9674,11 +9677,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-7-acceptance-01-unit-core",
-      "sentinel": "ez_7_acceptance_01_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_7_acceptance_01_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::proxy_marker_off_preserves_upstream_and_consumes_no_header_budget",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit.** Given an upstream response with N fields and a header-count cap of exactly N, when the marker is off, then the response succeeds. When it is on, it fails with the header-count limit. The same holds for header bytes.",
-      "artifact_path": "outbound/EZ-7/acceptance/01/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9730,11 +9733,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-7-acceptance-03-unit-core",
-      "sentinel": "ez_7_acceptance_03_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_7_acceptance_03_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::tests::proxy_marker_off_preserves_upstream_and_consumes_no_header_budget",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
       "expected": "**Unit.** Given the marker is off and the upstream sends `x-edgezero-proxy: upstream`, then the field arrives unchanged.",
-      "artifact_path": "outbound/EZ-7/acceptance/03/unit/core.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {

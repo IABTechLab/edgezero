@@ -20,6 +20,7 @@ enum Case {
     Caps,
     Handoff,
     Cleanup,
+    Callback,
 }
 
 impl Case {
@@ -36,6 +37,7 @@ impl Case {
             "caps-while-waiting" => Ok(Self::Caps),
             "response-handoff" => Ok(Self::Handoff),
             "response-cleanup" => Ok(Self::Cleanup),
+            "callback-exit" => Ok(Self::Callback),
             _ => Err("unknown lifetime case".into()),
         }
     }
@@ -53,6 +55,7 @@ impl Case {
             Self::Caps => "caps-while-waiting",
             Self::Handoff => "response-handoff",
             Self::Cleanup => "response-cleanup",
+            Self::Callback => "callback-exit",
         }
     }
 
@@ -71,13 +74,17 @@ impl Case {
                 role,
                 "origin" | "a" | "b" | "c" | "callback" | "ready" | "post" | "ack"
             ),
+            Self::Callback => matches!(
+                role,
+                "origin" | "a" | "b" | "c" | "ready" | "post" | "post-ready"
+            ),
         }
     }
 
     fn held(self) -> bool {
         matches!(
             self,
-            Self::PendingHead | Self::PendingBody | Self::Handoff | Self::Cleanup
+            Self::PendingHead | Self::PendingBody | Self::Handoff | Self::Cleanup | Self::Callback
         )
     }
 }
@@ -685,6 +692,28 @@ fn respond_caps(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>
 }
 
 fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> Result<bool> {
+    if matches!(exchange.case, Case::Callback) && matches!(exchange.role, "ready" | "post-ready") {
+        let needed = if exchange.role == "ready" { 4 } else { 5 };
+        shared.wait(GATE_BUDGET, |state| {
+            state.stop
+                || state.lifetimes[exchange.token]
+                    .events
+                    .iter()
+                    .filter(|event| event["op"] == "waiting")
+                    .count()
+                    == needed
+        })?;
+        require(!shared.lock().stop, "callback barrier stopped")?;
+        let started = Instant::now();
+        socket.write_all(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        socket.flush()?;
+        let mut event = exchange.event("head", Instant::now(), None);
+        event["write_started_us"] = json!(offset(started, exchange.anchor));
+        record(shared, exchange, event)?;
+        return Ok(true);
+    }
     if matches!(exchange.case, Case::Caps) && exchange.role == "a" {
         return respond_caps(socket, shared, exchange);
     }
@@ -814,7 +843,8 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
                 | Case::PendingHead
                 | Case::PendingBody
                 | Case::Handoff
-                | Case::Cleanup => {
+                | Case::Cleanup
+                | Case::Callback => {
                     unreachable!()
                 }
             };
@@ -875,6 +905,55 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_exit_source_holds_original_and_post_delivery_work_until_wrapper_evidence() {
+        let origins = WireOrigins::start().unwrap();
+        origins
+            .register_lifetime("callback", "callback-exit")
+            .unwrap();
+        origins.mark_lifetime_start("callback").unwrap();
+        let original = ["origin", "a", "b", "c"]
+            .map(|role| connect(&origins, "callback", "callback-exit", role, "0"));
+        assert!(
+            read(connect(&origins, "callback", "callback-exit", "ready", "0"))
+                .starts_with(b"HTTP/1.1 204")
+        );
+        let post = connect(&origins, "callback", "callback-exit", "post", "0");
+        assert!(
+            read(connect(
+                &origins,
+                "callback",
+                "callback-exit",
+                "post-ready",
+                "0"
+            ))
+            .starts_with(b"HTTP/1.1 204")
+        );
+        for socket in original.iter().chain([&post]) {
+            socket
+                .set_read_timeout(Some(Duration::from_millis(10)))
+                .unwrap();
+            assert!(
+                matches!(socket.peek(&mut[0]),Err(error) if matches!(error.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut))
+            );
+        }
+        origins
+            .release_lifetime("callback", Instant::now())
+            .unwrap();
+        for mut socket in original.into_iter().chain([post]) {
+            socket.set_read_timeout(Some(IO_BUDGET)).unwrap();
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).unwrap();
+            assert!(bytes.is_empty());
+        }
+        let events = origins.take_lifetime_events("callback").unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 22);
+        for role in ["origin", "a", "b", "c", "post"] {
+            assert_eq!(event(&events, role, "closed")["reason"], "fixture_released");
+        }
+        origins.finish().unwrap();
+    }
 
     #[test]
     fn cleanup_prefix_acknowledgment_is_distinct_from_original_work_release() {

@@ -21,6 +21,8 @@ use futures::executor::block_on;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(feature = "progress")]
+mod callback_cleanup;
 static INITIALIZATIONS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 static PANIC_IN_CONSTRUCTOR: AtomicBool = AtomicBool::new(false);
 
@@ -356,6 +358,10 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
     Ok(())
 }
 pub fn custom(reuse_sandbox: bool, reuse_app: bool) -> Result<(), Error> {
+    #[cfg(feature = "progress")]
+    if callback_cleanup::enabled() {
+        return callback_cleanup::run(reuse_sandbox);
+    }
     if reuse_sandbox {
         finish(edgezero_adapter_fastly::lifecycle::serve_custom(
             serving(),

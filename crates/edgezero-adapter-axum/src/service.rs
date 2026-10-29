@@ -414,16 +414,17 @@ mod tests {
     use edgezero_core::key_value_store::KvStore;
     use edgezero_core::middleware::{Middleware, Next};
     use edgezero_core::outbound::{
-        HttpClient, OutboundBatch, OutboundFuture, OutboundPending, OutboundRequest,
-        OutboundResponse,
+        HttpClient, OutboundBatch, OutboundCollectedSlot, OutboundFuture, OutboundPending,
+        OutboundRequest, OutboundResponse,
     };
     use edgezero_core::response_egress::{
         DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision, ResponseEgressCompletion,
-        ResponseEgressFallbackDisposition, ResponseEgressObserver, ResponseEgressOutcome,
-        ResponseEgressPolicy, ResponseEgressReport,
+        ResponseEgressDeadline, ResponseEgressFallbackDisposition, ResponseEgressObserver,
+        ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressReport,
     };
     use edgezero_core::router::{RouteMetadata, RouteResolution};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+    use futures_util::FutureExt as _;
     use futures_util::future::pending;
     use futures_util::stream::poll_fn;
     use http_body::Body as _;
@@ -436,8 +437,9 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
     use tokio::task::{JoinHandle, JoinSet, LocalSet, yield_now};
-    use tokio::time::{sleep, timeout};
+    use tokio::time::{Instant as TokioInstant, sleep, sleep_until, timeout};
     use tower::ServiceExt as _;
 
     thread_local! {
@@ -497,9 +499,6 @@ mod tests {
 
     async fn assert_retained_progress_cancelled(mut server: JoinHandle<()>) {
         let result = timeout(Duration::from_secs(2), &mut server).await;
-        let retained = RETAINED_PROGRESS.with(|retained| retained.borrow_mut().take());
-        assert!(retained.is_some(), "caller retains both progress handles");
-        drop(retained);
         if result.is_err() {
             server.abort();
             let _cancelled = server.await;
@@ -507,6 +506,117 @@ mod tests {
         result
             .expect("scope exit closes every native exchange")
             .expect("origin task");
+        let (origin, batch) = RETAINED_PROGRESS
+            .with(|retained| retained.borrow_mut().take())
+            .expect("caller retains both progress handles");
+        assert!(matches!(
+            origin
+                .collect()
+                .now_or_never()
+                .expect("closed begun receiver ready"),
+            Err(EdgeError::Internal { .. })
+        ));
+        let failure = batch
+            .collect()
+            .now_or_never()
+            .expect("closed batch ready")
+            .expect_err("closed batch scope");
+        assert!(matches!(failure.error(), EdgeError::Internal { .. }));
+        assert_eq!(failure.slots().len(), 2);
+        assert!(
+            failure
+                .slots()
+                .iter()
+                .all(|slot| matches!(slot, OutboundCollectedSlot::Unresolved))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn attached_progress_closes_before_retained_handles_on_terminal_egress() {
+        LocalSet::new().run_until(async {
+            for (mode,expected) in [("eof",ResponseEgressOutcome::HostHandoff),("source",ResponseEgressOutcome::SourceError),
+                ("deadline",ResponseEgressOutcome::DeadlineExceeded),("transport",ResponseEgressOutcome::TransportError)] {
+                let (target,receipts,server)=waiting_outbound_origin().await;
+                let (source_release,source_wait)=oneshot::channel::<()>();
+                let gate_slot=Arc::new(Mutex::new(Some(source_wait)));
+                let released=Arc::new(AtomicUsize::new(0));
+                let polls=Arc::new(AtomicUsize::new(0));
+                let source_released=Arc::clone(&released);
+                let source_polls=Arc::clone(&polls);
+                let router=RouterService::builder().get("/",move |ctx:RequestContext| {
+                    let destination=target.clone();let observed_requests=Arc::clone(&receipts);
+                    let source_gate=gate_slot.lock().expect("receiver").take().expect("one request");
+                    let owner=DropSignal(Arc::clone(&source_released));
+                    let observed_polls=Arc::clone(&source_polls);
+                    async move {
+                        let scope=OutboundScopeOwner::response_body();
+                        scope.run(start_retained_progress(&ctx.http_client().expect("client"),&destination)).await?;
+                        await_outbound_requests(&observed_requests).await;
+                        let source=stream! {
+                            let _owner=owner;
+                            observed_polls.fetch_add(1,Ordering::SeqCst);
+                            yield Ok(Bytes::from_static(b"live"));
+                            observed_polls.fetch_add(1,Ordering::SeqCst);
+                            source_gate.await.expect("release source");
+                            observed_polls.fetch_add(1,Ordering::SeqCst);
+                            if mode=="source" {yield Err(EdgeError::bad_gateway("controlled source failure"));}
+                        };
+                        let mut response=CoreResponse::new(Body::from_stream(source));
+                        if mode=="deadline" {response.extensions_mut().insert(ResponseEgressDeadline::after(Duration::from_secs(1)));}
+                        scope.attach(response)
+                    }
+                }).build();
+                let reports=Arc::new(Mutex::new(Vec::new()));
+                let mut app=App::new(router);
+                app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
+                let connection=EgressConnection::default();
+                let response=AxumServiceState::from_app(app).dispatch_request(Request::new(AxumBody::empty()),&connection,None)
+                    .await.expect("response handoff");
+                let mut body=response.into_body();
+                assert_eq!(poll_future(|cx|Pin::new(&mut body).poll_frame(cx)).await.expect("prefix").expect("prefix frame").into_data().expect("data"),"live");
+                assert!(poll_future(|cx|Pin::new(&mut body).poll_frame(cx)).now_or_never().is_none());
+                assert!(!server.is_finished(),"original SDK I/O remains pending");
+                RETAINED_PROGRESS.with(|storage| {
+                    let mut state=storage.borrow_mut();
+                    let (origin,batch)=state.as_mut().expect("original handles");
+                    assert!(!origin.is_ready());
+                    assert!(matches!(batch.check().expect("batch check"),edgezero_core::OutboundBatchCheck::Pending));
+                });
+                assert_eq!(released.load(Ordering::SeqCst),0);
+                assert!(reports.lock().expect("reports").is_empty());
+                let mut pending_release=Some(source_release);
+                if matches!(mode,"eof"|"source") {pending_release.take().expect("release").send(()).expect("source retained");}
+                if mode=="transport" {connection.signal_transport_error();}
+                if mode=="deadline" {
+                    let deadline=connection.next_deadline().expect("registered connection deadline");
+                    sleep_until(deadline).await;
+                    assert!(connection.signal_elapsed_deadline(TokioInstant::now()),"connection timer, not a safety timeout, signals expiry");
+                }
+                let next=poll_future(|cx|Pin::new(&mut body).poll_frame(cx)).now_or_never().expect("triggered terminal is immediately observable");
+                if mode=="eof" {assert!(next.is_none());}else{
+                    let error=next.expect("error frame").expect_err("terminal failure");
+                    assert_eq!(error.is_deadline(),mode=="deadline");
+                }
+                assert_eq!(released.load(Ordering::SeqCst),1,"source released before retained body drop");
+                {
+                    let recorded_before=reports.lock().expect("reports");
+                    assert_eq!(recorded_before.len(),1,"terminal report precedes later body/handle drops");
+                    assert_eq!(recorded_before[0].outcome,expected);assert_eq!(recorded_before[0].bytes_written,4);
+                    if mode=="deadline" {assert!(recorded_before[0].elapsed>=Duration::from_secs(1));}
+                }
+                if let Some(pending_sender)=pending_release {assert!(pending_sender.send(()).is_err(),"terminal source no longer owns its receiver");}
+                assert_retained_progress_cancelled(server).await;
+                let terminal_polls=polls.load(Ordering::SeqCst);
+                assert!(poll_future(|cx|Pin::new(&mut body).poll_frame(cx)).now_or_never().expect("terminal EOF does not await a timer").is_none());
+                drop(body);yield_now().await;
+                assert_eq!(polls.load(Ordering::SeqCst),terminal_polls);
+                assert_eq!(released.load(Ordering::SeqCst),1);
+                assert!(connection.next_deadline().is_none());
+                let recorded_after=reports.lock().expect("reports");
+                assert_eq!(recorded_after.len(),1);assert_eq!(recorded_after[0].outcome,expected);
+                assert_eq!(recorded_after[0].bytes_written,4);
+            }
+        }).await;
     }
 
     #[tokio::test(flavor = "current_thread")]

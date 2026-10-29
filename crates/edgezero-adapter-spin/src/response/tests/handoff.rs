@@ -1,3 +1,4 @@
+use std::iter::repeat_with;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -10,10 +11,10 @@ use edgezero_core::ingress::{
 };
 use edgezero_core::outbound::{
     HttpClient, IndependentOutboundProgress, OutboundBatch, OutboundBatchDriverEvent,
-    OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
-    OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
-    OutboundRequest, OutboundResponse, OutboundScope, OutboundScopeOwner, OutboundSendMode,
-    OutboundTime,
+    OutboundCollectedSlot, OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture,
+    OutboundHead, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
+    OutboundProgressRuntime, OutboundRequest, OutboundResponse, OutboundScope, OutboundScopeOwner,
+    OutboundSendMode, OutboundTime,
 };
 use edgezero_core::response_egress::ResponseEgressBeginFailure;
 use edgezero_core::router::RouterService;
@@ -30,13 +31,33 @@ type BegunEgress = Result<
     Box<ResponseEgressBeginFailure>,
 >;
 
-struct UnpolledClient(OutboundTime);
+struct PendingClient(OutboundTime, Arc<ProgressResources>);
+
+#[derive(Default)]
+struct ProgressResources {
+    batch_cancelled: AtomicUsize,
+    begin_cancelled: AtomicUsize,
+    dispatches: AtomicUsize,
+    polls: AtomicUsize,
+    released: AtomicUsize,
+}
+
+struct ProgressResource(Arc<ProgressResources>);
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl Drop for ProgressResource {
+    fn drop(&mut self) {
+        self.0.released.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 struct Handoff {
+    batch: OutboundBatch,
     begun: Option<BegunEgress>,
     callback: Option<OutboundScopeOwner>,
     completed: Arc<AtomicUsize>,
     observer: RecordingObserver,
+    origin: OutboundPending,
+    resources: Arc<ProgressResources>,
     retained: OutboundFuture<OutboundResponse>,
     scope: OutboundScope,
     upload: Weak<[u8]>,
@@ -46,19 +67,25 @@ std::thread_local! {
     static RESPONSE: RefCell<Option<Response>> = const { RefCell::new(None) };
 }
 
-impl OutboundHttpClient for UnpolledClient {
-    fn begin(&self, _request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
-        Err(EdgeError::internal(anyhow::anyhow!(
-            "fixture only retains unpolled Send"
-        )))
+impl OutboundHttpClient for PendingClient {
+    fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+        let resource = ProgressResource(Arc::clone(&self.1));
+        let cancelled = Arc::clone(&self.1);
+        Ok(OutboundPending::new(
+            Box::pin(async move {
+                let _resource = resource;
+                let _request = request;
+                pending().await
+            }),
+            OutboundExchangeOwner::new(move || {
+                cancelled.begin_cancelled.fetch_add(1, Ordering::SeqCst);
+            }),
+        ))
     }
 
     fn dispatch_head(&self, _request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
-        Box::pin(async {
-            Err(EdgeError::internal(anyhow::anyhow!(
-                "fixture Send must remain unpolled"
-            )))
-        })
+        self.1.dispatches.fetch_add(1, Ordering::SeqCst);
+        panic!("fixture Send must remain unpolled")
     }
 
     fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
@@ -66,13 +93,25 @@ impl OutboundHttpClient for UnpolledClient {
     }
 
     fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
-        let (context, _) = batch.into_slots();
+        let (context, slots) = batch.into_slots();
+        assert_eq!(context.slot_count(), 3);
+        assert_eq!(slots.len(), 3);
+        let resources = repeat_with(|| ProgressResource(Arc::clone(&self.1)))
+            .take(3)
+            .collect::<Vec<_>>();
+        let polled = Arc::clone(&self.1);
+        let cancelled = Arc::clone(&self.1);
         OutboundBatch::from_driver(
             context,
-            stream::iter([OutboundBatchDriverEvent::Failed(EdgeError::internal(
-                anyhow::anyhow!("fixture only retains unpolled Send"),
-            ))]),
-            OutboundExchangeOwner::new(|| {}),
+            stream::poll_fn(move |_| {
+                let _resources = &resources;
+                let _slots = &slots;
+                polled.polls.fetch_add(1, Ordering::SeqCst);
+                Poll::<Option<OutboundBatchDriverEvent>>::Pending
+            }),
+            OutboundExchangeOwner::new(move || {
+                cancelled.batch_cancelled.fetch_add(1, Ordering::SeqCst);
+            }),
         )
     }
 
@@ -98,7 +137,8 @@ async fn attached_response(_context: RequestContext) -> Result<Response, EdgeErr
 
 impl Handoff {
     fn assert_closed(self, outcome: ResponseEgressOutcome) {
-        assert!(self.scope.check().is_err());
+        self.assert_revoked();
+        let polls = self.resources.polls.load(Ordering::SeqCst);
         assert!(
             self.upload.upgrade().is_none(),
             "retained handle cannot retain its request body"
@@ -107,10 +147,59 @@ impl Handoff {
             block_on(self.retained),
             Err(EdgeError::Internal { .. })
         ));
+        assert!(matches!(
+            block_on(self.origin.collect()),
+            Err(EdgeError::Internal { .. })
+        ));
+        let failure = block_on(self.batch.collect()).expect_err("closed original batch");
+        assert!(matches!(failure.error(), EdgeError::Internal { .. }));
+        assert_eq!(failure.slots().len(), 3);
+        assert!(
+            failure
+                .slots()
+                .iter()
+                .all(|slot| matches!(slot, OutboundCollectedSlot::Unresolved))
+        );
+        assert_eq!(self.resources.released.load(Ordering::SeqCst), 4);
+        assert_eq!(self.resources.begin_cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(self.resources.batch_cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(self.resources.dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            self.resources.polls.load(Ordering::SeqCst),
+            polls,
+            "terminal handles cannot poll producers"
+        );
         assert_eq!(self.completed.load(Ordering::SeqCst), 1);
         let reports = self.observer.reports();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].outcome, outcome);
+    }
+
+    fn assert_live(&mut self) {
+        self.scope.check().expect("accepted jobs remain live");
+        assert!(self.upload.upgrade().is_some());
+        assert_eq!(self.resources.released.load(Ordering::SeqCst), 0);
+        assert_eq!(self.resources.begin_cancelled.load(Ordering::SeqCst), 0);
+        assert_eq!(self.resources.batch_cancelled.load(Ordering::SeqCst), 0);
+        assert_eq!(self.resources.dispatches.load(Ordering::SeqCst), 0);
+        assert!(!self.origin.is_ready());
+        assert!(matches!(
+            self.batch.check().expect("original batch"),
+            edgezero_core::OutboundBatchCheck::Pending
+        ));
+    }
+
+    fn assert_revoked(&self) {
+        assert!(self.scope.check().is_err());
+        assert_eq!(
+            self.resources.released.load(Ordering::SeqCst),
+            4,
+            "original resources released before consuming handles"
+        );
+        assert_eq!(self.resources.begin_cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(self.resources.batch_cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(self.resources.dispatches.load(Ordering::SeqCst), 0);
+        assert!(self.upload.upgrade().is_none());
     }
 
     fn new(response: Response, method: Method) -> Self {
@@ -120,10 +209,11 @@ impl Handoff {
         let scope = owner.scope();
         let bytes = Arc::<[u8]>::from(&b"owned before callback return"[..]);
         let upload = Arc::downgrade(&bytes);
-        let client = HttpClient::with_client(UnpolledClient(OutboundTime::new(
-            stable_clock(now),
-            |_, _| panic!("unpolled Send must not register timers"),
-        )));
+        let resources = Arc::new(ProgressResources::default());
+        let client = HttpClient::with_client(PendingClient(
+            OutboundTime::new(stable_clock(now), |_, _| Box::pin(pending())),
+            Arc::clone(&resources),
+        ));
         let retained = owner.with(|| {
             client.send(
                 OutboundRequest::post("https://fixture.invalid/retained")
@@ -131,6 +221,9 @@ impl Handoff {
                     .body(Bytes::from_owner(bytes)),
             )
         });
+        let (origin, batch) = pending_jobs(&owner, &client, now);
+        assert_eq!(resources.released.load(Ordering::SeqCst), 0);
+        assert!(resources.polls.load(Ordering::SeqCst) > 0);
         let attached = owner
             .attach(response)
             .expect("unique body owner attachment");
@@ -148,15 +241,25 @@ impl Handoff {
         let completed = Arc::new(AtomicUsize::new(0));
         let calls = Arc::clone(&completed);
         let completion_upload = Weak::clone(&upload);
+        let completion_resources = Arc::clone(&resources);
         app.set_ingress_admission_policy(move |head| {
             let call_count = Arc::clone(&calls);
             let upload_probe = Weak::clone(&completion_upload);
+            let tracked = Arc::clone(&completion_resources);
             AdmissionDecision::Admit {
                 completion: ResponseEgressCompletion::new(move |_report| {
                     assert!(
                         upload_probe.upgrade().is_none(),
                         "scope closes before completion"
                     );
+                    assert_eq!(
+                        tracked.released.load(Ordering::SeqCst),
+                        4,
+                        "scope releases original jobs before completion callback"
+                    );
+                    assert_eq!(tracked.begin_cancelled.load(Ordering::SeqCst), 1);
+                    assert_eq!(tracked.batch_cancelled.load(Ordering::SeqCst), 1);
+                    assert_eq!(tracked.dispatches.load(Ordering::SeqCst), 0);
                     call_count.fetch_add(1, Ordering::SeqCst);
                 }),
                 grant: IngressGrant::empty(),
@@ -178,7 +281,7 @@ impl Handoff {
         };
         let begun =
             callback.with(|| envelope.begin(ResponseEgressFramingMode::ExplicitBufferedLength));
-        Self {
+        let mut handoff = Self {
             begun: Some(begun),
             callback: Some(callback),
             completed,
@@ -186,7 +289,12 @@ impl Handoff {
             retained,
             scope,
             upload,
-        }
+            origin,
+            batch,
+            resources,
+        };
+        handoff.assert_live();
+        handoff
     }
 
     fn start(&mut self, committer: &mut MockCommitter) -> MockResponse {
@@ -213,6 +321,35 @@ impl Handoff {
     }
 }
 
+fn pending_jobs(
+    owner: &OutboundScopeOwner,
+    client: &HttpClient,
+    now: MonotonicInstant,
+) -> (OutboundPending, OutboundBatch) {
+    let mut origin = owner
+        .with(|| {
+            block_on(
+                client
+                    .begin(OutboundRequest::get("https://fixture.invalid/begun").expect("origin")),
+            )
+        })
+        .expect("original begun request");
+    let mut batch = owner.with(|| {
+        client.start_batch_until(
+            repeat_with(|| OutboundRequest::get("https://fixture.invalid/bidder").expect("bidder"))
+                .take(3)
+                .collect(),
+            stable_clock(now).deadline_after(Duration::from_secs(3)),
+        )
+    });
+    assert!(!origin.is_ready());
+    assert!(
+        batch.next().now_or_never().is_none(),
+        "original batch pending before egress"
+    );
+    (origin, batch)
+}
+
 #[test]
 fn attached_owner_survives_callback_return_and_eof_until_sdk_completion() {
     let mut handoff = Handoff::new(Response::new(Body::stream(stream::empty())), Method::GET);
@@ -234,6 +371,7 @@ fn attached_owner_survives_callback_return_and_eof_until_sdk_completion() {
         "source reached EOF"
     );
     handoff.scope.check().expect("EOF is not SDK completion");
+    handoff.assert_live();
     assert!(handoff.upload.upgrade().is_some());
     assert!(handoff.observer.reports().is_empty());
     state.borrow_mut().pending = None;
@@ -255,6 +393,7 @@ fn attached_owner_closes_on_coordinator_cancellation_at_every_await() {
         let mut task = committer.tasks.pop_front().expect("coordinator");
         assert!(task.as_mut().now_or_never().is_none());
         handoff.scope.check().expect("coordinator still owns scope");
+        handoff.assert_live();
         drop(task);
         handoff.assert_closed(ResponseEgressOutcome::TransportError);
     }
@@ -303,6 +442,7 @@ fn attached_owner_closes_on_source_deadline_write_and_finish_failures() {
             .scope
             .check()
             .expect("accepted work remains live before its egress failure");
+        handoff.assert_live();
         committer.run_task();
         handoff.assert_closed(expected);
     }
@@ -330,6 +470,7 @@ fn head_suppression_keeps_attached_owner_until_sdk_terminal() {
     assert!(task.as_mut().now_or_never().is_none());
     assert!(state.borrow().events.contains(&"finish"));
     handoff.scope.check().expect("HEAD retains accepted scope");
+    handoff.assert_live();
     assert!(handoff.upload.upgrade().is_some());
     assert_eq!(handoff.completed.load(Ordering::SeqCst), 0);
     assert!(handoff.observer.reports().is_empty());
@@ -359,6 +500,7 @@ fn fallback_revokes_application_work_before_sdk_terminal_without_completing_egre
     assert_eq!(delivered.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(delivered.transmits_body);
     assert!(handoff.scope.check().is_err());
+    handoff.assert_revoked();
     assert!(handoff.upload.upgrade().is_none());
     handoff
         .callback
@@ -396,10 +538,12 @@ fn fallback_revokes_application_work_before_sdk_terminal_without_completing_egre
 #[test]
 fn externally_retained_attachment_is_revoked_when_callback_returns_error() {
     let now = MonotonicInstant::now();
-    let client = HttpClient::with_client(UnpolledClient(OutboundTime::new(
-        stable_clock(now),
-        |_, _| panic!("unpolled Send must not register timers"),
-    )));
+    let client = HttpClient::with_client(PendingClient(
+        OutboundTime::new(stable_clock(now), |_, _| {
+            panic!("unpolled Send must not register timers")
+        }),
+        Arc::new(ProgressResources::default()),
+    ));
     let bytes = Arc::<[u8]>::from(&b"unaccepted response upload"[..]);
     let upload = Arc::downgrade(&bytes);
     let mut escaped_response = None;

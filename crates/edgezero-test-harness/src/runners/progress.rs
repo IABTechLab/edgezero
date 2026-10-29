@@ -343,6 +343,14 @@ fn coding_checks(name: &str, port: u16, records: &mut Records) -> Result<()> {
     )
 }
 
+fn fastly_progress_variant(suite: &str) -> &'static str {
+    match suite {
+        "outbound-callback-run" => "custom-a",
+        "outbound-callback-serve" => "custom-b",
+        _ => "outbound-progress",
+    }
+}
+
 pub(super) fn build(
     name: &str,
     run: &Path,
@@ -351,6 +359,7 @@ pub(super) fn build(
     suite: &str,
 ) -> Result<Option<(Command, u16)>> {
     let package = root().join("crates").join(format!("fixture-{name}"));
+    let fastly_variant = fastly_progress_variant(suite);
     let (variable, fallback) = match name {
         "fastly" => ("VICEROY_BIN", "viceroy"),
         "spin" => ("SPIN_BIN", "spin"),
@@ -416,7 +425,7 @@ pub(super) fn build(
                 "--target",
                 "wasm32-wasip1",
                 "--bin",
-                "fixture-fastly-outbound-progress",
+                wasm_name(fastly_variant).trim_end_matches(".wasm"),
             ]);
         } else {
             command.args(["--bin", "fixture-axum-outbound-progress"]);
@@ -429,9 +438,9 @@ pub(super) fn build(
         )?;
         let source = match name {
             "spin" => root().join("target/wasm32-wasip2/release/fixture_spin.wasm"),
-            "fastly" => {
-                root().join("target/wasm32-wasip1/release/fixture-fastly-outbound-progress.wasm")
-            }
+            "fastly" => root()
+                .join("target/wasm32-wasip1/release")
+                .join(wasm_name(fastly_variant)),
             _ => built_executable(&output.stdout, "fixture-axum-outbound-progress")?,
         };
         stage(&source, run)?
@@ -441,12 +450,12 @@ pub(super) fn build(
     } else {
         artifact_path.clone()
     };
-    records.push(json!({"event":"build","adapter":name,"variant":format!("{name}-outbound-progress"),"revision":revision,"artifact":artifact(&fingerprint)?}))?;
+    records.push(json!({"event":"build","adapter":name,"variant":format!("{name}-{}",if name=="fastly"{fastly_variant}else{"outbound-progress"}),"revision":revision,"artifact":artifact(&fingerprint)?}))?;
     let port = net::port()?;
     let command = if name == "fastly" {
         let config = run.join("fastly.toml");
         fs::copy(package.join("fastly.toml"), &config)?;
-        fastly_command(&exe, &config, run, "outbound-progress", port)
+        fastly_command(&exe, &config, run, fastly_variant, port)
     } else {
         let exe = if name == "axum" { &artifact_path } else { &exe };
         provider_command(name, "retained", exe, &artifact_path, &package, run, port)?
@@ -1125,5 +1134,22 @@ mod tests {
             "variant":format!("{name}-outbound-progress"),"artifact":{"fnv1a64":name}})
         });
         assert_eq!(summarize(&events)["build_identity"]["status"], "consistent");
+    }
+
+    #[test]
+    fn callback_suites_reuse_existing_custom_entrypoints_without_changing_other_builds() {
+        assert_eq!(fastly_progress_variant("outbound-callback-run"), "custom-a");
+        assert_eq!(
+            fastly_progress_variant("outbound-callback-serve"),
+            "custom-b"
+        );
+        for suite in [
+            "outbound-progress",
+            "outbound-lifetimes",
+            "response-framing",
+            "synthesized-headers",
+        ] {
+            assert_eq!(fastly_progress_variant(suite), "outbound-progress");
+        }
     }
 }

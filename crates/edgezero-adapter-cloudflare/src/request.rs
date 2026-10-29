@@ -1009,13 +1009,16 @@ mod tests {
     use edgezero_core::http::{Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::outbound::{
-        OutboundBatch, OutboundFuture, OutboundPending, OutboundRequest, OutboundResponse,
+        OutboundBatch, OutboundCollectedSlot, OutboundFuture, OutboundPending, OutboundRequest,
+        OutboundResponse,
     };
     use edgezero_core::response_egress::{
-        ResponseEgressCompletion, ResponseEgressObserver, ResponseEgressReport,
+        ResponseEgressCompletion, ResponseEgressDeadline, ResponseEgressObserver,
+        ResponseEgressOutcome, ResponseEgressReport,
     };
     use edgezero_core::router::RouterService;
     use futures::channel::oneshot;
+    use futures_util::FutureExt as _;
     use futures_util::future::join;
     #[cfg(feature = "test-utils")]
     use futures_util::stream::empty;
@@ -1024,6 +1027,7 @@ mod tests {
     use worker::js_sys::{Function, Object, Reflect, Uint8Array};
     use worker::wasm_bindgen::JsCast as _;
     use worker::wasm_bindgen::JsValue;
+    use worker::wasm_bindgen_futures::JsFuture;
     use worker::worker_sys::Context as WorkerSysContext;
 
     thread_local! {
@@ -1041,10 +1045,22 @@ mod tests {
 
     struct ScopeRoutes;
 
-    struct ScopeTerminalObserver(Mutex<Option<oneshot::Sender<ResponseEgressReport>>>);
+    struct ScopeTerminalObserver(
+        Mutex<Option<oneshot::Sender<ResponseEgressReport>>>,
+        Arc<AtomicUsize>,
+    );
+
+    struct ScopeSourceDrop(Arc<AtomicUsize>);
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for ScopeSourceDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     impl ResponseEgressObserver for ScopeTerminalObserver {
         fn complete(&self, report: &ResponseEgressReport) {
+            self.1.fetch_add(1, Ordering::SeqCst);
             let sender = self
                 .0
                 .lock()
@@ -1134,6 +1150,42 @@ mod tests {
         );
         RETAINED_PROGRESS.with(|retained| *retained.borrow_mut() = Some((pending, batch)));
         Ok(())
+    }
+
+    fn assert_retained_fetch_progress_closed(probe: &ScopeFetchProbe) {
+        assert_eq!(
+            probe.count("aborts"),
+            Some(3.0_f64),
+            "all fetch aborts precede consuming retained handles"
+        );
+        let (origin, batch) = RETAINED_PROGRESS
+            .with(|slot| slot.borrow_mut().take())
+            .expect("retained original handles");
+        assert!(matches!(
+            origin
+                .collect()
+                .now_or_never()
+                .expect("closed begun receiver ready"),
+            Err(EdgeError::Internal { .. })
+        ));
+        let failure = batch
+            .collect()
+            .now_or_never()
+            .expect("closed original batch ready")
+            .expect_err("closed batch");
+        assert!(matches!(failure.error(), EdgeError::Internal { .. }));
+        assert_eq!(failure.slots().len(), 2);
+        assert!(
+            failure
+                .slots()
+                .iter()
+                .all(|slot| matches!(slot, OutboundCollectedSlot::Unresolved))
+        );
+        assert_eq!(
+            probe.count("aborts"),
+            Some(3.0_f64),
+            "later handle consumption cannot duplicate aborts"
+        );
     }
 
     async fn retain_progress_handler(ctx: RequestContext) -> Result<Response, EdgeError> {
@@ -1320,7 +1372,10 @@ mod tests {
                 .build();
             let mut app = App::new(router);
             let (published, terminal) = oneshot::channel();
-            app.set_response_egress_observer(ScopeTerminalObserver(Mutex::new(Some(published))));
+            app.set_response_egress_observer(ScopeTerminalObserver(
+                Mutex::new(Some(published)),
+                Arc::new(AtomicUsize::new(0)),
+            ));
             let (env, context) = env_context();
             let mut response = CloudflareService::new(&app)
                 .dispatch(native_request(Method::Get, "/", None), env, context)
@@ -1391,7 +1446,10 @@ mod tests {
                 .build();
             let mut app = App::new(router);
             let (published, terminal) = oneshot::channel();
-            app.set_response_egress_observer(ScopeTerminalObserver(Mutex::new(Some(published))));
+            app.set_response_egress_observer(ScopeTerminalObserver(
+                Mutex::new(Some(published)),
+                Arc::new(AtomicUsize::new(0)),
+            ));
             let (env, context) = env_context();
             let mut response = CloudflareService::new(&app)
                 .dispatch(native_request(Method::Get, "/", None), env, context)
@@ -1431,6 +1489,175 @@ mod tests {
                 Some(3.0_f64),
                 "each native fetch aborts once"
             );
+        }
+    }
+
+    fn scope_terminal_router(
+        mode: &'static str,
+        body_wait: oneshot::Receiver<()>,
+        tail_notice: oneshot::Sender<()>,
+        source_drops: Arc<AtomicUsize>,
+        source_polls: Arc<AtomicUsize>,
+    ) -> RouterService {
+        let gate_slot = Arc::new(Mutex::new(Some(body_wait)));
+        let tail_slot = Arc::new(Mutex::new(Some(tail_notice)));
+        RouterService::builder().get("/",move |ctx:RequestContext| {
+            let gate=gate_slot.lock().expect("source gate").take().expect("one request");
+            let tail=tail_slot.lock().expect("tail signal").take().expect("one request");
+            let guard=ScopeSourceDrop(Arc::clone(&source_drops));
+            let observed_polls=Arc::clone(&source_polls);
+            async move {
+                let owner=OutboundScopeOwner::response_body();
+                owner.run(retain_progress(&ctx.http_client().expect("HTTP client"))).await?;
+                let source=stream! {
+                    let _guard=guard;
+                    observed_polls.fetch_add(1,Ordering::SeqCst);
+                    yield Ok(Bytes::from_static(b"live"));
+                    observed_polls.fetch_add(1,Ordering::SeqCst);
+                    gate.await.expect("source release");
+                    observed_polls.fetch_add(1,Ordering::SeqCst);
+                    if mode=="source" {yield Err(EdgeError::bad_gateway("controlled source failure"));}
+                    if mode=="transport" {tail.send(()).expect("tail observer");yield Ok(Bytes::from_static(b"tail"));}
+                };
+                let mut response=Response::new(Body::from_stream(source));
+                if mode=="deadline" {response.extensions_mut().insert(ResponseEgressDeadline::after(Duration::from_secs(1)));}
+                owner.attach(response)
+            }
+        }).build()
+    }
+
+    async fn trigger_scope_terminal(
+        mode: &str,
+        release: oneshot::Sender<()>,
+        tail_started: oneshot::Receiver<()>,
+        controller: &web_sys::AbortController,
+        reader: &web_sys::ReadableStreamDefaultReader,
+    ) -> Option<oneshot::Sender<()>> {
+        let mut pending_release = Some(release);
+        if matches!(mode, "eof" | "source" | "transport") {
+            pending_release
+                .take()
+                .expect("gate")
+                .send(())
+                .expect("source pending");
+        }
+        if mode == "cancel" {
+            controller.abort();
+        }
+        if mode == "transport" {
+            tail_started
+                .await
+                .expect("second chunk produced without another read");
+            JsFuture::from(reader.cancel())
+                .await
+                .expect("cancel response reader");
+        } else {
+            let next = JsFuture::from(reader.read()).await;
+            if mode == "eof" {
+                assert_eq!(
+                    Reflect::get(&next.expect("EOF"), &JsValue::from_str("done")).expect("done"),
+                    JsValue::TRUE
+                );
+            } else {
+                assert!(next.is_err(), "terminal failure rejects the reader");
+            }
+        }
+        pending_release
+    }
+
+    #[wasm_bindgen_test]
+    async fn attached_progress_closes_on_worker_terminal_paths_before_retained_handles() {
+        let _timers = NumericTimeoutGuard::install();
+        for (mode, expected) in [
+            ("eof", ResponseEgressOutcome::HostHandoff),
+            ("source", ResponseEgressOutcome::SourceError),
+            ("deadline", ResponseEgressOutcome::DeadlineExceeded),
+            ("cancel", ResponseEgressOutcome::RequestCancelled),
+            ("transport", ResponseEgressOutcome::TransportError),
+        ] {
+            let probe = ScopeFetchProbe::install();
+            let (release, wait) = oneshot::channel::<()>();
+            let (tail_ready, tail_started) = oneshot::channel::<()>();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let polls = Arc::new(AtomicUsize::new(0));
+            let router = scope_terminal_router(
+                mode,
+                wait,
+                tail_ready,
+                Arc::clone(&drops),
+                Arc::clone(&polls),
+            );
+            let mut app = App::new(router);
+            let (published, terminal) = oneshot::channel();
+            let reports = Arc::new(AtomicUsize::new(0));
+            app.set_response_egress_observer(ScopeTerminalObserver(
+                Mutex::new(Some(published)),
+                Arc::clone(&reports),
+            ));
+            let (env, context) = env_context();
+            let controller = web_sys::AbortController::new().expect("abort controller");
+            let init = web_sys::RequestInit::new();
+            init.set_signal(Some(&controller.signal()));
+            let request = web_sys::Request::new_with_str_and_init("https://example.com/", &init)
+                .expect("native request");
+            let response = CloudflareService::new(&app)
+                .dispatch(CfRequest::from(request), env, context)
+                .await
+                .expect("response handoff");
+            assert_eq!(response.status_code(), 200);
+            let (_, worker::ResponseBody::Stream(readable)) = response.into_parts() else {
+                panic!("native response stream");
+            };
+            let reader = readable
+                .get_reader()
+                .dyn_into::<web_sys::ReadableStreamDefaultReader>()
+                .expect("stream reader");
+            let prefix = JsFuture::from(reader.read()).await.expect("prefix read");
+            assert_eq!(
+                Reflect::get(&prefix, &JsValue::from_str("done")).expect("done"),
+                JsValue::FALSE
+            );
+            let value = Reflect::get(&prefix, &JsValue::from_str("value")).expect("prefix value");
+            assert_eq!(Uint8Array::new(&value).to_vec(), b"live");
+            assert_eq!(probe.count("calls"), Some(3.0_f64));
+            assert_eq!(probe.count("aborts"), Some(0.0_f64));
+            RETAINED_PROGRESS.with(|storage| {
+                let mut state = storage.borrow_mut();
+                let (origin, batch) = state.as_mut().expect("original handles");
+                assert!(!origin.is_ready());
+                assert!(matches!(
+                    batch.check().expect("batch pending"),
+                    edgezero_core::OutboundBatchCheck::Pending
+                ));
+            });
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(reports.load(Ordering::SeqCst), 0);
+            let pending_release =
+                trigger_scope_terminal(mode, release, tail_started, &controller, &reader).await;
+            let report = terminal.await.expect("canonical terminal");
+            assert_eq!(report.outcome, expected);
+            assert_eq!(report.bytes_written, 4);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "source released before reader and handles drop"
+            );
+            if let Some(pending_sender) = pending_release {
+                assert!(
+                    pending_sender.send(()).is_err(),
+                    "terminal source no longer owns its receiver"
+                );
+            }
+            assert_retained_fetch_progress_closed(&probe);
+            let terminal_polls = polls.load(Ordering::SeqCst);
+            drop(reader);
+            drop(readable);
+            Delay::from(Duration::ZERO).await;
+            assert_eq!(polls.load(Ordering::SeqCst), terminal_polls);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(reports.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.count("calls"), Some(3.0_f64));
+            assert_eq!(probe.count("aborts"), Some(3.0_f64));
         }
     }
 

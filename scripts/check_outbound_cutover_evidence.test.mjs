@@ -531,7 +531,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 478,
+    planned: 474,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -692,7 +692,7 @@ test("redirect core criteria bind every required test before one module executio
   );
 });
 
-test("mixed batch core binding guards every receipt proof without promoting adapter legs", () => {
+test("core batch and marker bindings guard exact tests without promoting adapter legs", () => {
   const manifest = JSON.parse(
     readFileSync(
       new URL(
@@ -725,8 +725,29 @@ test("mixed batch core binding guards every receipt proof without promoting adap
   assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
   assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
   const selected = checker.readySentinels(manifest, "unit/core");
-  assert.equal(selected.length, 56);
+  assert.equal(selected.length, 60);
   for (const name of names) assert.ok(selected.includes(name));
+  const bindings = [
+    ["EZ-6/acceptance/15", [
+      "outbound::batch::tests::arrival_ledger_preserves_late_collection_and_cancel_safety",
+      "outbound::tests::batch_ledger_rejects_an_outcome_observed_at_observation_cutoff",
+    ]],
+    ["EZ-6/acceptance/17", ["outbound::batch::tests::cancellation_includes_recorded_but_undelivered_indices"]],
+    ["EZ-7/acceptance/01", ["outbound::tests::proxy_marker_off_preserves_upstream_and_consumes_no_header_budget"]],
+    ["EZ-7/acceptance/03", ["outbound::tests::proxy_marker_off_preserves_upstream_and_consumes_no_header_budget"]],
+  ];
+  for (const [caseId, expected] of bindings) {
+    const row = manifest.cases.find((c) => c.case_id === caseId && c.environment === "unit/core");
+    assert.ok(row, caseId);
+    assert.equal(row.implementation, "ready", caseId);
+    assert.equal(row.applicability, "blocking", caseId);
+    assert.equal(row.approval, null, caseId);
+    assert.equal(row.condition, null, caseId);
+    assert.equal(row.command, core.command, caseId);
+    assert.equal(row.artifact_path, core.artifact_path, caseId);
+    assert.deepEqual([row.sentinel, ...(row.additional_sentinels ?? [])], expected, caseId);
+    for (const name of expected) assert.ok(selected.includes(name), name);
+  }
   const source = readFileSync(
     new URL("../crates/edgezero-core/src/outbound/batch.rs", import.meta.url),
     "utf8",
@@ -808,12 +829,13 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 33);
+  assert.equal(ready.length, 37);
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
-        (c.case_id === "EZ-6/acceptance/22" && c.environment === "unit/core") ||
+        (c.environment === "unit/core" && ["EZ-6/acceptance/15", "EZ-6/acceptance/17", "EZ-6/acceptance/22",
+          "EZ-7/acceptance/01", "EZ-7/acceptance/03"].includes(c.case_id)) ||
         (c.case_id.startsWith("EZ-23/acceptance/") &&
           Number(c.case_id.split("/").at(-1)) <= 11),
     ),

@@ -1,6 +1,30 @@
 use super::*;
 use crate::net::WireOrigins;
+mod callback;
 mod cleanup;
+mod protocol;
+
+struct CapsClockBounds {
+    epoch: [i128; 2],
+    host_epoch: [i128; 2],
+    offset_upper: i128,
+    terminal: [i128; 2],
+    collection_upper: i128,
+    window_end: i128,
+    native_return: i128,
+}
+
+impl CapsClockBounds {
+    fn evidence(&self) -> Value {
+        json!({"basis":"causal-receipts-epoch-and-diagnostic-return",
+            "epoch_lower_us":self.epoch[0],"epoch_upper_us":self.epoch[1],
+            "host_epoch_lower_us":self.host_epoch[0],"host_epoch_upper_us":self.host_epoch[1],
+            "offset_upper_us":self.offset_upper,"terminal_lower_us":self.terminal[0],
+            "terminal_upper_us":self.terminal[1],"collection_upper_us":self.collection_upper,
+            "window_end_us":self.window_end,"native_http_response_us":self.native_return,
+            "rounding_guard_us":1000,"same_rate_assumed":true,"clock_sync_proven":false})
+    }
+}
 
 const CASES: [&str; 9] = [
     "slow-origin",
@@ -16,7 +40,7 @@ const CASES: [&str; 9] = [
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     let log = run.join(format!("{name}-outbound-lifetimes.log"));
-    let mut cursor = cleanup::LogCursor::default();
+    let mut cursor = protocol::LogCursor::default();
     let outcome = wire::progress_suite(
         name,
         "outbound-lifetimes",
@@ -33,8 +57,12 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     } else {
         Ok(())
     };
-    let count = outcome?;
-    tail?;
+    let callbacks = if name == "fastly" {
+        callback::run(run, records)
+    } else {
+        Ok(0)
+    };
+    let count = combined_count(outcome, tail, callbacks)?;
     if let Some(count) = count {
         records.push(json!({"event":"lifetime-inventory","adapter":name,
             "status":"pass","cases":count,"qualification":false}))?;
@@ -42,12 +70,39 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 
+fn combined_count(
+    outcome: Result<Option<usize>>,
+    tail: Result<()>,
+    callbacks: Result<usize>,
+) -> Result<Option<usize>> {
+    let mut failures = Vec::new();
+    let count = match outcome {
+        Ok(count) => count,
+        Err(error) => {
+            failures.push(format!("lifetime cases: {error}"));
+            None
+        }
+    };
+    if let Err(error) = tail {
+        failures.push(format!("cleanup tail: {error}"));
+    }
+    let additional = match callbacks {
+        Ok(count) => count,
+        Err(error) => {
+            failures.push(format!("callback wrappers: {error}"));
+            0
+        }
+    };
+    require(failures.is_empty(), failures.join("; "))?;
+    Ok(count.map(|count| count + additional))
+}
+
 fn checks(
     adapter: &str,
     port: u16,
     origins: &WireOrigins,
     log: &Path,
-    cursor: &mut cleanup::LogCursor,
+    cursor: &mut protocol::LogCursor,
     records: &mut Records,
 ) -> Result<usize> {
     let mut failures = Vec::new();
@@ -143,6 +198,10 @@ fn checks(
                     "lower_us":lower,"upper_us":upper,"rounding_guard_us":1000,
                     "same_rate_assumed":true,"clock_sync_proven":false})
                 })
+        } else if case == "caps-while-waiting" {
+            caps_clock_bounds(&report, &origin)
+                .ok()
+                .map(|bounds| bounds.evidence())
         } else {
             None
         };
@@ -663,7 +722,94 @@ fn validate_handoff(report: &Value, events: &[Value], origin: &Value) -> Result<
     Ok(())
 }
 
+fn caps_clock_bounds(report: &Value, origin: &Value) -> Result<CapsClockBounds> {
+    let events = report["events"].as_array().ok_or("missing caps events")?;
+    let origin = origin.as_array().ok_or("missing caps source events")?;
+    let items = report["items"].as_array().ok_or("missing caps items")?;
+    require(
+        items.len() == 3,
+        "caps timing requires three original slots",
+    )?;
+    let batch = event(events, "batch-start")?;
+    let collected = event(events, "collect")?;
+    let entered = i128::from(number(batch, "at_us")?);
+    let returned = entered + i128::from(number(batch, "duration_us")?);
+    let collection =
+        i128::from(number(collected, "at_us")?) + i128::from(number(collected, "duration_us")?);
+    require(
+        i128::from(number(collected, "at_us")?) >= returned,
+        "caps collection precedes the original batch invocation",
+    )?;
+    let native_return = i128::from(number(
+        role_event(origin, "control", "response-returned")?,
+        "at_us",
+    )?);
+    let mut epoch = [(entered - 1).max(0), returned + 1];
+    let mut offset_upper = i128::MAX;
+    let mut elapsed = [0_i128; 3];
+    let mut payload = [0_i128; 3];
+    for (index, role) in ["a", "b", "c"].into_iter().enumerate() {
+        require(
+            items[index]["index"] == index,
+            "caps timing lost an original slot",
+        )?;
+        let request = role_event(origin, role, "request")?;
+        let stamp = i128::from(number(request, "guest_at_us")?);
+        require(stamp <= entered, "caps request stamp follows batch entry")?;
+        // Sending precedes receipt: transit delay can only loosen this upper bound.
+        offset_upper = offset_upper.min(i128::from(number(request, "at_us")?) - stamp);
+        elapsed[index] = i128::from(number(&items[index], "elapsed_us")?);
+        epoch[1] = epoch[1].min(collection + 1 - elapsed[index]);
+        let piece = if index == 0 {
+            origin
+                .iter()
+                .find(|entry| {
+                    entry["role"] == "a"
+                        && entry["op"] == "chunk"
+                        && entry["decoded_prefix_bytes"]
+                            .as_u64()
+                            .is_some_and(|prefix| prefix > 65536)
+                        && entry["written_bytes"]
+                            .as_u64()
+                            .is_some_and(|written| written > 0)
+                })
+                .ok_or("caps timing lacks a confirmed over-cap prefix")?
+        } else {
+            role_event(origin, role, "chunk")?
+        };
+        payload[index] = i128::from(number(piece, "write_started_us")?);
+    }
+    require(
+        epoch[0] <= epoch[1],
+        "caps arrivals have no common invocation epoch",
+    )?;
+    offset_upper = (offset_upper + 1000).min(native_return - collection + 1000);
+    // All slots share one host epoch. Payload writes must precede terminal observations;
+    // every observation must precede collection and the diagnostic response.
+    let host_lower = (0..3)
+        .map(|index| payload[index] - elapsed[index] - 1000)
+        .max()
+        .unwrap();
+    let host_upper = (epoch[1] + offset_upper)
+        .min(native_return + 1000 - elapsed.iter().copied().max().unwrap());
+    require(
+        host_lower <= host_upper,
+        "caps payloads and arrivals have contradictory shared epochs",
+    )?;
+    let start = i128::from(number(role_event(origin, "a", "head")?, "body_start_us")?);
+    Ok(CapsClockBounds {
+        epoch,
+        host_epoch: [host_lower, host_upper],
+        offset_upper,
+        terminal: [host_lower + elapsed[0], host_upper + elapsed[0]],
+        collection_upper: collection + 1 + offset_upper,
+        window_end: start + 300000,
+        native_return,
+    })
+}
+
 fn validate_caps(report: &Value, events: &[Value], origin: &Value) -> Result<()> {
+    let timing = caps_clock_bounds(report, origin)?;
     require(
         report["slots"] == json!(["Resolved", "Resolved", "Resolved"])
             && report["termination"] == "Completed"
@@ -743,9 +889,12 @@ fn validate_caps(report: &Value, events: &[Value], origin: &Value) -> Result<()>
             && (131072..=129 * 1024).contains(&encoded)
             && number(request, "at_us")? <= number(head, "write_started_us")?
             && number(head, "write_started_us")? <= number(head, "at_us")?
-            && number(head, "at_us")? == start
-            && returned < start + 300000,
-        "caps result did not precede the source's full trickle window",
+            && number(head, "at_us")? == start,
+        "invalid caps response head or body-start evidence",
+    )?;
+    require(
+        timing.terminal[1] < timing.window_end,
+        "caps slot terminal upper bound reaches the source's full trickle window",
     )?;
     let ends = head["piece_ends"]
         .as_array()
@@ -1598,6 +1747,29 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
 mod tests {
     use super::*;
 
+    #[test]
+    fn suite_failures_preserve_original_timing_tail_and_both_wrapper_diagnostics() {
+        let error = combined_count(
+            Err("original timing failure".into()),
+            Err("late protocol failure".into()),
+            Err("run_custom and serve_custom failed".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        for expected in [
+            "original timing failure",
+            "late protocol failure",
+            "run_custom and serve_custom failed",
+        ] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
+        assert_eq!(
+            combined_count(Ok(Some(12)), Ok(()), Ok(8)).unwrap(),
+            Some(20)
+        );
+        assert_eq!(combined_count(Ok(None), Ok(()), Ok(0)).unwrap(), None);
+    }
+
     fn handoff_sample() -> (Value, Value) {
         let prelude = json!({"schema":1,"case":"response-handoff","token":"handoff","phase":"pending-handoff",
             "origin_pending":true,"batch_pending":true,"slots":3,"cutoff_at_us":534000,"qualification":false,
@@ -1905,7 +2077,7 @@ mod tests {
             "events":[{"op":"batch-start","at_us":34000,"duration_us":100,"result":{"cutoff_at_us":534000}},
             {"op":"collect","at_us":34100,"duration_us":175900,"result":"ok"}],
             "slots":["Resolved","Resolved","Resolved"],"termination":"Completed","error":null,"origin":null,"mediator":null,
-            "items":[{"index":0,"via":"collect","elapsed_us":170000,"slot_error":true,"outcome":{"error":{"kind":"response_too_large","status":502,"reason":"BufferedBody"}}},
+            "items":[{"index":0,"via":"collect","elapsed_us":174000,"slot_error":true,"outcome":{"error":{"kind":"response_too_large","status":502,"reason":"BufferedBody"}}},
             {"index":1,"via":"collect","elapsed_us":20000,"slot_error":false,"outcome":{"status":200,"bytes":[66]}},
             {"index":2,"via":"collect","elapsed_us":40000,"slot_error":false,"outcome":{"status":200,"bytes":[67]}}]});
         let mut origin = vec![
@@ -2081,7 +2253,7 @@ mod tests {
             .unwrap();
         returned["at_us"] = json!(173428);
         let error = validate("caps-while-waiting", "sample", &report, &unproven).unwrap_err();
-        assert!(error.to_string().contains("confirmed over-cap prefix"));
+        assert!(error.to_string().contains("contradictory shared epochs"));
         let mut early = origin.clone();
         let head = early
             .as_array_mut()
@@ -2094,13 +2266,8 @@ mod tests {
     }
 
     #[test]
-    fn caps_evidence_rejects_late_missing_foreign_and_unproven_source_boundaries() {
+    fn caps_evidence_rejects_missing_foreign_and_unproven_source_boundaries() {
         let (report, origin) = caps_sample();
-        for at in [302000, 400000] {
-            let mut changed = origin.clone();
-            changed.as_array_mut().unwrap().last_mut().unwrap()["at_us"] = json!(at);
-            assert!(validate("caps-while-waiting", "sample", &report, &changed).is_err());
-        }
         for field in ["observer", "token", "case"] {
             let mut changed = origin.clone();
             changed.as_array_mut().unwrap().last_mut().unwrap()[field] = json!("foreign");
@@ -2125,6 +2292,118 @@ mod tests {
             entry["decoded_prefix_bytes"] = json!(65536);
         }
         assert!(validate("caps-while-waiting", "sample", &report, &premature).is_err());
+    }
+
+    #[test]
+    fn caps_slot_time_is_not_the_native_diagnostic_response_time() {
+        let (report, origin) = caps_sample();
+        for at in [302000, 400000] {
+            let mut changed = origin.clone();
+            changed.as_array_mut().unwrap().last_mut().unwrap()["at_us"] = json!(at);
+            validate("caps-while-waiting", "sample", &report, &changed).unwrap();
+        }
+    }
+
+    #[test]
+    fn caps_timing_rejects_early_errors_and_incompatible_sibling_epochs() {
+        let (report, origin) = caps_sample();
+        for (index, elapsed) in [(0, 50000), (1, 5000)] {
+            let mut changed = report.clone();
+            changed["items"][index]["elapsed_us"] = json!(elapsed);
+            assert!(validate("caps-while-waiting", "sample", &changed, &origin).is_err());
+        }
+    }
+
+    #[test]
+    fn caps_timing_requires_each_original_request_stamp() {
+        let (report, origin) = caps_sample();
+        for role in ["a", "b", "c"] {
+            for stamp in [Value::Null, json!(35000), json!(u64::MAX)] {
+                let mut changed = origin.clone();
+                changed
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|entry| entry["role"] == role && entry["op"] == "request")
+                    .unwrap()["guest_at_us"] = stamp;
+                assert!(validate("caps-while-waiting", "sample", &report, &changed).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn caps_timing_rejects_equality_overlap_and_late_slot_observation() {
+        let (report, mut origin) = caps_sample();
+        origin.as_array_mut().unwrap().last_mut().unwrap()["at_us"] = json!(500000);
+        for (elapsed, passes) in [
+            (299898, true),
+            (299899, false),
+            (299900, false),
+            (340000, false),
+        ] {
+            let mut changed = report.clone();
+            changed["events"][1]["duration_us"] = json!(400000);
+            changed["items"][0]["elapsed_us"] = json!(elapsed);
+            assert_eq!(
+                validate("caps-while-waiting", "sample", &changed, &origin).is_ok(),
+                passes,
+                "elapsed={elapsed}"
+            );
+        }
+    }
+
+    #[test]
+    fn caps_timing_is_independent_of_the_native_clock_origin() {
+        let (report, mut origin) = caps_sample();
+        for entry in origin.as_array_mut().unwrap() {
+            for field in ["at_us", "write_started_us", "body_start_us", "scheduled_us"] {
+                if let Some(at) = entry[field].as_u64() {
+                    entry[field] = json!(at + 500000);
+                }
+            }
+        }
+        validate("caps-while-waiting", "sample", &report, &origin).unwrap();
+    }
+
+    #[test]
+    fn caps_timing_uses_the_tightest_original_receipt_across_all_slots() {
+        let (report, origin) = caps_sample();
+        for (controlling, expected) in [("a", -32000), ("b", -31990), ("c", -31980)] {
+            let mut changed = origin.clone();
+            for entry in changed
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .filter(|entry| entry["op"] == "request" && entry["role"] != controlling)
+            {
+                entry["guest_at_us"] = json!(33000);
+            }
+            let proof = caps_clock_bounds(&report, &changed).unwrap();
+            assert_eq!(proof.offset_upper, expected);
+            validate("caps-while-waiting", "sample", &report, &changed).unwrap();
+        }
+    }
+
+    #[test]
+    fn caps_timing_requires_collection_to_precede_the_diagnostic_response() {
+        let (mut report, mut origin) = caps_sample();
+        report["events"][1]["duration_us"] = json!(400000);
+        assert!(validate("caps-while-waiting", "sample", &report, &origin).is_err());
+        origin.as_array_mut().unwrap().last_mut().unwrap()["at_us"] = json!(500000);
+        validate("caps-while-waiting", "sample", &report, &origin).unwrap();
+    }
+
+    #[test]
+    fn caps_timing_extremes_fail_without_arithmetic_panics() {
+        let (report, origin) = caps_sample();
+        for index in [0, 1] {
+            let mut changed = report.clone();
+            changed["events"][index]["duration_us"] = json!(u64::MAX);
+            let rejected = std::panic::catch_unwind(|| {
+                validate("caps-while-waiting", "sample", &changed, &origin)
+            });
+            assert!(rejected.expect("malformed timing must not panic").is_err());
+        }
     }
 
     fn cpu_sample(delivered: bool) -> (Value, Value) {

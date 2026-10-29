@@ -162,6 +162,21 @@ their scope when introduced; the current summary supersedes their then-pending A
   framing errors as interruption evidence; bound all three cases with one log cursor, observed-length
   checks and a post-shutdown tail check. Fixture socket closure is not host cancellation or SDK
   release certification. No production API, runtime pin, capability or timing relaxation.
+- Exercise callback exit through both existing Fastly custom entrypoints with normal/error return,
+  early error and setup failure, retaining original Send/Begin/Batch handles outside the callback.
+  Share bounded protocol parsing with response cleanup, preserve original errors through `main`,
+  and retain simultaneous suite/tail/wrapper diagnostics. Label pre-delivery HTTP 500 provenance
+  unverified rather than treating it as no-replacement proof.
+- Expand response-owned terminal coverage using real Axum outbound sockets, Cloudflare SDK/JS
+  abort/reader operations, and Spin's existing mock committer. Check pre-terminal liveness,
+  immediate release before retained handles are consumed, typed closed outcomes and stable later
+  drops. Keep HostHandoff, mock-resource evidence and hosted teardown guarantees distinct.
+- Bind four existing core cutoff/cancellation/marker acceptance legs to exact tests through the
+  existing grouped guard, without another CI command or qualification promotion. Preserve all
+  source identities and pending provider/application decisions.
+- Validate cap timing against original slot termination rather than diagnostic HTTP delivery.
+  Use conservative shared clock/epoch bounds, reject contradictory or insufficient evidence,
+  and disclose the equal-rate assumption without changing production deadlines or qualification.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
   `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).

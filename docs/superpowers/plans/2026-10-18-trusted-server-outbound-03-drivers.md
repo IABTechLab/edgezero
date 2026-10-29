@@ -528,6 +528,14 @@ SDK drops, both wrappers, strict timing or hosted qualification. G1 readiness st
 **Files:** Fixture-core qualification cases, four fixture entrypoints, fixture-harness `net.rs`,
 `runners.rs`, `evidence.rs`, `main.rs` and suite documentation; adapter-local owner tests.
 
+The [local lifecycle matrix/binding checkpoint](2026-10-18-trusted-server-outbound-implementation.md#local-lifecycle-matrix-and-binding-checkpoint-2026-10-29)
+adds eight guest-cleanup cases through both real Fastly wrappers and strengthens the existing
+Axum, Cloudflare and Spin terminal matrices with retained original begun/batch work. It reuses
+existing entrypoints, committer seams and one bounded protocol reader. Native/JS abort signals
+and mock resource counts are not SDK-drop or hosted qualification. Pre-delivery HTTP 500s retain
+unknown provenance; full criteria 21/23 stay planned. Four independently complete core cutoff,
+cancellation and marker legs bind existing tests: 37 ready / 474 planned, still unqualified.
+
 - [ ] Add `late_collection_preserves_arrivals_and_response_ownership` to core and applicable
       adapter contracts. Run
       `scripts/run_test_nonzero.sh late_collection_preserves_arrivals_and_response_ownership cargo test -p edgezero-core --features test-utils --lib`

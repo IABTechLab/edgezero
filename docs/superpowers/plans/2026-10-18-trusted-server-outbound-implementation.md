@@ -54,8 +54,9 @@ Keep three different status questions separate:
   criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
   readiness of that leg's declared command/sentinel, not overall feature implementation.
   EZ-23 local criteria 01-11 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
-  `ready`; the core receipt checkpoint also activates EZ-6 criterion 22: 33 legs, with 478 still
-  `planned`. G1/Q3 binding work remains unfinished, not evidence that 478 features are absent. Only the explicitly bound
+  `ready`; the receipt/cutoff/cancellation and marker checkpoints activate EZ-6 core criteria
+  15/17/22 and EZ-7 core criteria 01/03: 37 legs, with 474 still
+  `planned`. G1/Q3 binding work remains unfinished, not evidence that 474 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -1005,6 +1006,141 @@ the other adapter failure paths, observable disconnect/cancellation, actual SDK 
 witnesses, both Fastly wrappers in criterion 23, native pending-body witnesses and strict timing.
 G1 stays 33 ready / 478 planned across 255 criteria / 511 legs, unqualified. No frozen requirement,
 capability, SDK/runtime pin, production implementation, demo or generator change is needed.
+
+### Local Lifecycle Matrix And Binding Checkpoint (2026-10-29)
+
+Continue local D6 acceptance without changing production outbound APIs or semantics. Reuse the
+existing Fastly custom-single-request and custom-rebuild-per-request binaries, selected internally
+by the current progress builder; do not pre-read the serving-loop request or add another binary,
+executor or transport. One shared guest probe covers normal post-delivery return, post-delivery
+error, early error and setup failure under both `run_custom` and `serve_custom`. Each serving loop
+is limited to one request; this is not sandbox-reuse adoption or next-request evidence.
+
+Keep the original unpolled Send, begun origin and three-slot batch in state outside the callback.
+Four original source receipts precede readiness. After-delivery cases additionally start a pending
+post-delivery exchange on the same client and confirm its receipt before callback exit. Before
+consuming any original handle, verify closed callback scope, one request-data release, zero
+unpolled source polls and disposal of every fixture-wrapped native timer. Original handles yield
+typed Internal; the batch preserves three unresolved slots. Later handle consumption cannot change
+those counters. These are request-data/timer observations, not counts of SDK handle drops.
+
+Share the prior response-cleanup parser/cursor rather than adding another log parser. Three exact
+canonical records per case (`pending`, `returning`, `closed`) precede original source release,
+under the unchanged 2048-byte record / total 1 MiB log limits, observed-length checks and
+post-shutdown tail validation. Early/after-delivery source evidence uses 16/22 events plus a
+native boundary, within unchanged resource limits. Parent diagnostics aggregate original timing,
+response-tail and both-wrapper failures, preserving every error and raw observation.
+
+The first local run exposed a fixture error: after checking the expected callback error, it
+returned success from `main`, producing an empty provider response. Propagate the original error
+after cleanup verification instead; do not weaken the wire assertion. Retain that failed run at
+`/private/tmp/edgezero-finish-callback-viceroy-1`. The repaired run at
+`/private/tmp/edgezero-finish-callback-viceroy-2` passes all eight callback guest-cleanup cases,
+both callback-log tails and all three response-cleanup cases. Its full suite remains exit 1 for
+the original slow-origin observation at 706.217 ms against the unchanged 705 ms upper bound.
+After-delivery responses retain their canonical body. Before delivery, a typed no-head peer close
+is distinct from `UnverifiedHttp500`; every observed 500 has
+`no_replacement_response_proven: false`. Do not count it as evidence that no replacement was sent.
+
+Strengthen existing adapter-local helpers, not parallel mock transports. Axum retains real native
+Begin/Batch sockets through EOF, source failure, connection-deadline signalling and transport
+failure, checks original handles non-consumingly before termination, and observes TCP close before
+consuming their typed scope errors. Its explicit timer driver waits on the registered connection
+deadline; an outer safety-timeout wake is not expiry proof. Assert the four-byte terminal report
+and source release while the body/handles remain retained, then stable counts after later drops.
+Cloudflare's actual SDK/JS matrix reads a prefix before EOF, source failure, one-second deadline,
+request AbortSignal or readable cancellation with another write eligible. It checks three abort
+notifications, typed retained Begin/Batch errors, disposed source receiver and stable poll/report
+counts. These are JS-runtime observations, not hosted transport teardown or immediate detection
+of a disconnected readable while the producer remains blocked.
+
+Spin extends its existing private mock client/committer, retaining an original begun request and
+three-slot batch alongside the unpolled Send. Four mock guards and both cancellation notifications
+remain live until the appropriate terminal boundary, with explicit forbidden-Send dispatch checks.
+Completion observes their disposal before retained handles are consumed. HEAD/EOF do not release
+early; fallback revokes application work before SDK-terminal simulation. Source/deadline/write/
+finish errors and coordinator cancellation at every await share the same assertions. This is
+mock-resource/core revocation coverage, not real Spin SDK-drop or scheduling qualification.
+
+Bind only four already-complete core acceptance legs: EZ-6 criteria 15/17 and EZ-7 criteria 01/03.
+Add cutoff-equality, recorded-undelivered cancellation and exact marker-off/upstream-marker tests
+to the existing inventory guard, discovering 60 primary/additional sentinels before one unchanged
+grouped command. It passes 296 tests. Node regressions first reject the missing bindings, then
+validate 37 ready / 474 planned across the same 255 criteria / 511 legs. Preserve every source
+digest, applicability and approval; neither callback partial coverage nor counts promote a leg.
+Refresh the stale G4 prerequisite description to name existing scoped authorizations while keeping
+its remaining policy/qualification decisions pending.
+
+Independent timing investigation found no demonstrated production defect in the saved misses:
+cold receipt-minus-guest alignment includes connection delay; some source writes miss their own
+schedule; CPU correlation intervals cross the unchanged acceptance boundary. Preserve those
+failures and the original capture points. Do not backdate results, sort outcomes to fit a desired
+order, replace interval proof with a midpoint, widen targets or claim a scheduler guarantee.
+
+Demo and full generated-project integration checks pass with current hard-cut APIs. The new code
+is test/fixture/binding work; no production signature, SDK pin, capability, runtime promotion,
+frozen requirement or deployment changes.
+
+Final verification passes all five root gates: formatting, strict workspace Clippy, 2,569 tests
+in 32 binaries (one existing ignored), workspace feature compilation and the Spin target check.
+All seven adapter feature matrices pass all eight configurations each. The consolidated Axum TCP
+command passes 294 tests with none ignored; native Spin passes 102. Cloudflare's actual SDK/Node
+library runs pass 83/82 with/without test-utils. Fastly's repaired-Viceroy library/contract runs
+pass 271/36; pinned Wasmtime 48.0.2 passes Spin's supported SDK-resource/contract targets 21/35.
+The first SDK-resource attempt used installed Wasmtime 45.0.0 and fails before tests; preserve
+that negative. The standalone Spin library-test component also cannot link Spin-specific KV
+imports in Wasmtime, including the pinned runner; its mock handoff units execute natively, not
+as claimed SDK execution. Preserve `/private/tmp/edgezero-finish-spin-full-library-host-gap.log`.
+Harness tests pass 289 (one ignored), fixture-core 55, native Fastly fixture two, and the guarded
+core outbound suite 296. Strict harness, provider-target and changed progress-fixture Clippy,
+standalone formatting, 51 Node regressions, docs lint/format/build, legacy/docs/inventory guards,
+shared pins and decoder/map audits pass. The checked-in demo passes 66 tests; the generated
+workspace integration runs its 33 generated tests and all three provider builds.
+
+After compilation stops, single serial runs at
+`/private/tmp/edgezero-finish-final-{axum,fastly,spin,cloudflare}-lifetimes` retain Axum 8/10,
+repaired Viceroy 18/20, Spin 6/10 and workerd 8/10; every full suite is exit 1. All eight Fastly
+callback cases, both callback tails, all three response-cleanup cases and the main tail pass.
+Retain the exact strict scheduling/arrival and CPU-correlation failures. Spin additionally
+reports its typed BufferedBody result at guest collection 214.072 ms, but the native diagnostic
+response returns at 370.800 ms, after the source's 341.181 ms full-trickle target and 341.827 ms
+EOF. Its then-current cap validator therefore fails. Preserve this original artifact and failure;
+do not infer a missing cap or attribute the response gap to a provider without proof.
+
+Both independent reviews identify that gate as stronger than acceptance 9: the required boundary
+is original slot failure, not diagnostic HTTP delivery. Correct the existing validator using
+one-sided causal request-receipt bounds and the original elapsed values. Intersect one common
+batch epoch with collection, payload-write and native-response constraints for all three slots.
+Collection completion must itself precede native HTTP receipt under that same offset; a paired
+negative/positive regression reproduces and closes the initially omitted joint constraint.
+Require the worst-case cap terminal upper bound strictly before the unchanged body-start-plus-
+300 ms boundary; retain all source cadence, prefix, typed outcome and capture checks. Round
+invocation/collection outward by one microsecond and use the existing additional 1 ms clock
+guard, never a midpoint or a later socket close. Correlation explicitly reports
+`same_rate_assumed: true` and `clock_sync_proven: false`: monotonicity alone cannot prove equal
+rates. This is conditional local evidence, not a provider timing guarantee. Eight new regressions
+reproduce five logic failures, then pass with the existing six cap validators. They cover
+late diagnostic delivery, equality/overlap, impossible early errors, shared-epoch contradictions,
+missing/future stamps, shifted native origins, controlling A/B/C receipts and extreme arithmetic. Repair the positive unit
+fixture's formerly impossible pre-prefix arrival rather than accepting contradictory evidence.
+The response-delivery gap and uncorrelated Spin shutdown worker-panic line remain unqualified.
+
+After the reviewed correction, one further serial pass at
+`/private/tmp/edgezero-finish-postcaps-{axum,fastly,spin,cloudflare}-lifetimes` records Axum 5/10,
+repaired Viceroy 19/20, Spin 7/10 and workerd 6/10. All four full suites remain exit 1; retain
+these observations alongside, not in place of, the earlier captures. All eight callback cases,
+both callback tails, all three response-cleanup cases and the main tail pass again. The cap
+terminal upper bounds precede the original window end on every target, but Axum's healthy-sibling
+cadence and workerd's counted-write cadence still fail their unchanged checks. Their complete
+cap cases remain failed. Spin's new cap case passes with terminal upper 216.155 ms before the
+340.908 ms window end; this neither changes nor explains its older delayed HTTP response.
+Other strict arrival, scheduling, pending-cutoff and CPU-interval misses remain open. No source
+or operation timestamp, window, capture point, error category or approval was changed to pass.
+
+Read-only guest/source, timing, adapter ownership and verification reviews found no further
+defect in this checkpoint's changes. Full criteria 21/23, native SDK/poll witnesses, all required
+exact-candidate bindings, strict timing and hosted/consumer evidence remain open. No candidate
+freeze or qualification is supplied by this checkpoint.
 
 ### Current Work Queue and Gates
 
