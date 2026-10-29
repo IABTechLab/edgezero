@@ -7,6 +7,8 @@ pub mod cli;
 pub mod config_store;
 pub mod context;
 mod decompress;
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+mod ingress;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 pub mod key_value_store;
 // `kv_pagination` is the pure paging logic for `SpinKvStore::list_keys_page`.
@@ -108,7 +110,10 @@ pub fn init_logger() -> Result<(), log::SetLoggerError> {
 /// router, store binding, or response translation errors propagate here.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[inline]
-pub async fn run_app<A: Hooks>(req: SpinRequest) -> anyhow::Result<SpinFullResponse> {
+pub async fn run_app<A>(req: SpinRequest) -> anyhow::Result<SpinFullResponse>
+where
+    A: Hooks,
+{
     // Best-effort: every Spin `#[http_service]` re-enters this function, so a
     // second `log::set_logger` call returns Err — drop the result instead of
     // `.expect()` to avoid panicking on every subsequent request. Skipped
@@ -132,10 +137,10 @@ pub async fn run_app<A: Hooks>(req: SpinRequest) -> anyhow::Result<SpinFullRespo
 /// # Errors
 /// Returns conversion or dispatch errors from the existing adapter boundary.
 #[inline]
-pub async fn dispatch_app<A: Hooks>(
-    app: &App,
-    req: SpinRequest,
-) -> anyhow::Result<SpinFullResponse> {
+pub async fn dispatch_app<A>(app: &App, req: SpinRequest) -> anyhow::Result<SpinFullResponse>
+where
+    A: Hooks,
+{
     let stores = A::stores();
     let env = EnvConfig::from_env();
     request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)

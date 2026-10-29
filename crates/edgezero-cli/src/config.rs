@@ -1298,13 +1298,16 @@ fn sort_keys_recursive(value: &serde_json::Value) -> serde_json::Value {
 /// in production) so operators can pipe through `git diff` colour
 /// wrappers. Informational messages go to stderr via `eprintln!` in the
 /// caller. Never `log::*` — prefixes corrupt TTY renders and `jq` consumers.
-pub(crate) fn print_unified_diff_to_writer<W: Write>(
+pub(crate) fn print_unified_diff_to_writer<W>(
     remote_data: &serde_json::Value,
     local_data: &serde_json::Value,
     remote_sha: &str,
     local_sha: &str,
     out: &mut W,
-) -> Result<(), IoError> {
+) -> Result<(), IoError>
+where
+    W: Write,
+{
     let remote_text = render_for_diff(remote_data);
     let local_text = render_for_diff(local_data);
     let diff = TextDiff::from_lines(&remote_text, &local_text);
@@ -1839,11 +1842,14 @@ fn collect_secret_leaves<'raw>(
 /// runtime store ids, not flat-namespace candidates) so adapters
 /// whose secret store has a flat-namespace constraint (Spin) can
 /// detect within-secrets collisions.
-fn run_adapter_typed_checks<C: AppConfigMeta>(
+fn run_adapter_typed_checks<C>(
     typed: &C,
     ctx: &ValidationContext,
     adapter_scope: AdapterValidationScope,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    C: AppConfigMeta,
+{
     if let Some(lookups) = typed.implicit_secret_lookups()? {
         check_implicit_metadata(&lookups, ctx)?;
         return match adapter_scope {
@@ -1957,12 +1963,15 @@ fn check_implicit_metadata(
     Ok(())
 }
 
-fn check_implicit_adapter<C: AppConfigMeta>(
+fn check_implicit_adapter<C>(
     typed: &C,
     lookups: &[ImplicitSecretLookup],
     adapter: &dyn adapter_registry::Adapter,
     environment: &EnvConfig,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    C: AppConfigMeta,
+{
     let mut entries = Vec::new();
     let mut seen_requests = BTreeSet::new();
     let mut native_owners = BTreeMap::new();
@@ -2013,7 +2022,10 @@ fn check_implicit_adapter<C: AppConfigMeta>(
     adapter.validate_typed_secrets(&entries)
 }
 
-fn typed_secret_checks<C: AppConfigMeta>(typed: &C, ctx: &ValidationContext) -> Result<(), String> {
+fn typed_secret_checks<C>(typed: &C, ctx: &ValidationContext) -> Result<(), String>
+where
+    C: AppConfigMeta,
+{
     if let Some(lookups) = typed.implicit_secret_lookups()? {
         return check_implicit_metadata(&lookups, ctx);
     }

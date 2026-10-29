@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Compiles the CLI package the APPLICATION provides — a crate in the app's own
-# workspace — into an application-scoped cached CARGO_TARGET_DIR when configured,
-# or an action-owned scratch directory otherwise. It then packages the binary
+# workspace — into the shared job-local target provided by cache setup (even
+# without remote target caching), or fresh action-owned scratch when setup is
+# absent. It then packages the binary
 # plus a self-describing app-cli-meta.json into a tar so the executable bit
 # survives actions/upload-artifact. Never builds the EdgeZero monorepo CLI.
 #
@@ -18,7 +19,7 @@ set -euo pipefail
 #   RUNNER_TEMP                           optional  action-owned scratch root (default: /tmp)
 #   EDGEZERO__PROVIDER__ENV_CLEAR         optional  JSON array of provider aliases to scrub before the build (default: [])
 #   EDGEZERO__ACTION__WORKSPACE           optional  per-invocation scratch root (default: mktemp under RUNNER_TEMP)
-#   EDGEZERO__RUST_CACHE__TARGET_DIR      optional  shared Cargo target directory beneath RUNNER_TEMP
+#   EDGEZERO__RUST_CACHE__TARGET_DIR      optional  shared job-local target beneath RUNNER_TEMP, independent of remote cache mode
 #   EDGEZERO__ACTION__OUTPUT_FILE         optional  outputs handoff file, started fresh (default: GITHUB_OUTPUT)
 # Writes (outputs):
 #   app-cli-package                       the package that was built
@@ -63,7 +64,7 @@ fi
 parse_toolchain_from_channel_file() {
   local file="$1"
   # An extensionless `rust-toolchain` is EITHER a legacy single-line channel
-  # (e.g. `1.95.0`) OR a TOML document (`[toolchain]` + `channel = "..."`).
+  # (e.g. `1.98.1`) OR a TOML document (`[toolchain]` + `channel = "..."`).
   # rustup accepts both, so detect the TOML form and parse its channel rather
   # than taking the literal `[toolchain]` line as the channel.
   if grep -qE '^[[:space:]]*\[toolchain\]' "$file"; then

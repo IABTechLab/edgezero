@@ -27,6 +27,7 @@ pub mod error;
 pub mod extractor;
 pub mod handler;
 pub mod http;
+pub mod ingress;
 pub mod introspection;
 pub mod key_value_store;
 pub mod manifest;

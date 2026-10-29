@@ -28,42 +28,139 @@ GitHub Release asset, when the required rollback window exceeds 14 days.
 
 ### Optional Rust build caching
 
-Call the provider-neutral cache action once after checking out the application
-and before its Rust build steps:
+Call the provider-neutral cache action after checking out the application and
+before its Rust build steps. Replace the repository/ref placeholders and pin
+EdgeZero actions to one reviewed full commit SHA:
 
 ```yaml
+- name: Check out application source
+  uses: actions/checkout@v7
+  with:
+    repository: your-org/example-app
+    ref: <application-ref>
+    path: application
+    persist-credentials: false
+
+- name: Capture immutable application revision
+  id: source
+  shell: bash
+  run: |
+    set -euo pipefail
+    sha=$(git -C application rev-parse HEAD)
+    [[ "$sha" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || exit 1
+    printf 'sha=%s\n' "$sha" >>"$GITHUB_OUTPUT"
+
 - name: Set up Rust build cache
-  uses: stackpop/edgezero/.github/actions/setup-rust-build-cache@<ref>
+  id: rust-cache
+  uses: IABTechLab/edgezero/.github/actions/setup-rust-build-cache@<ref>
   with:
     app-name: example-app
     cache-target: true
+    save-target: ${{ github.ref == 'refs/heads/main' }}
+    target-cache-revision: ${{ steps.source.outputs.sha }}
     working-directory: application
+
+- name: Report cache selection
+  shell: bash
+  env:
+    SOURCE_HIT: ${{ steps.rust-cache.outputs.source-cache-hit }}
+    TARGET_HIT: ${{ steps.rust-cache.outputs.target-cache-hit }}
+    TARGET_DIR: ${{ steps.rust-cache.outputs.cargo-target-dir }}
+  run: printf 'Source exact hit=%s; target exact hit=%s; target directory=%s\n' "$SOURCE_HIT" "$TARGET_HIT" "$TARGET_DIR"
 ```
 
-`app-name` is a stable lowercase cache namespace for one application.
+`app-name` is a stable lowercase cache namespace for one application. Do not
+append its source SHA: that would prevent dependency-source reuse across commits.
+Resolve `steps.source.outputs.sha` from the checked-out **application** source,
+for example with `git -C application rev-parse HEAD`. Do not use the deployment
+repository's `github.sha` when the application lives in a separate checkout.
+`target-cache-revision` must be a full lowercase Git SHA and is required when
+`cache-target: true`; missing or invalid values fail without a compatibility
+fallback. An explicitly supplied revision is validated in either mode.
+
 `working-directory` identifies its Cargo workspace containing the committed
 `Cargo.lock`. The action restores application-scoped Cargo registry and Git
 dependency sources, installs a pinned `sccache`, and enables compiler caching
-for every later native or WASM Rust build in the job. With `cache-target: true`,
-it also restores an application-scoped Cargo target directory containing Cargo
-fingerprints, build-script outputs, generated code, libraries, and linking
-inputs. Cargo keeps target triples, profiles, features, and compiler fingerprints
-separate inside that directory. The target cache key is scoped by application,
-runner OS and architecture, and the committed `Cargo.lock`. Cargo fingerprints
-and `sccache` determine which source, toolchain, feature, and build-script outputs
-can be reused safely. Existing build, package, release, adapter, and deployment
-commands remain unchanged.
+for every later native or WASM Rust build in the job.
+
+- Dependency source keys include app, runner OS/architecture, and `Cargo.lock`,
+  but not source revision. A stable restore prefix also permits reuse when the
+  lockfile changes; Cargo fetches missing dependencies.
+- With `cache-target: true`, target artifacts are restored using a new v2 key
+  containing the complete source revision and lock digest. There is no
+  cross-revision or legacy-key fallback. The first build of a new revision has
+  a cold target cache; repeating that revision can restore previously saved artifacts.
+  Saving is separately opt-in: `save-target: true` enables a success-only
+  post-job save after builds complete. Its default is false (restore-only), and
+  enabling it without `cache-target: true` fails. Prefer writes from trusted main
+  workflow runs; this controls the workflow ref, not which application branch
+  can be built. Do not save a full target on every disposable fixture/PR run.
+- Compiler results use sccache's compiler/input/environment checks. Unchanged
+  compilations can be reused across revisions. Crates that invoke the linker
+  (`bin`, `dylib`, `cdylib`, and `proc-macro`) are not cacheable. A cold target
+  still requires those compilations, build-script execution, and linking; it
+  does not make a new application revision a fully warm build. A hit ratio or
+  deployment duration is not guaranteed.
+
+In both modes, the action sets one stable app-specific `CARGO_TARGET_DIR` beneath
+`RUNNER_TEMP`, without a SHA or random invocation directory in the path. Native
+CLI and WASM builds share it; Cargo keeps target triples/profiles separate.
+`cache-target: false` disables remote target operations, not that stable
+directory, dependency caching, or sccache. Use **one application per job**: setup
+sets job-wide target-directory variables, so setting up another application
+redirects subsequent builds into its directory. Put different applications in
+separate jobs. Prefer one setup call; an identical repeat skips remote restores
+and compiler-cache setup, preserving newer local build outputs. Changing
+workspace, source revision, lockfile or cache settings within that directory
+fails. With remote targets
+disabled, Git HEAD can identify local ownership when no revision was supplied;
+a non-Git workspace requires an explicit revision for repeat setup. Symlinks,
+control characters in paths and unowned target contents are rejected rather
+than deleted.
+
+Outputs `source-cache-hit` and `target-cache-hit` indicate exact primary-key
+matches. A false source hit can still mean prefix reuse after a lockfile change;
+target hits are false when disabled or missing. Both hit outputs are false on
+an identical repeat because that call performs no restore. Read hit status from
+the first setup call. `source-cache-key`, `target-cache-key`, and
+`cargo-target-dir` expose the selected identities/path,
+and sccache logs compiler statistics at job completion. Branch-scoped GitHub
+cache access still applies: PR merge-ref caches cannot seed main or unrelated
+PRs. Trusted main builds warm the source/compiler caches accessible to later
+branch builds; merging may require a cold target build.
+
+#### Breaking cache/build-path migration
+
+This changes the former lockfile-only target policy: only dependency sources and
+valid compiler results may cross source revisions, never writable target archives.
+It also changes build paths when remote target caching is disabled.
+
+1. Use one stable `app-name` per application, without a source SHA suffix.
+2. Resolve the application's full SHA and supply `target-cache-revision` when
+   enabling target restores; missing revisions have no compatibility fallback.
+3. Opt into target saves explicitly where repeated builds justify archive cost.
+   Restore-only callers do not automatically populate new target keys.
+4. Remove hard-coded `<application>/target/...` paths. Use `CARGO_TARGET_DIR` or
+   `cargo-target-dir`; CLI and adapter builds now share this job-local directory
+   even with `cache-target: false`, instead of fresh per-invocation CLI scratch.
+5. Use one application per job and prefer one setup call. Repeats must identify
+   the same source and use identical workspace, lockfile and cache settings.
+6. Expect a cold first target build after migration and for each new source SHA.
+   Measure compiler hits and build duration instead of assuming all work is cached.
+
+CLI build invocation, packaging, release verification, credential isolation, and
+production/staging deployment semantics are unchanged.
 
 Build and download the configurable application CLI artifact before assembling
 the release:
 
 ```yaml
 - id: app-cli
-  uses: stackpop/edgezero/.github/actions/build-app-cli@<ref>
+  uses: IABTechLab/edgezero/.github/actions/build-app-cli@<ref>
   with:
     app-cli-package: example-app-cli
     app-cli-bin: example-app-cli
-    app-cli-artifact: example-app-cli-${{ github.sha }}
+    app-cli-artifact: example-app-cli-${{ steps.source.outputs.sha }}
     working-directory: application
 
 - name: Download the application CLI archive
@@ -78,14 +175,14 @@ built in the credential-free producer job:
 
 ```yaml
 - id: release
-  uses: stackpop/edgezero/.github/actions/package-application-release-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/package-application-release-fastly@<ref>
   with:
     app-cli-archive: release-inputs/app-cli.tar
     fastly-package: application/pkg/app.tar.gz
     application-manifest: application/edgezero.toml
     adapter-manifest: application/adapters/fastly/fastly.toml
-    source-revision: ${{ github.sha }}
-    artifact-name: application-release-${{ github.sha }}
+    source-revision: ${{ steps.source.outputs.sha }}
+    artifact-name: application-release-${{ steps.source.outputs.sha }}
 ```
 
 The action verifies the application CLI's lifecycle command surface, writes
@@ -166,7 +263,7 @@ Download the selected release once and reuse it:
     github-token: ${{ secrets.APPLICATION_RELEASE_TOKEN }}
 
 - id: deploy
-  uses: stackpop/edgezero/.github/actions/deploy-fastly@<ref>
+  uses: IABTechLab/edgezero/.github/actions/deploy-fastly@<ref>
   with:
     app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
     app-release-sha256: ${{ needs.release.outputs.sha256 }}
@@ -319,7 +416,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - id: environment
-        uses: stackpop/edgezero/.github/actions/require-github-environment@<ref>
+        uses: IABTechLab/edgezero/.github/actions/require-github-environment@<ref>
         with:
           environment-name: ${{ steps.target.outputs.environment }}
           repository: ${{ github.repository }}
@@ -369,7 +466,7 @@ jobs:
           export_selector EDGEZERO__STORES__SECRETS__CREDENTIALS__NAME "$SECRET_NAME"
 
       - id: config
-        uses: stackpop/edgezero/.github/actions/config-push-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/config-push-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}
@@ -390,7 +487,7 @@ jobs:
           exit 1
 
       - id: deploy
-        uses: stackpop/edgezero/.github/actions/deploy-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/deploy-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}
@@ -401,7 +498,7 @@ jobs:
           deploy-to: ${{ needs.preflight.outputs.deploy-to }}
 
       - id: health
-        uses: stackpop/edgezero/.github/actions/healthcheck-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/healthcheck-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}
@@ -415,7 +512,7 @@ jobs:
 
       - name: Roll back failed deployment
         if: ${{ (failure() || cancelled()) && steps.deploy.outputs.fastly-version != '' && (needs.preflight.outputs.deploy-to == 'staging' || steps.deploy.outputs.previous-version != '') }}
-        uses: stackpop/edgezero/.github/actions/rollback-fastly@<ref>
+        uses: IABTechLab/edgezero/.github/actions/rollback-fastly@<ref>
         with:
           app-release-archive: ${{ github.workspace }}/app-release/app-release.tar.gz
           app-release-sha256: ${{ needs.preflight.outputs.sha256 }}

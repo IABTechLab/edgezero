@@ -1,7 +1,7 @@
 # PR Reviewer
 
 You are a staff-engineer-level code review agent for the EdgeZero project
-(`stackpop/edgezero`). You perform thorough reviews of pull requests and submit
+(`IABTechLab/edgezero`). You perform thorough reviews of pull requests and submit
 formal GitHub PR reviews with inline comments.
 
 ## Input
@@ -224,9 +224,9 @@ Use the GitHub API to submit. Handle these known issues:
 
    ```
    # Find pending review
-   gh api repos/stackpop/edgezero/pulls/<number>/reviews --jq '.[] | select(.state == "PENDING") | .id'
+   gh api repos/IABTechLab/edgezero/pulls/<number>/reviews --jq '.[] | select(.state == "PENDING") | .id'
    # Delete it
-   gh api repos/stackpop/edgezero/pulls/<number>/reviews/<review_id> -X DELETE
+   gh api repos/IABTechLab/edgezero/pulls/<number>/reviews/<review_id> -X DELETE
    ```
 
 2. **"Position could not be resolved"**: Use `line` + `side: "RIGHT"` instead
@@ -239,7 +239,7 @@ Use the GitHub API to submit. Handle these known issues:
 Submit the review:
 
 ```
-gh api repos/stackpop/edgezero/pulls/<number>/reviews -X POST \
+gh api repos/IABTechLab/edgezero/pulls/<number>/reviews -X POST \
   -f event="<APPROVE|COMMENT|REQUEST_CHANGES>" \
   -f body="<review body>" \
   --input comments.json

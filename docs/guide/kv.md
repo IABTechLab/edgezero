@@ -198,4 +198,4 @@ Violating any of these returns a `KvError::Validation`, which maps to
 
 ## Next Steps
 
-- Check out the [demo app](https://github.com/stackpop/edgezero/tree/main/examples/app-demo) for a full working example.
+- Check out the [demo app](https://github.com/IABTechLab/edgezero/tree/main/examples/app-demo) for a full working example.

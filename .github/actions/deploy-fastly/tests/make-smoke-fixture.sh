@@ -36,7 +36,7 @@ TOML
 [package]
 name = "fixture-app-cli"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [[bin]]
 name = "fixture-app-cli"
@@ -51,7 +51,7 @@ edgezero-cli = { path = "../../../crates/edgezero-cli", default-features = false
 clap = { version = "4", features = ["derive"] }
 edgezero-core = { path = "../../../crates/edgezero-core" }
 serde = { version = "1", features = ["derive"] }
-validator = { version = "0.20", features = ["derive"] }
+validator = { version = "0.21", features = ["derive"] }
 TOML
 
   cat >crates/fixture-app-cli/src/main.rs <<'RS'
@@ -155,8 +155,11 @@ source = "fixture.wasm"
 TOML
 
   cargo generate-lockfile
+  # Path dependencies live in the enclosing EdgeZero checkout, not this Git repo.
+  git -C "$workspace" rev-parse HEAD >.edgezero-source-revision
   git add -A
-  git commit -q -m fixture
+  GIT_AUTHOR_DATE=2000-01-01T00:00:00Z GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
+    git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -q -m fixture
 }
 
 main() {
