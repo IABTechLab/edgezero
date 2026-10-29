@@ -536,7 +536,10 @@ impl Adapter for SpinCliAdapter {
         // tells us which field already claimed it.
         let mut seen: HashMap<String, &str> = HashMap::with_capacity(entries.len());
         for entry in entries {
-            let spin_var = entry.key_value.to_ascii_lowercase();
+            let spin_var = entry
+                .native_name
+                .clone()
+                .unwrap_or_else(|| entry.key_value.to_ascii_lowercase());
             if !is_valid_spin_key(&spin_var) {
                 let reason = spin_key_rule_violation(&spin_var);
                 return Err(format!(
@@ -942,7 +945,12 @@ fn read_sqlite_entry(db_path: &Path, store: &str, key: &str) -> Result<ReadConfi
 /// multi-component requires an explicit `component = "..."` in
 /// `[adapters.spin.adapter]`, and a selector that doesn't match
 /// any declared id is an error.
-fn resolve_spin_component(
+///
+/// # Errors
+/// Returns an error for unreadable/invalid manifests, missing components,
+/// ambiguous selection or an undeclared selector.
+#[inline]
+pub fn resolve_spin_component(
     spin_path: &Path,
     component_selector: Option<&str>,
 ) -> Result<String, String> {

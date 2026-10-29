@@ -29,6 +29,9 @@ mod config;
 mod demo_server;
 #[cfg(feature = "cli")]
 mod diff;
+/// Shared Fastly resource resolution and secure secret writes.
+#[cfg(all(feature = "cli", feature = "edgezero-adapter-fastly"))]
+pub mod fastly_secrets;
 #[cfg(feature = "cli")]
 mod generator;
 #[cfg(feature = "cli")]
@@ -48,9 +51,11 @@ pub mod args;
 pub use auth::run_auth;
 #[cfg(feature = "cli")]
 pub use config::{
-    DiffExit, run_config_diff_typed, run_config_gc, run_config_push, run_config_push_typed,
-    run_config_validate, run_config_validate_typed,
+    DiffExit, effective_manifest_environment, run_config_diff_typed, run_config_gc,
+    run_config_push, run_config_push_typed, run_config_validate, run_config_validate_typed,
 };
+#[cfg(all(feature = "cli", feature = "edgezero-adapter-spin"))]
+pub use edgezero_adapter_spin::cli::resolve_spin_component;
 #[cfg(feature = "cli")]
 pub use provision::run_provision;
 

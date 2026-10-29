@@ -362,8 +362,22 @@ impl Adapter for AxumCliAdapter {
     fn validate_typed_secrets(&self, entries: &[TypedSecretEntry<'_>]) -> Result<(), String> {
         let mut claimed: BTreeMap<String, &TypedSecretEntry<'_>> = BTreeMap::new();
         for entry in entries {
-            let var = secret_env_var(entry.key_value)
-                .map_err(|err| format!("`#[secret]` field `{}`: {err}", entry.field_name))?;
+            let var = if let Some(native_name) = &entry.native_name {
+                if native_name.is_empty()
+                    || !native_name.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+                {
+                    return Err(format!(
+                        "invalid native environment name for `{}`",
+                        entry.field_name
+                    ));
+                }
+                native_name.clone()
+            } else {
+                secret_env_var(entry.key_value)
+                    .map_err(|err| format!("`#[secret]` field `{}`: {err}", entry.field_name))?
+            };
             if let Some(prev) = claimed.get(&var) {
                 if prev.key_value != entry.key_value {
                     return Err(format!(
