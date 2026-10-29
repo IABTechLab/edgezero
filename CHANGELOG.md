@@ -130,13 +130,17 @@ their scope when introduced; the current summary supersedes their then-pending A
   exact cutoff collection states. Record timeout-contract diagnostics separately without
   waiving source timing failures or claiming hosted qualification.
 - Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
-  `e65ff90dadf4173b08b14194e878ad3acd555337`; propose it upstream in
+  `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).
-  Hard-migrate SDK spawn calls to `spawn_local`, using WASIp3 0.9.0 / wit-bindgen 0.62.0
-  through one SDK executor. Align the root, demo, reusable fixture and generated manifests;
+  Hard-migrate SDK spawn calls to `spawn_local`, using WASIp3 0.10.0 / wit-bindgen 0.63.0
+  through one SDK executor. Align the root, demo, reusable/request-fidelity fixtures and generated manifests;
   compare Git source and revision as well as package version in dependency guards.
   Preserve absolute deadlines, cutoffs and all limits; scheduler-latency and hosted qualification
   remain separate gates. See the [dependency audit](docs/audits/2026-10-27-spin-sdk-eager-progress.md).
+- Adapt to the reviewed SDK's join-handle return at one private provider launcher, keeping
+  eager task cancellation with EdgeZero's existing owner. Run the native-request conversion
+  contract inside the SDK executor without weakening admission/refusal assertions. Preserve
+  the full Spin wire matrix and keep strict lifetime timing failures explicitly unqualified.
 
 ### Main Integration
 

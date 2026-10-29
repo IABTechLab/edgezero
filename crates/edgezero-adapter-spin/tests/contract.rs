@@ -590,6 +590,7 @@ mod tests {
         use futures::FutureExt as _;
         use futures::stream::{empty, poll_fn};
         use spin_sdk::http::{FromRequest as _, IntoRequest as _, Request as SpinRequest};
+        use spin_sdk::wasip3::wit_bindgen::block_on as sdk_block_on;
 
         use super::*;
 
@@ -880,39 +881,42 @@ mod tests {
 
         #[test]
         fn standard_native_request_refuses_before_body_read() {
-            let (mut app, handler_calls, middleware_calls) = guarded_fallback_app();
-            app.set_ingress_admission_policy(|head| {
-                assert!(matches!(head.route_resolution(), RouteResolution::NotFound));
-                AdmissionDecision::Refuse {
-                    completion: ResponseEgressCompletion::empty(),
-                    response: response_builder()
-                        .status(StatusCode::SERVICE_UNAVAILABLE)
-                        .header("x-ingress-refusal", "saturated")
-                        .body(Body::from("spin unavailable\n"))
-                        .expect("refusal response"),
-                }
+            sdk_block_on(async {
+                let (mut app, handler_calls, middleware_calls) = guarded_fallback_app();
+                app.set_ingress_admission_policy(|head| {
+                    assert!(matches!(head.route_resolution(), RouteResolution::NotFound));
+                    AdmissionDecision::Refuse {
+                        completion: ResponseEgressCompletion::empty(),
+                        response: response_builder()
+                            .status(StatusCode::SERVICE_UNAVAILABLE)
+                            .header("x-ingress-refusal", "saturated")
+                            .body(Body::from("spin unavailable\n"))
+                            .expect("refusal response"),
+                    }
+                });
+                let outgoing_request = SpinRequest::builder()
+                    .method("POST")
+                    .uri("http://example.test/missing")
+                    .body(http_body_util::Full::new(Bytes::from_static(b"abcde")))
+                    .expect("outgoing-compatible request");
+                let wasi_request = outgoing_request.into_request().expect("WASI request");
+                let incoming_request =
+                    SpinRequest::from_request(wasi_request).expect("incoming Spin request");
+
+                let response = dispatch_request_for_test(&app, incoming_request)
+                    .await
+                    .expect("Spin response");
+
+                let mut expected_headers = HeaderMap::new();
+                expected_headers.insert("x-ingress-refusal", HeaderValue::from_static("saturated"));
+                assert_terminal_response(
+                    response,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &expected_headers,
+                    b"spin unavailable\n",
+                );
+                assert_no_route_dispatch(&handler_calls, &middleware_calls);
             });
-            let outgoing_request = SpinRequest::builder()
-                .method("POST")
-                .uri("http://example.test/missing")
-                .body(http_body_util::Full::new(Bytes::from_static(b"abcde")))
-                .expect("outgoing-compatible request");
-            let wasi_request = outgoing_request.into_request().expect("WASI request");
-            let incoming_request =
-                SpinRequest::from_request(wasi_request).expect("incoming Spin request");
-
-            let response =
-                block_on(dispatch_request_for_test(&app, incoming_request)).expect("Spin response");
-
-            let mut expected_headers = HeaderMap::new();
-            expected_headers.insert("x-ingress-refusal", HeaderValue::from_static("saturated"));
-            assert_terminal_response(
-                response,
-                StatusCode::SERVICE_UNAVAILABLE,
-                &expected_headers,
-                b"spin unavailable\n",
-            );
-            assert_no_route_dispatch(&handler_calls, &middleware_calls);
         }
 
         struct CountingMiddleware(Arc<AtomicUsize>);

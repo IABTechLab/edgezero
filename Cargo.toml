@@ -103,7 +103,7 @@ syn = { version = "3", features = ["full", "extra-traits", "visit"] }
 subtle = "2"
 # The Spin outbound classifier exhaustively matches this SDK's WASI HTTP
 # snapshot, so both dependencies move only through an explicit review.
-spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk.git", rev = "e65ff90dadf4173b08b14194e878ad3acd555337", default-features = false, features = ["http", "key-value", "variables"] }
+spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk.git", rev = "6c59ed5b4fcb377072763aee0b27a3abdd8edb72", default-features = false, features = ["http", "key-value", "variables"] }
 tempfile = "3"
 toml_edit = "0.25"
 thiserror = "2"

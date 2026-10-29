@@ -123,7 +123,7 @@ plan; compilation, routing sentinels and local smoke are not hosted outbound acc
 Worktree tool pins are Rust 1.98.1, Node 24.20.0, Fastly CLI 16.0.0, Spin 4.1.0,
 standalone Viceroy 0.21.0 and Wasmtime 48.0.2. SDK requirements are Fastly 0.13.1,
 worker 0.8.5 and spin-sdk 7.0.0 from `stackpop/spin-rust-sdk` at
-`e65ff90dadf4173b08b14194e878ad3acd555337` (`wasip3 0.9.0` / `wit-bindgen 0.62.0`).
+`6c59ed5b4fcb377072763aee0b27a3abdd8edb72` (`wasip3 0.10.0` / `wit-bindgen 0.63.0`).
 Record actual executable identities rather than borrowing
 historical paths. Local fixture runners accept `VICEROY_BIN`, `SPIN_BIN`, `WRANGLER_BIN` and
 `WORKER_BUILD_BIN`; Cloudflare also requires explicit absolute `WASM_BINDGEN_BIN`,

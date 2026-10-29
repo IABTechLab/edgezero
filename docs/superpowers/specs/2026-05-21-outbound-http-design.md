@@ -7046,8 +7046,8 @@ separate flate dependency audit.
 both the root and excluded app-demo lockfiles, and assert both resolved graphs. Spin uses the
 SDK's `wasip3` re-export rather than a second direct dependency. SDK 7 is pinned to
 `https://github.com/stackpop/spin-rust-sdk.git` at
-`e65ff90dadf4173b08b14194e878ad3acd555337`, selecting `wasip3 0.9.0+wasi-0.3.0` and the
-corrected `wit-bindgen 0.62.0` executor. See the
+`6c59ed5b4fcb377072763aee0b27a3abdd8edb72`, selecting `wasip3 0.10.0+wasi-0.3.2` and the
+corrected `wit-bindgen 0.63.0` executor. See the
 [SDK dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) and
 [upstream change](https://github.com/spinframework/spin-rust-sdk/pull/169).
 Use `spawn_local` without a compatibility alias or another executor. Adapter manifests inherit the corresponding workspace dependency

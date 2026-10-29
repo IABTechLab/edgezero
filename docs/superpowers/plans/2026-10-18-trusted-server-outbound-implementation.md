@@ -348,6 +348,38 @@ and two strict timing failures. A pre-existing trailing worker diagnostic was re
 requested shutdown with identical guest artifacts; retain that caveat, not a clean-hosted-
 shutdown claim. These checks do not change any acceptance binding or qualification gate.
 
+### Spin SDK Review Refresh Checkpoint (2026-10-28)
+
+The requester authorized consuming the latest reviewed SDK contribution after the upstream
+review fixes were pushed. Root, demo, reusable/request-fidelity fixtures and generator now pin
+`6c59ed5b4fcb377072763aee0b27a3abdd8edb72`, with all four application locks aligned. This selects
+WASIp3 0.10.0/WASI 0.3.2 and wit-bindgen 0.63.0; the preceding checkpoint's 0.9/0.62 observations
+remain historical, not evidence for the refreshed graph. The
+[dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md#current-reviewed-revision-2026-10-28)
+records the SDK review scope and new local evidence.
+
+One private provider launcher explicitly detaches the new SDK join handle at every eager/batch
+spawn site, keeping registration and cancellation with the existing shared task owner. No private
+scheduler contract, deprecated API, second executor or compatibility mode is introduced. The native
+WASM request-conversion test now constructs and dispatches inside the SDK executor, preserving
+its admission/refusal assertions; the old raw-test setup reproduced an SDK task-context panic.
+
+The five root gates pass (2,568 workspace tests, one existing ignored), as do strict native and
+both Spin WASM Clippy configurations, all eight Spin WASM feature combinations, 35 WASM contracts,
+21 SDK-resource cases and the real eager component on exact Wasmtime 48.0.2. Demo core (60), demo
+and request-fidelity Spin builds, generator source/lock guards and the full Spin 4.1.0 wire matrix
+(68 exchanges/84 receipts) pass. The full ignored fresh generated-workspace gate also passes:
+33 core tests, CLI/configuration, all three WASM adapters and fallback TCP assertions. Decoder/map,
+documentation and legacy/evidence-inventory guards pass. These are local working-tree results,
+not a frozen or hosted qualification candidate.
+
+The approved D6 characterization resumes with this SDK: six of eight local cases pass, including
+per-call timeout and unobserved work. Slow-origin Begin timing and the CPU write window still
+fail their original targets. Preserve both failures and all artifacts; this refresh does not
+close D6, native body-entry evidence, consumer acceptance or hosted qualification. No source
+criterion, requirement/interface digest, runtime pin, capability or acceptance binding changes.
+The inventory remains 32 ready / 479 planned and unqualified; no deployment or candidate freeze.
+
 ### Main Integration Checkpoint (2026-10-28)
 
 Merge main `87456c70` into the signed-SDK checkpoint `7b68f737`, preserving the existing

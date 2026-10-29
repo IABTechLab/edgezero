@@ -716,8 +716,8 @@ shared dependencies, and keep its Fastly SDK requirement aligned with the root.
 Select executables with `VICEROY_BIN`, `WORKER_BUILD_BIN`, `WRANGLER_BIN`, and
 `SPIN_BIN`. Install tools explicitly; the runner never deploys or installs them.
 The PR pins Fastly SDK 0.13.1, Viceroy 0.21.0, `worker` 0.8.5, and `spin-sdk` 7.0.0
-from `stackpop/spin-rust-sdk` at `e65ff90dadf4173b08b14194e878ad3acd555337`, using its
-`wasip3 0.9.0` / `wit-bindgen 0.62.0` re-export and `spawn_local`. See the
+from `stackpop/spin-rust-sdk` at `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`, using its
+`wasip3 0.10.0` / `wit-bindgen 0.63.0` re-export and `spawn_local`. See the
 [dependency audit](../../../docs/audits/2026-10-27-spin-sdk-eager-progress.md).
 The repository pins Spin CLI 4.1.0. Use a worker-build
 version compatible with the locked worker/wasm-bindgen graph rather than assuming

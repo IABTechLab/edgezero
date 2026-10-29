@@ -394,7 +394,7 @@ mod spin_impl {
     use edgezero_core::time::{Deadline, MonotonicInstant};
     use edgezero_core::time::{DispatchBudget, MonotonicClock};
     use futures_util::StreamExt as _;
-    use futures_util::future::FutureExt as _;
+    use futures_util::future::{FutureExt as _, LocalBoxFuture};
     use futures_util::stream::{iter, once};
     use spin_sdk::time::sleep;
     use spin_sdk::wasip3::http::client;
@@ -416,6 +416,11 @@ mod spin_impl {
     };
 
     const RESPONSE_READ_BYTES: usize = 16 * 1024;
+
+    fn spawn_outbound_task(task: LocalBoxFuture<'static, ()>) {
+        // SDK handle drop detaches; OutboundTask retains cancellation ownership.
+        drop(spawn_local(task));
+    }
 
     #[expect(
         unsafe_code,
@@ -675,7 +680,7 @@ mod spin_impl {
             let future = self.dispatch_head(request);
             super::scheduling::schedule_exchange(
                 async move { future.await?.finish().await }.boxed_local(),
-                spawn_local,
+                spawn_outbound_task,
             )
         }
 
@@ -731,7 +736,7 @@ mod spin_impl {
                     )
                 })
                 .collect();
-            super::scheduling::schedule_prepared_batch(context, exchanges, spawn_local)
+            super::scheduling::schedule_prepared_batch(context, exchanges, spawn_outbound_task)
         }
     }
 
@@ -1098,7 +1103,7 @@ mod spin_impl {
             let head = self.dispatch_head(request);
             super::scheduling::schedule_exchange(
                 async move { head.await?.finish().await }.boxed_local(),
-                spawn_local,
+                spawn_outbound_task,
             )
         }
 
@@ -1123,7 +1128,7 @@ mod spin_impl {
                     )
                 })
                 .collect();
-            super::scheduling::schedule_prepared_batch(context, slots, spawn_local)
+            super::scheduling::schedule_prepared_batch(context, slots, spawn_outbound_task)
         }
     }
 

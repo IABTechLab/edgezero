@@ -284,7 +284,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
         concat!(
             "spin-sdk = { version = \"=7.0.0\", ",
             "git = \"https://github.com/stackpop/spin-rust-sdk.git\", ",
-            "rev = \"e65ff90dadf4173b08b14194e878ad3acd555337\", default-features = false }",
+            "rev = \"6c59ed5b4fcb377072763aee0b27a3abdd8edb72\", default-features = false }",
         )
         .to_owned(),
     );
