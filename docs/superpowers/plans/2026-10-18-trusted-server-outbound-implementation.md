@@ -38,8 +38,9 @@ the fixture/runner cleanup separately from delivery requirements. It preserves n
 synchronous SDK, async CLI, actual HTTP and raw-ingress execution boundaries, all acceptance
 identities and unqualified evidence. One Spin runtime suite replaces scattered YAML checks;
 the shared Rust process owner replaces the separate ingress runner. Historical checkpoint
-commands below remain revision-specific, not current invocation instructions. Hosted timing
-comparison is pending a successful run of the consolidated workflow.
+commands below remain revision-specific, not current invocation instructions. Consolidated
+implementation workflows pass; comparable warm hosted timing remains pending because the
+follow-up run misses the previously saved caches. The consolidation plan records that evidence.
 
 The six approved consolidation commitments are **not collectively complete**:
 
@@ -70,7 +71,7 @@ Keep three different status questions separate:
   adds each adapter's unit criterion 09, Axum/Cloudflare/Fastly unit criteria 10/11 and Axum
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   62 legs, with 449 still
-  `planned`. G1/Q3 binding work remains unfinished, not evidence that 450 features are absent. Only the explicitly bound
+  `planned`. G1/Q3 binding work remains unfinished, not evidence that 449 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for

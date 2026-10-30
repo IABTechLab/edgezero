@@ -42,7 +42,7 @@ Required check names remain unchanged. Original deadlines, timing tolerances, so
 
 Local result: all 26 CI-tooling regression cases pass, including damaged executable/version/
 identity, missing compiler/platform facts, failed commands, zero tests and cache-hit readiness
-execution. Actionlint passes. Hosted timing remains unmeasured for these changes.
+execution. Actionlint passes. Comparable warm hosted timing remains unmeasured.
 
 ## Task 2: Give Spin Fixtures a Clear Home
 
@@ -107,10 +107,10 @@ regression), and the ingress phase forwards its configured readiness timeout.
 - [x] Run guard/evidence/CI regression tests and docs lint/format/build. Audit for old targets, paths and duplicate supervisors.
 - [x] Perform independent specification and quality reviews and fix findings.
 - [x] Commit and push the verified consolidation to PR #275.
-- [ ] Collect a successful hosted run and compare job critical path, summed worker time, cache transfer and build/install time with the baseline. Mark cold timing unmeasured until an explicit cache-miss run exists.
+- [ ] Complete a comparable warm hosted measurement of job critical path, summed worker time, cache transfer and build/install time against the baseline. Verify actual cache hits; retain cache-miss timing separately.
 - [x] Mark completion only for implemented and verified tasks; retain any unclosed evidence or timing work explicitly.
 
-Local verification (2026-10-30): all five root gates; both Spin WASM Clippy configurations;
+Initial local verification (2026-10-30): all five root gates; both Spin WASM Clippy configurations;
 all three Spin fixture packages' target Clippy; 352 harness tests (two intentionally ignored);
 42 evidence, 97 execution/legacy guard and 25 CI-tooling tests; docs format/lint/build.
 The full suite passed at `.runs/18e33c1d25021528-554d-0`: 35 synchronous contracts,
@@ -119,7 +119,7 @@ The full suite passed at `.runs/18e33c1d25021528-554d-0`: 35 synchronous contrac
 50 seconds, not a hosted-CI timing result. A preceding run failed on the local macOS
 LLVM lookup; supplying the installed toolchain library path resolved linking without
 repository or runtime-pin changes. Required named checks and hosted qualification
-limitations remain unchanged. Independent final review and hosted measurement remain open.
+limitations remain unchanged. Final review is recorded below; comparable warm hosted measurement remains open.
 
 Final review's four P2 cleanup items are implemented: ingress-target caching in the named
 Clippy jobs; content-bound build identities with fresh launch nonces; shared ownership for
@@ -170,6 +170,21 @@ measurement checkbox requires a comparable warm run, cache-transfer data and a r
 interpretation; the provisional six-minute target is not claimed achieved. Live follow-up
 results belong in [PR #275](https://github.com/IABTechLab/edgezero/pull/275) without changing
 the outbound acceptance inventory or qualification status.
+
+The documentation-only follow-up at `ce1257f1cfed59c8a56c787a7e9aa8d587efc4d2` also passes:
+[test workflow 41100850098](https://github.com/IABTechLab/edgezero/actions/runs/41100850098)
+and [format/Clippy workflow 41100850329](https://github.com/IABTechLab/edgezero/actions/runs/41100850329).
+All reported PR checks are successful. This run is **not warm**: Spin and Fastly miss their
+Cargo caches, and Fastly misses both Viceroy caches. The earlier run's logs confirm successful
+uploads of these same keys, so failed initial saves do not explain the misses.
+
+The 2026-10-30 repository API snapshot reports 11,308,456,209 bytes of cache usage against
+`max_cache_size_gb: 10`. The earlier entries are absent; 22 retained Cargo archives account
+for 9,821,939,523 bytes. This is consistent with retention pressure, not proof of a particular
+eviction or deletion event. Other large archives belong to open PRs and have not been removed.
+No cache deletion or storage-limit change is authorized by this plan. A separately approved
+storage-budget or cache-size decision is needed before repeating the warm comparison; no
+speedup, six-minute target achievement or hosted-provider qualification is claimed.
 
 ## Verification Commands
 
