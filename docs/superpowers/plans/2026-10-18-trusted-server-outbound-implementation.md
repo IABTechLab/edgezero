@@ -39,8 +39,11 @@ synchronous SDK, async CLI, actual HTTP and raw-ingress execution boundaries, al
 identities and unqualified evidence. One Spin runtime suite replaces scattered YAML checks;
 the shared Rust process owner replaces the separate ingress runner. Historical checkpoint
 commands below remain revision-specific, not current invocation instructions. Consolidated
-implementation workflows pass; comparable warm hosted timing remains pending because the
-follow-up run misses the previously saved caches. The consolidation plan records that evidence.
+implementation workflows pass. A later exact-key warm run records a 373-second job span
+versus the baseline's 625 seconds, missing the provisional six-minute target by 13 seconds.
+The consolidation plan records cache transfers, workload caveats and the approved but rejected
+20 GB repository-limit update; the effective limit remains 10 GB. This CI measurement closes
+neither outbound acceptance nor hosted-provider qualification.
 
 The six approved consolidation commitments are **not collectively complete**:
 

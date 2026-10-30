@@ -42,7 +42,7 @@ Required check names remain unchanged. Original deadlines, timing tolerances, so
 
 Local result: all 26 CI-tooling regression cases pass, including damaged executable/version/
 identity, missing compiler/platform facts, failed commands, zero tests and cache-hit readiness
-execution. Actionlint passes. Comparable warm hosted timing remains unmeasured.
+execution. Actionlint passes. The warm hosted comparison is recorded below.
 
 ## Task 2: Give Spin Fixtures a Clear Home
 
@@ -107,7 +107,7 @@ regression), and the ingress phase forwards its configured readiness timeout.
 - [x] Run guard/evidence/CI regression tests and docs lint/format/build. Audit for old targets, paths and duplicate supervisors.
 - [x] Perform independent specification and quality reviews and fix findings.
 - [x] Commit and push the verified consolidation to PR #275.
-- [ ] Complete a comparable warm hosted measurement of job critical path, summed worker time, cache transfer and build/install time against the baseline. Verify actual cache hits; retain cache-miss timing separately.
+- [x] Complete a comparable warm hosted measurement of job critical path, summed worker time, cache transfer and build/install time against the baseline. Verify actual cache hits; retain cache-miss timing separately. The six-minute target is missed by 13 seconds; measurement completion does not mean target achievement.
 - [x] Mark completion only for implemented and verified tasks; retain any unclosed evidence or timing work explicitly.
 
 Initial local verification (2026-10-30): all five root gates; both Spin WASM Clippy configurations;
@@ -119,7 +119,7 @@ The full suite passed at `.runs/18e33c1d25021528-554d-0`: 35 synchronous contrac
 50 seconds, not a hosted-CI timing result. A preceding run failed on the local macOS
 LLVM lookup; supplying the installed toolchain library path resolved linking without
 repository or runtime-pin changes. Required named checks and hosted qualification
-limitations remain unchanged. Final review is recorded below; comparable warm hosted measurement remains open.
+limitations remain unchanged. Final review and the subsequent warm hosted comparison are recorded below.
 
 Final review's four P2 cleanup items are implemented: ingress-target caching in the named
 Clippy jobs; content-bound build identities with fresh launch nonces; shared ownership for
@@ -165,11 +165,9 @@ The first run populates new runtime/fixture cache keys; it is **not a comparable
 | Sum of job durations |                        1878 |                             3090 |
 
 Fastly's first stock install takes 288 seconds and its uncached isolated repair takes
-378 seconds (baseline 297/100). These observations do not establish a speedup. The remaining
-measurement checkbox requires a comparable warm run, cache-transfer data and a recorded
-interpretation; the provisional six-minute target is not claimed achieved. Live follow-up
-results belong in [PR #275](https://github.com/IABTechLab/edgezero/pull/275) without changing
-the outbound acceptance inventory or qualification status.
+378 seconds (baseline 297/100). These cache-miss observations do not establish a speedup;
+the later warm comparison below records the separate measurement. Neither changes the
+outbound acceptance inventory or qualification status.
 
 The documentation-only follow-up at `ce1257f1cfed59c8a56c787a7e9aa8d587efc4d2` also passes:
 [test workflow 41100850098](https://github.com/IABTechLab/edgezero/actions/runs/41100850098)
@@ -182,9 +180,63 @@ The 2026-10-30 repository API snapshot reports 11,308,456,209 bytes of cache usa
 `max_cache_size_gb: 10`. The earlier entries are absent; 22 retained Cargo archives account
 for 9,821,939,523 bytes. This is consistent with retention pressure, not proof of a particular
 eviction or deletion event. Other large archives belong to open PRs and have not been removed.
-No cache deletion or storage-limit change is authorized by this plan. A separately approved
-storage-budget or cache-size decision is needed before repeating the warm comparison; no
-speedup, six-minute target achievement or hosted-provider qualification is claimed.
+No cache deletion is authorized by this plan. The requester separately approved a repository
+cache-limit increase to 20 GB, acknowledging potential charges. GitHub rejects that update with
+HTTP 400 (`Repository cache size limit must be between 10 and 10.`); readback still reports
+`max_cache_size_gb: 10`. Organization-policy inspection returns HTTP 403 because the current
+credentials lack organization administration access. The increase remains unapplied; no
+organization policy, billing budget or cache entry was changed. An administrator must resolve
+the allowed-limit restriction before retrying the approved repository setting. The policy
+request itself establishes no performance or qualification result. GitHub documents that
+[repository limits cannot exceed the organization's maximum](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#increasing-cache-size).
+
+### Warm Follow-Up
+
+At `3b4e1f8c574b80f9d6b137cbb99e35a684f8fba8`,
+[test workflow 41104906699](https://github.com/IABTechLab/edgezero/actions/runs/41104906699)
+and [format/Clippy workflow 41104906668](https://github.com/IABTechLab/edgezero/actions/runs/41104906668)
+pass; all 30 reported PR checks are successful. Only the two tracking documents changed after
+the consolidation implementation. The existing run already provides warm evidence, so no
+additional run is needed merely to establish cache hits; the rejected capacity increase is
+not a prerequisite for this measurement.
+
+| Test Job             | Warm Baseline (Seconds) | Warm Consolidated Run (Seconds) |
+| -------------------- | ----------------------: | ------------------------------: |
+| Axum                 |                     109 |                              91 |
+| Fastly               |                     625 |                             373 |
+| Workspace            |                     284 |                             313 |
+| Cloudflare           |                     227 |                             170 |
+| CLI                  |                     302 |                             266 |
+| Spin                 |                     104 |                             116 |
+| Demo                 |                     224 |                             221 |
+| Test aggregate       |                       3 |                               3 |
+| Sum of job durations |                    1878 |                            1553 |
+
+Durations use GitHub job start/completion timestamps at one-second resolution. The full
+job span is 373 seconds (18:12:40-18:18:53 UTC), including the aggregate job, versus the
+baseline's 625 seconds. The provisional six-minute critical-path target is **missed by
+13 seconds**. The summed worker duration is not elapsed wall time or billed minutes.
+
+All 11 configured archives restore exact primary keys: seven Cargo, two Viceroy, npm and
+worker-build. There are zero misses and zero archive uploads. Downloads total 5,021,594,784
+bytes: 4,275,790,065 Cargo, 673,173,101 Viceroy and 72,631,618 npm/worker-build, versus the
+baseline's 16 restores / 8,240,665,926 bytes including seven overlapping automatic Cargo
+restores. These figures exclude other tool downloads and uploaded evidence artifacts.
+
+Stock Viceroy validation takes zero seconds at API timestamp resolution rather than the
+baseline's 297-second installation. The isolated repair still builds and executes its 10-test
+and 24-test readiness suites on a hit: 120 seconds versus the baseline's 100 seconds.
+Warm archives do not imply no compilation or tool installation; Cloudflare still spends
+70 seconds installing wasm-bindgen and Spin downloads its runtime in two seconds.
+
+The observed critical-path, worker-sum and archive-download reductions are 40.32%, 17.31%
+and 39.06% respectively. This is a single-run workflow comparison, not isolated cache-only
+attribution or proof of stable timing/retention: Spin gains native/evidence execution while
+duplicate audits are removed and some Clippy work moves between workflows. Hooke inspected
+all test-job cache logs and runtime steps; Raman independently checked baseline timestamp
+definitions and comparison scope. The parent verified current job timestamps, Fastly exact-key
+restores/readiness execution and the arithmetic. Provider qualification remains separate;
+the outbound inventory is still 255 criteria / 511 legs / 449 planned / `qualified: false`.
 
 ## Verification Commands
 
