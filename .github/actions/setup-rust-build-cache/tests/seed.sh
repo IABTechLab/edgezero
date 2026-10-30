@@ -8,7 +8,7 @@ source "$ACTION_DIR/tests/common.sh"
 mkdir -p "$WORK_DIR/bin" "$WORK_DIR/workspace/cache-restore-fixture" "$WORK_DIR/runner"
 export GITHUB_WORKSPACE="$WORK_DIR/workspace" RUNNER_TEMP="$WORK_DIR/runner"
 export CARGO_TARGET_DIR="$RUNNER_TEMP/edgezero-rust-cache/cache-restore-smoke-v2/target"
-export PROBE_LOG="$WORK_DIR/calls" PROBE_COUNT="$WORK_DIR/count"
+export PROBE_LOG="$WORK_DIR/calls" PROBE_STATE="$WORK_DIR/state"
 cat >"$WORK_DIR/bin/rustc" <<'MOCK'
 #!/usr/bin/env bash
 printf 'host: %s\n' "${PROBE_HOST:-test-host}"
@@ -20,7 +20,13 @@ MOCK
 cat >"$WORK_DIR/bin/cargo" <<'MOCK'
 #!/usr/bin/env bash
 printf 'build %s\n' "$*" >>"$PROBE_LOG"
+target="${*: -1}"
+printf '%s\n' "$target" >"$PROBE_STATE/target"
+count=0
+[[ ! -f "$PROBE_STATE/$target.count" ]] || count=$(cat "$PROBE_STATE/$target.count")
+printf '%s\n' "$((count + 1))" >"$PROBE_STATE/$target.count"
 [[ "${PROBE_MODE:-}" != compile-failure ]] || exit 42
+[[ "$PROBE_MODE" != readback-compile-failure || "$count" != 1 ]] || exit 42
 [[ "$PROBE_MODE" != compile-wasm-failure || "${*: -1}" != wasm32-wasip1 ]] || exit 42
 [[ ! -d "$CARGO_TARGET_DIR/${*: -1}/debug" ]] || exit 43
 mkdir -p "$CARGO_TARGET_DIR/${*: -1}/debug"
@@ -32,13 +38,13 @@ if [[ "$1" == --zero-stats ]]; then
   exit 0
 fi
 [[ "$1" == --show-stats ]] || exit 2
-count=$(cat "$PROBE_COUNT")
-printf '%s\n' "$((count + 1))" >"$PROBE_COUNT"
+target=$(cat "$PROBE_STATE/target")
+count=$(cat "$PROBE_STATE/$target.count")
 if [[ "$PROBE_MODE" == permanent ||
-  ( "$PROBE_MODE" == transient && "$count" == 0 ) ||
-  ( "$PROBE_MODE" == wasm-transient && "$count" == 1 ) ||
-  ( "$PROBE_MODE" == both-transient && ( "$count" == 0 || "$count" == 2 ) ) ||
-  ( "$PROBE_MODE" == wasm-permanent && "$count" -ge 1 ) ]]; then
+  ( "$PROBE_MODE" == transient && "$target" == test-host && "$count" == 1 ) ||
+  ( "$PROBE_MODE" == wasm-transient && "$target" == wasm32-wasip1 && "$count" == 1 ) ||
+  ( "$PROBE_MODE" == both-transient && "$count" == 1 ) ||
+  ( "$PROBE_MODE" == wasm-permanent && "$target" == wasm32-wasip1 ) ]]; then
   printf '{"stats":{"cache_write_errors":1,"cache_writes":0}}\n'
 elif [[ "$PROBE_MODE" == read-error ]]; then
   printf '{"stats":{"cache_writes":1,"cache_read_errors":1}}\n'
@@ -48,9 +54,18 @@ elif [[ "$PROBE_MODE" == malformed ]]; then
   printf 'not-json\n'
 elif [[ "$PROBE_MODE" == empty ]]; then
   printf '{"stats":{}}\n'
-elif [[ "$PROBE_MODE" == hit ]]; then
+elif [[ "$PROBE_MODE" == hit || -f "$PROBE_STATE/$target.published" ]]; then
   printf '{"stats":{"cache_hits":{"counts":{"Rust":1}}}}\n'
 else
+  # An upload can report success while finalization leaves no readable entry.
+  if [[ "$PROBE_MODE" != finalize-permanent &&
+    !( "$PROBE_MODE" == finalize-wasm-permanent && "$target" == wasm32-wasip1 ) &&
+    !( "$PROBE_MODE" == finalize-transient && "$target" == test-host && "$count" -le 2 ) &&
+    !( "$PROBE_MODE" == finalize-wasm-transient && "$target" == wasm32-wasip1 && "$count" -le 2 ) &&
+    !( "$PROBE_MODE" == finalize-both-transient && "$count" -le 2 ) &&
+    !( "$PROBE_MODE" == finalize-last-attempt && "$target" == test-host && "$count" -le 4 ) ]]; then
+    touch "$PROBE_STATE/$target.published"
+  fi
   printf '{"stats":{"cache_writes":1}}\n'
 fi
 MOCK
@@ -59,12 +74,32 @@ export PATH="$WORK_DIR/bin:$PATH"
 run_seed() {
   rm -rf "$CARGO_TARGET_DIR"
   mkdir -p "$CARGO_TARGET_DIR"
-  printf '0\n' >"$PROBE_COUNT"
+  rm -rf -- "$PROBE_STATE"
+  mkdir -p "$PROBE_STATE"
   : >"$PROBE_LOG"
   PROBE_MODE="$1" bash "$ACTION_DIR/tests/seed-compiler-cache.sh" >"$WORK_DIR/log" 2>&1
 }
+if run_seed finalize-permanent; then fail 'accepted successful writes without remote publication'; fi
+[[ "$(grep -c '^build ' "$PROBE_LOG")" == 6 ]] || fail 'read-back verification exceeds three publication attempts'
+[[ "$(grep -c '^zero$' "$PROBE_LOG")" == 6 ]] || fail 'read-back uses stale stats'
+[[ "$(grep '^sleep ' "$PROBE_LOG")" == $'sleep 60\nsleep 120' ]] || fail 'read-back changes bounded backoff'
+for mode in finalize-transient finalize-wasm-transient finalize-both-transient finalize-last-attempt; do
+  run_seed "$mode" || fail "$mode does not recover"
+  expected=6
+  if [[ "$mode" == finalize-both-transient || "$mode" == finalize-last-attempt ]]; then expected=8; fi
+  [[ "$(grep -c '^build ' "$PROBE_LOG")" == "$expected" ]] || fail "$mode does not verify every write"
+  [[ "$(grep -c '^zero$' "$PROBE_LOG")" == "$expected" ]] || fail "$mode uses stale read-back stats"
+done
+if run_seed finalize-wasm-permanent; then fail 'accepted unpublished WASM writes'; fi
+[[ "$(grep -c '^build ' "$PROBE_LOG")" == 8 ]] || fail 'WASM read-back violates per-target limits'
+run_seed cold || fail 'cold compiler seed is not read back'
+[[ "$(grep -c '^build ' "$PROBE_LOG")" == 4 ]] || fail 'cold seed does not read back both targets'
+[[ "$(grep -c '^sleep ' "$PROBE_LOG")" == 0 ]] || fail 'cold seed unnecessarily backs off'
+if run_seed readback-compile-failure; then fail 'accepted read-back compilation failure'; fi
+[[ "$(grep -c '^build ' "$PROBE_LOG")" == 2 ]] || fail 'read-back compilation failure was retried'
+[[ "$(grep -c '^sleep ' "$PROBE_LOG")" == 0 ]] || fail 'read-back compilation failure backs off'
 run_seed transient || fail 'compiler seed does not recover from a transient write failure'
-[[ "$(grep -c '^build ' "$PROBE_LOG")" == 3 ]] || fail 'retry does not rebuild fresh outputs'
+[[ "$(grep -c '^build ' "$PROBE_LOG")" == 5 ]] || fail 'retry does not rebuild fresh outputs'
 [[ "$(grep -c '^sleep ' "$PROBE_LOG")" == 1 ]] || fail 'transient error does not back off'
 run_seed hit || fail 'existing compiler hit is not accepted as published'
 [[ "$(grep -c '^build ' "$PROBE_LOG")" == 2 ]] || fail 'successful seed does not build both targets'
@@ -73,8 +108,8 @@ grep -q -- '--target wasm32-wasip1$' "$PROBE_LOG" || fail 'successful seed omits
 [[ "$(grep -c '^zero$' "$PROBE_LOG")" == 2 ]] || fail 'successful seed does not reset stats for each target'
 for mode in wasm-transient both-transient; do
   run_seed "$mode" || fail "$mode does not recover"
-  expected=3
-  if [[ "$mode" == both-transient ]]; then expected=4; fi
+  expected=5
+  if [[ "$mode" == both-transient ]]; then expected=6; fi
   [[ "$(grep -c '^build ' "$PROBE_LOG")" == "$expected" ]] || fail "$mode does not rebuild every attempt"
   [[ "$(grep -c '^zero$' "$PROBE_LOG")" == "$expected" ]] || fail "$mode does not reset every attempt"
 done
@@ -82,8 +117,8 @@ for mode in permanent empty compile-failure compile-wasm-failure wasm-permanent 
   if run_seed "$mode"; then fail "accepted unsuccessful compiler seeding: $mode"; fi
   case "$mode" in
     compile-failure) expected=1 ;;
-    compile-wasm-failure) expected=2 ;;
-    wasm-permanent) expected=4 ;;
+    compile-wasm-failure) expected=3 ;;
+    wasm-permanent) expected=5 ;;
     *) expected=3 ;;
   esac
   [[ "$(grep -c '^build ' "$PROBE_LOG")" == "$expected" ]] || fail "$mode violates per-target retry limits"
