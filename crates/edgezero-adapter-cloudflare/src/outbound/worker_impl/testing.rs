@@ -69,7 +69,7 @@ impl OutboundHttpClient for ResponseClient {
     }
 }
 
-fn fixture_client<Head>(time: OutboundTime, head: Head) -> Result<HttpClient, EdgeError>
+pub(super) fn fixture_client<Head>(time: OutboundTime, head: Head) -> Result<HttpClient, EdgeError>
 where
     Head: FnOnce(OutboundResponseContext) -> Result<OutboundHead, EdgeError> + 'static,
 {

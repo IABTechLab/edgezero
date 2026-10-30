@@ -11,7 +11,7 @@ case "${1:-}" in
 esac
 
 if [ "$#" -lt 2 ]; then
-    echo "usage: $0 [--ignored|--include-ignored] <sentinel>|--inventory <environment> <command...>" >&2
+    echo "usage: $0 [--ignored|--include-ignored] <sentinel>|--inventory <environment[,environment]> <command...>" >&2
     exit 2
 fi
 

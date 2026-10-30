@@ -31,9 +31,16 @@ interface, source requirement or provider acceptance is changed. Complete codec/
 required, not one nearby test per criterion. The subsequent
 [forwarding and shared-head checkpoint](2026-10-18-trusted-server-outbound-implementation.md#forwarding-and-shared-head-acceptance-checkpoint-2026-10-29)
 adds EZ-1 core criterion 07, EZ-3 core criterion 04's two-slot ordering clause and EZ-5 core
-criterion 11's normalization/body-disposition matrix. G1 remains unqualified at 47 ready / 464
-planned. Conditional metadata changes, known-origin registration scheduling and all corresponding
-provider legs stay open; these core bindings do not close P2 or P3.
+criterion 11's normalization/body-disposition matrix. The native response-policy checkpoint binds
+each adapter's unit criterion 09, plus Axum, Cloudflare and Fastly unit criteria 10/11, through
+production head conversion and SDK sources, with
+inexpressible-field injection explicitly limited to the shared-head boundary. Axum forwarding
+criteria 01/04/08 and its existing supplied-client Begin helper also bind executable local proofs.
+G1 remains unqualified at 61 ready / 450 planned. Spin's remaining matrices require the existing
+real host-wire fixture because synthetic full-body completion hits a Wasmtime fixture limitation.
+Conditional metadata changes, known-origin
+registration scheduling, remaining provider-runtime legs and hosted/consumer evidence stay open;
+these bindings do not close P2 or P3.
 
 ## Interfaces: Proposed Hard-Cut Contract
 

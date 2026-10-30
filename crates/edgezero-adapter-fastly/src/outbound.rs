@@ -1291,6 +1291,12 @@ mod fastly_impl {
             OutboundHeaderFidelity::AdapterVisibleFields,
         );
         let encoded = progress.body(response.take_body().into_handle(), context.budget());
+        #[cfg(test)]
+        #[expect(
+            clippy::shadow_reuse,
+            reason = "test-only ownership observation retains the production stream unchanged"
+        )]
+        let encoded = tests::observe_native_encoded_stream(encoded);
         OutboundHead::new(
             status,
             headers,
@@ -1589,11 +1595,85 @@ mod fastly_impl {
         };
         use edgezero_core::outbound::{ContentTypeIneligibility, ContentTypeProvenance};
         use edgezero_core::time::{Deadline, dispatch_budget};
+        use edgezero_core::{ContentEncoding, PassthroughReason, classify_content_encoding};
         use flate2::{Compression, write::GzEncoder};
         use futures::executor::block_on;
         use futures_util::stream;
 
         use super::*;
+
+        std::thread_local! {
+            static NATIVE_ENCODED_CREATED: Cell<usize> = const { Cell::new(0) };
+            static NATIVE_ENCODED_OUTSTANDING: Cell<usize> = const { Cell::new(0) };
+        }
+
+        struct NativeEncodedLease;
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for NativeEncodedLease {
+            fn drop(&mut self) {
+                NATIVE_ENCODED_OUTSTANDING.set(
+                    NATIVE_ENCODED_OUTSTANDING
+                        .get()
+                        .checked_sub(1)
+                        .expect("native encoded fixture lease released twice"),
+                );
+            }
+        }
+
+        pub(super) fn observe_native_encoded_stream(encoded: BodyStream) -> BodyStream {
+            NATIVE_ENCODED_CREATED.set(
+                NATIVE_ENCODED_CREATED
+                    .get()
+                    .checked_add(1)
+                    .expect("native encoded fixture creation count overflow"),
+            );
+            NATIVE_ENCODED_OUTSTANDING.set(
+                NATIVE_ENCODED_OUTSTANDING
+                    .get()
+                    .checked_add(1)
+                    .expect("native encoded fixture outstanding count overflow"),
+            );
+            let lease = NativeEncodedLease;
+            encoded
+                .inspect(move |_item| {
+                    let _lease = &lease;
+                })
+                .boxed_local()
+        }
+
+        // This witnesses EdgeZero stream ownership, not native host-handle termination.
+        struct NativeEncodedWitness {
+            created_before: usize,
+        }
+
+        impl NativeEncodedWitness {
+            fn new() -> Self {
+                assert_eq!(
+                    NATIVE_ENCODED_OUTSTANDING.get(),
+                    0,
+                    "no prior encoded lease"
+                );
+                Self {
+                    created_before: NATIVE_ENCODED_CREATED.get(),
+                }
+            }
+
+            fn assert_outstanding(&self, expected: usize) {
+                assert_eq!(
+                    NATIVE_ENCODED_CREATED.get(),
+                    self.created_before
+                        .checked_add(1)
+                        .expect("native encoded fixture expected count overflow"),
+                    "one encoded lease created at the real native head boundary"
+                );
+                assert_eq!(
+                    NATIVE_ENCODED_OUTSTANDING.get(),
+                    expected,
+                    "encoded stream ownership before response or progress teardown"
+                );
+            }
+        }
 
         #[expect(
             clippy::too_many_arguments,
@@ -1710,6 +1790,731 @@ mod fastly_impl {
                 cause: BudgetSource::PerCallTimeout,
                 deadline: Deadline::at_instant(start.checked_add(duration).expect("deadline")),
                 duration,
+            }
+        }
+
+        fn native_gzip_fixture() -> Bytes {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(b"body").expect("gzip input");
+            Bytes::from(encoder.finish().expect("gzip fixture"))
+        }
+
+        #[test]
+        fn native_bodyless_disposition_precedes_caps_and_sdk_reads() {
+            for encoded_cap in [1, 64 * 1024] {
+                for (method, status) in [
+                    (Method::HEAD, StatusCode::OK),
+                    (Method::GET, StatusCode::NOT_MODIFIED),
+                    (Method::GET, StatusCode::NO_CONTENT),
+                    (Method::GET, StatusCode::RESET_CONTENT),
+                ] {
+                    for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                        for mode in [
+                            ResponseMode::Buffered { max_bytes: 1 },
+                            ResponseMode::Streamed,
+                        ] {
+                            let start = MonotonicInstant::now();
+                            let budget = clock_budget(start, Duration::from_secs(1));
+                            let clock = constant_clock(start);
+                            let progress = NativeProgress::new(
+                                NativeTransport,
+                                clock.clone(),
+                                start,
+                                Some(budget.deadline),
+                            );
+                            let mut native = FastlyResponse::from_status(status.as_u16());
+                            native.set_header(CONTENT_ENCODING, "gzip");
+                            native.set_header(CONTENT_LENGTH, "1073741824");
+                            native.set_body("not a gzip payload");
+                            NATIVE_SELECTIONS.set(0);
+                            let witness = NativeEncodedWitness::new();
+
+                            let response = block_on(finish_native_fixture(
+                                native,
+                                method.clone(),
+                                OutboundProxyMarker::Off,
+                                decoding,
+                                mode,
+                                budget,
+                                0,
+                                24,
+                                None,
+                                Some(1),
+                                Some(encoded_cap),
+                                None,
+                                None,
+                                native_time(clock),
+                                &progress,
+                            ))
+                            .expect("bodyless disposition precedes payload limits");
+
+                            witness.assert_outstanding(0);
+                            // With one ready SDK body and no pending heads, a selection services a read.
+                            assert_eq!(NATIVE_SELECTIONS.get(), 0, "no SDK body read");
+                            assert_eq!(response.status(), status);
+                            assert_eq!(response.body().as_bytes(), Some(b"".as_slice()));
+                            assert_eq!(response.headers()[CONTENT_ENCODING], "gzip");
+                            if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+                                assert_eq!(response.headers()[CONTENT_LENGTH], "1073741824");
+                            } else if status == StatusCode::RESET_CONTENT {
+                                assert_eq!(response.headers()[CONTENT_LENGTH], "0");
+                            } else {
+                                assert!(!response.headers().contains_key(CONTENT_LENGTH));
+                            }
+                            assert!(
+                                block_on(progress.drive(response.into_bytes_bounded(0)))
+                                    .expect("callback progress")
+                                    .expect("empty body")
+                                    .is_empty()
+                            );
+                            assert_eq!(NATIVE_SELECTIONS.get(), 0, "collection stays unread");
+                            witness.assert_outstanding(0);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn native_identity_limits_cover_declared_observed_and_exact_boundaries() {
+            for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for mode in [
+                    ResponseMode::Buffered { max_bytes: 20 },
+                    ResponseMode::Streamed,
+                ] {
+                    for explicit_identity in [false, true] {
+                        for (length, declared) in [(11, true), (11, false), (10, true), (10, false)]
+                        {
+                            let start = MonotonicInstant::now();
+                            let budget = clock_budget(start, Duration::from_secs(1));
+                            let clock = constant_clock(start);
+                            let progress = NativeProgress::new(
+                                NativeTransport,
+                                clock.clone(),
+                                start,
+                                Some(budget.deadline),
+                            );
+                            let mut native = FastlyResponse::from_body(vec![b'a'; length]);
+                            if explicit_identity {
+                                native.set_header(CONTENT_ENCODING, "identity");
+                            }
+                            if declared {
+                                native.set_header(CONTENT_LENGTH, length.to_string());
+                            }
+                            assert_eq!(
+                                response_headers(&native).contains_key(CONTENT_LENGTH),
+                                declared,
+                                "fixture must distinguish declared and observed lengths"
+                            );
+                            NATIVE_SELECTIONS.set(0);
+                            let witness = NativeEncodedWitness::new();
+
+                            let processed = block_on(finish_native_fixture(
+                                native,
+                                Method::GET,
+                                OutboundProxyMarker::Off,
+                                decoding,
+                                mode,
+                                budget,
+                                0,
+                                24,
+                                None,
+                                Some(10),
+                                Some(20),
+                                None,
+                                None,
+                                native_time(clock),
+                                &progress,
+                            ));
+                            if declared && length == 11 {
+                                witness.assert_outstanding(0);
+                                assert!(matches!(
+                                    &processed,
+                                    Err(EdgeError::ResponseTooLarge {
+                                        reason: ResponseLimitReason::DecodedBody,
+                                        ..
+                                    })
+                                ));
+                                assert_eq!(NATIVE_SELECTIONS.get(), 0, "declared rejection");
+                            } else if mode == ResponseMode::Streamed {
+                                witness.assert_outstanding(1);
+                                assert_eq!(NATIVE_SELECTIONS.get(), 0, "lazy body handoff");
+                            } else {
+                                witness.assert_outstanding(0);
+                                assert!(
+                                    NATIVE_SELECTIONS.get() > 0,
+                                    "buffered finalization reads before returning"
+                                );
+                            }
+                            let outcome = block_on(
+                                progress.drive(async { processed?.into_bytes_bounded(20).await }),
+                            )
+                            .expect("callback progress");
+                            witness.assert_outstanding(0);
+
+                            if length == 11 {
+                                assert!(matches!(
+                                    outcome,
+                                    Err(EdgeError::ResponseTooLarge {
+                                        reason: ResponseLimitReason::DecodedBody,
+                                        ..
+                                    })
+                                ));
+                                assert_eq!(NATIVE_SELECTIONS.get() == 0, declared);
+                            } else {
+                                assert_eq!(outcome.expect("exact identity cap"), vec![b'a'; 10]);
+                                assert!(NATIVE_SELECTIONS.get() > 0, "read exact-cap body");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "one native gzip matrix keeps declared and observed limits, eager and lazy reads, and release assertions together"
+        )]
+        fn native_original_gzip_exempts_decoded_and_decoder_limits() {
+            let gzip = native_gzip_fixture();
+            let length = u64::try_from(gzip.len()).expect("gzip length");
+            for streamed in [false, true] {
+                for declared in [false, true] {
+                    for expected in [
+                        None,
+                        Some(ResponseLimitReason::EncodedBody),
+                        Some(ResponseLimitReason::BufferedBody),
+                    ] {
+                        if streamed && expected == Some(ResponseLimitReason::BufferedBody) {
+                            continue;
+                        }
+                        let encoded_cap = if expected == Some(ResponseLimitReason::EncodedBody) {
+                            length - 1
+                        } else {
+                            length
+                        };
+                        let final_cap = if expected == Some(ResponseLimitReason::BufferedBody) {
+                            length - 1
+                        } else {
+                            length
+                        };
+                        let mode = if streamed {
+                            ResponseMode::Streamed
+                        } else {
+                            ResponseMode::Buffered {
+                                max_bytes: final_cap,
+                            }
+                        };
+                        let start = MonotonicInstant::now();
+                        let budget = clock_budget(start, Duration::from_secs(1));
+                        let clock = constant_clock(start);
+                        let progress = NativeProgress::new(
+                            NativeTransport,
+                            clock.clone(),
+                            start,
+                            Some(budget.deadline),
+                        );
+                        let mut native = FastlyResponse::from_body(gzip.to_vec());
+                        native.set_header(CONTENT_ENCODING, "gzip");
+                        if declared {
+                            native.set_header(CONTENT_LENGTH, length.to_string());
+                        }
+                        NATIVE_SELECTIONS.set(0);
+                        let witness = NativeEncodedWitness::new();
+                        let processed = block_on(finish_native_fixture(
+                            native,
+                            Method::GET,
+                            OutboundProxyMarker::Off,
+                            ResponseDecoding::Original,
+                            mode,
+                            budget,
+                            0,
+                            24,
+                            None,
+                            Some(1),
+                            Some(encoded_cap),
+                            None,
+                            None,
+                            native_time(clock),
+                            &progress,
+                        ));
+                        if !streamed && let Some(expected_reason) = expected {
+                            assert!(
+                                matches!(
+                                    &processed,
+                                    Err(EdgeError::ResponseTooLarge { reason, .. })
+                                        if *reason == expected_reason
+                                ),
+                                "buffered overflow must fail finalization, not collection"
+                            );
+                        }
+                        let early_rejection = declared
+                            && (expected == Some(ResponseLimitReason::EncodedBody)
+                                || (!streamed
+                                    && expected == Some(ResponseLimitReason::BufferedBody)));
+                        if early_rejection {
+                            witness.assert_outstanding(0);
+                            assert!(processed.is_err(), "declared overflow rejects at head");
+                            assert_eq!(NATIVE_SELECTIONS.get(), 0, "prebody rejection");
+                        } else if streamed {
+                            witness.assert_outstanding(1);
+                            assert_eq!(NATIVE_SELECTIONS.get(), 0, "lazy original body");
+                        } else {
+                            witness.assert_outstanding(0);
+                            assert!(
+                                NATIVE_SELECTIONS.get() > 0,
+                                "buffered finalization reads before returning"
+                            );
+                        }
+                        let outcome = block_on(progress.drive(async {
+                            let response = processed?;
+                            assert_eq!(response.headers()[CONTENT_ENCODING], "gzip");
+                            assert_eq!(response.headers().contains_key(CONTENT_LENGTH), declared);
+                            response.into_bytes_bounded(256).await
+                        }))
+                        .expect("callback progress");
+                        witness.assert_outstanding(0);
+
+                        if let Some(expected_reason) = expected {
+                            assert!(matches!(
+                                outcome,
+                                Err(EdgeError::ResponseTooLarge { reason, .. })
+                                    if reason == expected_reason
+                            ));
+                        } else {
+                            assert_eq!(outcome.expect("original gzip"), gzip);
+                        }
+                        assert_eq!(NATIVE_SELECTIONS.get() == 0, early_rejection);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn native_original_gzip_streamed_collection_limit_is_caller_policy() {
+            let gzip = native_gzip_fixture();
+            let length = u64::try_from(gzip.len()).expect("gzip length");
+            for declared in [false, true] {
+                let start = MonotonicInstant::now();
+                let budget = clock_budget(start, Duration::from_secs(1));
+                let clock = constant_clock(start);
+                let progress = NativeProgress::new(
+                    NativeTransport,
+                    clock.clone(),
+                    start,
+                    Some(budget.deadline),
+                );
+                let mut native = FastlyResponse::from_body(gzip.to_vec());
+                native.set_header(CONTENT_ENCODING, "gzip");
+                if declared {
+                    native.set_header(CONTENT_LENGTH, length.to_string());
+                }
+                NATIVE_SELECTIONS.set(0);
+                let witness = NativeEncodedWitness::new();
+                let response = block_on(finish_native_fixture(
+                    native,
+                    Method::GET,
+                    OutboundProxyMarker::Off,
+                    ResponseDecoding::Original,
+                    ResponseMode::Streamed,
+                    budget,
+                    0,
+                    24,
+                    None,
+                    Some(1),
+                    Some(length),
+                    None,
+                    None,
+                    native_time(clock),
+                    &progress,
+                ))
+                .expect("adapter accepts exact encoded limit without collecting");
+                assert_eq!(NATIVE_SELECTIONS.get(), 0, "lazy streamed handoff");
+                witness.assert_outstanding(1);
+
+                let error = block_on(progress.drive(response.into_bytes_bounded(length - 1)))
+                    .expect("callback progress")
+                    .expect_err("caller's collection limit");
+                witness.assert_outstanding(0);
+
+                assert!(matches!(
+                    error,
+                    EdgeError::ResponseTooLarge {
+                        reason: ResponseLimitReason::BufferedBody,
+                        ..
+                    }
+                ));
+                assert!(
+                    NATIVE_SELECTIONS.get() > 0,
+                    "caller collection reads the body"
+                );
+            }
+        }
+
+        #[test]
+        fn native_nominated_representation_headers_are_removed_before_policy() {
+            for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for mode in [
+                    ResponseMode::Buffered { max_bytes: 32 },
+                    ResponseMode::Streamed,
+                ] {
+                    for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                        for decoded_cap in [1, 2] {
+                            let start = MonotonicInstant::now();
+                            let budget = clock_budget(start, Duration::from_secs(1));
+                            let clock = constant_clock(start);
+                            let progress = NativeProgress::new(
+                                NativeTransport,
+                                clock.clone(),
+                                start,
+                                Some(budget.deadline),
+                            );
+                            let mut native = FastlyResponse::from_status(status.as_u16());
+                            native.set_body("ab");
+                            native.set_header(CONNECTION, "content-encoding, content-length, etag");
+                            native.set_header(CONTENT_ENCODING, "gzip");
+                            native.set_header(CONTENT_LENGTH, "malformed");
+                            native.set_header("etag", "\"removed\"");
+                            native.set_header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT");
+                            NATIVE_SELECTIONS.set(0);
+                            let processed = block_on(finish_native_fixture(
+                                native,
+                                Method::GET,
+                                OutboundProxyMarker::Off,
+                                decoding,
+                                mode,
+                                budget,
+                                0,
+                                24,
+                                None,
+                                Some(decoded_cap),
+                                Some(32),
+                                None,
+                                None,
+                                native_time(clock),
+                                &progress,
+                            ));
+                            let outcome = block_on(progress.drive(async {
+                                let response = processed?;
+                                for name in
+                                    ["connection", "content-encoding", "content-length", "etag"]
+                                {
+                                    assert!(!response.headers().contains_key(name), "{name}");
+                                }
+                                assert_eq!(
+                                    classify_content_encoding(response.headers()),
+                                    ContentEncoding::Identity
+                                );
+                                assert_eq!(
+                                    response.headers()["last-modified"],
+                                    "Wed, 21 Oct 2015 07:28:00 GMT"
+                                );
+                                response.into_bytes_bounded(32).await
+                            }))
+                            .expect("callback progress");
+
+                            if decoded_cap == 1 {
+                                assert!(matches!(
+                                    outcome,
+                                    Err(EdgeError::ResponseTooLarge {
+                                        reason: ResponseLimitReason::DecodedBody,
+                                        ..
+                                    })
+                                ));
+                            } else {
+                                assert_eq!(outcome.expect("normalized identity"), b"ab".as_slice());
+                            }
+                            assert!(NATIVE_SELECTIONS.get() > 0, "normalized identity is read");
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn native_opaque_representation_fields_preserve_malformed_passthrough() {
+            for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for mode in [
+                    ResponseMode::Buffered { max_bytes: 32 },
+                    ResponseMode::Streamed,
+                ] {
+                    for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                        for opaque_coding in [false, true] {
+                            let start = MonotonicInstant::now();
+                            let budget = clock_budget(start, Duration::from_secs(1));
+                            let clock = constant_clock(start);
+                            let progress = NativeProgress::new(
+                                NativeTransport,
+                                clock.clone(),
+                                start,
+                                Some(budget.deadline),
+                            );
+                            let mut native = FastlyResponse::from_status(status.as_u16());
+                            native.set_body("ab");
+                            native.set_header("etag", b"\xff".as_slice());
+                            native.set_header(CONTENT_LENGTH, "2");
+                            if opaque_coding {
+                                native.set_header(CONTENT_ENCODING, b"\xff".as_slice());
+                            }
+                            let captured = response_headers(&native);
+                            assert_eq!(captured["etag"].as_bytes(), b"\xff");
+                            if opaque_coding {
+                                assert_eq!(captured[CONTENT_ENCODING].as_bytes(), b"\xff");
+                            }
+                            NATIVE_SELECTIONS.set(0);
+                            let response = block_on(finish_native_fixture(
+                                native,
+                                Method::GET,
+                                OutboundProxyMarker::Off,
+                                decoding,
+                                mode,
+                                budget,
+                                0,
+                                24,
+                                None,
+                                Some(if opaque_coding { 1 } else { 2 }),
+                                Some(32),
+                                None,
+                                None,
+                                native_time(clock),
+                                &progress,
+                            ))
+                            .expect("opaque representation fields");
+
+                            assert!(!response.headers().contains_key("etag"));
+                            assert_eq!(response.headers()[CONTENT_LENGTH], "2");
+                            assert_eq!(
+                                classify_content_encoding(response.headers()),
+                                if opaque_coding {
+                                    ContentEncoding::Passthrough(PassthroughReason::Malformed)
+                                } else {
+                                    ContentEncoding::Identity
+                                }
+                            );
+                            if opaque_coding {
+                                assert_eq!(
+                                    response.headers()[CONTENT_ENCODING].as_bytes(),
+                                    b"\xff"
+                                );
+                            } else {
+                                assert!(!response.headers().contains_key(CONTENT_ENCODING));
+                            }
+                            assert_eq!(
+                                block_on(progress.drive(response.into_bytes_bounded(32)))
+                                    .expect("callback progress")
+                                    .expect("passthrough body"),
+                                b"ab".as_slice()
+                            );
+                            assert!(NATIVE_SELECTIONS.get() > 0, "SDK body consumed");
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn native_surviving_malformed_length_rejects_before_sdk_body_read() {
+            for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for mode in [
+                    ResponseMode::Buffered { max_bytes: 32 },
+                    ResponseMode::Streamed,
+                ] {
+                    for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                        let start = MonotonicInstant::now();
+                        let budget = clock_budget(start, Duration::from_secs(1));
+                        let clock = constant_clock(start);
+                        let progress = NativeProgress::new(
+                            NativeTransport,
+                            clock.clone(),
+                            start,
+                            Some(budget.deadline),
+                        );
+                        let mut native = FastlyResponse::from_status(status.as_u16());
+                        native.set_body("ab");
+                        native.set_header(CONTENT_LENGTH, "malformed");
+                        NATIVE_SELECTIONS.set(0);
+                        let witness = NativeEncodedWitness::new();
+
+                        let error = block_on(finish_native_fixture(
+                            native,
+                            Method::GET,
+                            OutboundProxyMarker::Off,
+                            decoding,
+                            mode,
+                            budget,
+                            0,
+                            24,
+                            None,
+                            Some(32),
+                            Some(32),
+                            None,
+                            None,
+                            native_time(clock),
+                            &progress,
+                        ))
+                        .expect_err("surviving malformed framing");
+                        witness.assert_outstanding(0);
+
+                        assert!(matches!(
+                            error,
+                            EdgeError::BadGateway {
+                                reason: BadGatewayReason::Protocol,
+                                ..
+                            }
+                        ));
+                        assert_eq!(NATIVE_SELECTIONS.get(), 0, "framing rejects before read");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn native_original_and_partial_content_preserve_representation_headers() {
+            let gzip = native_gzip_fixture();
+            for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for mode in [
+                    ResponseMode::Buffered { max_bytes: 256 },
+                    ResponseMode::Streamed,
+                ] {
+                    for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
+                        let original = decoding == ResponseDecoding::Original
+                            || status == StatusCode::PARTIAL_CONTENT;
+                        let start = MonotonicInstant::now();
+                        let budget = clock_budget(start, Duration::from_secs(1));
+                        let clock = constant_clock(start);
+                        let progress = NativeProgress::new(
+                            NativeTransport,
+                            clock.clone(),
+                            start,
+                            Some(budget.deadline),
+                        );
+                        let mut native = FastlyResponse::from_status(status.as_u16());
+                        native.set_body(gzip.to_vec());
+                        native.set_header(CONTENT_ENCODING, "gzip");
+                        native.set_header(CONTENT_LENGTH, gzip.len().to_string());
+                        native.set_header(
+                            "content-range",
+                            format!("bytes 0-{}/{}", gzip.len() - 1, gzip.len() * 2),
+                        );
+                        for (name, value) in [
+                            ("etag", "\"strong\""),
+                            ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                            ("vary", "Accept-Encoding"),
+                            ("accept-ranges", "bytes"),
+                            ("cache-control", "public, max-age=60"),
+                            (
+                                "content-digest",
+                                "sha-256=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:",
+                            ),
+                        ] {
+                            native.set_header(name, value);
+                        }
+                        let original_headers = response_headers(&native);
+                        let response = block_on(finish_native_fixture(
+                            native,
+                            Method::GET,
+                            OutboundProxyMarker::Off,
+                            decoding,
+                            mode,
+                            budget,
+                            if original { 0 } else { 32 * 1024 * 1024 },
+                            24,
+                            None,
+                            Some(if original { 1 } else { 4 }),
+                            Some(256),
+                            None,
+                            None,
+                            native_time(clock),
+                            &progress,
+                        ))
+                        .expect("representation response");
+
+                        if original {
+                            assert_eq!(response.headers(), &original_headers);
+                        } else {
+                            assert!(!response.headers().contains_key(CONTENT_ENCODING));
+                            assert!(!response.headers().contains_key(CONTENT_LENGTH));
+                        }
+                        assert_eq!(
+                            block_on(progress.drive(response.into_bytes_bounded(256)))
+                                .expect("callback progress")
+                                .expect("representation body")
+                                .as_ref(),
+                            if original { gzip.as_ref() } else { b"body" }
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn native_reset_content_preserves_original_disposition() {
+            for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                for mode in [
+                    ResponseMode::Buffered { max_bytes: 0 },
+                    ResponseMode::Streamed,
+                ] {
+                    for length in [None, Some("0"), Some("9")] {
+                        let start = MonotonicInstant::now();
+                        let budget = clock_budget(start, Duration::from_secs(1));
+                        let clock = constant_clock(start);
+                        let progress = NativeProgress::new(
+                            NativeTransport,
+                            clock.clone(),
+                            start,
+                            Some(budget.deadline),
+                        );
+                        let mut native = FastlyResponse::from_status(StatusCode::RESET_CONTENT);
+                        // A body larger than one SDK read distinguishes one-item disposal from EOF.
+                        native.set_body(vec![b'x'; 32 * 1024 + 1]);
+                        native.set_header(CONTENT_ENCODING, "gzip");
+                        if let Some(value) = length {
+                            native.set_header(CONTENT_LENGTH, value);
+                        }
+                        assert_eq!(
+                            response_headers(&native)
+                                .get(CONTENT_LENGTH)
+                                .map(HeaderValue::as_bytes),
+                            length.map(str::as_bytes)
+                        );
+                        NATIVE_SELECTIONS.set(0);
+                        let witness = NativeEncodedWitness::new();
+                        let response = block_on(finish_native_fixture(
+                            native,
+                            Method::GET,
+                            OutboundProxyMarker::Off,
+                            decoding,
+                            mode,
+                            budget,
+                            0,
+                            24,
+                            None,
+                            Some(0),
+                            Some(0),
+                            None,
+                            None,
+                            native_time(clock),
+                            &progress,
+                        ))
+                        .expect("reset disposition precedes decoding and all caps");
+                        witness.assert_outstanding(0);
+
+                        assert_eq!(response.headers()[CONTENT_LENGTH], "0");
+                        assert_eq!(response.headers()[CONTENT_ENCODING], "gzip");
+                        assert_eq!(response.body().as_bytes(), Some(b"".as_slice()));
+                        let expected_reads = usize::from(length != Some("9"));
+                        assert_eq!(NATIVE_SELECTIONS.get(), expected_reads, "reset disposal");
+                        assert!(
+                            block_on(progress.drive(response.into_bytes_bounded(0)))
+                                .expect("callback progress")
+                                .expect("empty reset")
+                                .is_empty()
+                        );
+                        assert_eq!(NATIVE_SELECTIONS.get(), expected_reads, "no further read");
+                        witness.assert_outstanding(0);
+                    }
+                }
             }
         }
 

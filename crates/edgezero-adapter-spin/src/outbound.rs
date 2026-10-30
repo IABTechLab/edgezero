@@ -1048,16 +1048,21 @@ mod spin_impl {
                 BadGatewayReason::Protocol,
             )
         })?;
-        let headers = OutboundHeaderInput::new(
-            "spin",
-            response_headers(&response)?,
-            OutboundHeaderFidelity::AdapterVisibleFields,
-        );
+        let native_headers = response_headers(&response)?;
         // The encoded stream alone owns the WASI reader, trailers and completion writer.
+        let native_encoded = super::cooperative_stream(response_stream(response, budget, time));
+        #[cfg(feature = "test-utils")]
+        let encoded = native_policy_tests::observe_response_head(native_encoded);
+        #[cfg(not(feature = "test-utils"))]
+        let encoded = native_encoded;
         OutboundHead::new(
             status,
-            headers,
-            super::cooperative_stream(response_stream(response, budget, time)),
+            OutboundHeaderInput::new(
+                "spin",
+                native_headers,
+                OutboundHeaderFidelity::AdapterVisibleFields,
+            ),
+            encoded,
             context,
             OutboundExchangeOwner::new(|| {}),
         )
@@ -1066,6 +1071,8 @@ mod spin_impl {
     #[cfg(any(test, feature = "test-utils"))]
     std::thread_local! {
         static FIXTURE_RESPONSE: RefCell<Option<Response>> = const { RefCell::new(None) };
+        #[cfg(feature = "test-utils")]
+        static FIXTURE_HEAD_PROBE: RefCell<Option<native_policy_tests::HeadProbe>> = const { RefCell::new(None) };
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1160,6 +1167,8 @@ mod spin_impl {
         impl Drop for Reset {
             fn drop(&mut self) {
                 FIXTURE_RESPONSE.with(|slot| drop(slot.borrow_mut().take()));
+                #[cfg(feature = "test-utils")]
+                FIXTURE_HEAD_PROBE.with(|slot| drop(slot.borrow_mut().take()));
             }
         }
 
@@ -1957,6 +1966,137 @@ mod spin_impl {
         }
     }
 
+    #[cfg(feature = "test-utils")]
+    mod native_policy_tests {
+        use super::*;
+        use edgezero_core::error::BudgetSource;
+        use futures_util::stream::poll_fn;
+        use std::cell::Cell;
+
+        #[derive(Clone, Default)]
+        pub(super) struct HeadProbe {
+            polls: Rc<Cell<usize>>,
+            released: Rc<Cell<bool>>,
+        }
+
+        struct SourceLease(HeadProbe);
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for SourceLease {
+            fn drop(&mut self) {
+                self.0.released.set(true);
+            }
+        }
+
+        pub(super) fn observe_response_head(mut encoded: BodyStream) -> BodyStream {
+            let Some(probe) = FIXTURE_HEAD_PROBE.with(|slot| slot.borrow_mut().take()) else {
+                return encoded;
+            };
+            let lease = SourceLease(probe);
+            poll_fn(move |cx| {
+                lease.0.polls.set(lease.0.polls.get().saturating_add(1));
+                encoded.as_mut().poll_next(cx)
+            })
+            .boxed_local()
+        }
+
+        pub(super) async fn check_native_bodyless_precedes_caps_and_polling()
+        -> Result<(), EdgeError> {
+            for encoded_cap in [1, 0x0001_0000] {
+                for (method, status) in [
+                    (Method::HEAD, StatusCode::OK),
+                    (Method::GET, StatusCode::NOT_MODIFIED),
+                    (Method::GET, StatusCode::NO_CONTENT),
+                    (Method::GET, StatusCode::RESET_CONTENT),
+                ] {
+                    for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                        for mode in [
+                            ResponseMode::Buffered { max_bytes: 1 },
+                            ResponseMode::Streamed,
+                        ] {
+                            let fields = Fields::new();
+                            fields
+                                .append("content-encoding", b"gzip")
+                                .map_err(EdgeError::internal)?;
+                            fields
+                                .append("content-length", b"1073741824")
+                                .map_err(EdgeError::internal)?;
+                            let (mut writer, contents, trailers) = BodyWriter::new();
+                            let (native, response_done) =
+                                Response::new(fields, Some(contents), trailers);
+                            native.set_status_code(status.as_u16()).map_err(|()| {
+                                EdgeError::internal(anyhow::anyhow!("Spin fixture status rejected"))
+                            })?;
+                            let start = MonotonicInstant::now();
+                            let duration = Duration::from_secs(5);
+                            let end = start.checked_add(duration).ok_or_else(|| {
+                                EdgeError::internal(anyhow::anyhow!(
+                                    "Spin fixture deadline overflow"
+                                ))
+                            })?;
+                            let probe = HeadProbe::default();
+                            FIXTURE_HEAD_PROBE
+                                .with(|slot| *slot.borrow_mut() = Some(probe.clone()));
+                            let response = process_response(
+                                native,
+                                method.clone(),
+                                OutboundProxyMarker::Off,
+                                choice,
+                                mode,
+                                DispatchBudget {
+                                    cause: BudgetSource::PerCallTimeout,
+                                    deadline: Deadline::at_instant(end),
+                                    duration,
+                                },
+                                0,
+                                24,
+                                None,
+                                Some(1),
+                                Some(encoded_cap),
+                                None,
+                                None,
+                                native_time(MonotonicClock::new(move || start)),
+                            )
+                            .await?;
+                            let expected_length =
+                                if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+                                    Some("1073741824")
+                                } else if status == StatusCode::RESET_CONTENT {
+                                    Some("0")
+                                } else {
+                                    None
+                                };
+                            let correct = response.headers().get("content-encoding")
+                                == Some(&HeaderValue::from_static("gzip"))
+                                && response
+                                    .headers()
+                                    .get("content-length")
+                                    .and_then(|value| value.to_str().ok())
+                                    == expected_length
+                                && response.body().as_bytes() == Some(b"".as_slice())
+                                && probe.polls.get() == 0
+                                && probe.released.get()
+                                && writer.stream_writer.write_all(vec![1]).now_or_never()
+                                    == Some(vec![1]);
+                            if !correct {
+                                return Err(EdgeError::internal(anyhow::anyhow!(
+                                    "bodyless 1 GiB representation must preserve metadata and release its unread native source"
+                                )));
+                            }
+                            if !response.into_bytes_bounded(0).await?.is_empty() {
+                                return Err(EdgeError::internal(anyhow::anyhow!(
+                                    "bodyless representation exposed payload bytes"
+                                )));
+                            }
+                            drop((writer, response_done));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     mod handoff_tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2079,6 +2219,10 @@ mod spin_impl {
         }
 
         #[cfg(feature = "test-utils")]
+        #[expect(
+            clippy::print_stdout,
+            reason = "the existing eager component reports each acceptance criterion after its checks complete"
+        )]
         pub(super) async fn check_batch_handoff() -> Result<(), EdgeError> {
             use edgezero_core::{HttpClient, OutboundBatchTermination, OutboundCollectedSlot};
 
@@ -2147,6 +2291,8 @@ mod spin_impl {
                     }
                 }
             }
+            super::native_policy_tests::check_native_bodyless_precedes_caps_and_polling().await?;
+            println!("ez_5_acceptance_09_spin: passed");
             Ok(())
         }
     }

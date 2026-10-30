@@ -68,6 +68,13 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Exercise normalization, opaque fields, independent identity caps, original/206 representation
   fields and bodyless/205 source release under both decoding choices and response modes. Bind
   reviewed core proofs without promoting provider qualification or optional metadata changes.
+- Extend bodyless policy through all four native adapter head/source paths and the full policy
+  matrix through Axum, Cloudflare and Fastly. Keep unsupported
+  raw fields explicitly shared-head-only, distinguish adapter buffer failures from reporter limits,
+  and verify local stream release. Group inventory discovery without duplicating suite execution.
+- Tighten evidence validation: eager batches on every target, original scheduled write starts,
+  head-before-payload phase order and payload-based receipt causality. Preserve timing thresholds
+  and failed runtime evidence; local SDK tests do not establish hosted or real-time guarantees.
 
 ### Explicit Redirect Following
 

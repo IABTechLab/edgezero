@@ -53,12 +53,15 @@ Keep three different status questions separate:
   [inventory](../../../tests/fixtures/reusable-app/outbound-cutover-cases.json) covers 255 source
   criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
   readiness of that leg's declared command/sentinel, not overall feature implementation.
-  EZ-23 local criteria 01-11 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
+  EZ-23 local criteria 01-12 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
   `ready`; core policy, receipt/cutoff/cancellation and marker checkpoints activate EZ-4 core
   criterion 01, EZ-5 core criteria 01/02/03/10/11, EZ-6 core criteria 13/15/17/22 and EZ-7 core
   criteria 01/02/03. The [forwarding and shared-head checkpoint](#forwarding-and-shared-head-acceptance-checkpoint-2026-10-29)
-  also binds EZ-1 core criterion 07 and EZ-3 core criterion 04's ordering clause: 47 legs, with 464 still
-  `planned`. G1/Q3 binding work remains unfinished, not evidence that 464 features are absent. Only the explicitly bound
+  also binds EZ-1 core criterion 07 and EZ-3 core criterion 04's ordering clause. The
+  [native policy checkpoint](#native-response-policy-and-evidence-validation-checkpoint-2026-10-29)
+  adds each adapter's unit criterion 09, Axum/Cloudflare/Fastly unit criteria 10/11 and Axum
+  forwarding criteria 01/04/08: 61 legs, with 450 still
+  `planned`. G1/Q3 binding work remains unfinished, not evidence that 450 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -1257,6 +1260,69 @@ are updated.
 This test-only checkpoint does not close a parent task, provider leg, candidate freeze or
 hosted/consumer qualification. Historical strict runtime failures, SDK/poll witnesses and raw
 resource-accounting limitations remain open rather than being relabelled by core test results.
+
+### Native Response Policy and Evidence Validation Checkpoint (2026-10-29)
+
+The requester selected the required EZ-1–9 baseline before the four unimplemented optional
+extensions. Cache tags, chain-only TLS, idle-body mode and fire-and-forget remain follow-ups;
+this checkpoint does not adopt those features, optional representation metadata or P6.
+
+Each adapter's EZ-5 unit criterion 09 and Axum/Cloudflare/Fastly unit criteria 10/11 now have
+complete production-head/source matrices.
+Both decoding choices and response modes cover bodyless 1 GiB representation lengths with
+64 KiB encoded caps, declared/observed identity overflow and exact-cap controls, original gzip
+without decoder budget, encoded/final overflow, normalization precedence, opaque fields,
+unchanged original/206 representation fields and both 205 dispositions. Inexpressible fields
+remain explicitly shared-head injection, not a raw-header-fidelity claim. Buffered overflow
+must fail before reporting; a generous reporter cannot supply the expected error. Local source
+release is witnessed without claiming host allocation recovery or client delivery.
+
+Axum's real TCP tests bind EZ-1 criteria 01/04/08: GET/HEAD and empty chunked forwarding,
+literal five-byte GET rejection with no origin dispatch and safe pipeline boundaries, and
+certified-empty forwarding after the inbound deadline. The existing plain Tokio helper adds
+Begin against its supplied client for EZ-23 criterion 12; it is not native scheduler proof.
+Inventory source text, digests, applicability and decisions stay unchanged: 255 criteria,
+511 legs, 61 ready / 450 planned, unqualified. Axum uses one grouped suite across its three
+inventory selections. Provider libraries retain one guarded execution each; Spin's existing
+eager component emits criterion 09's marker only after its bodyless matrix passes.
+
+The synthetic Spin full-body fixture fails at Wasmtime 48.0.2's unsupported intra-component
+non-numeric trailer-future boundary, before a production transport conclusion can be drawn.
+Its failed binary SHA-256 is `ff97bc949852c0e7e2a6fd07296b8b36d9619b0a43c97e2e27bf72b215a12f07`;
+the unqualified log is `/private/tmp/edgezero-spin-policy-intra-component-failure.log`.
+Remove the unusable probe and leave unit criteria 10/11 planned. Extend the existing Spin
+host-wire matrix instead, preserving its trailer acknowledgement, original redirect counts and
+production converter. No second executor, discarded completion check or runtime-pin change.
+
+Three evidence defects are repaired after failing regression proofs: baseline batches are eager
+on every adapter; head/chunk starts must respect original schedules and phase order; CPU-stretch
+receipt causality uses actual payload production rather than earlier head production. The
+original clock uncertainty, cutoff and +5 ms boundaries are unchanged. Independent spec and
+quality review also caught a substituted Spin head constructor and reporter-generated overflow;
+the tests now use the production converter and distinguish those failures.
+
+Strict local timing remains open. The fresh Axum baseline in
+`/private/tmp/edgezero-finish-7e9619ce-baseline-axum` fails two of ten cases: an origin write
+misses +5 ms by 38 microseconds and a terminal sample misses it by 460 microseconds. A temporary
+precision-wait experiment also fails two cases and is removed, not shipped as a timing workaround.
+Its failed evidence remains in `/private/tmp/edgezero-finish-precision-axum-lifetimes`.
+Neither run is qualified or relabelled by passing unit tests. Remaining required work includes
+all-target forwarding/mode/lifetime acceptance, exact-candidate binding and approved
+consumer/hosted evidence, including successful native Image Optimizer transformation/performance.
+No deployment, capability promotion or completed parent migration is claimed.
+
+Final checkpoint verification passes all five required Rust gates: 2,586 workspace tests in
+32 binaries, zero failures and one existing ignored test. The grouped Axum run passes 271
+library tests and 27 contracts; repaired-Viceroy Fastly passes 280 library tests; Cloudflare's
+Node/WASM runner passes 90 library tests; the rebuilt Spin eager component passes its existing
+lifecycle checks plus the new criterion 09 marker. Strict actual-target Clippy passes for all
+three WASM adapters with and without `test-utils` (six configurations). The Rust harness passes
+293 tests with one existing ignored case and strict Clippy; evidence/guard regressions pass 61;
+the demo passes 66 tests. Docs format/lint/build, inventory validation, legacy/docs guards and
+diff checks pass. Independent spec and quality reviews are clear for this checkpoint. Frozen
+requirements/interfaces, dependency/tool pins, all leg identities/expected text and applicability
+decisions remain unchanged. These local results do not qualify the retained failed timing runs
+or complete the remaining required host-wire, consumer and hosted evidence.
 
 ### Current Work Queue and Gates
 

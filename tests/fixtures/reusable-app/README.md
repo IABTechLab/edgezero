@@ -99,7 +99,7 @@ setting a leg to `ready`. No staging deployment or approval is inferred from thi
 
 Specifically, `implementation: planned | ready` means the declared leg's command/sentinel is
 planned or implemented and executable with its full assertions. It does not mean the corresponding
-feature is absent or qualified. EZ-23 local criteria 01-11 bind guarded Cargo tests and the
+feature is absent or qualified. EZ-23 local criteria 01-12 bind guarded Cargo tests and the
 existing Axum CI job. EZ-9 core criteria 01-15 bind all 51 redirect tests, and EZ-6 core criterion
 22 binds five mixed-observation/receipt-recovery tests through the same inventory guard.
 EZ-6 core criteria 13/15/17 bind facade upload rules, cutoff-equality and recorded-undelivered
@@ -110,7 +110,11 @@ limits and shared-head normalization/body disposition. EZ-1 core criterion 07 bi
 with empty chunks, expired budgets, dispatch-lazy POST, buffered/taken and failed-read controls.
 EZ-3 core criterion 04 binds the literal two-slot completion/input-order clause, not Fastly's
 known-origin registration SHOULD. EZ-9 runtime criteria 16/17 bind the complete four-adapter wire
-matrix. There are 47 ready legs and 464 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criteria 12/13 stay planned
+matrix. EZ-1 Axum HTTP/1 criteria 01/04/08 bind actual forwarding, five-byte rejection with
+pipeline safety, and certified-empty forwarding after the inbound deadline. Each adapter's
+EZ-5 unit criterion 09 binds its native head/source bodyless matrix; Axum, Cloudflare and Fastly
+also bind unit criteria 10/11. There are 61 ready legs and 450 planned. Spin unit 10/11,
+EZ-6 criterion 22's four adapter legs and EZ-23 criterion 13 stay planned
 for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
@@ -118,7 +122,7 @@ do not promote it solely from a checkpoint test count or green CI.
 The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 
 ```sh
-scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
+scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1 cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
 
 The core legs discover all 80 bound primary/additional sentinels before running one outbound suite:
@@ -140,6 +144,28 @@ certify provider raw-header fidelity. Both decoding choices and response modes r
 precedence, opaque coding passthrough and identity decoded caps. HEAD/304/204 and both 205
 dispositions preserve suppression and release source/owner resources before collection. Conditional
 metadata criteria 11b/12 remain planned, independently of the core criterion 11 binding.
+
+The native adapter matrices use the production head conversion and SDK body reader, under both
+decoding choices and response modes. Spin currently binds the bodyless matrix only. A generous reporting collector cannot manufacture the
+tested final-buffer overflow. Fastly's test-only lease witnesses prove release of EdgeZero's
+encoded stream, not host-side interruption or delivery. Provider-inexpressible fields are injected
+only at the explicitly labelled shared-head boundary; they do not establish raw-header fidelity.
+Cloudflare and Fastly use one inventory-guarded library suite each. Spin's existing WASI component
+requires the normal build prerequisite and emits each criterion marker only after its matrix passes:
+
+```sh
+cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-eager
+wasmtime run -W component-model-async=y -S p3=y -S http=y target/wasm32-wasip2/debug/examples/outbound_eager.wasm
+```
+
+CI checks every ready `unit/spin` marker from the inventory in the component output. The synthetic
+full-body probe hit Wasmtime 48.0.2's unsupported intra-component non-numeric future boundary;
+its unqualified failure log is `/private/tmp/edgezero-spin-policy-intra-component-failure.log`.
+The unusable probe is removed. Criteria 10/11 require extending the existing real host-wire
+fixture, not bypassing trailer or completion acknowledgement. A host library test is not a
+substitute for that SDK execution. Grouped inventory selection requires at least one
+ready sentinel in every selected environment and deduplicates names before the one suite run.
+This binds local execution only, without adopting optional metadata or qualifying hosted behavior.
 
 Core criterion 22 uses exactly three slots under Completed, Cutoff and an original typed driver
 failure, with both fresh collection and check/next/collect. Terminal production is held until
@@ -1164,6 +1190,10 @@ a realtime or whole-shutdown guarantee: workers retain their existing 5-second I
 gate budgets. The 128 cumulative/eight-active connection limits remain global to both listeners,
 and shutdown wakes create no TCP requests. These are test-origin bounds, not deployed-app claims.
 Source timing and hosted qualification remain open when actual write/receipt bounds do not fit.
+The validators also require every head and chunk write to start at or after its original schedule,
+finish after its own start, and begin payload only after head completion. Receipt lower bounds
+use actual payload production, not head production. `baseline-batch` is eager on all four adapters;
+only `lazy-single` is the lazy negative control. These checks retain the original +5 ms boundary.
 
 CPU work is synchronous and bounded by ten million iterations, with rejection on backwards,
 frozen or already-expired windows. The iteration cap is a finite work bound, not a wall-clock

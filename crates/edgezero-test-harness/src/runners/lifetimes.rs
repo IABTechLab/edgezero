@@ -1286,7 +1286,8 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
         require(
             number(request, "at_us")? <= number(head, "write_started_us")?
                 && number(head, "write_started_us")? <= number(head, "at_us")?
-                && number(head, "at_us")? <= number(chunk, "at_us")?
+                && number(head, "at_us")? <= number(chunk, "write_started_us")?
+                && number(chunk, "write_started_us")? <= number(chunk, "at_us")?
                 && number(chunk, "at_us")? <= number(closed, "at_us")?
                 && chunk["bytes"] == json!([byte])
                 && closed["reason"] == "complete",
@@ -1309,6 +1310,7 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
     let head = role_event(origin, "b", "head")?;
     let chunk = role_event(origin, "b", "chunk")?;
     let write_start = i128::from(number(head, "write_started_us")?);
+    let payload_start = i128::from(number(chunk, "write_started_us")?);
     let write_end = i128::from(number(chunk, "at_us")?);
     require(
         i128::from(start) + upper <= write_start && write_end <= i128::from(end) + lower,
@@ -1346,8 +1348,8 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
             "Cutoff",
         )?;
     }
-    let a_head_start = i128::from(number(
-        role_event(origin, "a", "head")?,
+    let a_payload_start = i128::from(number(
+        role_event(origin, "a", "chunk")?,
         "write_started_us",
     )?);
     require(
@@ -1362,9 +1364,9 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
                     let earliest_arrival = batch_started + elapsed;
                     let latest_arrival = batch_ended + elapsed;
                     let earliest = if index == 0 {
-                        a_head_start - upper
+                        a_payload_start - upper
                     } else {
-                        write_start - upper
+                        payload_start - upper
                     };
                     elapsed < 500000
                         && i128::from(earliest_arrival) >= earliest
@@ -1616,25 +1618,26 @@ fn validate_late_c(origin: &[Value], aligned: i128) -> Result<()> {
         entry["role"] == "c" && matches!(entry["op"].as_str(), Some("head" | "chunk"))
     }) {
         let actual = number(entry, "at_us")?;
+        let started = number(entry, "write_started_us")?;
         require(
             entry["scenario_scheduled_us"] == 900000
                 && number(entry, "scheduled_us")? == scheduled
                 && entry["schedule_basis"] == "origin-receipt-minus-guest-at-us"
-                && actual >= scheduled
+                && started >= scheduled
+                && started <= actual
                 && actual <= number(closed, "at_us")?,
             "late C source schedule or phase order changed",
         )?;
         within(actual, scheduled, "late C origin scheduling target missed")?;
         if entry["op"] == "head" {
-            let started = number(entry, "write_started_us")?;
             require(
-                started >= scheduled && started <= actual && started >= number(request, "at_us")?,
+                started >= number(request, "at_us")?,
                 "C response head began before its late schedule",
             )?;
         } else {
             require(
                 entry["bytes"] == json!([67])
-                    && actual >= number(role_event(origin, "c", "head")?, "at_us")?,
+                    && started >= number(role_event(origin, "c", "head")?, "at_us")?,
                 "late C payload changed or preceded its head",
             )?;
         }
@@ -1722,6 +1725,7 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
             )?;
             let actual = number(entry, "at_us")?;
             let scheduled = number(entry, "scheduled_us")?;
+            let started = number(entry, "write_started_us")?;
             require(
                 (i128::from(scheduled)
                     - aligned
@@ -1730,11 +1734,18 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
                     <= 1,
                 "host schedule was reanchored after registration",
             )?;
-            require(actual >= scheduled, "origin wrote before scheduled time")?;
+            require(
+                started >= scheduled && started <= actual,
+                "origin write began before its schedule or after its completion",
+            )?;
             within(actual, scheduled, "origin scheduling target missed")?;
         }
         for (entry, byte) in chunks.iter().zip(bytes) {
-            require(entry["bytes"] == json!([byte]), "origin chunk bytes differ")?;
+            require(
+                entry["bytes"] == json!([byte])
+                    && number(entry, "write_started_us")? >= number(heads[0], "at_us")?,
+                "origin chunk bytes differ or precede the response head",
+            )?;
         }
     }
     if slow {
@@ -2439,11 +2450,11 @@ mod tests {
             {"op":"head","role":"origin","at_us":100100,"write_started_us":100000},
             {"op":"chunk","role":"origin","at_us":100200,"write_started_us":100150,"bytes":[79]},
             {"op":"head","role":"a","at_us":180100,"write_started_us":180000},
-            {"op":"chunk","role":"a","at_us":180200,"bytes":[65]},
+            {"op":"chunk","role":"a","at_us":180200,"write_started_us":180150,"bytes":[65]},
             {"op":"head","role":"calibration","at_us":452100,"write_started_us":452000},
             {"op":"closed","role":"calibration","at_us":452300,"reason":"complete"},
             {"op":"head","role":"b","at_us":530100,"write_started_us":530000},
-            {"op":"chunk","role":"b","at_us":530200,"bytes":[66]},
+            {"op":"chunk","role":"b","at_us":530200,"write_started_us":530150,"bytes":[66]},
             {"op":"closed","role":"origin","at_us":100300,"reason":"complete"},
             {"op":"closed","role":"a","at_us":180300,"reason":"complete"},
             {"op":"closed","role":"b","at_us":530300,"reason":"complete"},
@@ -2454,6 +2465,54 @@ mod tests {
             entry["token"] = json!("sample");
         }
         (report, origin)
+    }
+
+    #[test]
+    fn cpu_stretch_rejects_arrivals_before_original_payload_production() {
+        for (role, payload_start, payload_end, closed_at) in
+            [("a", 183400, 183500, 183600), ("b", 533400, 533500, 533600)]
+        {
+            let (report, mut origin) = cpu_sample(true);
+            for entry in origin
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .filter(|e| e["role"] == role)
+            {
+                if entry["op"] == "chunk" {
+                    entry["write_started_us"] = json!(payload_start);
+                    entry["at_us"] = json!(payload_end);
+                } else if entry["op"] == "closed" {
+                    entry["at_us"] = json!(closed_at);
+                }
+            }
+            assert!(
+                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                "{role} cannot arrive before its bytes exist under any allowed offset"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_stretch_rejects_payload_starts_outside_their_write_phase() {
+        for start in [None, Some(530050), Some(530201)] {
+            let (report, mut origin) = cpu_sample(true);
+            let chunk = origin
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|e| e["role"] == "b" && e["op"] == "chunk")
+                .unwrap();
+            if let Some(start) = start {
+                chunk["write_started_us"] = json!(start);
+            } else {
+                chunk.as_object_mut().unwrap().remove("write_started_us");
+            }
+            assert!(
+                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                "payload must start after head completion and before its completion"
+            );
+        }
     }
 
     #[test]
@@ -2590,7 +2649,7 @@ mod tests {
                 .unwrap();
             entries[index]["reason"] = json!(reason);
             if chunk {
-                entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":400200,"bytes":[67]}));
+                entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":400200,"write_started_us":400150,"bytes":[67]}));
             }
             entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"head","at_us":400100,"write_started_us":400000}));
             assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
@@ -2608,7 +2667,7 @@ mod tests {
                 .unwrap();
             if complete {
                 entries[index]["reason"] = json!("complete");
-                entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":900200,"bytes":[67]}));
+                entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":900200,"write_started_us":900150,"bytes":[67]}));
             }
             entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"head","at_us":900100,"write_started_us":900000}));
             validate("cpu-stretch", "sample", &report, &origin).unwrap();
@@ -2673,7 +2732,10 @@ mod tests {
                     entry["write_started_us"] = json!(534000);
                     entry["at_us"] = json!(534100);
                 }
-                "chunk" => entry["at_us"] = json!(535500),
+                "chunk" => {
+                    entry["write_started_us"] = json!(534150);
+                    entry["at_us"] = json!(535500);
+                }
                 "closed" => entry["at_us"] = json!(535600),
                 _ => {}
             }
@@ -3091,7 +3153,7 @@ mod tests {
                 for (time, byte) in chunks {
                     origin.as_array_mut().unwrap().push(
                         json!({"op":"chunk","role":role,"bytes":[byte],
-                        "at_us":time+1000,"scheduled_us":time+1000,"scenario_scheduled_us":time,
+                        "at_us":time+1000,"write_started_us":time+1000,"scheduled_us":time+1000,"scenario_scheduled_us":time,
                         "schedule_basis":"origin-receipt-minus-guest-at-us"}),
                     );
                 }
@@ -3393,6 +3455,94 @@ mod tests {
             .find(|entry| entry["op"] == "mediator-send")
             .unwrap()["duration_us"] = json!(1000000);
         assert!(validate("fast-origin", "sample", &extended, &origin).is_err());
+    }
+
+    #[test]
+    fn timeline_rejects_early_missing_or_inverted_source_starts() {
+        for case in ["slow-origin", "fast-origin"] {
+            let (report, origin) = sample(case);
+            validate(case, "sample", &report, &origin).unwrap();
+            for role in ["origin", "a", "b", "c"] {
+                for op in ["head", "chunk"] {
+                    for mutation in ["early", "missing", "inverted"] {
+                        let mut changed = origin.clone();
+                        let write = changed
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|e| e["role"] == role && e["op"] == op)
+                            .unwrap();
+                        match mutation {
+                            "early" => {
+                                write["write_started_us"] =
+                                    json!(number(write, "scheduled_us").unwrap() - 1)
+                            }
+                            "inverted" => {
+                                write["write_started_us"] =
+                                    json!(number(write, "at_us").unwrap() + 1)
+                            }
+                            _ => {
+                                write.as_object_mut().unwrap().remove("write_started_us");
+                            }
+                        }
+                        assert!(
+                            validate(case, "sample", &report, &changed).is_err(),
+                            "{case}: {role}: {op}: {mutation}"
+                        );
+                    }
+                }
+            }
+            for role in ["a", "b", "c"] {
+                let mut changed = origin.clone();
+                for entry in changed
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .filter(|e| e["role"] == role)
+                {
+                    if entry["op"] == "head" {
+                        entry["at_us"] = json!(number(entry, "at_us").unwrap() + 1);
+                    }
+                    if entry["op"] == "chunk" {
+                        entry["at_us"] = json!(number(entry, "at_us").unwrap() + 2);
+                    }
+                    if entry["op"] == "closed" {
+                        entry["at_us"] = json!(number(entry, "at_us").unwrap() + 3);
+                    }
+                }
+                assert!(
+                    validate(case, "sample", &report, &changed).is_err(),
+                    "{case}: {role}: payload started before head completion"
+                );
+            }
+            for role in ["a", "c"] {
+                for (delay, accepted) in [(5000, true), (5001, false)] {
+                    let mut changed = origin.clone();
+                    let chunk = changed
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|e| e["role"] == role && e["op"] == "chunk")
+                        .unwrap();
+                    let completed = number(chunk, "scheduled_us").unwrap() + delay;
+                    chunk["at_us"] = json!(completed);
+                    if let Some(closed) = changed
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|e| e["role"] == role && e["op"] == "closed")
+                    {
+                        closed["at_us"] = json!(completed + 1);
+                    }
+                    assert_eq!(
+                        validate_timeline(case, report["events"].as_array().unwrap(), &changed)
+                            .is_ok(),
+                        accepted,
+                        "{case}: {role}: original {delay} us completion boundary"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

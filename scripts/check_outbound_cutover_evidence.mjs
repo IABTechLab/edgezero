@@ -754,15 +754,22 @@ function readJson(path) {
 }
 
 export function readySentinels(manifest, environment) {
-  const names = manifest.cases
-    .filter(
-      (c) => c.environment === environment && c.implementation === "ready",
-    )
-    .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
+  const environments = environment.split(",");
   requireFact(
-    names.length > 0,
-    "no ready test sentinels for selected environment",
+    environments.every(Boolean) &&
+      new Set(environments).size === environments.length,
+    "invalid or duplicate sentinel environment",
   );
+  const names = environments.flatMap((selected) => {
+    const names = manifest.cases
+      .filter((c) => c.environment === selected && c.implementation === "ready")
+      .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
+    requireFact(
+      names.length > 0,
+      "no ready test sentinels for selected environment",
+    );
+    return names;
+  });
   requireFact(
     names.every((s) => /^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(s)),
     "ready test sentinels must be Rust test names",

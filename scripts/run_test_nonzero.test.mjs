@@ -68,12 +68,16 @@ const inventory = JSON.parse(
   ),
 );
 for (const [environment, mode] of [
-  ["axum/native-tcp", "--include-ignored"],
+  ["axum/native-tcp,unit/axum,axum/http1", "--include-ignored"],
   ["unit/core", null],
+  ["unit/cloudflare", null],
+  ["unit/fastly", null],
 ]) {
   const required = inventory.cases
     .filter(
-      (c) => c.environment === environment && c.implementation === "ready",
+      (c) =>
+        environment.split(",").includes(c.environment) &&
+        c.implementation === "ready",
     )
     .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
 

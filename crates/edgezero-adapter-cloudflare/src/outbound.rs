@@ -1159,6 +1159,9 @@ mod worker_impl {
     mod redirect_tests;
 
     #[cfg(test)]
+    mod policy_tests;
+
+    #[cfg(test)]
     mod clock_tests {
         use edgezero_core::outbound::{
             HttpClient, OutboundBatchTermination, OutboundCollectedSlot,

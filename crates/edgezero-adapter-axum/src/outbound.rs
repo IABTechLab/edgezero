@@ -639,7 +639,7 @@ mod clock_tests {
     use edgezero_core::time::Deadline;
     use edgezero_core::{
         AxumFailureCause, AxumFailureKind, OutboundScopeOwner, ProviderFailureDetail,
-        ProviderFailurePhase,
+        ProviderFailurePhase, ResponseLimitReason,
     };
     use futures::executor::block_on;
     use futures_util::future::pending;
@@ -653,6 +653,29 @@ mod clock_tests {
     struct NeverReadyBody(Arc<AtomicUsize>);
 
     struct FailingBody(Option<IoError>);
+
+    struct CountedBody {
+        bytes: Option<Bytes>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "default hints keep counted source reads observable"
+    )]
+    impl http_body::Body for CountedBody {
+        type Data = Bytes;
+        type Error = IoError;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let body = self.get_mut();
+            body.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(body.bytes.take().map(|bytes| Ok(Frame::data(bytes))))
+        }
+    }
 
     #[expect(
         clippy::missing_trait_methods,
@@ -1523,71 +1546,482 @@ mod clock_tests {
 
     #[tokio::test]
     async fn original_coding_bodyless_disposition_precedes_caps_and_polling() {
-        for (method, status) in [
-            (Method::HEAD, StatusCode::OK),
-            (Method::GET, StatusCode::NOT_MODIFIED),
-            (Method::GET, StatusCode::NO_CONTENT),
-            (Method::GET, StatusCode::RESET_CONTENT),
-        ] {
-            for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
-                for mode in [
-                    ResponseMode::Buffered { max_bytes: 1 },
-                    ResponseMode::Streamed,
+        for encoded_cap in [1, 64 * 1024] {
+            for (method, status) in [
+                (Method::HEAD, StatusCode::OK),
+                (Method::GET, StatusCode::NOT_MODIFIED),
+                (Method::GET, StatusCode::NO_CONTENT),
+                (Method::GET, StatusCode::RESET_CONTENT),
+            ] {
+                for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+                    for mode in [
+                        ResponseMode::Buffered { max_bytes: 1 },
+                        ResponseMode::Streamed,
+                    ] {
+                        let polls = Arc::new(AtomicUsize::new(0));
+                        let native = http::Response::builder()
+                            .status(status)
+                            .header("content-encoding", "gzip")
+                            .header("content-length", "1073741824")
+                            .body(reqwest::Body::wrap(NeverReadyBody(Arc::clone(&polls))))
+                            .expect("native response");
+                        let start = MonotonicInstant::now();
+                        let response = finish_fixture_response(
+                            reqwest::Response::from(native),
+                            method.clone(),
+                            OutboundProxyMarker::Inherit,
+                            choice,
+                            mode,
+                            test_budget(start, Duration::from_secs(1)),
+                            0,
+                            24,
+                            None,
+                            Some(1),
+                            Some(encoded_cap),
+                            None,
+                            None,
+                            native_time(MonotonicClock::new(move || start)),
+                        )
+                        .await
+                        .expect("bodyless response");
+                        assert_eq!(polls.load(Ordering::Relaxed), 0);
+                        assert_eq!(response.body().as_bytes(), Some(b"".as_slice()));
+                        assert_eq!(
+                            response
+                                .headers()
+                                .get("content-encoding")
+                                .expect("baseline coding metadata"),
+                            "gzip"
+                        );
+                        if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+                            assert_eq!(
+                                response
+                                    .headers()
+                                    .get("content-length")
+                                    .expect("representation length"),
+                                "1073741824"
+                            );
+                        } else if status == StatusCode::RESET_CONTENT {
+                            assert_eq!(
+                                response
+                                    .headers()
+                                    .get("content-length")
+                                    .expect("reset length"),
+                                "0"
+                            );
+                        } else {
+                            assert!(!response.headers().contains_key("content-length"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the literal native normalization matrix keeps input and policy assertions together"
+    )]
+    async fn native_response_normalization_preserves_policy_precedence() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write as _;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(b"body").expect("gzip input");
+        let gzip = Bytes::from(encoder.finish().expect("gzip fixture"));
+        for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 256 },
+                ResponseMode::Streamed,
+            ] {
+                for (case, status) in [
+                    ("nominated-over", StatusCode::OK),
+                    ("nominated-exact", StatusCode::OK),
+                    ("missing-over", StatusCode::OK),
+                    ("opaque", StatusCode::OK),
+                    ("etag", StatusCode::OK),
+                    ("malformed", StatusCode::OK),
+                    ("representation", StatusCode::OK),
+                    ("representation", StatusCode::PARTIAL_CONTENT),
                 ] {
+                    let mut headers = HeaderMap::new();
+                    let mut payload = Bytes::from_static(b"ab");
+                    let mut decoded = 1;
+                    match case {
+                        "nominated-over" | "nominated-exact" => {
+                            headers.insert(
+                                "connection",
+                                HeaderValue::from_static("content-encoding, content-length, etag"),
+                            );
+                            headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+                            headers.insert("content-length", HeaderValue::from_static("malformed"));
+                            headers.insert("etag", HeaderValue::from_static("\"removed\""));
+                            if case == "nominated-exact" {
+                                decoded = 2;
+                            }
+                        }
+                        "opaque" | "etag" => {
+                            headers.insert(
+                                "etag",
+                                HeaderValue::from_bytes(&[0xff]).expect("opaque ETag"),
+                            );
+                            headers.insert("content-length", HeaderValue::from_static("2"));
+                            if case == "opaque" {
+                                headers.insert(
+                                    "content-encoding",
+                                    HeaderValue::from_bytes(&[0xff]).expect("opaque coding"),
+                                );
+                            } else {
+                                decoded = 2;
+                            }
+                        }
+                        "malformed" => {
+                            headers.insert("content-length", HeaderValue::from_static("malformed"));
+                        }
+                        "representation" => {
+                            payload = gzip.clone();
+                            decoded = 4;
+                            headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+                            headers.insert(
+                                "content-length",
+                                HeaderValue::from_str(&gzip.len().to_string()).expect("length"),
+                            );
+                            headers.insert(
+                                "content-range",
+                                HeaderValue::from_str(&format!(
+                                    "bytes 0-{}/{}",
+                                    gzip.len() - 1,
+                                    gzip.len() * 2
+                                ))
+                                .expect("range"),
+                            );
+                            for (name, value) in [
+                                ("etag", "\"strong\""),
+                                ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                                ("vary", "Accept-Encoding"),
+                                ("accept-ranges", "bytes"),
+                                ("cache-control", "public, max-age=60"),
+                                (
+                                    "content-digest",
+                                    "sha-256=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:",
+                                ),
+                            ] {
+                                headers.insert(name, HeaderValue::from_static(value));
+                            }
+                        }
+                        _ => {}
+                    }
+                    let original = headers.clone();
                     let polls = Arc::new(AtomicUsize::new(0));
-                    let native = http::Response::builder()
+                    let mut native = response_builder()
                         .status(status)
-                        .header("content-encoding", "gzip")
-                        .header("content-length", "1073741824")
-                        .body(reqwest::Body::wrap(NeverReadyBody(Arc::clone(&polls))))
+                        .body(reqwest::Body::wrap(CountedBody {
+                            bytes: Some(payload),
+                            polls: Arc::clone(&polls),
+                        }))
                         .expect("native response");
+                    *native.headers_mut() = headers;
+                    let start = MonotonicInstant::now();
+                    let processed = finish_fixture_response(
+                        reqwest::Response::from(native),
+                        Method::GET,
+                        OutboundProxyMarker::Off,
+                        choice,
+                        mode,
+                        test_budget(start, Duration::from_secs(1)),
+                        edgezero_core::DEFAULT_MAX_DECODER_BYTES,
+                        24,
+                        None,
+                        Some(decoded),
+                        Some(256),
+                        None,
+                        None,
+                        native_time(MonotonicClock::new(move || start)),
+                    )
+                    .await;
+                    let result = async {
+                        let response = processed?;
+                        match case {
+                            "nominated-exact" => {
+                                for name in
+                                    ["connection", "content-encoding", "content-length", "etag"]
+                                {
+                                    assert!(
+                                        !response.headers().contains_key(name),
+                                        "{name} stays removed"
+                                    );
+                                }
+                            }
+                            "opaque" | "etag" => {
+                                assert!(!response.headers().contains_key("etag"));
+                                assert_eq!(response.headers()["content-length"], "2");
+                                if case == "opaque" {
+                                    assert_eq!(
+                                        response.headers()["content-encoding"].as_bytes(),
+                                        &[0xff]
+                                    );
+                                } else {
+                                    assert!(!response.headers().contains_key("content-encoding"));
+                                }
+                            }
+                            "representation" => {
+                                if choice == ResponseDecoding::Original
+                                    || status == StatusCode::PARTIAL_CONTENT
+                                {
+                                    assert_eq!(response.headers(), &original);
+                                } else {
+                                    assert!(!response.headers().contains_key("content-encoding"));
+                                    assert!(!response.headers().contains_key("content-length"));
+                                }
+                            }
+                            _ => {}
+                        }
+                        response.into_bytes_bounded(256).await
+                    }
+                    .await;
+                    if case == "malformed" {
+                        assert!(matches!(
+                            result,
+                            Err(EdgeError::BadGateway {
+                                reason: BadGatewayReason::Protocol,
+                                ..
+                            })
+                        ));
+                        assert_eq!(polls.load(Ordering::SeqCst), 0);
+                    } else if matches!(case, "nominated-over" | "missing-over") {
+                        assert!(matches!(
+                            result,
+                            Err(EdgeError::ResponseTooLarge {
+                                reason: ResponseLimitReason::DecodedBody,
+                                ..
+                            })
+                        ));
+                        assert!(polls.load(Ordering::SeqCst) > 0);
+                    } else {
+                        let expected = if case == "representation" {
+                            if choice == ResponseDecoding::Original
+                                || status == StatusCode::PARTIAL_CONTENT
+                            {
+                                gzip.as_ref()
+                            } else {
+                                b"body"
+                            }
+                        } else {
+                            b"ab"
+                        };
+                        assert_eq!(result.expect(case).as_ref(), expected);
+                    }
+                    assert_eq!(
+                        Arc::strong_count(&polls),
+                        1,
+                        "native source released: {case}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_identity_limits_cover_declared_observed_and_exact_boundaries() {
+        for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 20 },
+                ResponseMode::Streamed,
+            ] {
+                for (length, declared) in [(11, true), (11, false), (10, true), (10, false)] {
+                    let polls = Arc::new(AtomicUsize::new(0));
+                    let mut native = response_builder()
+                        .status(StatusCode::OK)
+                        .body(reqwest::Body::wrap(CountedBody {
+                            bytes: Some(Bytes::from(vec![b'a'; length])),
+                            polls: Arc::clone(&polls),
+                        }))
+                        .expect("native identity response");
+                    if declared {
+                        native.headers_mut().insert(
+                            "content-length",
+                            HeaderValue::from_str(&length.to_string()).expect("length"),
+                        );
+                    }
+                    let start = MonotonicInstant::now();
+                    let result = async {
+                        let response = finish_fixture_response(
+                            reqwest::Response::from(native),
+                            Method::GET,
+                            OutboundProxyMarker::Off,
+                            choice,
+                            mode,
+                            test_budget(start, Duration::from_secs(1)),
+                            0,
+                            24,
+                            None,
+                            Some(10),
+                            Some(20),
+                            None,
+                            None,
+                            native_time(MonotonicClock::new(move || start)),
+                        )
+                        .await?;
+                        response.into_bytes_bounded(20).await
+                    }
+                    .await;
+                    if length == 11 {
+                        assert!(matches!(
+                            result,
+                            Err(EdgeError::ResponseTooLarge {
+                                reason: ResponseLimitReason::DecodedBody,
+                                ..
+                            })
+                        ));
+                        assert_eq!(polls.load(Ordering::SeqCst) == 0, declared);
+                    } else {
+                        assert_eq!(result.expect("exact identity cap"), vec![b'a'; 10]);
+                        assert!(polls.load(Ordering::SeqCst) > 0);
+                    }
+                    assert_eq!(Arc::strong_count(&polls), 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_original_gzip_exempts_decoded_and_decoder_limits() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write as _;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(b"body").expect("gzip input");
+        let gzip = Bytes::from(encoder.finish().expect("gzip fixture"));
+        let size = u64::try_from(gzip.len()).expect("fixture length");
+        for declared in [false, true] {
+            for streamed in [false, true] {
+                for (encoded_cap, final_cap, expected) in [
+                    (size, size, None),
+                    (size - 1, size, Some(ResponseLimitReason::EncodedBody)),
+                    (size, size - 1, Some(ResponseLimitReason::BufferedBody)),
+                ] {
+                    if streamed && expected == Some(ResponseLimitReason::BufferedBody) {
+                        continue;
+                    }
+                    let polls = Arc::new(AtomicUsize::new(0));
+                    let mut native = response_builder()
+                        .status(StatusCode::OK)
+                        .header("content-encoding", "gzip")
+                        .body(reqwest::Body::wrap(CountedBody {
+                            bytes: Some(gzip.clone()),
+                            polls: Arc::clone(&polls),
+                        }))
+                        .expect("native gzip response");
+                    if declared {
+                        native.headers_mut().insert(
+                            "content-length",
+                            HeaderValue::from_str(&size.to_string()).expect("length"),
+                        );
+                    }
+                    let start = MonotonicInstant::now();
+                    let result = async {
+                        let response = finish_fixture_response(
+                            reqwest::Response::from(native),
+                            Method::GET,
+                            OutboundProxyMarker::Off,
+                            ResponseDecoding::Original,
+                            if streamed {
+                                ResponseMode::Streamed
+                            } else {
+                                ResponseMode::Buffered {
+                                    max_bytes: final_cap,
+                                }
+                            },
+                            test_budget(start, Duration::from_secs(1)),
+                            0,
+                            24,
+                            None,
+                            Some(1),
+                            Some(encoded_cap),
+                            None,
+                            None,
+                            native_time(MonotonicClock::new(move || start)),
+                        )
+                        .await?;
+                        assert_eq!(response.headers()["content-encoding"], "gzip");
+                        response.into_bytes_bounded(256).await
+                    }
+                    .await;
+                    if let Some(expected_reason) = expected {
+                        assert!(
+                            matches!(result, Err(EdgeError::ResponseTooLarge { reason, .. }) if reason == expected_reason)
+                        );
+                        assert_eq!(polls.load(Ordering::SeqCst) == 0, declared);
+                    } else {
+                        assert_eq!(result.expect("original gzip without a decoder"), gzip);
+                        assert!(polls.load(Ordering::SeqCst) > 0);
+                    }
+                    assert_eq!(Arc::strong_count(&polls), 1, "native source released");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_reset_content_preserves_original_disposition() {
+        for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 0 },
+                ResponseMode::Streamed,
+            ] {
+                for length in [None, Some("0"), Some("9")] {
+                    let polls = Arc::new(AtomicUsize::new(0));
+                    let mut native = response_builder()
+                        .status(StatusCode::RESET_CONTENT)
+                        .header("content-encoding", "gzip")
+                        .body(reqwest::Body::wrap(CountedBody {
+                            bytes: Some(Bytes::from_static(b"not decoded")),
+                            polls: Arc::clone(&polls),
+                        }))
+                        .expect("native reset response");
+                    if let Some(value) = length {
+                        native
+                            .headers_mut()
+                            .insert("content-length", HeaderValue::from_static(value));
+                    }
                     let start = MonotonicInstant::now();
                     let response = finish_fixture_response(
                         reqwest::Response::from(native),
-                        method.clone(),
-                        OutboundProxyMarker::Inherit,
+                        Method::GET,
+                        OutboundProxyMarker::Off,
                         choice,
                         mode,
                         test_budget(start, Duration::from_secs(1)),
                         0,
                         24,
                         None,
-                        Some(1),
-                        Some(1),
+                        Some(0),
+                        Some(0),
                         None,
                         None,
                         native_time(MonotonicClock::new(move || start)),
                     )
                     .await
-                    .expect("bodyless response");
-                    assert_eq!(polls.load(Ordering::Relaxed), 0);
-                    assert_eq!(response.body().as_bytes(), Some(b"".as_slice()));
+                    .expect("bodyless before caps");
+                    assert_eq!(response.headers()["content-length"], "0");
+                    assert_eq!(response.headers()["content-encoding"], "gzip");
                     assert_eq!(
-                        response
-                            .headers()
-                            .get("content-encoding")
-                            .expect("baseline coding metadata"),
-                        "gzip"
+                        polls.load(Ordering::SeqCst),
+                        usize::from(length != Some("9"))
                     );
-                    if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
-                        assert_eq!(
-                            response
-                                .headers()
-                                .get("content-length")
-                                .expect("representation length"),
-                            "1073741824"
-                        );
-                    } else if status == StatusCode::RESET_CONTENT {
-                        assert_eq!(
-                            response
-                                .headers()
-                                .get("content-length")
-                                .expect("reset length"),
-                            "0"
-                        );
-                    } else {
-                        assert!(!response.headers().contains_key("content-length"));
-                    }
+                    assert_eq!(
+                        Arc::strong_count(&polls),
+                        1,
+                        "source released before collection"
+                    );
+                    assert!(
+                        response
+                            .into_bytes_bounded(0)
+                            .await
+                            .expect("empty reset")
+                            .is_empty()
+                    );
                 }
             }
         }

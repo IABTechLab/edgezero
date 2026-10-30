@@ -801,8 +801,25 @@ mod tests {
 
     #[tokio::test]
     async fn plain_tokio_test_runs_local_handler_work() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let supplied = HttpClient::with_client(RecordingClient {
+            calls: Arc::clone(&calls),
+            time: native_time(MonotonicClock::default()),
+        });
         let router = RouterService::builder()
-            .get("/", |_| async {
+            .with_state(supplied)
+            .get("/", |ctx: RequestContext| async move {
+                let pending = ctx
+                    .http_client()
+                    .expect("supplied client")
+                    .begin(OutboundRequest::get("https://fixture.invalid/local")?)
+                    .await?;
+                let response = pending.collect().await?;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response.into_bytes_bounded(16).await?,
+                    b"supplied".as_slice()
+                );
                 let values = Rc::new(["local", "stream", "complete"]);
                 let (sender, receiver) = mpsc::channel(1);
                 spawn_local(async move {
@@ -839,6 +856,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(body, "localstreamcomplete");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         running.shutdown().await.unwrap();
     }
 

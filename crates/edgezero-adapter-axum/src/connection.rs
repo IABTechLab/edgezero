@@ -546,6 +546,7 @@ mod tests {
 
         for (framing, body) in [
             ("Content-Length: 4", "data"),
+            ("Content-Length: 5", "hello"),
             ("Transfer-Encoding: chunked", "4\r\ndata\r\n0\r\n\r\n"),
             ("Transfer-Encoding: chunked", "0\r\n\r\n"),
         ] {
@@ -588,6 +589,7 @@ mod tests {
                 let (method, headers, forwarded_body) =
                     receipt.expect("settled empty GET reaches origin");
                 assert_eq!(method, "GET");
+                assert!(!headers.contains_key("content-length"));
                 assert!(forwarded_body.is_empty());
                 assert!(!headers.contains_key("transfer-encoding"));
                 assert!(accepted);

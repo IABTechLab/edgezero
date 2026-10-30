@@ -80,7 +80,7 @@ pub fn validate_outbound_progress(probe: &Value, receipts: &[Value]) -> Result<(
         end.saturating_sub(start) >= 100_000_000,
         "unrelated wait shorter than 100ms",
     )?;
-    let eager = case != "lazy-single" && (case != "baseline-batch" || probe["adapter"] == "fastly");
+    let eager = case != "lazy-single";
     for slot in 0..slots {
         let received = one(&format!("slot-{slot}"))?;
         require(
@@ -983,6 +983,30 @@ mod tests {
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    #[test]
+    fn baseline_batches_require_eager_receipts_on_every_adapter() {
+        for adapter in ["axum", "cloudflare", "fastly", "spin"] {
+            let probe = json!({"adapter":adapter,"case":"baseline-batch","token":"one",
+                "protocol":"http1","slots":2,"consumer_polls_before_window_end":0,
+                "pause_ns":100_000_000});
+            let receipts = vec![
+                json!({"path":"/g3/one/start","received_ns":0}),
+                json!({"path":"/g3/one/slot-0","received_ns":10_000_000}),
+                json!({"path":"/g3/one/slot-1","received_ns":20_000_000}),
+                json!({"path":"/g3/one/end","received_ns":110_000_000}),
+            ];
+            validate_outbound_progress(&probe, &receipts).expect("batch starts before observation");
+            for late in [100_000_000, 120_000_000] {
+                let mut delayed = receipts.clone();
+                delayed[1]["received_ns"] = json!(late);
+                assert!(
+                    validate_outbound_progress(&probe, &delayed).is_err(),
+                    "{adapter}: {late}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn outbound_progress_probe_requires_origin_receipts() {
