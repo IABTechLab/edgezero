@@ -8,7 +8,7 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
     fs::create_dir_all(&run)?;
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(root())
+        .current_dir(fixture_root())
         .output()?;
     require(revision.status.success(), "missing framing source revision")?;
     let revision = String::from_utf8(revision.stdout)?.trim().to_owned();

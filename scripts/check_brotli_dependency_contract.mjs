@@ -133,7 +133,7 @@ function audit(workspace) {
 auditWorkflowFetchOrder()
 audit('.')
 audit('examples/app-demo')
-audit('tests/fixtures/reusable-app')
+audit('crates/edgezero-test-harness/fixtures/reusable-app')
 
 if (process.exitCode === undefined) {
   process.stdout.write('brotli dependency contract: ok\n')

@@ -1,8 +1,5 @@
 //! Adapter helpers for Spin (Fermyon).
 
-#[cfg(all(test, feature = "spin", target_arch = "wasm32"))]
-extern crate self as edgezero_adapter_spin;
-
 #[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
 

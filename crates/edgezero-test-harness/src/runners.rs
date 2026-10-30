@@ -1,7 +1,7 @@
 use crate::{evidence::*, net::Backend, *};
 use std::collections::{BTreeSet, HashMap, HashSet};
 mod assembly;
-mod ci;
+pub(crate) mod ci;
 mod framing;
 mod lifetimes;
 mod overflow;
@@ -12,9 +12,9 @@ mod wire;
 fn cargo_build() -> Result<Command> {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
-        .current_dir(root())
+        .current_dir(fixture_root())
         .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id()?)
-        .env("CARGO_TARGET_DIR", root().join("target"));
+        .env("CARGO_TARGET_DIR", fixture_root().join("target"));
     Ok(command)
 }
 
@@ -120,7 +120,7 @@ fn wasm_name(variant: &str) -> String {
     format!("fixture-fastly-{name}.wasm")
 }
 fn stage_fastly_artifacts(run: &Path) -> Result<()> {
-    let release = root().join("target/wasm32-wasip1/release");
+    let release = fixture_root().join("target/wasm32-wasip1/release");
     for variant in [
         "a",
         "b",
@@ -280,7 +280,7 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     let version = Command::new(&exe).arg("--version").output()?;
     require(version.status.success(), "Viceroy version command failed")?;
     let version = String::from_utf8(version.stdout)?.trim().to_owned();
-    let pins = fs::read_to_string(root().join("../../../.tool-versions"))?;
+    let pins = fs::read_to_string(repository_root().join(".tool-versions"))?;
     let pin = pins
         .lines()
         .find_map(|line| line.strip_prefix("viceroy "))
@@ -334,7 +334,7 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     stage_fastly_artifacts(run)?;
     let config_snapshot = run.join("fastly.toml");
     fs::copy(
-        root().join("crates/fixture-fastly/fastly.toml"),
+        fixture_root().join("crates/fixture-fastly/fastly.toml"),
         &config_snapshot,
     )?;
     if args.suite == "smoke" {
@@ -1165,7 +1165,7 @@ fn smoke_origin_checks(
     Ok(())
 }
 fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
-    let base = fs::read_to_string(root().join("crates/fixture-fastly/fastly.toml"))?;
+    let base = fs::read_to_string(fixture_root().join("crates/fixture-fastly/fastly.toml"))?;
     let config = run.join("logging.toml");
     fs::write(&config, base)?;
     for variant in ["b", "c", "custom-c", "logger-negative"] {
@@ -1217,9 +1217,6 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
-    if args.suite == "ci" {
-        return ci::run(args, run, records);
-    }
     if args.suite == "outbound-lifetimes" {
         return lifetimes::run(name, run, records);
     }
@@ -1241,7 +1238,9 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
     if args.suite == "outbound-progress" {
         return progress::run(name, run, records);
     }
-    let package = root().join("crates").join(format!("fixture-{name}"));
+    let package = fixture_root()
+        .join("crates")
+        .join(format!("fixture-{name}"));
     let Some((exe, staged)) = provider_build(name, &package, run, records)? else {
         return Ok(());
     };
@@ -1334,7 +1333,7 @@ fn provider_build(
             "wasm32-wasip2",
         ]))?;
         let staged = stage(
-            &root().join("target/wasm32-wasip2/release/fixture_spin.wasm"),
+            &fixture_root().join("target/wasm32-wasip2/release/fixture_spin.wasm"),
             run,
         )?;
         (staged.clone(), staged)
@@ -1350,7 +1349,7 @@ fn provider_build(
             Command::new(builder)
                 .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id()?)
                 .args(["--release", ".", "--", "--locked"])
-                .env("CARGO_TARGET_DIR", root().join("target"))
+                .env("CARGO_TARGET_DIR", fixture_root().join("target"))
                 .current_dir(package),
         )?;
         let staged = stage(&package.join("build"), run)?;
@@ -1385,7 +1384,7 @@ fn provider_command(
     };
     let nonce = startup::command(&mut command, &identity_mode, &startup::build_id()?);
     command
-        .env("CARGO_TARGET_DIR", root().join("target"))
+        .env("CARGO_TARGET_DIR", fixture_root().join("target"))
         .current_dir(package)
         .env("EDGEZERO__ADAPTER__HOST", "127.0.0.1")
         .env("EDGEZERO__ADAPTER__PORT", port.to_string());
@@ -1615,7 +1614,7 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         &config,
         format!(
             "{}\n[local_server.backends.fault-origin]\nurl = {:?}\n",
-            fs::read_to_string(root().join("crates/fixture-fastly/fastly.toml"))?,
+            fs::read_to_string(fixture_root().join("crates/fixture-fastly/fastly.toml"))?,
             backend.url("/")
         ),
     )?;
@@ -2229,7 +2228,7 @@ mod tests {
     }
     #[test]
     fn wrangler_runtime_configuration_does_not_rebuild_fingerprinted_artifacts() {
-        let package = root().join("crates/fixture-cloudflare");
+        let package = fixture_root().join("crates/fixture-cloudflare");
         let staged = Path::new("/run/artifacts/build/worker/shim.mjs");
         let config = wrangler_runtime_config(&package, staged).unwrap();
         assert!(!config.contains("[build]") && !config.contains("worker-build"));
@@ -2239,13 +2238,13 @@ mod tests {
     #[test]
     fn builds_share_a_fixed_target_directory() {
         let command = cargo_build().unwrap();
-        let target = root().join("target");
+        let target = fixture_root().join("target");
         assert!(
             command
                 .get_envs()
                 .any(|(key, value)| key == "CARGO_TARGET_DIR" && value == Some(target.as_os_str()))
         );
-        assert_eq!(command.get_current_dir(), Some(root().as_path()));
+        assert_eq!(command.get_current_dir(), Some(fixture_root().as_path()));
     }
     #[test]
     fn served_artifacts_are_copies_inside_the_run_directory() {

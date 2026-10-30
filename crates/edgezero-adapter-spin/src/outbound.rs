@@ -527,7 +527,6 @@ mod spin_impl {
     pub(super) mod test_support;
 
     #[cfg(test)]
-    #[path = "../../../tests/support/outbound/clock_tests.rs"]
     mod clock_tests;
 
     use core::ffi::c_void;

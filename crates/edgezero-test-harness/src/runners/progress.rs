@@ -5,7 +5,7 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
     fs::create_dir_all(&run)?;
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(root())
+        .current_dir(fixture_root())
         .output()?;
     require(
         revision.status.success(),
@@ -358,7 +358,9 @@ pub(super) fn build(
     revision: &str,
     suite: &str,
 ) -> Result<Option<(Command, u16)>> {
-    let package = root().join("crates").join(format!("fixture-{name}"));
+    let package = fixture_root()
+        .join("crates")
+        .join(format!("fixture-{name}"));
     let fastly_variant = fastly_progress_variant(suite);
     let (variable, fallback) = match name {
         "fastly" => ("VICEROY_BIN", "viceroy"),
@@ -393,7 +395,7 @@ pub(super) fn build(
                     "--features",
                     "progress",
                 ])
-                .env("CARGO_TARGET_DIR", root().join("target"))
+                .env("CARGO_TARGET_DIR", fixture_root().join("target"))
                 .env("EDGEZERO_QUALIFICATION_REVISION", revision)
                 .env("EDGEZERO_QUALIFICATION_SUITE", suite)
                 .current_dir(&package),
@@ -438,8 +440,8 @@ pub(super) fn build(
             format!("{name} progress fixture build failed"),
         )?;
         let source = match name {
-            "spin" => root().join("target/wasm32-wasip2/release/fixture_spin.wasm"),
-            "fastly" => root()
+            "spin" => fixture_root().join("target/wasm32-wasip2/release/fixture_spin.wasm"),
+            "fastly" => fixture_root()
                 .join("target/wasm32-wasip1/release")
                 .join(wasm_name(fastly_variant)),
             _ => built_executable(&output.stdout, "fixture-axum-outbound-progress")?,

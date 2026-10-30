@@ -13,6 +13,11 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Consolidate cross-runtime fixtures and acceptance assets under `edgezero-test-harness`.
+  Replace the lifecycle-specific smoke launcher with `scripts/test_integration.sh` and
+  use the same explicit per-adapter CI suites locally and in Actions. Move shared Spin
+  guest scenarios into an ordinary fixture dependency instead of cross-tree source includes;
+  retain separate native/guest lockfiles, SDK exports, assertions and qualification limits.
 - Consolidate Spin runtime checks into one shared Rust harness suite, with CLI/HTTP
   scenarios in the fixture workspace and crate-owned unit/SDK tests. Remove the
   separate ingress supervisor and bootstrap; validate persisted evidence in Rust.

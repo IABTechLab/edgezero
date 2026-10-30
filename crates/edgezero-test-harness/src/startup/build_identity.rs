@@ -10,11 +10,7 @@ use std::{
 };
 
 // Hash source trees directly, including dirty/untracked inputs, but never build outputs.
-const ROOTS: &[&str] = &[
-    "crates",
-    "tests/fixtures/reusable-app",
-    "tests/fixtures/request-fidelity",
-];
+const ROOTS: &[&str] = &["crates"];
 
 pub(super) fn current() -> crate::Result<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -257,13 +253,16 @@ mod tests {
         "crates/edgezero-core/Cargo.toml",
         "crates/edgezero-adapter-spin/tests/support/helper.rs",
         "crates/edgezero-test-harness/src/runners.rs",
-        "tests/fixtures/reusable-app/Cargo.toml",
-        "tests/fixtures/reusable-app/Cargo.lock",
-        "tests/fixtures/reusable-app/crates/fixture-spin-wire/src/lib.rs",
-        "tests/fixtures/reusable-app/crates/fixture-spin-wire/spin.toml",
-        "tests/fixtures/request-fidelity/Cargo.toml",
-        "tests/fixtures/request-fidelity/Cargo.lock",
-        "tests/fixtures/request-fidelity/src/lib.rs",
+        "crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml",
+        "crates/edgezero-test-harness/fixtures/reusable-app/Cargo.lock",
+        "crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin-wire/src/lib.rs",
+        "crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin-wire/spin.toml",
+        "crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin-support/Cargo.toml",
+        "crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin-support/src/outbound.rs",
+        "crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        "crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml",
+        "crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.lock",
+        "crates/edgezero-test-harness/fixtures/request-fidelity/src/lib.rs",
         "crates/edgezero-core/src/build/embedded.txt",
         "rust-toolchain.toml",
     ];
@@ -412,11 +411,11 @@ mod tests {
         for output in [
             "crates/edgezero-core/target/a",
             "crates/edgezero-core/node_modules/a",
-            "tests/fixtures/reusable-app/target/a",
-            "tests/fixtures/reusable-app/.runs/a",
-            "tests/fixtures/request-fidelity/node_modules/a",
-            "tests/fixtures/request-fidelity/build/a",
-            "tests/fixtures/reusable-app/crates/fixture-cloudflare/build/a",
+            "crates/edgezero-test-harness/fixtures/reusable-app/target/a",
+            "crates/edgezero-test-harness/fixtures/reusable-app/.runs/a",
+            "crates/edgezero-test-harness/fixtures/request-fidelity/node_modules/a",
+            "crates/edgezero-test-harness/fixtures/request-fidelity/build/a",
+            "crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-cloudflare/build/a",
         ] {
             write(root.path(), output, b"ignored output");
         }

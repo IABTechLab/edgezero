@@ -37,7 +37,48 @@ const sha = "a".repeat(40);
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const clone = (value) => structuredClone(value);
 const spinCiCommand =
-  "scripts/smoke_test_reusable_app.sh --adapter spin --suite ci --output tests/fixtures/reusable-app/.runs/outbound/redirect/spin";
+  "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin";
+
+function ciOwnsCommand(workflow, command) {
+  if (workflow.includes(command)) return true;
+  const [prefix, argumentsText, extra] = command.split(" cargo ");
+  if (
+    extra !== undefined ||
+    !argumentsText ||
+    !prefix.startsWith("scripts/run_test_nonzero.sh ")
+  )
+    return false;
+  const options = prefix
+    .slice("scripts/run_test_nonzero.sh ".length)
+    .split(" ");
+  const argumentsList = argumentsText.split(" ");
+  const packageIndex = argumentsList.indexOf("-p");
+  const adapter = argumentsList[packageIndex + 1]?.replace(
+    "edgezero-adapter-",
+    "",
+  );
+  if (!["axum", "cloudflare", "fastly"].includes(adapter)) return false;
+  const invocation =
+    adapter === "axum"
+      ? "scripts/test_integration.sh --adapter axum --suite ci"
+      : "scripts/test_integration.sh --adapter ${{ matrix.adapter }} --suite ci";
+  if (!workflow.includes(invocation)) return false;
+  const runner = readFileSync(
+    new URL(
+      "../crates/edgezero-test-harness/src/runners/ci/platforms.rs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const arrays = [
+    ...runner.matchAll(/\[(?:\s*"(?:[^"\\]|\\.)*"\s*,?)*\s*\]/g),
+  ].map(([value]) => JSON.parse(value.replace(/,\s*\]/g, "]")));
+  return [options, argumentsList].every((expected) =>
+    arrays.some(
+      (actual) => JSON.stringify(actual) === JSON.stringify(expected),
+    ),
+  );
+}
 function fixtureLegPolicy(input) {
   if (!input.startsWith("### ")) return undefined;
   return digest(
@@ -198,8 +239,7 @@ test("sentinel selection isolates the exact declared command within a shared env
     ...clone(manifest.cases[0]),
     case_id: "EZ-9/acceptance/16",
     sentinel: "axum-wire-inventory",
-    command:
-      "scripts/smoke_test_reusable_app.sh --adapter axum --suite outbound-wire",
+    command: "scripts/test_integration.sh --adapter axum --suite outbound-wire",
     additional_sentinels: undefined,
   });
   assert.deepEqual(checker.readySentinels(manifest, "axum", command), [
@@ -247,7 +287,7 @@ test("hosted optimizer acceptance requires a native-path comparison", () => {
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -461,7 +501,7 @@ test("rejects missing toolchain, runner image and comparison build identities", 
 });
 test("real inventory covers all 26 acceptance sections with distinct caching/pooling cases", () => {
   const path = new URL(
-    "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+    "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
     import.meta.url,
   );
   const manifest = JSON.parse(readFileSync(path, "utf8"));
@@ -487,7 +527,7 @@ test("local assembled-app criteria bind guarded tests without closing pending le
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -532,7 +572,7 @@ test("local assembled-app criteria bind guarded tests without closing pending le
       c.artifact_path,
       `outbound/EZ-23/acceptance/${criterion}/axum/native-tcp.log`,
     );
-    assert.ok(workflow.includes(command), `${criterion} CI command`);
+    assert.ok(ciOwnsCommand(workflow, command), `${criterion} CI command`);
   }
   for (const criterion of ["13"]) {
     const c = cases.find(
@@ -548,10 +588,10 @@ test("local assembled-app criteria bind guarded tests without closing pending le
     [factory],
   );
   const axumStep = workflow
-    .split("- name: Run Axum host tests")[1]
+    .split("- name: Run Axum integration suite")[1]
     .split("- name:")[0];
   assert.equal(
-    axumStep.match(/cargo test/g)?.length,
+    axumStep.match(/scripts\/test_integration\.sh/g)?.length,
     1,
     "one Axum suite execution",
   );
@@ -564,7 +604,7 @@ test("redirect core criteria bind every required test before one module executio
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -748,7 +788,7 @@ test("core batch and marker bindings guard exact tests without promoting adapter
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -845,7 +885,7 @@ test("core policy conformance binds complete proofs without promoting provider l
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -939,7 +979,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -1040,7 +1080,7 @@ test("Axum forwarding modes bind actual ingress tests without promoting sibling 
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -1087,7 +1127,10 @@ test("Axum forwarding modes bind actual ingress tests without promoting sibling 
   }
   const guarded = checker.readySentinels(manifest, "axum", command);
   for (const name of selected) assert.ok(guarded.includes(name), name);
-  assert.ok(workflow.includes(command), "one existing grouped Axum command");
+  assert.ok(
+    ciOwnsCommand(workflow, command),
+    "one existing grouped Axum command",
+  );
   const pending = manifest.cases.find(
     (c) =>
       c.case_id === "EZ-1/acceptance/06" &&
@@ -1100,7 +1143,7 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -1131,13 +1174,15 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
       assert.equal(c.sentinel, `${adapter}-wire-inventory`);
       assert.equal(
         c.command,
-        adapter === "spin"
-          ? spinCiCommand
-          : `scripts/smoke_test_reusable_app.sh --adapter ${adapter} --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/${environment}`,
+        adapter === "cloudflare"
+          ? `scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd`
+          : `scripts/test_integration.sh --adapter ${adapter} --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/${adapter}`,
       );
       assert.equal(
         c.artifact_path,
-        `outbound/redirect/${environment}/${adapter === "spin" ? "wire/" : ""}events.jsonl`,
+        adapter === "cloudflare"
+          ? `outbound/redirect/workerd/events.jsonl`
+          : `outbound/redirect/${adapter}/wire/events.jsonl`,
       );
       bound.push(c);
     }
@@ -1206,7 +1251,7 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -1247,7 +1292,7 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
       }
       assert.equal(row.artifact_path, `outbound/unit/${adapter}/raw.log`);
       assert.ok(
-        workflow.includes(row.command),
+        ciOwnsCommand(workflow, row.command),
         `${criterion}@${adapter} CI execution`,
       );
       assert.ok(
@@ -1289,7 +1334,7 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
         row.environment === environment,
     );
     assert.equal(row.implementation, "ready");
-    assert.ok(workflow.includes(row.command));
+    assert.ok(ciOwnsCommand(workflow, row.command));
     for (const name of [row.sentinel, ...(row.additional_sentinels ?? [])])
       assert.ok(guarded.includes(name), name);
   }
@@ -1298,7 +1343,7 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
   const manifest = JSON.parse(
     readFileSync(
       new URL(
-        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
         import.meta.url,
       ),
       "utf8",
@@ -1318,21 +1363,22 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
     "utf8",
   );
   const step = workflow
-    .split("- name: Run Spin runtime suite")[1]
+    .split("- name: Run adapter integration suite")[1]
     .split("- name:")[0];
-  assert.match(step, /if: matrix\.adapter == 'spin'/);
+  assert.doesNotMatch(step, /if: matrix\.adapter/);
   assert.ok(
     step.includes(
-      'run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/outbound/redirect/spin"',
+      'run="$GITHUB_WORKSPACE/crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/${{ matrix.adapter }}"',
     ),
   );
   assert.match(
     step,
-    /scripts\/smoke_test_reusable_app\.sh --adapter spin --suite ci --output "\$run"/,
+    /scripts\/test_integration\.sh --adapter \$\{\{ matrix\.adapter \}\} --suite ci --output "\$run"/,
   );
   assert.equal(
-    workflow.match(/scripts\/smoke_test_reusable_app\.sh --adapter spin /g)
-      ?.length,
+    workflow.match(
+      /scripts\/test_integration\.sh --adapter \$\{\{ matrix\.adapter \}\}/g,
+    )?.length,
     1,
     "one Spin suite execution",
   );
@@ -1361,8 +1407,8 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
     /super::wire::validate_spin_artifact\(\s*&read_events\(\s*&wire_dir\.join\("events\.jsonl"\)\s*\)\?\s*\)\?/,
   );
   assert.match(wire, /pub\(super\) fn validate_spin_artifact\(/);
-  assert.match(ci, /let\s+async_log\s*=\s*phase\(\s*"async"/);
-  assert.match(ci, /let\s+wire_log\s*=\s*phase\(\s*"wire"/);
+  assert.match(ci, /let\s+async_log\s*=\s*phase\(\s*"spin",\s*"async"/);
+  assert.match(ci, /let\s+wire_log\s*=\s*phase\(\s*"spin",\s*"wire"/);
   assert.match(
     ci,
     /validate_markers\(\s*&inventory,\s*&fs::read_to_string\(async_log\)\?,\s*&fs::read_to_string\(wire_log\)\?,?\s*\)\?/,
@@ -1372,7 +1418,7 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
 });
 test("rejects deletion of reviewed split cases or environment legs", () => {
   const path = new URL(
-    "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+    "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
     import.meta.url,
   );
   const original = JSON.parse(readFileSync(path, "utf8"));

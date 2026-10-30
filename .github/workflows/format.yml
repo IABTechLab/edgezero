@@ -30,7 +30,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            tests/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/fixtures/reusable-app/target/
             crates/edgezero-test-harness/target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -51,26 +51,26 @@ jobs:
       - name: Fetch dependencies (locked)
         run: |
           cargo fetch --locked
-          cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
-          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
 
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
       - name: Run cargo fmt (lifecycle fixtures)
-        run: cargo fmt --manifest-path tests/fixtures/reusable-app/Cargo.toml --all -- --check
+        run: cargo fmt --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml --all -- --check
 
       - name: Run cargo fmt (test harness)
         run: cargo fmt --manifest-path crates/edgezero-test-harness/Cargo.toml --all -- --check
 
       - name: Run cargo fmt (ingress fixtures)
-        run: cargo fmt --manifest-path tests/fixtures/request-fidelity/Cargo.toml --all -- --check
+        run: cargo fmt --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml --all -- --check
 
       - name: Run cargo clippy (native lifecycle fixtures)
         run: |
           cargo clippy --locked --manifest-path crates/edgezero-test-harness/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-core -p fixture-axum --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml -p fixture-core -p fixture-axum --all-targets -- -D warnings
 
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -146,8 +146,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            tests/fixtures/reusable-app/target/
-            tests/fixtures/request-fidelity/target/
+            crates/edgezero-test-harness/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/fixtures/request-fidelity/target/
           key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-clippy-
@@ -171,8 +171,8 @@ jobs:
       - name: Fetch dependencies (locked)
         run: |
           cargo fetch --locked
-          cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
-          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
 
       - name: Clippy ${{ matrix.adapter }} feature combinations on ${{ matrix.target }}
         env:
@@ -206,17 +206,17 @@ jobs:
           if [[ "${TARGET}" != "native" ]]; then
             target_args=(--target "${TARGET}")
           fi
-          cargo clippy --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml \
+          cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml \
             -p "fixture-${ADAPTER}" "${target_args[@]}" --all-targets -- -D warnings
           if [[ "${ADAPTER}" == spin ]]; then
-            cargo clippy --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml \
+            cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml \
               -p fixture-spin-async -p fixture-spin-wire "${target_args[@]}" --all-targets -- -D warnings
           fi
 
       - name: Clippy ${{ matrix.adapter }} ingress fixture
         if: matrix.adapter != 'axum'
         run: >-
-          cargo clippy --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
+          cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
           --features ${{ matrix.adapter }} --target ${{ matrix.target }}
           --all-targets -- -D warnings
 

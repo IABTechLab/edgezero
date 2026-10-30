@@ -360,8 +360,8 @@ fn report_observation_diff(
 }
 
 pub fn run(args: &Args, output: &Path) -> crate::Result<()> {
-    let repository = crate::root().join("../../..").canonicalize()?;
-    let fixture = repository.join("tests/fixtures/request-fidelity");
+    let repository = crate::repository_root();
+    let fixture = repository.join("crates/edgezero-test-harness/fixtures/request-fidelity");
     let cancelled = &crate::CANCELLED;
     let platforms = if args.adapter == "all" {
         vec!["fastly", "cloudflare", "spin"]

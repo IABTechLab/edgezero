@@ -1,5 +1,7 @@
 use super::*;
 
+mod platforms;
+
 const ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 
 fn read_artifact(path: &Path) -> Result<String> {
@@ -78,20 +80,33 @@ fn validate_markers(inventory: &Value, async_log: &str, wire_log: &str) -> Resul
 }
 
 fn phase(
+    adapter: &str,
     name: &str,
     command: &mut Command,
     repo: &Path,
     run: &Path,
     records: &mut Records,
 ) -> Result<PathBuf> {
+    phase_with_exit(adapter, name, command, repo, run, records, 0)
+}
+
+fn phase_with_exit(
+    adapter: &str,
+    name: &str,
+    command: &mut Command,
+    repo: &Path,
+    run: &Path,
+    records: &mut Records,
+    expected_exit: i32,
+) -> Result<PathBuf> {
     let log = run.join(format!("{name}.log"));
     let start = Instant::now();
-    eprintln!("Spin CI: {name}");
+    eprintln!("{adapter} CI: {name}");
     command.current_dir(repo).stdin(Stdio::null());
-    let outcome = Process::spawn(command, &log)?.wait_success();
-    records.push(json!({"event":"ci-phase","adapter":"spin","phase":name,
+    let outcome = Process::spawn(command, &log)?.wait_exit_code(expected_exit);
+    records.push(json!({"event":"ci-phase","adapter":adapter,"phase":name,
         "status":if outcome.is_ok() {"pass"} else {"fail"},"elapsed_ms":start.elapsed().as_millis(),
-        "log":log,"qualification":false}))?;
+        "log":log,"expected_exit":expected_exit,"qualification":false}))?;
     if outcome.is_err()
         && let Ok(file) = fs::File::open(&log)
     {
@@ -117,6 +132,7 @@ fn pinned_tool(
         .find_map(|line| line.strip_prefix(&format!("{name} ")).map(str::to_owned))
         .ok_or(format!("missing {name} pin"))?;
     let log = phase(
+        "spin",
         &format!("{name}-version"),
         Command::new(&executable).arg("--version"),
         repo,
@@ -132,17 +148,21 @@ fn pinned_tool(
     Ok(executable)
 }
 
-pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.adapter != "spin" {
+        return platforms::run(args, run, records);
+    }
     require(
         args.adapter == "spin",
         "CI runtime suite requires the Spin adapter",
     )?;
-    let repo = root().join("../../..").canonicalize()?;
+    let repo = repository_root();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let wasmtime = pinned_tool("WASMTIME_BIN", "wasmtime", &repo, run, records)?;
     let spin = pinned_tool("SPIN_BIN", "spin", &repo, run, records)?;
 
     phase(
+        "spin",
         "feature-matrix",
         Command::new("bash").args([
             "scripts/check_adapter_feature_matrix.sh",
@@ -154,8 +174,12 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         records,
     )?;
     phase(
+        "spin",
         "native-tests",
-        Command::new(&cargo).args([
+        Command::new("bash").args([
+            "scripts/run_test_nonzero.sh",
+            "batch_preflight_precedence_and_indices",
+            "cargo",
             "test",
             "--offline",
             "--locked",
@@ -164,13 +188,14 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
             "--no-default-features",
             "--features",
             "test-utils",
-            "--lib",
+            "--all-targets",
         ]),
         &repo,
         run,
         records,
     )?;
     phase(
+        "spin",
         "sdk-tests",
         Command::new("bash")
             .args([
@@ -206,8 +231,25 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         records,
     )?;
 
-    let fixtures = root();
+    let fixtures = fixture_root();
     phase(
+        "spin",
+        "shared-sdk-tests",
+        Command::new("bash")
+            .args([
+                "scripts/run_test_nonzero.sh",
+                "tests::ingress_contract::deferred_request_and_response_paths_retain_the_injected_clock\ntests::ingress_contract::converted_response_retains_injected_clock\ntests::ingress_contract::converted_response_preserves_original_content_type_provenance\ntests::sdk_resources::response_conversion_checks_deadline_before_handoff\ntests::sdk_resources::provider_diagnostics_survive_ready_deadlines\ntests::clock_tests::response_conversion_checks_deadline_before_handoff\ntests::clock_tests::converted_response_retains_injected_clock\ntests::clock_tests::converted_response_preserves_original_content_type_provenance",
+                "cargo", "test", "--offline", "--locked", "--manifest-path",
+            ])
+            .arg(fixtures.join("Cargo.toml"))
+            .args(["-p", "fixture-spin-support", "--target", "wasm32-wasip2", "--lib"])
+            .env("CARGO_TARGET_WASM32_WASIP2_RUNNER", format!("{} run -W component-model-async=y -S p3=y -S http=y", wasmtime.display())),
+        &repo,
+        run,
+        records,
+    )?;
+    phase(
+        "spin",
         "async-build",
         Command::new(&cargo)
             .args(["build", "--offline", "--locked", "--manifest-path"])
@@ -225,6 +267,7 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
     )?;
     records.push(json!({"event":"build","adapter":"spin","phase":"async","artifact":artifact(&component)?,"qualification":false}))?;
     let async_log = phase(
+        "spin",
         "async",
         Command::new(&wasmtime)
             .args([
@@ -244,6 +287,7 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
 
     let wire_dir = run.join("wire");
     let wire_log = phase(
+        "spin",
         "wire",
         Command::new(std::env::current_exe()?)
             .args(["--adapter", "spin", "--suite", "outbound-wire", "--output"])
@@ -254,8 +298,9 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         records,
     )?;
     super::wire::validate_spin_artifact(&read_events(&wire_dir.join("events.jsonl"))?)?;
-    let inventory: Value =
-        serde_json::from_slice(&fs::read(fixtures.join("outbound-cutover-cases.json"))?)?;
+    let inventory: Value = serde_json::from_slice(&fs::read(
+        acceptance_root().join("outbound-cutover-cases.json"),
+    )?)?;
     validate_markers(
         &inventory,
         &fs::read_to_string(async_log)?,
@@ -263,6 +308,7 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
     )?;
 
     phase(
+        "spin",
         "ingress",
         Command::new(std::env::current_exe()?)
             .args([
@@ -282,7 +328,7 @@ pub(super) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
     )?;
     validate_ingress(
         &run.join("ingress/observations.json"),
-        &repo.join("tests/fixtures/request-fidelity/observations.json"),
+        &repo.join("crates/edgezero-test-harness/fixtures/request-fidelity/observations.json"),
     )?;
     records.push(json!({"event":"spin-ci-inventory","status":"pass","qualification":false}))
 }
@@ -300,6 +346,7 @@ mod tests {
             values: Vec::new(),
         };
         let error = phase(
+            "spin",
             "failure",
             Command::new("sh").args(["-c", "printf '\\377'; exit 23"]),
             run,

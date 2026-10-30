@@ -65,7 +65,7 @@ empty evidence directory:
 
 ```sh
 unset CARGO_TARGET_DIR
-VICEROY_BIN="$VICEROY_SOURCE/target/debug/viceroy" scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output NEW_EVIDENCE_DIRECTORY
+VICEROY_BIN="$VICEROY_SOURCE/target/debug/viceroy" scripts/test_integration.sh --adapter fastly --suite outbound-readiness --output NEW_EVIDENCE_DIRECTORY
 ```
 
 The fixture must still use its own target directory, as the existing launcher enforces. The

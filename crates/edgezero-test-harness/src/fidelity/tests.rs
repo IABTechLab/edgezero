@@ -40,7 +40,8 @@ fn runtime_overrides_use_the_ci_selected_executables() {
 #[test]
 fn baseline_retains_all_56_raw_observations() {
     let baseline: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(crate::root().join("../request-fidelity/observations.json")).unwrap(),
+        &std::fs::read(crate::fixture_root().join("../request-fidelity/observations.json"))
+            .unwrap(),
     )
     .unwrap();
     let common: std::collections::BTreeSet<_> = cases().into_iter().map(|case| case.name).collect();
@@ -484,7 +485,7 @@ fn diagnostic_failures_preserve_the_original_runtime_error() {
 #[test]
 #[ignore = "requires a freshly built Cloudflare fixture and pinned workerd"]
 fn cloudflare_primary_uri_preserves_no_hook_routing() {
-    let fixture = crate::root().join("../request-fidelity");
+    let fixture = crate::fixture_root().join("../request-fidelity");
     let cancelled = Arc::new(AtomicBool::new(false));
     cloudflare_routing_probes(&fixture, &cancelled, Duration::from_secs(60))
         .expect("primary URI normalization and raw ingress capture must remain independent");

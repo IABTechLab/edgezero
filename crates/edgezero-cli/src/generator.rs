@@ -917,7 +917,7 @@ mod tests {
             (
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../tests/fixtures/reusable-app/Cargo.toml"
+                    "/../../crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml"
                 )),
                 false,
             ),
@@ -961,7 +961,7 @@ mod tests {
         );
         let spin: toml::Value = toml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/reusable-app/crates/fixture-spin/Cargo.toml"
+            "/../../crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin/Cargo.toml"
         )))
         .expect("valid fixture member manifest");
         assert_eq!(
@@ -1059,11 +1059,11 @@ unpinned = { path = "somewhere" }
             workspace_dependencies(include_str!("../../../Cargo.toml")),
             toml::from_str(include_str!("../../../Cargo.lock")).expect("workspace lock"),
             toml::from_str(include_str!(
-                "../../../tests/fixtures/request-fidelity/Cargo.toml"
+                "../../../crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml"
             ))
             .expect("fidelity manifest"),
             toml::from_str(include_str!(
-                "../../../tests/fixtures/request-fidelity/Cargo.lock"
+                "../../../crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.lock"
             ))
             .expect("fidelity lock"),
         )

@@ -832,7 +832,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         _ => {}
     }
     require(name == "spin", "wire suite requires Spin")?;
-    let repo = root().join("../../..").canonicalize()?;
+    let repo = repository_root();
     let executable = executable("SPIN_BIN", "spin").ok_or("Spin runtime unavailable")?;
     let version = Command::new(&executable).arg("--version").output()?;
     require(version.status.success(), "Spin version probe failed")?;
@@ -850,17 +850,17 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     checked(
         Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .current_dir(&repo)
-            .env("CARGO_TARGET_DIR", root().join("target"))
+            .env("CARGO_TARGET_DIR", fixture_root().join("target"))
             .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id()?)
             .args(["build", "--offline", "--locked", "--manifest-path"])
-            .arg(root().join("Cargo.toml"))
+            .arg(fixture_root().join("Cargo.toml"))
             .args(["-p", "fixture-spin-wire", "--target", "wasm32-wasip2"]),
     )?;
-    let relative_wasm =
-        "tests/fixtures/reusable-app/target/wasm32-wasip2/debug/fixture_spin_wire.wasm";
+    let relative_wasm = "crates/edgezero-test-harness/fixtures/reusable-app/target/wasm32-wasip2/debug/fixture_spin_wire.wasm";
     let wasm = run.join(relative_wasm);
     copy_tree(&repo.join(relative_wasm), &wasm)?;
-    let relative_manifest = "tests/fixtures/reusable-app/crates/fixture-spin-wire/spin.toml";
+    let relative_manifest =
+        "crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin-wire/spin.toml";
     let manifest = run.join(relative_manifest);
     copy_tree(&repo.join(relative_manifest), &manifest)?;
     records.push(json!({"event":"build","adapter":"spin","artifact":artifact(&wasm)?,"root_lockfile":artifact(&repo.join("Cargo.lock"))?,"qualification":false}))?;
@@ -970,7 +970,7 @@ pub(super) fn progress_suite<T>(
     };
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(root())
+        .current_dir(fixture_root())
         .output()?;
     require(
         revision.status.success(),

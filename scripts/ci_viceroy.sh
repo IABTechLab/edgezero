@@ -61,7 +61,7 @@ case "${1:-}" in
     stock_valid
     stock_identity="$(sha256 "$stock")"
     source="$RUNNER_TEMP/viceroy-readiness-source"
-    evidence="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/viceroy-repair"
+    evidence="$GITHUB_WORKSPACE/crates/edgezero-test-harness/fixtures/reusable-app/.runs/viceroy-repair"
     # Only Cargo inputs/artifacts are cached. Revalidate a fresh checkout and patch.
     test ! -e "$source" && test ! -L "$source"
     trap 'rm -rf "$source"' EXIT

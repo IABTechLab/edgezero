@@ -123,8 +123,8 @@ impl Args {
             "ingress fidelity requires --adapter spin|fastly|cloudflare|all",
         )?;
         require(
-            a.suite != "ci" || (adapter_selected && a.adapter == "spin"),
-            "ci requires --adapter spin",
+            a.suite != "ci" || (adapter_selected && a.adapter != "all"),
+            "ci requires one explicit adapter",
         )?;
         require(
             !a.readiness_timeout.is_zero(),
@@ -145,11 +145,17 @@ impl Args {
         Ok(a)
     }
 }
-pub fn root() -> PathBuf {
+pub fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/reusable-app")
+        .join("../..")
         .canonicalize()
-        .expect("fixture workspace root")
+        .expect("repository root")
+}
+pub fn acceptance_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("acceptance")
+}
+pub fn fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/reusable-app")
 }
 pub fn token() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -398,6 +404,7 @@ pub struct Process(startup::ChildHandle, ProcessState);
 struct ProcessState {
     log: PathBuf,
     command_status: Option<ExitStatus>,
+    expected_exit_code: i32,
     finished: Option<std::result::Result<(), String>>,
     shutdown_started: bool,
     failures: Vec<String>,
@@ -438,6 +445,7 @@ impl Process {
             ProcessState {
                 log: log.to_owned(),
                 command_status: None,
+                expected_exit_code: 0,
                 finished: None,
                 shutdown_started: false,
                 failures: Vec::new(),
@@ -508,21 +516,34 @@ impl Process {
     pub fn wait_success(&mut self) -> Result<ExitStatus> {
         self.wait_success_cancelled(&CANCELLED)
     }
+    pub fn wait_exit_code(&mut self, expected: i32) -> Result<ExitStatus> {
+        self.wait_expected_cancelled(expected, &CANCELLED)
+    }
     pub fn child_status(&self) -> std::io::Result<Option<ExitStatus>> {
         self.0.try_wait()
     }
     pub fn wait_success_cancelled(&mut self, cancelled: &AtomicBool) -> Result<ExitStatus> {
+        self.wait_expected_cancelled(0, cancelled)
+    }
+    fn wait_expected_cancelled(
+        &mut self,
+        expected: i32,
+        cancelled: &AtomicBool,
+    ) -> Result<ExitStatus> {
         require(
             self.1.launch.is_none(),
             "cannot wait for command completion on a registered server",
         )?;
         if self.1.finished.is_some() {
             self.finish()?;
-            return self
-                .1
-                .command_status
-                .ok_or_else(|| "process already shut down".into());
+            let status = self.1.command_status.ok_or("process already shut down")?;
+            require(
+                status.code() == Some(expected),
+                "command exit code differs from expected",
+            )?;
+            return Ok(status);
         }
+        self.1.expected_exit_code = expected;
         loop {
             if let Err(error) = check_cancelled(cancelled) {
                 let cleanup = self.finish();
@@ -537,7 +558,7 @@ impl Process {
             }
             if let Some(status) = self.0.try_wait()? {
                 self.1.command_status = Some(status);
-                if !status.success() {
+                if status.code() != Some(expected) {
                     self.1.failures.push(format!("command exited: {status}"));
                 }
                 self.finish()?;
@@ -610,7 +631,7 @@ impl Process {
         match status {
             Some(status) => {
                 let terminated = requested_termination(status, term_sent);
-                if !status.success() && !terminated {
+                if status.code() != Some(self.1.expected_exit_code) && !terminated {
                     failures.push(format!(
                         "runtime exited unexpectedly during shutdown: {status}"
                     ));
@@ -698,7 +719,7 @@ fn run() -> Result<i32> {
     let path = args
         .output
         .clone()
-        .unwrap_or_else(|| root().join(".runs").join(token()));
+        .unwrap_or_else(|| fixture_root().join(".runs").join(token()));
     if path.exists() {
         require(
             fs::read_dir(&path)?.next().is_none(),
@@ -711,7 +732,7 @@ fn run() -> Result<i32> {
         fidelity::run(&args, &path)?;
         return Ok(0);
     }
-    fs::copy(root().join("Cargo.lock"), path.join("Cargo.lock"))?;
+    fs::copy(fixture_root().join("Cargo.lock"), path.join("Cargo.lock"))?;
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"),
         path.join("harness-Cargo.lock"),
@@ -729,7 +750,9 @@ fn run() -> Result<i32> {
     };
     for adapter in adapters {
         let recorded = records.values.len();
-        let result = if adapter == "fastly" {
+        let result = if args.suite == "ci" {
+            runners::ci::run(&args, &path, &mut records)
+        } else if adapter == "fastly" {
             runners::fastly(&args, &path, &mut records)
         } else {
             runners::provider(adapter, &args, &path, &mut records)
@@ -824,7 +847,7 @@ mod layout_tests {
             .canonicalize()
             .unwrap();
         assert_eq!(runner.file_name().unwrap(), "edgezero-test-harness");
-        let repository = root().join("../../..").canonicalize().unwrap();
+        let repository = repository_root();
         assert_eq!(runner, repository.join("crates/edgezero-test-harness"));
         let own = metadata(&runner.join("Cargo.toml"));
         assert_eq!(
@@ -848,17 +871,57 @@ mod layout_tests {
                         .starts_with("edgezero-")
                 })
         );
-        for manifest in [repository.join("Cargo.toml"), root().join("Cargo.toml")] {
+        for manifest in [
+            repository.join("Cargo.toml"),
+            fixture_root().join("Cargo.toml"),
+        ] {
             let other = metadata(&manifest);
             assert!(other["packages"].as_array().unwrap().iter().all(|package| {
                 package["name"] != "edgezero-test-harness" && package["name"] != "fixture-harness"
             }));
         }
-        assert!(!root().join("crates/fixture-harness/Cargo.toml").exists());
-        let launcher =
-            fs::read_to_string(repository.join("scripts/smoke_test_reusable_app.sh")).unwrap();
+        assert!(
+            !fixture_root()
+                .join("crates/fixture-harness/Cargo.toml")
+                .exists()
+        );
+        assert!(!repository.join("tests/fixtures/reusable-app").exists());
+        assert!(!repository.join("tests/fixtures/request-fidelity").exists());
+        assert!(
+            acceptance_root()
+                .join("outbound-cutover-cases.json")
+                .is_file()
+        );
+        let launcher = fs::read_to_string(repository.join("scripts/test_integration.sh")).unwrap();
         assert!(launcher.contains("crates/edgezero-test-harness/Cargo.toml"));
         assert!(launcher.find("cd \"$REPO_DIR\"").unwrap() < launcher.find("exec ").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod command_exit_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_unqualified_exit_never_accepts_success_failure_or_a_signal() {
+        for (script, accepted) in [
+            ("exit 2", true),
+            ("exit 0", false),
+            ("exit 23", false),
+            ("kill -TERM $$", false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut process = Process::spawn(
+                Command::new("sh").args(["-c", script]),
+                &directory.path().join("child.log"),
+            )
+            .unwrap();
+            assert_eq!(process.wait_exit_code(2).is_ok(), accepted, "{script}");
+            assert!(
+                process.wait_success().is_err(),
+                "unqualified is never a successful command"
+            );
+        }
     }
 }
 
@@ -867,7 +930,7 @@ mod argument_tests {
     use super::Args;
 
     #[test]
-    fn fidelity_requires_a_supported_explicit_adapter_and_ci_requires_spin() {
+    fn fidelity_and_ci_require_their_supported_explicit_adapters() {
         for adapter in ["fastly", "cloudflare", "spin", "axum", "all"] {
             for suite in ["ingress-fidelity", "ci"] {
                 let result =
@@ -875,7 +938,7 @@ mod argument_tests {
                 assert_eq!(
                     result.is_ok(),
                     if suite == "ci" {
-                        adapter == "spin"
+                        adapter != "all"
                     } else {
                         adapter != "axum"
                     }

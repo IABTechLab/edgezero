@@ -12,6 +12,17 @@
 
 ## Status and Authority
 
+### Integration Test Ownership (2026-10-30)
+
+The approved [integration consolidation plan](2026-10-30-integration-test-consolidation.md)
+moves runtime applications and acceptance assets under `crates/edgezero-test-harness`.
+Use its [integration guide](../../../crates/edgezero-test-harness/README.md) for current commands:
+`scripts/test_integration.sh --adapter NAME --suite ci` is the shared local/CI entrypoint.
+Adapter-owned contracts and private-boundary tests remain colocated. The controller and guest
+workspaces retain independent dependency graphs and lockfiles. Historical commands and raw
+measurements below retain their original paths; this layout change does not revise requirements,
+acceptance identities, failed observations, capability support or hosted qualification.
+
 ### Current Delivery Dashboard (2026-10-29)
 
 Reconciled against the current hard-cut working tree above `f4d660b1`, including live prepared

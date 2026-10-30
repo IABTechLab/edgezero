@@ -1,8 +1,5 @@
 #![cfg(all(feature = "spin", feature = "test-utils", target_arch = "wasm32"))]
 
-#[path = "support/outbound/mod.rs"]
-mod outbound_support;
-
 #[cfg(test)]
 #[expect(
     clippy::arbitrary_source_item_ordering,
@@ -14,7 +11,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use crate::outbound_support::{deferred_clock_paths_hold, provider_deadline_diagnostics_hold};
     use edgezero_adapter_spin::outbound::SpinOutboundClient;
     use edgezero_adapter_spin::outbound::test_support::{
         map_spin_dispatch_error, map_spin_host_error, map_spin_preparation_header, request_fields,
@@ -317,14 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn response_conversion_checks_deadline_before_handoff() {
-        assert!(
-            block_on(deferred_clock_paths_hold()),
-            "response handoff must retain deadlines and release SDK body consumers"
-        );
-    }
-
-    #[test]
     fn injected_clock_controls_method_entry_and_preflight_elapsed() {
         let start = MonotonicInstant::now();
         let completed = start
@@ -454,11 +442,6 @@ mod tests {
         options
             .set_between_bytes_timeout(Some(3_000_000))
             .expect("between-bytes timeout is supported");
-    }
-
-    #[test]
-    fn provider_diagnostics_survive_ready_deadlines() {
-        assert!(block_on(provider_deadline_diagnostics_hold()));
     }
 
     #[test]

@@ -41,10 +41,6 @@ run node scripts/check_flate_dependency_contract.mjs
 
 section "Outbound Contract Tests"
 run node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_legacy_api.test.mjs
-run scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --test contract
-run scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils --test contract
-run scripts/run_test_nonzero.sh batch_preflight_rejects_streamed_slots_without_poisoning_siblings cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --test contract
-run scripts/run_test_nonzero.sh batch_preflight_precedence_and_indices cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils --test contract
 
 section "Outbound Capability Tests"
 for adapter in axum cloudflare fastly spin; do
@@ -59,21 +55,14 @@ for adapter in axum cloudflare fastly spin; do
   run bash scripts/check_adapter_feature_matrix.sh "${adapter}" native
 done
 
-section "Adapter Wasm Feature Matrices"
-run bash scripts/check_adapter_feature_matrix.sh cloudflare wasm32-unknown-unknown
-run bash scripts/check_adapter_feature_matrix.sh fastly wasm32-wasip1
-
 section "Fastly CLI Tests"
 run cargo test -p edgezero-adapter-fastly --no-default-features --features cli
 
-section "Fastly Wasm Tests"
-(
-  cd crates/edgezero-adapter-fastly
-  run cargo test --features fastly --target wasm32-wasip1 -- --nocapture
-)
-
-section "Spin Runtime Suite"
-run scripts/smoke_test_reusable_app.sh --adapter spin --suite ci
+section "Adapter Integration Suites"
+run scripts/test_integration.sh --adapter axum --suite ci
+run scripts/test_integration.sh --adapter fastly --suite ci
+run scripts/test_integration.sh --adapter cloudflare --suite ci
+run scripts/test_integration.sh --adapter spin --suite ci
 
 section "Generated Project"
 run scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds

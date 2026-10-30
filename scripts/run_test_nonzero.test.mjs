@@ -486,7 +486,7 @@ test(
 const inventory = JSON.parse(
   readFileSync(
     new URL(
-      "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+      "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
       import.meta.url,
     ),
     "utf8",

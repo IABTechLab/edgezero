@@ -2085,8 +2085,8 @@ mod tests {
             io::{BufRead, BufReader},
         };
 
-        let path = crate::root()
-            .join("../../../docs/audits/evidence/2026-10-23-fastly-readiness-matrix-probes.jsonl");
+        let path = crate::repository_root()
+            .join("docs/audits/evidence/2026-10-23-fastly-readiness-matrix-probes.jsonl");
         let mut runs: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for line in BufReader::new(File::open(path).unwrap()).lines() {
             let row: Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -2190,8 +2190,8 @@ mod tests {
             fs::File,
             io::{BufRead, BufReader},
         };
-        let path = crate::root()
-            .join("../../../docs/audits/evidence/2026-10-23-fastly-timer-controls-probes.jsonl");
+        let path = crate::repository_root()
+            .join("docs/audits/evidence/2026-10-23-fastly-timer-controls-probes.jsonl");
         let mut runs: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for line in BufReader::new(File::open(path).unwrap()).lines() {
             let row: Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -2244,8 +2244,8 @@ mod tests {
             fs::File,
             io::{BufRead, BufReader},
         };
-        let path = crate::root()
-            .join("../../../docs/audits/evidence/2026-10-24-fastly-local-recheck-probes.jsonl");
+        let path = crate::repository_root()
+            .join("docs/audits/evidence/2026-10-24-fastly-local-recheck-probes.jsonl");
         let rows: Vec<Value> = BufReader::new(File::open(path).unwrap())
             .lines()
             .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
@@ -2324,8 +2324,8 @@ mod tests {
             fs::File,
             io::{BufRead, BufReader},
         };
-        let path = crate::root()
-            .join("../../../docs/audits/evidence/2026-10-25-fastly-mixed-readiness-probes.jsonl");
+        let path = crate::repository_root()
+            .join("docs/audits/evidence/2026-10-25-fastly-mixed-readiness-probes.jsonl");
         let rows: Vec<Value> = BufReader::new(File::open(path).unwrap())
             .lines()
             .map(|line| serde_json::from_str(&line.unwrap()).unwrap())

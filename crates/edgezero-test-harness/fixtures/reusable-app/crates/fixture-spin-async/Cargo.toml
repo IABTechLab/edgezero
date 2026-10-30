@@ -1,0 +1,15 @@
+[package]
+name = "fixture-spin-async"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fixture-spin-support.workspace = true
+spin-sdk = { workspace = true, features = ["http", "key-value"] }
+
+[lints]
+workspace = true

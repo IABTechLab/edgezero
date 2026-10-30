@@ -383,7 +383,7 @@ pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()
         "wasm32-wasip1",
     ]))?;
     let artifact_path = stage(
-        &root().join("target/wasm32-wasip1/release/fixture-fastly-assembly.wasm"),
+        &fixture_root().join("target/wasm32-wasip1/release/fixture-fastly-assembly.wasm"),
         run,
     )?;
     records.push(json!({"event":"build","adapter":"fastly","variant":"assembly","artifact":artifact(&artifact_path)?}))?;
@@ -399,7 +399,8 @@ pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()
     ] {
         let log = run.join(format!("assembly-{case}.log"));
         let config = run.join(format!("assembly-{case}.toml"));
-        let mut contents = fs::read_to_string(root().join("crates/fixture-fastly/fastly.toml"))?;
+        let mut contents =
+            fs::read_to_string(fixture_root().join("crates/fixture-fastly/fastly.toml"))?;
         contents.push_str(&format!("\n[local_server.config_stores.assembly]\nformat = \"inline-toml\"\n[local_server.config_stores.assembly.contents]\ncase = {case:?}\n"));
         fs::write(&config, contents)?;
         let outcome = (|| -> Result<()> {
@@ -513,7 +514,9 @@ pub(super) fn provider(name: &str, run: &Path, records: &mut Records) -> Result<
     if name == "axum" {
         return axum_startup(run, records);
     }
-    let package = root().join("crates").join(format!("fixture-{name}"));
+    let package = fixture_root()
+        .join("crates")
+        .join(format!("fixture-{name}"));
     let Some((exe, staged)) = provider_build(name, &package, run, records)? else {
         return Ok(());
     };

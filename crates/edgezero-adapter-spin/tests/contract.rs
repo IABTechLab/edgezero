@@ -1,7 +1,4 @@
 #[cfg(all(feature = "spin", feature = "test-utils", target_arch = "wasm32"))]
-#[path = "support/outbound/mod.rs"]
-mod outbound_support;
-#[cfg(all(feature = "spin", feature = "test-utils", target_arch = "wasm32"))]
 #[path = "support/request.rs"]
 mod request_support;
 
@@ -570,9 +567,6 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::task::Poll;
 
-        use crate::outbound_support::{
-            self, converted_response_content_type_provenance_holds, deferred_clock_paths_hold,
-        };
         use crate::request_support::dispatch_ingress_source_error;
         use edgezero_adapter_spin::outbound::SpinOutboundClient;
         use edgezero_adapter_spin::outbound::test_support::{
@@ -819,23 +813,6 @@ mod tests {
                     .iter()
                     .all(|slot| resolved(slot).elapsed == Duration::ZERO)
             );
-        }
-
-        #[test]
-        fn deferred_request_and_response_paths_retain_the_injected_clock() {
-            assert!(block_on(deferred_clock_paths_hold()));
-        }
-
-        #[test]
-        fn converted_response_retains_injected_clock() {
-            assert!(block_on(
-                outbound_support::converted_response_retains_injected_clock()
-            ));
-        }
-
-        #[test]
-        fn converted_response_preserves_original_content_type_provenance() {
-            assert!(block_on(converted_response_content_type_provenance_holds()));
         }
 
         #[test]

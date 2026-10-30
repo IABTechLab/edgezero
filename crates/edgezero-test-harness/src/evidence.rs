@@ -533,10 +533,11 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("outbound-record-{}", crate::token()));
         std::fs::create_dir(&directory)?;
         let run = || -> Result<()> {
-            let repository = crate::root().join("../../..").canonicalize()?;
+            let repository = crate::repository_root();
             let script = repository.join("scripts/check_outbound_cutover_evidence.mjs");
             let inventory: Value = serde_json::from_slice(&std::fs::read(
-                repository.join("tests/fixtures/reusable-app/outbound-cutover-cases.json"),
+                repository
+                    .join("crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json"),
             )?)?;
             let candidate = "a".repeat(40);
             let build = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";

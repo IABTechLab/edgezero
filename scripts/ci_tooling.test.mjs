@@ -43,6 +43,54 @@ const format = workflow("format");
 const host = tests.jobs["host-tests"];
 const adapters = tests.jobs["adapter-wasm-tests"];
 
+test("cross-runtime fixtures and acceptance assets have one integration-test home", () => {
+  const home = join(root, "crates/edgezero-test-harness");
+  for (const path of [
+    "fixtures/reusable-app/Cargo.toml",
+    "fixtures/request-fidelity/Cargo.toml",
+    "acceptance/outbound-cutover-cases.json",
+    "acceptance/ts-outbound-qualification-runbook.md",
+  ]) {
+    assert.ok(existsSync(join(home, path)), path);
+  }
+  for (const path of [
+    "tests/fixtures/reusable-app",
+    "tests/fixtures/request-fidelity",
+  ]) {
+    assert.equal(existsSync(join(root, path)), false, path);
+  }
+});
+
+test("every adapter uses the same CI and local integration suite entrypoint", () => {
+  const launcher = "scripts/test_integration.sh";
+  assert.ok(existsSync(join(root, launcher)));
+  assert.equal(
+    existsSync(join(root, "scripts/smoke_test_reusable_app.sh")),
+    false,
+  );
+  const local = readFileSync(join(root, "scripts/run_tests.sh"), "utf8");
+  assert.doesNotMatch(
+    local,
+    /check_adapter_feature_matrix\.sh (cloudflare|fastly|spin) wasm32-/,
+  );
+  for (const adapter of ["axum", "fastly", "cloudflare", "spin"]) {
+    const invocation = `${launcher} --adapter ${adapter} --suite ci`;
+    assert.ok(local.includes(invocation), invocation);
+  }
+  const invocation = `${launcher} --adapter \${{ matrix.adapter }} --suite ci`;
+  assert.equal(
+    adapters.steps.filter((step) => step.run?.includes(invocation)).length,
+    1,
+  );
+  assert.ok(
+    host.steps.some(
+      (step) =>
+        step.if === "matrix.suite == 'axum'" &&
+        step.run?.includes(`${launcher} --adapter axum --suite ci`),
+    ),
+  );
+});
+
 test("explicit Cargo caches are the sole owners in both workflows", () => {
   for (const flow of [tests, format]) {
     for (const job of Object.values(flow.jobs)) {
@@ -97,8 +145,8 @@ test("adapter Clippy caches cover both isolated fixture build roots", () => {
     (step) => step.uses === "actions/cache@v5",
   );
   for (const path of [
-    "tests/fixtures/reusable-app/target/",
-    "tests/fixtures/request-fidelity/target/",
+    "crates/edgezero-test-harness/fixtures/reusable-app/target/",
+    "crates/edgezero-test-harness/fixtures/request-fidelity/target/",
   ]) {
     assert.ok(cache.with.path.split("\n").includes(path), path);
   }

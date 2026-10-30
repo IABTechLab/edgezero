@@ -1250,7 +1250,7 @@ mod tests {
                 "../../../examples/app-demo/crates/app-demo-adapter-cloudflare/wrangler.toml"
             ),
             include_str!(
-                "../../../tests/fixtures/reusable-app/crates/fixture-cloudflare/wrangler.toml"
+                "../../../crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-cloudflare/wrangler.toml"
             ),
         ] {
             let document = source

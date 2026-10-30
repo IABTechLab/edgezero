@@ -201,8 +201,8 @@ mod tests {
             fs::File,
             io::{BufRead, BufReader},
         };
-        let path = crate::root()
-            .join("../../../docs/audits/evidence/2026-10-23-fastly-timer-controls-probes.jsonl");
+        let path = crate::repository_root()
+            .join("docs/audits/evidence/2026-10-23-fastly-timer-controls-probes.jsonl");
         let mut runs: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for line in BufReader::new(File::open(path).unwrap()).lines() {
             let row: Value = serde_json::from_str(&line.unwrap()).unwrap();

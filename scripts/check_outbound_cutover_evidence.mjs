@@ -16,7 +16,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SPEC = "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md";
-const INVENTORY = "tests/fixtures/reusable-app/outbound-cutover-cases.json";
+const INVENTORY =
+  "crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json";
 // Updating the reviewed environment/split set requires a separate policy review.
 const REVIEWED_LEG_SET_SHA256 =
   "5ad5ad13cb3a0ea9d96307f1ec150649a21357490b4b9b26ae59027e0e539ec9";

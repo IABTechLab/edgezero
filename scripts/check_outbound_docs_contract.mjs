@@ -2602,7 +2602,7 @@ for (const adapterPath of outboundAdapterPaths) {
   if (normalizationError !== null) fail(`${adapterPath} ${normalizationError}`)
   const clockTests = adapterPath.includes('spin')
     ? readFileSync(
-        'crates/edgezero-adapter-spin/tests/support/outbound/clock_tests.rs',
+        'crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin-support/src/lib.rs',
         'utf8'
       )
     : adapterSource

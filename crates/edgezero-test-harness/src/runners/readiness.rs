@@ -211,7 +211,7 @@ pub(super) fn run(
 ) -> Result<()> {
     let revision = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(root())
+        .current_dir(fixture_root())
         .output()?;
     require(revision.status.success(), "cannot record source revision")?;
     let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
@@ -234,13 +234,16 @@ pub(super) fn run(
             .env("EDGEZERO_QUALIFICATION_REVISION", &revision),
     )?;
     let binary = stage(
-        &root().join("target/wasm32-wasip1/release/fixture-fastly-outbound-readiness.wasm"),
+        &fixture_root().join("target/wasm32-wasip1/release/fixture-fastly-outbound-readiness.wasm"),
         run,
     )?;
     records.push(json!({"event":"readiness-build", "revision":revision,
         "source_state":"working-tree-characterization", "sdk":"0.13.1", "artifact":artifact(&binary)?}))?;
     let config = run.join("fastly.toml");
-    fs::copy(root().join("crates/fixture-fastly/fastly.toml"), &config)?;
+    fs::copy(
+        fixture_root().join("crates/fixture-fastly/fastly.toml"),
+        &config,
+    )?;
     let log = run.join("readiness.log");
     let outcome = (|| -> Result<()> {
         let port = net::port()?;

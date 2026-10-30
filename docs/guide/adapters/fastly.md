@@ -672,7 +672,7 @@ fn handle(req: fastly::Request, sandbox: &mut Sandbox<App>) -> Result<(), fastly
 }
 ```
 
-The fixture's [`custom_dispatch`](https://github.com/IABTechLab/edgezero/blob/main/tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs)
+The fixture's [`custom_dispatch`](https://github.com/IABTechLab/edgezero/blob/main/crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs)
 is a fuller reference covering logger setup, handled initialization failure,
 response finalization, adapter-owned progressive streaming and post-send work.
 It verifies retained-client follow-up after a committed application-source failure
@@ -696,10 +696,10 @@ Keep adapter, core and SDK versions aligned with the pinned checkout. Run the
 lifecycle fixtures against the checkout being adopted:
 
 ```sh
-./scripts/smoke_test_reusable_app.sh --adapter fastly --suite smoke
+./scripts/test_integration.sh --adapter fastly --suite smoke
 ```
 
-See the [fixture README](https://github.com/IABTechLab/edgezero/tree/main/tests/fixtures/reusable-app)
+See the [fixture README](https://github.com/IABTechLab/edgezero/tree/main/crates/edgezero-test-harness/fixtures/reusable-app)
 for assertions, runtime requirements and evidence files. An unavailable runtime
 or missing reuse is unverified and exits 2. Local fixtures do not guarantee
 provider reuse, deployed resource lifetimes or application workload gains.
@@ -711,7 +711,7 @@ Dynamic-backend capacity is service-wide, and registrations may wait for capacit
 (see Fastly's [dynamic-backend limit behavior](https://www.fastly.com/documentation/reference/compute/errors)).
 A sandbox request limit alone does not bound origin diversity or request fan-out.
 
-The local fixtures are in `tests/fixtures/reusable-app`. Local reuse and streaming
+The local fixtures are in `crates/edgezero-test-harness/fixtures/reusable-app`. Local reuse and streaming
 results do not establish deployed eviction frequency, endpoint-handle validity,
 resource accounting, or performance. Named endpoint delivery must be verified
 separately from echoed stdout. Roll back by restoring the original single-request
