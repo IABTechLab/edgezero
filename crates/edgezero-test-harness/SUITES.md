@@ -123,13 +123,12 @@ EZ-3 core criterion 04 binds the literal two-slot completion/input-order clause,
 known-origin registration SHOULD. EZ-9 runtime criteria 16/17 bind the complete four-adapter wire
 matrix. EZ-1 Axum HTTP/1 criteria 01/04/08 bind actual forwarding, five-byte rejection with
 pipeline safety, and certified-empty forwarding after the inbound deadline. Each adapter's
-EZ-5 unit criterion 09 binds its native head/source bodyless matrix; Axum, Cloudflare and Fastly
-also bind unit criteria 10/11. Spin unit criterion 10 binds its independent-cap host-wire matrix.
+EZ-5 unit criteria 09/10/11 bind native head/source bodyless, independent-cap and normalization
+matrices. Spin combines its adapter-visible shared-head boundary with SDK disposal and real-wire controls.
 Axum EZ-1 criteria 09/10/11/12/14 bind actual ingress through Send, Begin, Follow and batches:
 exact POST bytes and framing, bodyless OPTIONS/DELETE, dispatch before collection, one streamed
 inbound settlement across redirects, cached-empty batching and unread unsupported-option refusal.
-There are 67 ready legs and 444 planned. Spin unit criterion 11,
-EZ-6 criterion 22's four adapter legs and EZ-23 criterion 13 stay planned
+There are 68 ready legs and 443 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criterion 13 stay planned
 for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
@@ -182,7 +181,11 @@ The CLI and HTTP components live in `crates/fixture-spin-async` and
 `crates/fixture-spin-wire` in this workspace; unit/SDK tests remain in the adapter crate.
 Pinned Wasmtime and Spin must already be installed (`WASMTIME_BIN`/`SPIN_BIN` may select them).
 The Rust runner checks every ready `unit/spin` marker in its owning phase and
-reopens the persisted JSONL to validate complete wire and policy inventories.
+reopens the persisted JSONL to validate complete wire, policy and representation inventories.
+Criterion 11 requires both native shared-head tests, the CLI component's native SDK bodyless/205
+proof, and eight real-wire 200/206 representation controls. Pending source polls are distinct from
+delivered items; the 205 producer join is deadline-bounded. Readback rejects missing proof phases,
+foreign origin receipts, altered effective request settings and HTTP response/report disagreement.
 Per-phase logs and artifacts are retained under `outbound/redirect/spin/`,
 with wire records in `wire/events.jsonl`. The synthetic
 full-body probe hit Wasmtime 48.0.2's unsupported intra-component non-numeric future boundary;
@@ -213,7 +216,8 @@ The focused `--suite outbound-wire` remains available for wire-only iteration an
 JSONL to its selected output directory. The full Spin CI suite owns that phase in `wire/`.
 Each adapter must complete 68 exchanges and
 84 ordered origin receipts. Spin additionally records a separate `spin-policy-inventory` with
-26 policy exchanges and 26 correlated receipts, without changing the redirect counters or connection
+26 policy exchanges and 26 correlated receipts, plus a `spin-normalization-inventory` with eight
+200/206 representation exchanges and eight correlated receipts, without changing redirect counters or connection
 limits. Idle-body policy remains an unadopted conditional leg; these bindings
 do not qualify that policy, native optimizer transformation or consumer/hosted behavior.
 Axum, Fastly and Spin execute these bindings in their existing CI jobs. Workerd's command is

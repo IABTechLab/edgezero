@@ -26,7 +26,7 @@ mod sdk {
         ResponseEgressCompletion, ResponseEgressOutcome, ResponseEgressReport,
     };
     use edgezero_core::router::RouterService;
-    use edgezero_core::{Body, EdgeError, ResponseDecoding, action};
+    use edgezero_core::{Body, EdgeError, ResponseDecoding, ResponseMode, action};
     use fixture_spin_support::outbound::canonical_entrypoints_release_retained_handles;
     use futures_util::{StreamExt as _, stream};
     use serde_json::{Value, json};
@@ -70,7 +70,7 @@ mod sdk {
                 return empty_response();
             }
             let method = match path.as_str() {
-                "/get" | "/get-settled" | "/p5" | "/policy" => Method::GET,
+                "/get" | "/get-settled" | "/p5" | "/policy" | "/normalization" => Method::GET,
                 "/head" | "/head-settled" => Method::HEAD,
                 "/post" => Method::POST,
                 _ => return Err(ErrorCode::HttpRequestUriInvalid),
@@ -93,6 +93,9 @@ mod sdk {
             }
             if path == "/policy" {
                 return policy_exchange(uri, &headers).await;
+            }
+            if path == "/normalization" {
+                return normalization_exchange(uri, &headers).await;
             }
             let mut outgoing = OutboundRequest::new(method, uri)
                 .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?;
@@ -234,6 +237,71 @@ mod sdk {
         if streamed {
             request = request.stream_response();
         }
+        let report = response_policy_report(request).await?;
+        json!({
+            "case": case,
+            "request": {
+                "decoding": if original { "original" } else { "decode" },
+                "streamed": streamed,
+                "decoded_cap": 10_u64,
+                "encoded_cap": encoded_cap,
+                "final_cap": (!streamed).then_some(final_cap),
+                "decoder_cap": 0_u64,
+            },
+            "outcome": report["outcome"],
+            "error_stage": report["error_stage"],
+            "source": report["source"],
+        })
+        .to_string()
+        .into_response()
+    }
+
+    async fn normalization_exchange(uri: Uri, headers: &Fields) -> Result<Response, ErrorCode> {
+        let case = headers
+            .get("x-normalization-case")
+            .first()
+            .and_then(|value| from_utf8(value).ok())
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| *value < 8)
+            .ok_or(ErrorCode::HttpRequestUriInvalid)?;
+        let original = case & 2 != 0;
+        let streamed = case & 1 != 0;
+        let passthrough = original || case >= 4;
+        let mut request = OutboundRequest::new(Method::GET, uri)
+            .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?
+            .timeout(Duration::from_secs(3))
+            .response_decoding(if original {
+                ResponseDecoding::Original
+            } else {
+                ResponseDecoding::Decode
+            })
+            .proxy_marker(edgezero_core::OutboundProxyMarker::Off)
+            .max_response_bytes(256)
+            .max_encoded_response_bytes(256)
+            .max_decoded_response_bytes(if passthrough { 1 } else { 11 });
+        if passthrough {
+            request = request.max_decoder_bytes(0);
+        }
+        if streamed {
+            request = request.stream_response();
+        }
+        let parts = request.into_parts();
+        let configuration = json!({
+            "decoding":if parts.response_decoding == ResponseDecoding::Original {"original"} else {"decode"},
+            "streamed":parts.response_mode == ResponseMode::Streamed,
+            "buffered_cap":if let ResponseMode::Buffered {max_bytes} = parts.response_mode {Some(max_bytes)} else {None},
+            "decoded_cap":parts.max_decoded_response_bytes,
+            "encoded_cap":parts.max_encoded_response_bytes,
+            "decoder_cap":parts.max_decoder_bytes,
+        });
+        let request = OutboundRequest::from_parts(parts)
+            .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?;
+        json!({"case":case,"request":configuration,"report":response_policy_report(request).await?})
+            .to_string()
+            .into_response()
+    }
+
+    async fn response_policy_report(request: OutboundRequest) -> Result<Value, ErrorCode> {
         let operation = async {
             let client = HttpClient::with_client(SpinOutboundClient::new());
             let response = match client.send(request).await {
@@ -257,26 +325,15 @@ mod sdk {
                 Err(error) => (p5_error(&error), Some("body")),
             }
         };
-        let ((outcome, error_stage), polls, released) =
+        let ((outcome, error_stage), polls, items, released) =
             observe_response_head(operation).await.map_err(|_error| {
                 ErrorCode::InternalError(Some("response policy probe failed".to_owned()))
             })?;
-        json!({
-            "case": case,
-            "request": {
-                "decoding": if original { "original" } else { "decode" },
-                "streamed": streamed,
-                "decoded_cap": 10_u64,
-                "encoded_cap": encoded_cap,
-                "final_cap": (!streamed).then_some(final_cap),
-                "decoder_cap": 0_u64,
-            },
+        Ok(json!({
             "outcome": outcome,
             "error_stage": error_stage,
-            "source": { "polls": polls, "released": released },
-        })
-        .to_string()
-        .into_response()
+            "source": { "polls": polls, "items":items, "released": released },
+        }))
     }
 
     async fn p5_exchange(uri: Uri, headers: &Fields) -> Result<Response, ErrorCode> {

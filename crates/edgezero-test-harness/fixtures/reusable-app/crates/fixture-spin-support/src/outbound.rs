@@ -670,7 +670,7 @@ mod native_policy_tests {
                         let end = start.checked_add(duration).ok_or_else(|| {
                             EdgeError::internal(anyhow::anyhow!("Spin fixture deadline overflow"))
                         })?;
-                        let (outcome, polls, released) =
+                        let (outcome, polls, items, released) =
                             test_support::observe_response_head(process_response(
                                 native,
                                 method.clone(),
@@ -710,6 +710,7 @@ mod native_policy_tests {
                                 == expected_length
                             && response.body().as_bytes() == Some(b"".as_slice())
                             && polls == 0
+                            && items == 0
                             && released
                             && writer.stream_writer.write_all(vec![1]).now_or_never()
                                 == Some(vec![1]);
@@ -725,6 +726,88 @@ mod native_policy_tests {
                         }
                         drop((writer, response_done));
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn check_native_reset_content_disposition() -> Result<(), EdgeError> {
+        for choice in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 0 },
+                ResponseMode::Streamed,
+            ] {
+                for length in [None, Some("0"), Some("1073741824")] {
+                    let fields = Fields::new();
+                    fields
+                        .append("content-encoding", b"gzip")
+                        .map_err(EdgeError::internal)?;
+                    if let Some(value) = length {
+                        fields
+                            .append("content-length", value.as_bytes())
+                            .map_err(EdgeError::internal)?;
+                    }
+                    let (mut writer, contents, trailers) = BodyWriter::new();
+                    let (native, response_done) = Response::new(fields, Some(contents), trailers);
+                    native.set_status_code(205).map_err(|()| {
+                        EdgeError::internal(anyhow::anyhow!("reset fixture status rejected"))
+                    })?;
+                    // More than one production read proves that 205 disposal never drains to EOF.
+                    let producer = spin_sdk::wasip3::spawn_local(async move {
+                        writer.stream_writer.write_all(vec![1; 64 * 1024]).await
+                    });
+                    let time = native_time(MonotonicClock::default());
+                    let request = OutboundRequest::get("https://example.com/")?
+                        .timeout(Duration::from_secs(3));
+                    let budget = dispatch_budget(&request, time.clock().now(), None)?;
+                    let (outcome, polls, items, released) =
+                        test_support::observe_response_head(process_response(
+                            native,
+                            Method::GET,
+                            OutboundProxyMarker::Off,
+                            choice,
+                            mode,
+                            budget,
+                            0,
+                            24,
+                            None,
+                            Some(0),
+                            Some(0),
+                            None,
+                            None,
+                            time.clone(),
+                        ))
+                        .await?;
+                    let response = outcome?;
+                    let expected_items = usize::from(length != Some("1073741824"));
+                    if items != expected_items || !released || (expected_items == 0 && polls != 0) {
+                        return Err(EdgeError::internal(anyhow::anyhow!(
+                            "native reset disposition retained its SDK consumer or read the wrong number of items"
+                        )));
+                    }
+                    let mut previous = time.clock().now();
+                    let unread = test_support::race_deadline(
+                        producer,
+                        budget,
+                        &time,
+                        &mut previous,
+                        |_result| None,
+                    )
+                    .await?;
+                    if !unread.is_some_and(|bytes| !bytes.is_empty())
+                        || response.headers().get("content-length")
+                            != Some(&HeaderValue::from_static("0"))
+                        || response.headers().get("content-encoding")
+                            != Some(&HeaderValue::from_static("gzip"))
+                        || response.body().as_bytes() != Some(b"".as_slice())
+                        || !response.into_bytes_bounded(0).await?.is_empty()
+                    {
+                        return Err(EdgeError::internal(anyhow::anyhow!(
+                            "native reset disposition polled, drained or retained the wrong SDK resources"
+                        )));
+                    }
+                    drop(response_done);
                 }
             }
         }
@@ -919,6 +1002,8 @@ pub(crate) mod handoff_tests {
             }
         }
         super::native_policy_tests::check_native_bodyless_precedes_caps_and_polling().await?;
+        super::native_policy_tests::check_native_reset_content_disposition().await?;
+        println!("ez_5_acceptance_11_native_spin: passed");
         println!("ez_5_acceptance_09_spin: passed");
         Ok(())
     }

@@ -12,6 +12,23 @@
 
 ## Status and Authority
 
+### Spin Normalization Acceptance (2026-10-30)
+
+EZ-5 acceptance 11's `unit/spin` leg now binds the existing shared CI invocation. Its two
+colocated matrices cover normalization and body disposition through the same private
+head-construction boundary as production; forbidden/raw fields are injected only there.
+Native SDK controls retain the original reader, trailer and completion ownership, including
+zero-read bodyless suppression and bounded one-item 205 disposal. Count delivered items
+separately from pending polls and bound producer teardown with the original deadline.
+Eight actual HTTP 200/206 representation controls cross both decoding choices and response
+modes without altering the 68/84 redirect or 26/26 independent-cap inventories.
+
+The controller requires every native/SDK/wire proof in its owning phase and reopens persisted
+wire evidence, binding origin receipts, effective request settings and HTTP report bytes.
+Mutation tests reject missing/duplicated cases, forged phases and altered fields or ownership.
+The inventory now has 68 ready and 443 planned legs. Frozen requirements, precedence-table
+assertions, optional metadata decisions, provider support and hosted qualification are unchanged.
+
 ### Integration Test Ownership (2026-10-30)
 
 The approved [integration consolidation plan](2026-10-30-integration-test-consolidation.md)

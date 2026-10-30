@@ -37,6 +37,9 @@ use std::time::Duration;
 use edgezero_core::error::EdgeError;
 
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+mod head;
+
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 mod scheduling;
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
 use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
@@ -380,6 +383,7 @@ mod response_probe {
     use std::cell::{Cell, RefCell};
     use std::future::Future;
     use std::rc::Rc;
+    use std::task::Poll;
 
     use edgezero_core::EdgeError;
     use edgezero_core::body::BodyStream;
@@ -392,6 +396,7 @@ mod response_probe {
     #[derive(Clone, Default)]
     pub(super) struct HeadProbe {
         attached: Rc<Cell<bool>>,
+        items: Rc<Cell<usize>>,
         polls: Rc<Cell<usize>>,
         released: Rc<Cell<bool>>,
     }
@@ -401,6 +406,10 @@ mod response_probe {
     pub(super) struct ProbeInstallation(HeadProbe);
 
     impl HeadProbe {
+        pub(super) fn items(&self) -> usize {
+            self.items.get()
+        }
+
         pub(super) fn polls(&self) -> usize {
             self.polls.get()
         }
@@ -442,7 +451,7 @@ mod response_probe {
 
     pub(super) async fn observe_operation<F>(
         operation: F,
-    ) -> Result<(F::Output, usize, bool), EdgeError>
+    ) -> Result<(F::Output, usize, usize, bool), EdgeError>
     where
         F: Future,
     {
@@ -454,7 +463,7 @@ mod response_probe {
                 "Spin response probe did not observe a native head"
             )));
         }
-        Ok((result, probe.polls(), probe.released()))
+        Ok((result, probe.polls(), probe.items(), probe.released()))
     }
 
     pub(super) fn observe_response_head(mut encoded: BodyStream) -> BodyStream {
@@ -465,7 +474,11 @@ mod response_probe {
         let lease = SourceLease(probe);
         poll_fn(move |cx| {
             lease.0.polls.set(lease.0.polls.get().saturating_add(1));
-            encoded.as_mut().poll_next(cx)
+            let result = encoded.as_mut().poll_next(cx);
+            if matches!(result, Poll::Ready(Some(_))) {
+                lease.0.items.set(lease.0.items.get().saturating_add(1));
+            }
+            result
         })
         .boxed_local()
     }
@@ -485,9 +498,36 @@ mod response_probe {
         }
 
         #[test]
+        fn response_probe_distinguishes_pending_polls_from_delivered_items() {
+            let ((), polls, items, released) = block_on(observe_operation(async {
+                let mut pending_once = true;
+                let mut source = observe_response_head(
+                    poll_fn(move |context| {
+                        if pending_once {
+                            pending_once = false;
+                            context.waker().wake_by_ref();
+                            Poll::Pending
+                        } else {
+                            Poll::Ready(Some(Ok(Bytes::from_static(b"x"))))
+                        }
+                    })
+                    .boxed_local(),
+                );
+                assert_eq!(
+                    source.next().await.expect("item").expect("bytes"),
+                    b"x".as_slice()
+                );
+            }))
+            .expect("attached source");
+            assert_eq!(polls, 2);
+            assert_eq!(items, 1);
+            assert!(released);
+        }
+
+        #[test]
         fn response_probe_tracks_unread_and_consumed_source_release() {
             for consume in [false, true] {
-                let ((), polls, released) = block_on(observe_operation(async {
+                let ((), polls, items, released) = block_on(observe_operation(async {
                     let mut source =
                         observe_response_head(iter([Ok(Bytes::from_static(b"x"))]).boxed_local());
                     if consume {
@@ -500,6 +540,7 @@ mod response_probe {
                 }))
                 .expect("attached source");
                 assert_eq!(polls, usize::from(consume));
+                assert_eq!(items, usize::from(consume));
                 assert!(released);
             }
         }
@@ -546,9 +587,9 @@ mod spin_impl {
     use edgezero_core::outbound::{
         IndependentOutboundProgress, OutboundBatch, OutboundBatchDriverEvent,
         OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
-        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundPending,
-        OutboundPreparedBatch, OutboundProgressRuntime, OutboundRequest, OutboundRequestParts,
-        OutboundResponseContext, OutboundSendMode, OutboundTime,
+        OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
+        OutboundRequest, OutboundRequestParts, OutboundResponseContext, OutboundSendMode,
+        OutboundTime,
     };
     use edgezero_core::time::{DispatchBudget, MonotonicClock};
     use futures_util::StreamExt as _;
@@ -1106,17 +1147,7 @@ mod spin_impl {
         let encoded = super::response_probe::observe_response_head(native_encoded);
         #[cfg(not(feature = "test-utils"))]
         let encoded = native_encoded;
-        OutboundHead::new(
-            status,
-            OutboundHeaderInput::new(
-                "spin",
-                native_headers,
-                OutboundHeaderFidelity::AdapterVisibleFields,
-            ),
-            encoded,
-            context,
-            OutboundExchangeOwner::new(|| {}),
-        )
+        super::head::response_head(status, native_headers, encoded, context)
     }
 
     fn response_headers(response: &Response) -> Result<HeaderMap, EdgeError> {

@@ -663,7 +663,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 444,
+    planned: 443,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -1028,7 +1028,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /444 other legs remain planned/);
+  assert.match(manifest.status, /443 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1250,10 +1250,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 67);
+  assert.equal(ready.length, 68);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    444,
+    443,
   );
   assert.ok(
     ready.every(
@@ -1311,10 +1311,6 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
           row.case_id === `EZ-5/acceptance/${criterion}` &&
           row.environment === `unit/${adapter}`,
       );
-      if (adapter === "spin" && criterion === "11") {
-        assert.equal(row?.implementation, "planned", `${criterion}@${adapter}`);
-        continue;
-      }
       assert.equal(row?.implementation, "ready", `${criterion}@${adapter}`);
       assert.equal(row.applicability, "blocking");
       assert.equal(row.approval, null);
@@ -1325,12 +1321,21 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
           row.sentinel,
           criterion === "09"
             ? "ez_5_acceptance_09_spin"
-            : "ez_5_acceptance_10_unit_spin",
+            : criterion === "10"
+              ? "ez_5_acceptance_10_unit_spin"
+              : "ez_5_acceptance_11_wire_spin",
         );
         assert.equal(
           row.artifact_path,
           `outbound/redirect/spin/${criterion === "09" ? "async.log" : "wire/events.jsonl"}`,
         );
+        if (criterion === "11") {
+          assert.deepEqual(row.additional_sentinels, [
+            "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence",
+            "outbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps",
+            "ez_5_acceptance_11_native_spin",
+          ]);
+        }
         continue;
       }
       assert.equal(row.artifact_path, `outbound/unit/${adapter}/raw.log`);
@@ -1454,10 +1459,11 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
   assert.match(ci, /let\s+wire_log\s*=\s*phase\(\s*"spin",\s*"wire"/);
   assert.match(
     ci,
-    /validate_markers\(\s*&inventory,\s*&fs::read_to_string\(async_log\)\?,\s*&fs::read_to_string\(wire_log\)\?,?\s*\)\?/,
+    /validate_markers\(\s*&inventory,\s*&fs::read_to_string\(native_log\)\?,\s*&fs::read_to_string\(async_log\)\?,\s*&fs::read_to_string\(wire_log\)\?,?\s*\)\?/,
   );
   assert.match(ci, /Some\("EZ-5\/acceptance\/09"\)\s*=>\s*async_log/);
   assert.match(ci, /Some\("EZ-5\/acceptance\/10"\)\s*=>\s*wire_log/);
+  assert.match(ci, /Some\("EZ-5\/acceptance\/11"\)\s*=>\s*wire_log/);
 });
 test("rejects deletion of reviewed split cases or environment legs", () => {
   const path = new URL(

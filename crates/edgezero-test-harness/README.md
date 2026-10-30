@@ -36,6 +36,12 @@ does not implement. Preserve its WASM compile/Clippy coverage without claiming e
 the SDK phase runs the existing executable contract/resource targets, and the separate
 shared-scenario phase requires all eight migrated wrapper tests.
 
+Spin normalization acceptance combines colocated shared-head tests for provider-inexpressible
+fields, native SDK bodyless/205 disposal, and eight actual HTTP representation controls. The
+existing 68 redirect exchanges and 26 independent-cap cases remain separate inventories. One
+CI invocation checks every required proof in its owning phase; this adds no header-fidelity or
+hosted qualification claim.
+
 Use `--suite outbound-wire`, `--suite ingress-fidelity` or the other focused suites for
 iteration. See [suite assertions and runtime setup](SUITES.md) for their exact contracts,
 provider-specific tools, retained negative observations and hosted qualification limits.

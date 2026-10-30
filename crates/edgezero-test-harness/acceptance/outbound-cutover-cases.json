@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09, Axum/Cloudflare/Fastly unit acceptance 10/11 and Spin unit acceptance 10 through the real host-wire matrix, EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 444 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 443 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -4999,11 +4999,16 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-5-acceptance-11-unit-spin",
-      "sentinel": "ez_5_acceptance_11_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_5_acceptance_11_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "ez_5_acceptance_11_wire_spin",
+      "additional_sentinels": [
+        "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence",
+        "outbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps",
+        "ez_5_acceptance_11_native_spin"
+      ],
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "**Unit and each adapter's actual normalization/response-policy path, both decoding choices and both response modes.** `Connection: content-encoding, content-length, etag` removes those fields before coding/length interpretation; a nominated malformed length does not become a framing error, and removed fields are never restored. A separate non-UTF-8 `ETag` is dropped. Missing or nominated-away coding is classified as identity and retains its decoded cap. Malformed surviving `Content-Length` still fails, and non-UTF-8 `Content-Encoding` retains F's passthrough classification rather than being silently dropped. Valid surviving representation fields remain unchanged in original mode and on a 206. A 204 still removes length and suppresses its body; a 205 still normalizes length to zero and preserves F's declared-body evidence and disposition; HEAD/304 keep bodyless handling without payload-cap rejection or body polling. EZ-5.9's separately adopted metadata change is the only permitted HEAD/304 difference. Keep F's `response_normalization_precedence_table` assertions unchanged. Provider-inexpressible raw fields are injected at the adapter-visible/shared-head unit boundary; provider-visible controls retain the existing header-fidelity limitations. These cases make no new raw-header fidelity claim.",
-      "artifact_path": "outbound/EZ-5/acceptance/11/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {

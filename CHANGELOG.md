@@ -102,6 +102,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Verify Spin's independent decoded, encoded and buffered caps through 26 real host-wire cases,
   including original gzip, declared zero-poll rejection and source release. Preserve the separate
   68-exchange redirect inventory; acceptance readiness does not qualify hosted behavior.
+- Bind Spin normalization acceptance to colocated shared-head tests, native SDK bodyless/205
+  disposal and eight real-wire 200/206 representation controls. Validate all owning phases,
+  effective settings, source release and persisted HTTP evidence without changing requirements,
+  raw-header fidelity claims or hosted qualification.
 - Extend bodyless policy through all four native adapter head/source paths and the full policy
   matrix through Axum, Cloudflare and Fastly. Keep unsupported
   raw fields explicitly shared-head-only, distinguish adapter buffer failures from reporter limits,

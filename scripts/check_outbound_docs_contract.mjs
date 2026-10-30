@@ -1094,8 +1094,20 @@ function observationCutoffContract(coreProduction) {
   }
 }
 
-function headerNormalizationContractError(source, fidelity) {
-  const code = productionCode(source)
+function headerNormalizationContractError(source, fidelity, headSource = null) {
+  let code = productionCode(source)
+  if (headSource !== null) {
+    if (
+      !code.includes('mod head;') ||
+      !code.includes(
+        'super::head::response_head(status, native_headers, encoded, context)'
+      ) ||
+      (code.match(/super::head::response_head\s*\(/gu)?.length ?? 0) !== 1
+    ) {
+      return 'must delegate unchanged native fields, source and context to its single head boundary'
+    }
+    code += '\n' + productionCode(headSource)
+  }
   if (
     (code.match(/OutboundHeaderInput::new\(/gu)?.length ?? 0) !== 1 ||
     (code.match(/OutboundHead::new\(/gu)?.length ?? 0) !== 1 ||
@@ -1121,6 +1133,8 @@ function runHeaderNormalizationContractSelfTests() {
     OutboundHead::new(status, headers, encoded, context, owner)
   `
   const unknown = 'ProviderFieldBoundariesUnknown'
+  const delegated =
+    'mod head; fn response_head() { super::head::response_head(status, native_headers, encoded, context) }'
   const cases = [
     [source, unknown, true],
     [
@@ -1158,10 +1172,16 @@ function runHeaderNormalizationContractSelfTests() {
     ],
     [`/* ${source} */`, unknown, false],
     [`const TEXT: &str = r#"${source}"#;`, unknown, false],
+    [delegated, unknown, true, source],
+    [delegated.replace('native_headers', 'normalized'), unknown, false, source],
+    [delegated.replace('mod head;', ''), unknown, false, source],
+    [delegated, unknown, false, source + source],
+    [delegated, 'AdapterVisibleFields', false, source],
+    [delegated + '\nnormalize_response_headers();', unknown, false, source],
   ]
-  for (const [index, [fixture, fidelity, valid]] of cases.entries()) {
+  for (const [index, [fixture, fidelity, valid, head]] of cases.entries()) {
     if (
-      (headerNormalizationContractError(fixture, fidelity) === null) !==
+      (headerNormalizationContractError(fixture, fidelity, head) === null) !==
       valid
     ) {
       fail(`head-first header checker self-test ${index} failed`)
@@ -2597,7 +2617,13 @@ for (const adapterPath of outboundAdapterPaths) {
     : 'AdapterVisibleFields'
   const normalizationError = headerNormalizationContractError(
     adapterSource,
-    fidelity
+    fidelity,
+    adapterPath.includes('spin')
+      ? readFileSync(
+          'crates/edgezero-adapter-spin/src/outbound/head.rs',
+          'utf8'
+        )
+      : null
   )
   if (normalizationError !== null) fail(`${adapterPath} ${normalizationError}`)
   const clockTests = adapterPath.includes('spin')

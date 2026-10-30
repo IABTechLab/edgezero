@@ -2,6 +2,8 @@ use super::*;
 use crate::net::WireOrigins;
 use std::io::Read as _;
 
+mod normalization;
+
 fn body(reply: &Value) -> Result<Vec<u8>> {
     Ok(serde_json::from_value(reply["body_bytes"].clone())?)
 }
@@ -241,6 +243,10 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
         .filter(|event| event["event"] == "spin-wire-case")
         .collect::<Vec<_>>();
     require(wire.len() == 68, "incomplete Spin redirect matrix")?;
+    let origin_port = wire[0]["origin_requests"][0][0]
+        .as_u64()
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or("missing Spin origin port")?;
     replay_spin_wire(wire)?;
     let mut cases = Vec::new();
     let mut receipts = 0;
@@ -275,6 +281,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
         receipts += requests.len();
     }
     validate_policy_inventory(&cases, receipts)?;
+    normalization::validate_artifact(events, origin_port)?;
     Ok(())
 }
 
@@ -897,6 +904,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         matrix.run()?;
         let baseline = (matrix.exchanges, matrix.dispatches);
         let policy = spin_policy(port, &origins, matrix.records)?;
+        normalization::run(port, &origins, matrix.records)?;
         running.check_running()?;
         Ok((baseline, policy))
     })();
@@ -915,6 +923,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         "origin_requests":policy_receipts,"qualification":false}),
     )?;
     println!("ez_5_acceptance_10_unit_spin: passed");
+    println!("ez_5_acceptance_11_wire_spin: passed");
     Ok(())
 }
 
@@ -1258,6 +1267,7 @@ mod tests {
         }));
         values.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         values.push(json!({"event":"spin-policy-inventory","status":"pass","exchanges":26,"origin_requests":26,"qualification":false}));
+        values.extend(normalization::tests::artifact(first));
         values
     }
 

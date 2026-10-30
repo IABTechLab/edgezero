@@ -39,7 +39,12 @@ fn validate_ingress(path: &Path, baseline: &Path) -> Result<()> {
     )
 }
 
-fn validate_markers(inventory: &Value, async_log: &str, wire_log: &str) -> Result<()> {
+fn validate_markers(
+    inventory: &Value,
+    native_log: &str,
+    async_log: &str,
+    wire_log: &str,
+) -> Result<()> {
     let cases = inventory["cases"]
         .as_array()
         .ok_or("missing acceptance inventory")?;
@@ -51,6 +56,7 @@ fn validate_markers(inventory: &Value, async_log: &str, wire_log: &str) -> Resul
         let log = match case["case_id"].as_str() {
             Some("EZ-5/acceptance/09") => async_log,
             Some("EZ-5/acceptance/10") => wire_log,
+            Some("EZ-5/acceptance/11") => wire_log,
             _ => return Err("ready Spin criterion has no implemented CI phase".into()),
         };
         let mut names = vec![case["sentinel"].as_str().ok_or("missing Spin sentinel")?];
@@ -62,12 +68,30 @@ fn validate_markers(inventory: &Value, async_log: &str, wire_log: &str) -> Resul
                 names.push(name.as_str().ok_or("invalid additional Spin sentinel")?);
             }
         }
+        if case["case_id"] == "EZ-5/acceptance/11" {
+            require(names.len() == 4 && [
+                "ez_5_acceptance_11_wire_spin",
+                "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence",
+                "outbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps",
+                "ez_5_acceptance_11_native_spin",
+            ].iter().all(|name| names.contains(name)), "normalization criterion must retain all owning-phase proofs")?;
+        }
         for name in names {
             require(
                 !name.is_empty() && !name.contains(char::is_whitespace),
                 "invalid Spin sentinel name",
             )?;
-            let expected = format!("{name}: passed");
+            let (log, expected) = match (case["case_id"].as_str(), name) {
+                (
+                    Some("EZ-5/acceptance/11"),
+                    "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence"
+                    | "outbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps",
+                ) => (native_log, format!("test {name} ... ok")),
+                (Some("EZ-5/acceptance/11"), "ez_5_acceptance_11_native_spin") => {
+                    (async_log, format!("{name}: passed"))
+                }
+                _ => (log, format!("{name}: passed")),
+            };
             require(
                 log.lines()
                     .any(|line| line.trim_end_matches('\r') == expected),
@@ -173,12 +197,12 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         run,
         records,
     )?;
-    phase(
+    let native_log = phase(
         "spin",
         "native-tests",
         Command::new("bash").args([
             "scripts/run_test_nonzero.sh",
-            "batch_preflight_precedence_and_indices",
+            "batch_preflight_precedence_and_indices\noutbound::head::tests::adapter_visible_normalization_preserves_policy_precedence\noutbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps",
             "cargo",
             "test",
             "--offline",
@@ -303,6 +327,7 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
     )?)?;
     validate_markers(
         &inventory,
+        &fs::read_to_string(native_log)?,
         &fs::read_to_string(async_log)?,
         &fs::read_to_string(wire_log)?,
     )?;
@@ -390,19 +415,77 @@ mod tests {
             {"case_id":"EZ-5/acceptance/09","environment":"unit/spin","implementation":"ready","sentinel":"async_case"},
             {"case_id":"EZ-5/acceptance/10","environment":"unit/spin","implementation":"ready","sentinel":"wire_case"}
         ]});
-        validate_markers(&inventory, "async_case: passed\n", "wire_case: passed\n").unwrap();
+        validate_markers(
+            &inventory,
+            "",
+            "async_case: passed\n",
+            "wire_case: passed\n",
+        )
+        .unwrap();
         for (async_log, wire_log) in [
             ("", "async_case: passed\nwire_case: passed\n"),
             ("async_case: passed\nwire_case: passed\n", ""),
             (" async_case: passed\n", "wire_case: passed\n"),
             ("async_case: failed\n", "wire_case: passed\n"),
         ] {
-            assert!(validate_markers(&inventory, async_log, wire_log).is_err());
+            assert!(validate_markers(&inventory, "", async_log, wire_log).is_err());
         }
-        assert!(validate_markers(&json!({"cases":[]}), "", "").is_err());
+        assert!(validate_markers(&json!({"cases":[]}), "", "", "").is_err());
         let mut unknown = inventory;
-        unknown["cases"][0]["case_id"] = json!("EZ-5/acceptance/11");
-        assert!(validate_markers(&unknown, "async_case: passed\n", "wire_case: passed\n").is_err());
+        unknown["cases"][0]["case_id"] = json!("EZ-5/acceptance/12");
+        assert!(
+            validate_markers(&unknown, "", "async_case: passed\n", "wire_case: passed\n").is_err()
+        );
+    }
+
+    #[test]
+    fn normalization_markers_require_every_proof_in_its_own_phase() {
+        let names = [
+            "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence",
+            "outbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps",
+        ];
+        let native = names.map(|name| format!("test {name} ... ok\n")).concat();
+        let sdk = "ez_5_acceptance_11_native_spin: passed\n";
+        let wire = "ez_5_acceptance_11_wire_spin: passed\n";
+        let inventory = json!({"cases":[{"case_id":"EZ-5/acceptance/11","environment":"unit/spin","implementation":"ready","sentinel":"ez_5_acceptance_11_wire_spin","additional_sentinels":[names[0],names[1],"ez_5_acceptance_11_native_spin"]}]});
+        validate_markers(&inventory, &native, sdk, wire).unwrap();
+        for missing in 0..3 {
+            let mut changed = inventory.clone();
+            changed["cases"][0]["additional_sentinels"]
+                .as_array_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(
+                validate_markers(&changed, &native, sdk, wire).is_err(),
+                "omitted mandatory normalization proof {missing}"
+            );
+        }
+        let mut omitted = inventory.clone();
+        omitted["cases"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("additional_sentinels");
+        assert!(validate_markers(&omitted, &native, sdk, wire).is_err());
+        for (native_log, sdk_log, wire_log) in [
+            ("", sdk, wire),
+            (&native, "", wire),
+            (&native, sdk, ""),
+            (sdk, &native, wire),
+            (wire, sdk, &native),
+        ] {
+            assert!(validate_markers(&inventory, native_log, sdk_log, wire_log).is_err());
+        }
+        let missing = native.lines().skip(1).collect::<Vec<_>>().join("\n");
+        assert!(validate_markers(&inventory, &missing, sdk, wire).is_err());
+        assert!(
+            validate_markers(
+                &inventory,
+                &native.replace(" ... ok", " ... FAILED"),
+                sdk,
+                wire
+            )
+            .is_err()
+        );
     }
 
     #[test]

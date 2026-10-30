@@ -28,7 +28,10 @@ pub const READY_ITEM_YIELD_QUOTA: usize = super::READY_ITEM_YIELD_QUOTA;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 #[doc(hidden)]
 #[inline]
-pub async fn observe_response_head<F>(operation: F) -> Result<(F::Output, usize, bool), EdgeError>
+/// Returns the outcome, poll attempts, delivered items and source-release state.
+pub async fn observe_response_head<F>(
+    operation: F,
+) -> Result<(F::Output, usize, usize, bool), EdgeError>
 where
     F: Future,
 {

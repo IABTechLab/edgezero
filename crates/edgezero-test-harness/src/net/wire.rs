@@ -480,6 +480,30 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
     let mut pending = None;
     let mut policy_reject = false;
     match parts.as_slice() {
+        ["representation", code @ ("200" | "206"), token] => {
+            require(
+                !token.is_empty() && token.len() <= 128,
+                "invalid representation token",
+            )?;
+            status = code.parse()?;
+            body = GZIP_ELEVEN.to_vec();
+            for (name, value) in [
+                ("Content-Encoding", "gzip"),
+                ("Content-Length", "23"),
+                ("Content-Range", "bytes 0-22/46"),
+                ("ETag", "\"strong\""),
+                ("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                ("Vary", "Accept-Encoding"),
+                ("Accept-Ranges", "bytes"),
+                ("Cache-Control", "public, max-age=60"),
+                (
+                    "Content-Digest",
+                    "sha-256=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:",
+                ),
+            ] {
+                fields.push((name, value.to_owned()));
+            }
+        }
         [
             "policy",
             coding @ ("identity" | "gzip"),
@@ -681,6 +705,37 @@ mod tests {
             b"POST /post HTTP/1.1\r\nContent-Length: 14\r\n\r\nupload-control",
         );
         assert_eq!(origins.take_wire().unwrap()["payload"], "upload-control");
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn representation_origin_preserves_status_fields_and_encoded_body() {
+        let origins = WireOrigins::start().unwrap();
+        for status in [200, 206] {
+            let request = format!("GET /p5/representation/{status}/control HTTP/1.1\r\n\r\n");
+            let response = exchange(&origins, 0, request.as_bytes());
+            let split = response
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let head = std::str::from_utf8(&response[..split]).unwrap();
+            assert!(head.starts_with(&format!("HTTP/1.1 {status} Fixture\r\n")));
+            for field in [
+                "Content-Encoding: gzip",
+                "Content-Length: 23",
+                "ETag: \"strong\"",
+                "Content-Range: bytes 0-22/46",
+                "Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT",
+                "Vary: Accept-Encoding",
+                "Accept-Ranges: bytes",
+                "Cache-Control: public, max-age=60",
+                "Content-Digest: sha-256=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:",
+            ] {
+                assert!(head.contains(field), "missing {field}");
+            }
+            assert_eq!(&response[split + 4..], GZIP_ELEVEN);
+        }
+        assert_eq!(origins.take_requests().len(), 2);
         origins.finish().unwrap();
     }
 
