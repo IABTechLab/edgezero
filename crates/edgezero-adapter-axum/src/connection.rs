@@ -279,8 +279,14 @@ mod tests {
     use edgezero_core::error::EdgeError;
     use edgezero_core::extractor::State;
     use edgezero_core::http::Response as CoreResponse;
-    use edgezero_core::http::{HeaderMap, Method, StatusCode, Uri, Version, response_builder};
+    use edgezero_core::http::{
+        HeaderMap, Method, Request as CoreRequest, StatusCode, Uri, Version, response_builder,
+    };
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
+    use edgezero_core::outbound::{
+        OutboundBatchTermination, OutboundCollectedSlot, OutboundImageOptimizerOptions,
+        OutboundRedirectAction, OutboundRedirectLimit, OutboundRequest,
+    };
     use edgezero_core::response_egress::{
         ResponseEgressAttempt, ResponseEgressCompletion, ResponseEgressHead,
         ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressOutcome,
@@ -289,6 +295,7 @@ mod tests {
     use edgezero_core::router::{RouteMetadata, RouterService};
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::future::join;
+    use futures_util::FutureExt as _;
     use futures_util::stream::{pending, poll_fn, repeat_with};
     use hyper::Request;
     use hyper::Response;
@@ -297,6 +304,7 @@ mod tests {
     use hyper::service::service_fn;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Notify;
     use tokio::task::{LocalSet, spawn_local};
     use tokio::time::timeout;
 
@@ -318,6 +326,31 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    struct ForwardReadProbe {
+        bytes: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        eofs: Arc<AtomicUsize>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    struct ForwardReceipt {
+        body: Bytes,
+        headers: HeaderMap,
+        method: Method,
+        uri: Uri,
+    }
+
+    #[derive(Clone)]
+    enum ForwardReply {
+        Empty,
+        Paused {
+            received: Arc<Notify>,
+            release: Arc<Notify>,
+        },
+        Redirect(Uri),
+    }
+
+    #[derive(Clone, Default)]
     struct RecordingObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
 
     struct SourceDropProbe(Arc<AtomicUsize>);
@@ -335,6 +368,31 @@ mod tests {
     impl Drop for SourceDropProbe {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ForwardReadProbe {
+        fn observe(&self, request: CoreRequest) -> CoreRequest {
+            let (parts, inbound_body) = request.into_parts();
+            let mut source = inbound_body.into_stream().expect("actual streamed ingress");
+            let observed = self.clone();
+            let released = SourceDropProbe(Arc::clone(&self.drops));
+            let body = Body::from_stream(poll_fn(move |cx| {
+                let _keep_source_witness = &released;
+                observed.polls.fetch_add(1, Ordering::SeqCst);
+                let result = source.as_mut().poll_next(cx);
+                match &result {
+                    Poll::Ready(Some(Ok(bytes))) => {
+                        observed.bytes.fetch_add(bytes.len(), Ordering::SeqCst);
+                    }
+                    Poll::Ready(None) => {
+                        observed.eofs.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Poll::Ready(Some(Err(_))) | Poll::Pending => {}
+                }
+                result
+            }));
+            CoreRequest::from_parts(parts, body)
         }
     }
 
@@ -456,7 +514,8 @@ mod tests {
 
     async fn record_forwarded_request(
         listener: TcpListener,
-    ) -> (bool, Option<(Method, HeaderMap, Bytes)>) {
+        reply: ForwardReply,
+    ) -> (bool, Option<ForwardReceipt>) {
         use hyper_util::rt::TokioIo;
 
         let Ok(Ok((socket, _peer))) = timeout(Duration::from_millis(500), listener.accept()).await
@@ -467,16 +526,36 @@ mod tests {
         let recorded = Arc::clone(&receipt);
         let service = service_fn(move |request: Request<Incoming>| {
             let request_receipt = Arc::clone(&recorded);
+            let request_reply = reply.clone();
             async move {
                 let (parts, body) = request.into_parts();
                 let bytes = to_bytes(AxumBody::new(body), 16)
                     .await
                     .expect("bounded upstream body");
-                *request_receipt.lock().expect("receipt") =
-                    Some((parts.method, parts.headers, bytes));
+                let previous = request_receipt
+                    .lock()
+                    .expect("receipt")
+                    .replace(ForwardReceipt {
+                        body: bytes,
+                        headers: parts.headers,
+                        method: parts.method,
+                        uri: parts.uri,
+                    });
+                assert!(previous.is_none(), "exactly one origin request");
+                let mut response = Response::builder();
+                response = match request_reply {
+                    ForwardReply::Empty => response.status(StatusCode::NO_CONTENT),
+                    ForwardReply::Redirect(target) => response
+                        .status(StatusCode::TEMPORARY_REDIRECT)
+                        .header("location", target.to_string()),
+                    ForwardReply::Paused { received, release } => {
+                        received.notify_one();
+                        release.notified().await;
+                        response.status(StatusCode::NO_CONTENT)
+                    }
+                };
                 Ok::<_, Infallible>(
-                    Response::builder()
-                        .status(StatusCode::NO_CONTENT)
+                    response
                         .header("connection", "close")
                         .body(AxumBody::empty())
                         .expect("origin response"),
@@ -520,7 +599,7 @@ mod tests {
                     Duration::from_secs(2),
                     join(
                         exchange_with_wire(app, request),
-                        record_forwarded_request(listener),
+                        record_forwarded_request(listener, ForwardReply::Empty),
                     ),
                 )
                 .await
@@ -528,11 +607,11 @@ mod tests {
                 assert!(response.starts_with("HTTP/1.1 204"), "{method}: {response}");
                 assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
                 assert!(accepted, "origin accepted the forward");
-                let (received_method, headers, body) = receipt.expect("origin received request");
-                assert_eq!(received_method, method);
-                assert!(body.is_empty());
-                assert!(!headers.contains_key("transfer-encoding"));
-                assert!(!headers.contains_key("content-length"));
+                let captured = receipt.expect("origin received request");
+                assert_eq!(captured.method, method);
+                assert!(captured.body.is_empty());
+                assert!(!captured.headers.contains_key("transfer-encoding"));
+                assert!(!captured.headers.contains_key("content-length"));
             }
         }
     }
@@ -567,7 +646,7 @@ mod tests {
                 Duration::from_secs(2),
                 join(
                     exchange_with_wire(App::new(router), request),
-                    record_forwarded_request(listener),
+                    record_forwarded_request(listener, ForwardReply::Empty),
                 ),
             )
             .await
@@ -586,12 +665,11 @@ mod tests {
                 ConnectionExit::Completed
             );
             if empty {
-                let (method, headers, forwarded_body) =
-                    receipt.expect("settled empty GET reaches origin");
-                assert_eq!(method, "GET");
-                assert!(!headers.contains_key("content-length"));
-                assert!(forwarded_body.is_empty());
-                assert!(!headers.contains_key("transfer-encoding"));
+                let captured = receipt.expect("settled empty GET reaches origin");
+                assert_eq!(captured.method, "GET");
+                assert!(!captured.headers.contains_key("content-length"));
+                assert!(captured.body.is_empty());
+                assert!(!captured.headers.contains_key("transfer-encoding"));
                 assert!(accepted);
                 let mut responses = response.split("HTTP/1.1 ").skip(1);
                 assert!(
@@ -637,6 +715,325 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarded_post_options_and_delete_preserve_actual_ingress() {
+        for method in [Method::POST, Method::OPTIONS, Method::DELETE] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+            let target: Uri = format!("http://{}/asset", listener.local_addr().expect("address"))
+                .parse()
+                .expect("target");
+            let router = RouterService::builder()
+                .with_state(target)
+                .route("/", method.clone(), forward_inbound)
+                .build();
+            let (framing, body) = if method == Method::POST {
+                ("Content-Length: 3\r\n", "abc")
+            } else {
+                ("", "")
+            };
+            let request = format!(
+                "{method} / HTTP/1.1\r\nHost: localhost\r\n{framing}Connection: close\r\n\r\n{body}"
+            );
+            let ((response, exit), (accepted, receipt)) = timeout(
+                Duration::from_secs(2),
+                join(
+                    exchange_with_wire(App::new(router), request),
+                    record_forwarded_request(listener, ForwardReply::Empty),
+                ),
+            )
+            .await
+            .expect("bounded forwarding");
+            assert!(response.starts_with("HTTP/1.1 204"), "{response}");
+            assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
+            assert!(accepted);
+            let captured = receipt.expect("actual origin request");
+            assert_eq!(captured.method, method);
+            assert_eq!(captured.uri.path(), "/asset");
+            assert_eq!(captured.body, body);
+            if method == Method::POST {
+                assert_eq!(captured.headers["content-length"], "3");
+                assert!(!captured.headers.contains_key("transfer-encoding"));
+            } else {
+                assert!(!captured.headers.contains_key("transfer-encoding"));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarded_begin_dispatches_before_collection_and_refuses_streamed_post() {
+        #[edgezero_core::action]
+        async fn begin_forward(
+            ctx: RequestContext,
+            State((target, probe, received, release)): State<(
+                Uri,
+                ForwardReadProbe,
+                Arc<Notify>,
+                Arc<Notify>,
+            )>,
+        ) -> Result<CoreResponse, EdgeError> {
+            let client = ctx.http_client().expect("outbound client");
+            let original = ctx.into_request()?;
+            let streamed_post = original.method() == Method::POST;
+            let inbound = if streamed_post {
+                probe.observe(original)
+            } else {
+                original
+            };
+            let request =
+                OutboundRequest::from_request(inbound, target)?.timeout(Duration::from_secs(1));
+            if streamed_post {
+                assert!(request.is_stream_body());
+                let error = client
+                    .begin(request)
+                    .now_or_never()
+                    .expect("preflight is immediately ready")
+                    .expect_err("streamed Begin upload must be refused");
+                assert!(matches!(error, EdgeError::BadRequest { .. }));
+                assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                return Err(error);
+            }
+            let pending = client.begin(request).await?;
+            timeout(Duration::from_secs(1), received.notified())
+                .await
+                .expect("origin received the request before collection");
+            release.notify_one();
+            pending.collect().await?.into_response()
+        }
+
+        for method in [Method::GET, Method::POST] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+            let target: Uri = format!("http://{}/asset", listener.local_addr().expect("address"))
+                .parse()
+                .expect("target");
+            let probe = ForwardReadProbe::default();
+            let received = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let router = RouterService::builder()
+                .with_state((
+                    target,
+                    probe.clone(),
+                    Arc::clone(&received),
+                    Arc::clone(&release),
+                ))
+                .route("/", method.clone(), begin_forward)
+                .build();
+            let framing = if method == Method::POST {
+                "Transfer-Encoding: chunked\r\n"
+            } else {
+                ""
+            };
+            let request = format!(
+                "{method} / HTTP/1.1\r\nHost: localhost\r\n{framing}Connection: close\r\n\r\n"
+            );
+            let ((response, exit), (accepted, receipt)) = timeout(
+                Duration::from_secs(2),
+                join(
+                    exchange_with_wire(App::new(router), request),
+                    record_forwarded_request(listener, ForwardReply::Paused { received, release }),
+                ),
+            )
+            .await
+            .expect("bounded Begin forwarding");
+            assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
+            if method == Method::POST {
+                assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+                assert!(!accepted);
+                assert!(receipt.is_none());
+                assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            } else {
+                assert!(response.starts_with("HTTP/1.1 204"), "{response}");
+                assert!(accepted);
+                let captured = receipt.expect("request before response-head release");
+                assert_eq!(captured.method, Method::GET);
+                assert!(captured.body.is_empty());
+                assert!(!captured.headers.contains_key("transfer-encoding"));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarded_redirect_settles_the_inbound_body_once() {
+        #[edgezero_core::action]
+        async fn follow_forward(
+            ctx: RequestContext,
+            State((target, probe)): State<(Uri, ForwardReadProbe)>,
+        ) -> Result<CoreResponse, EdgeError> {
+            let client = ctx.http_client().expect("outbound client");
+            let inbound = probe.observe(ctx.into_request()?);
+            let request =
+                OutboundRequest::from_request(inbound, target)?.timeout(Duration::from_secs(1));
+            let policy_probe = probe.clone();
+            let result = client
+                .follow(
+                    request,
+                    OutboundRedirectLimit::new(2).expect("limit"),
+                    move |_| {
+                        assert_eq!(policy_probe.eofs.load(Ordering::SeqCst), 1);
+                        assert_eq!(policy_probe.bytes.load(Ordering::SeqCst), 0);
+                        assert_eq!(policy_probe.drops.load(Ordering::SeqCst), 1);
+                        Ok::<_, ()>(OutboundRedirectAction::FollowPrepared)
+                    },
+                )
+                .await
+                .expect("forwarded redirect");
+            assert_eq!(result.redirects_followed(), 1);
+            assert!(result.stop_reason().is_none());
+            assert_eq!(result.final_uri().path(), "/final");
+            result.into_parts().0.into_response()
+        }
+
+        let first_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("first origin");
+        let second_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("second origin");
+        let target: Uri = format!(
+            "http://{}/asset",
+            first_listener.local_addr().expect("address")
+        )
+        .parse()
+        .expect("target");
+        let redirect: Uri = format!(
+            "http://{}/final",
+            second_listener.local_addr().expect("address")
+        )
+        .parse()
+        .expect("redirect");
+        let probe = ForwardReadProbe::default();
+        let router = RouterService::builder()
+            .with_state((target, probe.clone()))
+            .get("/", follow_forward)
+            .build();
+        let request = "GET / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n".to_owned();
+        let ((response, exit), (first, second)) = timeout(
+            Duration::from_secs(2),
+            join(
+                exchange_with_wire(App::new(router), request),
+                join(
+                    record_forwarded_request(first_listener, ForwardReply::Redirect(redirect)),
+                    record_forwarded_request(second_listener, ForwardReply::Empty),
+                ),
+            ),
+        )
+        .await
+        .expect("bounded redirect chain");
+        assert!(response.starts_with("HTTP/1.1 204"), "{response}");
+        assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
+        for ((accepted, receipt), path) in [(first, "/asset"), (second, "/final")] {
+            assert!(accepted);
+            let captured = receipt.expect("one actual request per hop");
+            assert_eq!(captured.method, Method::GET);
+            assert_eq!(captured.uri.path(), path);
+            assert!(captured.body.is_empty());
+            assert!(!captured.headers.contains_key("transfer-encoding"));
+        }
+        assert_eq!(probe.eofs.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.bytes.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        assert!(probe.polls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarded_cached_empty_get_is_accepted_by_batch() {
+        #[edgezero_core::action]
+        async fn batch_forward(
+            ctx: RequestContext,
+            State(target): State<Uri>,
+        ) -> Result<CoreResponse, EdgeError> {
+            assert!(ctx.body_bytes(8).await?.is_empty());
+            assert_eq!(ctx.body_kind(), BodyKind::Cached { len: 0 });
+            let client = ctx.http_client().expect("outbound client");
+            let observation_cutoff = ctx.monotonic_clock().deadline_after(Duration::from_secs(1));
+            let request = OutboundRequest::from_request(ctx.into_request()?, target)?;
+            assert!(!request.is_stream_body());
+            let result = client
+                .send_all_until(vec![request], observation_cutoff)
+                .await
+                .expect("complete batch");
+            let (mut slots, termination) = result.into_parts();
+            assert_eq!(termination, OutboundBatchTermination::Completed);
+            assert_eq!(slots.len(), 1);
+            let OutboundCollectedSlot::Resolved(slot) = slots.pop().expect("one slot") else {
+                panic!("the actual forwarded request must resolve");
+            };
+            slot.outcome?.into_response()
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+        let target: Uri = format!("http://{}/asset", listener.local_addr().expect("address"))
+            .parse()
+            .expect("target");
+        let router = RouterService::builder()
+            .with_state(target)
+            .get("/", batch_forward)
+            .build();
+        let ((response, exit), (accepted, receipt)) = timeout(
+            Duration::from_secs(2),
+            join(
+                exchange_with_method(App::new(router), "GET"),
+                record_forwarded_request(listener, ForwardReply::Empty),
+            ),
+        )
+        .await
+        .expect("bounded batch forwarding");
+        assert!(response.starts_with("HTTP/1.1 204"), "{response}");
+        assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
+        assert!(accepted);
+        let captured = receipt.expect("actual batch request");
+        assert_eq!(captured.method, Method::GET);
+        assert!(captured.body.is_empty());
+        assert!(!captured.headers.contains_key("transfer-encoding"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_forwarding_options_leave_chunked_ingress_unread() {
+        #[edgezero_core::action]
+        async fn unsupported_forward(
+            ctx: RequestContext,
+            State((target, probe)): State<(Uri, ForwardReadProbe)>,
+        ) -> Result<CoreResponse, EdgeError> {
+            let client = ctx.http_client().expect("outbound client");
+            let inbound = probe.observe(ctx.into_request()?);
+            let request = OutboundRequest::from_request(inbound, target)?
+                .image_optimizer(OutboundImageOptimizerOptions::new());
+            let error = client
+                .send(request)
+                .now_or_never()
+                .expect("unsupported options reject without waiting")
+                .expect_err("Axum cannot use native image optimization");
+            assert!(matches!(error, EdgeError::BadRequest { .. }));
+            assert_eq!(error.message(), "image_optimizer is not supported by axum");
+            assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+            Err(error)
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+        let target: Uri = format!("http://{}/asset", listener.local_addr().expect("address"))
+            .parse()
+            .expect("target");
+        let probe = ForwardReadProbe::default();
+        let router = RouterService::builder()
+            .with_state((target, probe.clone()))
+            .get("/", unsupported_forward)
+            .build();
+        let request = "GET / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_owned();
+        let ((response, exit), (accepted, receipt)) = timeout(
+            Duration::from_secs(2),
+            join(
+                exchange_with_wire(App::new(router), request),
+                record_forwarded_request(listener, ForwardReply::Empty),
+            ),
+        )
+        .await
+        .expect("pending ingress must not delay unsupported-option refusal");
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
+        assert!(!accepted);
+        assert!(receipt.is_none());
+        assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn rejection_pipeline_guard_rejects_corrupted_second_response() {
         let rejected = "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n";
@@ -657,12 +1054,15 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let ((accepted, request), ()) = timeout(
             Duration::from_secs(2),
-            join(record_forwarded_request(listener), async move {
-                let socket = TcpStream::connect(address)
-                    .await
-                    .expect("connect without sending");
-                drop(socket);
-            }),
+            join(
+                record_forwarded_request(listener, ForwardReply::Empty),
+                async move {
+                    let socket = TcpStream::connect(address)
+                        .await
+                        .expect("connect without sending");
+                    drop(socket);
+                },
+            ),
         )
         .await
         .expect("bounded empty connection observation");

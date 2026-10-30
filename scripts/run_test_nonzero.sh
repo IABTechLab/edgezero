@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+declared_command="scripts/run_test_nonzero.sh $*"
 selection=
 case "${1:-}" in
     --ignored|--include-ignored)
@@ -21,7 +22,7 @@ if [ "$1" = --inventory ]; then
         echo "inventory mode needs an environment and command" >&2
         exit 2
     fi
-    sentinels=$(node "$(dirname "$0")/check_outbound_cutover_evidence.mjs" --sentinels "$2")
+    sentinels=$(node "$(dirname "$0")/check_outbound_cutover_evidence.mjs" --sentinels "$2" --command "$declared_command")
     exact=1
     shift 2
 else

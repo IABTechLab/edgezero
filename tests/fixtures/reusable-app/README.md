@@ -121,7 +121,10 @@ matrix. EZ-1 Axum HTTP/1 criteria 01/04/08 bind actual forwarding, five-byte rej
 pipeline safety, and certified-empty forwarding after the inbound deadline. Each adapter's
 EZ-5 unit criterion 09 binds its native head/source bodyless matrix; Axum, Cloudflare and Fastly
 also bind unit criteria 10/11. Spin unit criterion 10 binds its independent-cap host-wire matrix.
-There are 62 ready legs and 449 planned. Spin unit criterion 11,
+Axum EZ-1 criteria 09/10/11/12/14 bind actual ingress through Send, Begin, Follow and batches:
+exact POST bytes and framing, bodyless OPTIONS/DELETE, dispatch before collection, one streamed
+inbound settlement across redirects, cached-empty batching and unread unsupported-option refusal.
+There are 67 ready legs and 444 planned. Spin unit criterion 11,
 EZ-6 criterion 22's four adapter legs and EZ-23 criterion 13 stay planned
 for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
@@ -130,8 +133,12 @@ do not promote it solely from a checkpoint test count or green CI.
 The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 
 ```sh
-scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1 cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
+scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
+
+The guard selects the exact declared command as well as the environment. This keeps Rust test
+names separate from wire-report markers sharing an environment. A missing command/group match
+fails before execution; no additional CI test-name list is maintained.
 
 The core legs discover all 80 bound primary/additional sentinels before running one outbound suite:
 

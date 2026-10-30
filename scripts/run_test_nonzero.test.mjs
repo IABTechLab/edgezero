@@ -21,6 +21,15 @@ const viceroyDiagnostic =
 const splitViceroyPass = (name) =>
   `test ${name} ... ${viceroyDiagnostic}\nok\n`;
 
+function inventoryCommand(environment) {
+  return inventory.cases.find(
+    (c) =>
+      environment.split(",").includes(c.environment) &&
+      c.implementation === "ready" &&
+      c.command.includes(" cargo test "),
+  )?.command;
+}
+
 function run(
   mode,
   listed = ["tests::sentinel"],
@@ -33,9 +42,19 @@ function run(
     env = process.env,
   } = {},
 ) {
+  const inventoryMode = required[0] === "--inventory";
+  const cargoArgs = inventoryMode
+    ? (inventoryCommand(required[1])?.split(" cargo ")[1].split(" ") ?? [
+        "test",
+      ])
+    : [];
   const fixture = `
     const mode = ${JSON.stringify(mode)};
-    const args = process.argv.slice(1);
+    const prefix = ${JSON.stringify(cargoArgs)};
+    const supplied = process.argv.slice(${inventoryMode ? 2 : 1});
+    if (JSON.stringify(supplied.slice(0, prefix.length)) !== JSON.stringify(prefix)) process.exit(86);
+    const args = supplied.slice(prefix.length);
+    if (${inventoryMode} && args[0] === "--") args.shift();
     const listing = args.includes("--list");
     const expected = [...(mode ? [mode] : []), ...(listing ? ["--list"] : [])];
     if (JSON.stringify(args) !== JSON.stringify(expected)) process.exit(87);
@@ -49,18 +68,37 @@ function run(
       process.exitCode = ${exit};
     }
   `;
-  return spawnSync(
-    "bash",
-    [
-      script,
-      ...(mode ? [mode] : []),
-      ...required,
-      process.execPath,
-      "-e",
-      fixture,
-    ],
-    { encoding: "utf8", env },
-  );
+  const directory = inventoryMode
+    ? mkdtempSync(join(tmpdir(), "edgezero-guard-cargo-"))
+    : null;
+  try {
+    if (directory) {
+      writeFileSync(
+        join(directory, "cargo"),
+        `#!${process.execPath}\n${fixture}`,
+        {
+          mode: 0o700,
+        },
+      );
+    }
+    return spawnSync(
+      "bash",
+      [
+        script,
+        ...(mode ? [mode] : []),
+        ...required,
+        ...(inventoryMode
+          ? ["cargo", ...cargoArgs]
+          : [process.execPath, "-e", fixture]),
+      ],
+      {
+        encoding: "utf8",
+        env: directory ? { ...env, PATH: `${directory}:${env.PATH}` } : env,
+      },
+    );
+  } finally {
+    if (directory) rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 for (const mode of [null, "--ignored", "--include-ignored"]) {
@@ -455,7 +493,7 @@ const inventory = JSON.parse(
   ),
 );
 for (const [environment, mode] of [
-  ["axum/native-tcp,unit/axum,axum/http1", "--include-ignored"],
+  ["axum/native-tcp,unit/axum,axum/http1,axum", "--include-ignored"],
   ["unit/core", null],
   ["unit/cloudflare", null],
   ["unit/fastly", null],
@@ -464,7 +502,8 @@ for (const [environment, mode] of [
     .filter(
       (c) =>
         environment.split(",").includes(c.environment) &&
-        c.implementation === "ready",
+        c.implementation === "ready" &&
+        c.command === inventoryCommand(environment),
     )
     .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
 

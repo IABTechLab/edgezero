@@ -753,7 +753,11 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-export function readySentinels(manifest, environment) {
+export function readySentinels(manifest, environment, command) {
+  requireFact(
+    command === undefined || nonempty(command),
+    "sentinel command must be nonempty",
+  );
   const environments = environment.split(",");
   requireFact(
     environments.every(Boolean) &&
@@ -762,7 +766,12 @@ export function readySentinels(manifest, environment) {
   );
   const names = environments.flatMap((selected) => {
     const names = manifest.cases
-      .filter((c) => c.environment === selected && c.implementation === "ready")
+      .filter(
+        (c) =>
+          c.environment === selected &&
+          c.implementation === "ready" &&
+          (command === undefined || c.command === command),
+      )
       .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
     requireFact(
       names.length > 0,
@@ -780,7 +789,7 @@ export function readySentinels(manifest, environment) {
 function run(args) {
   if (args.length === 1 && args[0] === "--help") {
     process.stdout.write(
-      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --sentinels ENVIRONMENT [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate SHA --input OBSERVATIONS.json --artifacts DIRECTORY --output NEW_DRAFT.json [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --report|--release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nAssembly preserves observations in an unqualified pre-freeze draft and exits nonzero for open release gates. It refuses overwrites.\nManifest validation and sentinel listing permit planned/pending legs; neither qualifies a release.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
+      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --sentinels ENVIRONMENT [--command EXACT_COMMAND] [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate SHA --input OBSERVATIONS.json --artifacts DIRECTORY --output NEW_DRAFT.json [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --report|--release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nAssembly preserves observations in an unqualified pre-freeze draft and exits nonzero for open release gates. It refuses overwrites.\nManifest validation and sentinel listing permit planned/pending legs; neither qualifies a release.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
     );
     return;
   }
@@ -805,6 +814,7 @@ function run(args) {
     requireFact(
       [
         "--candidate",
+        "--command",
         "--record",
         "--artifacts",
         "--inventory",
@@ -829,11 +839,14 @@ function run(args) {
   if (mode === "--sentinels") {
     requireFact(
       nonempty(environment) &&
-        Object.keys(options).every((k) => k === "--inventory"),
-      "sentinel listing needs an environment and optional inventory only",
+        Object.keys(options).every((k) =>
+          ["--inventory", "--command"].includes(k),
+        ),
+      "sentinel listing needs an environment, optional command and inventory only",
     );
     process.stdout.write(
-      readySentinels(manifest, environment).join("\n") + "\n",
+      readySentinels(manifest, environment, options["--command"]).join("\n") +
+        "\n",
     );
     return;
   }

@@ -73,8 +73,9 @@ Keep three different status questions separate:
   [native policy checkpoint](#native-response-policy-and-evidence-validation-checkpoint-2026-10-29)
   adds each adapter's unit criterion 09, Axum/Cloudflare/Fastly unit criteria 10/11 and Axum
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
-  62 legs, with 449 still
-  `planned`. G1/Q3 binding work remains unfinished, not evidence that 449 features are absent. Only the explicitly bound
+  the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14, giving
+  67 legs, with 444 still
+  `planned`. G1/Q3 binding work remains unfinished, not evidence that 444 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -117,6 +118,56 @@ The tables track the additional adoption work; they do not authorize replacing o
 existing batch/cutoff/cancellation, timing, cap, encoding, provenance or lifecycle guarantees.
 Normative requirements, attributed approval amendments and explicit applicability decisions
 remain authoritative over this summary. Pending follow-ups are not silently promoted or waived.
+
+### Axum Forwarding Mode Acceptance Checkpoint (2026-10-30)
+
+Continue G1/Q3 and P2 with five complete Axum TCP legs: EZ-1 criteria 09/10/11/12/14.
+Reuse the existing production HTTP/1 connection helper and origin recorder, extending the
+recorder with request URI, 307 Location and a receipt/release gate. Separate small action
+handlers preserve each operation's ordering assertions; no new forwarding framework or
+production transport is introduced.
+
+POST delivers exactly `abc` with Content-Length 3 and no Transfer-Encoding; bodyless
+OPTIONS/DELETE also have no upstream Transfer-Encoding. Begin returns before the origin releases
+response headers, and the handler observes the complete origin request before collection.
+An actual streamed POST is refused synchronously without source polling or an origin connection.
+Follow sends one GET to each of two origins through a 307, with zero bytes and no Transfer-Encoding.
+A passive wrapper around the actual inbound chunked stream retains request parts/extensions
+and observes one EOF, zero payload bytes and one release before replay and after completion.
+Pending polls are not counted as extra reads. Cached-empty GET uses the same context in a
+one-slot completed batch. Unsupported native optimizer options return the exact Axum 400 on
+the first poll while the client withholds all chunks and EOF; the original source stays unread.
+
+Environment `axum` also contains wire-report markers. Guard discovery now selects the exact
+declared command within every requested environment, rejecting missing groups rather than
+mistaking a wire marker for a Rust test. The existing CI command adds that environment once;
+no job or duplicate sentinel list is added. Guard regression fixtures run the declared Cargo
+argument prefix through a temporary fake executable, retaining listing/execution and cleanup
+checks. Negative binding/selection tests fail first, then pass after activation. The inventory
+has 67 ready / 444 planned legs; all 255 criteria, 511 identities, expected text, digests,
+applicability, conditions and approvals remain unchanged. No sibling provider leg is promoted.
+
+A fresh unchanged strict-lifetime probe at `91266319` remains failed: six of ten cases pass.
+`slow-origin`, `timeout-before-cutoff`, `fast-origin` and `pending-body-cutoff` exceed their
+original timing targets. Raw evidence remains at
+`/private/tmp/pr275-91266319-close-axum-lifetimes/events.jsonl`, 84,430 bytes, SHA-256
+`5dfba280f3631f82dbd9e34047ecb816482ca04912de2b40c6f525e5e2518000`.
+This is local working-tree characterization, not a durable qualified release artifact. Do not
+replace it with the new TCP tests or relax the +5 ms windows. Cloudflare overflow/recovery,
+remaining forwarding/normalization legs, candidate freeze and authorized hosted qualification
+remain open. Newton reviewed the actual-source/receipt proofs; Dewey reviewed guarded discovery
+and all inventory identities. The POST framing observation found in review is asserted explicitly.
+
+Verification passes all five root gates: formatting, strict workspace/all-targets/all-features
+Clippy, 2,621 workspace tests across 32 binaries (one existing ignored), workspace feature
+compilation and the Spin target check. The exact grouped Axum command discovers all 25 required
+names before one execution of 285 library tests and 27 contracts, with no failures. All 136
+evidence/guard and 31 CI/legacy regressions pass. Documentation lint/build, targeted Prettier,
+Actionlint, ShellCheck, docs/legacy guards, inventory validation and diff checks pass.
+The final naming correction uses `observation_cutoff` without a legacy alias and its focused
+batch test passes. Production APIs, demo/generator behavior, SDK/runtime pins and provider
+capabilities are unchanged. This checkpoint does not rerun the serverless runtime suites or ignored
+generated-workspace gate, freeze a candidate or replace retained failed runtime evidence.
 
 ### P5 Explicit Redirect Policy Checkpoint (2026-10-27)
 

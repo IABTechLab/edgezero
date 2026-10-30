@@ -87,6 +87,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Add core acceptance proofs through actual forwarding and shared-head boundaries: empty-chunk
   settlement, unread expired requests, dispatch-lazy POST, taken/failed inbound bodies and literal
   two-slot completion versus input order. Preserve existing three-slot and normalization tables.
+- Add actual Axum TCP forwarding acceptance for POST/OPTIONS/DELETE, eager Begin, a 307 redirect,
+  cached-empty batching and unsupported options before inbound polling. Observe one source EOF
+  and release across redirect hops. Select guarded tests by their declared command/environment
+  so wire markers do not enter the same Rust suite; retain one grouped CI execution.
 - Exercise normalization, opaque fields, independent identity caps, original/206 representation
   fields and bodyless/205 source release under both decoding choices and response modes. Bind
   reviewed core proofs without promoting provider qualification or optional metadata changes.

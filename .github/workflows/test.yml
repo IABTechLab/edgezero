@@ -262,7 +262,7 @@ jobs:
 
       - name: Run Axum host tests
         if: matrix.suite == 'axum'
-        run: scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1 cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
+        run: scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 
       - name: Run app-demo workspace tests
         if: matrix.suite == 'app-demo'
