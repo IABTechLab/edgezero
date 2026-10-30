@@ -2,11 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use super::Probe;
+    use super::{Probe, RouterService};
     use edgezero_core::body::Body;
-    use edgezero_core::error::{EdgeError, RequestBodyOverflowOrigin};
-    use edgezero_core::http::request_builder;
-    use edgezero_core::router::PreDispatchHook as _;
+    use edgezero_core::http::{StatusCode, request_builder};
+    use serde_json::json;
     use std::future::Future as _;
     use std::pin::pin;
     use std::sync::Arc;
@@ -16,22 +15,36 @@ mod tests {
     #[test]
     fn framing_probes_reject_any_nonempty_body_before_reading_metadata() {
         for case in ["te-cl", "chunked"] {
-            let mut request = request_builder()
+            let request = request_builder()
                 .header("x-fixture", case)
                 .body(Body::from("x"))
                 .expect("fixed request");
             let probe = Probe {
                 ordinary_calls: Arc::new(AtomicUsize::new(0)),
             };
-            let mut future = pin!(probe.handle(&mut request));
-            assert!(matches!(
-                future
-                    .as_mut()
-                    .poll(&mut Context::from_waker(Waker::noop())),
-                Poll::Ready(Err(EdgeError::PayloadTooLarge {
-                    origin: RequestBodyOverflowOrigin::Inbound,
-                }))
-            ));
+            let router = RouterService::builder().pre_dispatch_hook(probe).build();
+            let mut future = pin!(router.oneshot(request));
+            let Poll::Ready(Ok(response)) = future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            else {
+                panic!("framing probe must reject the buffered body immediately");
+            };
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let payload: serde_json::Value = serde_json::from_slice(
+                response.body().as_bytes().expect("buffered error response"),
+            )
+            .expect("error response JSON");
+            assert_eq!(
+                payload,
+                json!({
+                    "error": {
+                        "status": 413,
+                        "kind": "payload_too_large",
+                        "message": "request body too large",
+                    },
+                })
+            );
         }
     }
 }
@@ -42,12 +55,12 @@ mod cloudflare;
 mod spin;
 
 use async_trait::async_trait;
-use edgezero_core::action;
+use edgezero_core::{PreDispatchRequest, action};
 use edgezero_core::app::Hooks;
 use edgezero_core::body::Body;
 use edgezero_core::context::RequestContext;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::{Request, Response, response_builder};
+use edgezero_core::http::{Response, response_builder};
 use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress};
 use edgezero_core::middleware::{Middleware, Next};
 use edgezero_core::router::{PreDispatchHook, RouterService};
@@ -99,7 +112,7 @@ async fn ordinary() -> &'static str {
 
 #[async_trait(?Send)]
 impl PreDispatchHook for Probe {
-    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+    async fn handle(&self, request: &mut PreDispatchRequest) -> Result<Option<Response>, EdgeError> {
         // These fixed framing probes carry only the empty chunk terminator. Finish that
         // body explicitly so Wrangler's proxy does not reuse a cancelled upstream read.
         if request
@@ -108,9 +121,7 @@ impl PreDispatchHook for Probe {
             .and_then(|value| value.to_str().ok())
             .is_some_and(|case| matches!(case, "te-cl" | "chunked"))
         {
-            std::mem::take(request.body_mut())
-                .into_bytes_bounded(0)
-                .await?;
+            request.body_bytes(0).await?;
         }
         let case = request
             .headers()
@@ -156,7 +167,9 @@ impl PreDispatchHook for Probe {
                 .get::<NativeClient>()
                 .is_some_and(|native| {
                     native.0.is_some()
-                        && edgezero_adapter_fastly::context::FastlyRequestContext::get(request)
+                        && request
+                            .extensions()
+                            .get::<edgezero_adapter_fastly::context::FastlyRequestContext>()
                             .is_some_and(|context| context.client_ip == native.0)
                 });
         #[cfg(not(feature = "fastly"))]

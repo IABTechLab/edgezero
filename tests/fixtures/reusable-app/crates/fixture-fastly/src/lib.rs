@@ -26,6 +26,13 @@ mod callback_cleanup;
 static INITIALIZATIONS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 static PANIC_IN_CONSTRUCTOR: AtomicBool = AtomicBool::new(false);
 
+pub fn initialize_launch(mode: &str) {
+    let nonce = fastly::ConfigStore::try_open("fixture_launch")
+        .ok()
+        .and_then(|store| store.try_get("nonce").ok().flatten());
+    fixture_core::launch::initialize(nonce, mode);
+}
+
 pub fn strict_delivery(result: FastlyRequestDelivery<()>) -> Result<(), Error> {
     match result {
         FastlyRequestDelivery::Routed { delivery, .. }
@@ -223,6 +230,10 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
     }
     if req.get_path() == "/health" {
         Response::from_status(200)
+            .with_header(
+                fixture_core::launch::HEADER,
+                fixture_core::launch::value().unwrap_or("unconfigured"),
+            )
             .with_header(
                 "x-fixture-attempts",
                 sandbox.initialization_attempts().to_string(),

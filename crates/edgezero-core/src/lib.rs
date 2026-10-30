@@ -37,6 +37,7 @@ pub mod middleware;
 pub mod outbound;
 pub mod params;
 pub mod platform;
+pub mod pre_dispatch;
 pub mod responder;
 pub mod response;
 pub mod response_egress;
@@ -114,6 +115,7 @@ pub use platform::{
     MemoryValidationIndeterminateReason, PlatformFact, PlatformMetadata, PlatformResourceSource,
     PlatformUnknownReason,
 };
+pub use pre_dispatch::PreDispatchRequest;
 pub use response_egress::{
     DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
     DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead,

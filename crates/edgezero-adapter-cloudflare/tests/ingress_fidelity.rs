@@ -10,13 +10,13 @@ mod tests {
     use edgezero_adapter_cloudflare::request::{CloudflareService, into_core_request};
     use edgezero_core::app::App;
     use edgezero_core::http::response_builder;
-    use edgezero_core::http::{Method, Request, Response, StatusCode};
+    use edgezero_core::http::{Method, Response, StatusCode};
     use edgezero_core::ingress::{
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };
     use edgezero_core::router::{PreDispatchHook, RouterService};
-    use edgezero_core::{Body, EdgeError};
+    use edgezero_core::{Body, EdgeError, PreDispatchRequest};
     use std::sync::Arc;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
     use worker::js_sys::{Function, Object, Reflect};
@@ -32,7 +32,10 @@ mod tests {
 
     #[async_trait::async_trait(?Send)]
     impl PreDispatchHook for IngressHook {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             assert!(request.extensions().get::<RequestIngress>().is_some());
             assert_eq!(request.method().as_str(), "EXAMPLE-METHOD");
             if self.continue_routing {

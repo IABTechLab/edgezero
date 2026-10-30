@@ -12,6 +12,7 @@ fn cargo_build() -> Command {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
         .current_dir(root())
+        .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
         .env("CARGO_TARGET_DIR", root().join("target"));
     command
 }
@@ -56,10 +57,20 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 fn settle<T>(
     records: &mut Records,
     log: &Path,
-    fields: Value,
+    mut fields: Value,
     failure: Value,
-    outcome: Result<T>,
+    mut outcome: Result<T>,
 ) -> Result<T> {
+    if let Some(identity) = startup::settle(log) {
+        if identity["status"] != "pass" {
+            fields["startup_identity"] = json!("unverified/no-credit");
+            fields["qualification"] = json!(false);
+            outcome = outcome.and(Err(
+                "startup identity unverified/open; no case evidence is credited".into(),
+            ));
+        }
+        records.push(annotate(identity, fields.clone()))?;
+    }
     records.collect_clients(fields.clone())?;
     for event in logs(log) {
         records.push(annotate(event, fields.clone()))?;
@@ -126,12 +137,24 @@ fn stage_fastly_artifacts(run: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn fastly_command(exe: &Path, config: &Path, run: &Path, variant: &str, port: u16) -> Command {
+fn fastly_command(
+    exe: &Path,
+    config: &Path,
+    run: &Path,
+    variant: &str,
+    port: u16,
+) -> Result<Command> {
     let mut cmd = Command::new(exe);
+    let mode = wasm_name(variant).trim_end_matches(".wasm").to_owned();
+    let nonce = startup::command(&mut cmd, &mode);
+    let launch_config = run.join(format!("launch-{nonce}.toml"));
+    let mut contents = fs::read_to_string(config)?;
+    contents.push_str(&format!("\n[local_server.config_stores.fixture_launch]\nformat = \"inline-toml\"\n[local_server.config_stores.fixture_launch.contents]\nnonce = {nonce:?}\n"));
+    fs::write(&launch_config, contents)?;
     cmd.args(["serve", "--addr", &format!("127.0.0.1:{port}"), "--config"])
-        .arg(config)
+        .arg(launch_config)
         .arg(wasm(run, variant));
-    cmd
+    Ok(cmd)
 }
 
 fn custom_initialization_contract(
@@ -144,7 +167,7 @@ fn custom_initialization_contract(
     let outcome = (|| -> Result<()> {
         let port = net::port()?;
         let _process = Process::start(
-            &mut fastly_command(exe, config, run, "custom-c", port),
+            &mut fastly_command(exe, config, run, "custom-c", port)?,
             &log,
             port,
         )?;
@@ -378,7 +401,7 @@ fn fastly_variant(
         let backend = Backend::start()?;
         let port = net::port()?;
         let _process = Process::start(
-            &mut fastly_command(exe, config, run, variant, port),
+            &mut fastly_command(exe, config, run, variant, port)?,
             &log,
             port,
         )?;
@@ -1149,7 +1172,7 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         let outcome = (|| -> Result<()> {
             let port = net::port()?;
             let process = Process::start(
-                &mut fastly_command(exe, &config, run, variant, port),
+                &mut fastly_command(exe, &config, run, variant, port)?,
                 &log,
                 port,
             )?;
@@ -1321,6 +1344,7 @@ fn provider_build(
         }
         checked(
             Command::new(builder)
+                .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
                 .args(["--release", ".", "--", "--locked"])
                 .env("CARGO_TARGET_DIR", root().join("target"))
                 .current_dir(package),
@@ -1347,6 +1371,15 @@ fn provider_command(
     port: u16,
 ) -> Result<Command> {
     let mut command = Command::new(exe);
+    let identity_mode = if name == "axum" {
+        exe.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("missing native fixture binary name")?
+            .to_owned()
+    } else {
+        format!("fixture-{name}-{mode}")
+    };
+    let nonce = startup::command(&mut command, &identity_mode);
     command
         .env("CARGO_TARGET_DIR", root().join("target"))
         .current_dir(package)
@@ -1395,6 +1428,7 @@ fn provider_command(
                 "--persist-to",
             ])
             .arg(state);
+        command.args(["--var", &format!("{}:{nonce}", startup::NONCE)]);
     } else {
         let manifest = fs::read_to_string(package.join("spin.toml"))?
             .replace(
@@ -1412,6 +1446,7 @@ fn provider_command(
             .arg(config)
             .arg("--runtime-config-file")
             .arg(package.join("runtime-config.toml"));
+        command.args(["--env", &format!("{}={nonce}", startup::NONCE)]);
     }
     Ok(command)
 }
@@ -1594,7 +1629,7 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         let outcome = (|| -> Result<()> {
             let port = net::port()?;
             let _process = Process::start(
-                &mut fastly_command(exe, &config, run, "faults", port),
+                &mut fastly_command(exe, &config, run, "faults", port)?,
                 &log,
                 port,
             )?;
@@ -1610,7 +1645,7 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
             )?;
             records.push(json!({"status":"pass","assertion":"malformed_rejected_before_dispatch","token":malformed_token,"status_line":rejected}))?;
             let failed_token = token();
-            let reply = if *path == "/collect-error" {
+            let mut reply = if *path == "/collect-error" {
                 let failure = net::request(port, path, &failed_token, None, None)
                     .err()
                     .ok_or("owned egress must abandon the failed response stream")?;
@@ -1631,6 +1666,7 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
             } else {
                 net::request(port, path, &failed_token, None, None)?
             };
+            startup::annotate(&mut reply);
             let recoverable = *path == "/recoverable-store-error";
             let rendered_ingress = *path == "/inbound-error";
             require(
@@ -1645,8 +1681,7 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                         },
                 format!("fault not observed: {path}: {reply}"),
             )?;
-            let following = req(port, "/probe/recovered")?;
-            let value = guest(&following)?;
+            // Client EOF can precede callback completion; observe delivery work before recovery.
             let mut failed_guest = Value::Null;
             await_evidence(|| {
                 let events = logs(&log);
@@ -1665,12 +1700,29 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
                     "adapter_error"
                 };
                 require(
-                    events
-                        .iter()
-                        .any(|e| e["event"] == event && e["instance"] == failed_guest),
+                    events.iter().any(|e| {
+                        e["event"] == event
+                            && e["instance"] == failed_guest
+                            && (event == "constructor_panic" || e["token"] == failed_token)
+                    }),
                     "missing actual failure boundary",
+                )?;
+                require(
+                    !rendered_ingress
+                        || events.iter().any(|e| {
+                            e["event"] == "delivery_completed"
+                                && e["instance"] == failed_guest
+                                && e["token"] == failed_token
+                        }),
+                    "rendered ingress callback has not completed its delivery work",
                 )
             })?;
+            let following = req(port, "/probe/recovered")?;
+            require(
+                following["response_identity"] == "matched-launch",
+                "prescribed recovery response did not attest the launch",
+            )?;
+            let value = guest(&following)?;
             if *path == "/collect-error" {
                 validate_fastly_delivery_report(
                     &failed_token,

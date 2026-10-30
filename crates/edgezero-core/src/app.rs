@@ -69,7 +69,9 @@ impl App {
                 ingress,
             } => Ok(IngressAdmissionOutcome::Admitted {
                 completion,
-                ingress: ingress.with_config_extraction_limits(self.config_extraction_limits),
+                ingress: ingress
+                    .with_config_extraction_limits(self.config_extraction_limits)
+                    .with_head_limits(self.ingress_head_limits),
             }),
             IngressAdmissionOutcome::Refused {
                 completion,

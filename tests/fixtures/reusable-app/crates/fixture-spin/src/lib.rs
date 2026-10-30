@@ -47,6 +47,8 @@ async fn dispatch_selected<A: Hooks>(
 
 #[http_service]
 async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
+    let mode = std::env::var("FIXTURE_MODE").unwrap_or_else(|_| "per-request".to_owned());
+    fixture_core::launch::initialize_environment(&format!("fixture-spin-{mode}"));
     #[cfg(feature = "progress")]
     if req.uri().path().starts_with("/progress/") {
         return progress::dispatch(req).await;

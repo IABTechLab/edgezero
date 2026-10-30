@@ -245,7 +245,7 @@ pub(super) fn run(
     let outcome = (|| -> Result<()> {
         let port = net::port()?;
         let _process = Process::start(
-            &mut fastly_command(exe, &config, run, "outbound-readiness", port),
+            &mut fastly_command(exe, &config, run, "outbound-readiness", port)?,
             &log,
             port,
         )?;

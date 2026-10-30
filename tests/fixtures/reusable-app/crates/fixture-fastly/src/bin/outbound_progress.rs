@@ -63,6 +63,7 @@ fn telemetry(line: &str) {
 }
 
 fn main() -> Result<(), fastly::Error> {
+    fixture_fastly::initialize_launch(env!("CARGO_BIN_NAME"));
     fastly::init();
     fixture_core::init_fixture_logging(telemetry)?;
     let mut request = fastly::Request::from_client();

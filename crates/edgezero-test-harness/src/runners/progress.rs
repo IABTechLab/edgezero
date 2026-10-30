@@ -383,6 +383,7 @@ pub(super) fn build(
         }
         checked(
             Command::new(builder)
+                .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
                 .args([
                     "--release",
                     ".",
@@ -455,7 +456,7 @@ pub(super) fn build(
     let command = if name == "fastly" {
         let config = run.join("fastly.toml");
         fs::copy(package.join("fastly.toml"), &config)?;
-        fastly_command(&exe, &config, run, fastly_variant, port)
+        fastly_command(&exe, &config, run, fastly_variant, port)?
     } else {
         let exe = if name == "axum" { &artifact_path } else { &exe };
         provider_command(name, "retained", exe, &artifact_path, &package, run, port)?

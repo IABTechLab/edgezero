@@ -44,6 +44,26 @@ async fn dispatch_selected<A: Hooks>(
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
+    let mode = env
+        .var("FIXTURE_MODE")
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| "per-request".to_owned());
+    fixture_core::launch::initialize(
+        env.var(fixture_core::launch::NONCE)
+            .ok()
+            .map(|value| value.to_string()),
+        &format!("fixture-cloudflare-{mode}"),
+    );
+    let mut response = fetch_inner(req, env, ctx).await?;
+    if let Some(identity) = fixture_core::launch::value() {
+        response
+            .headers_mut()
+            .set(fixture_core::launch::HEADER, identity)?;
+    }
+    Ok(response)
+}
+
+async fn fetch_inner(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
     #[cfg(feature = "progress")]
     if req.path().starts_with("/progress/") {
         return progress::dispatch(req, env, ctx).await;

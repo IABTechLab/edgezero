@@ -243,7 +243,7 @@ fn capture(port: u16, case: &Case, id: &str, run: &Path, half_close: bool) -> Re
     request.push_str("\r\n");
     let mut bytes = Vec::new();
     let started = Instant::now();
-    let deadline = started + Duration::from_secs(5);
+    let deadline = started + startup::remaining(port, Duration::from_secs(5))?;
     let outcome = (|| -> Result<()> {
         require(
             request.len() <= 96 * 1024,
@@ -251,11 +251,12 @@ fn capture(port: u16, case: &Case, id: &str, run: &Path, half_close: bool) -> Re
         )?;
         let mut stream = TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            Duration::from_secs(5),
+            deadline.saturating_duration_since(Instant::now()),
         )?;
         stream.set_nonblocking(true)?;
         let mut written = 0;
         while written < request.len() {
+            startup::check(port)?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             require(
                 !remaining.is_zero(),
@@ -275,6 +276,7 @@ fn capture(port: u16, case: &Case, id: &str, run: &Path, half_close: bool) -> Re
             stream.shutdown(std::net::Shutdown::Write)?;
         }
         loop {
+            startup::check(port)?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             require(
                 !remaining.is_zero(),
@@ -339,6 +341,17 @@ fn capture(port: u16, case: &Case, id: &str, run: &Path, half_close: bool) -> Re
             .1
             .len()
     );
+    if response["capture_error"].is_null() {
+        startup::observe(
+            port,
+            &case.path,
+            response["headers"].as_array().unwrap_or(&Vec::new()),
+        )?;
+        startup::annotate_response(port, &mut response);
+    } else {
+        startup::reject(port, "first prescribed wire capture did not complete");
+        startup::check(port)?;
+    }
     Ok(response)
 }
 

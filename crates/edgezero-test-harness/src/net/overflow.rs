@@ -505,7 +505,23 @@ pub fn request(
     backend: Option<&str>,
     incoming: Option<usize>,
 ) -> Result<Value> {
+    let result = exchange(port, case, token, backend, incoming);
+    if let Err(error) = &result {
+        crate::startup::reject(port, error.to_string());
+    }
+    result
+}
+
+fn exchange(
+    port: u16,
+    case: &str,
+    token: &str,
+    backend: Option<&str>,
+    incoming: Option<usize>,
+) -> Result<Value> {
     let started = Instant::now();
+    let budget = crate::startup::remaining(port, Duration::from_secs(6))?;
+    let deadline = started + budget;
     require(
         !token.is_empty()
             && token.len() <= 64
@@ -525,8 +541,9 @@ pub fn request(
         incoming.is_none_or(|length| length <= 2048),
         "unbounded overflow input",
     )?;
-    let mut socket = TcpStream::connect(("127.0.0.1", port))?;
-    socket.set_write_timeout(Some(SOCKET_BUDGET))?;
+    let mut socket =
+        TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), budget)?;
+    socket.set_write_timeout(Some(budget.min(SOCKET_BUDGET)))?;
     let mut head = format!(
         "POST /progress/overflow/{case} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-request-token: {token}\r\nConnection: close\r\n"
     );
@@ -545,7 +562,6 @@ pub fn request(
         head.push_str("Content-Length: 0\r\n\r\n");
         socket.write_all(head.as_bytes())?;
     }
-    let deadline = Instant::now() + Duration::from_secs(6);
     let mut reader = BufReader::new(DeadlineSocket { socket, deadline });
     let mut metadata = 0;
     let response = read_head(&mut reader, &mut metadata, Profile::Overflow)
@@ -568,9 +584,21 @@ pub fn request(
         Profile::Overflow,
     )
     .map_err(|failure| failure.name())?;
-    let event = json!({"event":"client_completed","token":token,"status":status,"headers":response.fields,
+    require(
+        Instant::now() < deadline,
+        "absolute startup/capture deadline expired",
+    )?;
+    let mut event = json!({"event":"client_completed","token":token,"status":status,"headers":response.fields,
         "body":String::from_utf8(body)?,"header_ns":header_ns,"complete_ns":started.elapsed().as_nanos(),
         "first_byte_ns":null,"first_byte_timing":"not-measured"});
+    crate::startup::observe(
+        port,
+        &format!("/progress/overflow/{case}"),
+        event["headers"]
+            .as_array()
+            .ok_or("missing captured headers")?,
+    )?;
+    crate::startup::annotate_response(port, &mut event);
     super::CLIENT_EVENTS.lock().unwrap().push(event.clone());
     Ok(event)
 }

@@ -1,4 +1,5 @@
 pub mod assembly;
+pub mod launch;
 #[cfg(test)]
 mod outbound_test_support;
 #[cfg(feature = "qualification")]
@@ -441,6 +442,7 @@ impl edgezero_core::middleware::Middleware for ObserveRequest {
                 .to_owned(),
         );
         let mut response = next.run(ctx).await?;
+        launch::stamp(&mut response);
         response.extensions_mut().insert(finalization);
         if let Some(lifetime) = lifetime {
             lifetime.1.store(true, Ordering::SeqCst);

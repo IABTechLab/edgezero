@@ -1,12 +1,14 @@
 use std::any::Any;
 use std::fs;
 use std::future;
+use std::io::{self, ErrorKind};
 #[cfg(test)]
 use std::iter;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use futures_util::FutureExt as _;
@@ -18,6 +20,7 @@ use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::signal;
 use tokio::sync::oneshot::{Receiver as ShutdownReceiver, Sender as ShutdownSender, channel};
 use tokio::task::{LocalSet, spawn_blocking};
+use tokio::time::sleep;
 
 use edgezero_core::addr;
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
@@ -412,6 +415,9 @@ fn serve_local(
         tokio::pin!(shutdown);
         tokio::pin!(ctrl_c);
         let mut connections = FuturesUnordered::new();
+        let accept_next = || listener.accept();
+        let accepted = accept_with_retry(accept_next);
+        tokio::pin!(accepted);
 
         loop {
             tokio::select! {
@@ -421,8 +427,9 @@ fn serve_local(
                 Some(result) = connections.next(), if !connections.is_empty() => {
                     report_connection_exit(&result);
                 }
-                accepted = listener.accept() => {
-                    let (stream, remote_addr) = accepted.context("axum listener accept failed")?;
+                result = &mut accepted => {
+                    let (stream, remote_addr) = result.context("axum listener accept failed")?;
+                    accepted.set(accept_with_retry(accept_next));
                     // One transient accepted socket; no parser, task or waiter on refusal.
                     if connections.len() >= ingress.max_connections() {
                         drop(stream);
@@ -439,6 +446,67 @@ fn serve_local(
         Ok(())
     };
     runtime.block_on(local.run_until(serve))
+}
+
+async fn accept_with_retry<Accepted, AcceptFuture>(
+    mut accept: impl FnMut() -> AcceptFuture,
+) -> io::Result<Accepted>
+where
+    AcceptFuture: future::Future<Output = io::Result<Accepted>>,
+{
+    let mut backoff = Duration::from_millis(10);
+    loop {
+        match accept().await {
+            Ok(accepted) => return Ok(accepted),
+            Err(error) if is_retryable_accept_error(&error) => {
+                sleep(backoff).await;
+                backoff = backoff.saturating_mul(2).min(Duration::from_secs(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_retryable_accept_error(error: &io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::NetworkDown
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::HostUnreachable
+            | ErrorKind::TimedOut
+            | ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    ) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(
+        error.raw_os_error(),
+        Some(
+            libc::ENETDOWN
+                | libc::EPROTO
+                | libc::ENOPROTOOPT
+                | libc::EHOSTDOWN
+                | libc::ENONET
+                | libc::EHOSTUNREACH
+                | libc::EOPNOTSUPP
+                | libc::ENETUNREACH
+        )
+    ) {
+        return true;
+    }
+    false
 }
 
 fn report_connection_exit(result: &ConnectionResult) {
@@ -710,10 +778,13 @@ mod tests {
     use edgezero_core::error::EdgeError;
     use futures::executor::block_on;
     use log::LevelFilter;
+    use std::cell::Cell;
     use std::env;
     use std::net::{IpAddr, Ipv4Addr};
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
+    use tokio::time::advance;
 
     struct FailingConfiguration;
 
@@ -789,6 +860,135 @@ mod tests {
         fn routes() -> Result<RouterService, EdgeError> {
             Ok(RouterService::builder().build())
         }
+    }
+
+    #[test]
+    fn transient_accept_errors_are_retryable() {
+        use std::io::{Error, ErrorKind};
+
+        for kind in [
+            ErrorKind::Interrupted,
+            ErrorKind::WouldBlock,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::TimedOut,
+            ErrorKind::OutOfMemory,
+        ] {
+            assert!(
+                super::is_retryable_accept_error(&Error::from(kind)),
+                "transient accept error: {kind:?}"
+            );
+        }
+        #[cfg(unix)]
+        for code in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            assert!(
+                super::is_retryable_accept_error(&Error::from_raw_os_error(code)),
+                "temporary accept resource exhaustion: {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn network_accept_errors_are_retryable() {
+        for kind in [
+            ErrorKind::NetworkDown,
+            ErrorKind::NetworkUnreachable,
+            ErrorKind::HostUnreachable,
+        ] {
+            assert!(
+                super::is_retryable_accept_error(&io::Error::from(kind)),
+                "transient accept network error: {kind:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_pending_network_accept_errors_are_retryable() {
+        for code in [
+            libc::ENETDOWN,
+            libc::EPROTO,
+            libc::ENOPROTOOPT,
+            libc::EHOSTDOWN,
+            libc::ENONET,
+            libc::EHOSTUNREACH,
+            libc::EOPNOTSUPP,
+            libc::ENETUNREACH,
+        ] {
+            assert!(
+                super::is_retryable_accept_error(&io::Error::from_raw_os_error(code)),
+                "pending TCP/IP accept error: {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_listener_accept_errors_are_fatal() {
+        use std::io::{Error, ErrorKind};
+
+        for kind in [
+            ErrorKind::InvalidInput,
+            ErrorKind::NotConnected,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Unsupported,
+        ] {
+            assert!(
+                !super::is_retryable_accept_error(&Error::from(kind)),
+                "invalid listener must not retry: {kind:?}"
+            );
+        }
+        #[cfg(unix)]
+        for code in [libc::EBADF, libc::ENOTSOCK, libc::EINVAL] {
+            assert!(
+                !super::is_retryable_accept_error(&Error::from_raw_os_error(code)),
+                "invalid listener descriptor must not retry: {code}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_retry_backoff_is_bounded_and_yields() {
+        let attempts = Cell::new(0_usize);
+        let accepted = super::accept_with_retry(|| {
+            let attempt = attempts.get();
+            attempts.set(attempt + 1);
+            future::ready(if attempt < 9 {
+                Err(io::Error::from(ErrorKind::ConnectionAborted))
+            } else {
+                Ok(())
+            })
+        });
+        tokio::pin!(accepted);
+
+        for (index, milliseconds) in [10, 20, 40, 80, 160, 320, 640, 1000, 1000]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(futures_util::poll!(&mut accepted).is_pending());
+            assert_eq!(attempts.get(), index + 1);
+            advance(Duration::from_millis(milliseconds - 1)).await;
+            assert!(futures_util::poll!(&mut accepted).is_pending());
+            assert_eq!(attempts.get(), index + 1);
+            advance(Duration::from_millis(1)).await;
+        }
+        assert!(matches!(
+            futures_util::poll!(&mut accepted),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(attempts.get(), 10);
+    }
+
+    #[test]
+    fn accept_retry_propagates_fatal_error_without_waiting() {
+        let attempts = Cell::new(0_usize);
+        let error = block_on(super::accept_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            future::ready(Err::<(), _>(io::Error::from(ErrorKind::InvalidInput)))
+        }))
+        .expect_err("fatal listener error");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(attempts.get(), 1);
     }
 
     fn logging_probe(scenario: &str, level: &str) -> String {
@@ -1295,11 +1495,13 @@ mod bounded_ingress_tests {
     use edgezero_core::app::App;
     use edgezero_core::body::Body;
     use edgezero_core::error::EdgeError;
-    use edgezero_core::http::response_builder;
+    use edgezero_core::http::{HeaderValue, Response, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::response_egress::{ResponseEgressCompletion, ResponseEgressOutcome};
-    use edgezero_core::router::RouterService;
-    use edgezero_core::{Deadline, MonotonicClock, MonotonicInstant, ResponseEgressPolicy};
+    use edgezero_core::router::{PreDispatchHook, RouterService};
+    use edgezero_core::{
+        Deadline, MonotonicClock, MonotonicInstant, PreDispatchRequest, ResponseEgressPolicy,
+    };
     use futures_util::stream::poll_fn;
     use std::task::Poll;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -1319,12 +1521,39 @@ mod bounded_ingress_tests {
 
     struct DropProbe(Arc<AtomicUsize>);
 
+    struct HookBodyReader(Arc<AtomicUsize>);
+
     #[derive(Clone, Default)]
     struct EgressProbes {
         completions: Arc<AtomicUsize>,
+        hook_reads: Arc<AtomicUsize>,
         polls: Arc<AtomicUsize>,
         resources: Arc<AtomicUsize>,
         sources: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl PreDispatchHook for HookBodyReader {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
+            let clear = match request.parts().uri.path() {
+                "/hook-body" => false,
+                "/hook-body-cleared" => true,
+                _ => return Ok(None),
+            };
+            if clear {
+                let parts = request.parts_mut();
+                parts
+                    .headers
+                    .insert("content-length", HeaderValue::from_static("0"));
+                parts.extensions.clear();
+            }
+            self.0.fetch_add(1, Ordering::SeqCst);
+            request.body_bytes(1).await?;
+            Ok(None)
+        }
     }
 
     #[expect(
@@ -1379,6 +1608,7 @@ mod bounded_ingress_tests {
 
     fn stalled_egress_app(
         ready: bool,
+        empty: bool,
         expected: ResponseEgressOutcome,
         probes: &EgressProbes,
     ) -> App {
@@ -1386,6 +1616,7 @@ mod bounded_ingress_tests {
         let polls = Arc::clone(&probes.polls);
         let chunk = Bytes::from(vec![b'a'; 0x0004_0000]);
         let router = RouterService::builder()
+            .pre_dispatch_hook_arc(Arc::new(HookBodyReader(Arc::clone(&probes.hook_reads))))
             .get("/", |_| async { Ok::<_, EdgeError>("ok") })
             .get("/slow", move |_| {
                 let source = DropProbe(Arc::clone(&sources));
@@ -1395,7 +1626,13 @@ mod bounded_ingress_tests {
                     let body = poll_fn(move |_cx| {
                         let _keep_alive = &source;
                         let polled = observed_polls.fetch_add(1, Ordering::SeqCst);
-                        if ready || polled == 0 {
+                        if empty {
+                            if polled < 32 {
+                                Poll::Ready(Some(Ok(Bytes::new())))
+                            } else {
+                                Poll::Pending
+                            }
+                        } else if ready || polled == 0 {
                             Poll::Ready(Some(Ok(payload.clone())))
                         } else {
                             Poll::Pending
@@ -1445,9 +1682,18 @@ mod bounded_ingress_tests {
         app
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one TCP fixture covers hook input expiry, egress termination and capacity recovery"
+    )]
     #[tokio::test]
     async fn stalled_egress_termination_releases_capacity_and_recovers() {
-        for (ready, disconnect) in [(false, true), (false, false), (true, false)] {
+        for (ready, empty, disconnect) in [
+            (false, false, true),
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+        ] {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
             let address = listener.local_addr().expect("address");
             let probes = EgressProbes::default();
@@ -1456,15 +1702,44 @@ mod bounded_ingress_tests {
             } else {
                 ResponseEgressOutcome::DeadlineExceeded
             };
-            let app = stalled_egress_app(ready, expected, &probes);
+            let app = stalled_egress_app(ready, empty, expected, &probes);
             let task = tokio::spawn(super::serve_with_stores(
                 app,
                 listener,
                 false,
-                AxumIngressConfig::new(1, 8192, 100, Duration::from_secs(5)).expect("ingress"),
+                AxumIngressConfig::new(
+                    if empty { 2 } else { 1 },
+                    8192,
+                    100,
+                    Duration::from_secs(5),
+                )
+                .expect("ingress"),
                 super::Stores::default(),
                 pending(),
             ));
+            if disconnect {
+                for (index, request) in [
+                    &b"POST /hook-body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"[..],
+                    &b"POST /hook-body-cleared HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"[..],
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut pending_body = TcpStream::connect(address).await.expect("hook client");
+                    pending_body.write_all(request).await.expect("request head");
+                    let mut wire = Vec::new();
+                    timeout(Duration::from_secs(2), pending_body.read_to_end(&mut wire))
+                        .await
+                        .expect("original input deadline must wake the pending hook")
+                        .expect("timeout response");
+                    assert!(wire.starts_with(b"HTTP/1.1 408"));
+                    assert_eq!(probes.hook_reads.load(Ordering::SeqCst), index + 1);
+                    let mut recovered = TcpStream::connect(address)
+                        .await
+                        .expect("capacity after hook timeout");
+                    healthy(&mut recovered).await;
+                }
+            }
             let mut client = TcpStream::connect(address).await.expect("client");
             client
                 .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -1477,6 +1752,12 @@ mod bounded_ingress_tests {
             })
             .await
             .expect("producer is live");
+            if empty {
+                let mut concurrent = TcpStream::connect(address)
+                    .await
+                    .expect("healthy concurrent connection");
+                healthy(&mut concurrent).await;
+            }
             if disconnect {
                 drop(client);
             }
@@ -1838,12 +2119,12 @@ mod bounded_ingress_tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use edgezero_core::action;
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
     use edgezero_core::extractor::Secrets;
     use edgezero_core::router::RouterService;
     use edgezero_core::secret_store::SecretHandle as CoreSecretHandle;
+    use edgezero_core::{PreDispatchRequest, action};
     use reqwest::header::ALLOW;
     use std::time::{Duration, Instant};
     use tokio::task::{JoinHandle, spawn_blocking};
@@ -1851,7 +2132,7 @@ mod integration_tests {
 
     use async_trait::async_trait;
     use edgezero_core::body::Body;
-    use edgezero_core::http::{HeaderValue, Request, Response, response_builder};
+    use edgezero_core::http::{HeaderValue, Response, response_builder};
     use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress};
     use edgezero_core::middleware::{Middleware, Next};
     use edgezero_core::router::PreDispatchHook;
@@ -1887,10 +2168,14 @@ mod integration_tests {
 
     #[async_trait(?Send)]
     impl PreDispatchHook for IngressHook {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let ingress = request
-                .extensions()
+            let parts = request.parts();
+            let ingress = parts
+                .extensions
                 .get::<RequestIngress>()
                 .expect("should carry adapter metadata");
             assert_eq!(
@@ -1903,17 +2188,17 @@ mod integration_tests {
             let CapturedTarget::Complete(target) = ingress.target() else {
                 panic!("should capture target")
             };
-            assert_eq!(target.value(), request.uri().to_string());
-            match request.headers()["x-fixture"]
+            assert_eq!(target.value(), parts.uri.to_string());
+            match parts.headers["x-fixture"]
                 .to_str()
                 .expect("should read fixed fixture")
             {
                 "repeat" => {
-                    assert_eq!(request.method().as_str(), "EXAMPLE-METHOD");
-                    assert_eq!(request.headers().get_all("origin").iter().count(), 2);
-                    assert_eq!(request.headers().get_all("x-control").iter().count(), 2);
-                    let cookies: Vec<_> = request
-                        .headers()
+                    assert_eq!(parts.method.as_str(), "EXAMPLE-METHOD");
+                    assert_eq!(parts.headers.get_all("origin").iter().count(), 2);
+                    assert_eq!(parts.headers.get_all("x-control").iter().count(), 2);
+                    let cookies: Vec<_> = parts
+                        .headers
                         .get_all("cookie")
                         .iter()
                         .map(HeaderValue::as_bytes)
@@ -1921,10 +2206,7 @@ mod integration_tests {
                     assert_eq!(cookies, [b"a=\xff".as_slice(), b"b=2".as_slice()]);
                 }
                 "length" => {
-                    assert_eq!(
-                        request.headers().get_all("content-length").iter().count(),
-                        1
-                    );
+                    assert_eq!(parts.headers.get_all("content-length").iter().count(), 1);
                     assert_eq!(
                         ingress
                             .header_fidelity(&"content-length".parse().expect("should parse name"))
@@ -1932,12 +2214,12 @@ mod integration_tests {
                         Preservation::Unknown
                     );
                 }
-                "te-cl" => assert!(!request.headers().contains_key("content-length")),
+                "te-cl" => assert!(!parts.headers.contains_key("content-length")),
                 "continue" => {
                     return Ok(None);
                 }
                 "error" => return Err(EdgeError::bad_request("fixture rejection")),
-                "dot" => assert_eq!(request.uri().path(), "/reserved/%2e/../%2F//"),
+                "dot" => assert_eq!(parts.uri.path(), "/reserved/%2e/../%2F//"),
                 _ => panic!("should use fixed fixture"),
             }
             Ok(Some(

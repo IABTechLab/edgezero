@@ -18,6 +18,81 @@ pub use wire::WireOrigins;
 
 pub type Signal = Arc<(Mutex<bool>, Condvar)>;
 static CLIENT_EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+const MAX_HEAD: usize = 16 * 1024;
+const MAX_TEXT: usize = 1024 * 1024;
+
+struct BoundedStream {
+    stream: TcpStream,
+    port: u16,
+    deadline: Instant,
+}
+impl BoundedStream {
+    fn budget(&self) -> std::io::Result<Duration> {
+        crate::startup::check(self.port).map_err(std::io::Error::other)?;
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "absolute response deadline expired",
+            ));
+        }
+        Ok(remaining.min(Duration::from_millis(100)))
+    }
+}
+impl Read for BoundedStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            self.stream.set_read_timeout(Some(self.budget()?))?;
+            match self.stream.read(bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+}
+impl Write for BoundedStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        loop {
+            self.stream.set_write_timeout(Some(self.budget()?))?;
+            match self.stream.write(bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn bounded_line(
+    reader: &mut impl BufRead,
+    line: &mut String,
+    remaining: &mut usize,
+) -> std::io::Result<usize> {
+    let bytes = reader
+        .take(remaining.saturating_add(1) as u64)
+        .read_line(line)?;
+    if bytes > *remaining {
+        return Err(std::io::Error::other(
+            "response headers/chunk metadata exceed 16 KiB",
+        ));
+    }
+    *remaining -= bytes;
+    Ok(bytes)
+}
 pub fn take_client_events() -> Vec<Value> {
     std::mem::take(&mut *CLIENT_EVENTS.lock().unwrap())
 }
@@ -108,7 +183,8 @@ impl std::error::Error for ResponseHeadAborted {}
 
 fn read_status(reader: &mut impl BufRead) -> Result<u16> {
     let mut line = String::new();
-    match reader.read_line(&mut line) {
+    let mut remaining = MAX_HEAD;
+    match bounded_line(reader, &mut line, &mut remaining) {
         Ok(0) => {
             return Err(Box::new(ResponseHeadAborted(
                 std::io::ErrorKind::UnexpectedEof,
@@ -526,14 +602,22 @@ pub fn coding_representation_headers(
 }
 
 pub fn malformed_request(port: u16, token: &str) -> Result<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let budget = crate::startup::remaining(port, Duration::from_secs(5))?;
+    let deadline = Instant::now() + budget;
+    let stream =
+        TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), budget)?;
+    let mut stream = BoundedStream {
+        stream,
+        port,
+        deadline,
+    };
     write!(
         stream,
         "POST /probe/malformed HTTP/1.1\r\nHost: localhost\r\nx-request-token: {token}\r\nContent-Length: invalid\r\nConnection: close\r\n\r\n"
     )?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
+    let mut remaining = MAX_HEAD;
+    bounded_line(&mut BufReader::new(stream), &mut line, &mut remaining)?;
     Ok(line.trim().to_owned())
 }
 pub fn request(
@@ -736,10 +820,44 @@ fn request_with_framing(
     framing: Option<Framing>,
     capture: Capture<'_>,
 ) -> Result<Value> {
+    let result = exchange(port, path, token, backend, observer, framing, capture);
+    if let Err(error) = &result {
+        let expected_fault = crate::startup::deferred(port, path)
+            && (error.downcast_ref::<ResponseHeadAborted>().is_some()
+                || error
+                    .downcast_ref::<InterruptedResponse>()
+                    .is_some_and(|partial| {
+                        matches!(
+                            partial.cause,
+                            ResponseInterruption::PrematureEof | ResponseInterruption::PeerClosed
+                        )
+                    }));
+        if !expected_fault {
+            crate::startup::reject(port, error.to_string());
+        }
+    }
+    result
+}
+
+fn exchange(
+    port: u16,
+    path: &str,
+    token: &str,
+    backend: Option<&str>,
+    observer: Option<BodyObserver<'_>>,
+    framing: Option<Framing>,
+    capture: Capture<'_>,
+) -> Result<Value> {
     let start = Instant::now();
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(12)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(12)))?;
+    let budget = crate::startup::remaining(port, Duration::from_secs(12))?;
+    let deadline = start + budget;
+    let stream =
+        TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), budget)?;
+    let mut stream = BoundedStream {
+        stream,
+        port,
+        deadline,
+    };
     let probe = path.starts_with("/probe/");
     let body = if probe { token } else { "" };
     let framing_header = framing.map_or_else(
@@ -768,9 +886,13 @@ fn request_with_framing(
     let mut headers = Vec::new();
     let mut length = None;
     let mut chunked = false;
+    let mut head_remaining = MAX_HEAD;
     loop {
         line.clear();
-        require(reader.read_line(&mut line)? > 0, "truncated HTTP headers")?;
+        require(
+            bounded_line(&mut reader, &mut line, &mut head_remaining)? > 0,
+            "truncated HTTP headers",
+        )?;
         if line == "\r\n" {
             break;
         }
@@ -793,17 +915,18 @@ fn request_with_framing(
         headers.push(json!([name, value]));
     }
     require(!(chunked && length.is_some()), "ambiguous response framing")?;
+    crate::startup::validate_head(port, path, &headers)?;
     let header_ns = start.elapsed().as_nanos() as u64;
     let mut first_byte_ns = None;
     let mut observation = BodyObservation(observer);
     let mut bytes = Vec::new();
     let capture_limit = match capture {
-        Capture::Text => usize::MAX,
+        Capture::Text => MAX_TEXT,
         Capture::Binary => 256,
         Capture::Headers(_) => 64 * 1024,
     };
     let outcome = (|| -> Result<()> {
-        let mut read_part = |reader: &mut BufReader<TcpStream>, count: usize| -> Result<()> {
+        let mut read_part = |reader: &mut BufReader<BoundedStream>, count: usize| -> Result<()> {
             capture_require(
                 count <= capture_limit.saturating_sub(bytes.len()),
                 ResponseInterruption::CaptureLimit,
@@ -839,7 +962,7 @@ fn request_with_framing(
             loop {
                 line.clear();
                 capture_require(
-                    reader.read_line(&mut line)? > 0,
+                    bounded_line(&mut reader, &mut line, &mut head_remaining)? > 0,
                     ResponseInterruption::PrematureEof,
                     "truncated chunk header",
                 )?;
@@ -849,7 +972,7 @@ fn request_with_framing(
                     loop {
                         line.clear();
                         capture_require(
-                            reader.read_line(&mut line)? > 0,
+                            bounded_line(&mut reader, &mut line, &mut head_remaining)? > 0,
                             ResponseInterruption::PrematureEof,
                             "truncated chunk trailer",
                         )?;
@@ -907,11 +1030,17 @@ fn request_with_framing(
             cause: interruption_cause(error.as_ref()),
         }));
     }
+    require(
+        Instant::now() < deadline,
+        "absolute response deadline expired",
+    )?;
+    crate::startup::observe(port, path, &headers)?;
     let mut event = json!({"event":"client_completed","token":token,"status":status,"headers":headers,"header_ns":header_ns,"first_byte_ns":first_byte_ns.unwrap_or(header_ns),"complete_ns":start.elapsed().as_nanos() as u64});
     match capture {
         Capture::Text => event["body"] = json!(String::from_utf8(bytes)?),
         Capture::Binary | Capture::Headers(_) => event["body_bytes"] = json!(bytes),
     }
+    crate::startup::annotate_response(port, &mut event);
     CLIENT_EVENTS.lock().unwrap().push(event.clone());
     Ok(event)
 }
@@ -953,6 +1082,73 @@ mod tests {
         let result = request(port);
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn startup_transport_deadline_does_not_restart_when_the_peer_trickles() {
+        let started = Instant::now();
+        let result = served_reply(
+            |socket| {
+                for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" {
+                    if socket.write_all(&[*byte]).is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+            },
+            |port| {
+                let stream = TcpStream::connect(("127.0.0.1", port))?;
+                let mut stream = BoundedStream {
+                    stream,
+                    port,
+                    deadline: Instant::now() + Duration::from_millis(50),
+                };
+                stream.write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+                read_status(&mut BufReader::new(stream)).map(|status| json!({"status":status}))
+            },
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn startup_transport_rejects_an_oversized_header_section() {
+        let wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nx-padding: {}\r\n\r\n",
+            "x".repeat(16 * 1024)
+        );
+        let response = served_reply(
+            move |socket| {
+                let _ = socket.write_all(wire.as_bytes());
+            },
+            |port| request(port, "/probe/first", "first-prescribed-request", None, None),
+        );
+        assert!(
+            response.is_err(),
+            "startup transport accepted more than 16 KiB of response headers"
+        );
+    }
+
+    #[test]
+    fn startup_transport_rejects_an_oversized_text_body() {
+        let body = "x".repeat(1024 * 1024 + 1);
+        let wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = served_reply(
+            move |socket| {
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let _ = socket.write_all(wire.as_bytes());
+            },
+            |port| request(port, "/probe/first", "first-prescribed-request", None, None),
+        );
+        assert!(
+            response.is_err(),
+            "startup transport accepted more than 1 MiB of response text"
+        );
     }
 
     #[test]

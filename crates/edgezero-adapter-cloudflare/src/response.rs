@@ -503,6 +503,9 @@ mod platform {
             declared_length: Option<u64>,
             transmits_body: bool,
         ) -> Result<(Self::Response, Self::Io), DeliveryError> {
+            if !(200..=599).contains(&status.as_u16()) {
+                return Err(DeliveryError::Conversion);
+            }
             let mut worker_headers = worker::Headers::new();
             copy_header_values(headers, &mut worker_headers, |_name| {
                 EdgeError::internal(anyhow::anyhow!(
@@ -822,25 +825,261 @@ mod platform {
     #[cfg(test)]
     mod race_tests {
         use std::cell::Cell;
-        use std::rc::Rc;
+        use std::rc::{Rc, Weak};
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+        use edgezero_core::body::Body;
         use edgezero_core::error::BadGatewayReason;
         use edgezero_core::error_detail::{
             CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase,
         };
-        use edgezero_core::http::Version;
+        use edgezero_core::http::{Method, Version, response_builder};
         use edgezero_core::response_egress::{
-            ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressHead,
-            ResponseEgressObserverHandle, ResponseEgressOutcome, ResponseEgressReport,
+            ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressFallbackDisposition,
+            ResponseEgressHead, ResponseEgressObserver as _, ResponseEgressObserverHandle,
+            ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressReport,
         };
+        use edgezero_core::response_egress_framing::PreparedResponseEgress;
         use edgezero_core::time::MonotonicInstant;
         use futures_util::{future, stream};
         use wasm_bindgen_test::wasm_bindgen_test;
+        use worker::js_sys::{Array, Function, Promise};
+        use worker::wasm_bindgen::{JsCast as _, JsValue};
 
+        use super::super::INTERNAL_FALLBACK_BODY;
+        use super::super::tests::RecordingObserver;
         use super::*;
         use crate::test_runtime::NumericTimeoutGuard;
+
+        struct StatusFixture {
+            attempt: ResponseEgressAttempt,
+            clock: MonotonicClock,
+            completed: RecordingObserver,
+            observed: RecordingObserver,
+            policy: ResponseEgressPolicy,
+            polls: Rc<Cell<usize>>,
+            prepared: PreparedResponseEgress,
+            source: Weak<()>,
+        }
+
+        fn status_fixture(status: u16, streamed: bool, method: &Method) -> StatusFixture {
+            let now = MonotonicInstant::now();
+            let deadline = now.checked_add(Duration::from_secs(10)).expect("deadline");
+            let clock = MonotonicClock::new(move || now);
+            let completed = RecordingObserver::default();
+            let observed = RecordingObserver::default();
+            let polls = Rc::new(Cell::new(0_usize));
+            let counted = Rc::clone(&polls);
+            let source = Rc::new(());
+            let retained = Rc::downgrade(&source);
+            let body = if streamed {
+                Body::from_stream(stream::once(async move {
+                    counted.set(counted.get().checked_add(1).expect("source poll count"));
+                    drop(source);
+                    Ok(Bytes::from_static(b"application body"))
+                }))
+            } else {
+                Body::from("application body")
+            };
+            let response = response_builder()
+                .status(status)
+                .body(body)
+                .expect("response");
+            let head = ResponseEgressHead::new(
+                response.status(),
+                response.version(),
+                response.headers(),
+                None,
+                now,
+                None,
+            );
+            let completion = completed.clone();
+            let mut attempt = ResponseEgressAttempt::new(
+                &head,
+                now,
+                ResponseEgressCompletion::new(move |report| completion.complete(report)),
+                ResponseEgressObserverHandle::new(observed.clone()),
+                clock.clone(),
+            );
+            let prepared = attempt
+                .prepare_response(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    method,
+                    response,
+                )
+                .expect("core preserves provider-specific status validation");
+            StatusFixture {
+                attempt,
+                clock,
+                completed,
+                observed,
+                policy: ResponseEgressPolicy {
+                    write_deadline: Deadline::at_instant(deadline),
+                },
+                polls,
+                prepared,
+                source: retained,
+            }
+        }
+
+        async fn assert_status_handoff(status: u16, streamed: bool, method: &Method) {
+            let _timers = NumericTimeoutGuard::install();
+            Function::new_no_args(include_str!("../tests/worker_runtime.js"))
+                .call0(&JsValue::UNDEFINED)
+                .expect("guest Workers stream fixture");
+            let pending = Array::new();
+            let context = Function::new_with_args(
+                "tasks",
+                "return { waitUntil(promise) { tasks.push(promise); } };",
+            )
+            .call1(&JsValue::UNDEFINED, &pending)
+            .expect("guest waitUntil");
+            let controller = web_sys::AbortController::new().expect("controller");
+            let mut committer = WorkersCommitter {
+                context: Arc::new(Context::new(context.unchecked_into())),
+                signal: controller.signal().into(),
+            };
+            let fixture = status_fixture(status, streamed, method);
+            let response = match start_prepared(
+                fixture.prepared,
+                fixture.policy,
+                fixture.attempt,
+                fixture.clock.clone(),
+                EgressKind::Application,
+                &mut committer,
+            ) {
+                StartOutcome::Started(response) => response,
+                StartOutcome::Precommit { attempt, cause } => {
+                    assert_eq!(cause, ResponseEgressOutcome::ConversionError);
+                    assert_eq!(fixture.polls.get(), 0);
+                    assert!(fixture.source.upgrade().is_none());
+                    assert!(fixture.completed.reports().is_empty());
+                    assert!(fixture.observed.reports().is_empty());
+                    start_fallback(method, cause, *attempt, &fixture.clock, &mut committer)
+                        .expect("status conversion fallback")
+                }
+            };
+            let Ok(raw) = worker::IntoResponse::into_raw(response) else {
+                panic!("SDK native response conversion must succeed");
+            };
+            let bytes = Uint8Array::new(
+                &JsFuture::from(raw.array_buffer().expect("JS response body"))
+                    .await
+                    .expect("consume JS response"),
+            )
+            .to_vec();
+            JsFuture::from(Promise::all(&pending))
+                .await
+                .expect("response writer tasks");
+            let rejected = status != 599;
+            assert_eq!(raw.status(), if rejected { 500 } else { status });
+            let expected_body = if *method == Method::HEAD {
+                b"".as_slice()
+            } else if rejected {
+                INTERNAL_FALLBACK_BODY
+            } else {
+                b"application body".as_slice()
+            };
+            assert_eq!(bytes, expected_body);
+            assert_eq!(
+                fixture.polls.get(),
+                usize::from(streamed && !rejected && *method != Method::HEAD)
+            );
+            assert!(fixture.source.upgrade().is_none());
+            assert_status_report(
+                &fixture.completed,
+                &fixture.observed,
+                rejected,
+                expected_body.len(),
+            );
+        }
+
+        fn assert_status_report(
+            completed: &RecordingObserver,
+            observed: &RecordingObserver,
+            rejected: bool,
+            expected_bytes: usize,
+        ) {
+            let reports = observed.reports();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(completed.reports(), reports);
+            assert_eq!(
+                reports[0].outcome,
+                if rejected {
+                    ResponseEgressOutcome::ConversionError
+                } else {
+                    ResponseEgressOutcome::HostHandoff
+                }
+            );
+            assert_eq!(
+                reports[0].fallback_disposition,
+                rejected.then_some(ResponseEgressFallbackDisposition::Completed)
+            );
+            assert_eq!(
+                reports[0].body_kind,
+                if rejected {
+                    ResponseEgressBodyKind::Fallback
+                } else {
+                    ResponseEgressBodyKind::Application
+                }
+            );
+            assert_eq!(
+                reports[0].bytes_written,
+                u64::try_from(expected_bytes).expect("byte count")
+            );
+            assert_eq!(reports[0].framing_failures.application(), None);
+            assert_eq!(reports[0].framing_failures.fallback(), None);
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_600_buffered_get_uses_conversion_fallback() {
+            assert_status_handoff(600, false, &Method::GET).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_600_streamed_get_uses_conversion_fallback() {
+            assert_status_handoff(600, true, &Method::GET).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_600_buffered_head_uses_conversion_fallback() {
+            assert_status_handoff(600, false, &Method::HEAD).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_600_streamed_head_uses_conversion_fallback() {
+            assert_status_handoff(600, true, &Method::HEAD).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_999_buffered_get_uses_conversion_fallback() {
+            assert_status_handoff(999, false, &Method::GET).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_999_streamed_get_uses_conversion_fallback() {
+            assert_status_handoff(999, true, &Method::GET).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_999_buffered_head_uses_conversion_fallback() {
+            assert_status_handoff(999, false, &Method::HEAD).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_999_streamed_head_uses_conversion_fallback() {
+            assert_status_handoff(999, true, &Method::HEAD).await;
+        }
+
+        #[wasm_bindgen_test]
+        async fn status_599_is_accepted_for_buffered_and_streamed_get_and_head() {
+            for method in [Method::GET, Method::HEAD] {
+                for streamed in [false, true] {
+                    assert_status_handoff(599, streamed, &method).await;
+                }
+            }
+        }
 
         #[derive(Clone, Copy, Eq, PartialEq)]
         enum SourceCase {
@@ -1051,10 +1290,10 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Default)]
-    struct RecordingObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
+    pub(super) struct RecordingObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
 
     impl RecordingObserver {
-        fn reports(&self) -> Vec<ResponseEgressReport> {
+        pub(super) fn reports(&self) -> Vec<ResponseEgressReport> {
             self.0.lock().expect("reports lock").clone()
         }
     }

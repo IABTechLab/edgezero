@@ -204,7 +204,7 @@ jobs:
       - name: Bundled demo logging and fallback TCP contracts
         if: matrix.suite == 'cli'
         run: |
-          node --test scripts/run_test_nonzero.test.mjs
+          node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_legacy_api.test.mjs
           scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
 
       - name: Run native outbound adapter contracts

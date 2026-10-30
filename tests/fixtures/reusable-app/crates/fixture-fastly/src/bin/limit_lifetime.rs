@@ -18,6 +18,7 @@ impl Hooks for SlowInitialization {
     }
 }
 fn main() -> Result<(), fastly::Error> {
+    fixture_fastly::initialize_launch(env!("CARGO_BIN_NAME"));
     let summary = edgezero_adapter_fastly::serve_app_with_hooks::<SlowInitialization, _, _, _>(
         fixture_fastly::serving().with_max_lifetime(Duration::from_millis(50)),
         fixture_fastly::extend,

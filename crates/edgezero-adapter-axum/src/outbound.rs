@@ -116,9 +116,14 @@ impl AxumOutboundClient {
         Self::try_with_time(native_time(MonotonicClock::default()))
     }
 
+    #[expect(
+        clippy::absolute_paths,
+        reason = "keep the no-retry policy explicit at the shared transport boundary"
+    )]
     pub(crate) fn try_transport() -> Result<Arc<reqwest::Client>, reqwest::Error> {
         reqwest::Client::builder()
             .redirect(Policy::none())
+            .retry(reqwest::retry::never())
             .no_brotli()
             .no_deflate()
             .no_gzip()
@@ -708,6 +713,23 @@ mod clock_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             Poll::Pending
         }
+    }
+
+    #[test]
+    fn transport_explicitly_selects_never_retry_policy() {
+        // Policy selection, not an HTTP/1 closed-POST retry reproduction.
+        let source = include_str!("outbound.rs");
+        let transport = source
+            .split_once("pub(crate) fn try_transport()")
+            .expect("existing transport builder")
+            .1
+            .split_once(".build()")
+            .expect("transport construction")
+            .0;
+        assert!(
+            transport.contains(".retry(reqwest::retry::never())"),
+            "the shared transport must explicitly disable reqwest retries"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

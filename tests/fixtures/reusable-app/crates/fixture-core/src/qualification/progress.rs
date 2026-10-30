@@ -126,6 +126,7 @@ pub fn router(
     dispatch_returned: Option<Arc<DispatchReturn>>,
 ) -> RouterService {
     RouterService::builder()
+        .middleware(crate::launch::Identity)
         .with_state(Arc::new(State {
             runtime,
             host_signal,

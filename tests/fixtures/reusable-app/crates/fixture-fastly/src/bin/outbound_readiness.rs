@@ -229,7 +229,12 @@ fn p5_probe(request: &Request, case: &str) -> Result<(), fastly::Error> {
         "revision":env!("EDGEZERO_QUALIFICATION_REVISION"),"qualification":false,
         "a_uri":a_uri,"b_uri":b_uri,"response_decoding":format!("{decoding:?}"),
         "result":result.map_err(|error|p5_failure(&error))});
-    Response::from_body(serde_json::to_string(&probe)?).send_to_client();
+    Response::from_body(serde_json::to_string(&probe)?)
+        .with_header(
+            fixture_core::launch::HEADER,
+            fixture_core::launch::value().unwrap_or("unconfigured"),
+        )
+        .send_to_client();
     Ok(())
 }
 
@@ -345,7 +350,12 @@ fn client_probe(
     let probe = json!({"event":"fastly-client-progress","case":case,"consumption":consumption,
         "token":token,"revision":env!("EDGEZERO_QUALIFICATION_REVISION"),"result":result.map_err(|e|client_failure(&e)),"completed_us":start.elapsed().as_micros(),"qualification":false});
     println!("{probe}");
-    Response::from_body(serde_json::to_string(&probe)?).send_to_client();
+    Response::from_body(serde_json::to_string(&probe)?)
+        .with_header(
+            fixture_core::launch::HEADER,
+            fixture_core::launch::value().unwrap_or("unconfigured"),
+        )
+        .send_to_client();
     drop(body_owner);
     Ok(())
 }
@@ -680,11 +690,17 @@ fn timer_control(request: &Request, source: &str, budget: &str) -> Result<(), fa
         result["abi_return_us"] = json!(selection.returned.duration_since(start).as_micros());
     }
     println!("{result}");
-    Response::from_body(serde_json::to_string(&result)?).send_to_client();
+    Response::from_body(serde_json::to_string(&result)?)
+        .with_header(
+            fixture_core::launch::HEADER,
+            fixture_core::launch::value().unwrap_or("unconfigured"),
+        )
+        .send_to_client();
     Ok(())
 }
 
 fn main() -> Result<(), fastly::Error> {
+    fixture_fastly::initialize_launch(env!("CARGO_BIN_NAME"));
     fastly::init();
     let request = Request::from_client();
     let segments: Vec<_> = request
@@ -844,6 +860,11 @@ fn main() -> Result<(), fastly::Error> {
         "deadline_us":DEADLINE_US, "tolerance_us":5000, "samples":exchange.samples,
         "slots":slots, "completed_us":completed});
     println!("{probe}");
-    Response::from_body(serde_json::to_string(&probe)?).send_to_client();
+    Response::from_body(serde_json::to_string(&probe)?)
+        .with_header(
+            fixture_core::launch::HEADER,
+            fixture_core::launch::value().unwrap_or("unconfigured"),
+        )
+        .send_to_client();
     Ok(())
 }

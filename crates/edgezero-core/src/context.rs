@@ -1,13 +1,22 @@
-use std::{cell::RefCell, collections::BTreeMap, env, mem};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    env, mem,
+    rc::Rc,
+    task::Poll,
+};
 
-use crate::body::Body;
+use crate::body::{Body, BodyStream};
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
     BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin, ResponseLimitReason,
     StoreExtractionReason,
 };
 use crate::error_detail::ProviderFailureDetail;
-use crate::http::{Extensions, HeaderMap, Method, Request, RequestParts, Uri, Version};
+use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use crate::http::{
+    Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Uri, Version,
+};
 use crate::ingress::{AdmittedIngress, IngressGrant};
 use crate::outbound::{ForwardedReadDeadline, HttpClient};
 use crate::params::PathParams;
@@ -17,7 +26,7 @@ use crate::store_registry::{
     KvRegistry, SecretRegistry, StoreRegistry,
 };
 use crate::time::{Deadline, MonotonicClock, MonotonicInstant};
-use futures_util::StreamExt as _;
+use futures_util::{StreamExt as _, stream};
 use serde::de::DeserializeOwned;
 
 /// Default maximum body size accepted by JSON extractors (8 MiB).
@@ -65,10 +74,92 @@ enum BodyState {
     Taken,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum FallbackDrainOutcome {
     Complete,
     Exceeded,
     TimedOut,
+}
+
+#[derive(Clone, Copy)]
+enum FixedViolation {
+    Exceeded,
+    TimedOut,
+}
+
+// Raw input accounting is shared by source wrappers, never carried in mutable extensions.
+struct InputGuard {
+    clock: MonotonicClock,
+    complete: Cell<bool>,
+    consumed: Cell<usize>,
+    deadline: Option<Deadline>,
+    declared: Option<u64>,
+    failure: RefCell<Option<StoredError>>,
+    max: Option<usize>,
+    violation: Cell<Option<FixedViolation>>,
+}
+
+impl InputGuard {
+    fn check(&self) -> Result<(), EdgeError> {
+        if let Some(error) = &*self.failure.borrow() {
+            return Err(error.to_edge_error());
+        }
+        if self.complete.get() {
+            return Ok(());
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| deadline.is_expired_at(self.clock.now()))
+        {
+            return Err(self.fail_fixed(FixedViolation::TimedOut));
+        }
+        if self
+            .max
+            .zip(self.declared)
+            .is_some_and(|(max, declared)| u64::try_from(max).is_ok_and(|limit| declared > limit))
+        {
+            return Err(self.fail_fixed(FixedViolation::Exceeded));
+        }
+        Ok(())
+    }
+    fn fail(&self, error: EdgeError) -> EdgeError {
+        let mut failure = self.failure.borrow_mut();
+        failure.get_or_insert_with(|| StoredError::capture(&error));
+        error
+    }
+
+    fn fail_fixed(&self, violation: FixedViolation) -> EdgeError {
+        self.violation.set(Some(violation));
+        self.fail(match violation {
+            FixedViolation::Exceeded => {
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound)
+            }
+            FixedViolation::TimedOut => {
+                EdgeError::request_timeout("inbound body read deadline exceeded")
+            }
+        })
+    }
+
+    fn observe(&self, len: usize) -> Result<(), EdgeError> {
+        let Some(max) = self.max else {
+            return Ok(());
+        };
+        let total = self
+            .consumed
+            .get()
+            .checked_add(len)
+            .filter(|total| *total <= max)
+            .ok_or_else(|| self.fail_fixed(FixedViolation::Exceeded))?;
+        self.consumed.set(total);
+        Ok(())
+    }
+
+    fn outcome(&self) -> Option<FallbackDrainOutcome> {
+        self.violation.get().map(|violation| match violation {
+            FixedViolation::Exceeded => FallbackDrainOutcome::Exceeded,
+            FixedViolation::TimedOut => FallbackDrainOutcome::TimedOut,
+        })
+    }
 }
 
 enum StoredError {
@@ -95,51 +186,51 @@ impl StoredError {
         Self::Internal("inbound body drain cancelled".to_owned(), None)
     }
 
-    fn capture(error: EdgeError) -> Self {
+    fn capture(error: &EdgeError) -> Self {
         match error {
             EdgeError::BadGateway {
                 message,
                 reason,
                 provider_detail,
-            } => Self::BadGateway(message, reason, provider_detail),
+            } => Self::BadGateway(message.clone(), *reason, *provider_detail),
             EdgeError::BadRequest {
                 message,
                 provider_detail,
-            } => Self::BadRequest(message, provider_detail),
+            } => Self::BadRequest(message.clone(), *provider_detail),
             EdgeError::ConfigOutOfDate {
                 message,
                 field_path,
-            } => Self::ConfigOutOfDate(message, field_path),
+            } => Self::ConfigOutOfDate(message.clone(), field_path.clone()),
             EdgeError::GatewayTimeout {
                 message,
                 cause,
                 provider_detail,
-            } => Self::GatewayTimeout(message, cause, provider_detail),
+            } => Self::GatewayTimeout(message.clone(), *cause, *provider_detail),
             EdgeError::Internal {
                 source,
                 provider_detail,
-            } => Self::Internal(source.to_string(), provider_detail),
+            } => Self::Internal(source.to_string(), *provider_detail),
             EdgeError::MethodNotAllowed { method, allowed } => {
-                Self::MethodNotAllowed(method, allowed)
+                Self::MethodNotAllowed(method.clone(), allowed.clone())
             }
-            EdgeError::NotFound { path } => Self::NotFound(path),
-            EdgeError::NotImplemented { message } => Self::NotImplemented(message),
-            EdgeError::PayloadTooLarge { origin } => Self::PayloadTooLarge(origin),
+            EdgeError::NotFound { path } => Self::NotFound(path.clone()),
+            EdgeError::NotImplemented { message } => Self::NotImplemented(message.clone()),
+            EdgeError::PayloadTooLarge { origin } => Self::PayloadTooLarge(*origin),
             EdgeError::RequestHeaderFieldsTooLarge { message } => {
-                Self::RequestHeaderFieldsTooLarge(message)
+                Self::RequestHeaderFieldsTooLarge(message.clone())
             }
-            EdgeError::RequestTimeout { message } => Self::RequestTimeout(message),
+            EdgeError::RequestTimeout { message } => Self::RequestTimeout(message.clone()),
             EdgeError::ResponseTooLarge { message, reason } => {
-                Self::ResponseTooLarge(message, reason)
+                Self::ResponseTooLarge(message.clone(), *reason)
             }
-            EdgeError::ServiceUnavailable { message } => Self::ServiceUnavailable(message),
+            EdgeError::ServiceUnavailable { message } => Self::ServiceUnavailable(message.clone()),
             EdgeError::StoreExtraction {
                 reason,
                 message,
                 field_path,
-            } => Self::StoreExtraction(reason, message, field_path),
-            EdgeError::UriTooLong { message } => Self::UriTooLong(message),
-            EdgeError::Validation { message } => Self::Validation(message),
+            } => Self::StoreExtraction(*reason, message.clone(), field_path.clone()),
+            EdgeError::UriTooLong { message } => Self::UriTooLong(message.clone()),
+            EdgeError::Validation { message } => Self::Validation(message.clone()),
         }
     }
 
@@ -199,6 +290,7 @@ pub struct RequestContext {
     body: RefCell<BodyState>,
     config_extraction_limits: ConfigExtractionLimits,
     ingress_grant: RefCell<Option<IngressGrant>>,
+    input_guard: Option<Rc<InputGuard>>,
     monotonic_clock: MonotonicClock,
     parts: RequestParts,
     path_params: PathParams,
@@ -243,13 +335,24 @@ impl RequestContext {
         let body = {
             let mut state = self.body.borrow_mut();
             if matches!(&*state, BodyState::Initial(_)) {
-                if let Err(error) = check_read_deadline(self.read_deadline, &self.monotonic_clock) {
-                    let stored = StoredError::capture(error);
+                if let Some(guard) = &self.input_guard
+                    && let Err(error) = guard.check()
+                {
+                    let stored = StoredError::capture(&error);
                     let returned = stored.to_edge_error();
                     *state = BodyState::Poisoned(stored);
                     return Err(returned);
                 }
-                if declared_body_exceeds(&self.parts.headers, max) {
+                if self.input_guard.is_none()
+                    && let Err(error) =
+                        check_read_deadline(self.read_deadline, &self.monotonic_clock)
+                {
+                    let stored = StoredError::capture(&error);
+                    let returned = stored.to_edge_error();
+                    *state = BodyState::Poisoned(stored);
+                    return Err(returned);
+                }
+                if self.input_guard.is_none() && declared_body_exceeds(&self.parts.headers, max) {
                     return Err(EdgeError::payload_too_large(
                         RequestBodyOverflowOrigin::Inbound,
                     ));
@@ -286,7 +389,16 @@ impl RequestContext {
             armed: true,
             body: &self.body,
         };
-        let result = drain_body(body, max, self.read_deadline, &self.monotonic_clock).await;
+        let result = async {
+            let protected_body = prepare_protected_body(body, self.input_guard.as_deref())?;
+            let deadline = if self.input_guard.is_some() {
+                None
+            } else {
+                self.read_deadline
+            };
+            drain_body(protected_body, max, deadline, &self.monotonic_clock).await
+        }
+        .await;
         match result {
             Ok(bytes) => {
                 *self.body.borrow_mut() = BodyState::Cached(bytes.clone());
@@ -294,7 +406,7 @@ impl RequestContext {
                 Ok(bytes)
             }
             Err(error) => {
-                let stored = StoredError::capture(error);
+                let stored = StoredError::capture(&error);
                 let returned = stored.to_edge_error();
                 *self.body.borrow_mut() = BodyState::Poisoned(stored);
                 guard.disarm();
@@ -365,6 +477,22 @@ impl RequestContext {
         registry.default_ref()
     }
 
+    pub(crate) async fn discard_pre_dispatch_body(self) -> Result<FallbackDrainOutcome, EdgeError> {
+        if let Some(outcome) = self.fixed_input_outcome() {
+            return Ok(outcome);
+        }
+        let result = async {
+            let unread = self.take_body()?;
+            let body = prepare_protected_body(unread, self.input_guard.as_deref())?;
+            drain_body_discard(body).await
+        }
+        .await;
+        if let Some(outcome) = self.fixed_input_outcome() {
+            return Ok(outcome);
+        }
+        result.map(|()| FallbackDrainOutcome::Complete)
+    }
+
     /// Clone a request extension of type `T`, if present. Used by the
     /// introspection extractors (`ManifestJson` / `RouteTable`) to read the
     /// payload the router injected for their route.
@@ -386,6 +514,30 @@ impl RequestContext {
     #[inline]
     pub fn extensions_mut(&mut self) -> &mut Extensions {
         &mut self.parts.extensions
+    }
+
+    pub(crate) fn finish_pre_dispatch(
+        mut self,
+        params: PathParams,
+        route_metadata: Option<RouteMetadata>,
+        ingress: Option<AdmittedIngress>,
+    ) -> Self {
+        self.path_params = params;
+        self.route_metadata = route_metadata;
+        if let Some(admitted) = ingress {
+            let (request_start, read_deadline, grant, limits, clock) = admitted.into_parts();
+            self.config_extraction_limits = limits;
+            *self.ingress_grant.get_mut() = Some(grant);
+            self.monotonic_clock = clock;
+            self.read_deadline = Some(read_deadline);
+            self.request_start = request_start;
+        }
+        self
+    }
+
+    pub(crate) fn fixed_input_outcome(&self) -> Option<FallbackDrainOutcome> {
+        let guard = self.input_guard.as_ref()?;
+        guard.outcome()
     }
 
     /// Buffers at most `max` bytes and deserializes form-urlencoded data.
@@ -425,6 +577,11 @@ impl RequestContext {
     /// Returns the sticky body error or an internal error if a drain is in progress.
     #[inline]
     pub fn into_request(self) -> Result<Request, EdgeError> {
+        if let Some(guard) = &self.input_guard
+            && let Some(error) = &*guard.failure.borrow()
+        {
+            return Err(error.to_edge_error());
+        }
         let body = match self.body.into_inner() {
             BodyState::Cached(bytes) => Body::from(bytes),
             BodyState::Draining => {
@@ -479,6 +636,49 @@ impl RequestContext {
         registry.default()
     }
 
+    pub(crate) fn map_pre_dispatch_body<F>(
+        &mut self,
+        max_output: usize,
+        mut map: F,
+    ) -> Result<(), EdgeError>
+    where
+        F: FnMut(bytes::Bytes) -> Result<bytes::Bytes, EdgeError> + 'static,
+    {
+        let Some(guard) = self.input_guard.as_ref().map(Rc::clone) else {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "protected input guard missing"
+            )));
+        };
+        let body = self.take_body()?;
+        match body.into_stream() {
+            Ok(source) => {
+                self.parts.headers.remove(CONTENT_LENGTH);
+                self.parts.headers.remove(TRANSFER_ENCODING);
+                *self.body.borrow_mut() =
+                    BodyState::Initial(map_protected_stream(source, guard, max_output, map));
+                Ok(())
+            }
+            Err(buffered_source) => {
+                let buffered = prepare_protected_body(buffered_source, Some(&guard))
+                    .map_err(|error| self.poison_protected_body(error))?;
+                let input = buffered.into_bytes().ok_or_else(|| {
+                    EdgeError::internal(anyhow::anyhow!("buffered body lost payload"))
+                })?;
+                match map(input).and_then(|bytes| check_cached_body(&bytes, max_output)) {
+                    Ok(bytes) => {
+                        self.parts.headers.remove(TRANSFER_ENCODING);
+                        self.parts
+                            .headers
+                            .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+                        *self.body.borrow_mut() = BodyState::Cached(bytes);
+                        Ok(())
+                    }
+                    Err(error) => Err(self.poison_protected_body(error)),
+                }
+            }
+        }
+    }
+
     #[must_use]
     #[inline]
     pub fn method(&self) -> &Method {
@@ -499,6 +699,7 @@ impl RequestContext {
             body: RefCell::new(BodyState::Initial(body)),
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
+            input_guard: None,
             monotonic_clock: MonotonicClock::default(),
             parts,
             path_params: params,
@@ -507,26 +708,33 @@ impl RequestContext {
             route_metadata: None,
         }
     }
-
-    pub(crate) fn new_routed(
-        request: Request,
-        params: PathParams,
-        route_metadata: RouteMetadata,
-        ingress: AdmittedIngress,
-    ) -> Self {
-        let (request_start, read_deadline, grant, config_extraction_limits, monotonic_clock) =
-            ingress.into_parts();
-        let (parts, body) = request.into_parts();
+    pub(crate) fn new_pre_dispatch(request: Request, ingress: Option<&AdmittedIngress>) -> Self {
+        let clock = ingress.map_or_else(MonotonicClock::default, AdmittedIngress::monotonic_clock);
+        let deadline = ingress.map(AdmittedIngress::read_deadline);
+        let guard = Rc::new(InputGuard {
+            clock: clock.clone(),
+            complete: Cell::new(false),
+            consumed: Cell::new(0),
+            deadline,
+            declared: declared_body_length(request.headers()),
+            failure: RefCell::new(None),
+            max: ingress.and_then(AdmittedIngress::fallback_max_body_bytes),
+            violation: Cell::new(None),
+        });
+        let (parts, raw_body) = request.into_parts();
+        let body = guard_input(raw_body, Rc::clone(&guard));
+        let request_start = ingress.map_or_else(|| clock.now(), AdmittedIngress::request_start);
         Self {
             body: RefCell::new(BodyState::Initial(body)),
-            config_extraction_limits,
-            ingress_grant: RefCell::new(Some(grant)),
-            monotonic_clock,
+            config_extraction_limits: ConfigExtractionLimits::default(),
+            ingress_grant: RefCell::new(None),
+            input_guard: Some(guard),
+            monotonic_clock: clock,
             parts,
-            path_params: params,
-            read_deadline: Some(read_deadline),
+            path_params: PathParams::default(),
+            read_deadline: deadline,
             request_start,
-            route_metadata: Some(route_metadata),
+            route_metadata: None,
         }
     }
 
@@ -556,6 +764,18 @@ impl RequestContext {
     #[inline]
     pub fn path_params(&self) -> &PathParams {
         &self.path_params
+    }
+
+    fn poison_protected_body(&self, failure: EdgeError) -> EdgeError {
+        let error = if let Some(guard) = &self.input_guard {
+            guard.fail(failure)
+        } else {
+            failure
+        };
+        let stored = StoredError::capture(&error);
+        let returned = stored.to_edge_error();
+        *self.body.borrow_mut() = BodyState::Poisoned(stored);
+        returned
     }
 
     /// # Errors
@@ -619,6 +839,15 @@ impl RequestContext {
     #[inline]
     pub fn take_body(&self) -> Result<Body, EdgeError> {
         let mut state = self.body.borrow_mut();
+        if matches!(&*state, BodyState::Initial(_) | BodyState::Taken)
+            && let Some(guard) = &self.input_guard
+            && let Some(error) = &*guard.failure.borrow()
+        {
+            let stored = StoredError::capture(&error.to_edge_error());
+            let returned = stored.to_edge_error();
+            *state = BodyState::Poisoned(stored);
+            return Err(returned);
+        }
         match mem::replace(&mut *state, BodyState::Taken) {
             BodyState::Cached(bytes) => Ok(Body::from(bytes)),
             BodyState::Draining => {
@@ -647,6 +876,42 @@ impl RequestContext {
         self.ingress_grant.borrow_mut().take()
     }
 
+    pub(crate) async fn transform_pre_dispatch_body<F>(
+        &mut self,
+        max_input: usize,
+        max_output: usize,
+        transform: F,
+    ) -> Result<(), EdgeError>
+    where
+        F: FnOnce(bytes::Bytes) -> Result<bytes::Bytes, EdgeError>,
+    {
+        let input = self
+            .body_bytes(max_input)
+            .await
+            .map_err(|error| self.poison_protected_body(error))?;
+        let mut cancellation = DrainGuard {
+            armed: true,
+            body: &self.body,
+        };
+        let transformed = transform(input).and_then(|bytes| check_cached_body(&bytes, max_output));
+        match transformed {
+            Ok(bytes) => {
+                self.parts.headers.remove(TRANSFER_ENCODING);
+                self.parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+                *self.body.borrow_mut() = BodyState::Cached(bytes);
+                cancellation.disarm();
+                Ok(())
+            }
+            Err(error) => {
+                let returned = self.poison_protected_body(error);
+                cancellation.disarm();
+                Err(returned)
+            }
+        }
+    }
+
     #[must_use]
     #[inline]
     pub fn uri(&self) -> &Uri {
@@ -670,6 +935,100 @@ impl RequestContext {
     }
 }
 
+fn prepare_protected_body(body: Body, policy: Option<&InputGuard>) -> Result<Body, EdgeError> {
+    if let Some(guard) = policy {
+        guard.check()?;
+        if !guard.complete.get()
+            && let Some(bytes) = body.as_bytes()
+        {
+            guard.observe(bytes.len())?;
+            guard.complete.set(true);
+        }
+    }
+    Ok(body)
+}
+
+fn guard_input(body: Body, guard: Rc<InputGuard>) -> Body {
+    let mut source = match body.into_stream() {
+        Ok(source) => Some(source),
+        Err(buffered) => return buffered,
+    };
+    Body::from_stream(stream::poll_fn(move |cx| {
+        let Some(current) = source.as_mut() else {
+            return Poll::Ready(None);
+        };
+        if let Err(error) = guard.check() {
+            drop(source.take());
+            return Poll::Ready(Some(Err(error)));
+        }
+        let next = current.poll_next_unpin(cx);
+        if let Err(error) = guard.check() {
+            drop(source.take());
+            return Poll::Ready(Some(Err(error)));
+        }
+        match next {
+            Poll::Ready(Some(Ok(bytes))) => match guard.observe(bytes.len()) {
+                Ok(()) => Poll::Ready(Some(Ok(bytes))),
+                Err(error) => {
+                    drop(source.take());
+                    Poll::Ready(Some(Err(error)))
+                }
+            },
+            Poll::Ready(Some(Err(error))) => {
+                if matches!(error, EdgeError::RequestTimeout { .. }) {
+                    guard.violation.set(Some(FixedViolation::TimedOut));
+                }
+                let recorded = guard.fail(error);
+                drop(source.take());
+                Poll::Ready(Some(Err(recorded)))
+            }
+            Poll::Ready(None) => {
+                guard.complete.set(true);
+                drop(source.take());
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }))
+}
+
+fn map_protected_stream<F>(input: BodyStream, guard: Rc<InputGuard>, max: usize, mut map: F) -> Body
+where
+    F: FnMut(bytes::Bytes) -> Result<bytes::Bytes, EdgeError> + 'static,
+{
+    let mut source = Some(input);
+    let mut emitted = 0_usize;
+    Body::from_stream(stream::poll_fn(move |cx| {
+        let Some(current) = source.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let next = match current.poll_next_unpin(cx) {
+            Poll::Ready(Some(result)) => result.and_then(&mut map).and_then(|bytes| {
+                guard.check()?;
+                let total = emitted
+                    .checked_add(bytes.len())
+                    .filter(|total| *total <= max)
+                    .ok_or_else(|| {
+                        EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound)
+                    })?;
+                emitted = total;
+                Ok(bytes)
+            }),
+            Poll::Ready(None) => {
+                drop(source.take());
+                return Poll::Ready(None);
+            }
+            Poll::Pending => return Poll::Pending,
+        };
+        if let Err(error) = next {
+            drop(source.take());
+            Poll::Ready(Some(Err(guard.fail(error))))
+        } else {
+            Poll::Ready(Some(next))
+        }
+    }))
+}
+
 fn check_cached_body(bytes: &bytes::Bytes, max: usize) -> Result<bytes::Bytes, EdgeError> {
     if bytes.len() > max {
         return Err(EdgeError::payload_too_large(
@@ -679,22 +1038,22 @@ fn check_cached_body(bytes: &bytes::Bytes, max: usize) -> Result<bytes::Bytes, E
     Ok(bytes.clone())
 }
 
-fn declared_body_exceeds(headers: &HeaderMap, max: usize) -> bool {
+fn declared_body_length(headers: &HeaderMap) -> Option<u64> {
     let mut values = headers.get_all("content-length").iter();
-    let Some(value) = values.next() else {
-        return false;
-    };
+    let value = values.next()?;
     if values.next().is_some() {
-        return false;
+        return None;
     }
-    let Ok(raw) = value.to_str() else {
-        return false;
-    };
+    let raw = value.to_str().ok()?;
     let text = raw.trim();
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
+        return None;
     }
-    text.parse::<u64>().is_ok_and(|length| {
+    text.parse::<u64>().ok()
+}
+
+fn declared_body_exceeds(headers: &HeaderMap, max: usize) -> bool {
+    declared_body_length(headers).is_some_and(|length| {
         usize::try_from(length).map_or(true, |native_length| native_length > max)
     })
 }
@@ -751,66 +1110,14 @@ pub(crate) async fn drain_body(
     }
 }
 
-fn fallback_deadline_outcome(
-    deadline: Deadline,
-    monotonic_clock: &MonotonicClock,
-) -> Option<FallbackDrainOutcome> {
-    deadline
-        .is_expired_at(monotonic_clock.now())
-        .then_some(FallbackDrainOutcome::TimedOut)
-}
-
-pub(crate) async fn drain_body_discard(
-    body: Body,
-    max: usize,
-    deadline: Deadline,
-    monotonic_clock: &MonotonicClock,
-) -> Result<FallbackDrainOutcome, EdgeError> {
-    if let Some(outcome) = fallback_deadline_outcome(deadline, monotonic_clock) {
-        return Ok(outcome);
-    }
+async fn drain_body_discard(body: Body) -> Result<(), EdgeError> {
     match body.into_stream() {
-        Err(buffered_body) => {
-            let bytes = buffered_body.into_bytes().ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!("body conversion lost buffered payload"))
-            })?;
-            if let Some(outcome) = fallback_deadline_outcome(deadline, monotonic_clock) {
-                return Ok(outcome);
-            }
-            if bytes.len() > max {
-                return Ok(FallbackDrainOutcome::Exceeded);
-            }
-            Ok(FallbackDrainOutcome::Complete)
-        }
+        Err(_buffered) => Ok(()),
         Ok(mut stream) => {
-            let mut consumed = 0_usize;
-            loop {
-                if let Some(outcome) = fallback_deadline_outcome(deadline, monotonic_clock) {
-                    return Ok(outcome);
-                }
-                let next = stream.next().await;
-                // Deadline wins a simultaneous body/error/EOF observation.
-                if let Some(outcome) = fallback_deadline_outcome(deadline, monotonic_clock) {
-                    return Ok(outcome);
-                }
-                let Some(result) = next else {
-                    return Ok(FallbackDrainOutcome::Complete);
-                };
-                let chunk = match result {
-                    Ok(chunk) => chunk,
-                    Err(EdgeError::RequestTimeout { .. }) => {
-                        return Ok(FallbackDrainOutcome::TimedOut);
-                    }
-                    Err(error) => return Err(error),
-                };
-                let Some(next_consumed) = consumed.checked_add(chunk.len()) else {
-                    return Ok(FallbackDrainOutcome::Exceeded);
-                };
-                consumed = next_consumed;
-                if consumed > max {
-                    return Ok(FallbackDrainOutcome::Exceeded);
-                }
+            while let Some(chunk) = stream.next().await {
+                chunk?;
             }
+            Ok(())
         }
     }
 }
@@ -922,6 +1229,20 @@ mod tests {
             .body(body)
             .expect("request");
         RequestContext::new(request, params)
+    }
+
+    #[test]
+    fn uncapped_input_guard_skips_accounting_at_counter_overflow() {
+        let request = request_builder().body(Body::empty()).expect("request");
+        let context = RequestContext::new_pre_dispatch(request, None);
+        let guard = context.input_guard.as_ref().expect("protected input guard");
+        guard.consumed.set(usize::MAX);
+
+        guard.observe(1).expect("uncapped input must not overflow");
+
+        assert_eq!(guard.consumed.get(), usize::MAX);
+        assert!(guard.failure.borrow().is_none());
+        assert!(guard.outcome().is_none());
     }
 
     fn params(map: &[(&str, &str)]) -> PathParams {

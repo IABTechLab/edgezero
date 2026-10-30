@@ -198,21 +198,22 @@ adapter dispatch resolves the route during admission, before the hook. The hook
 cannot bypass admission or change that route selection. Direct
 `RouterService::call` and `RouterService::oneshot` instead perform their route
 lookup after the hook; they are not substitutes for canonical adapter admission.
-The hook receives the converted request before router state, introspection and
-`RequestContext` injection. Its future can be non-`Send`.
+The hook receives a protected `PreDispatchRequest` before router state and
+introspection injection. Its future can be non-`Send`.
 
 ```rust
 use async_trait::async_trait;
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::{Request, Response, response_builder};
+use edgezero_core::http::{Response, response_builder};
+use edgezero_core::PreDispatchRequest;
 use edgezero_core::router::{PreDispatchHook, RouterService};
 
 struct ExampleHook;
 
 #[async_trait(?Send)]
 impl PreDispatchHook for ExampleHook {
-    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+    async fn handle(&self, request: &mut PreDispatchRequest) -> Result<Option<Response>, EdgeError> {
         if request.headers().contains_key("x-example-stop") {
             return Ok(Some(
                 response_builder()
@@ -230,12 +231,19 @@ let router = RouterService::builder()
     .build();
 ```
 
-`Ok(None)` continues with modified headers, extensions, remaining body and URI
+`Ok(None)` continues with modified headers, extensions, bounded body and URI
 query. The method and URI path must remain unchanged; changing either returns
 an internal error before handler, middleware or fallback execution; canonical
-admission has already selected the route. Consuming a stream does not restore
-it. `Ok(Some(response))` skips router state, introspection, request-context
-injection, middleware, handlers and fallback execution. In canonical dispatch,
+admission has already selected the route. Modified heads are checked again against
+the original ingress limits and normalized framing rules. Use `body_bytes(max)`
+for cached bounded reads, `transform_body(input_max, output_max, transform)` for
+buffered transformations, or `map_body(output_max, transform)` for synchronous
+per-chunk transformations. Raw body replacement is not exposed. Original input
+limits, read deadlines and sticky failures survive transformations, header and
+extension edits. A fallback input overflow or timeout retains its configured response
+even if the hook ignores the read error. `Ok(Some(response))` skips router state,
+introspection, middleware, handlers and fallback draining when no body-policy failure
+has occurred. An unread terminal hook never polls the body. In canonical dispatch,
 the response still uses the admitted response-egress policy and coordinator.
 Return a complete response when exact challenge or hardening headers matter.
 `Err(error)` stops dispatch; direct `Service::call` propagates it,
@@ -259,8 +267,9 @@ let ingress = request.extensions()
     .get::<edgezero_core::ingress::RequestIngress>();
 ```
 
-If the hook consumes the body and returns `Ok(None)`, the handler receives only
-what remains unless the hook replaces the body. Generated `app!` applications
+If the hook reads the body and returns `Ok(None)`, the handler receives the shared
+cached bytes, or the bounded transformed body. Sticky read or transform failures
+cannot be cleared by continuing. Generated `app!` applications
 cannot install a hook through the macro or modify the built router. A
 hand-written `Hooks` implementation does not inherit the generated metadata.
 Move your existing `app!` invocation **unchanged, including all arguments**

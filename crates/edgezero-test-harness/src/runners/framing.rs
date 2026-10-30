@@ -87,6 +87,7 @@ fn parse_head(bytes: &[u8]) -> Result<Value> {
 }
 
 fn request(port: u16, path: &str, head: bool, h2: bool, run: &Path) -> Result<Value> {
+    let budget = startup::remaining(port, Duration::from_secs(5))?;
     let id = token();
     let header_path = run.join(format!("{id}.headers"));
     let body_path = run.join(format!("{id}.body"));
@@ -100,7 +101,7 @@ fn request(port: u16, path: &str, head: bool, h2: bool, run: &Path) -> Result<Va
             "--noproxy",
             "*",
             "--max-time",
-            "5",
+            &budget.as_secs_f64().to_string(),
             "--max-filesize",
             "131072",
         ])
@@ -127,6 +128,16 @@ fn request(port: u16, path: &str, head: bool, h2: bool, run: &Path) -> Result<Va
         &output.stderr,
     )?;
     response["curl_exit"] = json!(output.status.code());
+    if startup::check(port)?.is_some() && !output.status.success() {
+        startup::reject(port, "first prescribed curl response did not complete");
+        startup::check(port)?;
+    }
+    startup::observe(
+        port,
+        path,
+        response["headers"].as_array().unwrap_or(&Vec::new()),
+    )?;
+    startup::annotate_response(port, &mut response);
     Ok(response)
 }
 

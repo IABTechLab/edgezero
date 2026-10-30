@@ -1270,6 +1270,39 @@ fn body_policy_decodes_recognized_codings_before_rechunking() {
     }
 }
 
+fn assert_preserved_source_variant(error: &EdgeError, case: usize) {
+    match case {
+        0 => assert!(matches!(error, EdgeError::BadRequest { .. })),
+        1 => assert!(matches!(
+            error,
+            EdgeError::BadGateway {
+                reason: BadGatewayReason::Transport,
+                ..
+            }
+        )),
+        2 => assert!(matches!(
+            error,
+            EdgeError::GatewayTimeout {
+                cause: BudgetSource::RequestDeadline,
+                ..
+            }
+        )),
+        _ => {
+            assert_eq!(case, 3, "four explicit source cases");
+            assert!(matches!(error, EdgeError::Internal { .. }));
+            assert_eq!(
+                error
+                    .inner()
+                    .expect("internal source")
+                    .downcast_ref::<IoError>()
+                    .expect("concrete source")
+                    .raw_os_error(),
+                Some(42_i32)
+            );
+        }
+    }
+}
+
 #[test]
 fn provider_diagnostics_survive_response_body_policy_and_collection() {
     use crate::error_detail::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
@@ -1297,7 +1330,7 @@ fn provider_diagnostics_survive_response_body_policy_and_collection() {
     ] {
         for response_decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
             for status in [StatusCode::OK, StatusCode::PARTIAL_CONTENT] {
-                for error in [
+                for (case, error) in [
                     EdgeError::bad_request_with_detail("source rejected", detail),
                     EdgeError::bad_gateway_with_detail(
                         "source failed",
@@ -1310,7 +1343,10 @@ fn provider_diagnostics_survive_response_body_policy_and_collection() {
                         detail,
                     ),
                     EdgeError::internal_with_detail(IoError::from_raw_os_error(42), detail),
-                ] {
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     let expected_display = error.to_string();
                     let expected_message = error.message();
                     let expected_kind = error.kind();
@@ -1337,21 +1373,7 @@ fn provider_diagnostics_survive_response_body_policy_and_collection() {
                     assert_eq!(retained.message(), expected_message);
                     assert_eq!(retained.kind(), expected_kind);
                     assert_eq!(retained.status(), expected_status);
-                    if let EdgeError::BadGateway { reason, .. } = &retained {
-                        assert_eq!(*reason, BadGatewayReason::Transport);
-                    }
-                    if let EdgeError::GatewayTimeout { cause, .. } = &retained {
-                        assert_eq!(*cause, BudgetSource::RequestDeadline);
-                    }
-                    if let Some(inner) = retained.inner() {
-                        assert_eq!(
-                            inner
-                                .downcast_ref::<IoError>()
-                                .expect("concrete source")
-                                .raw_os_error(),
-                            Some(42_i32)
-                        );
-                    }
+                    assert_preserved_source_variant(&retained, case);
                 }
             }
         }

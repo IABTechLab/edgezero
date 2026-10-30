@@ -7,14 +7,15 @@ use async_trait::async_trait;
 use matchit::Router as PathRouter;
 use tower_service::Service;
 
-use crate::context::{FallbackDrainOutcome, RequestContext, drain_body_discard};
+use crate::context::FallbackDrainOutcome;
 use crate::error::EdgeError;
 use crate::handler::{BoxHandler, IntoHandler, IntrospectionNeeds};
 use crate::http::{Extensions, HandlerFuture, Method, Request, Response};
-use crate::ingress::AdmittedIngress;
+use crate::ingress::{AdmittedIngress, IngressHeadLimits, validate_normalized_ingress_parts};
 use crate::introspection::{ManifestJson, RouteTable};
 use crate::middleware::{BoxMiddleware, Middleware, Next};
 use crate::params::PathParams;
+use crate::pre_dispatch::PreDispatchRequest;
 use crate::response::IntoResponse as _;
 
 /// Shared optional interception performed before router lookup and state injection.
@@ -31,14 +32,16 @@ pub type BoxPreDispatchHook = Arc<dyn PreDispatchHook>;
 #[async_trait(?Send)]
 pub trait PreDispatchHook: Send + Sync + 'static {
     /// Return a terminal response, or continue with the mutated request.
-    /// Continuing hooks may change headers, extensions, the body and URI query,
-    /// but must preserve the method and URI path. A violation is an internal error.
+    /// Continuing hooks may change headers, extensions and URI query, and transform
+    /// the body through bounded accessors. They must preserve method and URI path.
+    /// Modified heads are revalidated against the captured ingress limits.
     ///
     /// # Errors
     ///
     /// Errors prevent dispatch. [`Service::call`] propagates them, while
     /// [`RouterService::oneshot`] uses the existing error-response rendering.
-    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError>;
+    async fn handle(&self, request: &mut PreDispatchRequest)
+    -> Result<Option<Response>, EdgeError>;
 }
 
 struct RouteEntry {
@@ -423,8 +426,12 @@ struct RouterInner {
 }
 
 impl RouterInner {
-    async fn dispatch(&self, mut request: Request) -> Result<Response, EdgeError> {
-        if let Some(response) = self.pre_dispatch(&mut request).await? {
+    async fn dispatch(&self, incoming: Request) -> Result<Response, EdgeError> {
+        let mut request = PreDispatchRequest::new(incoming, None);
+        if let Some(response) = self
+            .pre_dispatch(&mut request, IngressHeadLimits::default())
+            .await?
+        {
             return Ok(response);
         }
         let method = request.method().clone();
@@ -447,7 +454,7 @@ impl RouterInner {
 
     async fn dispatch_found(
         &self,
-        mut request: Request,
+        mut request: PreDispatchRequest,
         entry: &RouteEntry,
         params: PathParams,
         ingress: Option<AdmittedIngress>,
@@ -472,12 +479,8 @@ impl RouterInner {
         request
             .extensions_mut()
             .extend(self.state_extensions.clone());
-        let ctx = match ingress {
-            Some(admitted) => {
-                RequestContext::new_routed(request, params, entry.metadata.clone(), admitted)
-            }
-            None => RequestContext::new(request, params),
-        };
+        let metadata = ingress.as_ref().map(|_| entry.metadata.clone());
+        let ctx = request.into_context(params, metadata, ingress);
         let next = Next::new(&self.middlewares, entry.handler.as_ref());
         next.run(ctx).await
     }
@@ -516,7 +519,11 @@ impl RouterInner {
             RouteMatch::MethodNotAllowed(allowed)
         }
     }
-    async fn pre_dispatch(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+    async fn pre_dispatch(
+        &self,
+        request: &mut PreDispatchRequest,
+        head_limits: IngressHeadLimits,
+    ) -> Result<Option<Response>, EdgeError> {
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
         if let Some(hook) = &self.pre_dispatch_hook {
@@ -528,6 +535,7 @@ impl RouterInner {
                     "pre-dispatch hook changed the request method or path",
                 )));
             }
+            validate_normalized_ingress_parts(request.parts(), head_limits)?;
         }
         Ok(None)
     }
@@ -571,7 +579,7 @@ impl RouterService {
     pub async fn dispatch_resolved(
         &self,
         resolved: ResolvedDispatch,
-        mut request: Request,
+        incoming: Request,
         ingress: AdmittedIngress,
     ) -> Result<Response, EdgeError> {
         if !Arc::ptr_eq(&self.inner, &resolved.owner) {
@@ -579,12 +587,21 @@ impl RouterService {
                 "resolved dispatch token belongs to another router"
             )));
         }
-        if request.method() != resolved.method || request.uri().path() != resolved.path {
+        if incoming.method() != resolved.method || incoming.uri().path() != resolved.path {
             return Err(EdgeError::internal(anyhow::anyhow!(
                 "request method or path changed after ingress route resolution"
             )));
         }
-        if let Some(response) = self.inner.pre_dispatch(&mut request).await? {
+        let mut request = PreDispatchRequest::new(incoming, Some(&ingress));
+        let hook_result = self
+            .inner
+            .pre_dispatch(&mut request, ingress.head_limits())
+            .await;
+        if let Some(outcome) = request.fixed_outcome() {
+            return fallback_response_for_outcome(ingress, outcome)
+                .ok_or_else(|| EdgeError::request_timeout("inbound body read deadline exceeded"));
+        }
+        if let Some(response) = hook_result? {
             return Ok(response);
         }
 
@@ -695,27 +712,26 @@ impl RouterService {
 }
 
 async fn fallback_terminal_response(
-    request: Request,
+    request: PreDispatchRequest,
     ingress: AdmittedIngress,
 ) -> Result<Option<Response>, EdgeError> {
-    let Some(fallback) = ingress.into_fallback() else {
+    if !ingress.is_fallback() {
         return Ok(None);
-    };
-    let (grant, max_body_bytes, read_deadline, monotonic_clock, on_exceeded, on_timeout) =
-        fallback.into_parts();
-    let outcome = drain_body_discard(
-        request.into_body(),
-        max_body_bytes,
-        read_deadline,
-        &monotonic_clock,
-    )
-    .await;
-    drop(grant);
+    }
+    let outcome = request.discard().await?;
+    Ok(fallback_response_for_outcome(ingress, outcome))
+}
 
-    match outcome? {
-        FallbackDrainOutcome::Complete => Ok(None),
-        FallbackDrainOutcome::Exceeded => Ok(Some(on_exceeded.into_response())),
-        FallbackDrainOutcome::TimedOut => Ok(Some(on_timeout.into_response())),
+fn fallback_response_for_outcome(
+    ingress: AdmittedIngress,
+    outcome: FallbackDrainOutcome,
+) -> Option<Response> {
+    let (grant, on_exceeded, on_timeout) = ingress.into_fallback()?;
+    drop(grant);
+    match outcome {
+        FallbackDrainOutcome::Complete => None,
+        FallbackDrainOutcome::Exceeded => Some(on_exceeded.into_response()),
+        FallbackDrainOutcome::TimedOut => Some(on_timeout.into_response()),
     }
 }
 
@@ -1616,7 +1632,7 @@ mod pre_dispatch_tests {
         use crate::ingress::{
             AdmissionDecision, BufferedIngressResponse, IngressBeginOutcome,
             IngressDispatchOutcome, IngressFraming, IngressGrant, IngressHeadAccounting,
-            IngressHeadParts,
+            IngressHeadLimits, IngressHeadParts,
         };
         use crate::response_egress::{
             ResponseEgressCompletion, ResponseEgressEnvelope, ResponseEgressOutcome,
@@ -1630,9 +1646,54 @@ mod pre_dispatch_tests {
 
         struct DropCount(Arc<AtomicUsize>);
 
+        enum PolicyMutation {
+            Framing,
+            Headers,
+            Query,
+            SwallowBody,
+        }
+
+        struct PolicyMutationHook(PolicyMutation);
+
+        #[async_trait(?Send)]
+        impl PreDispatchHook for PolicyMutationHook {
+            async fn handle(
+                &self,
+                request: &mut PreDispatchRequest,
+            ) -> Result<Option<Response>, EdgeError> {
+                match self.0 {
+                    PolicyMutation::Framing => {
+                        request
+                            .headers_mut()
+                            .insert("content-length", "0".parse().expect("length"));
+                        request
+                            .headers_mut()
+                            .insert("transfer-encoding", "chunked".parse().expect("coding"));
+                    }
+                    PolicyMutation::Headers => {
+                        for name in ["x-one", "x-two", "x-three"] {
+                            request
+                                .headers_mut()
+                                .insert(name, "value".parse().expect("field"));
+                        }
+                    }
+                    PolicyMutation::Query => {
+                        *request.uri_mut() = "/after?expanded=too-long".parse().expect("target");
+                    }
+                    PolicyMutation::SwallowBody => {
+                        let _ignored = request.body_bytes(32).await;
+                    }
+                }
+                Ok(None)
+            }
+        }
+
         #[async_trait(?Send)]
         impl PreDispatchHook for CountedContinueHook {
-            async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            async fn handle(
+                &self,
+                request: &mut PreDispatchRequest,
+            ) -> Result<Option<Response>, EdgeError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 if let Some(method) = self.mutation {
                     RoutingMutationHook {
@@ -1655,6 +1716,75 @@ mod pre_dispatch_tests {
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
+        }
+
+        #[action]
+        async fn policy_target() -> &'static str {
+            "must not dispatch"
+        }
+
+        #[test]
+        fn continued_hook_head_rechecks_original_limits_and_framing() {
+            for (mutation, expected) in [
+                (PolicyMutation::Framing, StatusCode::BAD_REQUEST),
+                (
+                    PolicyMutation::Headers,
+                    StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                ),
+                (PolicyMutation::Query, StatusCode::URI_TOO_LONG),
+            ] {
+                let mut app = App::new(
+                    RouterService::builder()
+                        .pre_dispatch_hook(PolicyMutationHook(mutation))
+                        .get("/after", policy_target)
+                        .build(),
+                );
+                app.set_ingress_head_limits(
+                    IngressHeadLimits::default()
+                        .with_max_request_header_count(2)
+                        .expect("count")
+                        .with_max_request_target_bytes(8)
+                        .expect("target"),
+                );
+                let response = complete(envelope(dispatch(
+                    &app,
+                    input(Method::GET, "/after", Body::empty()),
+                )));
+                assert_eq!(response.status(), expected);
+            }
+        }
+
+        #[test]
+        fn continued_hook_cannot_swallow_original_fallback_overflow() {
+            let mut app = App::new(
+                RouterService::builder()
+                    .pre_dispatch_hook(PolicyMutationHook(PolicyMutation::SwallowBody))
+                    .build(),
+            );
+            app.set_ingress_admission_policy(|head| AdmissionDecision::ReadBodyBeforeFallback {
+                completion: ResponseEgressCompletion::empty(),
+                grant: IngressGrant::empty(),
+                max_body_bytes: 4,
+                read_deadline: head.read_deadline_after(Duration::from_secs(1)),
+                on_exceeded: BufferedIngressResponse::text(
+                    StatusCode::BAD_REQUEST,
+                    "input exceeded\n",
+                ),
+                on_timeout: BufferedIngressResponse::text(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "input timed out\n",
+                ),
+            });
+            let body = Body::from_stream(stream::iter([Ok(Bytes::from_static(b"hello"))]));
+            let response = complete(envelope(dispatch(
+                &app,
+                input(Method::GET, "/missing", body),
+            )));
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.body().as_bytes(),
+                Some(b"input exceeded\n".as_slice())
+            );
         }
 
         fn complete(envelope: ResponseEgressEnvelope) -> Response {
@@ -1941,7 +2071,6 @@ mod pre_dispatch_tests {
     }
 
     use std::io::Error as IoError;
-    use std::mem::take;
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1960,6 +2089,7 @@ mod pre_dispatch_tests {
     use crate::http::{Method, Request, Response, StatusCode, request_builder, response_builder};
     use crate::introspection::{ManifestJson, RouteTable};
     use crate::middleware::{Middleware, Next};
+    use crate::pre_dispatch::PreDispatchRequest;
     use crate::router::{PreDispatchHook, RouterService};
 
     struct CountedState {
@@ -1998,10 +2128,12 @@ mod pre_dispatch_tests {
 
     #[async_trait(?Send)]
     impl PreDispatchHook for InspectHook {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             let local = Rc::new(7_u32);
-            let body = take(request.body_mut());
-            body.into_bytes_bounded(0).await?;
+            request.body_bytes(0).await?;
             ready(()).await;
             assert_eq!(*local, 7_u32, "should support a non-Send hook future");
             Ok(Some(
@@ -2020,7 +2152,10 @@ mod pre_dispatch_tests {
 
     #[async_trait(?Send)]
     impl PreDispatchHook for RoutingMutationHook {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             if self.method {
                 *request.method_mut() = Method::POST;
             } else {
@@ -2041,7 +2176,10 @@ mod pre_dispatch_tests {
 
     #[async_trait(?Send)]
     impl PreDispatchHook for ContinueHook {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             assert!(request.extensions().get::<CountedState>().is_none());
             *request.uri_mut() = "/after?hook=present"
                 .parse()
@@ -2051,7 +2189,9 @@ mod pre_dispatch_tests {
                 "present".parse().expect("should parse fixed header"),
             );
             request.extensions_mut().insert(HookMarker);
-            *request.body_mut() = Body::text("changed");
+            request
+                .transform_body(0, 16, |_| Ok(Bytes::from_static(b"changed")))
+                .await?;
             Ok(None)
         }
     }
@@ -2063,7 +2203,10 @@ mod pre_dispatch_tests {
 
     #[async_trait(?Send)]
     impl PreDispatchHook for TerminalHook {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert!(request.extensions().get::<CountedState>().is_none());
             assert!(request.extensions().get::<ManifestJson>().is_none());

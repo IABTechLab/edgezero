@@ -13,6 +13,21 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Hard-cut pre-dispatch hooks to protected requests: share the admitted body cell,
+  preserve original input caps/deadlines through bounded transformations, and revalidate
+  modified request heads. Remove unrestricted hook body replacement.
+- Reject unsupported Workers response statuses before SDK conversion, preserving bounded
+  fallback and exactly-once completion. Explicitly disable reqwest retries, recover
+  transient listener errors, and yield on empty Axum response chunks without DATA frames.
+- Make legacy API scans and selected-test execution guards fail closed on command errors,
+  empty runs and missing executed sentinels. Preserve provider qualification limitations.
+- Bind fixture readiness to an owned launch, embedded build identity and prescribed response,
+  with absolute startup/capture deadlines and finite header/body capture. Keep unattested fault
+  observations uncredited until recovery, reject later identity conflicts, and preserve failed
+  evidence. This mitigates port handoff races without claiming atomic socket reservation.
+- Preserve concrete streaming source errors through protected body maps and forwarding while
+  retaining sticky error snapshots for repeated access. Keep original deadlines and uncapped
+  streaming semantics rather than introducing a platform-sized cumulative limit.
 - Replace implementer `send` and raw-request batch hooks with paired `time`, explicit `progress`, synchronous
   support validation, prepared `dispatch_head`, eager `begin` and prepared batching. Core
   captures invocation time, performs validation/settlement once and finalizes provider heads.

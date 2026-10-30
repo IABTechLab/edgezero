@@ -18,6 +18,13 @@ Its HTTP clients, controlled
 loopback backend, process management, and evidence checks run outside the WASM
 applications. The shell script only launches it through Cargo.
 
+The runner now treats TCP readiness as provisional and requires responder identity on
+the first prescribed response, with bounded startup and capture. See the
+[startup contract](../../../crates/edgezero-test-harness/README.md#bounded-startup).
+Headerless canonical Fastly assembly-error responses cannot currently establish that
+identity; those modes remain unverified and do not receive case-evidence credit.
+This does not weaken their functional assertions or replace the standard entrypoints.
+
 ## Outbound Cutover Gates
 
 ### Dispatch-Slack Retirement (2026-10-27)

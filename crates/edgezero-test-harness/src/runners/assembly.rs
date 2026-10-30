@@ -405,7 +405,7 @@ pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()
         let outcome = (|| -> Result<()> {
             let port = net::port()?;
             let process = Process::start(
-                &mut fastly_command(exe, &config, run, "assembly", port),
+                &mut fastly_command(exe, &config, run, "assembly", port)?,
                 &log,
                 port,
             )?;
@@ -692,7 +692,7 @@ fn axum_startup(run: &Path, records: &mut Records) -> Result<()> {
             .current_dir(run)
             .env("EDGEZERO__ADAPTER__HOST", "127.0.0.1")
             .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string());
-        let mut process = Process::spawn(&mut command, &log)?;
+        let process = Process::spawn(&mut command, &log)?;
         let deadline = Instant::now() + Duration::from_secs(5);
         let status = loop {
             if let Some(status) = process.0.try_wait()? {

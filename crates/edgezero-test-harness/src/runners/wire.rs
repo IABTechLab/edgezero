@@ -450,6 +450,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .current_dir(&repo)
             .env("CARGO_TARGET_DIR", repo.join("target"))
+            .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
             .args([
                 "build",
                 "--offline",
@@ -479,6 +480,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     let component_logs = run.join("component-logs");
     let log = run.join("spin-wire.log");
     let mut command = Command::new(executable);
+    let nonce = startup::command(&mut command, "spin-wire");
     command
         .args(["up", "--from"])
         .arg(manifest)
@@ -488,6 +490,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         .arg("--log-dir")
         .arg(&component_logs)
         .arg("--disable-cache");
+    command.args(["--env", &format!("{}={nonce}", startup::NONCE)]);
     let mut process = None;
     let outcome: Result<(usize, usize)> = (|| {
         let running = process.insert(Process::start(&mut command, &log, port)?);

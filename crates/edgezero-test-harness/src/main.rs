@@ -1,6 +1,7 @@
 mod evidence;
 mod net;
 mod runners;
+mod startup;
 use evidence::{Result, require};
 use serde_json::{Value, json};
 use std::{
@@ -147,7 +148,11 @@ impl Records {
         }
         Ok(())
     }
-    fn push(&mut self, v: Value) -> Result<()> {
+    fn push(&mut self, mut v: Value) -> Result<()> {
+        startup::annotate(&mut v);
+        if v["startup_identity"] == "unverified/no-credit" && v["status"] == "pass" {
+            v["status"] = json!("pending");
+        }
         if matches!(
             v["status"].as_str(),
             Some("fail" | "unverified" | "unsupported")
@@ -318,12 +323,13 @@ fn kill_live_groups_and_exit() {
     }
     std::process::exit(130);
 }
-pub struct Process(Child, ProcessState);
+pub struct Process(startup::ChildHandle, ProcessState);
 struct ProcessState {
     log: PathBuf,
     finished: Option<std::result::Result<(), String>>,
     shutdown_started: bool,
     failures: Vec<String>,
+    launch: Option<std::sync::Arc<Mutex<startup::Launch>>>,
 }
 impl Process {
     pub fn spawn(command: &mut Command, log: &Path) -> Result<Self> {
@@ -334,15 +340,18 @@ impl Process {
         }
         let file = fs::File::create(log)?;
         let p = Self(
-            command
-                .stdout(Stdio::from(file.try_clone()?))
-                .stderr(Stdio::from(file))
-                .spawn()?,
+            startup::ChildHandle::new(
+                command
+                    .stdout(Stdio::from(file.try_clone()?))
+                    .stderr(Stdio::from(file))
+                    .spawn()?,
+            ),
             ProcessState {
                 log: log.to_owned(),
                 finished: None,
                 shutdown_started: false,
                 failures: Vec::new(),
+                launch: None,
             },
         );
         LIVE_GROUPS
@@ -352,24 +361,30 @@ impl Process {
         Ok(p)
     }
     pub fn start(command: &mut Command, log: &Path, port: u16) -> Result<Self> {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        startup::require_configured(command)?;
         let mut p = Self::spawn(command, log)?;
-        let start = Instant::now();
+        p.1.launch = Some(startup::register(command, p.0.clone(), log, port, deadline));
         loop {
             p.check_running()?;
             if std::net::TcpStream::connect_timeout(
                 &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-                Duration::from_millis(200),
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(200)),
             )
             .is_ok()
             {
                 p.check_running()?;
+                startup::check(port)?;
                 return Ok(p);
             }
-            require(
-                start.elapsed() < Duration::from_secs(45),
-                "runtime did not listen",
-            )?;
-            thread::sleep(Duration::from_millis(50));
+            require(Instant::now() < deadline, "runtime did not listen")?;
+            thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(50)),
+            );
         }
     }
     pub fn check_running(&mut self) -> Result<()> {
@@ -399,6 +414,11 @@ impl Process {
         }
         let mut failures = self.1.failures.clone();
         if !self.1.shutdown_started {
+            if let Some(launch) = &self.1.launch
+                && let Err(error) = launch.lock().unwrap().close()
+            {
+                failures.push(error.to_string());
+            }
             if let Err(error) = self.check_running() {
                 failures.push(error.to_string());
             }
@@ -413,7 +433,7 @@ impl Process {
                 false
             }
         };
-        let mut status = match wait_for_exit(&mut self.0, term_deadline) {
+        let mut status = match self.0.wait_until(term_deadline) {
             Ok(status) => status,
             Err(error) => {
                 failures.push(error.to_string());
@@ -442,7 +462,7 @@ impl Process {
             failures.push(error.to_string());
         }
         if status.is_none() {
-            match wait_for_exit(&mut self.0, kill_deadline) {
+            match self.0.wait_until(kill_deadline) {
                 Ok(observed) => status = observed,
                 Err(error) => failures.push(error.to_string()),
             }
@@ -477,6 +497,9 @@ impl Process {
                 self.1.log.display()
             ))
         };
+        if let (Some(launch), Err(error)) = (&self.1.launch, &outcome) {
+            launch.lock().unwrap().teardown_failed(error);
+        }
         if confirmed {
             self.1.finished = Some(outcome.clone());
         }
@@ -553,7 +576,7 @@ fn run() -> Result<i32> {
         path: path.join("events.jsonl"),
         values: Vec::new(),
     };
-    records.push(json!({"event":"run","seed":args.seed,"suite":args.suite,"construction_rounds":args.construction_rounds,"max_requests":args.max_requests}))?;
+    records.push(json!({"event":"run","seed":args.seed,"suite":args.suite,"construction_rounds":args.construction_rounds,"max_requests":args.max_requests,"fixture_build_id":startup::build_id()}))?;
     records.push(json!({"event":"build_environment","rustc":String::from_utf8_lossy(&Command::new(rustc()).arg("--version").output()?.stdout).trim(),"host_os":std::env::consts::OS,"host_arch":std::env::consts::ARCH,"lockfile":artifact(&path.join("Cargo.lock"))?,"harness_lockfile":artifact(&path.join("harness-Cargo.lock"))?}))?;
     let adapters = if args.adapter == "all" {
         vec!["fastly", "cloudflare", "spin", "axum"]
@@ -768,6 +791,7 @@ mod process_tests {
                 ])
                 .env("EDGEZERO_PROCESS_TEST_MODE", mode)
                 .env("EDGEZERO_PROCESS_TEST_DIR", &self.0);
+            startup::command(&mut command, "fixture-test");
             command
         }
 
@@ -811,6 +835,58 @@ mod process_tests {
             return;
         };
         let path = PathBuf::from(std::env::var_os("EDGEZERO_PROCESS_TEST_DIR").unwrap());
+        if mode == "startup-responder" {
+            use std::io::{BufRead, BufReader};
+            let port: u16 = std::env::var("EDGEZERO_PROCESS_TEST_PORT")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+            let identity = std::env::var("EDGEZERO_PROCESS_TEST_IDENTITY").unwrap();
+            let later_identity = std::env::var("EDGEZERO_PROCESS_TEST_LATER_IDENTITY").ok();
+            let skip_identity = std::env::var("EDGEZERO_PROCESS_TEST_SKIP_IDENTITY")
+                .map(|count| count.parse::<usize>().unwrap())
+                .unwrap_or(0);
+            let mut ordinal = 0;
+            for socket in listener.incoming() {
+                let mut socket = socket.unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    request.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if request.is_empty() {
+                    continue;
+                }
+                ordinal += 1;
+                fs::write(path.join("request"), &request).unwrap();
+                fs::write(path.join("ordinal"), ordinal.to_string()).unwrap();
+                let body = json!({"ordinal":ordinal}).to_string();
+                let identity = if ordinal > 1 {
+                    later_identity.as_deref().unwrap_or(&identity)
+                } else {
+                    &identity
+                };
+                let skip = identity.is_empty() || ordinal <= skip_identity;
+                let identity = if skip {
+                    String::new()
+                } else {
+                    format!("{}: {identity}\r\n", startup::HEADER)
+                };
+                write!(socket, "HTTP/1.1 200 OK\r\n{identity}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            return;
+        }
         if mode != "term-signal" {
             let ignore = matches!(mode.as_str(), "ignore-term" | "descendant-worker");
             let code = match mode.as_str() {
@@ -867,7 +943,9 @@ mod process_tests {
                     .args(["-KILL", "--", &format!("-{}", runtime.0.id())])
                     .status();
                 let _ = runtime.0.kill();
-                let _ = wait_for_exit(&mut runtime.0, Instant::now() + Duration::from_secs(5));
+                let _ = runtime
+                    .0
+                    .wait_until(Instant::now() + Duration::from_secs(5));
             }
             std::mem::forget(fixture);
             outcome.unwrap();
@@ -1106,6 +1184,341 @@ mod process_tests {
         let port = fixture.descendant_port();
         drop(process);
         until(|| std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    #[test]
+    fn startup_attests_the_first_prescribed_response_without_an_extra_http_request() {
+        let fixture = Fixture::new();
+        let port = net::port().unwrap();
+        let log = fixture.0.join("runtime.log");
+        let mut command = fixture.command("startup-responder");
+        let nonce = startup::command(&mut command, "fixture-test");
+        let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+        command
+            .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+            .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity);
+        let mut process = Process::start(&mut command, &log, port).unwrap();
+        let response = net::request(port, "/first", "request-token", None, None).unwrap();
+        assert_eq!(guest(&response).unwrap()["ordinal"], 1);
+        assert!(
+            !fs::read_to_string(fixture.0.join("request"))
+                .unwrap()
+                .contains(&nonce)
+        );
+        process.finish().unwrap();
+        assert_eq!(startup::settle(&log).unwrap()["status"], "pass");
+    }
+
+    #[test]
+    fn startup_rejects_mismatched_nonce_build_and_mode_without_retrying() {
+        for index in 1..=5 {
+            let fixture = Fixture::new();
+            let port = net::port().unwrap();
+            let log = fixture.0.join("runtime.log");
+            let mut command = fixture.command("startup-responder");
+            let nonce = startup::command(&mut command, "fixture-test");
+            let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+            let mut parts: Vec<_> = identity.split(';').collect();
+            let wrong = match index {
+                1..=3 => {
+                    parts[index] = "foreign";
+                    parts.join(";")
+                }
+                4 => format!("{identity}\r\n{}: {identity}", startup::HEADER),
+                _ => String::new(),
+            };
+            command
+                .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+                .env("EDGEZERO_PROCESS_TEST_IDENTITY", wrong);
+            let mut process = Process::start(&mut command, &log, port).unwrap();
+            let error = net::request(port, "/first", "request-token", None, None).unwrap_err();
+            let diagnostic = if index == 5 {
+                "missing launch identity"
+            } else {
+                "mismatched"
+            };
+            assert!(error.to_string().contains(diagnostic), "{error}");
+            assert!(net::request(port, "/first", "request-token", None, None).is_err());
+            assert_eq!(fs::read_to_string(fixture.0.join("ordinal")).unwrap(), "1");
+            assert!(process.finish().is_err());
+            assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+        }
+    }
+
+    #[test]
+    fn startup_fault_observations_have_no_credit_until_the_prescribed_recovery_response() {
+        for correct in [false, true] {
+            let fixture = Fixture::new();
+            let port = net::port().unwrap();
+            let log = fixture.0.join("runtime.log");
+            let mut command = fixture.command("startup-responder");
+            let nonce = startup::command(&mut command, "fixture-fastly-faults");
+            let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+            command
+                .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+                .env(
+                    "EDGEZERO_PROCESS_TEST_IDENTITY",
+                    if correct { &identity } else { "foreign" },
+                )
+                .env("EDGEZERO_PROCESS_TEST_SKIP_IDENTITY", "1");
+            let mut process = Process::start(&mut command, &log, port).unwrap();
+            let first = net::request(port, "/constructor-panic", "fault", None, None).unwrap();
+            assert_eq!(first["startup_identity"], "pending/no-credit");
+            let mut records = Records {
+                path: fixture.0.join("events.jsonl"),
+                values: Vec::new(),
+            };
+            records
+                .push(json!({"status":"pass","assertion":"earlier-parser-observation"}))
+                .unwrap();
+            assert_eq!(records.values[0]["status"], "pending");
+            let recovered = net::request(port, "/probe/recovered", "recovery", None, None);
+            assert_eq!(recovered.is_ok(), correct);
+            assert_eq!(process.finish().is_ok(), correct);
+            assert_eq!(
+                startup::settle(&log).unwrap()["status"],
+                if correct { "pass" } else { "unverified" }
+            );
+            assert_eq!(records.values[0]["status"], "pending");
+        }
+    }
+
+    #[test]
+    fn startup_review_observe_rejects_present_invalid_identity_after_attestation() {
+        for index in 1..=4 {
+            let fixture = Fixture::new();
+            let port = net::port().unwrap();
+            let log = fixture.0.join("runtime.log");
+            let mut command = fixture.command("startup-responder");
+            let nonce = startup::command(&mut command, "fixture-test");
+            let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+            command
+                .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+                .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity);
+            let mut process = Process::start(&mut command, &log, port).unwrap();
+            net::request(port, "/first", "first", None, None).unwrap();
+            let mut headers = vec![json!([startup::HEADER, &identity])];
+            if index == 4 {
+                headers.push(json!([startup::HEADER, &identity]));
+            } else {
+                let mut parts: Vec<_> = identity.split(';').collect();
+                parts[index] = "foreign";
+                headers[0][1] = json!(parts.join(";"));
+            }
+            assert!(
+                startup::observe(port, "/later", &headers).is_err(),
+                "later identity was accepted: {headers:?}"
+            );
+            assert!(
+                startup::observe(port, "/later", &[json!([startup::HEADER, &identity])]).is_err()
+            );
+            assert!(process.finish().is_err());
+            assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+        }
+    }
+
+    #[test]
+    fn startup_review_wire_rejects_later_identity_and_cannot_recover() {
+        for duplicate in [false, true] {
+            let fixture = Fixture::new();
+            let port = net::port().unwrap();
+            let log = fixture.0.join("runtime.log");
+            let mut command = fixture.command("startup-responder");
+            let nonce = startup::command(&mut command, "fixture-test");
+            let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+            let later = if duplicate {
+                format!("{identity}\r\n{}: {identity}", startup::HEADER)
+            } else {
+                "foreign".to_owned()
+            };
+            command
+                .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+                .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity)
+                .env("EDGEZERO_PROCESS_TEST_LATER_IDENTITY", later);
+            let mut process = Process::start(&mut command, &log, port).unwrap();
+            net::request(port, "/first", "first", None, None).unwrap();
+            assert!(net::request(port, "/second", "second", None, None).is_err());
+            assert!(net::request(port, "/bindings", "later", None, None).is_err());
+            assert_eq!(fs::read_to_string(fixture.0.join("ordinal")).unwrap(), "2");
+            assert!(process.finish().is_err());
+            assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+        }
+    }
+
+    #[test]
+    fn startup_review_recovery_cannot_defer_its_identity_to_bindings() {
+        let fixture = Fixture::new();
+        let port = net::port().unwrap();
+        let log = fixture.0.join("runtime.log");
+        let mut command = fixture.command("startup-responder");
+        let nonce = startup::command(&mut command, "fixture-fastly-faults");
+        let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+        command
+            .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+            .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity)
+            .env("EDGEZERO_PROCESS_TEST_SKIP_IDENTITY", "2");
+        let mut process = Process::start(&mut command, &log, port).unwrap();
+        let fault = net::request(port, "/constructor-panic", "fault", None, None).unwrap();
+        assert_eq!(fault["startup_identity"], "pending/no-credit");
+        assert!(
+            net::request(port, "/probe/recovered", "recovery", None, None).is_err(),
+            "missing recovery identity was deferred"
+        );
+        assert!(net::request(port, "/bindings", "later", None, None).is_err());
+        assert_eq!(fs::read_to_string(fixture.0.join("ordinal")).unwrap(), "2");
+        assert!(process.finish().is_err());
+        assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+    }
+
+    #[test]
+    fn startup_review_fault_mode_does_not_exempt_unprescribed_paths() {
+        for path in [
+            "/bindings",
+            "/probe/malformed",
+            "/constructor-panic?extra",
+            "/constructor-panic/",
+        ] {
+            let fixture = Fixture::new();
+            let port = net::port().unwrap();
+            let log = fixture.0.join("runtime.log");
+            let mut command = fixture.command("startup-responder");
+            let nonce = startup::command(&mut command, "fixture-fastly-faults");
+            let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+            command
+                .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+                .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity)
+                .env("EDGEZERO_PROCESS_TEST_SKIP_IDENTITY", "1");
+            let mut process = Process::start(&mut command, &log, port).unwrap();
+            assert!(
+                net::request(port, path, "request", None, None).is_err(),
+                "unprescribed path was exempted: {path}"
+            );
+            assert!(process.finish().is_err());
+            assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+        }
+    }
+
+    #[test]
+    fn startup_review_fault_identity_cannot_credit_a_case_before_recovery() {
+        let fixture = Fixture::new();
+        let port = net::port().unwrap();
+        let log = fixture.0.join("runtime.log");
+        let mut command = fixture.command("startup-responder");
+        let nonce = startup::command(&mut command, "fixture-fastly-faults");
+        let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+        command
+            .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+            .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity);
+        let mut process = Process::start(&mut command, &log, port).unwrap();
+        let fault = net::request(port, "/inbound-error", "fault", None, None).unwrap();
+        assert_eq!(fault["startup_identity"], "pending/no-credit");
+        assert!(startup::check(port).unwrap().is_some());
+        assert!(process.finish().is_err());
+        assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+    }
+
+    #[test]
+    fn startup_review_missing_later_identity_is_explicitly_unattested() {
+        let fixture = Fixture::new();
+        let port = net::port().unwrap();
+        let log = fixture.0.join("runtime.log");
+        let mut command = fixture.command("startup-responder");
+        let nonce = startup::command(&mut command, "fixture-test");
+        let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+        command
+            .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
+            .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity)
+            .env("EDGEZERO_PROCESS_TEST_LATER_IDENTITY", "");
+        let mut process = Process::start(&mut command, &log, port).unwrap();
+        net::request(port, "/first", "first", None, None).unwrap();
+        let later = net::request(port, "/canonical-error", "later", None, None).unwrap();
+        assert_eq!(later["response_identity"], "unattested");
+        process.finish().unwrap();
+        assert_eq!(startup::settle(&log).unwrap()["status"], "pass");
+    }
+
+    #[test]
+    fn startup_absolute_deadline_expires_even_with_an_owned_live_child() {
+        let fixture = Fixture::new();
+        let log = fixture.0.join("runtime.log");
+        let port = net::port().unwrap();
+        let mut command = fixture.command("graceful");
+        let nonce = startup::command(&mut command, "fixture-test");
+        let mut process = Process::spawn(&mut command, &log).unwrap();
+        process.1.launch = Some(startup::register(
+            &command,
+            process.0.clone(),
+            &log,
+            port,
+            Instant::now(),
+        ));
+        fixture.ready();
+        let headers = vec![json!([
+            startup::HEADER,
+            format!("v1;{nonce};{};fixture-test", startup::build_id())
+        ])];
+        let error = startup::observe(port, "/first", &headers).unwrap_err();
+        assert!(error.to_string().contains("absolute startup deadline"));
+        assert!(process.finish().is_err());
+        assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+    }
+
+    #[test]
+    fn startup_matching_identity_cannot_attest_a_child_that_already_exited() {
+        for mode in ["exit-zero", "exit-nonzero"] {
+            let fixture = Fixture::new();
+            let log = fixture.0.join("runtime.log");
+            let port = net::port().unwrap();
+            let mut command = fixture.command(mode);
+            let nonce = startup::command(&mut command, "fixture-test");
+            let mut process = Process::spawn(&mut command, &log).unwrap();
+            process.1.launch = Some(startup::register(
+                &command,
+                process.0.clone(),
+                &log,
+                port,
+                Instant::now() + Duration::from_secs(5),
+            ));
+            fixture.ready();
+            until(|| process.0.try_wait().unwrap().is_some());
+            let headers = vec![json!([
+                startup::HEADER,
+                format!("v1;{nonce};{};fixture-test", startup::build_id())
+            ])];
+            assert!(
+                startup::observe(port, "/first", &headers)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("owned child exited")
+            );
+            assert!(process.finish().is_err());
+            assert_eq!(startup::settle(&log).unwrap()["status"], "unverified");
+        }
+    }
+
+    #[test]
+    fn startup_foreign_listener_with_a_live_child_cannot_complete_successfully() {
+        let fixture = Fixture::new();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let outcome = Process::start(
+            &mut fixture.command("graceful"),
+            &fixture.0.join("runtime.log"),
+            port,
+        );
+        if let Ok(mut process) = outcome {
+            fixture.ready();
+            process.check_running().unwrap();
+            let completion = process.finish();
+            assert!(
+                completion.is_err(),
+                "a foreign TCP listener plus a live owned child is not responder identity"
+            );
+        }
+        assert!(
+            listener.local_addr().is_ok(),
+            "startup cleanup must not close the foreign listener"
+        );
     }
 
     #[test]

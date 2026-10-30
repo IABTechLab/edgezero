@@ -388,6 +388,43 @@ The inventory remains 32 ready / 479 planned and unqualified; no deployment or c
 
 ### Main Integration Checkpoint (2026-10-28)
 
+**Review hardening follow-up (2026-10-29):** retain all outbound requirements and
+the original measured timing thresholds. Hard-cut pre-dispatch hooks to the protected
+`PreDispatchRequest` view, sharing the admitted body cell and immutable head/input
+policy through bounded transformations and routing. Revalidate continuing heads;
+preserve configured fallback overflow/timeout responses even when a hook ignores a
+read failure. Migrate every in-tree hook rather than adding a raw-request compatibility path.
+Explicitly select reqwest's no-retry policy, recover transient accept errors with
+selectable bounded backoff, yield on empty Axum response chunks, and reject unsupported
+Workers statuses before SDK conversion. Exercise guards against scan failures and actual
+zero-test execution, and make source-error variant assertions unconditional.
+
+Fixture startup must be bounded and fail closed when responder ownership cannot be
+established. This is an identity mitigation for the existing port handoff, not atomic
+socket reservation. Do not add production lifecycle APIs only for fixture attestation.
+Retained readiness overruns remain failures, and existing nonzero exit handling remains
+intact. Local proof and hosted qualification remain separate; none of these fixes widens
+the +5 ms targets or promotes provider guarantees.
+
+Independent core/runtime and guard/harness reviews identified additional edge cases:
+cached-transform input errors must poison the shared cell; uncapped streams must not gain a
+`usize`-sized cumulative cap; the first streaming error must retain its concrete cause through
+nested maps; and a headerless fault response cannot borrow a later non-recovery response's
+identity. The implementation addresses these without compatibility paths or new transports.
+Fault/recovery probes now await correlated failure and delivery-work witnesses before sending
+recovery instead of inferring callback completion from client EOF. Reuse remains a strict
+observed assertion, not a guaranteed provider lifetime. Retain failed characterization runs
+alongside the subsequent passing smoke run; do not replace their timestamps or verdicts.
+
+Local verification passes all five required Rust gates, all six provider WASM Clippy
+combinations, 1,101 core tests, native TCP/adapter contracts, 308 harness tests (one
+controlled subprocess helper remains ignored), 64 shell-guard regressions and the
+60-test demo. Actual SDK suites pass Cloudflare 99, repaired-Viceroy Fastly 280 and
+Wasmtime Spin 21. Fastly smoke and the Axum/Spin wire runners pass unchanged assertions.
+Documentation lint, formatting, build and contract checks pass. These are local dirty-tree
+observations, not frozen or hosted qualification: the inventory remains 61 ready /
+450 planned, qualified false. Headerless canonical assembly-response attestation stays open.
+
 Merge main `87456c70` into the signed-SDK checkpoint `7b68f737`, preserving the existing
 outbound implementation and hard-cut APIs. Main's request-fidelity types remain available
 under `edgezero_core::ingress`, alongside route-aware admission. Canonical adapters admit

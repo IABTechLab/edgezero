@@ -1476,13 +1476,13 @@ mod ingress_tests {
     use edgezero_core::body::Body;
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::header::HOST;
-    use edgezero_core::http::{HeaderValue, Request, Response, Uri, response_builder};
+    use edgezero_core::http::{HeaderValue, Response, Uri, response_builder};
     use edgezero_core::ingress::{
         CapturedTarget, HeaderFidelity, OriginSource, Preservation, RequestIngress, TargetSource,
         TargetUnavailable,
     };
     use edgezero_core::router::{PreDispatchHook, RouterService};
-    use edgezero_core::{HttpClient, MonotonicClock};
+    use edgezero_core::{HttpClient, MonotonicClock, PreDispatchRequest};
     use fastly::Request as FastlyRequest;
     use std::sync::Arc;
 
@@ -1495,7 +1495,10 @@ mod ingress_tests {
 
     #[async_trait(?Send)]
     impl PreDispatchHook for VerifySnapshot {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             assert_eq!(
                 request.extensions().get::<ScratchMarker>().is_some(),
                 self.scratch_expected

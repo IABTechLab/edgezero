@@ -501,6 +501,10 @@ impl HttpBody for AxumEgressBody {
         }
         match next {
             Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Ok(bytes))) if bytes.is_empty() => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Poll::Ready(Some(Ok(bytes))) => {
                 if let Err(error) = this.account(bytes.len()) {
                     return Poll::Ready(Some(Err(error)));
@@ -762,7 +766,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::task::Poll;
+    use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -801,6 +805,19 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct RecordingObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     #[derive(Clone)]
     struct SourceCase {
@@ -1240,6 +1257,156 @@ mod tests {
         assert_eq!(reports[0].bytes_written, 5);
         assert_eq!(reports[0].outcome, ResponseEgressOutcome::HostHandoff);
         assert!(reports[0].source_failure.is_none());
+        assert!(connection.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_stream_chunks_yield_without_data_and_preserve_eof_accounting() {
+        for declared_length in [None, Some(3)] {
+            let observer = RecordingObserver::default();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let source_polls = Arc::clone(&polls);
+            let source = poll_stream(move |_cx| {
+                let index = source_polls.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(match index {
+                    0 | 1 => Some(Ok(Bytes::new())),
+                    2 => Some(Ok(Bytes::from_static(b"abc"))),
+                    _ => None,
+                })
+            });
+            let now = MonotonicInstant::now();
+            let connection = EgressConnection::default();
+            let Ok(registered_body) = AxumEgressBody::owned(
+                Body::from_stream(source),
+                declared_length,
+                true,
+                Deadline::at_instant(now + Duration::from_secs(1)),
+                MonotonicClock::new(move || now),
+                attempt(&observer, now),
+                EgressKind::Application,
+                &connection,
+            ) else {
+                panic!("register body");
+            };
+            let mut body = Box::pin(registered_body);
+            let notifications = Arc::new(WakeCounter::default());
+            let task_waker = Waker::from(Arc::clone(&notifications));
+            let mut cx = Context::from_waker(&task_waker);
+
+            for expected in 1..=2 {
+                assert!(
+                    body.as_mut().poll_frame(&mut cx).is_pending(),
+                    "an empty chunk must yield without emitting DATA"
+                );
+                assert_eq!(polls.load(Ordering::SeqCst), expected);
+                assert_eq!(notifications.0.load(Ordering::SeqCst), expected);
+                assert!(!body.is_end_stream());
+                assert_eq!(body.size_hint().exact(), declared_length);
+                assert!(observer.0.lock().expect("reports").is_empty());
+            }
+            let Poll::Ready(Some(Ok(frame))) = body.as_mut().poll_frame(&mut cx) else {
+                panic!("nonempty data frame");
+            };
+            assert_eq!(frame.into_data().expect("data"), b"abc".as_slice());
+            assert!(matches!(
+                body.as_mut().poll_frame(&mut cx),
+                Poll::Ready(None)
+            ));
+            drop(body);
+
+            assert_eq!(polls.load(Ordering::SeqCst), 4);
+            assert_eq!(notifications.0.load(Ordering::SeqCst), 2);
+            let reports = observer.0.lock().expect("reports");
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].bytes_written, 3);
+            assert_eq!(reports[0].outcome, ResponseEgressOutcome::HostHandoff);
+            assert!(connection.is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_ready_stream_is_cooperative_until_host_deadline() {
+        let observer = RecordingObserver::default();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let allowed_polls = Arc::new(AtomicUsize::new(0));
+        let source_polls = Arc::clone(&polls);
+        let allowed = Arc::clone(&allowed_polls);
+        let source = poll_stream(move |_cx| {
+            let index = source_polls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                index < allowed.load(Ordering::SeqCst),
+                "empty chunks must not be drained in a single body poll"
+            );
+            Poll::Ready(Some(Ok(Bytes::new())))
+        });
+        let now = MonotonicInstant::now();
+        let connection = EgressConnection::default();
+        let Ok(registered_body) = AxumEgressBody::application(
+            Body::from_stream(source),
+            Deadline::at_instant(now + Duration::from_secs(1)),
+            MonotonicClock::new(move || now),
+            attempt(&observer, now),
+            &connection,
+        ) else {
+            panic!("register body");
+        };
+        let mut body = Box::pin(registered_body);
+        let notifications = Arc::new(WakeCounter::default());
+        let task_waker = Waker::from(Arc::clone(&notifications));
+        let mut cx = Context::from_waker(&task_waker);
+
+        for expected in 1..=32 {
+            allowed_polls.store(expected, Ordering::SeqCst);
+            assert!(body.as_mut().poll_frame(&mut cx).is_pending());
+            assert_eq!(polls.load(Ordering::SeqCst), expected);
+            assert_eq!(notifications.0.load(Ordering::SeqCst), expected);
+        }
+        assert!(observer.0.lock().expect("reports").is_empty());
+        assert!(connection.signal_elapsed_deadline(connection.next_deadline().expect("deadline")));
+        let Poll::Ready(Some(Err(error))) = body.as_mut().poll_frame(&mut cx) else {
+            panic!("host deadline must terminate the empty stream");
+        };
+        assert!(error.is_deadline());
+        drop(body);
+        assert_eq!(polls.load(Ordering::SeqCst), 32);
+        assert_eq!(notifications.0.load(Ordering::SeqCst), 32);
+        let reports = observer.0.lock().expect("reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].bytes_written, 0);
+        assert_eq!(reports[0].outcome, ResponseEgressOutcome::DeadlineExceeded);
+        assert!(connection.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_ready_chunk_checks_post_poll_deadline_before_yielding() {
+        let observer = RecordingObserver::default();
+        let now = MonotonicInstant::now();
+        let deadline = now + Duration::from_secs(1);
+        let connection = EgressConnection::default();
+        let Ok(registered_body) = AxumEgressBody::application(
+            Body::from_stream(stream::once(async { Ok(Bytes::new()) })),
+            Deadline::at_instant(deadline),
+            scripted_clock(vec![now, now, deadline, deadline]),
+            attempt(&observer, now),
+            &connection,
+        ) else {
+            panic!("register body");
+        };
+        let mut body = Box::pin(registered_body);
+        let notifications = Arc::new(WakeCounter::default());
+        let task_waker = Waker::from(Arc::clone(&notifications));
+        let mut cx = Context::from_waker(&task_waker);
+
+        let Poll::Ready(Some(Err(error))) = body.as_mut().poll_frame(&mut cx) else {
+            panic!("deadline must win over empty ready data");
+        };
+        assert!(error.is_deadline());
+        assert_eq!(notifications.0.load(Ordering::SeqCst), 0);
+        drop(body);
+        let reports = observer.0.lock().expect("reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].bytes_written, 0);
+        assert_eq!(reports[0].outcome, ResponseEgressOutcome::DeadlineExceeded);
         assert!(connection.is_empty());
     }
 

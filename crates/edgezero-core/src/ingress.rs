@@ -196,40 +196,6 @@ enum IngressDispatchDisposition {
     ReadBodyBeforeFallback(Box<FallbackDispatch>),
 }
 
-pub(crate) struct FallbackIngress {
-    dispatch: Box<FallbackDispatch>,
-    grant: IngressGrant,
-    monotonic_clock: MonotonicClock,
-    read_deadline: Deadline,
-}
-
-impl FallbackIngress {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        IngressGrant,
-        usize,
-        Deadline,
-        MonotonicClock,
-        BufferedIngressResponse,
-        BufferedIngressResponse,
-    ) {
-        let FallbackDispatch {
-            max_body_bytes,
-            on_exceeded,
-            on_timeout,
-        } = *self.dispatch;
-        (
-            self.grant,
-            max_body_bytes,
-            self.read_deadline,
-            self.monotonic_clock,
-            on_exceeded,
-            on_timeout,
-        )
-    }
-}
-
 /// Validated policy outcome consumed by an adapter before native body ownership moves.
 ///
 /// `Admitted` includes both normal routed dispatch and an opt-in bounded fallback drain.
@@ -266,30 +232,43 @@ pub struct AdmittedIngress {
     config_extraction_limits: ConfigExtractionLimits,
     dispatch_disposition: IngressDispatchDisposition,
     grant: IngressGrant,
+    head_limits: IngressHeadLimits,
     monotonic_clock: MonotonicClock,
     read_deadline: Deadline,
     request_start: MonotonicInstant,
 }
 
 impl AdmittedIngress {
-    pub(crate) fn into_fallback(self) -> Option<FallbackIngress> {
+    pub(crate) fn fallback_max_body_bytes(&self) -> Option<usize> {
+        match &self.dispatch_disposition {
+            IngressDispatchDisposition::Dispatch => None,
+            IngressDispatchDisposition::ReadBodyBeforeFallback(dispatch) => {
+                Some(dispatch.max_body_bytes)
+            }
+        }
+    }
+
+    pub(crate) fn head_limits(&self) -> IngressHeadLimits {
+        self.head_limits
+    }
+
+    pub(crate) fn into_fallback(
+        self,
+    ) -> Option<(
+        IngressGrant,
+        BufferedIngressResponse,
+        BufferedIngressResponse,
+    )> {
         let Self {
             dispatch_disposition,
             grant,
-            monotonic_clock,
-            read_deadline,
             ..
         } = self;
         let IngressDispatchDisposition::ReadBodyBeforeFallback(dispatch) = dispatch_disposition
         else {
             return None;
         };
-        Some(FallbackIngress {
-            dispatch,
-            grant,
-            monotonic_clock,
-            read_deadline,
-        })
+        Some((grant, dispatch.on_exceeded, dispatch.on_timeout))
     }
 
     pub(crate) fn into_parts(
@@ -337,6 +316,11 @@ impl AdmittedIngress {
 
     pub(crate) fn with_config_extraction_limits(mut self, limits: ConfigExtractionLimits) -> Self {
         self.config_extraction_limits = limits;
+        self
+    }
+
+    pub(crate) fn with_head_limits(mut self, limits: IngressHeadLimits) -> Self {
+        self.head_limits = limits;
         self
     }
 }
@@ -820,6 +804,7 @@ pub(crate) fn apply_admission_policy(
             config_extraction_limits: ConfigExtractionLimits::default(),
             dispatch_disposition,
             grant,
+            head_limits: IngressHeadLimits::default(),
             monotonic_clock,
             read_deadline: deadline,
             request_start: head.request_start(),

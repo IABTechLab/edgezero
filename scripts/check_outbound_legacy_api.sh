@@ -8,13 +8,13 @@ scan() {
   if matches="$(git grep -nE "$pattern" -- "$@")"; then
     printf '%s\n' "$matches"
     return 1
+  else
+    local status=$?
+    if [ "$status" -eq 1 ]; then
+      return 0
+    fi
+    return "$status"
   fi
-
-  local status=$?
-  if [ "$status" -eq 1 ]; then
-    return 0
-  fi
-  return "$status"
 }
 
 scan_detached_send_tuple() {

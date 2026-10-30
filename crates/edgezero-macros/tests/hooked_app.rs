@@ -11,17 +11,17 @@ mod tests {
     }
 
     use async_trait::async_trait;
-    use edgezero_core::action;
     use edgezero_core::app::{App, Hooks, StoresMetadata};
     use edgezero_core::body::Body;
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
     use edgezero_core::extractor::State;
-    use edgezero_core::http::{Request, Response, request_builder, response_builder};
+    use edgezero_core::http::{Response, request_builder, response_builder};
     use edgezero_core::introspection::ManifestJson;
     use edgezero_core::manifest::{BakedManifest, LogLevel, ManifestLoader, ResolvedLoggingConfig};
     use edgezero_core::middleware::{Middleware, Next};
     use edgezero_core::router::{PreDispatchHook, RouterService};
+    use edgezero_core::{PreDispatchRequest, action};
     use futures::executor::block_on;
     use std::sync::{Arc, LazyLock};
 
@@ -71,7 +71,10 @@ mod tests {
     struct ReservedGate;
     #[async_trait(?Send)]
     impl PreDispatchHook for ReservedGate {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             assert!(
                 request.extensions().get::<u32>().is_none(),
                 "hook precedes state"

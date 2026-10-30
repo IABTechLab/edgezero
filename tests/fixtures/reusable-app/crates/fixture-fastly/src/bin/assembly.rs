@@ -10,6 +10,7 @@ use edgezero_core::app::{App, Hooks};
 use fixture_core::assembly::{ConfigurationFailureApp, InternalFailureApp, RetryApp};
 
 fn main() -> Result<(), fastly::Error> {
+    fixture_fastly::initialize_launch(env!("CARGO_BIN_NAME"));
     fastly::init();
     fixture_core::init_fixture_logging(|line| println!("{line}"))?;
     let case = fastly::ConfigStore::open("assembly")

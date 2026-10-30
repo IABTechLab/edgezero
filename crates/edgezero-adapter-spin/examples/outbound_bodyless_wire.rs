@@ -3,6 +3,7 @@ mod sdk {
     use core::str::from_utf8;
     use std::cell::{Cell, RefCell};
     use std::convert::Infallible;
+    use std::env;
     use std::rc::Rc;
     use std::sync::{Arc, Weak};
     use std::time::Duration;
@@ -64,7 +65,7 @@ mod sdk {
                 canonical_scopes_hold_for_test()
                     .await
                     .map_err(|error| ErrorCode::InternalError(Some(error.to_string())))?;
-                return Ok(empty_response());
+                return empty_response();
             }
             let method = match path.as_str() {
                 "/get" | "/get-settled" | "/p5" => Method::GET,
@@ -102,7 +103,7 @@ mod sdk {
                 .map_err(|_error| {
                     ErrorCode::InternalError(Some("outbound wire check failed".to_owned()))
                 })?;
-            Ok(empty_response())
+            empty_response()
         }
     }
 
@@ -148,12 +149,26 @@ mod sdk {
         eprintln!("FAIL: Spin attached Begin/Batch handoff terminal ownership");
     }
 
-    fn empty_response() -> Response {
+    fn empty_response() -> Result<Response, ErrorCode> {
+        let headers = Fields::new();
+        if let (Ok(nonce), Some(build)) = (
+            env::var("EDGEZERO_FIXTURE_LAUNCH_NONCE"),
+            option_env!("EDGEZERO_FIXTURE_BUILD_ID"),
+        ) {
+            let identity = format!("v1;{nonce};{build};spin-wire");
+            headers
+                .append("x-edgezero-fixture-launch", identity.as_bytes())
+                .map_err(|_error| {
+                    ErrorCode::InternalError(Some(
+                        "fixture launch identity header rejected".to_owned(),
+                    ))
+                })?;
+        }
         let (complete, trailers) = wit_future::new(|| Ok(None));
         drop(complete);
-        let (response, result) = Response::new(Fields::new(), None, trailers);
+        let (response, result) = Response::new(headers, None, trailers);
         drop(result);
-        response
+        Ok(response)
     }
 
     fn fixture_error(message: &'static str) -> EdgeError {
