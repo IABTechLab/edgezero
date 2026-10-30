@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09 and Axum/Cloudflare/Fastly unit acceptance 10/11, EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 450 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09, Axum/Cloudflare/Fastly unit acceptance 10/11 and Spin unit acceptance 10 through the real host-wire matrix, EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 449 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -4740,10 +4740,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-10-unit-spin",
       "sentinel": "ez_5_acceptance_10_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_5_acceptance_10_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "command": "scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "**Unit and each adapter's response-policy path.** An identity payload with decoded cap 10 and encoded/final caps 20 rejects `Content-Length: 11` before polling the source and rejects 11 observed bytes when no length is declared. Both decoding choices return `ResponseLimitReason::DecodedBody`. A 10-byte control succeeds under both choices. A gzip body kept in original mode remains exempt from the decoded cap, while its encoded and final caps still apply.",
-      "artifact_path": "outbound/EZ-5/acceptance/10/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {

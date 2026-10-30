@@ -549,7 +549,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 450,
+    planned: 449,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -914,7 +914,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /450 other legs remain planned/);
+  assert.match(manifest.status, /449 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1069,7 +1069,7 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 61);
+  assert.equal(ready.length, 62);
   assert.ok(
     ready.every(
       (c) =>
@@ -1126,7 +1126,7 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
           row.case_id === `EZ-5/acceptance/${criterion}` &&
           row.environment === `unit/${adapter}`,
       );
-      if (adapter === "spin" && criterion !== "09") {
+      if (adapter === "spin" && criterion === "11") {
         assert.equal(row?.implementation, "planned", `${criterion}@${adapter}`);
         continue;
       }
@@ -1134,6 +1134,11 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
       assert.equal(row.applicability, "blocking");
       assert.equal(row.approval, null);
       assert.equal(row.condition, null);
+      if (adapter === "spin" && criterion === "10") {
+        assert.equal(row.sentinel, "ez_5_acceptance_10_unit_spin");
+        assert.equal(row.artifact_path, "outbound/redirect/spin/events.jsonl");
+        continue;
+      }
       assert.equal(row.artifact_path, `outbound/unit/${adapter}/raw.log`);
       assert.ok(
         workflow.includes(row.command),
@@ -1199,6 +1204,58 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
     assert.ok(workflow.includes(row.command));
     for (const name of [row.sentinel, ...(row.additional_sentinels ?? [])])
       assert.ok(guarded.includes(name), name);
+  }
+});
+test("Spin independent-cap binding requires the wire matrix and both fresh marker logs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../tests/fixtures/reusable-app/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const row = manifest.cases.find(
+    (entry) =>
+      entry.case_id === "EZ-5/acceptance/10" &&
+      entry.environment === "unit/spin",
+  );
+  assert.equal(row.implementation, "ready");
+  assert.equal(row.sentinel, "ez_5_acceptance_10_unit_spin");
+  assert.equal(
+    row.command,
+    "scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/spin",
+  );
+  assert.equal(row.artifact_path, "outbound/redirect/spin/events.jsonl");
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  const eager = workflow
+    .split("- name: Run Spin eager exchange component")[1]
+    .split("- name:")[0];
+  const wire = workflow
+    .split("- name: Run Spin wire contracts")[1]
+    .split("- name:")[0];
+  assert.doesNotMatch(eager, /--sentinels/);
+  assert.match(eager, /tee .*outbound\/unit\/spin\/raw\.log/);
+  assert.match(wire, /tee .*outbound\/unit\/spin\/wire\.log/);
+  assert.ok(
+    wire.indexOf("--sentinels unit/spin") >
+      wire.indexOf("spin-policy-inventory"),
+  );
+  assert.match(
+    wire,
+    /grep -Fxq .*outbound\/unit\/spin\/raw\.log.*outbound\/unit\/spin\/wire\.log/,
+  );
+  for (const count of [
+    /\.exchanges == 68/,
+    /\.origin_requests == 84/,
+    /\.exchanges == 26/,
+    /\.origin_requests == 26/,
+  ]) {
+    assert.match(wire, count);
   }
 });
 test("rejects deletion of reviewed split cases or environment legs", () => {

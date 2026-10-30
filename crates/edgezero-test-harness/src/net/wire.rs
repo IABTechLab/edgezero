@@ -451,6 +451,23 @@ fn handoff(socket: &mut TcpStream, target: &str, shared: &Shared) -> Result<()> 
     Ok(())
 }
 
+fn policy_body_result(reject: bool, result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error)
+            if reject
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                ) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Result<()> {
     let parts: Vec<_> = target
         .strip_prefix("/p5/")
@@ -461,7 +478,41 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
     let mut fields = Vec::<(&str, String)>::new();
     let mut body = b"final".to_vec();
     let mut pending = None;
+    let mut policy_reject = false;
     match parts.as_slice() {
+        [
+            "policy",
+            coding @ ("identity" | "gzip"),
+            framing @ ("declared" | "observed"),
+            size @ ("10" | "11"),
+            disposition @ ("reject" | "success"),
+            token,
+        ] => {
+            require(
+                !token.is_empty()
+                    && token.len() <= 128
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+                "invalid Spin policy token",
+            )?;
+            let bytes = if *coding == "gzip" {
+                if *size == "10" { GZIP_TEN } else { GZIP_ELEVEN }
+            } else {
+                &[b'a'; 11][..if *size == "10" { 10 } else { 11 }]
+            };
+            fields.push(("Content-Encoding", (*coding).to_owned()));
+            if *framing == "declared" {
+                fields.push(("Content-Length", bytes.len().to_string()));
+                body = bytes.to_vec();
+            } else {
+                fields.push(("Transfer-Encoding", "chunked".to_owned()));
+                body = format!("{:X}\r\n", bytes.len()).into_bytes();
+                body.extend_from_slice(bytes);
+                body.extend_from_slice(b"\r\n0\r\n\r\n");
+            }
+            policy_reject = *disposition == "reject";
+        }
         [
             "body",
             coding @ ("identity" | "gzip" | "passthrough"),
@@ -556,7 +607,7 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
         write!(socket, "{name}: {value}\r\n")?;
     }
     socket.write_all(b"\r\n")?;
-    socket.write_all(&body)?;
+    policy_body_result(policy_reject, socket.write_all(&body))?;
     socket.flush()?;
     if let Some(name) = pending {
         shared.wait(GATE_BUDGET, |state| state.gates.get(name) == Some(&true))?;
@@ -683,6 +734,88 @@ mod tests {
         }
         assert_eq!(origins.take_requests().len(), 2);
         origins.finish().unwrap();
+    }
+
+    #[test]
+    fn policy_origin_tcp_preserves_declared_and_observed_body_boundaries() {
+        let origins = WireOrigins::start().unwrap();
+        for coding in ["identity", "gzip"] {
+            for declared in [false, true] {
+                for size in [10, 11] {
+                    for disposition in ["reject", "success"] {
+                        let path = format!(
+                            "/p5/policy/{coding}/{}/{size}/{disposition}/unique-{coding}-{declared}-{size}-{disposition}",
+                            if declared { "declared" } else { "observed" }
+                        );
+                        let response = exchange(
+                            &origins,
+                            0,
+                            format!("GET {path} HTTP/1.1\r\n\r\n").as_bytes(),
+                        );
+                        assert!(
+                            response.starts_with(b"HTTP/1.1 200 Fixture\r\n"),
+                            "missing policy origin response"
+                        );
+                        let split = response
+                            .windows(4)
+                            .position(|bytes| bytes == b"\r\n\r\n")
+                            .unwrap()
+                            + 4;
+                        let head = String::from_utf8(response[..split].to_vec()).unwrap();
+                        let bytes = if coding == "gzip" {
+                            if size == 10 { GZIP_TEN } else { GZIP_ELEVEN }
+                        } else {
+                            &[b'a'; 11][..size]
+                        };
+                        assert!(head.contains(&format!("Content-Encoding: {coding}\r\n")));
+                        assert!(head.contains("X-P5-Fixture: spin-wire\r\n"));
+                        if declared {
+                            assert!(head.contains(&format!("Content-Length: {}\r\n", bytes.len())));
+                            assert!(!head.contains("Transfer-Encoding:"));
+                            assert_eq!(&response[split..], bytes);
+                        } else {
+                            assert!(head.contains("Transfer-Encoding: chunked\r\n"));
+                            assert!(!head.contains("Content-Length:"));
+                            let mut framed = format!("{:X}\r\n", bytes.len()).into_bytes();
+                            framed.extend_from_slice(bytes);
+                            framed.extend_from_slice(b"\r\n0\r\n\r\n");
+                            assert_eq!(&response[split..], framed);
+                        }
+                        assert_eq!(origins.take_requests(), vec![(origins.port(0), path)]);
+                    }
+                }
+            }
+        }
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn policy_body_disconnects_are_allowed_only_for_reject_routes() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::WriteZero,
+        ] {
+            assert_eq!(
+                policy_body_result(true, Err(kind.into())).is_ok(),
+                matches!(
+                    kind,
+                    io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                )
+            );
+            assert_eq!(
+                policy_body_result(false, Err(kind.into()))
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
+        }
+        policy_body_result(true, Ok(())).unwrap();
+        policy_body_result(false, Ok(())).unwrap();
     }
 
     #[test]

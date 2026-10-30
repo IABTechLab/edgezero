@@ -83,6 +83,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Exercise normalization, opaque fields, independent identity caps, original/206 representation
   fields and bodyless/205 source release under both decoding choices and response modes. Bind
   reviewed core proofs without promoting provider qualification or optional metadata changes.
+- Verify Spin's independent decoded, encoded and buffered caps through 26 real host-wire cases,
+  including original gzip, declared zero-poll rejection and source release. Preserve the separate
+  68-exchange redirect inventory; acceptance readiness does not qualify hosted behavior.
 - Extend bodyless policy through all four native adapter head/source paths and the full policy
   matrix through Axum, Cloudflare and Fastly. Keep unsupported
   raw fields explicitly shared-head-only, distinguish adapter buffer failures from reporter limits,

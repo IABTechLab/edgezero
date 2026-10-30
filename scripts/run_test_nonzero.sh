@@ -94,8 +94,18 @@ if [ "${statuses[1]}" -ne 0 ]; then
 fi
 
 REQUIRED_TEST_SENTINELS="$sentinels" awk -v exact="$exact" '
+    function matches_sentinel(name, sentinel) {
+        return name == sentinel || (!exact && length(name) > length(sentinel) + 2 &&
+            substr(name, length(name) - length(sentinel) - 1) == ("::" sentinel))
+    }
+    function host_diagnostic(line) {
+        return line ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z[[:space:]]+ERROR[[:space:]]+Backend connection error for [^[:space:]]/
+    }
     BEGIN { required = split(ENVIRON["REQUIRED_TEST_SENTINELS"], names, "\n") }
-    { sub(/\r$/, "") }
+    {
+        gsub(/\033\[[0-9;]*m/, "")
+        sub(/\r$/, "")
+    }
     /^test result:/ {
         if ($0 !~ /^test result: ok\. [0-9]+ passed; 0 failed;/) {
             print "selected test suite reported an unsuccessful summary" > "/dev/stderr"
@@ -104,14 +114,34 @@ REQUIRED_TEST_SENTINELS="$sentinels" awk -v exact="$exact" '
             passed = 1
         }
     }
-    /^test [^[:space:]]+( - should panic)? \.\.\. ok$/ {
+    /^test [^[:space:]]+( - should panic)? \.\.\. / {
+        pending = ""
         name = $2
         for (i = 1; i <= required; i++) {
-            if (name == names[i] || (!exact && length(name) > length(names[i]) + 2 &&
-                substr(name, length(name) - length(names[i]) - 1) == ("::" names[i]))) {
-                found[i] = 1
+            if (matches_sentinel(name, names[i])) pending = name
+        }
+        name = ""
+        detail = $0
+        sub(/^test [^[:space:]]+( - should panic)? \.\.\. /, "", detail)
+        interrupted = host_diagnostic(detail)
+        if (detail == "ok") {
+            name = pending
+        } else {
+            if (detail != "" && !interrupted) pending = ""
+            next
+        }
+    }
+    # A split pass needs a known host interruption and its own standalone ok.
+    pending != "" && host_diagnostic($0) { interrupted = 1; next }
+    pending != "" && interrupted && /^ok$/ { name = pending }
+    {
+        if (name != "") {
+            for (i = 1; i <= required; i++) {
+                if (matches_sentinel(name, names[i])) found[i] = 1
             }
         }
+        name = pending = ""
+        interrupted = 0
     }
     END {
         if (!passed) {

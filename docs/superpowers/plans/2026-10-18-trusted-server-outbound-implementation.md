@@ -60,7 +60,8 @@ Keep three different status questions separate:
   also binds EZ-1 core criterion 07 and EZ-3 core criterion 04's ordering clause. The
   [native policy checkpoint](#native-response-policy-and-evidence-validation-checkpoint-2026-10-29)
   adds each adapter's unit criterion 09, Axum/Cloudflare/Fastly unit criteria 10/11 and Axum
-  forwarding criteria 01/04/08: 61 legs, with 450 still
+  forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
+  62 legs, with 449 still
   `planned`. G1/Q3 binding work remains unfinished, not evidence that 450 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
@@ -1360,6 +1361,48 @@ diff checks pass. Independent spec and quality reviews are clear for this checkp
 requirements/interfaces, dependency/tool pins, all leg identities/expected text and applicability
 decisions remain unchanged. These local results do not qualify the retained failed timing runs
 or complete the remaining required host-wire, consumer and hosted evidence.
+
+### Spin Independent-Cap Wire Checkpoint (2026-10-29)
+
+Extend the existing real Spin host-wire matrix for EZ-5 criterion 10, without another client,
+executor, transport or synthetic trailer/completion bypass. Sixteen identity cases cover both
+decoding choices, both response modes, declared/observed lengths and exact 10/overflow 11 bytes
+under decoded cap 10 and encoded/final caps 20. Ten original-gzip cases retain zero decoder budget
+and independently exercise exact 23-byte and exceeded 22-byte encoded/buffered caps. Streamed
+responses have no buffered-final cap; the 1024-byte reporting collector cannot supply these errors.
+
+Reuse the native-stream observer under `test-utils`, requiring an actual head attachment rather
+than accepting an unused zero-poll counter. Native regression tests cover attachment, unread and
+consumed release, overlapping installation and cancellation cleanup. The observer retains only
+counters, not the SDK source. Policy exchanges remain serialized so the next-head probe is
+unambiguous. Declared overflows reject during send without polling; observed streamed overflows
+reject during body collection. Every case requires local source release and exact correlated
+origin receipts. This does not certify host allocation recovery or interruption.
+
+The actual local Spin 4.1 run in `.runs/18e3362f57076e68-eb4c-0` passes the 26-case matrix and
+the unchanged 68-exchange/84-receipt redirect inventory, framing and scope/handoff controls.
+Emit the new marker only after runtime/origin cleanup, and retain separate CI logs for eager
+component and wire execution before checking all ready `unit/spin` markers. Criterion 10 is now
+`ready`; criterion 11 and optional representation-metadata legs stay planned. The inventory is
+62 ready / 449 planned, 255 criteria / 511 legs, `qualified: false`. No parent task, candidate
+freeze, strict timing, hosted/consumer or Image Optimizer performance gate is closed.
+
+CI following `4470e73e` exposed two infrastructure failures after the isolated fixture formatter
+was repaired. Fastly passed all 280 guest tests, but a timestamped Viceroy connection diagnostic
+split a named result from its standalone `ok`. The execution guard now recognizes only that
+specific host interruption, with exact names, successful nonzero summaries and command/tee exit
+checks preserved. Unknown text, another test or a summary clears pending credit. The actual
+guarded 280-test run and 139 guard/evidence regressions pass, including the captured CI shape
+and negative substitutions.
+
+The controlled startup responder also ignored the recovery POST body. It now consumes declared
+bytes through the same BufReader before replying, bounded to 16 KiB and the existing socket
+timeout. A regression first fails for absent body capture, then verifies exact recovery bytes,
+identity, pending-credit and teardown behavior; unexpected recovery errors retain their diagnostic.
+All 313 harness tests pass, with one intentional subprocess-only ignored test. This helper repair
+does not certify the original Linux I/O cause or change production HTTP behavior, connection
+budgets, retry policy, timing thresholds or qualification. Independent reviews preserve the same
+SDK reader/trailer/completion path and identify no remaining implementation issue in this slice.
 
 ### Current Work Queue and Gates
 

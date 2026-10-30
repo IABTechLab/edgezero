@@ -13,6 +13,14 @@ const summary = (passed) =>
 const passedOutput = (names) =>
   names.map((name) => `test ${name} ... ok\n`).join("") + summary(names.length);
 
+const fastlyBodylessSentinel =
+  "outbound::fastly_impl::tests::native_bodyless_disposition_precedes_caps_and_sdk_reads";
+// Exact interrupted test record from run 41004602092, job 123896528448.
+const viceroyDiagnostic =
+  "2026-10-30T04:54:37.540446Z ERROR Backend connection error for 'ez_b31v1_b9a7c76e3ec6916758e259f8dc3e932c30f858c644a3c8cef480baa258e2606b' (http://127.0.0.1:9/): error trying to connect: tcp connect error: Connection refused (os error 111)";
+const splitViceroyPass = (name) =>
+  `test ${name} ... ${viceroyDiagnostic}\nok\n`;
+
 function run(
   mode,
   listed = ["tests::sentinel"],
@@ -190,6 +198,149 @@ test("guard accepts named results and summaries written to stderr", () => {
   assert.match(result.stdout, /test tests::sentinel \.\.\. ok/);
 });
 
+for (const [name, output] of [
+  [
+    "the actual split Viceroy CI record",
+    splitViceroyPass(fastlyBodylessSentinel) +
+      "test result: ok. 280 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s\n",
+  ],
+  [
+    "colored Viceroy diagnostics and completion",
+    `test ${fastlyBodylessSentinel} ... ${viceroyDiagnostic
+      .replace(
+        "2026-10-30T04:54:37.540446Z",
+        "\u001b[2m2026-10-30T04:54:37.540446Z\u001b[0m",
+      )
+      .replace("ERROR", "\u001b[31mERROR\u001b[0m")}\n\u001b[32mok\u001b[0m\n` +
+      summary(1),
+  ],
+  [
+    "multiple timestamped Viceroy host lines",
+    `test ${fastlyBodylessSentinel} ... ${viceroyDiagnostic}\n${viceroyDiagnostic}\nok\n` +
+      summary(1),
+  ],
+  [
+    "a Viceroy diagnostic on its own line after the test prefix",
+    `test ${fastlyBodylessSentinel} ... \n${viceroyDiagnostic}\nok\n` +
+      summary(1),
+  ],
+  [
+    "an interrupted should-panic pass",
+    `test ${fastlyBodylessSentinel} - should panic ... ${viceroyDiagnostic}\nok\n` +
+      summary(1),
+  ],
+]) {
+  test(`guard accepts ${name}`, () => {
+    const result = run(
+      null,
+      [fastlyBodylessSentinel],
+      0,
+      [fastlyBodylessSentinel],
+      {
+        output,
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+  });
+}
+
+const interruptedSentinel = `test tests::sentinel ... ${viceroyDiagnostic}\n`;
+for (const [name, output] of [
+  [
+    "a wrong split test name",
+    splitViceroyPass("tests::unrelated") + summary(1),
+  ],
+  [
+    "a suffixed split name",
+    splitViceroyPass("tests::sentinel_suffix") + summary(1),
+  ],
+  [
+    "a prefixed split name",
+    splitViceroyPass("tests::not_sentinel") + summary(1),
+  ],
+  ["a failed split test", interruptedSentinel + "FAILED\nok\n" + summary(1)],
+  ["an ignored split test", interruptedSentinel + "ignored\nok\n" + summary(1)],
+  ["a split test without ok", interruptedSentinel + summary(1)],
+  ["a split test without a summary", interruptedSentinel + "ok\n"],
+  [
+    "a split test with zero passed tests",
+    interruptedSentinel + "ok\n" + summary(0),
+  ],
+  [
+    "a split test with a failed summary",
+    interruptedSentinel + "ok\ntest result: FAILED. 1 passed; 1 failed;\n",
+  ],
+  [
+    "a split test with failed tests in a success summary",
+    interruptedSentinel + "ok\ntest result: ok. 1 passed; 1 failed;\n",
+  ],
+  [
+    "a pending record reset by another test start",
+    interruptedSentinel + "test tests::unrelated ... \nok\n" + summary(1),
+  ],
+  [
+    "a pending record reset by another test pass",
+    interruptedSentinel + "test tests::unrelated ... ok\nok\n" + summary(1),
+  ],
+  [
+    "a pending record reset by a summary",
+    interruptedSentinel + summary(1) + "ok\n",
+  ],
+  [
+    "a pending record reset by an unrecognized log",
+    interruptedSentinel + "unrecognized log\nok\n" + summary(1),
+  ],
+  [
+    "a pending record reset by a timestamped non-host log",
+    interruptedSentinel +
+      "2026-10-30T04:54:37.540446Z ERROR unrelated log\nok\n" +
+      summary(1),
+  ],
+  [
+    "a pending record reset by a blank line",
+    interruptedSentinel + "\nok\n" + summary(1),
+  ],
+  [
+    "an unrecognized inline interruption followed by a host log",
+    `test tests::sentinel ... unrelated log\n${viceroyDiagnostic}\nok\n` +
+      summary(1),
+  ],
+  [
+    "a host interruption without its timestamp",
+    `test tests::sentinel ... ${viceroyDiagnostic.split("Z ")[1]}\nok\n` +
+      summary(1),
+  ],
+  [
+    "a forged multiline pass without a host diagnostic",
+    "test tests::sentinel ... \nok\n" + summary(1),
+  ],
+  [
+    "a host diagnostic without a test record",
+    `${viceroyDiagnostic}\nok\n` + summary(1),
+  ],
+  ["a non-standalone ok", interruptedSentinel + "ok extra\n" + summary(1)],
+  ["an indented ok", interruptedSentinel + " ok\n" + summary(1)],
+  ["a summary and standalone ok only", summary(1) + "ok\n"],
+]) {
+  test(`guard rejects ${name}`, () => {
+    const result = run(null, ["tests::sentinel"], 0, ["sentinel"], { output });
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  });
+}
+
+test("split passes preserve literal suffix boundaries and require every sentinel", () => {
+  const listed = ["tests::sentinel[0]", "tests::second"];
+  const required = ["sentinel[0]\nsecond"];
+  const output = listed.map(splitViceroyPass).join("") + summary(2);
+  assert.equal(run(null, listed, 0, required, { output }).status, 0);
+  for (const name of listed) {
+    const result = run(null, listed, 0, required, {
+      output: splitViceroyPass(name) + summary(1),
+    });
+    assert.equal(result.status, 1, result.stderr);
+  }
+});
+
 test("guard requires every newline-separated sentinel to pass", () => {
   const listed = ["tests::sentinel", "tests::second"];
   const required = ["sentinel\nsecond"];
@@ -357,6 +508,23 @@ for (const [environment, mode] of [
       });
       assert.equal(result.status, 1, `${name}: ${result.stderr}`);
       assert.match(result.stderr, /required sentinel test not passed/);
+    }
+  });
+
+  test(`${environment} inventory guard requires exact split sentinel names`, () => {
+    const name = required.at(-1);
+    for (const replacement of [name, `other::${name}`, `${name}_suffix`]) {
+      const output =
+        required
+          .filter((sentinel) => sentinel !== name)
+          .map((sentinel) => `test ${sentinel} ... ok\n`)
+          .join("") +
+        splitViceroyPass(replacement) +
+        summary(required.length);
+      const result = run(mode, required, 0, ["--inventory", environment], {
+        output,
+      });
+      assert.equal(result.status, replacement === name ? 0 : 1, result.stderr);
     }
   });
 

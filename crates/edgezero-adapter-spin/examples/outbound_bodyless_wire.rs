@@ -10,7 +10,9 @@ mod sdk {
 
     use async_stream::stream;
     use bytes::Bytes;
-    use edgezero_adapter_spin::outbound::{SpinOutboundClient, canonical_scopes_hold_for_test};
+    use edgezero_adapter_spin::outbound::{
+        SpinOutboundClient, canonical_scopes_hold_for_test, observe_response_head_for_test,
+    };
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::context::RequestContext;
     use edgezero_core::http::{Method, Response as CoreResponse, Uri};
@@ -25,7 +27,7 @@ mod sdk {
         ResponseEgressCompletion, ResponseEgressOutcome, ResponseEgressReport,
     };
     use edgezero_core::router::RouterService;
-    use edgezero_core::{Body, EdgeError, action};
+    use edgezero_core::{Body, EdgeError, ResponseDecoding, action};
     use futures_util::{StreamExt as _, stream};
     use serde_json::{Value, json};
     use spin_sdk::http::{FromRequest as _, IntoResponse as _, Request as SpinRequest};
@@ -68,7 +70,7 @@ mod sdk {
                 return empty_response();
             }
             let method = match path.as_str() {
-                "/get" | "/get-settled" | "/p5" => Method::GET,
+                "/get" | "/get-settled" | "/p5" | "/policy" => Method::GET,
                 "/head" | "/head-settled" => Method::HEAD,
                 "/post" => Method::POST,
                 _ => return Err(ErrorCode::HttpRequestUriInvalid),
@@ -88,6 +90,9 @@ mod sdk {
             }
             if path == "/p5" {
                 return p5_exchange(uri, &headers).await;
+            }
+            if path == "/policy" {
+                return policy_exchange(uri, &headers).await;
             }
             let mut outgoing = OutboundRequest::new(method, uri)
                 .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?;
@@ -193,6 +198,86 @@ mod sdk {
                 "provider": error.provider_failure_detail().map(|detail| format!("{detail:?}")),
             }
         })
+    }
+
+    async fn policy_exchange(uri: Uri, headers: &Fields) -> Result<Response, ErrorCode> {
+        let case = headers
+            .get("x-policy-case")
+            .first()
+            .and_then(|value| from_utf8(value).ok())
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| *value < 26)
+            .ok_or(ErrorCode::HttpRequestUriInvalid)?;
+        let (original, streamed, encoded_cap, final_cap) = if case < 16 {
+            (case & 8 != 0, case & 4 != 0, 20, 20)
+        } else {
+            let variant = case.saturating_sub(if case < 21 { 16 } else { 21 });
+            (
+                true,
+                variant >= 3,
+                if matches!(variant, 1 | 4) { 22 } else { 23 },
+                if variant == 2 { 22 } else { 23 },
+            )
+        };
+        let mut request = OutboundRequest::new(Method::GET, uri)
+            .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?
+            .timeout(Duration::from_secs(3))
+            .response_decoding(if original {
+                ResponseDecoding::Original
+            } else {
+                ResponseDecoding::Decode
+            })
+            .max_decoded_response_bytes(10)
+            .max_encoded_response_bytes(encoded_cap)
+            .max_response_bytes(final_cap)
+            .max_decoder_bytes(0);
+        if streamed {
+            request = request.stream_response();
+        }
+        let operation = async {
+            let client = HttpClient::with_client(SpinOutboundClient::new());
+            let response = match client.send(request).await {
+                Ok(response) => response,
+                Err(error) => return (p5_error(&error), Some("send")),
+            };
+            let status = response.status().as_u16();
+            let body_streamed = response.body().is_stream();
+            let mut fields = response
+                .headers()
+                .iter()
+                .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+                .collect::<Vec<_>>();
+            fields.sort_unstable();
+            // This reporter is above every tested limit; it cannot supply an expected overflow.
+            match response.into_bytes_bounded(1024).await {
+                Ok(bytes) => (
+                    json!({"status": status, "headers": fields, "bytes": bytes.to_vec(), "streamed": body_streamed}),
+                    None,
+                ),
+                Err(error) => (p5_error(&error), Some("body")),
+            }
+        };
+        let ((outcome, error_stage), polls, released) = observe_response_head_for_test(operation)
+            .await
+            .map_err(|_error| {
+                ErrorCode::InternalError(Some("response policy probe failed".to_owned()))
+            })?;
+        json!({
+            "case": case,
+            "request": {
+                "decoding": if original { "original" } else { "decode" },
+                "streamed": streamed,
+                "decoded_cap": 10_u64,
+                "encoded_cap": encoded_cap,
+                "final_cap": (!streamed).then_some(final_cap),
+                "decoder_cap": 0_u64,
+            },
+            "outcome": outcome,
+            "error_stage": error_stage,
+            "source": { "polls": polls, "released": released },
+        })
+        .to_string()
+        .into_response()
     }
 
     async fn p5_exchange(uri: Uri, headers: &Fields) -> Result<Response, ErrorCode> {

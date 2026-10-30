@@ -868,6 +868,20 @@ mod process_tests {
                 if request.is_empty() {
                     continue;
                 }
+                let mut body_length = None;
+                for line in request.lines().skip(1) {
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        assert!(body_length.is_none(), "duplicate fixture request length");
+                        let length = value.trim().parse::<usize>().unwrap();
+                        assert!(length <= 16 * 1024, "fixture request body exceeds 16 KiB");
+                        body_length = Some(length);
+                    }
+                }
+                let mut body_bytes = vec![0; body_length.unwrap_or(0)];
+                reader.read_exact(&mut body_bytes).unwrap();
+                fs::write(path.join("request-body"), body_bytes).unwrap();
                 ordinal += 1;
                 fs::write(path.join("request"), &request).unwrap();
                 fs::write(path.join("ordinal"), ordinal.to_string()).unwrap();
@@ -1273,7 +1287,11 @@ mod process_tests {
                 .unwrap();
             assert_eq!(records.values[0]["status"], "pending");
             let recovered = net::request(port, "/probe/recovered", "recovery", None, None);
-            assert_eq!(recovered.is_ok(), correct);
+            assert_eq!(
+                fs::read(fixture.0.join("request-body")).expect("helper captured the request body"),
+                b"recovery"
+            );
+            assert_eq!(recovered.is_ok(), correct, "{recovered:?}");
             assert_eq!(process.finish().is_ok(), correct);
             assert_eq!(
                 startup::settle(&log).unwrap()["status"],

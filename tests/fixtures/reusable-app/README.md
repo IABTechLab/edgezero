@@ -120,7 +120,8 @@ known-origin registration SHOULD. EZ-9 runtime criteria 16/17 bind the complete 
 matrix. EZ-1 Axum HTTP/1 criteria 01/04/08 bind actual forwarding, five-byte rejection with
 pipeline safety, and certified-empty forwarding after the inbound deadline. Each adapter's
 EZ-5 unit criterion 09 binds its native head/source bodyless matrix; Axum, Cloudflare and Fastly
-also bind unit criteria 10/11. There are 61 ready legs and 450 planned. Spin unit 10/11,
+also bind unit criteria 10/11. Spin unit criterion 10 binds its independent-cap host-wire matrix.
+There are 62 ready legs and 449 planned. Spin unit criterion 11,
 EZ-6 criterion 22's four adapter legs and EZ-23 criterion 13 stay planned
 for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
@@ -153,7 +154,8 @@ dispositions preserve suppression and release source/owner resources before coll
 metadata criteria 11b/12 remain planned, independently of the core criterion 11 binding.
 
 The native adapter matrices use the production head conversion and SDK body reader, under both
-decoding choices and response modes. Spin currently binds the bodyless matrix only. A generous reporting collector cannot manufacture the
+decoding choices and response modes. Spin binds the bodyless matrix through the eager component
+and independent-cap criterion 10 through the real host-wire matrix. A generous reporting collector cannot manufacture the
 tested final-buffer overflow. Fastly's test-only lease witnesses prove release of EdgeZero's
 encoded stream, not host-side interruption or delivery. Provider-inexpressible fields are injected
 only at the explicitly labelled shared-head boundary; they do not establish raw-header fidelity.
@@ -165,11 +167,20 @@ cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --
 wasmtime run -W component-model-async=y -S p3=y -S http=y target/wasm32-wasip2/debug/examples/outbound_eager.wasm
 ```
 
-CI checks every ready `unit/spin` marker from the inventory in the component output. The synthetic
+CI checks every ready `unit/spin` marker against the fresh eager-component and host-wire logs,
+retained under `outbound/unit/spin/`. The synthetic
 full-body probe hit Wasmtime 48.0.2's unsupported intra-component non-numeric future boundary;
 its unqualified failure log is `/private/tmp/edgezero-spin-policy-intra-component-failure.log`.
-The unusable probe is removed. Criteria 10/11 require extending the existing real host-wire
-fixture, not bypassing trailer or completion acknowledgement. A host library test is not a
+The unusable probe is removed. Criterion 10 now uses 26 serialized actual-client wire cases:
+identity with decoded cap 10 and encoded/final caps 20 under both decoding choices and modes,
+declared and observed 10/11-byte bodies, plus original gzip with zero decoder budget and independent
+23/22-byte transport/final boundaries. A test-only probe requires actual native-head attachment,
+counts source polls and witnesses local source release without retaining the SDK reader. Declared
+rejection must occur during send with zero polls; observed streamed overflow occurs during body
+collection. The reporter's 1024-byte bound cannot manufacture the expected cap failures.
+The marker is emitted only after all 26 distinct cases, their exact origin receipts and runtime/origin
+cleanup pass. Criterion 11 still requires extending the existing real host-wire fixture,
+not bypassing trailer or completion acknowledgement. A host library test is not a
 substitute for that SDK execution. Grouped inventory selection requires at least one
 ready sentinel in every selected environment and deduplicates names before the one suite run.
 This binds local execution only, without adopting optional metadata or qualifying hosted behavior.
@@ -184,7 +195,9 @@ relabelled as evidence for this broadened command. Readiness is not exact-candid
 
 Runtime commands select `--suite outbound-wire` and write their JSONL to
 `.runs/outbound/redirect/{environment}/events.jsonl`. Each adapter must complete 68 exchanges and
-84 ordered origin receipts. Idle-body policy remains an unadopted conditional leg; these bindings
+84 ordered origin receipts. Spin additionally records a separate `spin-policy-inventory` with
+26 policy exchanges and 26 correlated receipts, without changing the redirect counters or connection
+limits. Idle-body policy remains an unadopted conditional leg; these bindings
 do not qualify that policy, native optimizer transformation or consumer/hosted behavior.
 Axum, Fastly and Spin execute these bindings in their existing CI jobs. Workerd's command is
 locally executable; automatic CI runtime activation remains pending explicit setup of its
@@ -935,7 +948,8 @@ cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo
 ```
 
 These controls preserve raw request framing, scope/handoff checks and 68 redirect exchanges
-with 84 correlated origin requests. They establish local SDK behavior, not hosted qualification.
+with 84 correlated origin requests. Spin also runs the separate 26-case independent-cap matrix
+described above. They establish local SDK behavior, not hosted qualification.
 
 The same Rust matrix also runs Cloudflare's production client through the standard application
 entrypoint and local workerd, without replacing `fetch`:

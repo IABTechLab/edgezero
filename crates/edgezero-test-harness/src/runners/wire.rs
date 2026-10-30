@@ -29,6 +29,231 @@ fn error_is(report: &Value, kind: &str, reason: &str) -> Result<()> {
     )
 }
 
+const POLICY_CASES: usize = 26;
+const POLICY_GZIP: &[u8] = &[
+    31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 76, 132, 3, 0, 146, 93, 70, 85, 11, 0, 0, 0,
+];
+
+struct PolicyCase {
+    gzip: bool,
+    original: bool,
+    streamed: bool,
+    declared: bool,
+    size: usize,
+    encoded_cap: u64,
+    final_cap: u64,
+    reason: Option<&'static str>,
+}
+
+impl PolicyCase {
+    fn new(index: usize) -> Result<Self> {
+        require(index < POLICY_CASES, "unknown Spin policy case")?;
+        let gzip = index >= 16;
+        let variant = index.saturating_sub(16) % 5;
+        let size = if gzip { 11 } else { 10 + (index & 1) };
+        Ok(Self {
+            gzip,
+            original: gzip || index & 8 != 0,
+            streamed: if gzip { variant >= 3 } else { index & 4 != 0 },
+            declared: if gzip { index >= 21 } else { index & 2 != 0 },
+            size,
+            encoded_cap: if !gzip {
+                20
+            } else if matches!(variant, 1 | 4) {
+                22
+            } else {
+                23
+            },
+            final_cap: if !gzip {
+                20
+            } else if variant == 2 {
+                22
+            } else {
+                23
+            },
+            reason: if !gzip && size == 11 {
+                Some("DecodedBody")
+            } else if gzip && matches!(variant, 1 | 4) {
+                Some("EncodedBody")
+            } else if gzip && variant == 2 {
+                Some("BufferedBody")
+            } else {
+                None
+            },
+        })
+    }
+
+    fn path(&self, token: &str) -> String {
+        format!(
+            "/p5/policy/{}/{}/{}/{}/{token}",
+            if self.gzip { "gzip" } else { "identity" },
+            if self.declared {
+                "declared"
+            } else {
+                "observed"
+            },
+            self.size,
+            if self.reason.is_some() {
+                "reject"
+            } else {
+                "success"
+            }
+        )
+    }
+}
+
+fn validate_policy(index: usize, report: &Value) -> Result<()> {
+    let case = PolicyCase::new(index)?;
+    require(
+        report["case"] == index
+            && report["request"]
+                == json!({
+            "decoding":if case.original {"original"} else {"decode"},"streamed":case.streamed,
+            "decoded_cap":10,"encoded_cap":case.encoded_cap,
+            "final_cap":if case.streamed {None} else {Some(case.final_cap)},"decoder_cap":0}),
+        "wrong Spin policy case or effective configuration",
+    )?;
+    let polls = report["source"]["polls"]
+        .as_u64()
+        .ok_or("missing Spin source poll count")?;
+    require(
+        report["source"]["released"] == true
+            && if case.declared && case.reason.is_some() {
+                polls == 0
+            } else {
+                polls > 0
+            },
+        "Spin policy source polling or release differs",
+    )?;
+    if let Some(reason) = case.reason {
+        error_is(report, "response_too_large", reason)?;
+        return require(
+            report["outcome"]
+                .as_object()
+                .is_some_and(|outcome| outcome.len() == 1)
+                && report["outcome"]["error"].get("provider") == Some(&Value::Null)
+                && report["error_stage"]
+                    == if case.declared || !case.streamed {
+                        "send"
+                    } else {
+                        "body"
+                    },
+            "wrong Spin policy error stage or provider",
+        );
+    }
+    let bytes = if case.gzip {
+        POLICY_GZIP.to_vec()
+    } else {
+        vec![b'a'; case.size]
+    };
+    let outcome = &report["outcome"];
+    require(
+        report.get("error_stage") == Some(&Value::Null)
+            && outcome["status"] == 200
+            && outcome["bytes"] == json!(bytes)
+            && outcome["streamed"] == case.streamed
+            && outcome.get("error").is_none(),
+        "wrong Spin policy success bytes, mode or status",
+    )?;
+    let fields = outcome["headers"]
+        .as_array()
+        .ok_or("missing Spin policy headers")?;
+    require(
+        fields.iter().all(|field| {
+            field.as_array().is_some_and(|pair| {
+                pair.len() == 2
+                    && pair[0].as_str().is_some()
+                    && serde_json::from_value::<Vec<u8>>(pair[1].clone()).is_ok()
+            })
+        }),
+        "invalid Spin policy header report",
+    )?;
+    for (name, expected) in [
+        (
+            "content-encoding",
+            Some(if case.gzip {
+                b"gzip".to_vec()
+            } else {
+                b"identity".to_vec()
+            }),
+        ),
+        (
+            "content-length",
+            case.declared.then(|| bytes.len().to_string().into_bytes()),
+        ),
+        ("content-type", Some(b"application/octet-stream".to_vec())),
+        ("x-p5-fixture", Some(b"spin-wire".to_vec())),
+        ("transfer-encoding", None),
+        ("connection", None),
+    ] {
+        let found: Vec<_> = fields
+            .iter()
+            .filter(|field| {
+                field[0]
+                    .as_str()
+                    .is_some_and(|field| field.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        require(
+            match expected {
+                Some(expected) => found.len() == 1 && found[0][1] == json!(expected),
+                None => found.is_empty(),
+            },
+            format!("wrong Spin policy {name} field"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_policy_inventory(cases: &[usize], receipts: usize) -> Result<()> {
+    let mut observed = cases.to_vec();
+    observed.sort_unstable();
+    require(
+        observed == (0..POLICY_CASES).collect::<Vec<_>>() && receipts == POLICY_CASES,
+        "incomplete or duplicate Spin policy matrix",
+    )
+}
+
+fn spin_policy(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<(usize, usize)> {
+    let mut cases = Vec::new();
+    let mut receipts = 0;
+    for index in 0..POLICY_CASES {
+        require(
+            origins.take_requests().is_empty(),
+            "request escaped the preceding Spin policy exchange",
+        )?;
+        let case = PolicyCase::new(index)?;
+        let token = token();
+        let path = case.path(&token);
+        let uri = format!("http://127.0.0.1:{}{path}", origins.port(0));
+        let response = net::header_request(
+            port,
+            "/policy",
+            &token,
+            &[("x-origin", &uri), ("x-policy-case", &index.to_string())],
+            None,
+        )?;
+        let observed = origins.take_requests();
+        let report: Result<Value> =
+            body(&response).and_then(|bytes| Ok(serde_json::from_slice(&bytes)?));
+        records.push(json!({"event":"spin-policy-case","case":index,"token":token,"path":path,
+            "origin_requests":observed,"report":report.as_ref().ok(),"response":response,"qualification":false}))?;
+        require(
+            response["status"] == 200,
+            "Spin policy guest rejected the exchange",
+        )?;
+        require(
+            observed == vec![(origins.port(0), path)],
+            "missing, extra or foreign Spin policy origin requests",
+        )?;
+        validate_policy(index, &report?)?;
+        cases.push(index);
+        receipts += observed.len();
+    }
+    validate_policy_inventory(&cases, receipts)?;
+    Ok((cases.len(), receipts))
+}
+
 struct Matrix<'a> {
     adapter: &'static str,
     endpoint: &'static str,
@@ -492,7 +717,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         .arg("--disable-cache");
     command.args(["--env", &format!("{}={nonce}", startup::NONCE)]);
     let mut process = None;
-    let outcome: Result<(usize, usize)> = (|| {
+    let outcome: Result<((usize, usize), (usize, usize))> = (|| {
         let running = process.insert(Process::start(&mut command, &log, port)?);
         controls(port, &origins, &component_logs, running)?;
         let mut matrix = Matrix {
@@ -505,10 +730,12 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
             dispatches: 0,
         };
         matrix.run()?;
+        let baseline = (matrix.exchanges, matrix.dispatches);
+        let policy = spin_policy(port, &origins, matrix.records)?;
         running.check_running()?;
-        Ok((matrix.exchanges, matrix.dispatches))
+        Ok((baseline, policy))
     })();
-    let (exchanges, dispatches) = finish_wire(
+    let ((exchanges, dispatches), (policy_cases, policy_receipts)) = finish_wire(
         "spin",
         &mut process,
         Some(origins),
@@ -517,7 +744,13 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         outcome,
     )?;
     records.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":exchanges,"origin_requests":dispatches,
-        "bodyless_controls":4,"upload_controls":1,"scope_controls":1,"handoff_controls":1,"qualification":false}))
+        "bodyless_controls":4,"upload_controls":1,"scope_controls":1,"handoff_controls":1,"qualification":false}))?;
+    records.push(
+        json!({"event":"spin-policy-inventory","status":"pass","exchanges":policy_cases,
+        "origin_requests":policy_receipts,"qualification":false}),
+    )?;
+    println!("ez_5_acceptance_10_unit_spin: passed");
+    Ok(())
 }
 
 fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Result<()> {
@@ -652,6 +885,172 @@ fn finish_wire<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_report(index: usize) -> Value {
+        let gzip = index >= 16;
+        let variant = index.saturating_sub(16) % 5;
+        let original = gzip || index & 8 != 0;
+        let streamed = if gzip { variant >= 3 } else { index & 4 != 0 };
+        let declared = if gzip { index >= 21 } else { index & 2 != 0 };
+        let length = if gzip { 23 } else { 10 + (index & 1) };
+        let reason = if !gzip && length == 11 {
+            Some("DecodedBody")
+        } else if gzip && matches!(variant, 1 | 4) {
+            Some("EncodedBody")
+        } else if gzip && variant == 2 {
+            Some("BufferedBody")
+        } else {
+            None
+        };
+        let outcome = if let Some(reason) = reason {
+            json!({"error":{"kind":"response_too_large","status":502,"reason":reason,"provider":null}})
+        } else {
+            let bytes = if gzip {
+                vec![
+                    31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 76, 132, 3, 0, 146, 93, 70, 85, 11, 0, 0,
+                    0,
+                ]
+            } else {
+                vec![b'a'; length]
+            };
+            let mut headers = json!([
+                [
+                    "content-encoding",
+                    if gzip {
+                        b"gzip".as_slice()
+                    } else {
+                        b"identity".as_slice()
+                    }
+                ],
+                ["content-type", b"application/octet-stream".as_slice()],
+                ["x-p5-fixture", b"spin-wire".as_slice()]
+            ]);
+            if declared {
+                headers
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(["content-length", length.to_string().as_bytes()]));
+            }
+            json!({"status":200,"headers":headers,"bytes":bytes,"streamed":streamed})
+        };
+        json!({"case":index,
+            "request":{"decoding":if original {"original"} else {"decode"},"streamed":streamed,
+                "decoded_cap":10,"encoded_cap":if gzip {if matches!(variant,1|4) {22} else {23}} else {20},
+                "final_cap":if streamed {None} else {Some(if gzip {if variant==2 {22} else {23}} else {20})},"decoder_cap":0},
+            "outcome":outcome,"error_stage":reason.map(|_| if declared || !streamed {"send"} else {"body"}),
+            "source":{"polls":usize::from(!(declared && reason.is_some())),"released":true}})
+    }
+
+    #[test]
+    fn policy_reports_validate_all_twenty_six_cases() {
+        for index in 0..26 {
+            validate_policy(index, &policy_report(index)).unwrap();
+        }
+        assert!(validate_policy(26, &policy_report(0)).is_err());
+    }
+
+    #[test]
+    fn policy_reports_reject_mutated_configuration_source_and_outcomes() {
+        for index in 0..26 {
+            let valid = policy_report(index);
+            validate_policy(index, &valid).unwrap();
+            for (pointer, value) in [
+                ("/case", json!(26)),
+                ("/request/decoding", json!("other")),
+                (
+                    "/request/streamed",
+                    json!(!valid["request"]["streamed"].as_bool().unwrap()),
+                ),
+                ("/request/decoded_cap", json!(11)),
+                ("/request/encoded_cap", json!(99)),
+                ("/request/final_cap", json!(99)),
+                ("/request/decoder_cap", json!(1)),
+                ("/source/polls", Value::Null),
+                ("/source/polls", json!(-1)),
+                ("/source/released", json!(false)),
+                ("/error_stage", json!("reporter")),
+            ] {
+                let mut changed = valid.clone();
+                *changed.pointer_mut(pointer).unwrap() = value;
+                assert!(
+                    validate_policy(index, &changed).is_err(),
+                    "{index}: {pointer}"
+                );
+            }
+            let mut changed = valid.clone();
+            changed["source"]["polls"] = json!(usize::from(valid["source"]["polls"] == 0));
+            assert!(validate_policy(index, &changed).is_err());
+            for field in ["case", "request", "source", "outcome", "error_stage"] {
+                let mut changed = valid.clone();
+                changed.as_object_mut().unwrap().remove(field);
+                assert!(
+                    validate_policy(index, &changed).is_err(),
+                    "{index}: missing {field}"
+                );
+            }
+            if valid["outcome"].get("error").is_some() {
+                for (field, value) in [
+                    ("kind", json!("bad_gateway")),
+                    ("status", json!(500)),
+                    ("reason", json!("Protocol")),
+                    ("provider", json!("source-error")),
+                ] {
+                    let mut changed = valid.clone();
+                    changed["outcome"]["error"][field] = value;
+                    assert!(
+                        validate_policy(index, &changed).is_err(),
+                        "{index}: {field}"
+                    );
+                }
+                let mut changed = valid.clone();
+                changed["error_stage"] = json!(if valid["error_stage"] == "send" {
+                    "body"
+                } else {
+                    "send"
+                });
+                assert!(validate_policy(index, &changed).is_err());
+            } else {
+                for (pointer, value) in [
+                    ("/outcome/status", json!(201)),
+                    ("/outcome/bytes/0", json!(255)),
+                    (
+                        "/outcome/streamed",
+                        json!(!valid["request"]["streamed"].as_bool().unwrap()),
+                    ),
+                    ("/outcome/headers/0/1", json!(b"wrong".as_slice())),
+                    ("/error_stage", json!("body")),
+                ] {
+                    let mut changed = valid.clone();
+                    *changed.pointer_mut(pointer).unwrap() = value;
+                    assert!(
+                        validate_policy(index, &changed).is_err(),
+                        "{index}: {pointer}"
+                    );
+                }
+                let mut changed = valid.clone();
+                changed["outcome"]["headers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(valid["outcome"]["headers"][0].clone());
+                assert!(validate_policy(index, &changed).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn policy_inventory_requires_all_unique_cases_and_exact_receipts() {
+        let cases: Vec<_> = (0..26).collect();
+        validate_policy_inventory(&cases, 26).unwrap();
+        for receipts in [0, 25, 27] {
+            assert!(validate_policy_inventory(&cases, receipts).is_err());
+        }
+        assert!(validate_policy_inventory(&cases[..25], 26).is_err());
+        let mut duplicate = cases.clone();
+        duplicate[25] = 0;
+        assert!(validate_policy_inventory(&duplicate, 26).is_err());
+        duplicate[25] = 26;
+        assert!(validate_policy_inventory(&duplicate, 26).is_err());
+    }
 
     #[test]
     fn pre_startup_failure_removes_partial_state_and_preserves_primary_error() {

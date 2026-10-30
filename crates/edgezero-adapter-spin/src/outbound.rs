@@ -358,6 +358,155 @@ use exchange::{
 #[cfg(test)]
 use exchange::{duration_nanos, settle_reset_content};
 
+#[cfg(all(
+    feature = "test-utils",
+    any(test, all(feature = "spin", target_arch = "wasm32"))
+))]
+mod response_probe {
+    use std::cell::{Cell, RefCell};
+    use std::future::Future;
+    use std::rc::Rc;
+
+    use edgezero_core::EdgeError;
+    use edgezero_core::body::BodyStream;
+    use futures_util::{StreamExt as _, stream::poll_fn};
+
+    std::thread_local! {
+        static INSTALLED: RefCell<Option<HeadProbe>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Default)]
+    pub(super) struct HeadProbe {
+        attached: Rc<Cell<bool>>,
+        polls: Rc<Cell<usize>>,
+        released: Rc<Cell<bool>>,
+    }
+
+    struct SourceLease(HeadProbe);
+
+    pub(super) struct ProbeInstallation(HeadProbe);
+
+    impl HeadProbe {
+        pub(super) fn polls(&self) -> usize {
+            self.polls.get()
+        }
+
+        pub(super) fn released(&self) -> bool {
+            self.released.get()
+        }
+    }
+
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for ProbeInstallation {
+        fn drop(&mut self) {
+            INSTALLED.with(|slot| {
+                slot.borrow_mut()
+                    .take_if(|probe| Rc::ptr_eq(&probe.polls, &self.0.polls));
+            });
+        }
+    }
+
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for SourceLease {
+        fn drop(&mut self) {
+            self.0.released.set(true);
+        }
+    }
+
+    pub(super) fn install(probe: &HeadProbe) -> Result<ProbeInstallation, EdgeError> {
+        INSTALLED.with(|slot| {
+            let mut installed = slot.borrow_mut();
+            if installed.is_some() {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "Spin response probe is already installed"
+                )));
+            }
+            *installed = Some(probe.clone());
+            Ok(ProbeInstallation(probe.clone()))
+        })
+    }
+
+    pub(super) async fn observe_operation<F>(
+        operation: F,
+    ) -> Result<(F::Output, usize, bool), EdgeError>
+    where
+        F: Future,
+    {
+        let probe = HeadProbe::default();
+        let _installation = install(&probe)?;
+        let result = operation.await;
+        if !probe.attached.get() {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "Spin response probe did not observe a native head"
+            )));
+        }
+        Ok((result, probe.polls(), probe.released()))
+    }
+
+    pub(super) fn observe_response_head(mut encoded: BodyStream) -> BodyStream {
+        let Some(probe) = INSTALLED.with(|slot| slot.borrow_mut().take()) else {
+            return encoded;
+        };
+        probe.attached.set(true);
+        let lease = SourceLease(probe);
+        poll_fn(move |cx| {
+            lease.0.polls.set(lease.0.polls.get().saturating_add(1));
+            encoded.as_mut().poll_next(cx)
+        })
+        .boxed_local()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use bytes::Bytes;
+        use futures::executor::block_on;
+        use futures_util::FutureExt as _;
+        use futures_util::future::pending;
+        use futures_util::stream::{empty, iter};
+
+        #[test]
+        fn response_probe_rejects_an_operation_without_a_native_head() {
+            block_on(observe_operation(async {})).expect_err("native head is required");
+        }
+
+        #[test]
+        fn response_probe_tracks_unread_and_consumed_source_release() {
+            for consume in [false, true] {
+                let ((), polls, released) = block_on(observe_operation(async {
+                    let mut source =
+                        observe_response_head(iter([Ok(Bytes::from_static(b"x"))]).boxed_local());
+                    if consume {
+                        assert_eq!(
+                            source.next().await.expect("item").expect("bytes"),
+                            b"x".as_slice()
+                        );
+                    }
+                    drop(source);
+                }))
+                .expect("attached source");
+                assert_eq!(polls, usize::from(consume));
+                assert!(released);
+            }
+        }
+
+        #[test]
+        fn response_probe_rejects_overlap_and_cleans_up_cancelled_installation() {
+            assert!(observe_operation(pending::<()>()).now_or_never().is_none());
+            let outer = HeadProbe::default();
+            let installation = install(&outer).expect("cancelled probe removed");
+            block_on(observe_operation(async {})).expect_err("occupied installation");
+            drop(observe_response_head(empty().boxed_local()));
+            let later = HeadProbe::default();
+            let _later_installation = install(&later).expect("first probe attached");
+            drop(installation);
+            drop(observe_response_head(empty().boxed_local()));
+            assert!(later.attached.get());
+            assert!(later.released.get());
+        }
+    }
+}
+
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 mod spin_impl {
     #[cfg(feature = "test-utils")]
@@ -367,6 +516,8 @@ mod spin_impl {
     use core::ptr::null_mut;
     #[cfg(any(test, feature = "test-utils"))]
     use std::cell::RefCell;
+    #[cfg(feature = "test-utils")]
+    use std::future::Future;
     #[cfg(any(test, feature = "test-utils"))]
     use std::num::NonZeroU64;
     use std::rc::Rc;
@@ -1052,7 +1203,7 @@ mod spin_impl {
         // The encoded stream alone owns the WASI reader, trailers and completion writer.
         let native_encoded = super::cooperative_stream(response_stream(response, budget, time));
         #[cfg(feature = "test-utils")]
-        let encoded = native_policy_tests::observe_response_head(native_encoded);
+        let encoded = super::response_probe::observe_response_head(native_encoded);
         #[cfg(not(feature = "test-utils"))]
         let encoded = native_encoded;
         OutboundHead::new(
@@ -1071,8 +1222,6 @@ mod spin_impl {
     #[cfg(any(test, feature = "test-utils"))]
     std::thread_local! {
         static FIXTURE_RESPONSE: RefCell<Option<Response>> = const { RefCell::new(None) };
-        #[cfg(feature = "test-utils")]
-        static FIXTURE_HEAD_PROBE: RefCell<Option<native_policy_tests::HeadProbe>> = const { RefCell::new(None) };
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1167,8 +1316,6 @@ mod spin_impl {
         impl Drop for Reset {
             fn drop(&mut self) {
                 FIXTURE_RESPONSE.with(|slot| drop(slot.borrow_mut().take()));
-                #[cfg(feature = "test-utils")]
-                FIXTURE_HEAD_PROBE.with(|slot| drop(slot.borrow_mut().take()));
             }
         }
 
@@ -1242,6 +1389,23 @@ mod spin_impl {
         }
         drop((writer, response_done));
         Ok(())
+    }
+
+    /// Observes one real response head without retaining or replacing its SDK source.
+    /// Serialize single-send operations: the probe attaches to the next head on this thread.
+    ///
+    /// # Errors
+    /// Rejects an occupied probe or an operation that never attached a response head.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[inline]
+    pub async fn observe_response_head_for_test<F>(
+        operation: F,
+    ) -> Result<(F::Output, usize, bool), EdgeError>
+    where
+        F: Future,
+    {
+        super::response_probe::observe_operation(operation).await
     }
 
     /// Exercises canonical dispatch and assembly scope cleanup under a Spin HTTP host.
@@ -1968,37 +2132,9 @@ mod spin_impl {
 
     #[cfg(feature = "test-utils")]
     mod native_policy_tests {
+        use super::super::response_probe::{HeadProbe, install};
         use super::*;
         use edgezero_core::error::BudgetSource;
-        use futures_util::stream::poll_fn;
-        use std::cell::Cell;
-
-        #[derive(Clone, Default)]
-        pub(super) struct HeadProbe {
-            polls: Rc<Cell<usize>>,
-            released: Rc<Cell<bool>>,
-        }
-
-        struct SourceLease(HeadProbe);
-
-        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
-        impl Drop for SourceLease {
-            fn drop(&mut self) {
-                self.0.released.set(true);
-            }
-        }
-
-        pub(super) fn observe_response_head(mut encoded: BodyStream) -> BodyStream {
-            let Some(probe) = FIXTURE_HEAD_PROBE.with(|slot| slot.borrow_mut().take()) else {
-                return encoded;
-            };
-            let lease = SourceLease(probe);
-            poll_fn(move |cx| {
-                lease.0.polls.set(lease.0.polls.get().saturating_add(1));
-                encoded.as_mut().poll_next(cx)
-            })
-            .boxed_local()
-        }
 
         pub(super) async fn check_native_bodyless_precedes_caps_and_polling()
         -> Result<(), EdgeError> {
@@ -2035,8 +2171,7 @@ mod spin_impl {
                                 ))
                             })?;
                             let probe = HeadProbe::default();
-                            FIXTURE_HEAD_PROBE
-                                .with(|slot| *slot.borrow_mut() = Some(probe.clone()));
+                            let _installation = install(&probe)?;
                             let response = process_response(
                                 native,
                                 method.clone(),
@@ -2074,8 +2209,8 @@ mod spin_impl {
                                     .and_then(|value| value.to_str().ok())
                                     == expected_length
                                 && response.body().as_bytes() == Some(b"".as_slice())
-                                && probe.polls.get() == 0
-                                && probe.released.get()
+                                && probe.polls() == 0
+                                && probe.released()
                                 && writer.stream_writer.write_all(vec![1]).now_or_never()
                                     == Some(vec![1]);
                             if !correct {
@@ -2472,8 +2607,9 @@ pub use spin_impl::{
     converted_response_content_type_provenance_holds_for_test,
     converted_response_retains_injected_clock_for_test, deferred_clock_paths_hold_for_test,
     eager_outbound_paths_hold_for_test, map_spin_preparation_header_for_test,
-    provider_deadline_diagnostics_hold_for_test, request_fields_for_test,
-    request_target_errors_for_test, request_timeout_settings_for_test, set_timeout_option_for_test,
+    observe_response_head_for_test, provider_deadline_diagnostics_hold_for_test,
+    request_fields_for_test, request_target_errors_for_test, request_timeout_settings_for_test,
+    set_timeout_option_for_test,
 };
 
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
