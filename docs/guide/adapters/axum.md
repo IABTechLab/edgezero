@@ -219,21 +219,155 @@ flow — the bundled `edgezero config push` errors), which writes the same
 `.edgezero/local-config-<id>.json` files the runtime reads — no shell-out, no
 server to authenticate against.
 
-## Container Deployment
+## Container packaging
 
-Build and deploy as a standard container:
+`edgezero new` generates a workspace-root `Dockerfile` and `.dockerignore` when
+Axum is registered in the CLI build. The recipe builds only the native Axum
+application binary with `--release --locked`, using a GNU/Linux Rust builder and
+a shell-free GNU-compatible distroless runtime. The Rust builder has a reviewed
+digest pin; the runtime deliberately follows `gcr.io/distroless/cc-debian12:nonroot`.
+That floating tag and builder package installation require network access and do
+not provide a byte-reproducible build. Release and rollback use the exact tested
+image digest, not a rebuild from the runtime tag.
+
+### Prepare the application
+
+Generated EdgeZero dependencies may point into the developer's local checkout.
+Those paths are not portable Docker inputs. Before building, edit the root
+`[workspace.dependencies]` entries to use the same approved release tag or
+commit for every EdgeZero crate. For example:
+
+```toml
+# Replace the placeholder with a reviewed release compatible with this app.
+edgezero-core = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>", default-features = false }
+edgezero-adapter-axum = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>", default-features = false }
+edgezero-cli = { git = "https://github.com/IABTechLab/edgezero.git", tag = "<approved-release>" }
+```
+
+Apply that ref to the other generated EdgeZero adapter entries too. Preserve
+member feature settings, including Axum's `axum` feature and the operator CLI's
+default features. Keep relative paths between the application's own crates.
+There is no new dependency-selection flag; this is ordinary manifest preparation.
+
+```sh
+cargo generate-lockfile
+cargo metadata --locked --format-version 1
+# Review dependency sources, then commit the app manifests and Cargo.lock.
+```
+
+Do not copy EdgeZero's workspace lockfile. Scaffolding stays offline; these
+explicit preparation commands may fetch dependencies. Docker requires a present,
+current application lockfile and never repairs dependencies during the build.
+
+The builder compiler must match the exact Rust pin in the generated
+`.tool-versions`. An optional `rust-toolchain.toml` must have a matching quoted
+`channel = "X.Y.Z"` under `[toolchain]`. The small container check supports that
+conventional format, not arbitrary TOML/channel syntax; legacy `rust-toolchain`
+files are rejected. Update the declarations, Docker Rust version and reviewed
+builder digest together when upgrading. The image uses the installed compiler
+without downloading toolchain-file targets/components. It selects the native
+host target explicitly rather than inheriting a consumer's WASM build target.
+
+### Build and run
+
+Run from the application workspace root, which must retain all workspace member
+manifests, `edgezero.toml` and required build-time sources/assets:
+
+```sh
+docker build -t my-app:local .
+docker run --rm --read-only --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  -p 127.0.0.1:8787:8787 my-app:local
+# From another terminal:
+curl --fail http://127.0.0.1:8787/
+```
+
+The runtime contains the binary, system CA trust and required native libraries,
+not the source workspace, Rust, Node or the operator CLI. It runs as UID/GID
+10001:10001 with exec startup and binds `0.0.0.0:8787` inside the container. The
+publication above is localhost-only. EXPOSE does not publish ports, and the
+read-only/capability settings are Docker run options, not Dockerfile guarantees.
+To change the internal port, set `EDGEZERO__ADAPTER__PORT` and adjust the published
+port mapping. Local development still defaults to localhost.
+
+The default generated app declares no stores and needs no writable mount. Apps
+using current embedded stores must provide `/app/.edgezero`, owned/readable as
+needed by UID 10001. Provision permissions outside startup; do not run a root
+chown wrapper or use world-writable state. Config-only mounts can be read-only.
+Embedded redb needs one writer; a shared volume does not establish multi-replica
+safety. Runtime configuration, secrets, signing keys and mutable state remain
+external inputs. The image does not generate them.
+
+Review `.dockerignore` before building. It excludes common credentials, local
+state, Git and host build output, but cannot identify custom secret filenames.
+Keep required manifests and assets. Private build credentials need an explicit
+app-owned BuildKit secret/SSH setup, never COPY, ARG or ENV.
+
+### Optional application asset builds
+
+Node is not required for the generic template. Applications that embed JS during
+Rust compilation can add a separate pinned asset stage before the Rust builder.
+For example, an application with locked assets under `assets/` can use:
 
 ```dockerfile
-FROM rust:1.75 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build -p my-app-adapter-axum --release
+FROM node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS assets
+WORKDIR /assets
+COPY assets/package.json assets/package-lock.json ./
+RUN npm ci
+COPY assets/ ./
+RUN npm run build
 
-FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/my-app-adapter-axum /usr/local/bin/
-EXPOSE 8787
-CMD ["my-app-adapter-axum"]
+# In the existing Rust builder, before Cargo compilation:
+# COPY --from=assets /assets/dist /build/assets/dist
 ```
+
+Choose the version/digest from the application's declared Node pin and retain its
+npm lockfile. Adapt the paths and build command to its asset layout. Its Rust
+build must embed the fresh stage output rather than host-generated bundles and
+must not implicitly rerun npm. Check bundle completeness and embedded bytes.
+Any application-specific build flags, native package names and binary selection
+belong in that application's repository. Node stays out of the final runtime.
+
+### Packaging verification and limits
+
+From an EdgeZero checkout, the opt-in smoke accepts a **disposable generated
+workspace** after the preparation above:
+
+```sh
+npm ci --prefix scripts --ignore-scripts
+./scripts/test_generated_axum_container.sh /path/to/container-probe
+```
+
+See the [smoke script prerequisites](https://github.com/IABTechLab/edgezero/blob/main/scripts/test_generated_axum_container.sh)
+for the authoritative tool list. CI uses the Node version in `.tool-versions`;
+this is a tested pin, not a different minimum-version requirement. The separate
+handoff helper additionally needs jq, rustup and Cargo for its advisory inventory.
+It tests actual context exclusions, final filesystem/native libraries, UID,
+inspected read-only root/capability restrictions, explicit tmpfs configuration,
+published-port HTTP and the real proxy's controlled TLS trust and hostname rejection. It uses
+private test CA material, not production secrets or public upstreams, and cleans
+up its containers/network/image. Failure diagnostics are retained in a temporary
+directory, with private test keys removed.
+
+For unmerged framework changes, a separate disposable fixture can explicitly
+stage EdgeZero sources and point test-only dependencies within the context.
+Include all needed workspace manifests and the CLI's optional app-demo source
+path. Resolve that fixture's own lockfile. This local-source evidence is not a
+substitute for a standalone consumer with portable Git references.
+
+These are packaging checks, not production certification. Production acceptance
+still requires readiness, required-config failure, durable restart and bounded
+SIGTERM draining through the accepted runtime. A response from `/` is not
+application readiness, and exec startup alone does not implement signal handling.
+The scaffold uses `STOPSIGNAL SIGINT` for the current development entrypoint's
+graceful path; this does not certify bounded SIGTERM draining.
+Application owners publish their own images. No public EdgeZero image is needed.
+
+See [Publishing Axum containers](../publishing-axum-containers.md) for native
+architecture CI, artifact identity, the strict scan gate and the app-owned GHCR
+recipe. [Deploying Axum containers](../deploying-axum-containers.md) covers the
+no-store Docker/Compose example and the remaining runtime, Kubernetes and
+ECS/Fargate acceptance gates.
 
 ## Configuration
 
