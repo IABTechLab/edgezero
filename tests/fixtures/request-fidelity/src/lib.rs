@@ -55,7 +55,6 @@ mod cloudflare;
 mod spin;
 
 use async_trait::async_trait;
-use edgezero_core::{PreDispatchRequest, action};
 use edgezero_core::app::Hooks;
 use edgezero_core::body::Body;
 use edgezero_core::context::RequestContext;
@@ -64,6 +63,7 @@ use edgezero_core::http::{Response, response_builder};
 use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress};
 use edgezero_core::middleware::{Middleware, Next};
 use edgezero_core::router::{PreDispatchHook, RouterService};
+use edgezero_core::{PreDispatchRequest, action};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -112,7 +112,10 @@ async fn ordinary() -> &'static str {
 
 #[async_trait(?Send)]
 impl PreDispatchHook for Probe {
-    async fn handle(&self, request: &mut PreDispatchRequest) -> Result<Option<Response>, EdgeError> {
+    async fn handle(
+        &self,
+        request: &mut PreDispatchRequest,
+    ) -> Result<Option<Response>, EdgeError> {
         // These fixed framing probes carry only the empty chunk terminator. Finish that
         // body explicitly so Wrangler's proxy does not reuse a cancelled upstream read.
         if request
