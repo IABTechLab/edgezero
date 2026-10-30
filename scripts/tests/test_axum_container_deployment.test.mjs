@@ -19,7 +19,16 @@ docker() {
       ps) echo fixture ;;
       port)
         if [[ "$(< "$MOCK_DIR/phase")" == initial ]]; then echo 127.0.0.1:40001; else echo 127.0.0.1:40002; fi ;;
-      config|stop|logs|down) ;;
+      logs) echo 'fixture container logs' ;;
+      down)
+        local attempts
+        attempts=$(( $(< "$MOCK_DIR/down-count") + 1 ))
+        echo "$attempts" > "$MOCK_DIR/down-count"
+        if [[ "$attempts" -le "$DOWN_FAILURES" ]]; then
+          echo 'mock teardown failed' >&2
+          return 42
+        fi ;;
+      config|stop) ;;
       *) return 97 ;;
     esac
   elif [[ "$1" == inspect ]]; then
@@ -50,10 +59,11 @@ function runSmoke(t, overrides = {}, name = 'container-probe') {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const bashEnv = join(directory, 'mocks.sh');
   writeFileSync(bashEnv, mocks);
+  writeFileSync(join(directory, 'down-count'), '0');
   const result = spawnSync('bash', [script, 'localhost/app@sha256:' + 'a'.repeat(64), name], {
     encoding: 'utf8', timeout: 5000,
     env: { ...process.env, BASH_ENV: bashEnv, TMPDIR: directory, MOCK_DIR: directory,
-      FAIL_PHASE: '', WRONG_BODY_PHASE: '', EXPECTED_NAME: name, STOP_EXIT: '0',
+      FAIL_PHASE: '', WRONG_BODY_PHASE: '', EXPECTED_NAME: name, STOP_EXIT: '0', DOWN_FAILURES: '0',
       RESTRICTIONS: '10001:10001 true [ALL] [no-new-privileges:true]', ...overrides },
   });
   assert.ifError(result.error);
@@ -72,7 +82,32 @@ test('Compose smoke polls both starts and refreshes the published port', t => {
   assert.equal(result.events.filter(event => event === 'sleep 1').length, 4);
   assert.ok(result.events.includes('compose stop'));
   assert.ok(result.events.includes('compose start'));
+  assert.equal(result.events.filter(event => event === 'compose down').length, 1);
   assert.equal(result.events.at(-1), 'compose down');
+});
+
+for (const DOWN_FAILURES of ['1', '2']) {
+  test(`Compose smoke rejects failed teardown even if cleanup ${DOWN_FAILURES === '1' ? 'succeeds' : 'also fails'}`, t => {
+    const result = runSmoke(t, { DOWN_FAILURES });
+    assert.equal(result.status, 42);
+    assert.doesNotMatch(result.stdout, /PASS:/);
+    const diagnostics = result.stderr.match(/Diagnostics: ([^\n]+)/)?.[1];
+    assert.ok(diagnostics, result.stderr);
+    assert.match(readFileSync(join(diagnostics, 'teardown.log'), 'utf8'), /mock teardown failed/);
+    assert.match(readFileSync(join(diagnostics, 'compose.log'), 'utf8'), /fixture container logs/);
+    assert.equal(result.events.filter(event => event === 'compose down').length, 2);
+    assert.equal(result.events.at(-1), 'compose down');
+  });
+}
+
+test('Compose smoke preserves the primary failure when cleanup also fails', t => {
+  const result = runSmoke(t, { WRONG_BODY_PHASE: 'initial', DOWN_FAILURES: '1' });
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stdout, /PASS:/);
+  const diagnostics = result.stderr.match(/Diagnostics: ([^\n]+)/)?.[1];
+  assert.ok(diagnostics, result.stderr);
+  assert.match(readFileSync(join(diagnostics, 'cleanup.log'), 'utf8'), /mock teardown failed/);
+  assert.match(readFileSync(join(diagnostics, 'cleanup-compose.log'), 'utf8'), /fixture container logs/);
 });
 
 for (const phase of ['initial', 'restart']) {

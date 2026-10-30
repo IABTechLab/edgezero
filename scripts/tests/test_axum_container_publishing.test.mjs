@@ -130,6 +130,21 @@ test('publisher merges child blobs without changing bytes and records exact inde
   assert.notEqual(runMerge().status, 0);
 });
 
+test('Buildx setup reuses the daemon and the handoff alone creates the pinned builder', () => {
+  const native = readFileSync(new URL('.github/workflows/axum-container.yml', root), 'utf8');
+  for (const source of [native, workflow]) {
+    const setup = source.match(/      - uses: docker\/setup-buildx-action@[^\n]+\n        with:\n((?:          [^\n]*\n)+)/)?.[1];
+    assert.ok(setup, 'expected Buildx setup');
+    assert.match(setup, /driver: docker\n/);
+    assert.match(setup, /use: false\n/);
+    assert.doesNotMatch(setup, /driver-opts:/);
+    assert.doesNotMatch(source, /moby\/buildkit:/);
+  }
+  const handoff = readFileSync(new URL('scripts/test_axum_container_handoff.sh', root), 'utf8');
+  assert.match(handoff, /docker buildx create .*--driver docker-container --driver-opt "image=\$BUILDKIT_IMAGE"/);
+  assert.match(handoff, /docker buildx build --builder "\$BUILDER"/);
+});
+
 test('container helper CI has one suite owner and derives framework Node pins', () => {
   const native = readFileSync(new URL('.github/workflows/axum-container.yml', root), 'utf8');
   const actions = readFileSync(new URL('.github/workflows/deploy-action.yml', root), 'utf8');

@@ -106,8 +106,9 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           version: v0.37.0
+          # Reuse the daemon; the handoff helper creates the pinned build instance.
+          driver: docker
           use: false
-          driver-opts: image=moby/buildkit:v0.25.1@sha256:79cc6476ab1a3371c9afd8b44e7c55610057c43e18d9b39b68e2b0c2475cc1b6
       - name: Install framework helper dependencies
         run: npm ci --prefix scripts --ignore-scripts
       - name: Native image, packaging, scan and OCI identity checks

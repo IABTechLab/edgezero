@@ -21,9 +21,13 @@ wait_for_http() {
 }
 cleanup() {
   status=$?
-  compose logs > "$WORK/compose.log" 2>&1 || true
-  compose down >/dev/null 2>&1 || true
-  if [[ "$status" -eq 0 ]]; then rm -rf "$WORK"; else echo "Diagnostics: $WORK" >&2; fi
+  if [[ "$status" -eq 0 ]]; then
+    rm -rf "$WORK"
+  else
+    compose logs > "$WORK/cleanup-compose.log" 2>&1 || true
+    compose down > "$WORK/cleanup.log" 2>&1 || true
+    echo "Diagnostics: $WORK" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -40,5 +44,7 @@ compose stop
 compose start
 PORT="$(compose port app 8787 | awk -F: '{print $NF}')"
 wait_for_http
+compose logs > "$WORK/compose.log" 2>&1 || true
+compose down > "$WORK/teardown.log" 2>&1
 echo 'PASS: no-store Compose config, restricted HTTP startup, stop/start and teardown.'
 echo 'No production readiness, durable state or bounded SIGTERM acceptance is implied.'
