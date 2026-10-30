@@ -40,7 +40,7 @@ Required check names remain unchanged. Original deadlines, timing tolerances, so
 - [x] Cache compatible isolated-repair build inputs/artifacts using compiler, platform, upstream revision, lock, patch and build-profile inputs. Always execute its readiness regressions; do not cache a passing result as evidence.
 - [x] Validate workflow syntax, shell behavior and negative cache/identity cases. Report local proof separately from hosted timing improvement.
 
-Local result: all 25 CI-tooling regression cases pass, including damaged executable/version/
+Local result: all 26 CI-tooling regression cases pass, including damaged executable/version/
 identity, missing compiler/platform facts, failed commands, zero tests and cache-hit readiness
 execution. Actionlint passes. Hosted timing remains unmeasured for these changes.
 
@@ -106,9 +106,9 @@ regression), and the ingress phase forwards its configured readiness timeout.
 - [x] Run all five required root Rust gates, isolated harness/fixture formatting and strict Clippy, all moved tests and real Spin runtime phases.
 - [x] Run guard/evidence/CI regression tests and docs lint/format/build. Audit for old targets, paths and duplicate supervisors.
 - [x] Perform independent specification and quality reviews and fix findings.
-- [ ] Commit and push the verified consolidation to PR #275.
+- [x] Commit and push the verified consolidation to PR #275.
 - [ ] Collect a successful hosted run and compare job critical path, summed worker time, cache transfer and build/install time with the baseline. Mark cold timing unmeasured until an explicit cache-miss run exists.
-- [ ] Mark completion only for implemented and verified tasks; retain any unclosed evidence or timing work explicitly.
+- [x] Mark completion only for implemented and verified tasks; retain any unclosed evidence or timing work explicitly.
 
 Local verification (2026-10-30): all five root gates; both Spin WASM Clippy configurations;
 all three Spin fixture packages' target Clippy; 352 harness tests (two intentionally ignored);
@@ -141,6 +141,35 @@ cancellation gaps; Boole migrated ingress ownership and verified all three local
 providers; Pauli reviewed persisted evidence and reused the existing matrix for ordered
 replay. The selected changes retain distinct execution boundaries and one shared
 process owner rather than combining unlike proofs or introducing another executor.
+
+## Hosted Checkpoint
+
+Implementation commit `0a04ddb083147a1161eb46610bdd9644b3c92cbe` is pushed to PR #275.
+Both [test workflow 41022052304](https://github.com/IABTechLab/edgezero/actions/runs/41022052304)
+and [format/Clippy workflow 41022052131](https://github.com/IABTechLab/edgezero/actions/runs/41022052131)
+pass. All required check names are retained. This is local-runtime/CI evidence, not hosted
+provider qualification.
+
+The first run populates new runtime/fixture cache keys; it is **not a comparable warm run**:
+
+| Test Job             | Recorded Baseline (Seconds) | First Consolidated Run (Seconds) |
+| -------------------- | --------------------------: | -------------------------------: |
+| Axum                 |                         109 |                              313 |
+| Fastly               |                         625 |                              990 |
+| Workspace            |                         284 |                              650 |
+| Cloudflare           |                         227 |                              245 |
+| CLI                  |                         302 |                              458 |
+| Spin                 |                         104 |                              260 |
+| Demo                 |                         224 |                              170 |
+| Test aggregate       |                           3 |                                4 |
+| Sum of job durations |                        1878 |                             3090 |
+
+Fastly's first stock install takes 288 seconds and its uncached isolated repair takes
+378 seconds (baseline 297/100). These observations do not establish a speedup. The remaining
+measurement checkbox requires a comparable warm run, cache-transfer data and a recorded
+interpretation; the provisional six-minute target is not claimed achieved. Live follow-up
+results belong in [PR #275](https://github.com/IABTechLab/edgezero/pull/275) without changing
+the outbound acceptance inventory or qualification status.
 
 ## Verification Commands
 
