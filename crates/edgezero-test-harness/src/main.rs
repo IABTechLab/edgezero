@@ -1,4 +1,5 @@
 mod evidence;
+mod fidelity;
 mod net;
 mod runners;
 mod startup;
@@ -11,7 +12,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -26,6 +27,8 @@ pub struct Args {
     seed: u64,
     construction_rounds: u64,
     max_requests: usize,
+    readiness_timeout: Duration,
+    record_observations: bool,
 }
 impl Args {
     fn parse() -> Result<Self> {
@@ -45,15 +48,21 @@ impl Args {
             seed: 856,
             construction_rounds: 0,
             max_requests: 10,
+            readiness_timeout: Duration::from_secs(40),
+            record_observations: false,
         };
         let mut adapter_selected = false;
         let mut args = arguments.into_iter();
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "edgezero-test-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|outbound-lifetimes|response-framing|synthesized-headers] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10]"
+                    "edgezero-test-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|outbound-lifetimes|response-framing|synthesized-headers|ingress-fidelity|ci] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10] [--readiness-timeout 40] [--record-observations]"
                 );
                 std::process::exit(0);
+            }
+            if key == "--record-observations" {
+                a.record_observations = true;
+                continue;
             }
             let value = args.next().ok_or(format!("missing value for {key}"))?;
             match key.as_str() {
@@ -68,6 +77,9 @@ impl Args {
                 "--seed" => a.seed = value.parse()?,
                 "--construction-rounds" => a.construction_rounds = value.parse()?,
                 "--max-requests" => a.max_requests = value.parse()?,
+                "--readiness-timeout" => {
+                    a.readiness_timeout = Duration::try_from_secs_f64(value.parse()?)?
+                }
                 _ => return Err(format!("unknown option {key}").into()),
             }
         }
@@ -88,6 +100,8 @@ impl Args {
                 "outbound-lifetimes",
                 "response-framing",
                 "synthesized-headers",
+                "ingress-fidelity",
+                "ci",
             ]
             .contains(&a.suite.as_str()),
             "unknown suite",
@@ -103,6 +117,22 @@ impl Args {
             !matches!(a.suite.as_str(), "outbound-wire" | "outbound-lifetimes")
                 || (adapter_selected && a.adapter != "all"),
             "wire and lifetime suites require one explicit adapter",
+        )?;
+        require(
+            a.suite != "ingress-fidelity" || (adapter_selected && a.adapter != "axum"),
+            "ingress fidelity requires --adapter spin|fastly|cloudflare|all",
+        )?;
+        require(
+            a.suite != "ci" || (adapter_selected && a.adapter == "spin"),
+            "ci requires --adapter spin",
+        )?;
+        require(
+            !a.readiness_timeout.is_zero(),
+            "readiness timeout must be positive",
+        )?;
+        require(
+            !a.record_observations || a.suite == "ingress-fidelity",
+            "record-observations requires --suite ingress-fidelity",
         )?;
         require(
             a.requests > 0 && a.repetitions > 0,
@@ -200,15 +230,61 @@ pub fn executable(variable: &str, default: &str) -> Option<PathBuf> {
         .and_then(|p| p.canonicalize().ok())
 }
 pub fn checked(command: &mut Command) -> Result<()> {
-    let status = command.status()?;
-    require(
-        status.success(),
-        format!("command {command:?} failed: {status}"),
-    )
+    let directory = tempfile::tempdir()?;
+    let log = directory.path().join("command.log");
+    let result = Process::spawn(command, &log).and_then(|mut process| process.wait_success());
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let kind = error
+                .downcast_ref::<std::io::Error>()
+                .map_or(std::io::ErrorKind::Other, std::io::Error::kind);
+            let mut diagnostics = Vec::new();
+            if let Ok(file) = fs::File::open(&log) {
+                let _ = file.take(64 * 1024).read_to_end(&mut diagnostics);
+            }
+            let retained = directory.keep().join("command.log");
+            Err(std::io::Error::new(
+                kind,
+                format!(
+                    "command {} failed: {error}; diagnostics: {}; log: {}",
+                    command.get_program().to_string_lossy(),
+                    String::from_utf8_lossy(&diagnostics),
+                    retained.display()
+                ),
+            )
+            .into())
+        }
+    }
 }
-/// Process groups of live runtimes, killed by the Ctrl-C handler because a
-/// terminal SIGINT reaches only the harness's own foreground group.
-static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Owned command/runtime groups, retained until bounded teardown is confirmed.
+static LIVE_GROUPS: Mutex<std::collections::BTreeMap<u32, bool>> =
+    Mutex::new(std::collections::BTreeMap::new());
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+fn request_cancellation() {
+    CANCELLED.store(true, Ordering::SeqCst);
+    let groups = LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    for (id, nested_harness) in groups {
+        // A child harness must cascade to its own groups before its owner reaps it.
+        let signal = if nested_harness { "-TERM" } else { "-KILL" };
+        let _ = signal_group(id, signal, Instant::now() + Duration::from_secs(2));
+    }
+}
+
+pub fn check_cancelled(cancelled: &AtomicBool) -> std::io::Result<()> {
+    if cancelled.load(Ordering::SeqCst) || CANCELLED.load(Ordering::SeqCst) {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "interrupted",
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SignalOutcome {
@@ -275,7 +351,12 @@ fn signal_group_command(command: &mut Command, deadline: Instant) -> Result<Sign
             Ok(Some(status)) => status,
             outcome => {
                 let mut failure = outcome.err().map_or_else(
-                    || "process-group signal helper timed out".to_owned(),
+                    || {
+                        format!(
+                            "process-group signal helper timed out (pid {})",
+                            helper.id()
+                        )
+                    },
                     |error| error.to_string(),
                 );
                 if let Err(error) = helper.kill() {
@@ -313,19 +394,10 @@ fn signal_group_command(command: &mut Command, deadline: Instant) -> Result<Sign
     }
     outcome
 }
-fn kill_live_groups_and_exit() {
-    for id in LIVE_GROUPS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-    {
-        let _ = signal_group(*id, "-KILL", Instant::now() + Duration::from_secs(5));
-    }
-    std::process::exit(130);
-}
 pub struct Process(startup::ChildHandle, ProcessState);
 struct ProcessState {
     log: PathBuf,
+    command_status: Option<ExitStatus>,
     finished: Option<std::result::Result<(), String>>,
     shutdown_started: bool,
     failures: Vec<String>,
@@ -333,21 +405,39 @@ struct ProcessState {
 }
 impl Process {
     pub fn spawn(command: &mut Command, log: &Path) -> Result<Self> {
+        Self::spawn_logged(command, log, None)
+    }
+    pub fn spawn_with_stdout(command: &mut Command, log: &Path, stdout: &Path) -> Result<Self> {
+        Self::spawn_logged(command, log, Some(stdout))
+    }
+    fn spawn_logged(command: &mut Command, log: &Path, stdout: Option<&Path>) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
         let file = fs::File::create(log)?;
+        let output = match stdout {
+            Some(path) => fs::File::create(path)?,
+            None => file.try_clone()?,
+        };
         let p = Self(
             startup::ChildHandle::new(
                 command
-                    .stdout(Stdio::from(file.try_clone()?))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(output))
                     .stderr(Stdio::from(file))
-                    .spawn()?,
+                    .spawn()
+                    .map_err(|error| {
+                        std::io::Error::new(
+                            error.kind(),
+                            format!("{}: {error}", command.get_program().to_string_lossy()),
+                        )
+                    })?,
             ),
             ProcessState {
                 log: log.to_owned(),
+                command_status: None,
                 finished: None,
                 shutdown_started: false,
                 failures: Vec::new(),
@@ -357,7 +447,10 @@ impl Process {
         LIVE_GROUPS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(p.0.id());
+            .insert(
+                p.0.id(),
+                std::env::current_exe().is_ok_and(|own| command.get_program() == own.as_os_str()),
+            );
         Ok(p)
     }
     pub fn start(command: &mut Command, log: &Path, port: u16) -> Result<Self> {
@@ -388,6 +481,10 @@ impl Process {
         }
     }
     pub fn check_running(&mut self) -> Result<()> {
+        check_cancelled(&CANCELLED)?;
+        self.ensure_running()
+    }
+    fn ensure_running(&mut self) -> Result<()> {
         if let Some(outcome) = &self.1.finished {
             return Err(outcome
                 .as_ref()
@@ -408,6 +505,47 @@ impl Process {
             .into()),
         }
     }
+    pub fn wait_success(&mut self) -> Result<ExitStatus> {
+        self.wait_success_cancelled(&CANCELLED)
+    }
+    pub fn child_status(&self) -> std::io::Result<Option<ExitStatus>> {
+        self.0.try_wait()
+    }
+    pub fn wait_success_cancelled(&mut self, cancelled: &AtomicBool) -> Result<ExitStatus> {
+        require(
+            self.1.launch.is_none(),
+            "cannot wait for command completion on a registered server",
+        )?;
+        if self.1.finished.is_some() {
+            self.finish()?;
+            return self
+                .1
+                .command_status
+                .ok_or_else(|| "process already shut down".into());
+        }
+        loop {
+            if let Err(error) = check_cancelled(cancelled) {
+                let cleanup = self.finish();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    cleanup.err().map_or_else(
+                        || error.to_string(),
+                        |cleanup| format!("{error}; cleanup: {cleanup}"),
+                    ),
+                )
+                .into());
+            }
+            if let Some(status) = self.0.try_wait()? {
+                self.1.command_status = Some(status);
+                if !status.success() {
+                    self.1.failures.push(format!("command exited: {status}"));
+                }
+                self.finish()?;
+                return Ok(status);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     pub fn finish(&mut self) -> Result<()> {
         if let Some(outcome) = &self.1.finished {
             return outcome.clone().map_err(Into::into);
@@ -419,7 +557,9 @@ impl Process {
             {
                 failures.push(error.to_string());
             }
-            if let Err(error) = self.check_running() {
+            if self.1.command_status.is_none()
+                && let Err(error) = self.ensure_running()
+            {
                 failures.push(error.to_string());
             }
             self.1.shutdown_started = true;
@@ -485,7 +625,7 @@ impl Process {
             LIVE_GROUPS
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .retain(|live| *live != id);
+                .remove(&id);
         }
         self.1.failures = failures.clone();
         let outcome = if failures.is_empty() {
@@ -554,7 +694,7 @@ fn rustc() -> PathBuf {
 }
 fn run() -> Result<i32> {
     let args = Args::parse()?;
-    ctrlc::set_handler(kill_live_groups_and_exit)?;
+    ctrlc::set_handler(request_cancellation)?;
     let path = args
         .output
         .clone()
@@ -567,6 +707,10 @@ fn run() -> Result<i32> {
     }
     fs::create_dir_all(&path)?;
     let path = path.canonicalize()?;
+    if args.suite == "ingress-fidelity" {
+        fidelity::run(&args, &path)?;
+        return Ok(0);
+    }
     fs::copy(root().join("Cargo.lock"), path.join("Cargo.lock"))?;
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"),
@@ -576,7 +720,7 @@ fn run() -> Result<i32> {
         path: path.join("events.jsonl"),
         values: Vec::new(),
     };
-    records.push(json!({"event":"run","seed":args.seed,"suite":args.suite,"construction_rounds":args.construction_rounds,"max_requests":args.max_requests,"fixture_build_id":startup::build_id()}))?;
+    records.push(json!({"event":"run","seed":args.seed,"suite":args.suite,"construction_rounds":args.construction_rounds,"max_requests":args.max_requests,"fixture_build_id":startup::build_id()?}))?;
     records.push(json!({"event":"build_environment","rustc":String::from_utf8_lossy(&Command::new(rustc()).arg("--version").output()?.stdout).trim(),"host_os":std::env::consts::OS,"host_arch":std::env::consts::ARCH,"lockfile":artifact(&path.join("Cargo.lock"))?,"harness_lockfile":artifact(&path.join("harness-Cargo.lock"))?}))?;
     let adapters = if args.adapter == "all" {
         vec!["fastly", "cloudflare", "spin", "axum"]
@@ -723,6 +867,80 @@ mod argument_tests {
     use super::Args;
 
     #[test]
+    fn fidelity_requires_a_supported_explicit_adapter_and_ci_requires_spin() {
+        for adapter in ["fastly", "cloudflare", "spin", "axum", "all"] {
+            for suite in ["ingress-fidelity", "ci"] {
+                let result =
+                    Args::parse_from(["--adapter", adapter, "--suite", suite].map(str::to_owned));
+                assert_eq!(
+                    result.is_ok(),
+                    if suite == "ci" {
+                        adapter == "spin"
+                    } else {
+                        adapter != "axum"
+                    }
+                );
+            }
+        }
+        for suite in ["ingress-fidelity", "ci"] {
+            assert!(Args::parse_from(["--suite", suite].map(str::to_owned)).is_err());
+        }
+    }
+
+    #[test]
+    fn fidelity_options_preserve_recording_and_finite_positive_readiness() {
+        let args = Args::parse_from(
+            [
+                "--adapter",
+                "spin",
+                "--suite",
+                "ingress-fidelity",
+                "--record-observations",
+                "--readiness-timeout",
+                "0.25",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(args.record_observations);
+        assert_eq!(
+            args.readiness_timeout,
+            std::time::Duration::from_millis(250)
+        );
+        for timeout in ["0", "-1", "NaN", "inf", "1e100"] {
+            assert!(
+                Args::parse_from(
+                    [
+                        "--adapter",
+                        "spin",
+                        "--suite",
+                        "ingress-fidelity",
+                        "--readiness-timeout",
+                        timeout
+                    ]
+                    .map(str::to_owned)
+                )
+                .is_err(),
+                "{timeout}"
+            );
+        }
+        assert!(Args::parse_from(["--record-observations"].map(str::to_owned)).is_err());
+        assert!(
+            Args::parse_from(
+                [
+                    "--adapter",
+                    "spin",
+                    "--suite",
+                    "ingress-fidelity",
+                    "--skip-build"
+                ]
+                .map(str::to_owned)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn outbound_lifetimes_selects_exactly_one_explicit_provider() {
         for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
             let result = Args::parse_from(
@@ -767,6 +985,9 @@ mod argument_tests {
 
 #[cfg(all(test, unix))]
 mod process_tests {
+    // Supervisor fixtures do not build guest code or probe the real compiler.
+    const TEST_BUILD_ID: &str = "process-supervisor-fixture";
+
     use super::*;
     use std::{net::TcpListener, os::unix::process::ExitStatusExt};
 
@@ -791,7 +1012,7 @@ mod process_tests {
                 ])
                 .env("EDGEZERO_PROCESS_TEST_MODE", mode)
                 .env("EDGEZERO_PROCESS_TEST_DIR", &self.0);
-            startup::command(&mut command, "fixture-test");
+            startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
             command
         }
 
@@ -835,6 +1056,87 @@ mod process_tests {
             return;
         };
         let path = PathBuf::from(std::env::var_os("EDGEZERO_PROCESS_TEST_DIR").unwrap());
+        if mode == "checked-controller" {
+            ctrlc::set_handler(request_cancellation).unwrap();
+            let fixture = Fixture(path.clone());
+            let runtime = fixture.command("descendant");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "echo $$ > \"$EDGEZERO_PROCESS_TEST_DIR/checked-child\"; exec \"$@\"",
+                    "owned-checked",
+                ])
+                .arg(runtime.get_program())
+                .args(runtime.get_args())
+                .envs(runtime.get_envs().map(|(key, value)| (key, value.unwrap())));
+            let error = checked(&mut command).unwrap_err();
+            assert!(error.to_string().contains("interrupted"), "{error}");
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
+                Some(std::io::ErrorKind::Interrupted)
+            );
+            let id = fs::read_to_string(path.join("checked-child")).unwrap();
+            let id = id.trim();
+            assert!(
+                !LIVE_GROUPS
+                    .lock()
+                    .unwrap()
+                    .contains_key(&id.parse().unwrap())
+            );
+            assert!(
+                !Command::new("kill")
+                    .args(["-0", "--", id])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            fs::write(path.join("checked-reaped"), b"complete").unwrap();
+            std::mem::forget(fixture);
+            return;
+        }
+        if mode == "cascade-controller" {
+            ctrlc::set_handler(request_cancellation).unwrap();
+            let fixture = Fixture(path.clone());
+            let mut child = fixture.spawn("blocked-controller");
+            assert_eq!(LIVE_GROUPS.lock().unwrap().get(&child.0.id()), Some(&true));
+            let error = child.wait_success().unwrap_err();
+            assert!(error.to_string().contains("interrupted"), "{error}");
+            assert!(child.0.try_wait().unwrap().is_some());
+            fs::write(path.join("cascade-reaped"), b"complete").unwrap();
+            std::mem::forget(fixture);
+            return;
+        }
+        if matches!(mode.as_str(), "command-controller" | "blocked-controller") {
+            ctrlc::set_handler(request_cancellation).unwrap();
+            let fixture = Fixture(path.clone());
+            let runtime = fixture.command("descendant");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "exec \"$@\"", "owned-runtime"])
+                .arg(runtime.get_program())
+                .args(runtime.get_args())
+                .envs(runtime.get_envs().map(|(key, value)| (key, value.unwrap())));
+            let mut child = Process::spawn(&mut command, &path.join("runtime.log")).unwrap();
+            assert_eq!(LIVE_GROUPS.lock().unwrap().get(&child.0.id()), Some(&false));
+            if mode == "blocked-controller" {
+                fixture.ready();
+                fs::write(path.join("nested-runtime"), child.0.id().to_string()).unwrap();
+                fs::write(path.join("controller-blocked"), b"network wait").unwrap();
+                thread::sleep(Duration::from_secs(30));
+            }
+            let error = child.wait_success().unwrap_err();
+            assert!(error.to_string().contains("interrupted"), "{error}");
+            assert!(child.0.try_wait().unwrap().is_some());
+            assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&child.0.id()));
+            fs::write(path.join("cancellation-reaped"), b"complete").unwrap();
+            std::mem::forget(fixture);
+            return;
+        }
         if mode == "startup-responder" {
             use std::io::{BufRead, BufReader};
             let port: u16 = std::env::var("EDGEZERO_PROCESS_TEST_PORT")
@@ -933,7 +1235,7 @@ mod process_tests {
                         "unconfirmed cleanup was cached",
                     )?;
                     require(
-                        LIVE_GROUPS.lock().unwrap().contains(&runtime.0.id()),
+                        LIVE_GROUPS.lock().unwrap().contains_key(&runtime.0.id()),
                         "unconfirmed group cleanup lost ownership",
                     )?;
                     std::os::unix::fs::symlink(&kill, path.join("commands").join("kill"))?;
@@ -946,7 +1248,7 @@ mod process_tests {
                     "retry did not confirm cleanup",
                 )?;
                 require(
-                    !LIVE_GROUPS.lock().unwrap().contains(&runtime.0.id()),
+                    !LIVE_GROUPS.lock().unwrap().contains_key(&runtime.0.id()),
                     "confirmed cleanup retained the group",
                 )?;
                 Ok(())
@@ -980,6 +1282,7 @@ mod process_tests {
         }
         if mode == "descendant-worker" {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            fs::write(path.join("descendant-pid"), std::process::id().to_string()).unwrap();
             fs::write(
                 path.join("descendant"),
                 listener.local_addr().unwrap().port().to_string(),
@@ -1004,6 +1307,8 @@ mod process_tests {
         std::io::stderr().flush().unwrap();
         fs::write(path.join("ready"), b"ready").unwrap();
         if mode == "signal-timeout" {
+            // A loaded host may not schedule child initialization before the helper deadline.
+            thread::sleep(Duration::from_secs(1));
             fs::write(path.join("signal-pid"), std::process::id().to_string()).unwrap();
         }
         match mode.as_str() {
@@ -1018,6 +1323,193 @@ mod process_tests {
                 thread::sleep(Duration::from_secs(1));
             },
         }
+    }
+
+    #[test]
+    fn nested_harness_cancellation_stops_runtime_while_network_wait_is_blocked() {
+        fn alive(id: u32) -> bool {
+            let output = Command::new("ps")
+                .args(["-o", "stat=", "-p", &id.to_string()])
+                .output()
+                .unwrap();
+            assert!(
+                output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.status.success()
+                && !String::from_utf8_lossy(&output.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+        }
+        for mode in ["blocked-controller", "cascade-controller"] {
+            let fixture = Fixture::new();
+            let mut controller = fixture.spawn(mode);
+            until(|| fixture.0.join("controller-blocked").is_file());
+            let port = fixture.descendant_port();
+            let runtime = fs::read_to_string(fixture.0.join("nested-runtime"))
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            let descendant = fs::read_to_string(fixture.0.join("descendant-pid"))
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            assert!(alive(runtime) && alive(descendant));
+            let started = Instant::now();
+            signal_group(
+                controller.0.id(),
+                "-TERM",
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            // Inspect before killing the blocked owner. Always clean the nested group on red.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && (alive(runtime) || alive(descendant)) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let stopped = !alive(runtime) && !alive(descendant);
+            let elapsed = started.elapsed();
+            assert!(
+                controller.0.try_wait().unwrap().is_none(),
+                "owner must still be blocked"
+            );
+            let _ = signal_group(runtime, "-KILL", Instant::now() + Duration::from_secs(2));
+            if mode == "cascade-controller" {
+                controller.wait_success().unwrap();
+                assert!(fixture.0.join("cascade-reaped").is_file());
+            } else {
+                let _ = signal_group(
+                    controller.0.id(),
+                    "-KILL",
+                    Instant::now() + Duration::from_secs(2),
+                );
+                let _ = controller.finish();
+            }
+            assert!(
+                stopped,
+                "flag-only cancellation orphaned the nested runtime while its owner was blocked"
+            );
+            assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+            assert!(elapsed < Duration::from_secs(3));
+        }
+    }
+
+    #[test]
+    fn root_signal_cancellation_reaps_commands_and_descendants() {
+        for signal in ["-INT", "-TERM", "-HUP"] {
+            let fixture = Fixture::new();
+            let mut controller = fixture.spawn("command-controller");
+            fixture.ready();
+            let port = fixture.descendant_port();
+            signal_group(
+                controller.0.id(),
+                signal,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            controller.wait_success().unwrap();
+            assert!(fixture.0.join("cancellation-reaped").is_file(), "{signal}");
+            until(|| std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        }
+    }
+
+    #[test]
+    fn checked_preserves_failure_status_diagnostics_and_log() {
+        checked(Command::new("/bin/sh").args(["-c", "exit 0"])).unwrap();
+        let error = checked(Command::new("/bin/sh").args([
+            "-c",
+            "printf 'checked-out'; printf '\\377checked-err' >&2; exit 23",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("23") && error.contains("/bin/sh"), "{error}");
+        assert!(
+            error.contains("checked-out") && error.contains("checked-err"),
+            "{error}"
+        );
+        assert!(error.contains('\u{fffd}'), "{error}");
+        let (_, log) = error.rsplit_once("; log: ").expect("retained command log");
+        assert_eq!(fs::read(log).unwrap(), b"checked-out\xffchecked-err");
+        fs::remove_dir_all(Path::new(log).parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn checked_cancellation_reaps_the_command_and_descendants() {
+        for signal in ["-INT", "-TERM", "-HUP"] {
+            let fixture = Fixture::new();
+            let mut controller = fixture.spawn("checked-controller");
+            fixture.ready();
+            let port = fixture.descendant_port();
+            signal_group_command(
+                Command::new("kill").args([signal, "--", &controller.0.id().to_string()]),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while controller.child_status().unwrap().is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let completed = controller.child_status().unwrap().is_some();
+            let outcome = if completed {
+                controller.wait_success().map(|_| ())
+            } else {
+                controller.finish()
+            };
+            assert!(completed, "checked() ignored direct {signal} cancellation");
+            outcome.unwrap();
+            assert!(fixture.0.join("checked-reaped").is_file(), "{signal}");
+            until(|| std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        }
+    }
+
+    #[test]
+    fn command_completion_accepts_zero_and_cleans_exited_parents_descendants() {
+        for mode in ["exit-zero", "orphan"] {
+            let fixture = Fixture::new();
+            let mut process = fixture.spawn(mode);
+            fixture.ready();
+            let status = process.wait_success().unwrap();
+            assert!(status.success());
+            process.finish().unwrap();
+            assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&process.0.id()));
+            if mode == "orphan" {
+                let port = fixture.descendant_port();
+                until(|| std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn command_completion_preserves_failure_status_and_logs() {
+        let fixture = Fixture::new();
+        let mut process = fixture.spawn("exit-nonzero");
+        let error = process.wait_success().unwrap_err().to_string();
+        assert!(
+            error.contains("command exited") && error.contains("7"),
+            "{error}"
+        );
+        assert!(error.contains("runtime.log"), "{error}");
+        assert_eq!(process.child_status().unwrap().unwrap().code(), Some(7));
+        assert!(process.finish().is_err());
+        assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&process.0.id()));
+    }
+
+    #[test]
+    fn command_cancellation_reaps_before_returning() {
+        let fixture = Fixture::new();
+        let mut process = fixture.spawn("descendant");
+        fixture.ready();
+        let port = fixture.descendant_port();
+        let started = Instant::now();
+        let error = process
+            .wait_success_cancelled(&AtomicBool::new(true))
+            .unwrap_err();
+        assert!(error.to_string().contains("interrupted"), "{error}");
+        assert!(process.0.try_wait().unwrap().is_some());
+        assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&process.0.id()));
+        until(|| std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(6));
     }
 
     #[test]
@@ -1106,10 +1598,22 @@ mod process_tests {
         .unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(2));
-        let pid = fs::read_to_string(fixture.0.join("signal-pid")).unwrap();
+        assert!(
+            !fixture.0.join("signal-pid").exists(),
+            "helper must time out before initialization completes"
+        );
+        let message = error.to_string();
+        let pid = message
+            .split_once("(pid ")
+            .unwrap()
+            .1
+            .split_once(')')
+            .unwrap()
+            .0;
+        assert!(pid.parse::<u32>().is_ok(), "{message}");
         assert!(
             !Command::new("ps")
-                .args(["-p", &pid])
+                .args(["-p", pid])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
@@ -1185,7 +1689,7 @@ mod process_tests {
                 !LIVE_GROUPS
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .contains(&process.0.id())
+                    .contains_key(&process.0.id())
             );
         }
     }
@@ -1206,8 +1710,8 @@ mod process_tests {
         let port = net::port().unwrap();
         let log = fixture.0.join("runtime.log");
         let mut command = fixture.command("startup-responder");
-        let nonce = startup::command(&mut command, "fixture-test");
-        let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+        let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+        let identity = format!("v1;{nonce};{};fixture-test", TEST_BUILD_ID);
         command
             .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
             .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity);
@@ -1230,8 +1734,8 @@ mod process_tests {
             let port = net::port().unwrap();
             let log = fixture.0.join("runtime.log");
             let mut command = fixture.command("startup-responder");
-            let nonce = startup::command(&mut command, "fixture-test");
-            let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+            let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+            let identity = format!("v1;{nonce};{};fixture-test", TEST_BUILD_ID);
             let mut parts: Vec<_> = identity.split(';').collect();
             let wrong = match index {
                 1..=3 => {
@@ -1266,8 +1770,8 @@ mod process_tests {
             let port = net::port().unwrap();
             let log = fixture.0.join("runtime.log");
             let mut command = fixture.command("startup-responder");
-            let nonce = startup::command(&mut command, "fixture-fastly-faults");
-            let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+            let nonce = startup::command(&mut command, "fixture-fastly-faults", TEST_BUILD_ID);
+            let identity = format!("v1;{nonce};{};fixture-fastly-faults", TEST_BUILD_ID);
             command
                 .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
                 .env(
@@ -1308,8 +1812,8 @@ mod process_tests {
             let port = net::port().unwrap();
             let log = fixture.0.join("runtime.log");
             let mut command = fixture.command("startup-responder");
-            let nonce = startup::command(&mut command, "fixture-test");
-            let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+            let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+            let identity = format!("v1;{nonce};{};fixture-test", TEST_BUILD_ID);
             command
                 .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
                 .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity);
@@ -1342,8 +1846,8 @@ mod process_tests {
             let port = net::port().unwrap();
             let log = fixture.0.join("runtime.log");
             let mut command = fixture.command("startup-responder");
-            let nonce = startup::command(&mut command, "fixture-test");
-            let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+            let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+            let identity = format!("v1;{nonce};{};fixture-test", TEST_BUILD_ID);
             let later = if duplicate {
                 format!("{identity}\r\n{}: {identity}", startup::HEADER)
             } else {
@@ -1369,8 +1873,8 @@ mod process_tests {
         let port = net::port().unwrap();
         let log = fixture.0.join("runtime.log");
         let mut command = fixture.command("startup-responder");
-        let nonce = startup::command(&mut command, "fixture-fastly-faults");
-        let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+        let nonce = startup::command(&mut command, "fixture-fastly-faults", TEST_BUILD_ID);
+        let identity = format!("v1;{nonce};{};fixture-fastly-faults", TEST_BUILD_ID);
         command
             .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
             .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity)
@@ -1400,8 +1904,8 @@ mod process_tests {
             let port = net::port().unwrap();
             let log = fixture.0.join("runtime.log");
             let mut command = fixture.command("startup-responder");
-            let nonce = startup::command(&mut command, "fixture-fastly-faults");
-            let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+            let nonce = startup::command(&mut command, "fixture-fastly-faults", TEST_BUILD_ID);
+            let identity = format!("v1;{nonce};{};fixture-fastly-faults", TEST_BUILD_ID);
             command
                 .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
                 .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity)
@@ -1422,8 +1926,8 @@ mod process_tests {
         let port = net::port().unwrap();
         let log = fixture.0.join("runtime.log");
         let mut command = fixture.command("startup-responder");
-        let nonce = startup::command(&mut command, "fixture-fastly-faults");
-        let identity = format!("v1;{nonce};{};fixture-fastly-faults", startup::build_id());
+        let nonce = startup::command(&mut command, "fixture-fastly-faults", TEST_BUILD_ID);
+        let identity = format!("v1;{nonce};{};fixture-fastly-faults", TEST_BUILD_ID);
         command
             .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
             .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity);
@@ -1441,8 +1945,8 @@ mod process_tests {
         let port = net::port().unwrap();
         let log = fixture.0.join("runtime.log");
         let mut command = fixture.command("startup-responder");
-        let nonce = startup::command(&mut command, "fixture-test");
-        let identity = format!("v1;{nonce};{};fixture-test", startup::build_id());
+        let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+        let identity = format!("v1;{nonce};{};fixture-test", TEST_BUILD_ID);
         command
             .env("EDGEZERO_PROCESS_TEST_PORT", port.to_string())
             .env("EDGEZERO_PROCESS_TEST_IDENTITY", &identity)
@@ -1461,7 +1965,7 @@ mod process_tests {
         let log = fixture.0.join("runtime.log");
         let port = net::port().unwrap();
         let mut command = fixture.command("graceful");
-        let nonce = startup::command(&mut command, "fixture-test");
+        let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
         let mut process = Process::spawn(&mut command, &log).unwrap();
         process.1.launch = Some(startup::register(
             &command,
@@ -1473,7 +1977,7 @@ mod process_tests {
         fixture.ready();
         let headers = vec![json!([
             startup::HEADER,
-            format!("v1;{nonce};{};fixture-test", startup::build_id())
+            format!("v1;{nonce};{};fixture-test", TEST_BUILD_ID)
         ])];
         let error = startup::observe(port, "/first", &headers).unwrap_err();
         assert!(error.to_string().contains("absolute startup deadline"));
@@ -1488,7 +1992,7 @@ mod process_tests {
             let log = fixture.0.join("runtime.log");
             let port = net::port().unwrap();
             let mut command = fixture.command(mode);
-            let nonce = startup::command(&mut command, "fixture-test");
+            let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
             let mut process = Process::spawn(&mut command, &log).unwrap();
             process.1.launch = Some(startup::register(
                 &command,
@@ -1501,7 +2005,7 @@ mod process_tests {
             until(|| process.0.try_wait().unwrap().is_some());
             let headers = vec![json!([
                 startup::HEADER,
-                format!("v1;{nonce};{};fixture-test", startup::build_id())
+                format!("v1;{nonce};{};fixture-test", TEST_BUILD_ID)
             ])];
             assert!(
                 startup::observe(port, "/first", &headers)

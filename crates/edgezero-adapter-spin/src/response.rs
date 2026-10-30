@@ -1,5 +1,5 @@
 #![cfg_attr(
-    test,
+    any(test, all(target_arch = "wasm32", feature = "test-utils")),
     expect(
         clippy::self_named_module_files,
         reason = "retain the existing response module file while colocating coordinator tests"
@@ -678,205 +678,8 @@ mod platform {
         }
     }
 
-    #[cfg(feature = "test-utils")]
-    mod diagnostic_tests {
-        use super::*;
-        use core::time::Duration;
-        use edgezero_core::error::BadGatewayReason;
-        use edgezero_core::error_detail::{
-            ProviderFailureDetail, ProviderFailurePhase, SpinFailureCause,
-        };
-        use edgezero_core::http::Version;
-        use edgezero_core::response_egress::{
-            ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressHead,
-            ResponseEgressObserverHandle, ResponseEgressOutcome, ResponseEgressReport,
-        };
-        use edgezero_core::time::MonotonicInstant;
-        use futures_util::stream;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex, PoisonError};
-
-        #[derive(Clone, Copy, Eq, PartialEq)]
-        pub(super) enum SourceCase {
-            AlreadyExpired,
-            Eof,
-            Ready,
-            ReadyExpired,
-        }
-
-        fn attempt(
-            now: MonotonicInstant,
-            clock: MonotonicClock,
-        ) -> (ResponseEgressAttempt, Arc<Mutex<Vec<ResponseEgressReport>>>) {
-            let reports = Arc::new(Mutex::new(Vec::new()));
-            let completed = Arc::clone(&reports);
-            let headers = HeaderMap::new();
-            let head = ResponseEgressHead::new(
-                StatusCode::OK,
-                Version::HTTP_11,
-                &headers,
-                None,
-                now,
-                None,
-            );
-            (
-                ResponseEgressAttempt::new(
-                    &head,
-                    now,
-                    ResponseEgressCompletion::new(move |report| {
-                        completed
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .push(report.clone());
-                    }),
-                    ResponseEgressObserverHandle::default(),
-                    clock,
-                ),
-                reports,
-            )
-        }
-
-        pub(super) async fn check_source_case(
-            case: SourceCase,
-            with_detail: bool,
-        ) -> Result<(), EdgeError> {
-            let now = MonotonicInstant::now();
-            let deadline = now
-                .checked_add(Duration::from_secs(10))
-                .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("test deadline overflow")))?;
-            let expired = Arc::new(AtomicBool::new(case == SourceCase::AlreadyExpired));
-            let clock_expired = Arc::clone(&expired);
-            let clock = MonotonicClock::new(move || {
-                if clock_expired.load(Ordering::SeqCst) {
-                    deadline
-                } else {
-                    now
-                }
-            });
-            let polls = Arc::new(AtomicUsize::new(0));
-            let source_polls = Arc::clone(&polls);
-            let detail = ProviderFailureDetail::Spin {
-                phase: ProviderFailurePhase::ResponseBodyRead,
-                cause: SpinFailureCause::ConnectionTerminated,
-            };
-            let mut source = if case == SourceCase::Eof {
-                stream::empty().boxed_local()
-            } else {
-                stream::once(async move {
-                    source_polls.fetch_add(1, Ordering::SeqCst);
-                    expired.store(case == SourceCase::ReadyExpired, Ordering::SeqCst);
-                    Err(if with_detail {
-                        EdgeError::bad_gateway_with_detail(
-                            "provider-secret-token",
-                            BadGatewayReason::Transport,
-                            detail,
-                        )
-                    } else {
-                        EdgeError::bad_gateway_with_reason(
-                            "provider-secret-token",
-                            BadGatewayReason::Transport,
-                        )
-                    })
-                })
-                .boxed_local()
-            };
-            let (mut attempt, reports) = attempt(now, clock.clone());
-            if !attempt.begin_writing() {
-                return Err(EdgeError::internal(anyhow::anyhow!(
-                    "test writing state failed"
-                )));
-            }
-            let mut io = WasiEgressIo {
-                response_result: None,
-                result_writer: None,
-                stream_writer: None,
-            };
-            let result = io
-                .next_body(
-                    &mut source,
-                    Deadline::at_instant(deadline),
-                    &clock,
-                    &mut attempt,
-                )
-                .await;
-            let expected = match case {
-                SourceCase::AlreadyExpired | SourceCase::ReadyExpired => {
-                    ResponseEgressOutcome::DeadlineExceeded
-                }
-                SourceCase::Eof => ResponseEgressOutcome::Completed,
-                SourceCase::Ready => ResponseEgressOutcome::SourceError,
-            };
-            let actual = match result {
-                Ok(Some(Err(_))) => ResponseEgressOutcome::SourceError,
-                Ok(None) => ResponseEgressOutcome::Completed,
-                Err(IoFailureKind::Deadline) => ResponseEgressOutcome::DeadlineExceeded,
-                _ => {
-                    return Err(EdgeError::internal(anyhow::anyhow!(
-                        "unexpected test read result"
-                    )));
-                }
-            };
-            if actual != expected || !attempt.terminate(actual, clock.now()) {
-                return Err(EdgeError::internal(anyhow::anyhow!(
-                    "test terminal outcome changed"
-                )));
-            }
-            drop(attempt);
-            let retained = reports.lock().unwrap_or_else(PoisonError::into_inner);
-            let report = retained.first().ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!("test terminal report missing"))
-            })?;
-            let observed = matches!(case, SourceCase::Ready | SourceCase::ReadyExpired);
-            if retained.len() != 1
-                || report.bytes_written != 0
-                || report.source_failure.is_some() != observed
-                || polls.load(Ordering::SeqCst) != usize::from(observed)
-            {
-                return Err(EdgeError::internal(anyhow::anyhow!(
-                    "test source observation changed"
-                )));
-            }
-            check_report(report, with_detail.then_some(&detail))
-        }
-
-        fn check_report(
-            report: &ResponseEgressReport,
-            expected: Option<&ProviderFailureDetail>,
-        ) -> Result<(), EdgeError> {
-            if let Some(failure) = report.source_failure
-                && (failure.body_kind() != ResponseEgressBodyKind::Application
-                    || failure.category() != "bad_gateway_transport"
-                    || failure.provider_failure_detail() != expected)
-            {
-                return Err(EdgeError::internal(anyhow::anyhow!(
-                    "test source diagnostic changed"
-                )));
-            }
-            Ok(())
-        }
-    }
-
-    /// Exercises the production source-read race without creating a downstream writer.
-    ///
-    /// # Errors
-    /// Returns an internal test error if observation or terminal behavior changes.
-    #[cfg(feature = "test-utils")]
-    #[doc(hidden)]
-    #[inline]
-    pub(super) async fn response_source_diagnostics_hold_for_test() -> Result<(), EdgeError> {
-        use diagnostic_tests::{SourceCase, check_source_case};
-        for case in [
-            SourceCase::AlreadyExpired,
-            SourceCase::Eof,
-            SourceCase::Ready,
-            SourceCase::ReadyExpired,
-        ] {
-            for with_detail in [false, true] {
-                check_source_case(case, with_detail).await?;
-            }
-        }
-        Ok(())
-    }
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) mod test_support;
 
     /// Converts an owned response-egress envelope into a raw `WASIp3` response and spawns the sole
     /// body/transmission coordinator.
@@ -923,16 +726,8 @@ mod platform {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use platform::from_egress_response;
-#[cfg(all(feature = "spin", target_arch = "wasm32", feature = "test-utils"))]
-#[doc(hidden)]
-#[inline]
-/// Exercises the SDK response-read race and verifies bounded observation metadata.
-///
-/// # Errors
-/// Returns an internal test error if an expected observation changes.
-pub async fn response_source_diagnostics_hold_for_test() -> Result<(), EdgeError> {
-    platform::response_source_diagnostics_hold_for_test().await
-}
+#[cfg(all(target_arch = "wasm32", any(test, feature = "test-utils")))]
+pub(crate) use platform::test_support;
 
 fn start_prepared<Committer>(
     prepared: PreparedResponseEgress,

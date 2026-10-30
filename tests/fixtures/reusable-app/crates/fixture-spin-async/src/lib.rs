@@ -1,6 +1,10 @@
 #[cfg(target_arch = "wasm32")]
+#[path = "../../../../../../crates/edgezero-adapter-spin/tests/support/outbound/mod.rs"]
+mod outbound_support;
+
+#[cfg(target_arch = "wasm32")]
 mod sdk {
-    use edgezero_adapter_spin::outbound::eager_outbound_paths_hold_for_test;
+    use crate::outbound_support::eager_outbound_paths_hold;
     use spin_sdk::wasip3;
     use spin_sdk::wasip3::exports::cli::run::Guest;
 
@@ -13,11 +17,9 @@ mod sdk {
             reason = "the executable SDK fixture reports its nonzero result to the local runner"
         )]
         async fn run() -> Result<(), ()> {
-            eager_outbound_paths_hold_for_test()
-                .await
-                .map_err(|error| {
-                    eprintln!("Spin eager SDK checks failed: {error}");
-                })?;
+            eager_outbound_paths_hold().await.map_err(|error| {
+                eprintln!("Spin eager SDK checks failed: {error}");
+            })?;
             println!(
                 "Spin eager SDK checks passed: callback cleanup, foreign scope, bodyless GET/HEAD resources, begin, batch, late collection, body handoff, cutoff"
             );

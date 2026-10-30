@@ -253,7 +253,7 @@ The matrix below shows observed runtime behavior, not `RequestIngress` guarantee
 The table records the historical observations imported from main
 `87456c70`, checked into
 `tests/fixtures/request-fidelity/observations.json`;
-`./scripts/test-request-fidelity.sh all` compares against those expectations
+`./scripts/smoke_test_reusable_app.sh --adapter all --suite ingress-fidelity` compares against those expectations
 exactly. The versions below identify that historical record, not a run of the
 merged candidate. Rerun the probes after integration and record the actual
 dependency sources and runtime identities before citing new evidence. Neither
@@ -269,7 +269,7 @@ behavior.
 | Repeated control fields             | Tested ordinary duplicates retained; identical Content-Length folded | Fetch combines fields; original counts cannot be recovered; common fidelity Unknown       | Tested ordinary duplicates retained; identical Content-Length folded | Tested ordinary duplicates retained; identical Content-Length folded |
 | Global wire order                   | Not established                                                      | Unavailable                                                                               | Unavailable                                                          | Unavailable                                                          |
 
-Run `./scripts/test-request-fidelity.sh all` for local transport probes. They
+Run `./scripts/smoke_test_reusable_app.sh --adapter all --suite ingress-fidelity` for local transport probes. They
 assert pinned observations, including unsupported outcomes; a green regression
 run does not turn an unsupported capability into a preservation guarantee.
 Fastly raw-target support requires a safe borrowed SDK accessor and new ingress

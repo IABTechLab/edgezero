@@ -1,3 +1,10 @@
+#[cfg(all(feature = "spin", feature = "test-utils", target_arch = "wasm32"))]
+#[path = "support/outbound/mod.rs"]
+mod outbound_support;
+#[cfg(all(feature = "spin", feature = "test-utils", target_arch = "wasm32"))]
+#[path = "support/request.rs"]
+mod request_support;
+
 // Compile-time check: SpinKvStore and SpinSecretStore implement their
 // respective core store traits.
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
@@ -34,10 +41,10 @@ mod store_trait_compile_checks {
     )
 )]
 mod tests {
+    #[cfg(feature = "test-utils")]
+    use crate::request_support::deadline_body_releases_source;
     use bytes::Bytes;
     use edgezero_adapter_spin::context::SpinRequestContext;
-    #[cfg(feature = "test-utils")]
-    use edgezero_adapter_spin::request::deadline_body_releases_source_for_test;
     use edgezero_core::app::App;
     #[cfg(feature = "test-utils")]
     use edgezero_core::app::Hooks;
@@ -346,7 +353,7 @@ mod tests {
     #[cfg(feature = "test-utils")]
     #[test]
     fn deadline_body_releases_source_when_timeout_is_emitted() {
-        assert!(deadline_body_releases_source_for_test());
+        assert!(deadline_body_releases_source());
     }
 
     #[test]
@@ -563,14 +570,14 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::task::Poll;
 
-        use edgezero_adapter_spin::outbound::{
-            SpinOutboundClient, converted_response_content_type_provenance_holds_for_test,
-            converted_response_retains_injected_clock_for_test, deferred_clock_paths_hold_for_test,
+        use crate::outbound_support::{
+            self, converted_response_content_type_provenance_holds, deferred_clock_paths_hold,
         };
-        use edgezero_adapter_spin::request::{
-            dispatch_ingress_source_error_for_test, dispatch_ingress_stream_for_test,
-            dispatch_ingress_stream_with_timer_for_test, dispatch_ingress_with_for_test,
-            dispatch_request_for_test,
+        use crate::request_support::dispatch_ingress_source_error;
+        use edgezero_adapter_spin::outbound::SpinOutboundClient;
+        use edgezero_adapter_spin::outbound::test_support::{
+            dispatch_ingress_stream, dispatch_ingress_stream_with_timer, dispatch_ingress_with,
+            dispatch_request,
         };
         use edgezero_core::http::{HeaderMap, HeaderValue, Method};
         use edgezero_core::ingress::{
@@ -603,7 +610,7 @@ mod tests {
             let mut app = App::new(RouterService::builder().build());
             app.set_ingress_admission_policy(|_| AdmissionDecision::Abort);
 
-            let error = block_on(dispatch_ingress_with_for_test(
+            let error = block_on(dispatch_ingress_with(
                 &app,
                 Method::POST,
                 "/missing".parse().expect("URI"),
@@ -816,21 +823,19 @@ mod tests {
 
         #[test]
         fn deferred_request_and_response_paths_retain_the_injected_clock() {
-            assert!(block_on(deferred_clock_paths_hold_for_test()));
+            assert!(block_on(deferred_clock_paths_hold()));
         }
 
         #[test]
         fn converted_response_retains_injected_clock() {
             assert!(block_on(
-                converted_response_retains_injected_clock_for_test()
+                outbound_support::converted_response_retains_injected_clock()
             ));
         }
 
         #[test]
         fn converted_response_preserves_original_content_type_provenance() {
-            assert!(block_on(
-                converted_response_content_type_provenance_holds_for_test()
-            ));
+            assert!(block_on(converted_response_content_type_provenance_holds()));
         }
 
         #[test]
@@ -866,7 +871,7 @@ mod tests {
             }));
             let source = empty::<Result<Bytes, io::Error>>();
 
-            let response = block_on(dispatch_ingress_stream_for_test(
+            let response = block_on(dispatch_ingress_stream(
                 &app,
                 Method::GET,
                 "/clock".parse().expect("URI"),
@@ -903,7 +908,7 @@ mod tests {
                 let incoming_request =
                     SpinRequest::from_request(wasi_request).expect("incoming Spin request");
 
-                let response = dispatch_request_for_test(&app, incoming_request)
+                let response = dispatch_request(&app, incoming_request)
                     .await
                     .expect("Spin response");
 
@@ -1177,7 +1182,7 @@ mod tests {
                 }
             });
 
-            let egress = block_on(dispatch_ingress_stream_for_test(
+            let egress = block_on(dispatch_ingress_stream(
                 &app,
                 Method::GET,
                 "/too-long".parse().expect("URI"),
@@ -1213,7 +1218,7 @@ mod tests {
             let delivery_calls = Arc::new(AtomicUsize::new(0));
             let observed_delivery_calls = Arc::clone(&delivery_calls);
 
-            let error = block_on(dispatch_ingress_with_for_test(
+            let error = block_on(dispatch_ingress_with(
                 &app,
                 Method::GET,
                 "/too-long".parse().expect("URI"),
@@ -1289,7 +1294,7 @@ mod tests {
             let source_calls = Arc::new(AtomicUsize::new(0));
             let observed_source_calls = Arc::clone(&source_calls);
 
-            let response = block_on(dispatch_ingress_with_for_test(
+            let response = block_on(dispatch_ingress_with(
                 &app,
                 Method::GET,
                 "/known".parse().expect("URI"),
@@ -1351,7 +1356,7 @@ mod tests {
             let delivery_calls = Arc::new(AtomicUsize::new(0));
             let observed_delivery_calls = Arc::clone(&delivery_calls);
 
-            let error = block_on(dispatch_ingress_with_for_test(
+            let error = block_on(dispatch_ingress_with(
                 &app,
                 Method::GET,
                 "/known".parse().expect("URI"),
@@ -1395,7 +1400,7 @@ mod tests {
             });
             app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
 
-            let egress = block_on(dispatch_ingress_source_error_for_test(
+            let egress = block_on(dispatch_ingress_source_error(
                 &app,
                 Method::GET,
                 "/owned".parse().expect("URI"),
@@ -1439,7 +1444,7 @@ mod tests {
                     None,
                 );
 
-                let envelope = block_on(dispatch_ingress_stream_for_test(
+                let envelope = block_on(dispatch_ingress_stream(
                     &app,
                     Method::POST,
                     path.parse().expect("URI"),
@@ -1478,7 +1483,7 @@ mod tests {
                     None,
                 );
 
-                let response = block_on(dispatch_ingress_stream_for_test(
+                let response = block_on(dispatch_ingress_stream(
                     &app,
                     Method::POST,
                     path.parse().expect("URI"),
@@ -1517,7 +1522,7 @@ mod tests {
                     None,
                 );
 
-                let response = block_on(dispatch_ingress_stream_for_test(
+                let response = block_on(dispatch_ingress_stream(
                     &app,
                     Method::POST,
                     path.parse().expect("URI"),
@@ -1561,7 +1566,7 @@ mod tests {
                     Some((now, deadline)),
                 );
 
-                let response = block_on(dispatch_ingress_stream_for_test(
+                let response = block_on(dispatch_ingress_stream(
                     &app,
                     Method::POST,
                     path.parse().expect("URI"),
@@ -1591,7 +1596,7 @@ mod tests {
                 matched_body_app(Duration::from_millis(100), &grant_drops);
             let source = pending_stream(&grant_drops, &source_drops, &body_polls);
 
-            let envelope = block_on(dispatch_ingress_stream_with_timer_for_test(
+            let envelope = block_on(dispatch_ingress_stream_with_timer(
                 &app,
                 Method::POST,
                 "/body".parse().expect("URI"),
@@ -1633,7 +1638,7 @@ mod tests {
                 None,
             );
 
-            let envelope = block_on(dispatch_ingress_stream_with_timer_for_test(
+            let envelope = block_on(dispatch_ingress_stream_with_timer(
                 &app,
                 Method::POST,
                 "/body".parse().expect("URI"),
@@ -1661,7 +1666,7 @@ mod tests {
                     fallback_app(4, Duration::from_millis(100), &grant_drops);
                 let source = pending_stream(&grant_drops, &source_drops, &body_polls);
 
-                let response = block_on(dispatch_ingress_stream_with_timer_for_test(
+                let response = block_on(dispatch_ingress_stream_with_timer(
                     &app,
                     Method::POST,
                     path.parse().expect("URI"),
@@ -1719,7 +1724,7 @@ mod tests {
                     None,
                 );
 
-                let envelope = block_on(dispatch_ingress_stream_for_test(
+                let envelope = block_on(dispatch_ingress_stream(
                     &app,
                     Method::POST,
                     path.parse().expect("URI"),
@@ -1751,7 +1756,7 @@ mod tests {
                 fallback_app(4, Duration::from_secs(30), &grant_drops);
             let source = error_stream(&grant_drops, &source_drops, &body_polls);
 
-            let response = block_on(dispatch_ingress_stream_for_test(
+            let response = block_on(dispatch_ingress_stream(
                 &app,
                 Method::POST,
                 "/missing".parse().expect("URI"),
@@ -1780,7 +1785,7 @@ mod tests {
                 fallback_app(4, Duration::from_secs(30), &grant_drops);
             let source = pending_stream(&grant_drops, &source_drops, &body_polls);
 
-            let outcome = dispatch_ingress_stream_for_test(
+            let outcome = dispatch_ingress_stream(
                 &app,
                 Method::POST,
                 "/missing".parse().expect("URI"),
@@ -1801,9 +1806,7 @@ mod tests {
 #[cfg(all(feature = "test-utils", not(target_arch = "wasm32")))]
 mod outbound_contract_tests {
     use bytes::Bytes;
-    use edgezero_adapter_spin::outbound::{
-        validate_batch_request_for_test, validate_request_for_test,
-    };
+    use edgezero_adapter_spin::outbound::test_support::{validate_batch_request, validate_request};
     use edgezero_core::body::Body;
     use edgezero_core::http::{Method, Uri};
     use edgezero_core::outbound::OutboundRequest;
@@ -1819,7 +1822,7 @@ mod outbound_contract_tests {
             .expect("authority")
             .body(Body::from_stream(stream::pending()))
             .timeout(Duration::ZERO);
-        for validate in [validate_request_for_test, validate_batch_request_for_test] {
+        for validate in [validate_request, validate_batch_request] {
             let error = validate(&request).expect_err("unsupported option");
             assert!(error.message().contains("image_optimizer"));
             assert!(error.message().contains("spin"));
@@ -1846,7 +1849,7 @@ mod outbound_contract_tests {
                 .body(Body::from_stream(source))
                 .max_brotli_window_bits(9)
                 .timeout(Duration::ZERO);
-            for validate in [validate_request_for_test, validate_batch_request_for_test] {
+            for validate in [validate_request, validate_batch_request] {
                 let error = validate(&request).expect_err("unsupported authority wins");
                 assert_eq!(
                     error.message(),
@@ -1872,7 +1875,7 @@ mod outbound_contract_tests {
                 .expect("request")
                 .body(vec![b'x'; len])
                 .max_request_body_bytes(8);
-            let result = validate_batch_request_for_test(&request);
+            let result = validate_batch_request(&request);
             if len > 8 {
                 let error = result.expect_err("overflow before dispatch");
                 assert_eq!(
@@ -1896,10 +1899,7 @@ mod outbound_contract_tests {
             request().body(Bytes::from_static(b"last")),
         ];
 
-        let outcomes: Vec<_> = requests
-            .iter()
-            .map(validate_batch_request_for_test)
-            .collect();
+        let outcomes: Vec<_> = requests.iter().map(validate_batch_request).collect();
 
         outcomes[0].as_ref().expect("buffered slot 0");
         assert!(outcomes[1].is_err(), "streamed upload keeps slot index 1");
@@ -1913,7 +1913,7 @@ mod outbound_contract_tests {
             .host_authority_override("virtual.example")
             .expect("valid portable authority");
 
-        let error = validate_request_for_test(&request).expect_err("unsupported on Spin");
+        let error = validate_request(&request).expect_err("unsupported on Spin");
         assert!(matches!(error, edgezero_core::EdgeError::BadRequest { .. }));
     }
 }

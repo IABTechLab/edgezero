@@ -1,212 +1,40 @@
 //! Fixed, loopback-only HTTP ingress probes for the three WASM adapters.
 
+use crate::{Args, Process};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::env;
-use std::fs::{self, File};
-use std::io::Seek as _;
+use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
-use std::sync::Arc;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-use tokio::signal::unix::{SignalKind, signal};
 
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 const HEADER_LIMIT: usize = 64 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-type Cancelled = Arc<AtomicBool>;
+type Cancelled = AtomicBool;
 
-struct Options {
-    platforms: Vec<&'static str>,
-    skip_build: bool,
-    readiness_timeout: Duration,
-    record_observations: bool,
-    root: PathBuf,
-}
-
-impl Options {
-    fn parse() -> io::Result<Self> {
-        let mut args = env::args().skip(1);
-        let first = args.next();
-        let (root, platform) = if first.as_deref() == Some("--repo-root") {
-            let root = PathBuf::from(
-                args.next()
-                    .ok_or_else(|| io::Error::other("missing repository root"))?,
-            )
-            .canonicalize()?;
-            (root, args.next())
-        } else {
-            (
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../..")
-                    .canonicalize()?,
-                first,
-            )
-        };
-        let platforms = match platform.as_deref() {
-            Some("all") => vec!["fastly", "cloudflare", "spin"],
-            Some("fastly") => vec!["fastly"],
-            Some("cloudflare") => vec!["cloudflare"],
-            Some("spin") => vec!["spin"],
-            _ => {
-                return Err(io::Error::other(
-                    "usage: request-fidelity-runner <all|fastly|cloudflare|spin> [--skip-build] [--readiness-timeout SECONDS] [--record-observations]",
-                ));
-            }
-        };
-        let mut options = Self {
-            platforms,
-            skip_build: false,
-            readiness_timeout: Duration::from_secs(40),
-            record_observations: false,
-            root,
-        };
-        while let Some(argument) = args.next() {
-            match argument.as_str() {
-                "--repo-root" => {
-                    options.root = PathBuf::from(
-                        args.next()
-                            .ok_or_else(|| io::Error::other("missing repository root"))?,
-                    )
-                    .canonicalize()?;
-                }
-                "--skip-build" => options.skip_build = true,
-                "--record-observations" => options.record_observations = true,
-                "--readiness-timeout" => {
-                    let seconds = args
-                        .next()
-                        .ok_or_else(|| io::Error::other("missing readiness timeout"))?
-                        .parse::<f64>()
-                        .map_err(io::Error::other)?;
-                    options.readiness_timeout =
-                        Duration::try_from_secs_f64(seconds).map_err(io::Error::other)?;
-                    if options.readiness_timeout.is_zero() {
-                        return Err(io::Error::other("readiness timeout must be positive"));
-                    }
-                }
-                _ => return Err(io::Error::other(format!("unknown argument: {argument}"))),
-            }
-        }
-        Ok(options)
-    }
-}
-
-#[tokio::main]
-async fn main() -> ExitCode {
-    match execute().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            let _result = writeln!(io::stderr(), "request fidelity: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-async fn execute() -> io::Result<()> {
-    let options = Options::parse()?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let worker_cancelled = Arc::clone(&cancelled);
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut hangup = signal(SignalKind::hangup())?;
-    let mut worker = tokio::task::spawn_blocking(move || run(options, &worker_cancelled));
-    tokio::select! {
-        result = &mut worker => result.map_err(io::Error::other)?,
-        _ = interrupt.recv() => {
-            cancelled.store(true, Ordering::SeqCst);
-            let _result = worker.await;
-            Err(io::Error::new(io::ErrorKind::Interrupted, "SIGINT: owned children stopped"))
-        }
-        _ = terminate.recv() => {
-            cancelled.store(true, Ordering::SeqCst);
-            let _result = worker.await;
-            Err(io::Error::new(io::ErrorKind::Interrupted, "SIGTERM: owned children stopped"))
-        }
-        _ = hangup.recv() => {
-            cancelled.store(true, Ordering::SeqCst);
-            let _result = worker.await;
-            Err(io::Error::new(io::ErrorKind::Interrupted, "SIGHUP: owned children stopped"))
-        }
+fn io_error(error: Box<dyn std::error::Error + Send + Sync>) -> io::Error {
+    match error.downcast::<io::Error>() {
+        Ok(error) => *error,
+        Err(error) => io::Error::other(error),
     }
 }
 
 fn check_cancelled(cancelled: &Cancelled) -> io::Result<()> {
-    if cancelled.load(Ordering::SeqCst) {
-        Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"))
-    } else {
-        Ok(())
-    }
-}
-
-struct OwnedProcess {
-    child: Child,
-    group: u32,
-}
-
-impl OwnedProcess {
-    fn spawn(command: &mut Command) -> io::Result<Self> {
-        command.process_group(0).stdin(Stdio::null());
-        let child = command.spawn().map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("{}: {error}", command.get_program().to_string_lossy()),
-            )
-        })?;
-        let group = child.id();
-        Ok(Self { child, group })
-    }
-
-    fn wait(&mut self, cancelled: &Cancelled) -> io::Result<()> {
-        loop {
-            check_cancelled(cancelled)?;
-            if let Some(status) = self.child.try_wait()? {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(io::Error::other(format!(
-                        "fixture command exits with {status}"
-                    )))
-                };
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-    }
-}
-
-fn signal_group(group: u32, name: &str) {
-    let _result = Command::new("/bin/kill")
-        .args([name, "--", &format!("-{group}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-impl Drop for OwnedProcess {
-    fn drop(&mut self) {
-        // Signal the owned group even if its direct wrapper already exited.
-        signal_group(self.group, "-TERM");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if self.child.try_wait().is_ok_and(|status| status.is_some())
-                || Instant::now() >= deadline
-            {
-                break;
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-        signal_group(self.group, "-KILL");
-        // Also stop the direct child if the external group signal failed.
-        let _result = self.child.kill();
-        let _result = self.child.wait();
-    }
+    crate::check_cancelled(cancelled)
 }
 
 fn command(fixture: &Path, program: &str, arguments: &[&str]) -> Command {
+    let program = match program {
+        "spin" => env::var_os("SPIN_BIN").unwrap_or_else(|| program.into()),
+        "viceroy" => env::var_os("VICEROY_BIN").unwrap_or_else(|| program.into()),
+        _ => program.into(),
+    };
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -306,58 +134,58 @@ fn run_prepared_command(
         io::Error::new(error.kind(), format!("{description}: {message}"))
     };
     check_cancelled(cancelled).map_err(describe)?;
-    if !capture {
-        use std::os::fd::AsFd as _;
-        command.stdout(Stdio::from(
-            io::stderr()
-                .as_fd()
-                .try_clone_to_owned()
-                .map_err(describe)?,
-        ));
-        command.stderr(Stdio::inherit());
-        return OwnedProcess::spawn(command)
-            .map_err(describe)?
-            .wait(cancelled)
-            .map(|()| String::new())
-            .map_err(describe);
+    let scratch = tempfile::tempdir().map_err(describe)?;
+    let log_path = scratch.path().join("command.log");
+    let stdout_path = scratch.path().join("stdout.log");
+    let mut process = if capture {
+        Process::spawn_with_stdout(command, &log_path, &stdout_path)
+    } else {
+        Process::spawn(command, &log_path)
     }
-    // Capture --version output in files to keep waits interruptible without pipe backpressure.
-    let mut output = tempfile::tempfile().map_err(describe)?;
-    let mut stderr = tempfile::tempfile().map_err(describe)?;
-    command.stdout(output.try_clone().map_err(describe)?);
-    command.stderr(Stdio::from(stderr.try_clone().map_err(describe)?));
-    let result = OwnedProcess::spawn(command)
-        .map_err(describe)?
-        .wait(cancelled);
-    output.rewind().map_err(describe)?;
-    let mut bytes = Vec::new();
-    output.read_to_end(&mut bytes).map_err(describe)?;
-    stderr.rewind().map_err(describe)?;
-    let mut diagnostics = Vec::new();
-    stderr.read_to_end(&mut diagnostics).map_err(describe)?;
-    result.map_err(|error| {
+    .map_err(io_error)
+    .map_err(describe)?;
+    let result = process.wait_success_cancelled(cancelled).map_err(io_error);
+    // Never write to a potentially blocked terminal while command work is owned.
+    let diagnostics = fs::read(&log_path).unwrap_or_default();
+    let output = if capture {
+        fs::read(&stdout_path).and_then(|bytes| {
+            String::from_utf8(bytes).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{error}; output: {}",
+                        String::from_utf8_lossy(error.as_bytes())
+                    ),
+                )
+            })
+        })
+    } else {
+        Ok(String::new())
+    };
+    if result
+        .as_ref()
+        .err()
+        .is_none_or(|error| error.kind() != io::ErrorKind::Interrupted)
+    {
+        let _ = io::stderr().write_all(&diagnostics);
+    }
+    let failure = |error: io::Error, stdout: &str| {
+        let log = scratch.keep().join("command.log");
         describe(io::Error::new(
             error.kind(),
             format!(
-                "{error}; stdout: {}; stderr: {}",
-                String::from_utf8_lossy(&bytes),
-                String::from_utf8_lossy(&diagnostics)
+                "{error}; stdout: {}; stderr: {}; log: {}",
+                stdout,
+                String::from_utf8_lossy(&diagnostics),
+                log.display()
             ),
         ))
-    })?;
-    // eprint! honors libtest capture, unlike stderr().write_all(), but panics on write failure.
-    eprint!("{}", String::from_utf8_lossy(&diagnostics));
-    String::from_utf8(bytes).map_err(|error| {
-        describe(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{error}; output: {}",
-                String::from_utf8_lossy(error.as_bytes())
-            ),
-        ))
-    })
+    };
+    if let Err(error) = result {
+        return Err(failure(error, output.as_deref().unwrap_or_default()));
+    }
+    output.map_err(|error| failure(error, ""))
 }
-
 fn verify_version(
     fixture: &Path,
     program: &str,
@@ -444,6 +272,7 @@ fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()
                 "--features",
                 "cloudflare",
                 "--locked",
+                "--offline",
                 "--target-dir",
                 "target/cloudflare",
             ],
@@ -463,6 +292,7 @@ fn build(platform: &str, fixture: &Path, cancelled: &Cancelled) -> io::Result<()
         let mut arguments = vec![
             "build",
             "--locked",
+            "--offline",
             "--release",
             "--features",
             platform,
@@ -529,25 +359,30 @@ fn report_observation_diff(
     Ok(())
 }
 
-fn run(options: Options, cancelled: &Cancelled) -> io::Result<()> {
-    let fixture = options.root.join("tests/fixtures/request-fidelity");
+pub fn run(args: &Args, output: &Path) -> crate::Result<()> {
+    let repository = crate::root().join("../../..").canonicalize()?;
+    let fixture = repository.join("tests/fixtures/request-fidelity");
+    let cancelled = &crate::CANCELLED;
+    let platforms = if args.adapter == "all" {
+        vec!["fastly", "cloudflare", "spin"]
+    } else {
+        vec![args.adapter.as_str()]
+    };
     let mut observations = json!({});
-    for platform in &options.platforms {
+    for platform in &platforms {
         check_cancelled(cancelled)?;
         if *platform == "spin" {
             let pin = fixture_tool_pin(&fixture, "spin-cli")?;
             verify_version(&fixture, "spin", &pin, cancelled)?;
         } else if *platform == "fastly" {
-            let versions = fs::read_to_string(options.root.join(".tool-versions"))?;
+            let versions = fs::read_to_string(repository.join(".tool-versions"))?;
             let pin = versions
                 .lines()
                 .find_map(|line| line.strip_prefix("viceroy "))
                 .ok_or_else(|| io::Error::other("missing Viceroy pin"))?;
             verify_version(&fixture, "viceroy", pin.trim(), cancelled)?;
         }
-        if !options.skip_build {
-            build(platform, &fixture, cancelled)?;
-        }
+        build(platform, &fixture, cancelled)?;
         let scratch = tempfile::tempdir()?;
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
@@ -599,17 +434,13 @@ fn run(options: Options, cancelled: &Cancelled) -> io::Result<()> {
                 ],
             ),
         };
-        let log_path = scratch.path().join("runtime.log");
-        let log = File::create(&log_path)?;
-        runtime.stdout(log.try_clone()?).stderr(log);
-        let mut process = OwnedProcess::spawn(&mut runtime)?;
+        let log_path = output.join(format!("{platform}-runtime.log"));
+        let mut process = Process::spawn(&mut runtime, &log_path).map_err(io_error)?;
         let result = (|| {
-            let deadline = Instant::now() + options.readiness_timeout;
+            let deadline = Instant::now() + args.readiness_timeout;
             loop {
                 check_cancelled(cancelled)?;
-                if process.child.try_wait()?.is_some() {
-                    return Err(io::Error::other("runtime exits before readiness"));
-                }
+                process.check_running().map_err(io_error)?;
                 if Instant::now() >= deadline {
                     return Err(io::Error::other("runtime readiness deadline exceeded"));
                 }
@@ -620,16 +451,18 @@ fn run(options: Options, cancelled: &Cancelled) -> io::Result<()> {
                 }
                 thread::sleep(POLL_INTERVAL);
             }
+            process.check_running().map_err(io_error)?;
             let mut observed = probes(platform, port, cancelled)?;
             if *platform == "cloudflare" {
                 let routing =
-                    cloudflare_routing_probes(&fixture, cancelled, options.readiness_timeout)?;
+                    cloudflare_routing_probes(&fixture, cancelled, args.readiness_timeout)?;
                 observed
                     .as_object_mut()
                     .expect("probe results are objects")
                     .extend(routing);
             }
-            if !options.record_observations {
+            process.check_running().map_err(io_error)?;
+            if !args.record_observations {
                 let expected: Value =
                     serde_json::from_slice(&fs::read(fixture.join("observations.json"))?)
                         .map_err(io::Error::other)?;
@@ -647,11 +480,16 @@ fn run(options: Options, cancelled: &Cancelled) -> io::Result<()> {
             }
             Ok(observed)
         })();
-        drop(process);
+        let result = complete_runtime(&mut process, result);
         observations[*platform] = with_runtime_log(result, &log_path, &mut io::stderr())?;
     }
-    serde_json::to_writer_pretty(io::stdout(), &observations).map_err(io::Error::other)?;
-    writeln!(io::stdout())
+    fs::write(
+        output.join("observations.json"),
+        serde_json::to_vec_pretty(&observations)?,
+    )?;
+    serde_json::to_writer_pretty(io::stdout(), &observations)?;
+    writeln!(io::stdout())?;
+    Ok(())
 }
 
 fn request_packet(case: &Case) -> Vec<u8> {
@@ -1113,6 +951,17 @@ fn verify_observation(platform: &str, case: &str, status: u16, verdict: &Value) 
     )
 }
 
+fn complete_runtime<T>(process: &mut Process, result: io::Result<T>) -> io::Result<T> {
+    match (result, process.finish().map_err(io_error)) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => Err(io::Error::new(
+            error.kind(),
+            format!("{error}; cleanup: {cleanup}"),
+        )),
+    }
+}
+
 fn cloudflare_routing_probes(
     fixture: &Path,
     cancelled: &Cancelled,
@@ -1129,14 +978,13 @@ fn cloudflare_routing_probes(
         &["serve", "workerd.capnp", "--socket-addr", &address],
     );
     let log_path = scratch.path().join("workerd.log");
-    let log = File::create(&log_path)?;
-    runtime.stdout(log.try_clone()?).stderr(log);
-    let mut process = OwnedProcess::spawn(&mut runtime)?;
+    let mut process = Process::spawn(&mut runtime, &log_path).map_err(io_error)?;
     let result = (|| {
         let deadline = Instant::now() + readiness_timeout;
         loop {
             check_cancelled(cancelled)?;
-            if process.child.try_wait()?.is_some() || Instant::now() >= deadline {
+            process.check_running().map_err(io_error)?;
+            if Instant::now() >= deadline {
                 return Err(io::Error::other("direct workerd readiness failed"));
             }
             if exchange(port, &ready_case(), cancelled, deadline)
@@ -1184,9 +1032,10 @@ fn cloudflare_routing_probes(
             "no-hook routing",
             &failures.join("; "),
         )?;
+        process.check_running().map_err(io_error)?;
         Ok(observed)
     })();
-    drop(process);
+    let result = complete_runtime(&mut process, result);
     with_runtime_log(result, &log_path, &mut io::stderr())
 }
 
@@ -1262,517 +1111,4 @@ struct Case {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        Case, HEADER_LIMIT, OwnedProcess, TimedSocket, cases, cloudflare_routing_probes,
-        read_response, request_packet, verify_observation,
-    };
-    use serde_json::json;
-    use std::io::{self, BufRead as _, BufReader, Cursor, Write as _};
-    use std::net::{TcpListener, TcpStream};
-    use std::path::Path;
-    use std::process::{Command, Stdio};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn missing_program_diagnostic_names_the_executable() {
-        let program = "/missing-edgezero-runtime";
-        let error = OwnedProcess::spawn(&mut Command::new(program))
-            .err()
-            .expect("missing program must fail");
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains(program));
-        let error = super::run_command(
-            Path::new("/tmp"),
-            program,
-            &["--version"],
-            &Arc::new(AtomicBool::new(false)),
-            true,
-        )
-        .expect_err("missing command must fail");
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert_eq!(error.to_string().matches(program).count(), 1);
-        assert!(error.to_string().contains("--version"));
-    }
-
-    #[test]
-    fn command_failures_include_arguments_and_captured_diagnostics() {
-        let directory = tempfile::tempdir().expect("command directory");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        for (script, kind, diagnostics) in [
-            (
-                "printf '%s %s' probe out; printf '%s %s' probe err >&2; exit 3",
-                io::ErrorKind::Other,
-                "stdout: probe out",
-            ),
-            ("printf '\\377'", io::ErrorKind::InvalidData, "�"),
-        ] {
-            let error = super::run_command(
-                directory.path(),
-                "/bin/sh",
-                &["-c", script],
-                &cancelled,
-                true,
-            )
-            .expect_err("command must fail");
-            assert_eq!(error.kind(), kind);
-            let message = error.to_string();
-            assert!(message.contains("/bin/sh -c"), "{message}");
-            assert!(message.contains(diagnostics), "{message}");
-            if kind == io::ErrorKind::Other {
-                assert!(message.contains("stderr: probe err"), "{message}");
-                assert!(message.contains("exit status: 3"), "{message}");
-            }
-        }
-    }
-
-    #[test]
-    fn noncaptured_command_streams_in_order_and_preserves_failure() {
-        const CHILD: &str = "EDGEZERO_TEST_NONCAPTURE_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            let error = super::run_command(
-                Path::new("/tmp"),
-                "/bin/sh",
-                &["-c", "printf 'out-first\\n'; printf 'err-middle\\n' >&2; printf 'out-last\\n'; exit 7"],
-                &Arc::new(AtomicBool::new(false)),
-                false,
-            ).expect_err("noncapture must preserve command failure");
-            assert!(error.to_string().contains("exit status: 7"), "{error}");
-            return;
-        }
-        let output = Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "tests::noncaptured_command_streams_in_order_and_preserves_failure",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .expect("child test");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            "out-first\nerr-middle\nout-last\n"
-        );
-    }
-
-    #[test]
-    fn captured_success_keeps_stdout_separate_from_stderr() {
-        let directory = tempfile::tempdir().expect("command directory");
-        let output = super::run_command(
-            directory.path(),
-            "/bin/sh",
-            &["-c", "printf 'tool 1.2.3'; printf 'tool warning' >&2"],
-            &Arc::new(AtomicBool::new(false)),
-            true,
-        )
-        .expect("successful command");
-        assert_eq!(output, "tool 1.2.3");
-    }
-
-    #[test]
-    fn bindgen_resolution_skips_nonexecutables_and_honors_overrides() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let directory = tempfile::tempdir().expect("tool directories");
-        let first = directory.path().join("first");
-        let second = directory.path().join("second");
-        std::fs::create_dir_all(&first).expect("first directory");
-        std::fs::create_dir_all(&second).expect("second directory");
-        let shadow = first.join("wasm-bindgen");
-        let executable = second.join("wasm-bindgen");
-        for (file, mode) in [(&shadow, 0o644), (&executable, 0o755)] {
-            std::fs::write(file, "#!/bin/sh\nexit 0\n").expect("tool");
-            std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode))
-                .expect("permissions");
-        }
-        let path = std::env::join_paths([&first, &second]).expect("PATH");
-        assert_eq!(
-            super::resolve_wasm_bindgen(None, &path).expect("executable lookup"),
-            executable
-        );
-        let override_tool = directory.path().join("override-wasm-bindgen");
-        std::fs::copy(&executable, &override_tool).expect("distinct override outside PATH");
-        assert_eq!(
-            super::resolve_wasm_bindgen(Some(override_tool.clone().into_os_string()), &path)
-                .expect("override"),
-            override_tool
-        );
-        for invalid in [shadow, directory.path().join("missing"), first] {
-            let error = super::resolve_wasm_bindgen(Some(invalid.into_os_string()), &path)
-                .expect_err("invalid override must not fall back to PATH");
-            assert!(error.to_string().contains("WASM_BINDGEN_BIN"), "{error}");
-        }
-        std::fs::remove_file(&executable).expect("remove executable");
-        let error = super::resolve_wasm_bindgen(None, &path).expect_err("no executable");
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn version_diagnostic_includes_expected_and_actual() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let directory = tempfile::tempdir().expect("tool directory");
-        let tool = directory.path().join("fixture-tool");
-        std::fs::write(&tool, "#!/bin/sh\necho 'fixture-tool 9.9.9'\n").expect("binary");
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
-            .expect("executable");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let error = super::verify_version(
-            directory.path(),
-            &tool.to_string_lossy(),
-            "expected-pin",
-            &cancelled,
-        )
-        .expect_err("wrong tool version");
-        assert!(error.to_string().contains("expected-pin"), "{error:?}");
-        assert!(error.to_string().contains("9.9.9"), "{error:?}");
-    }
-
-    #[test]
-    fn missing_tool_pin_names_the_tool() {
-        let directory = tempfile::tempdir().expect("temporary fixture");
-        std::fs::write(
-            directory.path().join("Cargo.toml"),
-            "[package]\nname = 'fixture'\n",
-        )
-        .expect("manifest");
-        let error =
-            super::fixture_tool_pin(directory.path(), "worker-build").expect_err("missing pin");
-        assert!(error.to_string().contains("worker-build"));
-    }
-
-    #[test]
-    fn non_utf8_runtime_logs_are_printed_lossily() {
-        let directory = tempfile::tempdir().expect("temporary log");
-        let path = directory.path().join("runtime.log");
-        std::fs::write(&path, b"before\xffafter").expect("log bytes");
-        let mut output = Vec::new();
-        let error = super::with_runtime_log(
-            Err::<(), _>(io::Error::other("original failure")),
-            &path,
-            &mut output,
-        )
-        .expect_err("original error");
-        assert_eq!(error.to_string(), "original failure");
-        assert_eq!(
-            String::from_utf8(output).expect("lossy log"),
-            "before\u{fffd}after\n"
-        );
-    }
-
-    #[test]
-    fn worker_build_requires_locked_local_tools() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let directory = tempfile::tempdir().expect("fixture directory");
-        let fixture = directory.path();
-        std::fs::write(
-            fixture.join("Cargo.lock"),
-            "[[package]]\nname = 'wasm-bindgen'\nversion = '0.2.128'\n",
-        )
-        .expect("lock");
-        std::fs::write(
-            fixture.join("package-lock.json"),
-            r#"{"packages":{"node_modules/esbuild":{"version":"0.27.3"}}}"#,
-        )
-        .expect("npm lock");
-        let bindgen = fixture.join("wasm-bindgen");
-        std::fs::write(&bindgen, "#!/bin/sh\necho 'wasm-bindgen 0.2.128'\n").expect("binary");
-        std::fs::set_permissions(&bindgen, std::fs::Permissions::from_mode(0o755))
-            .expect("executable");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let mut command = Command::new("worker-build");
-        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
-            .expect_err("missing npm-locked esbuild must not trigger a download");
-        assert!(error.to_string().contains("esbuild"));
-        let esbuild = fixture.join("node_modules/.bin/esbuild");
-        std::fs::create_dir_all(esbuild.parent().expect("parent")).expect("bin directory");
-        std::fs::write(&esbuild, "#!/bin/sh\necho '0.27.3'\n").expect("binary");
-        std::fs::set_permissions(&esbuild, std::fs::Permissions::from_mode(0o755))
-            .expect("executable");
-        super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
-            .expect("pinned tools");
-        let envs: std::collections::BTreeMap<_, _> = command.get_envs().collect();
-        assert_eq!(
-            envs[std::ffi::OsStr::new("WASM_BINDGEN_BIN")],
-            Some(
-                bindgen
-                    .canonicalize()
-                    .expect("canonical binary")
-                    .as_os_str()
-            )
-        );
-        assert_eq!(
-            envs[std::ffi::OsStr::new("ESBUILD_BIN")],
-            Some(
-                esbuild
-                    .canonicalize()
-                    .expect("canonical binary")
-                    .as_os_str()
-            )
-        );
-        std::fs::write(&esbuild, "#!/bin/sh\necho '0.28.1'\n").expect("wrong esbuild");
-        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
-            .expect_err("reject unlocked esbuild");
-        assert!(error.to_string().contains("0.28.1"));
-        std::fs::write(&esbuild, "#!/bin/sh\necho '0.27.3'\n").expect("restore esbuild");
-        std::fs::write(&bindgen, "#!/bin/sh\necho 'wasm-bindgen 0.2.127'\n").expect("wrong tool");
-        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
-            .expect_err("reject wrong bindgen");
-        assert!(error.to_string().contains("0.2.127"));
-        std::fs::remove_file(&bindgen).expect("remove tool");
-        let error = super::configure_worker_build(&mut command, fixture, &bindgen, &cancelled)
-            .expect_err("missing configured tool must fail instead of downloading");
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("wasm-bindgen"));
-    }
-
-    #[test]
-    fn diagnostic_failures_preserve_the_original_runtime_error() {
-        let directory = tempfile::tempdir().expect("should create log directory");
-        for (name, contents) in [
-            ("missing", None),
-            ("invalid-utf8", Some(b"\xff".as_slice())),
-            ("failed-output", Some(b"runtime diagnostics".as_slice())),
-        ] {
-            let path = directory.path().join(name);
-            if let Some(contents) = contents {
-                std::fs::write(&path, contents).expect("should create diagnostic log");
-            }
-            let mut output = Cursor::new([].as_mut_slice());
-            let result = Err::<(), _>(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "original readiness failure",
-            ));
-            let error = super::with_runtime_log(result, &path, &mut output)
-                .expect_err("should preserve runtime failure");
-            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{name}");
-            assert_eq!(error.to_string(), "original readiness failure", "{name}");
-        }
-    }
-
-    #[test]
-    #[ignore = "requires a freshly built Cloudflare fixture and pinned workerd"]
-    fn cloudflare_primary_uri_preserves_no_hook_routing() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("runner has a fixture parent")
-            .join("request-fidelity");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        cloudflare_routing_probes(&fixture, &cancelled, Duration::from_secs(60))
-            .expect("primary URI normalization and raw ingress capture must remain independent");
-    }
-
-    #[test]
-    fn cancelled_response_reads_do_not_retry_until_deadline() {
-        for prefix in [
-            b"".as_slice(),
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n".as_slice(),
-        ] {
-            let listener =
-                TcpListener::bind("127.0.0.1:0").expect("should bind a silent loopback server");
-            let socket = TcpStream::connect(listener.local_addr().expect("should get port"))
-                .expect("should connect to silent server");
-            let (mut server, _) = listener.accept().expect("should accept test client");
-            server
-                .write_all(prefix)
-                .expect("should write partial response");
-            socket
-                .set_read_timeout(Some(Duration::from_millis(10)))
-                .expect("should bound individual reads");
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let mut reader = BufReader::new(TimedSocket {
-                socket,
-                cancelled: &cancelled,
-                deadline: Instant::now() + Duration::from_millis(150),
-            });
-            if !prefix.is_empty() {
-                let _buffer = reader.fill_buf().expect("should buffer response headers");
-            }
-            cancelled.store(true, Ordering::SeqCst);
-            // Bound the old retry loop as well, so a regression fails rather than hangs.
-            let fallback_cancelled = Arc::clone(&cancelled);
-            let fallback = thread::spawn(move || {
-                thread::sleep(Duration::from_millis(200));
-                fallback_cancelled.store(false, Ordering::SeqCst);
-            });
-            let error = read_response(&mut reader)
-                .expect_err("should cancel both header and exact-body reads");
-            fallback.join().expect("should join retry-loop fallback");
-            assert_eq!(
-                error.kind(),
-                io::ErrorKind::Other,
-                "should return a terminal cancellation error instead of a retryable interrupt"
-            );
-            assert_eq!(
-                error.to_string(),
-                "cancelled",
-                "should preserve cancellation reason"
-            );
-        }
-    }
-
-    #[test]
-    fn baseline_diff_reports_changed_added_and_removed_cases_once() {
-        let expected = json!({"same": {"hook": true}, "changed": {"count": 2}, "removed": true});
-        let observed = json!({"same": {"hook": true}, "changed": {"count": 1}, "added": false});
-        let mut output = Vec::new();
-        super::report_observation_diff(&mut output, "spin", &expected, &observed)
-            .expect("should report changes");
-        let output = String::from_utf8(output).expect("should write UTF-8");
-        assert_eq!(output.lines().count(), 3);
-        assert!(output.contains("spin/changed: expected={\"count\":2} observed={\"count\":1}"));
-        assert!(output.contains("spin/added: expected=null observed=false"));
-        assert!(output.contains("spin/removed: expected=true observed=null"));
-        assert!(!output.contains("spin/same"));
-    }
-
-    #[test]
-    fn fixed_registry_contains_unicode_and_standalone_chunked_probes() {
-        let cases = cases();
-        assert_eq!(cases.len(), 17, "should include every fixed ingress case");
-        let unicode = cases
-            .iter()
-            .find(|case| case.name == "unicode")
-            .expect("should include unicode case");
-        assert_eq!(
-            unicode.headers,
-            [(b"Cookie".as_slice(), b"a=\xc4\x80".as_slice())],
-            "should send exact UTF-8 C4 80"
-        );
-        let chunked = cases
-            .iter()
-            .find(|case| case.name == "chunked")
-            .expect("should include chunked case");
-        assert_eq!(
-            chunked.headers,
-            [(b"Transfer-Encoding".as_slice(), b"chunked".as_slice())],
-            "should probe Transfer-Encoding without Content-Length"
-        );
-        assert_eq!(
-            chunked.body, b"0\r\n\r\n",
-            "should terminate the empty chunked body"
-        );
-    }
-
-    #[test]
-    fn observation_verification_rejects_utf8_corruption_even_during_collection() {
-        let mut verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "origin_available": true, "origin_matches_expected": true, "target_available": true, "target_matches_runtime": true, "cookie_utf8": false, "cookie_latin1": true});
-        let error = verify_observation("cloudflare", "utf8", 200, &verdict)
-            .expect_err("should reject the former C3 A9 to E9 defect");
-        assert!(
-            error.to_string().contains("C3 A9"),
-            "should reach the UTF-8 check: {error}"
-        );
-        verdict["cookie_utf8"] = json!(true);
-        verdict["cookie_latin1"] = json!(false);
-        verify_observation("cloudflare", "utf8", 200, &verdict).expect("should accept exact UTF-8");
-        let _error = verify_observation("cloudflare", "unicode", 500, &serde_json::Value::Null)
-            .expect_err("should reject the former C4 80 conversion error");
-    }
-
-    #[test]
-    fn cancellation_stops_and_reaps_the_owned_process_group() {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let mut command = Command::new("/bin/sleep");
-        command
-            .arg("30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut process = OwnedProcess::spawn(&mut command).expect("should spawn owned group");
-        let group = process.group;
-        let worker_cancelled = Arc::clone(&cancelled);
-        let stopper = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
-            worker_cancelled.store(true, Ordering::SeqCst);
-        });
-        let start = Instant::now();
-        let error = process
-            .wait(&cancelled)
-            .expect_err("should stop waiting on interruption");
-        assert_eq!(
-            error.kind(),
-            io::ErrorKind::Interrupted,
-            "should preserve interruption reason"
-        );
-        drop(process);
-        stopper.join().expect("should join cancellation trigger");
-        assert!(
-            start.elapsed() < Duration::from_secs(6),
-            "should bound cleanup even when interrupted"
-        );
-        let status = Command::new("/bin/kill")
-            .args(["-0", "--", &format!("-{group}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("should inspect owned group");
-        assert!(
-            !status.success(),
-            "should leave no live owned process group"
-        );
-    }
-
-    #[test]
-    fn packet_preserves_case_order_high_bytes_and_chunk_body() {
-        let case = Case {
-            name: "fixed",
-            method: b"EXAMPLE-METHOD",
-            target: b"/reserved//%2F?q=a%2Fb",
-            headers: vec![(b"Cookie", b"a=\xff"), (b"COOKIE", b"b=2")],
-            body: b"0\r\n\r\n",
-        };
-        assert_eq!(
-            request_packet(&case),
-            b"EXAMPLE-METHOD /reserved//%2F?q=a%2Fb HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nX-Fixture: fixed\r\nCookie: a=\xff\r\nCOOKIE: b=2\r\n\r\n0\r\n\r\n",
-            "should preserve the exact raw request bytes"
-        );
-    }
-
-    #[test]
-    fn response_decodes_chunks_extensions_and_trailers() {
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;fixed=yes\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\nX-Fixture: fixed\r\n\r\n";
-        let (status, body) = read_response(&mut Cursor::new(raw)).expect("should parse chunks");
-        assert_eq!(status, 200, "should preserve status");
-        assert_eq!(body, b"{\"a\":1}", "should decode the chunk framing");
-    }
-
-    #[test]
-    fn response_handles_interim_status_and_content_length() {
-        let raw =
-            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 418 Fixed\r\nContent-Length: 2\r\n\r\n{}extra";
-        let (status, body) = read_response(&mut Cursor::new(raw)).expect("should parse response");
-        assert_eq!(status, 418, "should use final response status");
-        assert_eq!(body, b"{}", "should read exactly Content-Length");
-    }
-
-    #[test]
-    fn response_rejects_truncation_and_oversized_body() {
-        for raw in [
-            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}".as_slice(),
-            b"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n".as_slice(),
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}XX".as_slice(),
-        ] {
-            let _error = read_response(&mut Cursor::new(raw))
-                .expect_err("should reject incomplete or oversized responses");
-        }
-    }
-
-    #[test]
-    fn response_reads_eof_framing_and_rejects_excessive_headers() {
-        let (status, body) = read_response(&mut Cursor::new(b"HTTP/1.0 200 OK\r\n\r\n{}"))
-            .expect("should parse EOF-framed response");
-        assert_eq!(status, 200, "should retain status");
-        assert_eq!(body, b"{}", "should read the EOF-framed body");
-        let oversized = format!(
-            "HTTP/1.1 200 OK\r\nX-Fixture: {}\r\n\r\n",
-            "a".repeat(HEADER_LIMIT)
-        );
-        let _error = read_response(&mut Cursor::new(oversized))
-            .expect_err("should enforce a total header budget");
-    }
-}
+mod tests;

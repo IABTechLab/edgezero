@@ -62,7 +62,6 @@ done
 section "Adapter Wasm Feature Matrices"
 run bash scripts/check_adapter_feature_matrix.sh cloudflare wasm32-unknown-unknown
 run bash scripts/check_adapter_feature_matrix.sh fastly wasm32-wasip1
-run bash scripts/check_adapter_feature_matrix.sh spin wasm32-wasip2
 
 section "Fastly CLI Tests"
 run cargo test -p edgezero-adapter-fastly --no-default-features --features cli
@@ -73,11 +72,8 @@ section "Fastly Wasm Tests"
   run cargo test --features fastly --target wasm32-wasip1 -- --nocapture
 )
 
-# Spin SDK 7 compiles to wasm32-wasip2; CI runs the full contract
-# test under wasmtime. Locally we just check it compiles — the
-# contract test needs wasmtime + the wasm runner pinned in CI.
-section "Spin Wasm Compile Check"
-run cargo check -p edgezero-adapter-spin --features spin --target wasm32-wasip2
+section "Spin Runtime Suite"
+run scripts/smoke_test_reusable_app.sh --adapter spin --suite ci
 
 section "Generated Project"
 run scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds

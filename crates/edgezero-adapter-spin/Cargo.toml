@@ -47,15 +47,3 @@ rusqlite = { workspace = true, optional = true }
 edgezero-core = { path = "../edgezero-core", features = ["test-utils"] }
 http-body-util = { workspace = true }
 tempfile = { workspace = true }
-
-[[example]]
-name = "outbound-eager"
-path = "examples/outbound_eager.rs"
-crate-type = ["cdylib"]
-required-features = ["spin", "test-utils"]
-
-[[example]]
-name = "outbound-bodyless-wire"
-path = "examples/outbound_bodyless_wire.rs"
-crate-type = ["cdylib"]
-required-features = ["spin", "test-utils"]

@@ -159,16 +159,21 @@ and independent-cap criterion 10 through the real host-wire matrix. A generous r
 tested final-buffer overflow. Fastly's test-only lease witnesses prove release of EdgeZero's
 encoded stream, not host-side interruption or delivery. Provider-inexpressible fields are injected
 only at the explicitly labelled shared-head boundary; they do not establish raw-header fidelity.
-Cloudflare and Fastly use one inventory-guarded library suite each. Spin's existing WASI component
-requires the normal build prerequisite and emits each criterion marker only after its matrix passes:
+Cloudflare and Fastly use one inventory-guarded library suite each. Spin has one local/CI entrypoint:
 
 ```sh
-cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-eager
-wasmtime run -W component-model-async=y -S p3=y -S http=y target/wasm32-wasip2/debug/examples/outbound_eager.wasm
+scripts/smoke_test_reusable_app.sh --adapter spin --suite ci
 ```
 
-CI checks every ready `unit/spin` marker against the fresh eager-component and host-wire logs,
-retained under `outbound/unit/spin/`. The synthetic
+The suite runs the feature matrix, native tests, synchronous WASI SDK contracts,
+async CLI component, actual HTTP wire matrix and ingress probes as distinct phases.
+The CLI and HTTP components live in `crates/fixture-spin-async` and
+`crates/fixture-spin-wire` in this workspace; unit/SDK tests remain in the adapter crate.
+Pinned Wasmtime and Spin must already be installed (`WASMTIME_BIN`/`SPIN_BIN` may select them).
+The Rust runner checks every ready `unit/spin` marker in its owning phase and
+reopens the persisted JSONL to validate complete wire and policy inventories.
+Per-phase logs and artifacts are retained under `outbound/redirect/spin/`,
+with wire records in `wire/events.jsonl`. The synthetic
 full-body probe hit Wasmtime 48.0.2's unsupported intra-component non-numeric future boundary;
 its unqualified failure log is `/private/tmp/edgezero-spin-policy-intra-component-failure.log`.
 The unusable probe is removed. Criterion 10 now uses 26 serialized actual-client wire cases:
@@ -193,8 +198,9 @@ owner once. Companion tests cover foreign/missing receipts and duplicate/conflic
 The shared raw Cargo output path is `outbound/unit/core/raw.log`; old redirect-only logs are not
 relabelled as evidence for this broadened command. Readiness is not exact-candidate qualification.
 
-Runtime commands select `--suite outbound-wire` and write their JSONL to
-`.runs/outbound/redirect/{environment}/events.jsonl`. Each adapter must complete 68 exchanges and
+The focused `--suite outbound-wire` remains available for wire-only iteration and writes
+JSONL to its selected output directory. The full Spin CI suite owns that phase in `wire/`.
+Each adapter must complete 68 exchanges and
 84 ordered origin receipts. Spin additionally records a separate `spin-policy-inventory` with
 26 policy exchanges and 26 correlated receipts, without changing the redirect counters or connection
 limits. Idle-body policy remains an unadopted conditional leg; these bindings

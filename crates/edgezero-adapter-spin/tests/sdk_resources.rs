@@ -1,5 +1,8 @@
 #![cfg(all(feature = "spin", feature = "test-utils", target_arch = "wasm32"))]
 
+#[path = "support/outbound/mod.rs"]
+mod outbound_support;
+
 #[cfg(test)]
 #[expect(
     clippy::arbitrary_source_item_ordering,
@@ -11,12 +14,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use edgezero_adapter_spin::outbound::{
-        SpinOutboundClient, deferred_clock_paths_hold_for_test, map_spin_dispatch_error_for_test,
-        map_spin_host_error_for_test, map_spin_preparation_header_for_test,
-        provider_deadline_diagnostics_hold_for_test, request_fields_for_test,
-        request_target_errors_for_test, request_timeout_settings_for_test,
-        set_timeout_option_for_test,
+    use crate::outbound_support::{deferred_clock_paths_hold, provider_deadline_diagnostics_hold};
+    use edgezero_adapter_spin::outbound::SpinOutboundClient;
+    use edgezero_adapter_spin::outbound::test_support::{
+        map_spin_dispatch_error, map_spin_host_error, map_spin_preparation_header, request_fields,
+        request_target_errors, request_timeout_settings, set_timeout_option,
     };
     use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
     use edgezero_core::error_detail::{
@@ -293,18 +295,14 @@ mod tests {
             ] {
                 let mut retained = refusal;
                 let mut settings = Vec::new();
-                request_timeout_settings_for_test(
-                    Duration::from_millis(40),
-                    configured,
-                    |option, value| {
-                        settings.push((option, value));
-                        if option == SpinTimeoutOption::Connect {
-                            replace(&mut retained, Ok(()))
-                        } else {
-                            Ok(())
-                        }
-                    },
-                )
+                request_timeout_settings(Duration::from_millis(40), configured, |option, value| {
+                    settings.push((option, value));
+                    if option == SpinTimeoutOption::Connect {
+                        replace(&mut retained, Ok(()))
+                    } else {
+                        Ok(())
+                    }
+                })
                 .expect("connect refusals retain aggregate enforcement");
                 assert_eq!(
                     settings,
@@ -321,7 +319,7 @@ mod tests {
     #[test]
     fn response_conversion_checks_deadline_before_handoff() {
         assert!(
-            block_on(deferred_clock_paths_hold_for_test()),
+            block_on(deferred_clock_paths_hold()),
             "response handoff must retain deadlines and release SDK body consumers"
         );
     }
@@ -460,14 +458,14 @@ mod tests {
 
     #[test]
     fn provider_diagnostics_survive_ready_deadlines() {
-        assert!(block_on(provider_deadline_diagnostics_hold_for_test()));
+        assert!(block_on(provider_deadline_diagnostics_hold()));
     }
 
     #[test]
     fn provider_diagnostics_preserve_actual_preparation_header_rejection() {
         let mut headers = HeaderMap::new();
         headers.insert("connection", HeaderValue::from_static("close"));
-        let error = request_fields_for_test(&headers).expect_err("host forbids connection");
+        let error = request_fields(&headers).expect_err("host forbids connection");
         assert_eq!(
             error.provider_failure_detail(),
             Some(&ProviderFailureDetail::Spin {
@@ -481,7 +479,7 @@ mod tests {
         );
         headers.clear();
         headers.insert("x-test", HeaderValue::from_static("valid"));
-        request_fields_for_test(&headers).expect("accepted field");
+        request_fields(&headers).expect("accepted field");
     }
 
     #[test]
@@ -495,7 +493,7 @@ mod tests {
                 "provider-secret-token".to_owned(),
             ))),
         ] {
-            set_timeout_option_for_test(SpinTimeoutOption::Connect, &outcome)
+            set_timeout_option(SpinTimeoutOption::Connect, &outcome)
                 .expect("connect settings retain aggregate deadline fallback");
         }
     }
@@ -519,7 +517,7 @@ mod tests {
                 SpinFailureCause::HeaderOther,
             ),
         ] {
-            let error = map_spin_preparation_header_for_test(&source);
+            let error = map_spin_preparation_header(&source);
             assert_eq!(
                 error.provider_failure_detail(),
                 Some(&ProviderFailureDetail::Spin {
@@ -536,8 +534,8 @@ mod tests {
             (SpinTimeoutOption::FirstByte, "first-byte"),
             (SpinTimeoutOption::BetweenBytes, "between-bytes"),
         ] {
-            set_timeout_option_for_test(option, &Ok(())).expect("accepted option");
-            set_timeout_option_for_test(option, &Err(RequestOptionsError::NotSupported))
+            set_timeout_option(option, &Ok(())).expect("accepted option");
+            set_timeout_option(option, &Err(RequestOptionsError::NotSupported))
                 .expect("unsupported option stays advisory");
             for (source, cause, message) in [
                 (
@@ -556,8 +554,7 @@ mod tests {
                     format!("Spin host rejected the outbound {name} timeout option"),
                 ),
             ] {
-                let error =
-                    set_timeout_option_for_test(option, &Err(source)).expect_err("rejection");
+                let error = set_timeout_option(option, &Err(source)).expect_err("rejection");
                 assert_eq!(
                     error.provider_failure_detail(),
                     Some(&ProviderFailureDetail::Spin {
@@ -598,7 +595,7 @@ mod tests {
             (SpinFailureCause::RequestPathRejected, "path"),
             (SpinFailureCause::RequestSchemeRejected, "scheme"),
         ];
-        for (error, (cause, name)) in request_target_errors_for_test().into_iter().zip(expected) {
+        for (error, (cause, name)) in request_target_errors().into_iter().zip(expected) {
             assert_eq!(
                 error.provider_failure_detail(),
                 Some(&ProviderFailureDetail::Spin {
@@ -810,7 +807,7 @@ mod tests {
                 .expect("live deadline"),
         );
         for (code, expected) in known_error_codes() {
-            let mapped = map_spin_host_error_for_test(
+            let mapped = map_spin_host_error(
                 &code,
                 live,
                 BudgetSource::Default,
@@ -825,7 +822,7 @@ mod tests {
             assert_eq!(detail.phase(), ProviderFailurePhase::Send);
 
             for connect in [None, Some(Duration::from_millis(7))] {
-                let dispatched = map_spin_dispatch_error_for_test(
+                let dispatched = map_spin_dispatch_error(
                     &code,
                     live,
                     BudgetSource::Default,
@@ -850,7 +847,7 @@ mod tests {
                 );
             }
 
-            let expired = map_spin_host_error_for_test(
+            let expired = map_spin_host_error(
                 &code,
                 Deadline::at_instant(now),
                 BudgetSource::RequestDeadline,
@@ -941,7 +938,7 @@ mod tests {
                 SpinFailureCause::InternalError,
             ),
         ] {
-            let mapped = map_spin_host_error_for_test(
+            let mapped = map_spin_host_error(
                 &source,
                 live,
                 BudgetSource::Default,
@@ -966,7 +963,7 @@ mod tests {
             now.checked_add(Duration::from_secs(30))
                 .expect("live deadline"),
         );
-        let early = map_spin_host_error_for_test(
+        let early = map_spin_host_error(
             &ErrorCode::DnsTimeout,
             live,
             BudgetSource::PerCallTimeout,
@@ -981,7 +978,7 @@ mod tests {
             }
         ));
 
-        let unreachable = map_spin_host_error_for_test(
+        let unreachable = map_spin_host_error(
             &ErrorCode::ConnectionRefused,
             live,
             BudgetSource::Default,
@@ -1010,7 +1007,7 @@ mod tests {
                 BudgetSource::RequestDeadline,
             ),
         ] {
-            let error = map_spin_host_error_for_test(
+            let error = map_spin_host_error(
                 &ErrorCode::ConnectionTimeout,
                 Deadline::at_instant(end),
                 BudgetSource::RequestDeadline,
@@ -1064,7 +1061,7 @@ mod tests {
                         } else {
                             BudgetSource::Unspecified
                         };
-                        let error = map_spin_dispatch_error_for_test(
+                        let error = map_spin_dispatch_error(
                             &ErrorCode::ConnectionTimeout,
                             Deadline::at_instant(end),
                             selected,

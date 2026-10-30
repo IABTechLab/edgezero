@@ -13,6 +13,13 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Consolidate Spin runtime checks into one shared Rust harness suite, with CLI/HTTP
+  scenarios in the fixture workspace and crate-owned unit/SDK tests. Remove the
+  separate ingress supervisor and bootstrap; validate persisted evidence in Rust.
+  Reuse identity-checked runtime caches and run common CI audits once, without
+  changing required check names, outbound guarantees or qualification status.
+  Replace random guest build IDs with content-bound identities, retain fresh
+  launch nonces, and keep command cancellation/reaping independent of log consumers.
 - Hard-cut pre-dispatch hooks to protected requests: share the admitted body cell,
   preserve original input caps/deadlines through bounded transformations, and revalidate
   modified request heads. Remove unrestricted hook body replacement.

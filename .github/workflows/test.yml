@@ -38,7 +38,6 @@ jobs:
             tests/fixtures/reusable-app/target/
             crates/edgezero-test-harness/target/
             tests/fixtures/request-fidelity/target/
-            tests/fixtures/request-fidelity-runner/target/
           key: ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-ingress-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.suite }}-tests-ingress-v1-
@@ -52,6 +51,7 @@ jobs:
       - name: Set up Rust tool chain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: "false"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
           components: clippy, rustfmt
 
@@ -75,7 +75,6 @@ jobs:
           cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
           cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
-          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml
 
       - name: No placeholder pins
         if: matrix.suite == 'workspace'
@@ -88,10 +87,16 @@ jobs:
       # These roots are the active API surface. Historical design and plan
       # documents under docs/superpowers intentionally remain immutable.
       - name: No legacy outbound API
+        if: matrix.suite == 'workspace'
         run: bash scripts/check_outbound_legacy_api.sh
 
       - name: Outbound documentation contract
+        if: matrix.suite == 'workspace'
         run: node scripts/check_outbound_docs_contract.mjs
+
+      - name: CI tooling regressions
+        if: matrix.suite == 'workspace'
+        run: node --test scripts/ci_tooling.test.mjs
 
       - name: Compile mandatory forwarding example
         if: matrix.suite == 'workspace'
@@ -106,17 +111,21 @@ jobs:
           node scripts/check_outbound_cutover_evidence.mjs --manifest
 
       - name: Build strict public API documentation
+        if: matrix.suite == 'workspace'
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --offline --locked --workspace --all-features --no-deps
 
       - name: Brotli dependency contract
+        if: matrix.suite == 'workspace'
         run: node scripts/check_brotli_dependency_contract.mjs
 
       - name: Flate dependency contract
+        if: matrix.suite == 'workspace'
         run: node scripts/check_flate_dependency_contract.mjs
 
       - name: Serde JSON map contract
+        if: matrix.suite == 'workspace'
         run: node scripts/check_serde_json_map_contract.mjs
 
       # `validator` is pinned in four places cargo cannot reconcile (this
@@ -134,13 +143,6 @@ jobs:
       - name: Nested AppConfig checker tests
         if: matrix.suite == 'cli'
         run: cargo test -p edgezero-cli --features nested-app-config-check --bin check_no_nested_app_config
-
-      - name: Verify native request ingress harness
-        if: matrix.suite == 'workspace'
-        run: |
-          cargo fmt --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml --all -- --check
-          cargo test --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml --locked
-          cargo clippy --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml --all-targets --locked -- -D warnings
 
       - name: Lifecycle fixture host tests
         if: matrix.suite == 'workspace'
@@ -288,6 +290,10 @@ jobs:
   adapter-wasm-tests:
     name: ${{ matrix.adapter }} wasm tests
     runs-on: ubuntu-latest
+    env:
+      VICEROY_REVISION: a69d982d1d95e13c0fc9f92683b9118639bb4b04
+      VICEROY_LOCK_SHA256: d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a
+      VICEROY_PATCH_SHA256: 8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759
     strategy:
       fail-fast: false
       matrix:
@@ -325,7 +331,6 @@ jobs:
             tests/fixtures/reusable-app/target/
             crates/edgezero-test-harness/target/
             tests/fixtures/request-fidelity/target/
-            tests/fixtures/request-fidelity-runner/target/
           key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-${{ hashFiles('**/Cargo.lock', '.tool-versions', 'patches/viceroy/0.21.0-body-readiness.patch') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-
@@ -339,6 +344,7 @@ jobs:
       - name: Set up Rust tool chain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: "false"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
           components: clippy, rustfmt
 
@@ -409,57 +415,31 @@ jobs:
         if: matrix.adapter == 'fastly'
         id: viceroy-version
         shell: bash
-        run: echo "version=$(grep '^viceroy ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci_viceroy.sh keys
+
+      - name: Cache pinned stock Viceroy
+        if: matrix.adapter == 'fastly'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/viceroy-stock
+          key: viceroy-stock-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.viceroy-version.outputs.stock-key }}
 
       - name: Setup Viceroy
         if: matrix.adapter == 'fastly'
-        # Version comes from .tool-versions (single source of truth shared with
-        # local dev).
-        env:
-          VICEROY_VERSION: ${{ steps.viceroy-version.outputs.version }}
-        run: cargo install viceroy --version "$VICEROY_VERSION" --locked --force
+        run: bash scripts/ci_viceroy.sh stock
+
+      - name: Cache isolated Viceroy readiness build
+        if: matrix.adapter == 'fastly'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/viceroy-readiness
+          key: viceroy-readiness-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.viceroy-version.outputs.repair-key }}
 
       - name: Build isolated Viceroy readiness repair
         if: matrix.adapter == 'fastly'
         id: viceroy-repair
         shell: bash
-        env:
-          VICEROY_VERSION: ${{ steps.viceroy-version.outputs.version }}
-          VICEROY_REVISION: a69d982d1d95e13c0fc9f92683b9118639bb4b04
-          VICEROY_LOCK_SHA256: d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a
-          VICEROY_PATCH_SHA256: 8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759
-          RUSTUP_TOOLCHAIN: 1.98.1
-          ASDF_RUST_VERSION: 1.98.1
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/viceroy-readiness
-          CARGO_PROFILE_DEV_DEBUG: 0
-          CARGO_INCREMENTAL: 0
-        run: |
-          test "$VICEROY_VERSION" = 0.21.0
-          stock_identity="$(sha256sum "$(command -v viceroy)")"
-          source="$RUNNER_TEMP/viceroy-readiness-source"
-          patch="$GITHUB_WORKSPACE/patches/viceroy/0.21.0-body-readiness.patch"
-          evidence="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/viceroy-repair"
-          test ! -e "$source"
-          git clone --depth 1 --branch "v$VICEROY_VERSION" https://github.com/fastly/Viceroy.git "$source"
-          test "$(git -C "$source" rev-parse --verify HEAD)" = "$VICEROY_REVISION"
-          printf '%s  %s\n' "$VICEROY_LOCK_SHA256" "$source/Cargo.lock" | sha256sum --check --strict
-          printf '%s  %s\n' "$VICEROY_PATCH_SHA256" "$patch" | sha256sum --check --strict
-          git -C "$source" apply --check "$patch"
-          git -C "$source" apply "$patch"
-          cargo fetch --locked --manifest-path "$source/Cargo.toml"
-          "$GITHUB_WORKSPACE/scripts/run_test_nonzero.sh" readiness_preserves_bytes_without_polling_the_source_again cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib body::tests::readiness_
-          "$GITHUB_WORKSPACE/scripts/run_test_nonzero.sh" readiness_preserves_between_bytes_timeout_without_repolling_source cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib body::tests::
-          cargo build --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy
-          executable="$CARGO_TARGET_DIR/debug/viceroy"
-          test -x "$executable"
-          printf '%s\n' "$stock_identity" | sha256sum --check --strict
-          mkdir -p "$evidence"
-          {
-            printf 'upstream=%s\nprofile=dev debug=0 incremental=0\n' "$VICEROY_REVISION"
-            rustc --version
-            sha256sum "$source/Cargo.lock" "$patch" "$source/src/body.rs" "$executable"
-          } | tee "$evidence/build-identity.txt"
-          echo "executable=$executable" >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci_viceroy.sh repair
 
       - name: Resolve Wasmtime version
         if: matrix.adapter == 'spin'
@@ -508,14 +488,12 @@ jobs:
       - name: Fetch dependencies (locked)
         run: |
           cargo fetch --locked
-          if [ "${{ matrix.adapter }}" = spin ] || [ "${{ matrix.adapter }}" = fastly ]; then
-            cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
-            cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
-          fi
+          cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
           cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
-          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity-runner/Cargo.toml
 
       - name: Run ${{ matrix.adapter }} wasm tests
+        if: matrix.adapter != 'spin'
         env:
           ${{ matrix.runner_env }}: ${{ matrix.adapter == 'fastly' && format('{0} run', steps.viceroy-repair.outputs.executable) || matrix.runner_value }}
         run: scripts/run_test_nonzero.sh ${{ matrix.sentinel }} cargo test --offline --locked -p edgezero-adapter-${{ matrix.adapter }} --no-default-features --features ${{ matrix.adapter }},test-utils --target ${{ matrix.target }} --test contract
@@ -526,21 +504,7 @@ jobs:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: ${{ steps.viceroy-repair.outputs.executable }} run
         run: scripts/run_test_nonzero.sh closed_lifecycle_orders_hooks_and_returns_state_after_delivery cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --test contract
 
-      - name: Run Spin WASI HTTP SDK resource tests
-        if: matrix.adapter == 'spin'
-        env:
-          ${{ matrix.runner_env }}: ${{ matrix.runner_value }}
-        run: scripts/run_test_nonzero.sh spin_error_code_table_is_exhaustive cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --test sdk_resources
-
-      - name: Run Spin eager exchange component
-        if: matrix.adapter == 'spin'
-        shell: bash
-        run: |
-          cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-eager
-          mkdir -p tests/fixtures/reusable-app/.runs/outbound/unit/spin
-          wasmtime run -W component-model-async=y -S p3=y -S http=y target/wasm32-wasip2/debug/examples/outbound_eager.wasm | tee tests/fixtures/reusable-app/.runs/outbound/unit/spin/raw.log
-
-      - name: Run Spin wire contracts
+      - name: Set up pinned Spin runtime
         if: matrix.adapter == 'spin'
         shell: bash
         run: |
@@ -557,27 +521,12 @@ jobs:
           export PATH="$install_dir:$PATH"
           echo "$install_dir" >> "$GITHUB_PATH"
           test "$(spin --version | awk '{print $2}')" = "$version"
+
+      - name: Run Spin runtime suite
+        if: matrix.adapter == 'spin'
+        run: |
           run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/outbound/redirect/spin"
-          CARGO_NET_OFFLINE=true ./scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output "$run" | tee tests/fixtures/reusable-app/.runs/outbound/unit/spin/wire.log
-          jq --slurp --exit-status '
-            ([.[] | select(.event == "spin-wire-inventory")]
-              | length == 1 and .[0].status == "pass"
-              and .[0].exchanges == 68 and .[0].origin_requests == 84
-              and .[0].qualification == false)
-            and ([.[] | select(.event == "spin-wire-case")]
-              | length == 68 and ([.[].origin_requests | length] | add) == 84)
-            and ([.[] | select(.event == "spin-policy-inventory")]
-              | length == 1 and .[0].status == "pass"
-              and .[0].exchanges == 26 and .[0].origin_requests == 26
-              and .[0].qualification == false)
-            and ([.[] | select(.event == "spin-policy-case")]
-              | length == 26 and ([.[].case] | sort) == [range(26)]
-              and all(.[]; (.origin_requests | length) == 1))
-            and all(.[]; .status != "fail")
-          ' "$run/events.jsonl"
-          node scripts/check_outbound_cutover_evidence.mjs --sentinels unit/spin | while IFS= read -r sentinel; do
-            grep -Fxq "$sentinel: passed" tests/fixtures/reusable-app/.runs/outbound/unit/spin/raw.log tests/fixtures/reusable-app/.runs/outbound/unit/spin/wire.log
-          done
+          CARGO_NET_OFFLINE=true ./scripts/smoke_test_reusable_app.sh --adapter spin --suite ci --output "$run"
 
       - name: Run Cloudflare browser ingress fidelity tests
         if: matrix.adapter == 'cloudflare'
@@ -605,6 +554,7 @@ jobs:
         run: scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib
 
       - name: Check ${{ matrix.adapter }} wasm feature matrix
+        if: matrix.adapter != 'spin'
         run: bash scripts/check_adapter_feature_matrix.sh ${{ matrix.adapter }} ${{ matrix.target }}
 
       - name: Read fixture worker-build pin
@@ -638,16 +588,8 @@ jobs:
           test "$("$install_dir/bin/worker-build" --version)" = "$VERSION"
           echo "$install_dir/bin" >> "$GITHUB_PATH"
 
-      - name: Check isolated fixture formatting
-        run: cargo fmt --manifest-path tests/fixtures/request-fidelity/Cargo.toml --all -- --check
-
-      - name: Lint isolated ingress fixture
-        run: >-
-          cargo clippy --manifest-path tests/fixtures/request-fidelity/Cargo.toml
-          --features ${{ matrix.adapter }} --target ${{ matrix.target }}
-          --all-targets --locked -- -D warnings
-
       - name: Run local HTTP ingress probes
+        if: matrix.adapter != 'spin'
         shell: bash
         env:
           REPAIRED_VICEROY: ${{ steps.viceroy-repair.outputs.executable }}
@@ -667,7 +609,7 @@ jobs:
             fi
             export WASM_BINDGEN_BIN
           fi
-          ./scripts/test-request-fidelity.sh ${{ matrix.adapter }}
+          ./scripts/smoke_test_reusable_app.sh --adapter ${{ matrix.adapter }} --suite ingress-fidelity
 
       - name: Fastly reusable HTTP smoke
         if: matrix.adapter == 'fastly'

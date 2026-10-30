@@ -371,7 +371,7 @@ fn validate_boot(events: &[Value], expected: usize, expected_internal: usize) ->
 }
 
 pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
-    checked(cargo_build().args([
+    checked(cargo_build()?.args([
         "build",
         "--locked",
         "--release",
@@ -660,7 +660,7 @@ pub(super) fn provider(name: &str, run: &Path, records: &mut Records) -> Result<
 }
 
 fn axum_startup(run: &Path, records: &mut Records) -> Result<()> {
-    let output = cargo_build()
+    let output = cargo_build()?
         .args([
             "build",
             "--offline",

@@ -1,18 +1,13 @@
-use std::collections::BTreeMap;
-use std::future::Future;
-#[cfg(feature = "test-utils")]
-use std::future::pending;
-use std::sync::Arc;
-use std::time::Duration;
-#[cfg(feature = "test-utils")]
-use std::{
-    io,
-    sync::atomic::{AtomicUsize, Ordering},
-    task::Poll,
-};
+#![cfg_attr(
+    any(test, feature = "test-utils"),
+    expect(
+        clippy::self_named_module_files,
+        reason = "retain the existing request module file while separating the gated test bridge"
+    )
+)]
 
-#[cfg(feature = "test-utils")]
-use bytes::Bytes;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) mod test_support;
 
 use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
@@ -26,9 +21,7 @@ use edgezero_core::body::Body;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
-#[cfg(feature = "test-utils")]
-use edgezero_core::http::Uri;
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 use edgezero_core::http::request_builder;
 use edgezero_core::http::{Method, Request, RequestParts};
 use edgezero_core::ingress::{
@@ -43,18 +36,18 @@ use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
 use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 use futures::executor::block_on;
 use futures_util::future::{Either, select};
-#[cfg(feature = "test-utils")]
-use futures_util::stream::Empty;
-#[cfg(feature = "test-utils")]
-use futures_util::stream::poll_fn;
 use futures_util::stream::unfold;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use spin_sdk::http::Request as SpinRequest;
 use spin_sdk::http::body::IncomingBodyExt as _;
 use spin_sdk::time::sleep;
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::outbound::{SpinOutboundClient, native_time};
 
@@ -70,20 +63,6 @@ pub(crate) struct Stores {
     kv_registry: Option<KvRegistry>,
     secret_registry: Option<SecretRegistry>,
     secrets: Option<SecretHandle>,
-}
-
-#[cfg(feature = "test-utils")]
-struct DropSignal(Arc<AtomicUsize>);
-
-#[cfg(feature = "test-utils")]
-#[expect(
-    clippy::missing_trait_methods,
-    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
-)]
-impl Drop for DropSignal {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
 }
 
 fn detached_error_envelope(
@@ -236,180 +215,6 @@ where
         }
     });
     Body::from_stream(stream)
-}
-
-/// Runs the terminal source-release probe used by the WASM contract suite.
-#[cfg(feature = "test-utils")]
-#[must_use]
-#[inline]
-pub fn deadline_body_releases_source_for_test() -> bool {
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let signal = DropSignal(Arc::clone(&dropped));
-    let source = poll_fn(move |_cx| {
-        let _keep_alive = &signal;
-        Poll::<Option<Result<Bytes, io::Error>>>::Pending
-    });
-    let start = MonotonicInstant::now();
-    let clock = MonotonicClock::new(move || start);
-    let body = deadline_body_with_timer(source, Deadline::at_instant(start), clock, |_| {
-        pending::<()>()
-    });
-    let Ok(mut body_stream) = body.into_stream() else {
-        return false;
-    };
-    let Some(Err(error)) = block_on(body_stream.next()) else {
-        return false;
-    };
-    matches!(error, EdgeError::RequestTimeout { .. }) && dropped.load(Ordering::SeqCst) == 1
-}
-
-/// Dispatches an observable source through the production ingress body wrapper without a
-/// provider timer. Tests that exercise timer expiry use
-/// [`dispatch_ingress_stream_with_timer_for_test`] instead.
-#[cfg(feature = "test-utils")]
-#[doc(hidden)]
-#[inline]
-pub async fn dispatch_ingress_stream_for_test<Source, SourceError>(
-    app: &App,
-    method: Method,
-    uri: Uri,
-    source: Source,
-) -> anyhow::Result<ResponseEgressEnvelope>
-where
-    Source: futures_util::Stream<Item = Result<Bytes, SourceError>> + 'static,
-    SourceError: Into<anyhow::Error> + 'static,
-{
-    let request_start = app.monotonic_now();
-    let core_request = request_builder()
-        .method(method)
-        .uri(uri)
-        .body(Body::empty())
-        .map_err(EdgeError::internal)?;
-    dispatch_ingress_stream_with_timer_and(
-        app,
-        core_request,
-        Stores::default(),
-        request_start,
-        move || Ok(source),
-        |_| pending::<()>(),
-        Ok,
-    )
-    .await
-}
-
-/// Exercises admission ordering with observable source construction and delivery closures.
-#[cfg(feature = "test-utils")]
-#[doc(hidden)]
-#[inline]
-pub async fn dispatch_ingress_with_for_test<Source, SourceError, MakeSource, Output, Deliver>(
-    app: &App,
-    method: Method,
-    uri: Uri,
-    make_source: MakeSource,
-    deliver: Deliver,
-) -> anyhow::Result<Output>
-where
-    Source: futures_util::Stream<Item = Result<bytes::Bytes, SourceError>> + 'static,
-    SourceError: Into<anyhow::Error> + 'static,
-    MakeSource: FnOnce() -> Result<Source, EdgeError>,
-    Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
-{
-    let request_start = app.monotonic_now();
-    let core_request = request_builder()
-        .method(method)
-        .uri(uri)
-        .body(Body::empty())
-        .map_err(EdgeError::internal)?;
-    dispatch_ingress_stream_with_timer_and(
-        app,
-        core_request,
-        Stores::default(),
-        request_start,
-        make_source,
-        |_| pending::<()>(),
-        deliver,
-    )
-    .await
-}
-
-/// Exercises a source-construction failure after admission through the production seam.
-#[cfg(feature = "test-utils")]
-#[doc(hidden)]
-#[inline]
-pub async fn dispatch_ingress_source_error_for_test(
-    app: &App,
-    method: Method,
-    uri: Uri,
-) -> anyhow::Result<ResponseEgressEnvelope> {
-    let request_start = app.monotonic_now();
-    let core_request = request_builder()
-        .method(method)
-        .uri(uri)
-        .body(Body::empty())
-        .map_err(EdgeError::internal)?;
-    dispatch_ingress_stream_with_timer_and(
-        app,
-        core_request,
-        Stores::default(),
-        request_start,
-        || -> Result<Empty<Result<Bytes, io::Error>>, EdgeError> {
-            Err(EdgeError::internal(anyhow::anyhow!(
-                "spin source construction failed"
-            )))
-        },
-        |_| pending::<()>(),
-        Ok,
-    )
-    .await
-}
-
-/// Dispatches an observable source through the production ingress deadline race.
-#[cfg(feature = "test-utils")]
-#[doc(hidden)]
-#[inline]
-pub async fn dispatch_ingress_stream_with_timer_for_test<Source, SourceError, Timer, MakeTimer>(
-    app: &App,
-    method: Method,
-    uri: Uri,
-    source: Source,
-    make_timer: MakeTimer,
-) -> anyhow::Result<ResponseEgressEnvelope>
-where
-    Source: futures_util::Stream<Item = Result<Bytes, SourceError>> + 'static,
-    SourceError: Into<anyhow::Error> + 'static,
-    Timer: Future<Output = ()> + 'static,
-    MakeTimer: Fn(Duration) -> Timer + Clone + 'static,
-{
-    let request_start = app.monotonic_now();
-    let core_request = request_builder()
-        .method(method)
-        .uri(uri)
-        .body(Body::empty())
-        .map_err(EdgeError::internal)?;
-    dispatch_ingress_stream_with_timer_and(
-        app,
-        core_request,
-        Stores::default(),
-        request_start,
-        move || Ok(source),
-        make_timer,
-        Ok,
-    )
-    .await
-}
-
-/// Dispatches a native Spin request through the production outer request seam.
-///
-/// # Errors
-/// Returns the same request-conversion, routing, or response-conversion error as standard dispatch.
-#[cfg(feature = "test-utils")]
-#[doc(hidden)]
-#[inline]
-pub async fn dispatch_request_for_test(
-    app: &App,
-    req: SpinRequest,
-) -> anyhow::Result<ResponseEgressEnvelope> {
-    dispatch_with_handles_and(app, req, Stores::default(), app.monotonic_now(), Ok).await
 }
 
 /// Dispatch a Spin request through the `EdgeZero` router using the `"default"`

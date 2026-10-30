@@ -1,11 +1,14 @@
-use edgezero_adapter_spin::{
-    outbound::connect_timeout_fallback_holds_for_test,
-    response::response_source_diagnostics_hold_for_test,
-};
+#[path = "../../../../../../crates/edgezero-adapter-spin/tests/support/outbound/mod.rs"]
+mod outbound_support;
+#[path = "../../../../../../crates/edgezero-adapter-spin/tests/support/response.rs"]
+mod response_support;
+
 use edgezero_core::EdgeError;
 use fixture_core::qualification::progress::{self, Job, ProbeRuntime, ProgressHooks};
 use futures::{channel::oneshot, future::LocalBoxFuture};
 use http_body::Body as _;
+use outbound_support::connect_timeout_fallback_holds;
+use response_support::response_source_diagnostics_hold;
 use serde_json::json;
 use spin_sdk::http::body::IncomingBodyExt as _;
 use std::{
@@ -79,13 +82,13 @@ pub async fn dispatch(
         .strip_prefix("/progress/")
         .unwrap_or("");
     if case == "sdk-source-diagnostics" {
-        response_source_diagnostics_hold_for_test().await?;
+        response_source_diagnostics_hold().await?;
         return sdk_probe_response(
             json!({"source_diagnostics":"pass", "cases":8, "qualification":false}),
         );
     }
     if case == "sdk-connect-fallback" {
-        if !connect_timeout_fallback_holds_for_test().await {
+        if !connect_timeout_fallback_holds().await {
             anyhow::bail!("connect refusal lost aggregate deadline enforcement");
         }
         return sdk_probe_response(

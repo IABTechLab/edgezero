@@ -3,12 +3,11 @@
 Run from the repository root with the Rust and Node versions in `.tool-versions`:
 
 ```sh
-./scripts/test-request-fidelity.sh all
-./scripts/test-request-fidelity.sh fastly --skip-build
+./scripts/smoke_test_reusable_app.sh --adapter all --suite ingress-fidelity
+./scripts/smoke_test_reusable_app.sh --adapter fastly --suite ingress-fidelity
 ```
 
-`--skip-build` intentionally reuses existing fixture artifacts; it does not
-prove source freshness. Use the default locked build for review evidence.
+Every run performs a locked build. There is no unchecked skip-build path.
 
 The isolated Cargo workspace and npm lock pin fixture dependencies. Install
 Viceroy at the version in `.tool-versions`, Spin CLI and worker-build at the
@@ -27,13 +26,16 @@ and an owned process group that is cleaned up on success, failure or interruptio
 No platform credentials or deployment are required.
 
 The runner sends 56 fixed raw HTTP cases across Fastly, Cloudflare and Spin.
-The client and process orchestration use an isolated native Rust harness with exact isolated Tokio/serde_json/tempfile/TOML pins. Tokio is confined to this host test helper; it adds no core or WASM runtime dependency. Responses contain fixed booleans/counts rather than unrestricted request values.
+The client and process orchestration live in `crates/edgezero-test-harness`,
+alongside the cross-adapter suites. They share one bounded process-group owner,
+without another async runtime or signal executor. Responses contain fixed
+booleans/counts rather than unrestricted request values.
 `observations.json` records the pinned local runtimes' observed outcomes, and
 subsequent runs compare them exactly and report each changed case. Inspect
 changes before updating it. Record all platforms to a temporary file first:
 
 ```sh
-./scripts/test-request-fidelity.sh all --record-observations > /tmp/request-fidelity-observations.json
+./scripts/smoke_test_reusable_app.sh --adapter all --suite ingress-fidelity --record-observations > /tmp/request-fidelity-observations.json
 diff -u tests/fixtures/request-fidelity/observations.json /tmp/request-fidelity-observations.json
 # After a successful run and inspection:
 cp /tmp/request-fidelity-observations.json tests/fixtures/request-fidelity/observations.json

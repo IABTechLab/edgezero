@@ -819,6 +819,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "fixture-spin-async"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "edgezero-adapter-spin",
+ "edgezero-core",
+ "futures-util",
+ "spin-sdk",
+]
+
+[[package]]
+name = "fixture-spin-wire"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bytes",
+ "edgezero-adapter-spin",
+ "edgezero-core",
+ "futures-util",
+ "serde_json",
+ "spin-sdk",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

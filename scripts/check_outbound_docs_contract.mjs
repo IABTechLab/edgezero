@@ -2600,7 +2600,13 @@ for (const adapterPath of outboundAdapterPaths) {
     fidelity
   )
   if (normalizationError !== null) fail(`${adapterPath} ${normalizationError}`)
-  if (!adapterSource.includes('converted_response_retains_injected_clock')) {
+  const clockTests = adapterPath.includes('spin')
+    ? readFileSync(
+        'crates/edgezero-adapter-spin/tests/support/outbound/clock_tests.rs',
+        'utf8'
+      )
+    : adapterSource
+  if (!clockTests.includes('converted_response_retains_injected_clock')) {
     fail(`${adapterPath} must behaviorally test the returned response clock`)
   }
 }

@@ -4,9 +4,11 @@ use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+mod build_identity;
 
 pub const HEADER: &str = "x-edgezero-fixture-launch";
 pub const NONCE: &str = "EDGEZERO_FIXTURE_LAUNCH_NONCE";
@@ -57,17 +59,16 @@ pub struct Launch {
     failure: Option<String>,
 }
 
-pub fn build_id() -> &'static str {
-    static BUILD: OnceLock<String> = OnceLock::new();
-    BUILD.get_or_init(crate::token)
+pub fn build_id() -> Result<String> {
+    build_identity::current()
 }
 
-pub fn command(command: &mut Command, mode: &str) -> String {
+pub fn command(command: &mut Command, mode: &str, build: &str) -> String {
     let nonce = crate::token();
     command
         .env(NONCE, &nonce)
         .env(MODE, mode)
-        .env(EXPECTED, format!("v1;{nonce};{};{mode}", build_id()));
+        .env(EXPECTED, format!("v1;{nonce};{build};{mode}"));
     nonce
 }
 
@@ -302,4 +303,35 @@ pub fn remaining(port: u16, budget: Duration) -> Result<Duration> {
         .min(budget);
     require(!remaining.is_zero(), "absolute startup deadline expired")?;
     Ok(remaining)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_build_identity_keeps_each_launch_nonce_fresh() {
+        let mut first = Command::new("unused-test-command");
+        let mut second = Command::new("unused-test-command");
+        let build = build_id().unwrap();
+        let first_nonce = command(&mut first, "identity-test", &build);
+        let second_nonce = command(&mut second, "identity-test", &build);
+        assert_ne!(first_nonce, second_nonce);
+        let identity = |command: &Command| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == EXPECTED)
+                .unwrap()
+                .1
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let first = identity(&first);
+        let second = identity(&second);
+        let build = build_id().unwrap();
+        assert_eq!(first, format!("v1;{first_nonce};{build};identity-test"));
+        assert_eq!(second, format!("v1;{second_nonce};{build};identity-test"));
+    }
 }

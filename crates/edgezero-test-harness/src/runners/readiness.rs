@@ -216,7 +216,7 @@ pub(super) fn run(
     require(revision.status.success(), "cannot record source revision")?;
     let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
     checked(
-        cargo_build()
+        cargo_build()?
             .args([
                 "build",
                 "--offline",

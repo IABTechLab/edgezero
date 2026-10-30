@@ -36,6 +36,8 @@ const source = `### EZ-1. Forwarding
 const sha = "a".repeat(40);
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const clone = (value) => structuredClone(value);
+const spinCiCommand =
+  "scripts/smoke_test_reusable_app.sh --adapter spin --suite ci --output tests/fixtures/reusable-app/.runs/outbound/redirect/spin";
 function fixtureLegPolicy(input) {
   if (!input.startsWith("### ")) return undefined;
   return digest(
@@ -1040,11 +1042,13 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
       assert.equal(c.sentinel, `${adapter}-wire-inventory`);
       assert.equal(
         c.command,
-        `scripts/smoke_test_reusable_app.sh --adapter ${adapter} --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/${environment}`,
+        adapter === "spin"
+          ? spinCiCommand
+          : `scripts/smoke_test_reusable_app.sh --adapter ${adapter} --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/${environment}`,
       );
       assert.equal(
         c.artifact_path,
-        `outbound/redirect/${environment}/events.jsonl`,
+        `outbound/redirect/${environment}/${adapter === "spin" ? "wire/" : ""}events.jsonl`,
       );
       bound.push(c);
     }
@@ -1070,6 +1074,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
   assert.equal(ready.length, 62);
+  assert.equal(
+    manifest.cases.filter((c) => c.implementation === "planned").length,
+    449,
+  );
   assert.ok(
     ready.every(
       (c) =>
@@ -1134,9 +1142,18 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
       assert.equal(row.applicability, "blocking");
       assert.equal(row.approval, null);
       assert.equal(row.condition, null);
-      if (adapter === "spin" && criterion === "10") {
-        assert.equal(row.sentinel, "ez_5_acceptance_10_unit_spin");
-        assert.equal(row.artifact_path, "outbound/redirect/spin/events.jsonl");
+      if (adapter === "spin") {
+        assert.equal(row.command, spinCiCommand);
+        assert.equal(
+          row.sentinel,
+          criterion === "09"
+            ? "ez_5_acceptance_09_spin"
+            : "ez_5_acceptance_10_unit_spin",
+        );
+        assert.equal(
+          row.artifact_path,
+          `outbound/redirect/spin/${criterion === "09" ? "async.log" : "wire/events.jsonl"}`,
+        );
         continue;
       }
       assert.equal(row.artifact_path, `outbound/unit/${adapter}/raw.log`);
@@ -1144,26 +1161,13 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
         workflow.includes(row.command),
         `${criterion}@${adapter} CI execution`,
       );
-      if (adapter === "spin") {
-        assert.equal(row.sentinel, `ez_5_acceptance_${criterion}_spin`);
-        assert.equal(
-          row.command,
-          "wasmtime run -W component-model-async=y -S p3=y -S http=y target/wasm32-wasip2/debug/examples/outbound_eager.wasm",
-        );
-        assert.ok(
-          workflow.includes(
-            "cargo build --offline --locked -p edgezero-adapter-spin --no-default-features --features spin,test-utils --target wasm32-wasip2 --example outbound-eager",
-          ),
-        );
-      } else {
-        assert.ok(
-          row.sentinel.startsWith(
-            `outbound::${adapter === "axum" ? "clock_tests" : adapter === "fastly" ? "fastly_impl::tests" : "worker_impl::policy_tests"}::`,
-          ),
-        );
-        if (criterion !== "09") assert.ok(row.additional_sentinels.length > 0);
-        if (adapter !== "axum") assert.match(row.command, /--target wasm32-/);
-      }
+      assert.ok(
+        row.sentinel.startsWith(
+          `outbound::${adapter === "axum" ? "clock_tests" : adapter === "fastly" ? "fastly_impl::tests" : "worker_impl::policy_tests"}::`,
+        ),
+      );
+      if (criterion !== "09") assert.ok(row.additional_sentinels.length > 0);
+      if (adapter !== "axum") assert.match(row.command, /--target wasm32-/);
     }
     for (const criterion of ["09b", "11b", "12"]) {
       const row = manifest.cases.find(
@@ -1180,12 +1184,6 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
       );
     }
   }
-  assert.match(workflow, /--sentinels unit\/spin/);
-  assert.match(workflow, /\$sentinel: passed/);
-  const spinStep = workflow
-    .split("- name: Run Spin eager exchange component")[1]
-    .split("- name:")[0];
-  assert.match(spinStep, /shell: bash/);
   const guarded = checker.readySentinels(
     manifest,
     "axum/native-tcp,unit/axum,axum/http1",
@@ -1206,7 +1204,7 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
       assert.ok(guarded.includes(name), name);
   }
 });
-test("Spin independent-cap binding requires the wire matrix and both fresh marker logs", () => {
+test("Spin ready bindings use one CI invocation and Rust persisted owning-phase validation", () => {
   const manifest = JSON.parse(
     readFileSync(
       new URL(
@@ -1223,40 +1221,64 @@ test("Spin independent-cap binding requires the wire matrix and both fresh marke
   );
   assert.equal(row.implementation, "ready");
   assert.equal(row.sentinel, "ez_5_acceptance_10_unit_spin");
-  assert.equal(
-    row.command,
-    "scripts/smoke_test_reusable_app.sh --adapter spin --suite outbound-wire --output tests/fixtures/reusable-app/.runs/outbound/redirect/spin",
-  );
-  assert.equal(row.artifact_path, "outbound/redirect/spin/events.jsonl");
+  assert.equal(row.command, spinCiCommand);
+  assert.equal(row.artifact_path, "outbound/redirect/spin/wire/events.jsonl");
   const workflow = readFileSync(
     new URL("../.github/workflows/test.yml", import.meta.url),
     "utf8",
   );
-  const eager = workflow
-    .split("- name: Run Spin eager exchange component")[1]
+  const step = workflow
+    .split("- name: Run Spin runtime suite")[1]
     .split("- name:")[0];
-  const wire = workflow
-    .split("- name: Run Spin wire contracts")[1]
-    .split("- name:")[0];
-  assert.doesNotMatch(eager, /--sentinels/);
-  assert.match(eager, /tee .*outbound\/unit\/spin\/raw\.log/);
-  assert.match(wire, /tee .*outbound\/unit\/spin\/wire\.log/);
+  assert.match(step, /if: matrix\.adapter == 'spin'/);
   assert.ok(
-    wire.indexOf("--sentinels unit/spin") >
-      wire.indexOf("spin-policy-inventory"),
+    step.includes(
+      'run="$GITHUB_WORKSPACE/tests/fixtures/reusable-app/.runs/outbound/redirect/spin"',
+    ),
   );
   assert.match(
-    wire,
-    /grep -Fxq .*outbound\/unit\/spin\/raw\.log.*outbound\/unit\/spin\/wire\.log/,
+    step,
+    /scripts\/smoke_test_reusable_app\.sh --adapter spin --suite ci --output "\$run"/,
   );
-  for (const count of [
-    /\.exchanges == 68/,
-    /\.origin_requests == 84/,
-    /\.exchanges == 26/,
-    /\.origin_requests == 26/,
-  ]) {
-    assert.match(wire, count);
-  }
+  assert.equal(
+    workflow.match(/scripts\/smoke_test_reusable_app\.sh --adapter spin /g)
+      ?.length,
+    1,
+    "one Spin suite execution",
+  );
+  assert.doesNotMatch(step, /\b(jq|grep)\b|continue-on-error/);
+  assert.doesNotMatch(
+    workflow,
+    /Run Spin eager exchange component|Run Spin wire contracts/,
+  );
+  const ci = readFileSync(
+    new URL(
+      "../crates/edgezero-test-harness/src/runners/ci.rs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const wire = readFileSync(
+    new URL(
+      "../crates/edgezero-test-harness/src/runners/wire.rs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(ci, /let\s+wire_dir\s*=\s*run\.join\("wire"\)/);
+  assert.match(
+    ci,
+    /super::wire::validate_spin_artifact\(\s*&read_events\(\s*&wire_dir\.join\("events\.jsonl"\)\s*\)\?\s*\)\?/,
+  );
+  assert.match(wire, /pub\(super\) fn validate_spin_artifact\(/);
+  assert.match(ci, /let\s+async_log\s*=\s*phase\(\s*"async"/);
+  assert.match(ci, /let\s+wire_log\s*=\s*phase\(\s*"wire"/);
+  assert.match(
+    ci,
+    /validate_markers\(\s*&inventory,\s*&fs::read_to_string\(async_log\)\?,\s*&fs::read_to_string\(wire_log\)\?,?\s*\)\?/,
+  );
+  assert.match(ci, /Some\("EZ-5\/acceptance\/09"\)\s*=>\s*async_log/);
+  assert.match(ci, /Some\("EZ-5\/acceptance\/10"\)\s*=>\s*wire_log/);
 });
 test("rejects deletion of reviewed split cases or environment legs", () => {
   const path = new URL(

@@ -1,4 +1,8 @@
 #[cfg(target_arch = "wasm32")]
+#[path = "../../../../../../crates/edgezero-adapter-spin/tests/support/outbound/mod.rs"]
+mod outbound_support;
+
+#[cfg(target_arch = "wasm32")]
 mod sdk {
     use core::str::from_utf8;
     use std::cell::{Cell, RefCell};
@@ -8,11 +12,11 @@ mod sdk {
     use std::sync::{Arc, Weak};
     use std::time::Duration;
 
+    use crate::outbound_support::scope_tests::canonical_entrypoints_release_retained_handles;
     use async_stream::stream;
     use bytes::Bytes;
-    use edgezero_adapter_spin::outbound::{
-        SpinOutboundClient, canonical_scopes_hold_for_test, observe_response_head_for_test,
-    };
+    use edgezero_adapter_spin::outbound::SpinOutboundClient;
+    use edgezero_adapter_spin::outbound::test_support::observe_response_head;
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::context::RequestContext;
     use edgezero_core::http::{Method, Response as CoreResponse, Uri};
@@ -64,7 +68,7 @@ mod sdk {
             }
             if path == "/scope" {
                 drop(request);
-                canonical_scopes_hold_for_test()
+                canonical_entrypoints_release_retained_handles()
                     .await
                     .map_err(|error| ErrorCode::InternalError(Some(error.to_string())))?;
                 return empty_response();
@@ -257,9 +261,8 @@ mod sdk {
                 Err(error) => (p5_error(&error), Some("body")),
             }
         };
-        let ((outcome, error_stage), polls, released) = observe_response_head_for_test(operation)
-            .await
-            .map_err(|_error| {
+        let ((outcome, error_stage), polls, released) =
+            observe_response_head(operation).await.map_err(|_error| {
                 ErrorCode::InternalError(Some("response policy probe failed".to_owned()))
             })?;
         json!({

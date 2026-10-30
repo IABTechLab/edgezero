@@ -44,6 +44,7 @@ jobs:
       - name: Set up rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: "false"
           components: "clippy, rustfmt"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
 
@@ -52,6 +53,7 @@ jobs:
           cargo fetch --locked
           cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
+          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
 
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
@@ -61,6 +63,9 @@ jobs:
 
       - name: Run cargo fmt (test harness)
         run: cargo fmt --manifest-path crates/edgezero-test-harness/Cargo.toml --all -- --check
+
+      - name: Run cargo fmt (ingress fixtures)
+        run: cargo fmt --manifest-path tests/fixtures/request-fidelity/Cargo.toml --all -- --check
 
       - name: Run cargo clippy (native lifecycle fixtures)
         run: |
@@ -142,6 +147,7 @@ jobs:
             ~/.cargo/git/db/
             target/
             tests/fixtures/reusable-app/target/
+            tests/fixtures/request-fidelity/target/
           key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-clippy-
@@ -154,6 +160,7 @@ jobs:
       - name: Set up Rust tool chain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: "false"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
           components: clippy
 
@@ -162,7 +169,10 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Fetch dependencies (locked)
-        run: cargo fetch --locked
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml
+          cargo fetch --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
 
       - name: Clippy ${{ matrix.adapter }} feature combinations on ${{ matrix.target }}
         env:
@@ -198,6 +208,17 @@ jobs:
           fi
           cargo clippy --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml \
             -p "fixture-${ADAPTER}" "${target_args[@]}" --all-targets -- -D warnings
+          if [[ "${ADAPTER}" == spin ]]; then
+            cargo clippy --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml \
+              -p fixture-spin-async -p fixture-spin-wire "${target_args[@]}" --all-targets -- -D warnings
+          fi
+
+      - name: Clippy ${{ matrix.adapter }} ingress fixture
+        if: matrix.adapter != 'axum'
+        run: >-
+          cargo clippy --locked --manifest-path tests/fixtures/request-fidelity/Cargo.toml
+          --features ${{ matrix.adapter }} --target ${{ matrix.target }}
+          --all-targets -- -D warnings
 
   format-docs:
     runs-on: ubuntu-latest
@@ -231,10 +252,6 @@ jobs:
 
       - name: Run Prettier (check)
         run: npm run format
-
-      - name: Check outbound documentation contract
-        working-directory: .
-        run: node scripts/check_outbound_docs_contract.mjs
 
       - name: Build documentation
         run: npm run build

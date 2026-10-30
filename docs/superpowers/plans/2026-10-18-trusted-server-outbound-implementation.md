@@ -33,6 +33,14 @@ The checkpoint sections below retain their historical commands, results and limi
 [Requirement Coverage](#requirement-coverage) table maps every EZ requirement group to its owning
 tasks, current implementation/checkpoint and remaining closure work.
 
+The approved [test/CI consolidation plan](2026-10-29-test-ci-consolidation.md) now tracks
+the fixture/runner cleanup separately from delivery requirements. It preserves native,
+synchronous SDK, async CLI, actual HTTP and raw-ingress execution boundaries, all acceptance
+identities and unqualified evidence. One Spin runtime suite replaces scattered YAML checks;
+the shared Rust process owner replaces the separate ingress runner. Historical checkpoint
+commands below remain revision-specific, not current invocation instructions. Hosted timing
+comparison is pending a successful run of the consolidated workflow.
+
 The six approved consolidation commitments are **not collectively complete**:
 
 | Commitment                                                            | Current Implementation                                                                                                                                                                                              | Remaining Work                                                                                                                                                                                               |

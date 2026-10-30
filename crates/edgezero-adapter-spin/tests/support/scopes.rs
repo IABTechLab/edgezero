@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use crate::request::dispatch_ingress_stream_for_test;
 use bytes::Bytes;
+use edgezero_adapter_spin::outbound::test_support::dispatch_ingress_stream;
 use edgezero_core::app::{App, Hooks};
 use edgezero_core::context::RequestContext;
 use edgezero_core::http::{Method, Response as CoreResponse, Uri};
@@ -187,9 +187,9 @@ async fn retain_handles(RequestContext(ctx): RequestContext) -> Result<CoreRespo
     Ok(CoreResponse::new(Body::empty()))
 }
 
-pub(super) async fn canonical_callback_releases_retained_handles() -> Result<(), EdgeError> {
-    let app = App::build::<ScopeHooks>(crate::SPIN_PLATFORM)?;
-    let envelope = dispatch_ingress_stream_for_test(
+pub(crate) async fn canonical_callback_releases_retained_handles() -> Result<(), EdgeError> {
+    let app = App::build::<ScopeHooks>(edgezero_adapter_spin::SPIN_PLATFORM)?;
+    let envelope = dispatch_ingress_stream(
         &app,
         Method::GET,
         Uri::from_static("/retain"),
@@ -202,15 +202,15 @@ pub(super) async fn canonical_callback_releases_retained_handles() -> Result<(),
     Ok(())
 }
 
-pub(super) async fn canonical_entrypoints_release_retained_handles() -> Result<(), EdgeError> {
-    let app = App::build::<ScopeHooks>(crate::SPIN_PLATFORM)?;
-    let response = crate::dispatch_app::<ScopeHooks>(&app, native_request()?)
+pub(crate) async fn canonical_entrypoints_release_retained_handles() -> Result<(), EdgeError> {
+    let app = App::build::<ScopeHooks>(edgezero_adapter_spin::SPIN_PLATFORM)?;
+    let response = edgezero_adapter_spin::dispatch_app::<ScopeHooks>(&app, native_request()?)
         .await
         .map_err(EdgeError::internal)?;
     assert_retained_handles_closed().await?;
     drop(response);
 
-    let assembly_response = crate::run_app::<AssemblyFailure>(native_request()?)
+    let assembly_response = edgezero_adapter_spin::run_app::<AssemblyFailure>(native_request()?)
         .await
         .map_err(EdgeError::internal)?;
     if assembly_response.get_status_code() != 503 {
@@ -285,7 +285,7 @@ async fn assert_retained_handles_closed() -> Result<(), EdgeError> {
     Ok(())
 }
 
-pub(super) async fn foreign_poll_cannot_reparent_prepared_dispatch() -> Result<(), EdgeError> {
+pub(crate) async fn foreign_poll_cannot_reparent_prepared_dispatch() -> Result<(), EdgeError> {
     let start = MonotonicInstant::now();
     let observed = Arc::new(Mutex::new(start));
     let clock = Arc::clone(&observed);

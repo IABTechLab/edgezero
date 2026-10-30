@@ -1,6 +1,7 @@
 use crate::{evidence::*, net::Backend, *};
 use std::collections::{BTreeSet, HashMap, HashSet};
 mod assembly;
+mod ci;
 mod framing;
 mod lifetimes;
 mod overflow;
@@ -8,13 +9,13 @@ mod progress;
 mod readiness;
 mod response_headers;
 mod wire;
-fn cargo_build() -> Command {
+fn cargo_build() -> Result<Command> {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
         .current_dir(root())
-        .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
+        .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id()?)
         .env("CARGO_TARGET_DIR", root().join("target"));
-    command
+    Ok(command)
 }
 
 fn built_executable(output: &[u8], name: &str) -> Result<PathBuf> {
@@ -146,7 +147,7 @@ fn fastly_command(
 ) -> Result<Command> {
     let mut cmd = Command::new(exe);
     let mode = wasm_name(variant).trim_end_matches(".wasm").to_owned();
-    let nonce = startup::command(&mut cmd, &mode);
+    let nonce = startup::command(&mut cmd, &mode, &startup::build_id()?);
     let launch_config = run.join(format!("launch-{nonce}.toml"));
     let mut contents = fs::read_to_string(config)?;
     contents.push_str(&format!("\n[local_server.config_stores.fixture_launch]\nformat = \"inline-toml\"\n[local_server.config_stores.fixture_launch.contents]\nnonce = {nonce:?}\n"));
@@ -316,7 +317,7 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
         return readiness::run(&exe, run, records, suite);
     }
     checked(
-        cargo_build()
+        cargo_build()?
             .args([
                 "build",
                 "--locked",
@@ -1216,6 +1217,9 @@ fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> Result<()> {
+    if args.suite == "ci" {
+        return ci::run(args, run, records);
+    }
     if args.suite == "outbound-lifetimes" {
         return lifetimes::run(name, run, records);
     }
@@ -1289,7 +1293,7 @@ fn provider_build(
     records: &mut Records,
 ) -> Result<Option<(PathBuf, PathBuf)>> {
     if name == "axum" {
-        let output = cargo_build()
+        let output = cargo_build()?
             .args([
                 "build",
                 "--locked",
@@ -1320,7 +1324,7 @@ fn provider_build(
         let help = Command::new(&exe).args(["up", "--help"]).output()?;
         fs::write(run.join("spin-up-help.txt"), &help.stdout)?;
         records.push(json!({"event":"runtime_controls","adapter":"spin","selected":"host defaults","source":"spin-up-help.txt"}))?;
-        checked(cargo_build().args([
+        checked(cargo_build()?.args([
             "build",
             "--locked",
             "--release",
@@ -1344,7 +1348,7 @@ fn provider_build(
         }
         checked(
             Command::new(builder)
-                .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
+                .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id()?)
                 .args(["--release", ".", "--", "--locked"])
                 .env("CARGO_TARGET_DIR", root().join("target"))
                 .current_dir(package),
@@ -1379,7 +1383,7 @@ fn provider_command(
     } else {
         format!("fixture-{name}-{mode}")
     };
-    let nonce = startup::command(&mut command, &identity_mode);
+    let nonce = startup::command(&mut command, &identity_mode, &startup::build_id()?);
     command
         .env("CARGO_TARGET_DIR", root().join("target"))
         .current_dir(package)
@@ -2234,7 +2238,7 @@ mod tests {
     }
     #[test]
     fn builds_share_a_fixed_target_directory() {
-        let command = cargo_build();
+        let command = cargo_build().unwrap();
         let target = root().join("target");
         assert!(
             command

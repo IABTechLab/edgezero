@@ -214,6 +214,70 @@ fn validate_policy_inventory(cases: &[usize], receipts: usize) -> Result<()> {
     )
 }
 
+pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
+    require(
+        !events.is_empty() && events.iter().all(|event| event["status"] != "fail"),
+        "missing or failed Spin wire evidence",
+    )?;
+    for (name, exchanges, receipts) in [
+        ("spin-wire-inventory", 68, 84),
+        ("spin-policy-inventory", 26, 26),
+    ] {
+        let inventory = events
+            .iter()
+            .filter(|event| event["event"] == name)
+            .collect::<Vec<_>>();
+        require(
+            inventory.len() == 1
+                && inventory[0]["status"] == "pass"
+                && inventory[0]["qualification"] == false
+                && inventory[0]["exchanges"] == exchanges
+                && inventory[0]["origin_requests"] == receipts,
+            "invalid Spin wire inventory",
+        )?;
+    }
+    let wire = events
+        .iter()
+        .filter(|event| event["event"] == "spin-wire-case")
+        .collect::<Vec<_>>();
+    require(wire.len() == 68, "incomplete Spin redirect matrix")?;
+    replay_spin_wire(wire)?;
+    let mut cases = Vec::new();
+    let mut receipts = 0;
+    for event in events
+        .iter()
+        .filter(|event| event["event"] == "spin-policy-case")
+    {
+        let index = event["case"]
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or("invalid Spin policy index")?;
+        let token = event["token"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+            .ok_or("missing Spin policy token")?;
+        let path = PolicyCase::new(index)?.path(token);
+        let requests = event["origin_requests"]
+            .as_array()
+            .ok_or("missing Spin policy receipts")?;
+        require(
+            event["path"] == path
+                && requests.len() == 1
+                && requests[0].as_array().is_some_and(|pair| pair.len() == 2)
+                && requests[0][0]
+                    .as_u64()
+                    .is_some_and(|port| (1..=u64::from(u16::MAX)).contains(&port))
+                && requests[0][1] == path,
+            "mismatched Spin policy receipt",
+        )?;
+        validate_policy(index, &event["report"])?;
+        cases.push(index);
+        receipts += requests.len();
+    }
+    validate_policy_inventory(&cases, receipts)?;
+    Ok(())
+}
+
 fn spin_policy(port: u16, origins: &WireOrigins, records: &mut Records) -> Result<(usize, usize)> {
     let mut cases = Vec::new();
     let mut receipts = 0;
@@ -264,7 +328,19 @@ struct Matrix<'a> {
     dispatches: usize,
 }
 
-impl Matrix<'_> {
+impl MatrixContracts for Matrix<'_> {
+    fn adapter(&self) -> &'static str {
+        self.adapter
+    }
+
+    fn ports(&self) -> [u16; 2] {
+        [self.origins.port(0), self.origins.port(1)]
+    }
+
+    fn inventory(&self) -> (usize, usize) {
+        (self.exchanges, self.dispatches)
+    }
+
     fn call(
         &mut self,
         path: &str,
@@ -322,6 +398,21 @@ impl Matrix<'_> {
         )?;
         Ok(report)
     }
+}
+
+trait MatrixContracts {
+    fn adapter(&self) -> &'static str;
+    fn ports(&self) -> [u16; 2];
+    fn inventory(&self) -> (usize, usize);
+    fn call(
+        &mut self,
+        path: &str,
+        mode: &str,
+        streamed: bool,
+        encoded: bool,
+        expected: Option<Vec<(u16, String)>>,
+        gate: Option<&str>,
+    ) -> Result<Value>;
 
     fn parity(&mut self, path: &str, streamed: bool, encoded: bool) -> Result<Value> {
         let sent = self.call(path, "send", streamed, encoded, None, None)?;
@@ -334,8 +425,7 @@ impl Matrix<'_> {
     }
 
     fn run(&mut self) -> Result<()> {
-        let first = self.origins.port(0);
-        let second = self.origins.port(1);
+        let [first, second] = self.ports();
         let base = format!("http://127.0.0.1:{first}");
         for streamed in [false, true] {
             for coding in ["identity", "gzip", "passthrough"] {
@@ -442,7 +532,7 @@ impl Matrix<'_> {
                     match kind {
                         "pending" => error_is(&report, "gateway_timeout", "PerCallTimeout")?,
                         "error" => {
-                            source_error(&report, self.adapter)?;
+                            source_error(&report, self.adapter())?;
                         }
                         "emptybr" => error_is(&report, "bad_gateway", "Decode(Brotli)")?,
                         _ => error_is(&report, "response_too_large", "BufferedBody")?,
@@ -528,11 +618,97 @@ impl Matrix<'_> {
                 )?;
             }
         }
+        let (exchanges, dispatches) = self.inventory();
         require(
-            self.exchanges == 68 && self.dispatches == 84,
+            exchanges == 68 && dispatches == 84,
             "incomplete provider wire matrix",
         )
     }
+}
+
+struct ReplayMatrix<'a> {
+    ports: [u16; 2],
+    events: std::vec::IntoIter<&'a Value>,
+    exchanges: usize,
+    dispatches: usize,
+}
+
+impl MatrixContracts for ReplayMatrix<'_> {
+    fn adapter(&self) -> &'static str {
+        "spin"
+    }
+
+    fn ports(&self) -> [u16; 2] {
+        self.ports
+    }
+
+    fn inventory(&self) -> (usize, usize) {
+        (self.exchanges, self.dispatches)
+    }
+
+    fn call(
+        &mut self,
+        path: &str,
+        mode: &str,
+        streamed: bool,
+        encoded: bool,
+        expected: Option<Vec<(u16, String)>>,
+        _gate: Option<&str>,
+    ) -> Result<Value> {
+        let event = self.events.next().ok_or("missing Spin redirect case")?;
+        require(
+            event["path"] == path
+                && event["mode"] == mode
+                && event["streamed"] == streamed
+                && event["encoded_cap"] == encoded
+                && event["qualification"] == false,
+            "Spin redirect case differs from ordered matrix",
+        )?;
+        let observed: Vec<(u16, String)> =
+            serde_json::from_value(event["origin_requests"].clone())?;
+        let expected = expected.unwrap_or_else(|| vec![(self.ports[0], path.to_owned())]);
+        require(
+            observed == expected,
+            "missing, extra or foreign wire origin requests",
+        )?;
+        let report = event
+            .get("report")
+            .filter(|report| report.is_object())
+            .ok_or("missing Spin redirect report")?
+            .clone();
+        self.exchanges += 1;
+        self.dispatches += observed.len();
+        Ok(report)
+    }
+}
+
+fn replay_spin_wire(wire: Vec<&Value>) -> Result<()> {
+    let receipt_port = |event: &Value, index: usize| {
+        event["origin_requests"][index][0]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port != 0)
+            .ok_or("invalid Spin redirect origin port")
+    };
+    // Bind both origins once; every replayed receipt and final URI must agree.
+    let first = receipt_port(wire.first().ok_or("missing Spin redirect case")?, 0)?;
+    let cross = wire
+        .iter()
+        .find(|event| event["path"] == "/p5/cross" && event["mode"] == "follow")
+        .ok_or("missing Spin cross-origin case")?;
+    let second = receipt_port(cross, 1)?;
+    require(first != second, "Spin redirect origins must be distinct")?;
+    let mut matrix = ReplayMatrix {
+        ports: [first, second],
+        events: wire.into_iter(),
+        exchanges: 0,
+        dispatches: 0,
+    };
+    matrix.run()?;
+    require(
+        matrix.events.next().is_none(),
+        "unexpected extra Spin redirect case",
+    )
 }
 
 fn source_error_reason(adapter: &str) -> &'static str {
@@ -674,28 +850,17 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     checked(
         Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .current_dir(&repo)
-            .env("CARGO_TARGET_DIR", repo.join("target"))
-            .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
-            .args([
-                "build",
-                "--offline",
-                "--locked",
-                "-p",
-                "edgezero-adapter-spin",
-                "--no-default-features",
-                "--features",
-                "spin,test-utils",
-                "--target",
-                "wasm32-wasip2",
-                "--example",
-                "outbound-bodyless-wire",
-            ]),
+            .env("CARGO_TARGET_DIR", root().join("target"))
+            .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id()?)
+            .args(["build", "--offline", "--locked", "--manifest-path"])
+            .arg(root().join("Cargo.toml"))
+            .args(["-p", "fixture-spin-wire", "--target", "wasm32-wasip2"]),
     )?;
-    let relative_wasm = "target/wasm32-wasip2/debug/examples/outbound_bodyless_wire.wasm";
+    let relative_wasm =
+        "tests/fixtures/reusable-app/target/wasm32-wasip2/debug/fixture_spin_wire.wasm";
     let wasm = run.join(relative_wasm);
     copy_tree(&repo.join(relative_wasm), &wasm)?;
-    let relative_manifest =
-        "crates/edgezero-adapter-spin/examples/outbound-bodyless-wire.spin.toml";
+    let relative_manifest = "tests/fixtures/reusable-app/crates/fixture-spin-wire/spin.toml";
     let manifest = run.join(relative_manifest);
     copy_tree(&repo.join(relative_manifest), &manifest)?;
     records.push(json!({"event":"build","adapter":"spin","artifact":artifact(&wasm)?,"root_lockfile":artifact(&repo.join("Cargo.lock"))?,"qualification":false}))?;
@@ -705,7 +870,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     let component_logs = run.join("component-logs");
     let log = run.join("spin-wire.log");
     let mut command = Command::new(executable);
-    let nonce = startup::command(&mut command, "spin-wire");
+    let nonce = startup::command(&mut command, "spin-wire", &startup::build_id()?);
     command
         .args(["up", "--from"])
         .arg(manifest)
@@ -885,6 +1050,368 @@ fn finish_wire<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wire_error(kind: &str, reason: &str) -> Value {
+        json!({"error":{"kind":kind,"reason":reason,
+            "status":if kind == "gateway_timeout" {504} else {502},"provider":null}})
+    }
+
+    fn wire_report(path: &str, streamed: bool, outcome: Value) -> Value {
+        json!({"outcome":outcome,"streamed":streamed,"policies":0,"hop":0,
+            "redirects":0,"stop":null,"final_uri":format!("http://127.0.0.1:4001{path}")})
+    }
+
+    fn wire_body_report(coding: &str, size: usize, streamed: bool, encoded: bool) -> Value {
+        let path = format!("/p5/body/{coding}/{size}");
+        let outcome = if size == 10 {
+            let mut headers = vec![json!(["x-p5-fixture", b"spin-wire".as_slice()])];
+            if coding != "gzip" {
+                headers.push(json!([
+                    "content-encoding",
+                    if coding == "identity" {
+                        b"identity".as_slice()
+                    } else {
+                        b"x-p5-opaque".as_slice()
+                    }
+                ]));
+            }
+            json!({"status":200,"bytes":vec![b'a';size],"headers":headers})
+        } else {
+            wire_error(
+                "response_too_large",
+                if encoded {
+                    "EncodedBody"
+                } else if streamed {
+                    "DecodedBody"
+                } else {
+                    "BufferedBody"
+                },
+            )
+        };
+        wire_report(&path, streamed, outcome)
+    }
+
+    fn spin_artifact() -> Vec<Value> {
+        let mut values = Vec::new();
+        let first = 4001;
+        let second = 4002;
+        let mut push = |path: &str,
+                        mode: &str,
+                        streamed: bool,
+                        encoded: bool,
+                        requests: Vec<(u16, String)>,
+                        report: Value| {
+            values.push(json!({"event":"spin-wire-case","path":path,"mode":mode,
+                "streamed":streamed,"encoded_cap":encoded,"origin_requests":requests,
+                "report":report,"qualification":false}));
+        };
+        for streamed in [false, true] {
+            for coding in ["identity", "gzip", "passthrough"] {
+                for size in [10, 11] {
+                    let path = format!("/p5/body/{coding}/{size}");
+                    let encoded = streamed && coding == "passthrough";
+                    for mode in ["send", "follow"] {
+                        push(
+                            &path,
+                            mode,
+                            streamed,
+                            encoded,
+                            vec![(first, path.clone())],
+                            wire_body_report(coding, size, streamed, encoded),
+                        );
+                    }
+                }
+                let path = format!("/p5/declared/{coding}");
+                for mode in ["send", "follow"] {
+                    push(
+                        &path,
+                        mode,
+                        streamed,
+                        true,
+                        vec![(first, path.clone())],
+                        wire_report(
+                            &path,
+                            streamed,
+                            wire_error("response_too_large", "EncodedBody"),
+                        ),
+                    );
+                }
+            }
+        }
+        for kind in ["pending", "error", "emptybr", "oversized"] {
+            for mode in ["follow", "send", "stop", "limit"] {
+                let name = format!("{kind}-{mode}");
+                let redirect = format!("/p5/redirect/{kind}/{name}");
+                let path = if mode == "limit" {
+                    format!("/p5/limit/{kind}/{name}")
+                } else {
+                    redirect.clone()
+                };
+                let mut requests = vec![(first, path.clone())];
+                let outcome = if mode == "follow" {
+                    requests.push((first, format!("/p5/next/{name}")));
+                    json!({"status":200,"bytes":b"final".as_slice()})
+                } else {
+                    if mode == "limit" {
+                        requests.push((first, redirect));
+                    }
+                    match kind {
+                        "pending" => wire_error("gateway_timeout", "PerCallTimeout"),
+                        "error" => {
+                            let mut error = wire_error("bad_gateway", "Protocol");
+                            error["error"]["provider"] = json!("Spin { phase: ResponseBodyRead }");
+                            error
+                        }
+                        "emptybr" => wire_error("bad_gateway", "Decode(Brotli)"),
+                        _ => wire_error("response_too_large", "BufferedBody"),
+                    }
+                };
+                let mut report = wire_report(&path, false, outcome);
+                report["policies"] = json!(usize::from(mode != "send"));
+                report["hop"] = json!(usize::from(mode == "limit"));
+                if mode == "follow" {
+                    report["redirects"] = json!(1);
+                    report["final_uri"] = json!(format!("http://127.0.0.1:{first}/p5/next/{name}"));
+                }
+                push(&path, mode, false, false, requests, report);
+            }
+        }
+        for mode in ["stop", "limit"] {
+            let redirect = format!("/p5/redirect/clean/clean-{mode}");
+            let path = if mode == "limit" {
+                format!("/p5/limit/clean/clean-{mode}")
+            } else {
+                redirect.clone()
+            };
+            let mut requests = vec![(first, path.clone())];
+            if mode == "limit" {
+                requests.push((first, redirect));
+            }
+            let mut report = wire_report(
+                &path,
+                false,
+                json!({"status":302,"bytes":b"found".as_slice()}),
+            );
+            report["stop"] = json!(if mode == "limit" {
+                "LimitReached"
+            } else {
+                "StoppedByPolicy"
+            });
+            report["redirects"] = json!(usize::from(mode == "limit"));
+            push(&path, mode, false, false, requests, report);
+        }
+        push(
+            "/p5/cross",
+            "send",
+            false,
+            false,
+            vec![(first, "/p5/cross".into())],
+            wire_report("/p5/cross", false, json!({"status":302})),
+        );
+        let mut report = wire_report(
+            "/p5/final",
+            false,
+            json!({"status":200,"bytes":b"final".as_slice()}),
+        );
+        report["redirects"] = json!(1);
+        report["final_uri"] = json!(format!("http://127.0.0.1:{second}/p5/final"));
+        push(
+            "/p5/cross",
+            "follow",
+            false,
+            false,
+            vec![(first, "/p5/cross".into()), (second, "/p5/final".into())],
+            report,
+        );
+        for coding in ["identity", "gzip", "passthrough"] {
+            for size in [10, 11] {
+                let final_path = format!("/p5/body/{coding}/{size}");
+                let path = format!("/p5/to-body/{coding}/{size}");
+                let encoded = coding == "passthrough";
+                let report = wire_body_report(coding, size, true, encoded);
+                push(
+                    &final_path,
+                    "send",
+                    true,
+                    encoded,
+                    vec![(first, final_path.clone())],
+                    report.clone(),
+                );
+                let mut followed = report;
+                followed["redirects"] = json!(1);
+                followed["policies"] = json!(1);
+                push(
+                    &path,
+                    "follow",
+                    true,
+                    encoded,
+                    vec![(first, path.clone()), (first, final_path)],
+                    followed,
+                );
+            }
+        }
+        values.extend((0..26).map(|index| {
+            let token = format!("case-{index}");
+            let path = PolicyCase::new(index).unwrap().path(&token);
+            json!({"event":"spin-policy-case","case":index,"token":token,"path":path,
+                "origin_requests":[[1,path]],"report":policy_report(index)})
+        }));
+        values.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
+        values.push(json!({"event":"spin-policy-inventory","status":"pass","exchanges":26,"origin_requests":26,"qualification":false}));
+        values
+    }
+
+    #[test]
+    fn persisted_spin_redirect_accepts_legitimate_repeated_cases() {
+        let valid = spin_artifact();
+        assert_eq!(valid[18], valid[56]);
+        validate_spin_artifact(&valid).unwrap();
+    }
+
+    #[test]
+    fn persisted_spin_redirect_replay_requires_exact_consumption() {
+        let valid = spin_artifact();
+        let wire = valid[..68].iter().collect::<Vec<_>>();
+        replay_spin_wire(wire.clone()).unwrap();
+        assert!(replay_spin_wire(wire[..67].to_vec()).is_err());
+        let mut extra = wire;
+        extra.push(&valid[0]);
+        assert!(
+            replay_spin_wire(extra)
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected extra Spin redirect case")
+        );
+    }
+
+    #[test]
+    fn persisted_spin_redirect_rejects_count_preserving_duplicates() {
+        let valid = spin_artifact();
+        for (missing, duplicate) in [(0, 2), (0, 1), (36, 39), (56, 58)] {
+            let mut changed = valid.clone();
+            assert_eq!(
+                changed[missing]["origin_requests"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                changed[duplicate]["origin_requests"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            );
+            changed[missing] = changed[duplicate].clone();
+            assert!(
+                validate_spin_artifact(&changed).is_err(),
+                "replacement {missing} with {duplicate} passed"
+            );
+        }
+        let mut reordered = valid;
+        reordered.swap(0, 2);
+        assert!(validate_spin_artifact(&reordered).is_err());
+    }
+
+    #[test]
+    fn persisted_spin_redirect_rejects_foreign_reports() {
+        let valid = spin_artifact();
+        let mut foreign = valid.clone();
+        foreign[1]["report"] = valid[3]["report"].clone();
+        assert!(validate_spin_artifact(&foreign).is_err());
+        for (index, pointer, value) in [
+            (
+                1,
+                "/report/final_uri",
+                json!("http://127.0.0.1:4001/foreign"),
+            ),
+            (36, "/report/policies", json!(0)),
+            (37, "/report/outcome/error/reason", json!("Protocol")),
+            (
+                41,
+                "/report/outcome/error/provider",
+                json!("Spin { phase: Dispatch }"),
+            ),
+            (55, "/report/redirects", json!(0)),
+            (57, "/report/streamed", json!(false)),
+        ] {
+            let mut changed = valid.clone();
+            *changed[index].pointer_mut(pointer).unwrap() = value;
+            assert!(
+                validate_spin_artifact(&changed).is_err(),
+                "{index}: {pointer}"
+            );
+        }
+        let mut changed = valid;
+        for index in [0, 1] {
+            changed[index]["report"]["outcome"]["bytes"] = json!(b"foreign".as_slice());
+        }
+        assert!(validate_spin_artifact(&changed).is_err());
+    }
+
+    #[test]
+    fn persisted_spin_redirect_rejects_foreign_receipts_and_metadata() {
+        let valid = spin_artifact();
+        for (index, pointer, value) in [
+            (0, "/origin_requests/0", json!("not a receipt")),
+            (0, "/origin_requests/0/0", json!(0)),
+            (0, "/origin_requests/0/0", json!(4003)),
+            (2, "/origin_requests/0/0", json!(4003)),
+            (2, "/origin_requests/0/0", json!(65536)),
+            (2, "/origin_requests/0/1", json!("/foreign")),
+            (55, "/origin_requests/1/0", json!(4001)),
+            (55, "/origin_requests/1/0", json!(4003)),
+            (55, "/origin_requests/1/1", json!("/foreign")),
+            (0, "/path", json!("/foreign")),
+            (0, "/mode", json!("follow")),
+            (0, "/streamed", json!(true)),
+            (0, "/encoded_cap", json!(true)),
+            (0, "/qualification", json!(true)),
+        ] {
+            let mut changed = valid.clone();
+            *changed[index].pointer_mut(pointer).unwrap() = value;
+            assert!(
+                validate_spin_artifact(&changed).is_err(),
+                "{index}: {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_spin_inventory_rejects_missing_duplicate_failed_and_changed_records() {
+        let valid = spin_artifact();
+        validate_spin_artifact(&valid).unwrap();
+        let mut mutations = vec![Vec::new(), valid[..valid.len() - 1].to_vec()];
+        for index in [0, 67, 68, 93, 94, 95] {
+            let mut missing = valid.clone();
+            missing.remove(index);
+            mutations.push(missing);
+            let mut duplicate = valid.clone();
+            duplicate.push(valid[index].clone());
+            mutations.push(duplicate);
+        }
+        for (index, pointer, value) in [
+            (94, "/qualification", json!(true)),
+            (94, "/status", json!("fail")),
+            (94, "/exchanges", json!(67)),
+            (95, "/origin_requests", json!(25)),
+            (68, "/case", json!(1)),
+            (68, "/report/request/decoded_cap", json!(11)),
+            (68, "/report/source/released", json!(false)),
+            (68, "/origin_requests/0/1", json!("/foreign")),
+            (68, "/token", json!("foreign")),
+        ] {
+            let mut changed = valid.clone();
+            *changed[index].pointer_mut(pointer).unwrap() = value;
+            mutations.push(changed);
+        }
+        let mut failed = valid;
+        failed.push(json!({"status":"fail","stage":"late-cleanup"}));
+        mutations.push(failed);
+        for (index, changed) in mutations.into_iter().enumerate() {
+            assert!(
+                validate_spin_artifact(&changed).is_err(),
+                "mutation {index} passed"
+            );
+        }
+    }
 
     fn policy_report(index: usize) -> Value {
         let gzip = index >= 16;

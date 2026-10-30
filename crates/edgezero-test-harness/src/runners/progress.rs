@@ -383,7 +383,7 @@ pub(super) fn build(
         }
         checked(
             Command::new(builder)
-                .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id())
+                .env("EDGEZERO_FIXTURE_BUILD_ID", startup::build_id()?)
                 .args([
                     "--release",
                     ".",
@@ -405,7 +405,7 @@ pub(super) fn build(
         )?;
         staged
     } else {
-        let mut command = cargo_build();
+        let mut command = cargo_build()?;
         command
             .args([
                 "build",
@@ -466,7 +466,7 @@ pub(super) fn build(
 
 // Prevent worker-build from implicitly downloading/replacing tools during characterization.
 pub(super) fn check_bindgen(records: &mut Records) -> Result<bool> {
-    let output = cargo_build()
+    let output = cargo_build()?
         .args([
             "metadata",
             "--offline",
