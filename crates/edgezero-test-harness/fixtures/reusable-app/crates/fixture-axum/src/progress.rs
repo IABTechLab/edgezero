@@ -66,6 +66,12 @@ impl ProbeRuntime for NativeRuntime {
     fn adapter(&self) -> &'static str {
         "axum"
     }
+    fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+        Ok(Arc::new(
+            edgezero_adapter_axum::outbound::AxumOutboundClient::try_new()
+                .map_err(|_| progress::probe_failure())?,
+        ))
+    }
     fn perform(&self, target: String) -> Job {
         Box::pin(fetch(target))
     }

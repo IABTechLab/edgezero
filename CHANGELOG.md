@@ -106,6 +106,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   disposal and eight real-wire 200/206 representation controls. Validate all owning phases,
   effective settings, source release and persisted HTTP evidence without changing requirements,
   raw-header fidelity claims or hosted qualification.
+- Exercise mixed and fresh batch collection on all four native runtimes with exact receipt,
+  cutoff, typed failure and lossless recovery checks. Require same-candidate core identity
+  evidence and persisted runtime readback; reuse existing CI phases and one focused matrix.
+  Keep unrelated runtime failures and hosted qualification open.
 - Extend bodyless policy through all four native adapter head/source paths and the full policy
   matrix through Axum, Cloudflare and Fastly. Keep unsupported
   raw fields explicitly shared-head-only, distinguish adapter buffer failures from reporter limits,

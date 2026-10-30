@@ -478,8 +478,51 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
     let mut fields = Vec::<(&str, String)>::new();
     let mut body = b"final".to_vec();
     let mut pending = None;
+    let mut blocked = None;
     let mut policy_reject = false;
     match parts.as_slice() {
+        [
+            "batch",
+            token,
+            case,
+            operation @ ("slot" | "release"),
+            index @ ("0" | "1" | "2"),
+        ] => {
+            require(
+                !token.is_empty()
+                    && token.len() <= 64
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+                "invalid batch token",
+            )?;
+            require(
+                matches!(
+                    *case,
+                    "mixed-completed"
+                        | "mixed-cutoff"
+                        | "mixed-failure"
+                        | "fresh-completed"
+                        | "fresh-cutoff"
+                        | "fresh-failure"
+                ),
+                "invalid batch case",
+            )?;
+            let gate = format!("batch-{token}-{case}-{index}");
+            if *operation == "release" {
+                shared.release(&gate)?;
+                body.clear();
+            } else {
+                require(
+                    shared.lock().gates.contains_key(&gate),
+                    "unarmed batch gate",
+                )?;
+                blocked = Some(gate);
+                policy_reject = *index == "2" && !case.ends_with("completed");
+                body = vec![b'A' + index.parse::<u8>()?];
+            }
+            fields.push(("Content-Length", body.len().to_string()));
+        }
         ["representation", code @ ("200" | "206"), token] => {
             require(
                 !token.is_empty() && token.len() <= 128,
@@ -631,6 +674,9 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
         write!(socket, "{name}: {value}\r\n")?;
     }
     socket.write_all(b"\r\n")?;
+    if let Some(gate) = blocked {
+        shared.wait(GATE_BUDGET, |state| state.gates.get(&gate) == Some(&true))?;
+    }
     policy_body_result(policy_reject, socket.write_all(&body))?;
     socket.flush()?;
     if let Some(name) = pending {
@@ -705,6 +751,54 @@ mod tests {
             b"POST /post HTTP/1.1\r\nContent-Length: 14\r\n\r\nupload-control",
         );
         assert_eq!(origins.take_wire().unwrap()["payload"], "upload-control");
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn batch_recovery_origin_requires_an_explicit_matching_release() {
+        let origins = WireOrigins::start().unwrap();
+        origins.arm("batch-owned-mixed-completed-0");
+        origins.arm("batch-owned-mixed-completed-1");
+        let mut socket = TcpStream::connect(("127.0.0.1", origins.port(0))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        socket
+            .write_all(b"GET /p5/batch/owned/mixed-completed/slot/0 HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            head.extend(byte);
+            assert!(head.len() < 1024);
+        }
+        exchange(
+            &origins,
+            0,
+            b"GET /p5/batch/owned/mixed-completed/release/1 HTTP/1.1\r\n\r\n",
+        );
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let error = socket.read(&mut [0]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        let release = exchange(
+            &origins,
+            0,
+            b"GET /p5/batch/owned/mixed-completed/release/0 HTTP/1.1\r\n\r\n",
+        );
+        assert!(release.starts_with(b"HTTP/1.1 200 Fixture\r\n"));
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut body = Vec::new();
+        socket.read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"A");
+        assert_eq!(origins.take_requests().len(), 3);
         origins.finish().unwrap();
     }
 

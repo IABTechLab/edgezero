@@ -2,7 +2,17 @@ use super::*;
 use crate::net::WireOrigins;
 use std::io::Read as _;
 
+mod batch_recovery;
 mod normalization;
+
+pub(super) fn validate_batch_artifact(events: &[Value], adapter: &str) -> Result<()> {
+    batch_recovery::validate_artifact(events, adapter)
+}
+
+#[cfg(test)]
+pub(super) fn batch_recovery_artifact(adapter: &str) -> Vec<Value> {
+    batch_recovery::tests::artifact(adapter)
+}
 
 fn body(reply: &Value) -> Result<Vec<u8>> {
     Ok(serde_json::from_value(reply["body_bytes"].clone())?)
@@ -282,6 +292,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
     }
     validate_policy_inventory(&cases, receipts)?;
     normalization::validate_artifact(events, origin_port)?;
+    batch_recovery::validate_artifact(events, "spin")?;
     Ok(())
 }
 
@@ -831,11 +842,11 @@ fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Proc
     }
 }
 
-pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
+pub(super) fn run(name: &str, run: &Path, records: &mut Records, batch_only: bool) -> Result<()> {
     match name {
-        "cloudflare" => return progress_wire("cloudflare", run, records),
-        "axum" => return progress_wire("axum", run, records),
-        "fastly" => return progress_wire("fastly", run, records),
+        "cloudflare" => return progress_wire("cloudflare", run, records, batch_only),
+        "axum" => return progress_wire("axum", run, records, batch_only),
+        "fastly" => return progress_wire("fastly", run, records, batch_only),
         _ => {}
     }
     require(name == "spin", "wire suite requires Spin")?;
@@ -889,9 +900,14 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         .arg("--disable-cache");
     command.args(["--env", &format!("{}={nonce}", startup::NONCE)]);
     let mut process = None;
-    let outcome: Result<((usize, usize), (usize, usize))> = (|| {
+    let outcome = (|| -> Result<_> {
         let running = process.insert(Process::start(&mut command, &log, port)?);
         controls(port, &origins, &component_logs, running)?;
+        if batch_only {
+            batch_recovery::run("spin", port, records)?;
+            running.check_running()?;
+            return Ok(None);
+        }
         let mut matrix = Matrix {
             adapter: "spin",
             endpoint: "/p5",
@@ -905,10 +921,11 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         let baseline = (matrix.exchanges, matrix.dispatches);
         let policy = spin_policy(port, &origins, matrix.records)?;
         normalization::run(port, &origins, matrix.records)?;
+        batch_recovery::run("spin", port, matrix.records)?;
         running.check_running()?;
-        Ok((baseline, policy))
+        Ok(Some((baseline, policy)))
     })();
-    let ((exchanges, dispatches), (policy_cases, policy_receipts)) = finish_wire(
+    let result = finish_wire(
         "spin",
         &mut process,
         Some(origins),
@@ -916,6 +933,9 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         records,
         outcome,
     )?;
+    let Some(((exchanges, dispatches), (policy_cases, policy_receipts))) = result else {
+        return Ok(());
+    };
     records.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":exchanges,"origin_requests":dispatches,
         "bodyless_controls":4,"upload_controls":1,"scope_controls":1,"handoff_controls":1,"qualification":false}))?;
     records.push(
@@ -927,13 +947,26 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     Ok(())
 }
 
-fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Result<()> {
+fn progress_wire(
+    name: &'static str,
+    run: &Path,
+    records: &mut Records,
+    batch_only: bool,
+) -> Result<()> {
     let result = progress_suite(
         name,
-        "outbound-wire",
+        if batch_only {
+            "outbound-batch"
+        } else {
+            "outbound-wire"
+        },
         run,
         records,
         |port, origins, records| {
+            if batch_only {
+                batch_recovery::run(name, port, records)?;
+                return Ok(None);
+            }
             let mut matrix = Matrix {
                 adapter: name,
                 endpoint: "/progress/redirect",
@@ -944,10 +977,11 @@ fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Resul
                 dispatches: 0,
             };
             matrix.run()?;
-            Ok((matrix.exchanges, matrix.dispatches))
+            batch_recovery::run(name, port, matrix.records)?;
+            Ok(Some((matrix.exchanges, matrix.dispatches)))
         },
     )?;
-    if let Some((exchanges, dispatches)) = result {
+    if let Some(Some((exchanges, dispatches))) = result {
         records.push(
             json!({"event":format!("{name}-wire-inventory"),"status":"pass",
             "exchanges":exchanges,"origin_requests":dispatches,"qualification":false}),
@@ -1268,6 +1302,7 @@ mod tests {
         values.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         values.push(json!({"event":"spin-policy-inventory","status":"pass","exchanges":26,"origin_requests":26,"qualification":false}));
         values.extend(normalization::tests::artifact(first));
+        values.extend(batch_recovery::tests::artifact("spin"));
         values
     }
 

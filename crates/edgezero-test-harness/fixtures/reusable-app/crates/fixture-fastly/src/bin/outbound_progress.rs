@@ -17,6 +17,11 @@ impl ProbeRuntime for Runtime {
     fn adapter(&self) -> &'static str {
         "fastly"
     }
+    fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+        Ok(Arc::new(
+            edgezero_adapter_fastly::outbound::FastlyOutboundClient::default(),
+        ))
+    }
     fn perform(&self, target: String) -> Job {
         Box::pin(async move { Runtime.start(target)?.await })
     }

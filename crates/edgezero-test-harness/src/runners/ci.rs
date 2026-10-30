@@ -16,7 +16,7 @@ fn read_artifact(path: &Path) -> Result<String> {
     Ok(text)
 }
 
-fn read_events(path: &Path) -> Result<Vec<Value>> {
+pub(super) fn read_events(path: &Path) -> Result<Vec<Value>> {
     let text = read_artifact(path)?;
     let events = text
         .lines()

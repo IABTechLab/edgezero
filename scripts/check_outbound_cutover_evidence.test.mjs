@@ -218,6 +218,89 @@ function release(manifest, record, input = source) {
   });
 }
 
+test("a runtime proof receives no credit without its same-candidate companion", () => {
+  const manifest = inventory();
+  manifest.cases[0].companion_case = `${manifest.cases[1].case_id}@workerd`;
+  const options = {
+    candidateSha: sha,
+    source,
+    reviewedLegSetSha256: fixtureLegPolicy(source),
+  };
+  const valid = evidence(manifest);
+  assert.equal(checker.inspectRelease(manifest, valid, options).passed, 2);
+  for (const change of [
+    (record) => {
+      record.results.pop();
+    },
+    (record) => {
+      record.results[1].status = "failed";
+    },
+    (record) => {
+      record.results[1].candidate_sha = "f".repeat(40);
+    },
+    (record) => {
+      record.results[1].assertions[0].passed = false;
+    },
+  ]) {
+    const record = clone(valid);
+    change(record);
+    const report = checker.inspectRelease(manifest, record, options);
+    assert.equal(report.passed, 0);
+    assert.ok(
+      report.findings.some(
+        (finding) =>
+          finding.scope === `${manifest.cases[0].case_id}@axum` &&
+          finding.rule === "companion",
+      ),
+    );
+  }
+});
+
+test("companion bindings reject missing, self, deferred and chained proof references", () => {
+  const valid = inventory();
+  valid.cases[0].companion_case = `${valid.cases[1].case_id}@workerd`;
+  validateManifest(valid, source);
+  for (const mutate of [
+    (manifest) => {
+      manifest.cases[0].companion_case = "missing@unit/core";
+    },
+    (manifest) => {
+      manifest.cases[0].companion_case = `${manifest.cases[0].case_id}@axum`;
+    },
+    (manifest) => {
+      manifest.cases[1].companion_case = `${manifest.cases[0].case_id}@axum`;
+    },
+    (manifest) => {
+      manifest.cases[1].implementation = "planned";
+    },
+  ]) {
+    const manifest = clone(valid);
+    mutate(manifest);
+    assert.throws(() => validateManifest(manifest, source));
+  }
+});
+
+test("corrupted companion artifact invalidates otherwise valid runtime credit", (t) => {
+  const { manifest, input, options, artifactsRoot } = assemblyFixture(t);
+  manifest.cases[0].companion_case = `${manifest.cases[1].case_id}@workerd`;
+  const record = checker.assembleRecord(manifest, input, options);
+  record.stage = "frozen-candidate";
+  assert.equal(checker.inspectRelease(manifest, record, options).passed, 2);
+  writeFileSync(
+    join(artifactsRoot, record.results[1].artifact_path),
+    "corrupted companion",
+  );
+  const report = checker.inspectRelease(manifest, record, options);
+  assert.equal(report.passed, 0);
+  assert.ok(
+    report.findings.some(
+      (finding) =>
+        finding.scope === `${manifest.cases[0].case_id}@axum` &&
+        finding.rule === "companion",
+    ),
+  );
+});
+
 test("manifest validation accepts pending work, not qualification", () => {
   const manifest = inventory();
   manifest.cases.forEach((c) => {
@@ -663,7 +746,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 443,
+    planned: 439,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -827,7 +910,7 @@ test("redirect core criteria bind every required test before one module executio
   );
 });
 
-test("core batch and marker bindings guard exact tests without promoting adapter legs", () => {
+test("batch bindings require exact runtime and core identity proofs", () => {
   const manifest = JSON.parse(
     readFileSync(
       new URL(
@@ -915,8 +998,60 @@ test("core batch and marker bindings guard exact tests without promoting adapter
     assert.ok(source.includes(`fn ${name.split("::").at(-1)}()`), name);
   }
   for (const row of rows.filter((entry) => entry !== core)) {
-    assert.equal(row.implementation, "planned", row.environment);
+    const adapter = {
+      axum: "axum",
+      viceroy: "fastly",
+      workerd: "cloudflare",
+      spin: "spin",
+    }[row.environment];
+    assert.equal(row.implementation, "ready", row.environment);
+    assert.equal(row.companion_case, "EZ-6/acceptance/22@unit/core");
+    assert.equal(row.sentinel, `ez_6_acceptance_22_${adapter}_runtime`);
+    assert.equal(
+      row.command,
+      adapter === "cloudflare"
+        ? "scripts/test_integration.sh --adapter cloudflare --suite outbound-batch --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/batch/workerd"
+        : `scripts/test_integration.sh --adapter ${adapter} --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/${adapter}`,
+    );
+    assert.equal(
+      row.artifact_path,
+      adapter === "cloudflare"
+        ? "outbound/batch/workerd/events.jsonl"
+        : `outbound/redirect/${adapter}/wire/events.jsonl`,
+    );
+    for (const companion of [undefined, "EZ-6/acceptance/13@unit/core"]) {
+      const changed = clone(manifest);
+      const target = changed.cases.find(
+        (entry) =>
+          entry.case_id === row.case_id &&
+          entry.environment === row.environment,
+      );
+      target.companion_case = companion;
+      const spec = readFileSync(
+        new URL(`../${manifest.source}`, import.meta.url),
+        "utf8",
+      );
+      assert.throws(
+        () => validateManifest(changed, spec),
+        /private identity companion required/,
+      );
+    }
   }
+  const spec = readFileSync(
+    new URL(`../${manifest.source}`, import.meta.url),
+    "utf8",
+  );
+  const missing = clone(manifest);
+  missing.cases = missing.cases.filter(
+    (entry) =>
+      !(
+        entry.case_id === core.case_id && entry.environment === core.environment
+      ),
+  );
+  assert.throws(
+    () => validateManifest(missing, spec),
+    /reviewed.*leg|companion/,
+  );
   const workflow = readFileSync(
     new URL("../.github/workflows/test.yml", import.meta.url),
     "utf8",
@@ -1028,7 +1163,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /443 other legs remain planned/);
+  assert.match(manifest.status, /439 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1250,15 +1385,17 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 68);
+  assert.equal(ready.length, 72);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    443,
+    439,
   );
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
+        (c.case_id === "EZ-6/acceptance/22" &&
+          ["axum", "viceroy", "workerd", "spin"].includes(c.environment)) ||
         (c.environment === "unit/core" &&
           [
             "EZ-1/acceptance/07",

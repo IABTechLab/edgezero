@@ -12,6 +12,39 @@
 
 ## Status and Authority
 
+### Mixed Batch Recovery Acceptance (2026-10-30)
+
+EZ-6 acceptance 22 now binds all four native runtime legs to six shared controlled-origin cases:
+mixed nonblocking check/next/collect and fresh collection, each with completion, cutoff and an
+exact typed progress failure. Equal-sized foreign batches and missing receipts reject without
+losing either input's original results or elapsed values. Keep private duplicate/conflict forgery
+in the five existing core tests; each runtime leg requires their same-candidate companion proof.
+The release checker withholds runtime credit for missing, failed or corrupt companion evidence.
+Persisted runtime readback requires all six cases, 32 origin requests and unchanged owned outcomes.
+
+Axum, Fastly and Spin retain one CI wire execution; the focused `outbound-batch` selection shares
+the same runtime/fixture/matrix and provides Cloudflare's explicit local binding. It creates no
+CI job, executor or transport. The modern Cloudflare fixture removes a redundant weak-reference
+flag rejected by workerd; older demo/template dates keep explicit enablement. Full Cloudflare
+redirect execution still aborts workerd on malformed gzip and remains an independent open failure.
+Spin's initial startup-identity failure and subsequent unchanged-code isolated pass are retained.
+
+The inventory has 72 ready and 439 planned legs. All 255 criteria/511 identities, expected text,
+digests, applicability, optional decisions, production APIs, SDK/runtime pins and hosted gates
+remain unchanged. These working-tree runtime checks above `a0fd6f77` are not frozen-candidate
+qualification; remaining exact-candidate bindings, retained timing failures, hosted/consumer
+evidence and fresh approval still block closure.
+
+Checkpoint verification: all five root gates, 2,623 workspace tests (32 binaries, one existing
+ignored), 377 controller tests (two existing ignored), 56 qualification-enabled shared-fixture
+tests and 194 tooling tests pass. Strict controller/shared-fixture and all four guest target
+Clippy checks pass. Consolidated Axum, Fastly and Spin CI suites and focused native workerd
+batch/readback pass. The local Fastly run uses the tracked readiness repair without runtime
+promotion. Read-only identity/evidence and controller/runtime reviewers found and verified fixes
+for equal-sized foreign probes, exact restoration cardinality, mandatory companion corruption
+checks and failure-record rejection. Select one shared runtime matrix plus the existing core
+private-boundary proof; do not expose mutable receipt identity or repeat core per adapter.
+
 ### Spin Normalization Acceptance (2026-10-30)
 
 EZ-5 acceptance 11's `unit/spin` leg now binds the existing shared CI invocation. Its two

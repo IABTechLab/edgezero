@@ -291,8 +291,8 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
     }
-    if args.suite == "outbound-wire" {
-        return wire::run("fastly", run, records);
+    if matches!(args.suite.as_str(), "outbound-wire" | "outbound-batch") {
+        return wire::run("fastly", run, records, args.suite == "outbound-batch");
     }
     if args.suite == "response-framing" {
         return framing::run("fastly", run, records);
@@ -1220,8 +1220,8 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
     if args.suite == "outbound-lifetimes" {
         return lifetimes::run(name, run, records);
     }
-    if args.suite == "outbound-wire" {
-        return wire::run(name, run, records);
+    if matches!(args.suite.as_str(), "outbound-wire" | "outbound-batch") {
+        return wire::run(name, run, records, args.suite == "outbound-batch");
     }
     if args.suite == "synthesized-headers" {
         return response_headers::run(name, run, records);
@@ -2234,6 +2234,12 @@ mod tests {
         assert!(!config.contains("[build]") && !config.contains("worker-build"));
         assert!(config.contains(&format!("main = {staged:?}")));
         assert!(config.contains("binding = \"fixture_kv\""));
+        let document: toml::Value = toml::from_str(&config).unwrap();
+        assert_eq!(document["compatibility_date"].as_str(), Some("2026-04-22"));
+        assert_eq!(
+            document["compatibility_flags"].as_array().unwrap(),
+            &[toml::Value::String("enable_request_signal".to_owned())]
+        );
     }
     #[test]
     fn builds_share_a_fixed_target_directory() {

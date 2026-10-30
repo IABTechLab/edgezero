@@ -128,8 +128,13 @@ matrices. Spin combines its adapter-visible shared-head boundary with SDK dispos
 Axum EZ-1 criteria 09/10/11/12/14 bind actual ingress through Send, Begin, Follow and batches:
 exact POST bytes and framing, bodyless OPTIONS/DELETE, dispatch before collection, one streamed
 inbound settlement across redirects, cached-empty batching and unread unsupported-option refusal.
-There are 68 ready legs and 443 planned. EZ-6 criterion 22's four adapter legs and EZ-23 criterion 13 stay planned
-for their own runtime and consumer-owned gaps. G1/Q3 must still reconcile the other bindings.
+There are 72 ready legs and 439 planned. EZ-6 criterion 22's four adapter legs require both
+the six-case native batch-recovery matrix and `EZ-6/acceptance/22@unit/core` as a same-candidate
+companion. Core retains the five private identity/duplicate/conflict tests; no receipt constructor
+or identity mutator is added for testing. The release checker rejects missing, failed,
+wrong-candidate or corrupted companion evidence, as well as deleted/substituted bindings.
+The runtime marker ends in `_runtime` and is not a standalone whole-criterion proof.
+EZ-23 criterion 13 remains planned for consumer-owned gaps. G1/Q3 must reconcile other bindings.
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
 
@@ -142,6 +147,26 @@ scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/a
 The guard selects the exact declared command as well as the environment. This keeps Rust test
 names separate from wire-report markers sharing an environment. A missing command/group match
 fails before execution; no additional CI test-name list is maintained.
+
+### Mixed Batch Recovery
+
+`--suite outbound-batch` selects the batch portion of the same native wire runner. It requires
+one explicit adapter and runs six cases: mixed check/next/collect and fresh collection, each
+with Completed, Cutoff and exact typed progress failure. Three gated native HTTP requests per
+case preserve the first two original receipts and elapsed values. Failed insert/merge attempts
+restore the owned outcomes from both equal-sized batches. Foreign probes fail preflight, so
+the bounded origin sees exactly 32 requests, independently of the existing redirect inventory.
+Successful evidence has one `batch-recovery-inventory` and six `batch-recovery-case` records;
+readback rejects omissions, duplication, altered states/bytes/observations and any failure record.
+
+Axum, Fastly and Spin run it within their existing CI wire phase. Cloudflare's focused command
+is recorded in the inventory and requires the local workerd, Wrangler and matching guest build
+tools described below. Its modern fixture date uses default weak references; older scaffold
+dates retain explicit `enable_weak_ref`. No runtime pin or provider support claim changes.
+The 2026-10-30 full Cloudflare redirect run still aborts local workerd on a malformed-gzip head
+before the batch matrix; its independent failure is retained and a batch pass gives no redirect
+credit. The first Spin rerun failed startup identity checking; an isolated unchanged-code rerun
+passed. Neither failed attempt is converted into passing or hosted qualification evidence.
 
 The core legs discover all 80 bound primary/additional sentinels before running one outbound suite:
 

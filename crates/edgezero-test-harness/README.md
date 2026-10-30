@@ -42,6 +42,19 @@ existing 68 redirect exchanges and 26 independent-cap cases remain separate inve
 CI invocation checks every required proof in its owning phase; this adds no header-fidelity or
 hosted qualification claim.
 
+Mixed batch recovery runs six shared scenarios on every adapter: check/next followed by
+collection, or fresh collection, each ending in completion, cutoff or an injected typed
+progress failure. A separate bounded origin supplies 32 correlated requests; the original
+redirect, cap and normalization inventories stay unchanged. The controller reopens persisted
+evidence before reporting a runtime pass. Criterion 22 also requires the same-candidate core
+identity tests for private duplicate/conflicting receipt cases, once rather than per adapter.
+Missing or corrupt companion evidence grants no runtime acceptance credit.
+
+Axum, Fastly and Spin execute this matrix in their existing CI wire phase. Use
+`--suite outbound-batch` for the same focused matrix on any one adapter. Cloudflare's ready
+batch leg uses that focused local command; this does not activate its separate redirect suite
+in CI or qualify hosted behavior. There are 72 ready and 439 planned acceptance legs.
+
 Use `--suite outbound-wire`, `--suite ingress-fidelity` or the other focused suites for
 iteration. See [suite assertions and runtime setup](SUITES.md) for their exact contracts,
 provider-specific tools, retained negative observations and hosted qualification limits.

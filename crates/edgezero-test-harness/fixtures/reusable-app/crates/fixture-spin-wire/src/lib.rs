@@ -70,7 +70,8 @@ mod sdk {
                 return empty_response();
             }
             let method = match path.as_str() {
-                "/get" | "/get-settled" | "/p5" | "/policy" | "/normalization" => Method::GET,
+                "/get" | "/get-settled" | "/p5" | "/policy" | "/normalization"
+                | "/batch-recovery" => Method::GET,
                 "/head" | "/head-settled" => Method::HEAD,
                 "/post" => Method::POST,
                 _ => return Err(ErrorCode::HttpRequestUriInvalid),
@@ -96,6 +97,23 @@ mod sdk {
             }
             if path == "/normalization" {
                 return normalization_exchange(uri, &headers).await;
+            }
+            if path == "/batch-recovery" {
+                let cases = headers.get("x-batch-case");
+                let case = cases
+                    .first()
+                    .and_then(|value| from_utf8(value).ok())
+                    .ok_or(ErrorCode::HttpRequestUriInvalid)?;
+                let report = fixture_core::batch_recovery::run(
+                    Arc::new(SpinOutboundClient::new()),
+                    uri,
+                    case,
+                )
+                .await
+                .map_err(|_error| {
+                    ErrorCode::InternalError(Some("batch recovery proof failed".to_owned()))
+                })?;
+                return report.to_string().into_response();
             }
             let mut outgoing = OutboundRequest::new(method, uri)
                 .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?;

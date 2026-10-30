@@ -1,4 +1,5 @@
 pub mod assembly;
+pub mod batch_recovery;
 pub mod launch;
 #[cfg(test)]
 mod outbound_test_support;

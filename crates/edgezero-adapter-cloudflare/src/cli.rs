@@ -1260,10 +1260,16 @@ mod tests {
                 .get("compatibility_flags")
                 .and_then(toml_edit::Item::as_array)
                 .expect("explicit compatibility flags");
-            assert!(
+            let date = document
+                .get("compatibility_date")
+                .and_then(toml_edit::Item::as_str)
+                .expect("explicit compatibility date");
+            assert_eq!(
                 flags
                     .iter()
-                    .any(|value| value.as_str() == Some("enable_weak_ref"))
+                    .any(|value| value.as_str() == Some("enable_weak_ref")),
+                date < "2025-05-05",
+                "weak references are enabled by default from 2025-05-05"
             );
         }
     }

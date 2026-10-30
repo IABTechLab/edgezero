@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; 443 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; 439 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -9207,11 +9207,12 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-22-axum",
-      "sentinel": "ez_6_acceptance_22_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/22",
+      "sentinel": "ez_6_acceptance_22_axum_runtime",
+      "companion_case": "EZ-6/acceptance/22@unit/core",
+      "command": "scripts/test_integration.sh --adapter axum --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/axum",
       "expected": "Mixed observation and collection. Unit and every adapter. Consume slot 0 with a nonblocking check, slot 1 with `next`, then collect a three-slot batch. The first two positions are `AlreadyDelivered`, never unresolved; the third is `Resolved` on success or `Unresolved` at cutoff. A driver failure after the first two deliveries preserves those states and its exact error. Merging into the matching accumulator restores all owned outcomes without replay or cloning; missing prior results, a foreign batch, duplicate insertion, and a conflicting slot are rejected without losing either input's results. Fresh-batch collection has no `AlreadyDelivered`, and `Completed` never contains `Unresolved`.",
-      "artifact_path": "outbound/EZ-6/acceptance/22/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9258,11 +9259,12 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-22-viceroy",
-      "sentinel": "ez_6_acceptance_22_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/22",
+      "sentinel": "ez_6_acceptance_22_fastly_runtime",
+      "companion_case": "EZ-6/acceptance/22@unit/core",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "Mixed observation and collection. Unit and every adapter. Consume slot 0 with a nonblocking check, slot 1 with `next`, then collect a three-slot batch. The first two positions are `AlreadyDelivered`, never unresolved; the third is `Resolved` on success or `Unresolved` at cutoff. A driver failure after the first two deliveries preserves those states and its exact error. Merging into the matching accumulator restores all owned outcomes without replay or cloning; missing prior results, a foreign batch, duplicate insertion, and a conflicting slot are rejected without losing either input's results. Fresh-batch collection has no `AlreadyDelivered`, and `Completed` never contains `Unresolved`.",
-      "artifact_path": "outbound/EZ-6/acceptance/22/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9309,11 +9311,12 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-22-workerd",
-      "sentinel": "ez_6_acceptance_22_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/22",
+      "sentinel": "ez_6_acceptance_22_cloudflare_runtime",
+      "companion_case": "EZ-6/acceptance/22@unit/core",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-batch --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/batch/workerd",
       "expected": "Mixed observation and collection. Unit and every adapter. Consume slot 0 with a nonblocking check, slot 1 with `next`, then collect a three-slot batch. The first two positions are `AlreadyDelivered`, never unresolved; the third is `Resolved` on success or `Unresolved` at cutoff. A driver failure after the first two deliveries preserves those states and its exact error. Merging into the matching accumulator restores all owned outcomes without replay or cloning; missing prior results, a foreign batch, duplicate insertion, and a conflicting slot are rejected without losing either input's results. Fresh-batch collection has no `AlreadyDelivered`, and `Completed` never contains `Unresolved`.",
-      "artifact_path": "outbound/EZ-6/acceptance/22/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/batch/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9360,11 +9363,12 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-22-spin",
-      "sentinel": "ez_6_acceptance_22_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/22",
+      "sentinel": "ez_6_acceptance_22_spin_runtime",
+      "companion_case": "EZ-6/acceptance/22@unit/core",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Mixed observation and collection. Unit and every adapter. Consume slot 0 with a nonblocking check, slot 1 with `next`, then collect a three-slot batch. The first two positions are `AlreadyDelivered`, never unresolved; the third is `Resolved` on success or `Unresolved` at cutoff. A driver failure after the first two deliveries preserves those states and its exact error. Merging into the matching accumulator restores all owned outcomes without replay or cloning; missing prior results, a foreign batch, duplicate insertion, and a conflicting slot are rejected without losing either input's results. Fresh-batch collection has no `AlreadyDelivered`, and `Completed` never contains `Unresolved`.",
-      "artifact_path": "outbound/EZ-6/acceptance/22/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {

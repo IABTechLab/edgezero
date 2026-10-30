@@ -17,6 +17,11 @@ impl ProbeRuntime for Runtime {
     fn adapter(&self) -> &'static str {
         "spin"
     }
+    fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+        Ok(Arc::new(
+            edgezero_adapter_spin::outbound::SpinOutboundClient::new(),
+        ))
+    }
     fn perform(&self, target: String) -> Job {
         Box::pin(async move {
             let response = spin_sdk::http::get(&target)

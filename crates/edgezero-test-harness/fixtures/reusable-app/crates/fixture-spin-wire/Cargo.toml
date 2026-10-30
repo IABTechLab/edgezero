@@ -8,6 +8,7 @@ publish.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+fixture-core.workspace = true
 fixture-spin-support.workspace = true
 edgezero-core = { workspace = true, features = ["test-utils"] }
 edgezero-adapter-spin = { workspace = true, features = ["test-utils"] }

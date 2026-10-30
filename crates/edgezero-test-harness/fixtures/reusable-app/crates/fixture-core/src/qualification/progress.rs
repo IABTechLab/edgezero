@@ -5,7 +5,7 @@ use edgezero_core::app::{App, Hooks};
 use edgezero_core::context::RequestContext;
 use edgezero_core::http::{Method, Response, Uri, response_builder};
 use edgezero_core::outbound::{
-    OutboundCachePolicy, OutboundProxyMarker, OutboundRequest, ResponseDecoding,
+    OutboundCachePolicy, OutboundHttpClient, OutboundProxyMarker, OutboundRequest, ResponseDecoding,
 };
 use edgezero_core::response_egress::{ResponseEgressObserver, ResponseEgressReport};
 use edgezero_core::router::RouterService;
@@ -27,6 +27,7 @@ pub type Job = LocalBoxFuture<'static, Result<u64, EdgeError>>;
 
 pub trait ProbeRuntime: Send + Sync {
     fn adapter(&self) -> &'static str;
+    fn outbound_client(&self) -> Result<Arc<dyn OutboundHttpClient>, EdgeError>;
     fn perform(&self, target: String) -> Job;
     fn start(&self, target: String) -> Result<Job, EdgeError>;
     fn pause(&self, duration: Duration) -> LocalBoxFuture<'static, ()>;
@@ -95,6 +96,29 @@ pub(super) fn dispatch_returned(ctx: &RequestContext) -> Option<Arc<DispatchRetu
         .and_then(|state| state.dispatch_returned.clone())
 }
 
+#[action]
+async fn batch_recovery(ctx: RequestContext) -> Result<Response, EdgeError> {
+    let state = ctx
+        .extensions()
+        .get::<Arc<State>>()
+        .ok_or_else(probe_failure)?;
+    let runtime = Arc::clone(&state.runtime);
+    let native = runtime.outbound_client()?;
+    let case = ctx.path_params().get("case").ok_or_else(probe_failure)?;
+    let base: Uri = ctx
+        .headers()
+        .get("x-fixture-backend")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(probe_failure)?
+        .parse()
+        .map_err(|_| probe_failure())?;
+    let report = crate::batch_recovery::run(native, base, case).await?;
+    response_builder()
+        .header("content-type", "application/json")
+        .body(Body::from(report.to_string()))
+        .map_err(EdgeError::internal)
+}
+
 struct HandlerReturned(Arc<AtomicBool>);
 
 struct FramingObserver;
@@ -149,6 +173,7 @@ pub fn router(
             super::response_headers::probe,
         )
         .get("/progress/redirect", super::redirect::probe)
+        .get("/progress/batch-recovery/{case}", batch_recovery)
         .get("/progress/lifetimes/{case}", super::lifetimes::probe)
         .get("/progress/{case}", progress)
         .post("/progress/{case}", progress)
@@ -617,6 +642,9 @@ mod tests {
         fn adapter(&self) -> &'static str {
             "test"
         }
+        fn outbound_client(&self) -> Result<Arc<dyn OutboundHttpClient>, EdgeError> {
+            Err(probe_failure())
+        }
         fn perform(&self, target: String) -> Job {
             let events = Arc::clone(&self.0);
             Box::pin(async move {
@@ -1066,6 +1094,9 @@ mod tests {
         impl ProbeRuntime for Runtime {
             fn adapter(&self) -> &'static str {
                 "test"
+            }
+            fn outbound_client(&self) -> Result<Arc<dyn OutboundHttpClient>, EdgeError> {
+                Err(probe_failure())
             }
             fn perform(&self, _target: String) -> Job {
                 Box::pin(async { Ok(0) })

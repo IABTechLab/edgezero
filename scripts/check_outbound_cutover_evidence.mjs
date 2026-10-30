@@ -235,6 +235,26 @@ export function validateManifest(
             c.additional_sentinels.length + 1,
         `${id}: invalid additional_sentinels`,
       );
+    if (c.companion_case !== undefined) {
+      const companion = cases.get(c.companion_case);
+      requireFact(
+        nonempty(c.companion_case) &&
+          c.companion_case !== id &&
+          companion?.implementation === "ready" &&
+          ["blocking", "gate"].includes(companion?.applicability) &&
+          companion.companion_case === undefined,
+        `${id}: companion must be a distinct ready mandatory proof without another companion`,
+      );
+    }
+    if (
+      c.case_id === "EZ-6/acceptance/22" &&
+      c.implementation === "ready" &&
+      ["axum", "viceroy", "workerd", "spin"].includes(c.environment)
+    )
+      requireFact(
+        c.companion_case === "EZ-6/acceptance/22@unit/core",
+        `${id}: private identity companion required`,
+      );
     requireFact(
       !isAbsolute(c.artifact_path) &&
         !c.artifact_path.split(/[\\/]/).includes(".."),
@@ -724,6 +744,17 @@ export function inspectRelease(
         ),
       );
     }
+  }
+  const failedProofs = new Set(findings.map((finding) => finding.scope));
+  for (const [id, c] of cases) {
+    if (c.companion_case !== undefined && passed.includes(id))
+      check(id, "companion", () =>
+        requireFact(
+          passed.includes(c.companion_case) &&
+            !failedProofs.has(c.companion_case),
+          `${id}: same-candidate companion did not pass: ${c.companion_case}`,
+        ),
+      );
   }
   const invalid = new Set(findings.map((finding) => finding.scope));
   const accepted = (ids) =>

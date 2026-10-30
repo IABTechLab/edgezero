@@ -935,6 +935,9 @@ mod tests {
         fn adapter(&self) -> &'static str {
             "unit"
         }
+        fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+            Err(invalid())
+        }
         fn perform(&self, _: String) -> super::super::progress::Job {
             Box::pin(async { Err(invalid()) })
         }
