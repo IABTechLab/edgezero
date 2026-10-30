@@ -52,7 +52,7 @@ The requester approved this layout and implementation in the conversation on 202
 ## Verification Results (2026-10-30)
 
 - All five root gates passed: 2,621 tests across 32 binaries, zero failures and one existing ignored generated-workspace test.
-- Controller tests: 370 passed, zero failures and two existing ignored cases. Tooling/evidence/legacy regressions: 169 passed.
+- Controller tests: 370 passed, zero failures and two existing ignored cases. Tooling/evidence/legacy regressions: 171 passed.
 - The exact `--adapter NAME --suite ci` entrypoint completed with exit zero for Axum, Fastly, Cloudflare and Spin. Fastly retained the explicitly unqualified client-progress exit inside its validated phase. Spin separately executed all eight migrated shared wrappers.
 - Strict Clippy passed for the controller, all three WASM adapter targets, the extracted Spin support/CLI/HTTP guests and the Spin progress fixture. Documentation lint, formatting and site build, dependency audits, actionlint, shellcheck and legacy guards passed.
 - Structured comparison retained all 511 acceptance identities and every non-execution field. Only 214 commands and four artifact paths changed. Production, controller and ingress Cargo locks and the npm lock are unchanged. The lifecycle lock adds only the local support package and three fixture dependency edges; external dependency records are unchanged.
@@ -65,6 +65,10 @@ Runtime results are local regression evidence, not exact-candidate or hosted qua
 Initial attempts retained their failures for a globally mismatched Wasmtime, an old wasm-bindgen runner and macOS LLVM loader resolution. Successful runs selected the existing pinned Wasmtime 48.0.2/bindgen 0.2.128 binaries and supplied the existing LLVM library through ignored build-directory links, without changing installed toolchains or source pins.
 
 An experimental full Spin library execution could not link provider KV imports under plain Wasmtime. That command was not part of the previous runnable baseline and is not counted as a pass. The original SDK contract/resource targets remain executable; six private library clock tests retain compile/strict-Clippy coverage. All eight relocated shared wrappers now execute in the fixture support package. This limitation is also explicit in the integration guide.
+
+### CodeQL Follow-Up
+
+The first GitHub scan flagged exponential backtracking in the new test-only argument-array inspection regex. Replace it with a linear split and JSON parsing of the supported string-array subset; unsupported Rust expressions fail the binding check. Two additional regressions cover exact values/escaping/trailing commas and a 100,000-repetition malformed input. All 171 tooling tests and the Cargo evidence-assembly regression pass. No scanner suppression, production change or acceptance-policy change is introduced.
 
 ## Verification Commands
 

@@ -39,6 +39,51 @@ const clone = (value) => structuredClone(value);
 const spinCiCommand =
   "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin";
 
+test("CI argument inspection preserves exact string values and trailing commas", () => {
+  assert.deepEqual(
+    rustStringArrays(
+      'guarded(["--inventory", "unit/axum", ], ["test", "--target", "wasm32-wasip2"])',
+    ),
+    [
+      ["--inventory", "unit/axum"],
+      ["test", "--target", "wasm32-wasip2"],
+    ],
+  );
+  assert.deepEqual(rustStringArrays('["-- target", "escaped\\\"quote"]'), [
+    ["-- target", 'escaped"quote'],
+  ]);
+  assert.deepEqual(rustStringArrays('[dynamic, "test"]'), []);
+});
+
+test("CI argument inspection rejects a large unterminated array without backtracking", () => {
+  assert.deepEqual(rustStringArrays('[""' + ' ""'.repeat(100_000)), []);
+  assert.deepEqual(rustStringArrays('["not-closed"'), []);
+});
+
+function rustStringArrays(source) {
+  // Argument arrays use JSON-compatible strings. Unsupported Rust forms fail closed.
+  const fragments = source.split("]");
+  fragments.pop();
+  const arrays = [];
+  for (const fragment of fragments) {
+    const start = fragment.lastIndexOf("[");
+    if (start < 0) continue;
+    let body = fragment.slice(start).trimEnd();
+    if (body.endsWith(",")) body = body.slice(0, -1);
+    try {
+      const values = JSON.parse(body + "]");
+      if (
+        Array.isArray(values) &&
+        values.every((value) => typeof value === "string")
+      )
+        arrays.push(values);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  return arrays;
+}
+
 function ciOwnsCommand(workflow, command) {
   if (workflow.includes(command)) return true;
   const [prefix, argumentsText, extra] = command.split(" cargo ");
@@ -70,9 +115,7 @@ function ciOwnsCommand(workflow, command) {
     ),
     "utf8",
   );
-  const arrays = [
-    ...runner.matchAll(/\[(?:\s*"(?:[^"\\]|\\.)*"\s*,?)*\s*\]/g),
-  ].map(([value]) => JSON.parse(value.replace(/,\s*\]/g, "]")));
+  const arrays = rustStringArrays(runner);
   return [options, argumentsList].every((expected) =>
     arrays.some(
       (actual) => JSON.stringify(actual) === JSON.stringify(expected),
