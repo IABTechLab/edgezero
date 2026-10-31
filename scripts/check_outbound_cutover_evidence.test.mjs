@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parse, stringify } from "yaml";
 import * as checker from "./check_outbound_cutover_evidence.mjs";
 import {
   acceptanceCriteria,
@@ -51,6 +52,15 @@ const forwardingRuntimeKeys = new Set([
   "EZ-1/acceptance/08@workerd",
   "EZ-1/acceptance/08@spin/content-length-0",
   "EZ-1/acceptance/11@viceroy",
+]);
+const encodingRuntimeKeys = new Set([
+  ...["04", "05"].flatMap((criterion) =>
+    ["axum", "viceroy", "workerd", "spin"].map(
+      (environment) => `EZ-5/acceptance/${criterion}@${environment}`,
+    ),
+  ),
+  "EZ-5/acceptance/06@viceroy",
+  "EZ-5/acceptance/07@workerd",
 ]);
 
 test("CI argument inspection preserves exact string values and trailing commas", () => {
@@ -99,6 +109,36 @@ function rustStringArrays(source) {
 }
 
 function ciOwnsCommand(workflow, command) {
+  if (command.startsWith("scripts/test_integration.sh ")) {
+    const integration = command.match(
+      /^scripts\/test_integration\.sh --adapter (axum|cloudflare|fastly|spin) --suite ci --output (\S+)$/,
+    );
+    if (!integration) return false;
+    const [, adapter, output] = integration;
+    const directory =
+      "crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/";
+    if (output !== `${directory}${adapter}`) return false;
+    const selected = adapter === "axum" ? adapter : "${{ matrix.adapter }}";
+    const job = parse(workflow, { version: "1.2", uniqueKeys: true })?.jobs?.[
+      adapter === "axum" ? "host-tests" : "adapter-wasm-tests"
+    ];
+    const matrix = job?.strategy?.matrix;
+    const member =
+      adapter === "axum"
+        ? matrix?.suite?.includes(adapter)
+        : matrix?.include?.some((row) => row.adapter === adapter);
+    return Boolean(
+      member &&
+      job.if === undefined &&
+      job.steps?.some(
+        (step) =>
+          step.if ===
+            (adapter === "axum" ? "matrix.suite == 'axum'" : undefined) &&
+          step.run?.trim() ===
+            `run="$GITHUB_WORKSPACE/${directory}${selected}"\nCARGO_NET_OFFLINE=true ./scripts/test_integration.sh --adapter ${selected} --suite ci --output "$run"`,
+      ),
+    );
+  }
   if (workflow.includes(command)) return true;
   const [prefix, argumentsText, extra] = command.split(" cargo ");
   if (
@@ -136,6 +176,107 @@ function ciOwnsCommand(workflow, command) {
     ),
   );
 }
+test("integration CI ownership requires the paired canonical output and invocation", () => {
+  const directory =
+    "crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/";
+  for (const adapter of ["axum", "cloudflare", "fastly", "spin"]) {
+    const selected = adapter === "axum" ? adapter : "${{ matrix.adapter }}";
+    const run = `run="$GITHUB_WORKSPACE/${directory}${selected}"\nCARGO_NET_OFFLINE=true ./scripts/test_integration.sh --adapter ${selected} --suite ci --output "$run"`;
+    const job = {
+      strategy: {
+        matrix:
+          adapter === "axum" ? { suite: ["axum"] } : { include: [{ adapter }] },
+      },
+      steps: [
+        {
+          ...(adapter === "axum" ? { if: "matrix.suite == 'axum'" } : {}),
+          run,
+        },
+      ],
+    };
+    const workflow = stringify({
+      jobs: { [adapter === "axum" ? "host-tests" : "adapter-wasm-tests"]: job },
+    });
+    const command = `scripts/test_integration.sh --adapter ${adapter} --suite ci --output ${directory}${adapter}`;
+    assert.ok(ciOwnsCommand(workflow, command));
+    assert.equal(ciOwnsCommand(workflow, `${command}-wrong`), false);
+    assert.equal(
+      ciOwnsCommand(workflow.replace("--suite ci", "--suite smoke"), command),
+      false,
+    );
+    assert.equal(
+      ciOwnsCommand(workflow.replace(directory, "elsewhere/"), command),
+      false,
+    );
+    assert.equal(
+      ciOwnsCommand(`# ${command}-wrong\n${workflow}`, `${command}-wrong`),
+      false,
+    );
+    const missing = structuredClone(job);
+    missing.strategy.matrix =
+      adapter === "axum" ? { suite: [] } : { include: [] };
+    assert.equal(
+      ciOwnsCommand(
+        stringify({
+          jobs: {
+            [adapter === "axum" ? "host-tests" : "adapter-wasm-tests"]: missing,
+          },
+        }),
+        command,
+      ),
+      false,
+    );
+    for (const changed of [
+      command.replace(`--adapter ${adapter}`, "--adapter unknown"),
+      `${command} --extra`,
+      `${command} && true`,
+      command.replace(`${directory}${adapter}`, `${directory}wrong`),
+    ])
+      assert.equal(ciOwnsCommand(workflow, changed), false);
+    const separated = structuredClone(job);
+    separated.steps = [
+      { run: run.split("\n")[0] },
+      { run: run.split("\n")[1] },
+    ];
+    assert.equal(
+      ciOwnsCommand(
+        stringify({
+          jobs: {
+            [adapter === "axum" ? "host-tests" : "adapter-wasm-tests"]:
+              separated,
+          },
+        }),
+        command,
+      ),
+      false,
+    );
+    assert.equal(
+      ciOwnsCommand(
+        workflow.replace('--output "$run"', '--output "$other"'),
+        command,
+      ),
+      false,
+    );
+    for (const condition of [false, "false"]) {
+      for (const target of ["job", "step"]) {
+        const skipped = structuredClone(job);
+        (target === "job" ? skipped : skipped.steps[0]).if = condition;
+        assert.equal(
+          ciOwnsCommand(
+            stringify({
+              jobs: {
+                [adapter === "axum" ? "host-tests" : "adapter-wasm-tests"]:
+                  skipped,
+              },
+            }),
+            command,
+          ),
+          false,
+        );
+      }
+    }
+  }
+});
 function fixtureLegPolicy(input) {
   if (!input.startsWith("### ")) return undefined;
   return digest(
@@ -760,7 +901,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 403,
+    planned: 393,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -1342,7 +1483,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /403 other legs remain planned/);
+  assert.match(manifest.status, /393 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1562,6 +1703,60 @@ test("Axum pending-body timing binds both cases to the existing guarded phase", 
   assert.equal(row.approval, null);
 });
 
+test("encoding runtime acceptance binds only its ten complete local proofs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  assert.equal(encodingRuntimeKeys.size, 10);
+  for (const key of encodingRuntimeKeys) {
+    const row = manifest.cases.find(
+      (c) => `${c.case_id}@${c.environment}` === key,
+    );
+    const owner = manifest.cases.find(
+      (c) =>
+        c.case_id === "EZ-6/acceptance/22" && c.environment === row.environment,
+    );
+    assert.equal(row.implementation, "ready", key);
+    assert.equal(row.command, owner.command, key);
+    assert.equal(row.artifact_path, owner.artifact_path, key);
+    assert.equal(
+      row.sentinel,
+      `${row.case_id.toLowerCase().replaceAll(/[^a-z0-9]/g, "_")}_${row.environment}`,
+      key,
+    );
+    assert.equal(row.applicability, "blocking", key);
+    assert.equal(row.approval, null, key);
+    assert.equal(row.condition, null, key);
+    assert.ok(
+      checker
+        .readySentinels(
+          { ...manifest, cases: [row] },
+          row.environment,
+          row.command,
+        )
+        .includes(row.sentinel),
+    );
+    if (row.environment !== "workerd")
+      assert.ok(ciOwnsCommand(workflow, row.command), key);
+  }
+  for (const row of manifest.cases.filter(
+    (c) =>
+      c.case_id === "EZ-5/acceptance/08" ||
+      (c.case_id.startsWith("EZ-5/") && /hosted|consumer/.test(c.environment)),
+  ))
+    assert.equal(row.implementation, "planned");
+});
+
 test("real-ingress forwarding binds only its 22 owning runtime legs", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -1687,10 +1882,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 108);
+  assert.equal(ready.length, 118);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    403,
+    393,
   );
   assert.ok(
     ready.every(
@@ -1699,6 +1894,7 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
         (c.case_id === "EZ-1/acceptance/06" &&
           c.environment === "axum/http1-chunked") ||
         forwardingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
+        encodingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/22" &&

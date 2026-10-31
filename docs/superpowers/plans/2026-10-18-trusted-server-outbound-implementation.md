@@ -12,6 +12,63 @@
 
 ## Status and Authority
 
+### Encoding Runtime Acceptance (2026-10-30)
+
+EZ-5 criteria 04/05 now bind all four local runtimes, criterion 06 binds Viceroy and criterion
+07 binds workerd. Reuse the existing coding/relay handler and deterministic fixtures: one
+request builder and bounded reporter serve singles and real mixed batches. Spin enters that
+same action through canonical application dispatch with its installed native client, without
+inventing a second runtime or transport. Production APIs, demo/template behavior and decoder
+pins do not change. Historical 24 coding/24 relay controls and redirect 68/84 inventories remain.
+
+The new cohort has eight single requests and one two-slot batch on every adapter, plus two
+actual Cloudflare relay modes: 38 cases/42 origin requests. Choices, buffered/streamed modes,
+absent negotiation and exact `gzip, br` are checked against origin-observed fields. Token/slot
+echoes bind each representation to its request; Original preserves exact gzip bytes, length,
+strong ETag and Vary under a one-byte decoded cap and zero decoder allowance. Decode controls
+return plain bytes. Conditional representation-metadata changes remain unadopted.
+
+Each cohort owns the existing bounded origin recorder, retains failed/partial clients and
+receipts, joins cleanup and validates persisted records before printing sentinels. Parent
+validators require the complete cohort. Review added header-cardinality rejection, explicit
+cleanup-failure rejection, malformed/partial-data controls and a bounded fragmented trailing-byte
+check shared with forwarding. This is finite local framing evidence, not raw provider fidelity.
+
+The workerd relay records exact 37-byte gzip payloads and `Content-Encoding: gzip`; both modes
+also expose `Content-Length: 37` in the observed run. This does not promise universal Workers
+framing or promote hosted support. Spin's exact encoded bytes are run-specific host-raw evidence,
+not an independent observation inside the SDK boundary.
+
+The first full Fastly run stopped before wire tests on startup identity. Its staged guest
+embedded `a714723d16cb5b9c8f45a4c30414d6445427354b056167951a0f6f3abc98c2f6`, while
+launch expected `a1283c303aa4daf2fe1dd5ef6125a7fc62098ac0271a590e8bdea6844e68c081` after
+intervening crate-source edits. Preserve `/private/tmp/pr275-encoding-fastly-ci`; no failed
+group is relabelled as passing. A separate source-stable native wire run passes. Final full
+verification uses unchanged inputs, never an identity waiver or retry-based credit.
+
+Final verification passes all five root gates: 2,636 tests across 33 binaries, zero failures
+and one existing ignored test; strict Clippy, formatting, feature compilation and Spin WASM
+compilation pass. The isolated harness passes 397 tests with two existing ignored; the shared
+qualification fixture passes 59. All three guest WASM Clippy checks and 206 tooling tests pass,
+as do dependency-pin, documentation, inventory and legacy-API audits. CI ownership tests parse
+the existing workflow YAML and reject missing matrix members, skipped owners, commented commands
+and mismatched output paths without changing CI itself.
+
+Source-stable full Axum, Fastly and Spin CI runs pass at
+`/private/tmp/pr275-encoding-final-{axum,fastly,spin}-ci`; native workerd wire checks pass at
+`/private/tmp/pr275-encoding-final-cloudflare-wire`. Their persisted records contain all
+38 cases/42 origin requests with successful joined cleanup, plus unchanged 68/84 redirect
+inventories. The workerd relay length observation above is reverified in both final cases.
+Fastly's client-progress phase retains its expected failing-probe exit code as an asserted
+negative control, not a newly qualified scheduler or hosted lifetime guarantee.
+
+Exactly ten command/artifact/readiness bindings change: 118 ready/393 planned, still unqualified.
+All 255 criteria/511 identities, expected text/digests, applicability and approvals are unchanged.
+No new CI job, runtime selector, provider pin or qualification promotion is introduced. Consumer
+criterion 08, hosted evidence, other normalization/limit/lifetime acceptance and candidate freeze
+remain open. Two independent investigations selected fixture reuse over a parallel encoding path;
+separate code and evidence reviews drove the negative controls above.
+
 ### Axum Pending-Body Timing Acceptance (2026-10-30)
 
 The missing EZ-1 criterion 06 native TCP proof is implemented. Both fixed cases use the real
@@ -387,9 +444,10 @@ Keep three different status questions separate:
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
   provider-local forwarding, client-selection, policy, marker and observation checkpoints give
-  108 ready legs, with 403 still `planned`, including the subsequent strict Axum pending-body
-  proof. G1/Q3 binding work remains unfinished, not evidence that 403 features are absent. Only the explicitly bound
-  commands count as executable legs; unrelated checkpoint tests do not activate another leg.
+  118 ready legs, with 393 still `planned`, including the strict Axum pending-body proof and
+  ten local encoding proofs. G1/Q3 binding work remains unfinished, not evidence that 393 features
+  are absent. Only the explicitly bound commands count as executable legs; unrelated checkpoint
+  tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
   passing, exact-candidate evidence. The inventory check remains `qualified: false`.

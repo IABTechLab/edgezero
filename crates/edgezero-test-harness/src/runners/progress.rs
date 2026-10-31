@@ -82,7 +82,12 @@ fn check_groups(mut check: impl FnMut(&str) -> Result<()>) -> [(&'static str, Re
     ["coding", "marker", "relay", "progress-and-framing"].map(|group| (group, check(group)))
 }
 
-fn validate_relay_response(reply: &Value, coding: &str, status: u16, raw: bool) -> Result<()> {
+pub(super) fn validate_relay_response(
+    reply: &Value,
+    coding: &str,
+    status: u16,
+    raw: bool,
+) -> Result<()> {
     let fields = reply["headers"].as_array().ok_or("missing relay headers")?;
     let values = |name: &str| {
         fields

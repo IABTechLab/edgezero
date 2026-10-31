@@ -368,6 +368,26 @@ fn spawn_request(socket: TcpStream, port: u16, second: u16, shared: &Arc<Shared>
     shared.wake.notify_all();
 }
 
+fn no_trailing_bytes(reader: &mut BufReader<DeadlineSocket>) -> Result<()> {
+    reader.get_mut().deadline = reader
+        .get_ref()
+        .deadline
+        .min(Instant::now() + Duration::from_millis(50));
+    match reader.read(&mut [0]) {
+        Ok(0) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err("unframed forwarding bytes".into()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Result<()> {
     socket.set_nonblocking(false)?;
     socket.set_write_timeout(Some(IO_BUDGET))?;
@@ -384,6 +404,51 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
         "invalid wire request line",
     )?;
     let (method, target) = (parts[0], parts[1]);
+    if let Some(path) = target.strip_prefix("/coding/") {
+        let (coding, status) = path.split_once('/').ok_or("invalid coding target")?;
+        require(
+            matches!(coding, "gzip" | "deflate" | "br") && matches!(status, "200" | "206"),
+            "invalid coding fixture",
+        )?;
+        let fields = |field| {
+            head.fields
+                .iter()
+                .filter(|(name, _)| name == field)
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>()
+        };
+        let tokens = fields("x-request-token");
+        let [token] = tokens.as_slice() else {
+            return Err("missing or duplicate coding token".into());
+        };
+        let accept = fields("accept-encoding");
+        let slots = fields("x-coding-slot");
+        require(
+            method == "GET"
+                && !token.is_empty()
+                && token.len() <= 64
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && fields("transfer-encoding").is_empty()
+                && fields("content-length").len() <= 1
+                && fields("content-length").iter().all(|v| v == "0")
+                && slots.len() <= 1
+                && slots.iter().all(|slot| matches!(slot.as_str(), "0" | "1"))
+                && accept.len() <= 1
+                && accept.iter().all(|v| v.len() <= 128 && v.is_ascii()),
+            "invalid coding request or negotiation",
+        )?;
+        no_trailing_bytes(&mut reader)?;
+        shared.lock().wire.push_back(json!({"port":port,"method":method,"target":target,"token":token,"slot":fields("x-coding-slot"),
+            "accept_encoding":accept,"response_coding":coding,"response_status":status.parse::<u16>()?}));
+        shared.wake.notify_all();
+        let mut extra = vec![("x-coding-token", token.as_str())];
+        if let Some(slot) = slots.first() {
+            extra.push(("x-coding-slot", slot));
+        }
+        return super::coding_response(&mut socket, coding, status.parse()?, &extra);
+    }
     if let Some(tail) = target.strip_prefix("/forward/") {
         let (operation, token) = tail.split_once('/').ok_or("invalid forwarding target")?;
         require(
@@ -404,18 +469,7 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
         require(tokens == [token], "forwarding token changed")?;
         let (body, encoded) =
             capture_wire_body(&mut reader, &head).map_err(|error| error.name())?;
-        reader.get_mut().deadline = Instant::now() + Duration::from_millis(50);
-        let mut extra = [0];
-        match reader.read(&mut extra) {
-            Ok(0) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) => {}
-            Ok(_) => return Err("unframed forwarding bytes".into()),
-            Err(error) => return Err(error.into()),
-        }
+        no_trailing_bytes(&mut reader)?;
         require(
             body.len() <= 8 && body.is_ascii(),
             "forwarding origin body exceeds bound",
@@ -1081,6 +1135,60 @@ mod tests {
         }
         assert_eq!(origins.take_requests().len(), 2);
         origins.finish().unwrap();
+    }
+
+    #[test]
+    fn coding_origin_captures_token_and_negotiation_without_changing_bytes() {
+        let origins = WireOrigins::start().unwrap();
+        for (index, accept) in ["identity", "gzip, br"].into_iter().enumerate() {
+            let token = format!("encoding-{index}");
+            let response = exchange(&origins, 0, format!(
+                "GET /coding/gzip/200 HTTP/1.1\r\nHost: localhost\r\nx-request-token: {token}\r\nAccept-Encoding: {accept}\r\nConnection: close\r\n\r\n"
+            ).as_bytes());
+            assert!(response.starts_with(b"HTTP/1.1 200"));
+            let split = response
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            assert_eq!(
+                &response[split + 4..],
+                super::super::coding_body("gzip").unwrap()
+            );
+            let receipt = origins.take_wire().unwrap();
+            assert_eq!(receipt["token"], token);
+            assert_eq!(receipt["accept_encoding"], json!([accept]));
+            assert_eq!(receipt["target"], "/coding/gzip/200");
+            assert_eq!(receipt["port"], origins.port(0));
+        }
+        assert_eq!(origins.finish_counted().unwrap(), 2);
+    }
+
+    #[test]
+    fn coding_origin_rejects_fragmented_unframed_payload_before_receipt() {
+        let mut origins = WireOrigins::start().unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", origins.port(0))).unwrap();
+        client.set_nodelay(true).unwrap();
+        client.write_all(b"GET /coding/gzip/200 HTTP/1.1\r\nx-request-token: fragmented\r\nContent-Length: 0\r\n\r\n").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let early = client.read(&mut [0]);
+        assert!(
+            matches!(early, Err(ref error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)),
+            "head alone cannot certify absent trailing payload"
+        );
+        client.write_all(b"x").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
+        assert!(origins.take_wire().is_err());
+        origins.shutdown();
+        assert!(
+            origins.shared.lock().wire.is_empty(),
+            "rejection must not publish an accepted receipt"
+        );
+        assert!(origins.finish().is_err());
     }
 
     #[test]

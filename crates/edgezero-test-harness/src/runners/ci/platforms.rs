@@ -56,6 +56,7 @@ fn validate_wire(events: &[Value], adapter: &str) -> Result<()> {
     )?;
     super::super::wire::validate_batch_artifact(events, adapter)?;
     super::super::wire::validate_marker_artifact(events, adapter)?;
+    super::super::wire::validate_encoding_artifact(events, adapter)?;
     if adapter != "axum" {
         super::super::wire::validate_forwarding_artifact(events, adapter)?;
     }
@@ -401,6 +402,7 @@ mod tests {
         cases.push(json!({"event":format!("{adapter}-wire-inventory"),"status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         cases.extend(super::super::super::wire::batch_recovery_artifact(adapter));
         cases.extend(super::super::super::wire::marker_artifact(adapter));
+        cases.extend(super::super::super::wire::encoding_artifact(adapter));
         if adapter != "axum" {
             cases.extend(super::super::super::wire::forwarding_artifact(adapter));
         }
@@ -409,13 +411,42 @@ mod tests {
 
     #[test]
     fn persisted_wire_requires_all_cases_and_receipts_from_the_selected_adapter() {
-        for adapter in ["axum", "fastly"] {
+        for adapter in ["axum", "fastly", "cloudflare"] {
             let events = wire(adapter);
             validate_wire(&events, adapter).unwrap();
-            assert!(validate_wire(&events, "cloudflare").is_err());
+            assert!(
+                validate_wire(
+                    &events,
+                    if adapter == "cloudflare" {
+                        "fastly"
+                    } else {
+                        "cloudflare"
+                    }
+                )
+                .is_err()
+            );
+            if adapter == "cloudflare" {
+                let mut corrupt = events.clone();
+                let relay = corrupt
+                    .iter_mut()
+                    .find(|e| e["event"] == "outbound-encoding-case" && e["case"] == 9)
+                    .unwrap();
+                relay["client"]["body_bytes"] = json!(b"decoded".as_slice());
+                assert!(validate_wire(&corrupt, adapter).is_err());
+            }
             let mut changed = events.clone();
             changed.pop();
             assert!(validate_wire(&changed, adapter).is_err());
+            let without_encoding: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    !event["event"]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with("outbound-encoding-"))
+                })
+                .cloned()
+                .collect();
+            assert!(validate_wire(&without_encoding, adapter).is_err());
             if adapter != "axum" {
                 let without_forwarding = events
                     .iter()

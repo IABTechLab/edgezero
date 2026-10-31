@@ -371,23 +371,7 @@ fn serve(
     if let Some(path) = path.strip_prefix("/coding/") {
         let (coding, status) = path.split_once('/').ok_or("invalid coding path")?;
         require(["200", "206"].contains(&status), "invalid coding status")?;
-        let body = coding_body(coding)?;
-        write!(
-            stream,
-            "HTTP/1.1 {status} {}\r\nContent-Encoding: {coding}\r\nContent-Length: {}\r\nConnection: close\r\n",
-            if status == "206" {
-                "Partial Content"
-            } else {
-                "OK"
-            },
-            body.len()
-        )?;
-        for (name, value) in coding_representation_headers(coding, status.parse()?)? {
-            write!(stream, "{name}: {value}\r\n")?;
-        }
-        stream.write_all(b"\r\n")?;
-        stream.write_all(body)?;
-        return Ok(());
+        return coding_response(&mut stream, coding, status.parse()?, &[]);
     }
     if path.starts_with("/g3/") {
         progress
@@ -562,6 +546,35 @@ fn serve_p5(
 
 pub fn port() -> Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
+}
+
+fn coding_response(
+    stream: &mut TcpStream,
+    coding: &str,
+    status: u16,
+    extra: &[(&str, &str)],
+) -> Result<()> {
+    require([200, 206].contains(&status), "invalid coding status")?;
+    let body = coding_body(coding)?;
+    write!(
+        stream,
+        "HTTP/1.1 {status} {}\r\nContent-Encoding: {coding}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        if status == 206 {
+            "Partial Content"
+        } else {
+            "OK"
+        },
+        body.len()
+    )?;
+    for (name, value) in coding_representation_headers(coding, status)? {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    for (name, value) in extra {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    stream.write_all(b"\r\n")?;
+    stream.write_all(body)?;
+    Ok(())
 }
 
 pub fn coding_body(coding: &str) -> Result<&'static [u8]> {

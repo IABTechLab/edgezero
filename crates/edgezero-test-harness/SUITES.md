@@ -227,6 +227,26 @@ decompresses bodies independently of the application's manual-fetch policy. Enab
 `Network.enable` reproduces its fatal malformed-gzip error. Keep inspection disabled for these
 runtime acceptance runs; do not reinterpret the retained inspector-on failure as passing.
 
+### Encoding Runtime Proofs
+
+The existing wire phase also owns 9 encoding cases per adapter and two extra Cloudflare relay
+cases, totalling 38 cases/42 origin requests. It reuses the shared coding/relay action and one
+canonical request builder/reporter; the old 24-case coding/relay groups remain unchanged.
+Eight singles vary decoding, buffering and absent/exact `gzip, br` negotiation. A real two-slot
+batch mixes Original and Decode. A separate bounded origin cohort records actual negotiation
+and echoes token/slot identities; Original uses a one-byte decoded cap and zero decoder allowance.
+Both Cloudflare relay modes verify binary downstream payloads and surviving representation fields.
+Observed downstream length is recorded, not prescribed beyond matching any emitted length.
+
+The origin joins collectors/workers and rejects unframed bytes within its bounded trailing check.
+Persisted readback and parent validators require every case and successful cleanup before credit.
+Negative controls cover missing/duplicate/reassociated evidence, impossible metadata, duplicate
+header values, malformed/partial clients, partial receipt failures and corrupted relays. Fastly
+04/05/06, workerd 04/05/07, and Axum/Spin 04/05 sentinels name only these local proofs. No new
+suite, job or selector is added; frozen-candidate, consumer and hosted qualification stay separate.
+
+### Core Guard
+
 The core legs discover their bound primary/additional sentinels before running one outbound suite:
 
 ```sh

@@ -219,17 +219,21 @@ fn observed(mut job: Job, closed: Arc<AtomicBool>, polls: Arc<AtomicUsize>) -> J
 }
 
 #[action]
-async fn progress(ctx: RequestContext) -> Result<Response, EdgeError> {
-    let state = ctx
-        .extensions()
-        .get::<Arc<State>>()
-        .cloned()
-        .ok_or_else(probe_failure)?;
+pub async fn progress(ctx: RequestContext) -> Result<Response, EdgeError> {
     let case = ctx
         .path_params()
         .get("case")
         .ok_or_else(probe_failure)?
         .to_owned();
+    if case.starts_with("coding-") || case.starts_with("relay-") || case.starts_with("batch-gzip-")
+    {
+        return coding_probe(ctx, &case).await;
+    }
+    let state = ctx
+        .extensions()
+        .get::<Arc<State>>()
+        .cloned()
+        .ok_or_else(probe_failure)?;
     if case == "empty" {
         let before = format!("{:?}", ctx.body_kind());
         let request = ctx.into_request()?;
@@ -239,9 +243,6 @@ async fn progress(ctx: RequestContext) -> Result<Response, EdgeError> {
         return json_response(json!({"case":case, "adapter":state.runtime.adapter(),
             "host_signal":state.host_signal, "body_kind_before":before, "body_is_stream":streamed,
             "bytes_read":body.len(), "method":method, "qualification":false}));
-    }
-    if case.starts_with("coding-") || case.starts_with("relay-") {
-        return coding_probe(ctx, &case).await;
     }
     if case.starts_with("marker-") {
         return marker_probe(ctx, &case).await;
@@ -465,7 +466,7 @@ async fn marker_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
 async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeError> {
     let fields: Vec<_> = case.split('-').collect();
     let [
-        kind @ ("coding" | "relay"),
+        kind @ ("coding" | "relay" | "batch"),
         coding @ ("gzip" | "deflate" | "br"),
         mode @ ("buffered" | "streamed"),
         status @ ("200" | "206"),
@@ -474,6 +475,11 @@ async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
     else {
         return Err(EdgeError::bad_request("invalid coding probe"));
     };
+    if *kind == "batch"
+        && (*coding, *mode, *status, *choice) != ("gzip", "buffered", "200", "original")
+    {
+        return Err(EdgeError::bad_request("invalid coding batch"));
+    }
     let target: Uri = ctx
         .headers()
         .get("x-fixture-backend")
@@ -490,11 +496,91 @@ async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
             "coding probe requires controlled loopback origin",
         ));
     }
-    let original = *choice == "original" || *status == "206";
-    let request = OutboundRequest::new(Method::GET, target)?
-        .header("accept-encoding", "gzip, deflate, br")?
+    let request = coding_request(&ctx, target.clone(), mode, status, choice)?;
+    let client = ctx.http_client().ok_or_else(probe_failure)?;
+    if *kind == "batch" {
+        let request = request.header("x-coding-slot", "0")?;
+        let second =
+            coding_request(&ctx, target, mode, status, "decode")?.header("x-coding-slot", "1")?;
+        let choices = [
+            request.response_decoding_setting(),
+            second.response_decoding_setting(),
+        ];
+        let result = client
+            .send_all_until(
+                vec![request, second],
+                ctx.monotonic_clock().deadline_after(Duration::from_secs(3)),
+            )
+            .await
+            .map_err(|failure| failure.into_parts().0)?;
+        let (slots, termination) = result.into_parts();
+        if termination != edgezero_core::OutboundBatchTermination::Completed || slots.len() != 2 {
+            return Err(probe_failure());
+        }
+        let mut reports = Vec::new();
+        for (index, (slot, choice)) in slots.into_iter().zip(choices).enumerate() {
+            let edgezero_core::OutboundCollectedSlot::Resolved(slot) = slot else {
+                return Err(probe_failure());
+            };
+            reports.push(
+                json!({"index":index,"response":coding_report(slot.outcome?, case, choice).await?}),
+            );
+        }
+        return json_response(
+            json!({"case":case,"slots":reports,"termination":"Completed","qualification":false}),
+        );
+    }
+    let choice = request.response_decoding_setting();
+    let client = if *kind == "relay" {
+        client.with_proxy_marker(false)
+    } else {
+        client
+    };
+    let response = client.send(request).await?;
+    if *kind == "relay" {
+        return response.into_response();
+    }
+    json_response(coding_report(response, case, choice).await?)
+}
+
+fn coding_request(
+    ctx: &RequestContext,
+    target: Uri,
+    mode: &str,
+    status: &str,
+    choice: &str,
+) -> Result<OutboundRequest, EdgeError> {
+    let mut controls = ctx.headers().get_all("x-coding-accept").iter();
+    let accept = match controls.next().map(|value| value.to_str()) {
+        None => Some("gzip, deflate, br"),
+        Some(Ok("absent")) => None,
+        Some(Ok("gzip, br")) => Some("gzip, br"),
+        _ => return Err(EdgeError::bad_request("invalid coding negotiation")),
+    };
+    if controls.next().is_some() {
+        return Err(EdgeError::bad_request("ambiguous coding negotiation"));
+    }
+    let mut tokens = ctx.headers().get_all("x-request-token").iter();
+    let token = tokens
+        .next()
+        .filter(|token| {
+            token.to_str().is_ok_and(|token| {
+                !token.is_empty()
+                    && token.len() <= 64
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        })
+        .ok_or_else(probe_failure)?;
+    if tokens.next().is_some() {
+        return Err(probe_failure());
+    }
+    let original = choice == "original" || status == "206";
+    let mut request = OutboundRequest::new(Method::GET, target)?
+        .header("x-request-token", token.clone())?
         .cache_policy(OutboundCachePolicy::Bypass)
-        .response_decoding(if *choice == "original" {
+        .response_decoding(if choice == "original" {
             ResponseDecoding::Original
         } else {
             ResponseDecoding::Decode
@@ -508,22 +594,35 @@ async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
         .max_encoded_response_bytes(256)
         .max_response_bytes(256)
         .timeout(Duration::from_secs(2));
-    let request = if *mode == "streamed" {
+    if let Some(accept) = accept {
+        request = request.header("accept-encoding", accept)?;
+    }
+    Ok(if mode == "streamed" {
         request.stream_response()
     } else {
         request
-    };
-    let client = ctx.http_client().ok_or_else(probe_failure)?;
-    let client = if *kind == "relay" {
-        client.with_proxy_marker(false)
-    } else {
-        client
-    };
-    let response = client.send(request).await?;
-    if *kind == "relay" {
-        return response.into_response();
+    })
+}
+
+async fn coding_report(
+    response: edgezero_core::OutboundResponse,
+    case: &str,
+    choice: ResponseDecoding,
+) -> Result<Value, EdgeError> {
+    for name in [
+        "content-encoding",
+        "content-length",
+        "etag",
+        "vary",
+        "x-coding-token",
+        "x-coding-slot",
+    ] {
+        if response.headers().get_all(name).iter().count() > 1 {
+            return Err(probe_failure());
+        }
     }
     let status = response.status().as_u16();
+    let streamed = response.body().is_stream();
     let encoding = response
         .headers()
         .get("content-encoding")
@@ -534,9 +633,23 @@ async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let text = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let (etag, vary, token, slot) = (
+        text("etag"),
+        text("vary"),
+        text("x-coding-token"),
+        text("x-coding-slot"),
+    );
     let bytes = response.into_bytes_bounded(256).await?;
-    json_response(
-        json!({"case":case,"status":status,"content_encoding":encoding,"content_length":length,"bytes":bytes.to_vec(),"qualification":false}),
+    Ok(
+        json!({"case":case,"status":status,"content_encoding":encoding,"content_length":length,
+        "etag":etag,"vary":vary,"token":token,"slot":slot,"streamed":streamed,"decoding":format!("{choice:?}"),"bytes":bytes.to_vec(),"qualification":false}),
     )
 }
 
@@ -745,7 +858,7 @@ mod tests {
                 "decoding":format!("{:?}",parts.response_decoding),"encoded":parts.max_encoded_response_bytes,
                 "decoded":parts.max_decoded_response_bytes,"decoder":parts.max_decoder_bytes,
                 "timeout":parts.timeout.map(|t|t.as_millis()),"cache":format!("{:?}",parts.cache_policy),
-                "accept_encoding":parts.headers["accept-encoding"].to_str().unwrap(),"uri":parts.uri.to_string(),
+                "accept_encoding":parts.headers.get("accept-encoding").map(|value|value.to_str().unwrap()),"uri":parts.uri.to_string(),
             }));
             let raw = parts.response_decoding == ResponseDecoding::Original
                 || parts.uri.path().ends_with("206");
@@ -767,6 +880,7 @@ mod tests {
             let mut headers = edgezero_core::http::HeaderMap::new();
             headers.insert("content-type", "application/octet-stream".parse().unwrap());
             headers.insert("etag", "\"fixture\"".parse().unwrap());
+            headers.insert("vary", "Accept-Encoding".parse().unwrap());
             if raw {
                 headers.insert("content-encoding", "gzip".parse().unwrap());
                 headers.insert("content-length", "3".parse().unwrap());
@@ -966,6 +1080,124 @@ mod tests {
                 relay["marker"] = json!("On");
                 assert_eq!(relay, recorded[1]);
             }
+        }
+    }
+
+    #[test]
+    fn coding_controls_preserve_negotiation_and_representation_observations() {
+        for (negotiation, expected) in [("absent", Value::Null), ("gzip, br", json!("gzip, br"))] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let client = edgezero_core::HttpClient::with_client(RelayClient {
+                time: crate::outbound_test_support::TestTime::default().pair(),
+                polls: Arc::new(AtomicUsize::new(0)),
+                calls: Arc::clone(&calls),
+            });
+            let case = "coding-gzip-streamed-200-original";
+            let mut input = request(case, "http://127.0.0.1:1234/coding/gzip/200");
+            input
+                .headers_mut()
+                .insert("x-coding-accept", negotiation.parse().unwrap());
+            input.extensions_mut().insert(client);
+            let output =
+                block_on(router(Arc::new(Fake::default()), json!({}), None).oneshot(input))
+                    .unwrap();
+            let report: Value = serde_json::from_slice(
+                &block_on(output.into_body().into_bytes_bounded(4096)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(calls.lock().unwrap()[0]["accept_encoding"], expected);
+            assert_eq!(calls.lock().unwrap()[0]["decoded"], 1);
+            assert_eq!(calls.lock().unwrap()[0]["decoder"], 0);
+            assert_eq!(report["streamed"], true);
+            assert_eq!(report["etag"], "\"fixture\"");
+            assert_eq!(report["vary"], "Accept-Encoding");
+        }
+    }
+
+    #[test]
+    fn coding_report_rejects_duplicate_representation_and_correlation_fields() {
+        use edgezero_core::http::{HeaderMap, StatusCode};
+        for field in [
+            "content-encoding",
+            "content-length",
+            "etag",
+            "vary",
+            "x-coding-token",
+            "x-coding-slot",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(field, "first".parse().unwrap());
+            headers.append(field, "second".parse().unwrap());
+            let response = edgezero_core::OutboundResponse::new(
+                Method::GET,
+                StatusCode::OK,
+                headers,
+                Body::empty(),
+                crate::outbound_test_support::TestTime::default().clock(),
+                edgezero_core::ContentTypeProvenance::Unknown,
+            );
+            assert!(
+                block_on(coding_report(
+                    response,
+                    "control",
+                    ResponseDecoding::Original
+                ))
+                .is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn coding_batch_keeps_positional_choices_and_controls_reject_ambiguous_input() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let client = edgezero_core::HttpClient::with_client(RelayClient {
+            time: crate::outbound_test_support::TestTime::default().pair(),
+            polls: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::clone(&calls),
+        });
+        let case = "batch-gzip-buffered-200-original";
+        let mut input = request(case, "http://127.0.0.1:1234/coding/gzip/200");
+        input.extensions_mut().insert(client);
+        let output =
+            block_on(router(Arc::new(Fake::default()), json!({}), None).oneshot(input)).unwrap();
+        let report: Value =
+            serde_json::from_slice(&block_on(output.into_body().into_bytes_bounded(4096)).unwrap())
+                .unwrap();
+        assert_eq!(report["termination"], "Completed");
+        assert_eq!(report["slots"][0]["index"], 0);
+        assert_eq!(
+            report["slots"][0]["response"]["bytes"],
+            json!([255, 0, 128])
+        );
+        assert_eq!(report["slots"][1]["index"], 1);
+        assert_eq!(
+            report["slots"][1]["response"]["bytes"],
+            json!(b"decoded".as_slice())
+        );
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|call| call["decoding"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("Original"), json!("Decode")]
+        );
+        for values in [vec!["other"], vec!["absent", "gzip, br"]] {
+            let mut input = request(
+                "coding-gzip-buffered-200-original",
+                "http://127.0.0.1:1234/coding/gzip/200",
+            );
+            for value in values {
+                input
+                    .headers_mut()
+                    .append("x-coding-accept", value.parse().unwrap());
+            }
+            let output =
+                block_on(router(Arc::new(Fake::default()), json!({}), None).oneshot(input))
+                    .unwrap();
+            assert_eq!(output.status(), 400);
         }
     }
 

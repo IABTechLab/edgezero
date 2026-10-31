@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; 403 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; 393 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -4059,10 +4059,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-04-axum",
       "sentinel": "ez_5_acceptance_04_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-5/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter axum --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/axum",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given an origin that returns a gzip body with `Content-Length`, a strong `ETag`, and `Vary: Accept-Encoding`, when the application asks for the original coding, buffered and streamed, then the bytes and all four headers match the origin. In decoding mode, the bytes are decoded. On Spin 4.1 this holds where the run shows the host passes encoded bodies through. If the run shows the host decodes, the run records that, Spin is marked Unsupported, and the check becomes that a request asking for the original coding is rejected before sending under cross-cutting requirement 2 (EZ-5.13).",
-      "artifact_path": "outbound/EZ-5/acceptance/04/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4091,10 +4091,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-04-viceroy",
       "sentinel": "ez_5_acceptance_04_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-5/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given an origin that returns a gzip body with `Content-Length`, a strong `ETag`, and `Vary: Accept-Encoding`, when the application asks for the original coding, buffered and streamed, then the bytes and all four headers match the origin. In decoding mode, the bytes are decoded. On Spin 4.1 this holds where the run shows the host passes encoded bodies through. If the run shows the host decodes, the run records that, Spin is marked Unsupported, and the check becomes that a request asking for the original coding is rejected before sending under cross-cutting requirement 2 (EZ-5.13).",
-      "artifact_path": "outbound/EZ-5/acceptance/04/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4123,10 +4123,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-04-workerd",
       "sentinel": "ez_5_acceptance_04_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-5/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given an origin that returns a gzip body with `Content-Length`, a strong `ETag`, and `Vary: Accept-Encoding`, when the application asks for the original coding, buffered and streamed, then the bytes and all four headers match the origin. In decoding mode, the bytes are decoded. On Spin 4.1 this holds where the run shows the host passes encoded bodies through. If the run shows the host decodes, the run records that, Spin is marked Unsupported, and the check becomes that a request asking for the original coding is rejected before sending under cross-cutting requirement 2 (EZ-5.13).",
-      "artifact_path": "outbound/EZ-5/acceptance/04/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4155,10 +4155,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-04-spin",
       "sentinel": "ez_5_acceptance_04_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-5/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given an origin that returns a gzip body with `Content-Length`, a strong `ETag`, and `Vary: Accept-Encoding`, when the application asks for the original coding, buffered and streamed, then the bytes and all four headers match the origin. In decoding mode, the bytes are decoded. On Spin 4.1 this holds where the run shows the host passes encoded bodies through. If the run shows the host decodes, the run records that, Spin is marked Unsupported, and the check becomes that a request asking for the original coding is rejected before sending under cross-cutting requirement 2 (EZ-5.13).",
-      "artifact_path": "outbound/EZ-5/acceptance/04/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4187,10 +4187,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-05-axum",
       "sentinel": "ez_5_acceptance_05_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-5/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter axum --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/axum",
       "expected": "**Same environments, with the same Spin condition as criterion 4.** Given the request sets no `Accept-Encoding`, the origin sees `identity`. Given the request sets `gzip, br`, the origin sees exactly that, under both choices. Where Spin is Unsupported, the Spin run checks decoding mode only.",
-      "artifact_path": "outbound/EZ-5/acceptance/05/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4219,10 +4219,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-05-viceroy",
       "sentinel": "ez_5_acceptance_05_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-5/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "**Same environments, with the same Spin condition as criterion 4.** Given the request sets no `Accept-Encoding`, the origin sees `identity`. Given the request sets `gzip, br`, the origin sees exactly that, under both choices. Where Spin is Unsupported, the Spin run checks decoding mode only.",
-      "artifact_path": "outbound/EZ-5/acceptance/05/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4251,10 +4251,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-05-workerd",
       "sentinel": "ez_5_acceptance_05_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-5/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "**Same environments, with the same Spin condition as criterion 4.** Given the request sets no `Accept-Encoding`, the origin sees `identity`. Given the request sets `gzip, br`, the origin sees exactly that, under both choices. Where Spin is Unsupported, the Spin run checks decoding mode only.",
-      "artifact_path": "outbound/EZ-5/acceptance/05/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4283,10 +4283,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-05-spin",
       "sentinel": "ez_5_acceptance_05_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-5/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "**Same environments, with the same Spin condition as criterion 4.** Given the request sets no `Accept-Encoding`, the origin sees `identity`. Given the request sets `gzip, br`, the origin sees exactly that, under both choices. Where Spin is Unsupported, the Spin run checks decoding mode only.",
-      "artifact_path": "outbound/EZ-5/acceptance/05/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4315,10 +4315,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-06-viceroy",
       "sentinel": "ez_5_acceptance_06_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-5/acceptance/06",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "**Viceroy 0.21.0.** Given a two-slot batch where one slot keeps the original coding, then that slot's body is encoded and the other slot's body is decoded.",
-      "artifact_path": "outbound/EZ-5/acceptance/06/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4347,10 +4347,10 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-07-workerd",
       "sentinel": "ez_5_acceptance_07_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-5/acceptance/07",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "**workerd.** Given the application relays a passthrough response to its client, then the client receives the exact compressed bytes and `Content-Encoding`, and Workers does not re-encode them. The run records whether the origin `Content-Length` reached the client, and the caveat at `edgezero:docs/guide/capabilities.md:422-426` is updated to match.",
-      "artifact_path": "outbound/EZ-5/acceptance/07/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {

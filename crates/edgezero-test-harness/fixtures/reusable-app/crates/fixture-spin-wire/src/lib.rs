@@ -54,6 +54,27 @@ mod sdk {
     impl Guest for BodylessWire {
         async fn handle(request: Request) -> Result<Response, ErrorCode> {
             let path = request.get_path_with_query().unwrap_or_default();
+            if path.starts_with("/progress/coding-")
+                || path.starts_with("/progress/relay-")
+                || path.starts_with("/progress/batch-gzip-")
+            {
+                let incoming = SpinRequest::from_request(request)?;
+                let app = App::with_name_and_platform(
+                    RouterService::builder()
+                        .get(
+                            "/progress/{case}",
+                            fixture_core::qualification::progress::progress,
+                        )
+                        .build(),
+                    "encoding-probe",
+                    edgezero_adapter_spin::SPIN_PLATFORM,
+                );
+                return edgezero_adapter_spin::dispatch_app::<HandoffHooks>(&app, incoming)
+                    .await
+                    .map_err(|_| {
+                        ErrorCode::InternalError(Some("encoding fixture failed".to_owned()))
+                    });
+            }
             if path.starts_with("/progress/forward/") {
                 let incoming = SpinRequest::from_request(request)?;
                 let app = fixture_core::qualification::forwarding::application(

@@ -10,6 +10,12 @@
 
 ---
 
+**Current encoding checkpoint (2026-10-30):** the existing wire phases bind EZ-5 criteria 04/05
+on all four adapters, 06 on Viceroy and 07 on workerd, using the shared coding/relay handler and
+actual native clients. No driver, cap, pin, capability or pending metadata-adoption policy changes.
+See the master plan's encoding-runtime checkpoint for exact proof, failed startup evidence and
+remaining qualification. Historical driver sequencing below does not supersede that record.
+
 Dependencies: P1/P4 contracts; P2/P3/P5 integration accompanies each driver. G2 must pass before
 depending on Fastly timed reads. Do not introduce a background reader that buffers outside caps.
 Apply the index's scoped test/fmt/clippy card after each implementation increment, not only at

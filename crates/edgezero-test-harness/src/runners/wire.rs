@@ -3,9 +3,19 @@ use crate::net::WireOrigins;
 use std::io::Read as _;
 
 mod batch_recovery;
+mod encoding;
 mod forwarding;
 mod marker;
 mod normalization;
+
+pub(super) fn validate_encoding_artifact(events: &[Value], adapter: &str) -> Result<()> {
+    encoding::validate_artifact(events, adapter)
+}
+
+#[cfg(test)]
+pub(super) fn encoding_artifact(adapter: &str) -> Vec<Value> {
+    encoding::tests::artifact(adapter)
+}
 
 pub(super) fn validate_marker_artifact(events: &[Value], adapter: &str) -> Result<()> {
     marker::validate_artifact(events, adapter)
@@ -312,6 +322,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
     }
     validate_policy_inventory(&cases, receipts)?;
     normalization::validate_artifact(events, origin_port)?;
+    encoding::validate_artifact(events, "spin")?;
     batch_recovery::validate_artifact(events, "spin")?;
     marker::validate_artifact(events, "spin")?;
     forwarding::validate_artifact(events, "spin")?;
@@ -938,6 +949,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         let baseline = (matrix.exchanges, matrix.dispatches);
         let policy = spin_policy(port, &origins, matrix.records)?;
         normalization::run(port, &origins, matrix.records)?;
+        encoding::run("spin", port, matrix.records)?;
         batch_recovery::run("spin", port, matrix.records)?;
         marker::run("spin", port, matrix.records)?;
         forwarding::run("spin", port, matrix.records)?;
@@ -980,6 +992,7 @@ fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Resul
                 dispatches: 0,
             };
             matrix.run()?;
+            encoding::run(name, port, matrix.records)?;
             batch_recovery::run(name, port, matrix.records)?;
             marker::run(name, port, matrix.records)?;
             if name != "axum" {
@@ -1310,6 +1323,7 @@ mod tests {
         values.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         values.push(json!({"event":"spin-policy-inventory","status":"pass","exchanges":26,"origin_requests":26,"qualification":false}));
         values.extend(normalization::tests::artifact(first));
+        values.extend(encoding::tests::artifact("spin"));
         values.extend(batch_recovery::tests::artifact("spin"));
         values.extend(marker::tests::artifact("spin"));
         values.extend(forwarding::tests::artifact("spin"));
@@ -1321,6 +1335,20 @@ mod tests {
         let valid = spin_artifact();
         assert_eq!(valid[18], valid[56]);
         validate_spin_artifact(&valid).unwrap();
+    }
+
+    #[test]
+    fn persisted_spin_wire_requires_the_encoding_cohort() {
+        let mut records = spin_artifact();
+        records.retain(|record| {
+            !record["event"]
+                .as_str()
+                .is_some_and(|event| event.starts_with("outbound-encoding-"))
+        });
+        assert!(
+            validate_spin_artifact(&records).is_err(),
+            "missing encoding evidence cannot pass parent validation"
+        );
     }
 
     #[test]

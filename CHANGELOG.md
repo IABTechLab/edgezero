@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind local original-coding, negotiation, mixed-batch and Cloudflare relay acceptance to the
+  existing wire suites, reusing the shared coding handler and bounded origins. Preserve exact
+  encoded bytes/metadata, observed framing and failed evidence without changing production APIs,
+  decoder pins, capabilities or CI jobs.
 - Bind Axum's pending chunked-GET deadline acceptance to the existing grouped TCP gate.
   Preserve the original 200/205 ms and 100/105 ms windows, prove Pending and source release,
   and measure framed responses before connection cleanup without changing production timers.

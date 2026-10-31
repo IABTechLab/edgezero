@@ -609,6 +609,11 @@ passed through to the downstream response, the converter also selects manual res
 encoding so Workers does not encode them again. The latter does not promise an exact streamed
 wire `Content-Length`, because Workers owns final framing.
 
+The pinned local workerd encoding cohort observes the same 37 gzip bytes and a matching
+`Content-Length: 37` through both buffered and streamed relay converters. This is a recorded
+local observation, not a hosted or universal framing guarantee. The existing wire phase retains
+the actual downstream headers, token-bound origin receipts and compressed bytes.
+
 Original-coding policy is wired through all four adapters. Local controlled-origin checks cover
 gzip/deflate/Brotli on Axum, pinned Viceroy 0.21.0, Spin 4.1 and workerd 2026-09-10, in buffered and
 streamed modes, including 206 and Decode controls. These are working-tree characterizations, not
