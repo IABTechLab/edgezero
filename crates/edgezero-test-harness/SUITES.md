@@ -1292,8 +1292,13 @@ Drain errors are recorded separately from primary client failures, including int
 captures. Shared teardown records client completions and runtime logs even on failure.
 
 Host request-send and guest request-start have different origins, particularly on a cold guest.
-The slow/fast timeline cases, including the fourth-slot variant, record a scheduling alignment derived from the first
-origin receipt and its guest send timestamp. Transit uncertainty remains unknown and
+The slow/fast timeline cases, including the fourth-slot variant, retain the original cold-origin
+receipt estimate and append one sealed scheduling estimate before any response write. The seal
+uses the minimum receipt-minus-guest-send offset across the existing `origin/a/b/c` requests,
+plus `d` in the fourth-slot case, with an explicit 1 ms rounding guard. All initial receipts must
+arrive before the first source target. Later mediator requests cannot change the sealed epoch.
+The validator independently recomputes the seal and checks membership and pre-write ordering.
+Transit uncertainty remains unknown, equal clock rates remain an assumption, and
 `clock_sync_proven` remains false. Scheduled timestamps never replace actual writes or guest
 observations. The frozen +/-5 ms timeline targets remain checked; misses return exit 1, not a
 qualified pass. The fourth-slot case also records `timeout_contract` with its own status/error,
@@ -1302,6 +1307,15 @@ case, close its acceptance leg or prove prompt native timer wakeup.
 For quiet-window proofs, a head-write-start/guest-head-observation causal bound
 conservatively compares receipts without pretending the clocks are synchronized. The 5 ms
 measurement guard makes that proof stricter, and is not an extra deadline allowance.
+
+Scheduled lifecycle-source writes share one stop-aware condition-variable loop with waits capped
+at 1 ms against the original absolute target. This avoids long timeout coalescing without a
+busy-spin path, new worker or restarted deadline. It does not guarantee a 5 ms scheduling bound.
+The existing eight-active/128-cumulative connection and 32-event limits remain unchanged.
+The final origin payload records successful terminating-chunk start/completion through source
+close, independently of guest EOF. Framing completes before diagnostic formatting/recording;
+missing, failed or inverted terminal evidence fails validation. Late guest observations and
+late source writes still fail their original strict checks.
 
 The CPU case makes exactly one bounded calibration Send through the same injected client after
 consuming the origin. It carries the actual origin-head observation and request-send samples,

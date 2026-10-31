@@ -1077,18 +1077,15 @@ fn validate_timeout_before_cutoff(report: &Value, origin: &Value) -> Result<()> 
         .collect();
     let request = role_event(origin, "d", "request")?;
     let closed = role_event(origin, "d", "closed")?;
-    let initial = role_event(origin, "origin", "request")?;
-    let aligned = initial["alignment"]["scenario_anchor_host_offset_us"]
-        .as_i64()
-        .ok_or("missing scenario alignment")?;
+    let aligned = timeline_epoch(origin, "timeout-before-cutoff")?;
     let scheduled = number(closed, "scheduled_us")?;
     require(
         phases == ["request", "closed"]
             && closed["reason"] == "silent"
             && closed["scenario_scheduled_us"] == 1500000
-            && closed["schedule_basis"] == "origin-receipt-minus-guest-at-us"
+            && closed["schedule_basis"] == "initial-receipts-minimum-upper-bound"
             && number(request, "at_us")? <= scheduled
-            && i128::from(scheduled) - i128::from(aligned) == 1500000
+            && i128::from(scheduled) - aligned == 1500000
             && number(closed, "at_us")? >= scheduled,
         "fourth bidder was not silent past the cutoff",
     )
@@ -1101,6 +1098,63 @@ fn role_event<'a>(origin: &'a [Value], role: &str, op: &str) -> Result<&'a Value
     let entry = entries.next().ok_or("missing origin phase")?;
     require(entries.next().is_none(), "duplicate origin phase")?;
     Ok(entry)
+}
+
+fn timeline_epoch(origin: &[Value], case: &str) -> Result<i128> {
+    let roles: &[&str] = if case == "timeout-before-cutoff" {
+        &["origin", "a", "b", "c", "d"]
+    } else {
+        &["origin", "a", "b", "c"]
+    };
+    let seal = role_event(origin, "control", "alignment")?;
+    let sealed = number(seal, "at_us")?;
+    let mut candidates = Vec::new();
+    for role in roles {
+        let receipt = role_event(origin, role, "request")?;
+        require(
+            number(receipt, "at_us")? <= sealed,
+            "timeline sealed before an initial receipt",
+        )?;
+        candidates.push((
+            *role,
+            i128::from(number(receipt, "at_us")?) - i128::from(number(receipt, "guest_at_us")?),
+        ));
+    }
+    let (selected, minimum) = candidates
+        .iter()
+        .min_by_key(|(_, offset)| offset)
+        .ok_or("missing timeline candidates")?;
+    let aligned = seal["scenario_anchor_host_offset_us"]
+        .as_i64()
+        .ok_or("missing sealed epoch")?;
+    require(
+        seal["basis"] == "initial-receipts-minimum-upper-bound"
+            && seal["receipt_roles"] == json!(roles)
+            && seal["selected_role"] == *selected
+            && seal["rounding_guard_us"] == 1000
+            && i128::from(aligned) == minimum + 1000
+            && seal["clock_sync_proven"] == false
+            && seal["same_rate_assumed"] == true
+            && seal.get("transit_uncertainty_us") == Some(&Value::Null)
+            && i128::from(sealed)
+                <= i128::from(aligned)
+                    + if case == "fast-origin" {
+                        120000
+                    } else {
+                        180000
+                    },
+        "invalid or late sealed timeline epoch",
+    )?;
+    for write in origin
+        .iter()
+        .filter(|entry| matches!(entry["op"].as_str(), Some("head" | "chunk")))
+    {
+        require(
+            number(write, "write_started_us")? >= sealed,
+            "source wrote before sealing its timeline",
+        )?;
+    }
+    Ok(i128::from(aligned))
 }
 
 fn cpu_clock_bounds(events: &[Value], origin: &Value) -> Result<[i128; 2]> {
@@ -1622,7 +1676,7 @@ fn validate_late_c(origin: &[Value], aligned: i128) -> Result<()> {
         require(
             entry["scenario_scheduled_us"] == 900000
                 && number(entry, "scheduled_us")? == scheduled
-                && entry["schedule_basis"] == "origin-receipt-minus-guest-at-us"
+                && entry["schedule_basis"] == "initial-receipts-minimum-upper-bound"
                 && started >= scheduled
                 && started <= actual
                 && actual <= number(closed, "at_us")?,
@@ -1683,6 +1737,7 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
             <= 1,
         "scenario alignment differs from original origin receipt",
     )?;
+    let aligned = timeline_epoch(origin, case)?;
     for (role, head_at, chunk_times, bytes) in [
         (
             "origin",
@@ -1720,7 +1775,7 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
         ) {
             require(
                 number(entry, "scenario_scheduled_us")? == scheduled
-                    && entry["schedule_basis"] == "origin-receipt-minus-guest-at-us",
+                    && entry["schedule_basis"] == "initial-receipts-minimum-upper-bound",
                 "wrong origin scenario schedule",
             )?;
             let actual = number(entry, "at_us")?;
@@ -1745,6 +1800,20 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
                 entry["bytes"] == json!([byte])
                     && number(entry, "write_started_us")? >= number(heads[0], "at_us")?,
                 "origin chunk bytes differ or precede the response head",
+            )?;
+        }
+        if role == "origin" {
+            let last = chunks.last().ok_or("missing final origin chunk")?;
+            let terminal = &last["terminal_frame"];
+            let closed = role_event(origin, "origin", "closed")?;
+            require(
+                terminal["status"] == "pass"
+                    && terminal.get("error") == Some(&Value::Null)
+                    && number(last, "at_us")? <= number(terminal, "write_started_us")?
+                    && number(terminal, "write_started_us")? <= number(terminal, "completed_us")?
+                    && number(terminal, "completed_us")? <= number(closed, "at_us")?
+                    && closed["reason"] == "complete",
+                "missing, failed or inverted origin terminal framing",
             )?;
         }
     }
@@ -3097,9 +3166,9 @@ mod tests {
                 json!({"status":200,"bytes":if slow {vec![79,111,33]} else {vec![79]}});
             origin = json!([
                 {"op":"request","role":"origin","at_us":3000,"guest_at_us":2000},
-                {"op":"request","role":"a","at_us":35000,"guest_at_us":34000},
-                {"op":"request","role":"b","at_us":35010,"guest_at_us":34000},
-                {"op":"request","role":"c","at_us":35020,"guest_at_us":34000}
+                {"op":"request","role":"a","at_us":34000,"guest_at_us":34000},
+                {"op":"request","role":"b","at_us":34010,"guest_at_us":34000},
+                {"op":"request","role":"c","at_us":34020,"guest_at_us":34000}
             ]);
             if !slow {
                 report["items"].as_array_mut().unwrap().push(json!(
@@ -3126,6 +3195,10 @@ mod tests {
             ]);
             origin[0]["alignment"] = json!({"basis":"origin-receipt-minus-guest-at-us",
                 "clock_sync_proven":false,"transit_uncertainty_us":null,"scenario_anchor_host_offset_us":1000});
+            origin.as_array_mut().unwrap().push(json!({"op":"alignment","role":"control","at_us":36000,
+                "basis":"initial-receipts-minimum-upper-bound","receipt_roles":["origin","a","b","c"],
+                "selected_role":"a","scenario_anchor_host_offset_us":1000,"rounding_guard_us":1000,
+                "transit_uncertainty_us":null,"clock_sync_proven":false,"same_rate_assumed":true}));
             let scripts = vec![
                 (
                     "origin",
@@ -3149,20 +3222,27 @@ mod tests {
                     .unwrap()
                     .push(json!({"op":"head","role":role,
                     "at_us":head+1000,"write_started_us":head+1000,"scheduled_us":head+1000,"scenario_scheduled_us":head,
-                    "schedule_basis":"origin-receipt-minus-guest-at-us"}));
+                    "schedule_basis":"initial-receipts-minimum-upper-bound"}));
                 for (time, byte) in chunks {
-                    origin.as_array_mut().unwrap().push(
-                        json!({"op":"chunk","role":role,"bytes":[byte],
+                    let mut chunk = json!({"op":"chunk","role":role,"bytes":[byte],
                         "at_us":time+1000,"write_started_us":time+1000,"scheduled_us":time+1000,"scenario_scheduled_us":time,
-                        "schedule_basis":"origin-receipt-minus-guest-at-us"}),
-                    );
+                        "schedule_basis":"initial-receipts-minimum-upper-bound"});
+                    if role == "origin" && time == if slow { 1300000 } else { 260000 } {
+                        chunk["terminal_frame"] = json!({"write_started_us":time+1000,"completed_us":time+1000,"status":"pass","error":null});
+                    }
+                    origin.as_array_mut().unwrap().push(chunk);
                 }
-                if role == "c" {
+                if role == "c" || role == "origin" {
+                    let end = if role == "origin" {
+                        if slow { 1300000 } else { 260000 }
+                    } else {
+                        head
+                    };
                     origin
                         .as_array_mut()
                         .unwrap()
-                        .push(json!({"op":"closed","role":"c",
-                        "at_us":head+1001,"reason":"complete"}));
+                        .push(json!({"op":"closed","role":role,
+                        "at_us":end+1001,"reason":"complete"}));
                 }
             }
         }
@@ -3224,8 +3304,14 @@ mod tests {
             json!({"op":"request","role":"d","at_us":35030,"guest_at_us":34000}),
             json!({"op":"closed","role":"d","at_us":1501000,"scheduled_us":1501000,
                 "scenario_scheduled_us":1500000,"reason":"silent",
-                "schedule_basis":"origin-receipt-minus-guest-at-us"}),
+                "schedule_basis":"initial-receipts-minimum-upper-bound"}),
         ]);
+        origin
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["op"] == "alignment")
+            .unwrap()["receipt_roles"] = json!(["origin", "a", "b", "c", "d"]);
         for entry in origin.as_array_mut().unwrap() {
             entry["token"] = json!("sample");
             entry["case"] = json!("timeout-before-cutoff");
@@ -3455,6 +3541,113 @@ mod tests {
             .find(|entry| entry["op"] == "mediator-send")
             .unwrap()["duration_us"] = json!(1000000);
         assert!(validate("fast-origin", "sample", &extended, &origin).is_err());
+    }
+
+    #[test]
+    fn timeline_requires_successful_ordered_terminal_frame_evidence() {
+        for case in ["slow-origin", "fast-origin"] {
+            let (report, origin) = sample(case);
+            validate(case, "sample", &report, &origin).unwrap();
+            for mutation in [
+                "missing",
+                "failed",
+                "error",
+                "early",
+                "inverted",
+                "after-close",
+            ] {
+                let mut changed = origin.clone();
+                let last = changed
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .rev()
+                    .find(|e| e["role"] == "origin" && e["op"] == "chunk")
+                    .unwrap();
+                match mutation {
+                    "missing" => {
+                        last.as_object_mut().unwrap().remove("terminal_frame");
+                    }
+                    "failed" => last["terminal_frame"]["status"] = json!("fail"),
+                    "error" => last["terminal_frame"]["error"] = json!("write failed"),
+                    "early" => {
+                        last["terminal_frame"]["write_started_us"] =
+                            json!(number(last, "at_us").unwrap() - 1)
+                    }
+                    "inverted" => {
+                        last["terminal_frame"]["completed_us"] =
+                            json!(number(last, "at_us").unwrap() - 1)
+                    }
+                    _ => {
+                        last["terminal_frame"]["completed_us"] =
+                            json!(number(last, "at_us").unwrap() + 2)
+                    }
+                }
+                assert!(
+                    validate(case, "sample", &report, &changed).is_err(),
+                    "{case}: {mutation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_seal_rejects_missing_recomputed_or_post_write_alignment() {
+        for case in ["slow-origin", "fast-origin"] {
+            let (report, origin) = sample(case);
+            validate(case, "sample", &report, &origin).unwrap();
+            for (field, value) in [
+                ("scenario_anchor_host_offset_us", json!(1001)),
+                ("selected_role", json!("origin")),
+                ("receipt_roles", json!(["origin", "a", "b"])),
+                ("rounding_guard_us", json!(0)),
+                ("at_us", json!(2000)),
+                ("at_us", json!(200000)),
+                ("clock_sync_proven", json!(true)),
+                ("same_rate_assumed", json!(false)),
+                ("transit_uncertainty_us", json!(0)),
+            ] {
+                let mut changed = origin.clone();
+                changed
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|e| e["op"] == "alignment")
+                    .unwrap()[field] = value;
+                assert!(
+                    validate(case, "sample", &report, &changed).is_err(),
+                    "{case}: {field}"
+                );
+            }
+            let mut missing = origin.clone();
+            missing
+                .as_array_mut()
+                .unwrap()
+                .retain(|e| e["op"] != "alignment");
+            assert!(validate(case, "sample", &report, &missing).is_err());
+            let mut duplicate = origin.clone();
+            let seal = duplicate
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["op"] == "alignment")
+                .unwrap()
+                .clone();
+            duplicate.as_array_mut().unwrap().push(seal);
+            assert!(validate(case, "sample", &report, &duplicate).is_err());
+            let mut delayed_eof = report.clone();
+            let body = delayed_eof["events"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|e| e["op"] == "origin-body")
+                .unwrap();
+            body["duration_us"] = json!(number(body, "duration_us").unwrap() + 5001);
+            assert!(
+                validate(case, "sample", &delayed_eof, &origin).is_err(),
+                "delayed EOF must not be hidden by timely payload writes"
+            );
+        }
     }
 
     #[test]

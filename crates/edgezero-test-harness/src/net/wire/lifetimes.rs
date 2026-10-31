@@ -6,6 +6,8 @@ const EVENT_LIMIT: usize = 32;
 const CAPS_BUFFER_BYTES: usize = 64 * 1024;
 const CAPS_PIECE_BYTES: usize = 16 * 1024;
 const CAPS_PIECES: usize = 8;
+// Long timed sleeps can coalesce past the controlled origin's fixed write targets.
+const SCHEDULE_WAIT_QUANTUM: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy)]
 enum Case {
@@ -275,6 +277,8 @@ impl Exchange<'_> {
                         } else {
                             "calibrated-causal-midpoint"
                         }
+                    } else if matches!(self.case, Case::Slow | Case::Timeout | Case::Fast) {
+                        "initial-receipts-minimum-upper-bound"
                     } else {
                         "origin-receipt-minus-guest-at-us"
                     });
@@ -309,10 +313,72 @@ fn wait_until(shared: &Shared, deadline: Instant) -> bool {
         };
         state = shared
             .wake
-            .wait_timeout(state, remaining)
+            .wait_timeout(state, remaining.min(SCHEDULE_WAIT_QUANTUM))
             .unwrap_or_else(PoisonError::into_inner)
             .0;
     }
+}
+
+fn seal_timeline(lifetime: &mut Lifetime, token: &str) -> Result<Option<Instant>> {
+    if let Some(anchor) = lifetime.scenario_anchor {
+        return Ok(Some(anchor));
+    }
+    let roles: &[&str] = if matches!(lifetime.case, Case::Timeout) {
+        &["origin", "a", "b", "c", "d"]
+    } else {
+        &["origin", "a", "b", "c"]
+    };
+    let mut candidates = Vec::new();
+    for role in roles {
+        let Some(receipt) = lifetime
+            .events
+            .iter()
+            .find(|e| e["op"] == "request" && e["role"] == *role)
+        else {
+            return Ok(None);
+        };
+        let offset = receipt["at_us"]
+            .as_i64()
+            .ok_or("missing receipt time")?
+            .checked_sub(i64::try_from(
+                receipt["guest_at_us"]
+                    .as_u64()
+                    .ok_or("missing guest sample")?,
+            )?)
+            .ok_or("invalid receipt offset")?;
+        candidates.push((*role, offset));
+    }
+    let (role, minimum) = *candidates
+        .iter()
+        .min_by_key(|(_, offset)| offset)
+        .ok_or("missing timeline candidates")?;
+    let offset_us = minimum.checked_add(1000).ok_or("invalid aligned offset")?;
+    let host = lifetime.anchor.ok_or("lifetime not started")?;
+    let distance = Duration::from_micros(offset_us.unsigned_abs());
+    let anchor = if offset_us >= 0 {
+        host.checked_add(distance)
+    } else {
+        host.checked_sub(distance)
+    }
+    .ok_or("invalid timeline anchor")?;
+    let sealed = Instant::now();
+    require(
+        sealed
+            <= anchor
+                + Duration::from_millis(if matches!(lifetime.case, Case::Fast) {
+                    120
+                } else {
+                    180
+                }),
+        "initial receipts missed the first source target",
+    )?;
+    require(lifetime.events.len() < EVENT_LIMIT, "lifetime event limit")?;
+    lifetime.events.push(json!({"op":"alignment","role":"control","case":lifetime.case.name(),"token":token,
+        "at_us":offset(sealed,host),"basis":"initial-receipts-minimum-upper-bound","receipt_roles":roles,
+        "selected_role":role,"scenario_anchor_host_offset_us":offset_us,"rounding_guard_us":1000,
+        "transit_uncertainty_us":null,"clock_sync_proven":false,"same_rate_assumed":true}));
+    lifetime.scenario_anchor = Some(anchor);
+    Ok(Some(anchor))
 }
 
 #[derive(Clone, Copy)]
@@ -421,11 +487,7 @@ pub(super) fn serve(
             None
         };
         require(!lifetime.roles.contains(*role), "duplicate lifetime role")?;
-        if matches!(
-            lifetime.case,
-            Case::Slow | Case::Timeout | Case::Fast | Case::Cpu
-        ) && *role == "origin"
-        {
+        if matches!(lifetime.case, Case::Cpu) && *role == "origin" {
             lifetime.scenario_anchor = Some(
                 head_received
                     .checked_sub(Duration::from_micros(guest_at))
@@ -453,7 +515,7 @@ pub(super) fn serve(
         {
             event["alignment"] = json!({
                 "basis":"origin-receipt-minus-guest-at-us",
-                "scenario_anchor_host_offset_us":offset(lifetime.scenario_anchor.unwrap(),anchor),
+                "scenario_anchor_host_offset_us":offset(head_received,anchor)-i64::try_from(guest_at)?,
                 "boundary_start_us":offset(head_started,anchor),
                 "boundary_end_us":offset(head_received,anchor),
                 "boundary_span_us":head_received.duration_since(head_started).as_micros() as u64,
@@ -560,7 +622,11 @@ fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
                 shared.wake.notify_all();
                 return Ok(true);
             }
-        } else if let Some(anchor) = lifetime.scenario_anchor {
+        } else if let Some(anchor) = if matches!(exchange.case, Case::Cpu) {
+            lifetime.scenario_anchor
+        } else {
+            seal_timeline(lifetime, exchange.token)?
+        } {
             exchange.scenario_anchor = Some(anchor);
             return Ok(true);
         }
@@ -873,7 +939,8 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
     );
     event["write_started_us"] = json!(offset(write_started, exchange.anchor));
     record(shared, exchange, event)?;
-    for (at, bytes) in chunks {
+    let chunk_count = chunks.len();
+    for (index, (at, bytes)) in chunks.into_iter().enumerate() {
         if !wait_until(shared, at) {
             return Ok(false);
         }
@@ -886,16 +953,34 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
             socket.write_all(b"\r\n")?;
         }
         socket.flush()?;
+        let completed = Instant::now();
+        // Finish wire framing before diagnostic formatting or shared-state recording.
+        let terminal = if chunked && index + 1 == chunk_count {
+            let started = Instant::now();
+            let result = socket.write_all(b"0\r\n\r\n").and_then(|()| socket.flush());
+            Some((started, Instant::now(), result))
+        } else {
+            None
+        };
         let mut event = exchange.event(
             "chunk",
-            Instant::now(),
+            completed,
             (!matches!(exchange.case, Case::Handoff | Case::Cleanup)).then_some(at),
         );
         event["bytes"] = json!(bytes);
         event["write_started_us"] = json!(offset(write_started, exchange.anchor));
-        record(shared, exchange, event)?;
+        if let Some((started, ended, result)) = &terminal {
+            event["terminal_frame"] = json!({"write_started_us":offset(*started,exchange.anchor),
+                "completed_us":offset(*ended,exchange.anchor),"status":if result.is_ok(){"pass"}else{"fail"},
+                "error":result.as_ref().err().map(ToString::to_string)});
+        }
+        let recorded = record(shared, exchange, event);
+        if let Some((_, _, result)) = terminal {
+            result?;
+        }
+        recorded?;
     }
-    if chunked {
+    if chunked && chunk_count == 0 {
         socket.write_all(b"0\r\n\r\n")?;
         socket.flush()?;
     }
@@ -1294,7 +1379,12 @@ mod tests {
             "2000",
         );
         let silent = connect(&origins, "timeout", "timeout-before-cutoff", "d", "34000");
+        let bids = ["a", "b", "c"]
+            .map(|role| connect(&origins, "timeout", "timeout-before-cutoff", role, "34000"));
         assert!(read(origin).ends_with(b"1\r\n!\r\n0\r\n\r\n"));
+        for bid in bids {
+            assert!(!read(bid).is_empty());
+        }
         assert!(read(silent).is_empty());
         let events = origins.take_lifetime_events("timeout").unwrap();
         let phases: Vec<_> = events
@@ -1638,6 +1728,166 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_wait_releases_the_mutex_and_stops_on_a_control_wake() {
+        let shared = Arc::new(Shared::default());
+        let worker_shared = Arc::clone(&shared);
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = wait_until(&worker_shared, Instant::now() + Duration::from_secs(1));
+            sent.send(result).unwrap();
+        });
+        shared.lock().stop = true;
+        shared.wake.notify_all();
+        let result = received.recv_timeout(Duration::from_secs(1));
+        worker.join().unwrap();
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn scheduled_wait_ignores_spurious_wakes_without_renewal_or_early_return() {
+        let shared = Shared::default();
+        let deadline = Instant::now() + Duration::from_millis(10);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                while Instant::now() < deadline {
+                    shared.wake.notify_all();
+                    thread::yield_now();
+                }
+            });
+            assert!(wait_until(&shared, deadline));
+        });
+        assert!(Instant::now() >= deadline);
+        shared.lock().stop = true;
+        assert!(!wait_until(&shared, deadline));
+    }
+
+    #[test]
+    fn timeline_seals_once_after_complete_initial_receipts_not_the_mediator() {
+        for roles in [["origin", "a", "b", "c"], ["c", "b", "a", "origin"]] {
+            let shared = Shared::default();
+            register(&shared, "sealed", "fast-origin").unwrap();
+            mark_start(&shared, "sealed").unwrap();
+            let mut state = shared.lock();
+            let lifetime = state.lifetimes.get_mut("sealed").unwrap();
+            lifetime.anchor = Some(Instant::now() - Duration::from_millis(10));
+            for role in roles {
+                assert!(seal_timeline(lifetime, "sealed").unwrap().is_none());
+                lifetime.events.push(json!({"op":"request","role":role,"at_us":2000,"guest_at_us":if role=="origin"{0}else{1000}}));
+            }
+            let expected = lifetime.anchor.unwrap() + Duration::from_micros(2000);
+            assert_eq!(seal_timeline(lifetime, "sealed").unwrap(), Some(expected));
+            let seal = lifetime
+                .events
+                .iter()
+                .find(|event| event["op"] == "alignment")
+                .unwrap()
+                .clone();
+            lifetime
+                .events
+                .push(json!({"op":"request","role":"mediator","at_us":3000,"guest_at_us":3000}));
+            assert_eq!(seal_timeline(lifetime, "sealed").unwrap(), Some(expected));
+            assert_eq!(
+                lifetime
+                    .events
+                    .iter()
+                    .filter(|event| event["op"] == "alignment")
+                    .collect::<Vec<_>>(),
+                vec![&seal]
+            );
+        }
+        let shared = Shared::default();
+        register(&shared, "late", "fast-origin").unwrap();
+        mark_start(&shared, "late").unwrap();
+        let mut state = shared.lock();
+        let lifetime = state.lifetimes.get_mut("late").unwrap();
+        for role in ["origin", "a", "b", "c"] {
+            lifetime
+                .events
+                .push(json!({"op":"request","role":role,"at_us":1000,"guest_at_us":1_000_000}));
+        }
+        assert!(seal_timeline(lifetime, "late").is_err());
+        assert!(lifetime.scenario_anchor.is_none());
+    }
+
+    #[test]
+    fn timeout_alignment_waits_for_d_and_can_select_its_tighter_receipt() {
+        let shared = Shared::default();
+        register(&shared, "fourth", "timeout-before-cutoff").unwrap();
+        mark_start(&shared, "fourth").unwrap();
+        let mut state = shared.lock();
+        let lifetime = state.lifetimes.get_mut("fourth").unwrap();
+        lifetime.anchor = Some(Instant::now() - Duration::from_millis(10));
+        for role in ["origin", "a", "b", "c"] {
+            lifetime
+                .events
+                .push(json!({"op":"request","role":role,"at_us":2000,"guest_at_us":1000}));
+        }
+        assert!(seal_timeline(lifetime, "fourth").unwrap().is_none());
+        assert!(lifetime.scenario_anchor.is_none());
+        lifetime
+            .events
+            .push(json!({"op":"request","role":"d","at_us":2000,"guest_at_us":2000}));
+        assert_eq!(
+            seal_timeline(lifetime, "fourth").unwrap(),
+            Some(lifetime.anchor.unwrap() + Duration::from_micros(1000))
+        );
+        let seal = lifetime
+            .events
+            .iter()
+            .find(|e| e["op"] == "alignment")
+            .unwrap();
+        assert_eq!(seal["selected_role"], "d");
+        assert_eq!(seal["receipt_roles"], json!(["origin", "a", "b", "c", "d"]));
+    }
+
+    #[test]
+    fn timeline_alignment_uses_all_initial_receipts_before_any_response() {
+        let origins = WireOrigins::start().unwrap();
+        origins.register_lifetime("cold", "fast-origin").unwrap();
+        origins.mark_lifetime_start("cold").unwrap();
+        thread::sleep(Duration::from_millis(10));
+        let origin = connect(&origins, "cold", "fast-origin", "origin", "2000");
+        let bids =
+            ["a", "b", "c"].map(|role| connect(&origins, "cold", "fast-origin", role, "34000"));
+        assert!(read(origin).ends_with(b"1\r\nO\r\n0\r\n\r\n"));
+        for bid in bids {
+            assert!(!read(bid).is_empty());
+        }
+        let events = origins.take_lifetime_events("cold").unwrap();
+        let receipts: Vec<_> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["op"] == "request")
+            .collect();
+        let minimum = receipts
+            .iter()
+            .map(|entry| entry["at_us"].as_i64().unwrap() - entry["guest_at_us"].as_i64().unwrap())
+            .min()
+            .unwrap();
+        let alignment = event(&events, "control", "alignment");
+        assert_eq!(
+            alignment["scenario_anchor_host_offset_us"],
+            minimum + 1000,
+            "cold origin transit must not displace the entire scenario"
+        );
+        assert_eq!(alignment["basis"], "initial-receipts-minimum-upper-bound");
+        let sealed = alignment["at_us"].as_i64().unwrap();
+        for entry in receipts {
+            assert!(entry["at_us"].as_i64().unwrap() <= sealed);
+        }
+        for entry in events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["op"] == "head")
+        {
+            assert!(entry["write_started_us"].as_i64().unwrap() >= sealed);
+        }
+        origins.finish().unwrap();
+    }
+
+    #[test]
     fn slow_schedule_keeps_host_anchor_and_explicitly_derives_scenario_anchor() {
         let origins = WireOrigins::start().unwrap();
         origins.register_lifetime("slow", "slow-origin").unwrap();
@@ -1667,6 +1917,9 @@ mod tests {
             - alignment["boundary_start_us"].as_i64().unwrap();
         // Offsets and the duration are independently truncated to whole microseconds.
         assert!((span..=span + 1).contains(&boundary_delta));
+        let offset = event(&events, "control", "alignment")["scenario_anchor_host_offset_us"]
+            .as_i64()
+            .unwrap();
         for (role, expected) in [
             ("origin", 700_000),
             ("a", 180_000),

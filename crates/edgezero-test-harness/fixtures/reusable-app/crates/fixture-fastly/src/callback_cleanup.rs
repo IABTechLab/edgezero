@@ -335,6 +335,7 @@ fn deliver(request: fastly::Request, saved: &Saved) -> Result<(), EdgeError> {
         "content-type",
         "application/json".parse().map_err(EdgeError::internal)?,
     );
+    fixture_core::launch::stamp(&mut response);
     let mut app = App::with_name_and_platform(
         RouterService::builder()
             .get("/progress/lifetimes/callback-exit", placeholder)

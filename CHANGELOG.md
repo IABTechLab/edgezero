@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Repair local lifecycle-source scheduling and EOF evidence, and stamp custom Fastly callback
+  responses with the existing launch identity. Preserve strict timing failures, original
+  deadlines and capability levels; local measurement repairs are not hosted qualification.
 - Bind local original-coding, negotiation, mixed-batch and Cloudflare relay acceptance to the
   existing wire suites, reusing the shared coding handler and bounded origins. Preserve exact
   encoded bytes/metadata, observed framing and failed evidence without changing production APIs,

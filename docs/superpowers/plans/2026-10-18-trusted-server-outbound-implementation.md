@@ -12,6 +12,68 @@
 
 ## Status and Authority
 
+### Lifecycle Measurement Repair (2026-10-30)
+
+Investigate retained strict failures without changing production transports, guest deadlines,
+cutoffs or the frozen +/-5 ms targets. A fresh baseline Axum run passes 9/10 cases and misses
+guest EOF at 1305.506 ms. Independent source/measurement and CPU-proof investigations find two
+fixture defects: a cold request's receipt includes unknown setup/transit in the scheduling
+estimate, and source writes themselves sometimes miss their prescribed cadence. Neither proves
+an adapter defect, and origin socket-write completion is not peer receipt or guest observation.
+
+Slow/Fast/Timeout sources now append one immutable pre-write alignment seal, using existing
+initial `origin/a/b/c` receipts plus `d` for Timeout. Recompute the minimum receipt-minus-guest
+sample and add an explicit 1 ms rounding guard; keep the raw provisional origin estimate and
+all raw timestamps unchanged. Initial receipts must precede the first source target, and later
+mediator receipts cannot reanchor it. CPU retains its existing separate causal calibration.
+The estimate still assumes equal clock rates and discloses unknown transit uncertainty and
+unproved clock synchronization. Strict guest/source checks remain independent of the estimate.
+
+Scheduled writes use one condition-variable loop with waits capped at 1 ms against the original
+absolute deadline, rechecking sticky stop and releasing the mutex while waiting. No new worker,
+busy-spin path, timer restart, provider pin or resource-limit increase is introduced. The first
+early-wake/precision-tail experiment still produced late source writes and is removed, not kept
+as an alternate implementation. Preserve its failed `/private/tmp/pr275-lifetimes-repaired-axum`
+run (6/10); passing unit controls never relabel it. Short waits are not a realtime guarantee.
+
+Final payload and terminating-chunk times are captured before diagnostic formatting/locking;
+successful framing and payload/terminator/close order are required in the sealed-case validator.
+Header, payload and guest EOF targets are unchanged. Regression proofs cover cold alignment,
+immutable/order-independent seals, missing/late initial roles and Timeout D, forged evidence,
+spurious wakes, stop handling and missing/failed/inverted terminal framing. The earlier
+typo-driven terminal test failure is not credited; the corrected removal mutation fails before
+the guard is restored and passes afterward.
+
+The serial scheduling comparison retains these results:
+
+| Runtime | Passed | Remaining Strict Failures |
+| --- | --- | --- |
+| Axum | 9/10 | Guest fast-origin head at 131.432 ms despite the source head completing within 0.268 ms of its target. Source write is not proof of guest receipt. |
+| Repaired Viceroy | 12/12 timeline/response-cleanup | Callback wrappers initially fail launch attestation, separately from timing. |
+| Spin | 10/10 | None in this local comparison; not hosted qualification. |
+| workerd | 8/10 | Slow-case source write at 916.416 ms versus 910.623 +/-5 ms; Timeout guest origin head at 706 ms. |
+
+Artifacts are `/private/tmp/pr275-lifetimes-quantum-{axum,fastly,spin,cloudflare}`. No failed run
+is retried unchanged for passing credit. The earlier baseline and removed precision experiment
+remain separate evidence. These results do not establish a universal scheduling bound or
+attribute the remaining head delay to provider I/O, guest wakeup or another unobserved boundary.
+
+The Fastly callback failure is a separate fixture defect: its replacement response bypasses
+identity middleware. Add the existing `fixture_core::launch::stamp` before delivery, without
+changing body bytes, response commitment, early-error behavior or startup verification. The
+changed-fixture run `/private/tmp/pr275-lifetimes-attested-fastly` passes all 20 cases: twelve
+timeline/response-cleanup and eight `run_custom`/`serve_custom` callback-exit cases, including
+the negative early/setup outcomes. The earlier unverified run remains failed evidence.
+
+All five standard root gates pass: 2,636 tests across 33 binaries, one existing ignored,
+strict Clippy, formatting, feature compilation and Spin WASM compilation. Harness tests pass
+404 with two existing ignored; focused Fastly progress fixture tests pass two, and actual WASI
+progress-target Clippy passes. Final code and evidence reviews have no remaining scoped defect.
+The acceptance inventory remains 118 ready/393 planned, unqualified. No new CI job, selector,
+production API, capability claim, demo/template contract or frozen requirement changes.
+Axum/workerd strict timing, other missing lifetime/cancellation acceptance, candidate freeze,
+consumer composition and authorized hosted evidence remain open.
+
 ### Encoding Runtime Acceptance (2026-10-30)
 
 EZ-5 criteria 04/05 now bind all four local runtimes, criterion 06 binds Viceroy and criterion
