@@ -71,7 +71,7 @@ mod sdk {
             }
             let method = match path.as_str() {
                 "/get" | "/get-settled" | "/p5" | "/policy" | "/normalization"
-                | "/batch-recovery" => Method::GET,
+                | "/batch-recovery" | "/marker" => Method::GET,
                 "/head" | "/head-settled" => Method::HEAD,
                 "/post" => Method::POST,
                 _ => return Err(ErrorCode::HttpRequestUriInvalid),
@@ -97,6 +97,44 @@ mod sdk {
             }
             if path == "/normalization" {
                 return normalization_exchange(uri, &headers).await;
+            }
+            if path == "/marker" {
+                let field = |name: &str| -> Result<String, ErrorCode> {
+                    let values = headers.get(name);
+                    let [value] = values.as_slice() else {
+                        return Err(ErrorCode::HttpRequestUriInvalid);
+                    };
+                    from_utf8(value)
+                        .map(str::to_owned)
+                        .map_err(|_error| ErrorCode::HttpRequestUriInvalid)
+                };
+                let method = match field("x-marker-method")?.as_str() {
+                    "GET" => Method::GET,
+                    "HEAD" => Method::HEAD,
+                    _ => return Err(ErrorCode::HttpRequestUriInvalid),
+                };
+                let setting = match field("x-marker-setting")?.as_str() {
+                    "inherit" => edgezero_core::OutboundProxyMarker::Inherit,
+                    "on" => edgezero_core::OutboundProxyMarker::On,
+                    _ => return Err(ErrorCode::HttpRequestUriInvalid),
+                };
+                let outgoing = OutboundRequest::new(method, uri)
+                    .and_then(|request| {
+                        request.proxy_marker(setting).header(
+                            "x-request-token",
+                            field("x-request-token")
+                                .map_err(|_error| EdgeError::bad_request("invalid marker token"))?,
+                        )
+                    })
+                    .map_err(|_error| ErrorCode::HttpRequestUriInvalid)?;
+                let client =
+                    HttpClient::with_client(SpinOutboundClient::new()).with_proxy_marker(false);
+                let report = fixture_core::marker::run(&client, outgoing, &field("x-marker-case")?)
+                    .await
+                    .map_err(|_error| {
+                        ErrorCode::InternalError(Some("marker proof failed".to_owned()))
+                    })?;
+                return report.to_string().into_response();
             }
             if path == "/batch-recovery" {
                 let cases = headers.get("x-batch-case");

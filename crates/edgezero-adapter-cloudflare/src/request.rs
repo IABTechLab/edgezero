@@ -2025,6 +2025,25 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn unsupported_optimizer_precedes_expiry_without_transport() {
+        use edgezero_core::outbound::OutboundSendMode;
+        use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;
+
+        check_unsupported_image_optimizer_preflight(
+            CloudflareOutboundClient::with_time,
+            "cloudflare",
+            &[
+                OutboundSendMode::Send,
+                OutboundSendMode::Follow,
+                OutboundSendMode::Begin,
+                OutboundSendMode::Batch,
+            ],
+        )
+        .await
+        .expect("unsupported-mode conformance");
+    }
+
+    #[wasm_bindgen_test]
     async fn standard_service_installs_the_exact_application_outbound_clock() {
         async fn elapsed(ctx: RequestContext) -> Result<Response, EdgeError> {
             let client = ctx

@@ -3,7 +3,17 @@ use crate::net::WireOrigins;
 use std::io::Read as _;
 
 mod batch_recovery;
+mod marker;
 mod normalization;
+
+pub(super) fn validate_marker_artifact(events: &[Value], adapter: &str) -> Result<()> {
+    marker::validate_artifact(events, adapter)
+}
+
+#[cfg(test)]
+pub(super) fn marker_artifact(adapter: &str) -> Vec<Value> {
+    marker::tests::artifact(adapter)
+}
 
 pub(super) fn validate_batch_artifact(events: &[Value], adapter: &str) -> Result<()> {
     batch_recovery::validate_artifact(events, adapter)
@@ -293,6 +303,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
     validate_policy_inventory(&cases, receipts)?;
     normalization::validate_artifact(events, origin_port)?;
     batch_recovery::validate_artifact(events, "spin")?;
+    marker::validate_artifact(events, "spin")?;
     Ok(())
 }
 
@@ -917,6 +928,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         let policy = spin_policy(port, &origins, matrix.records)?;
         normalization::run(port, &origins, matrix.records)?;
         batch_recovery::run("spin", port, matrix.records)?;
+        marker::run("spin", port, matrix.records)?;
         running.check_running()?;
         Ok((baseline, policy))
     })();
@@ -957,6 +969,7 @@ fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Resul
             };
             matrix.run()?;
             batch_recovery::run(name, port, matrix.records)?;
+            marker::run(name, port, matrix.records)?;
             Ok((matrix.exchanges, matrix.dispatches))
         },
     )?;
@@ -1283,6 +1296,7 @@ mod tests {
         values.push(json!({"event":"spin-policy-inventory","status":"pass","exchanges":26,"origin_requests":26,"qualification":false}));
         values.extend(normalization::tests::artifact(first));
         values.extend(batch_recovery::tests::artifact("spin"));
+        values.extend(marker::tests::artifact("spin"));
         values
     }
 

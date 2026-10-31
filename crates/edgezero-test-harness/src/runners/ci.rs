@@ -55,7 +55,7 @@ fn validate_markers(
         .filter(|case| case["environment"] == "unit/spin" && case["implementation"] == "ready")
     {
         let log = match case["case_id"].as_str() {
-            Some("EZ-2/acceptance/01") => sdk_log,
+            Some("EZ-2/acceptance/01" | "EZ-3/acceptance/08") => sdk_log,
             Some("EZ-5/acceptance/09") => async_log,
             Some("EZ-5/acceptance/10") => wire_log,
             Some("EZ-5/acceptance/11") => wire_log,
@@ -84,7 +84,9 @@ fn validate_markers(
                 "invalid Spin sentinel name",
             )?;
             let (log, expected) = match (case["case_id"].as_str(), name) {
-                (Some("EZ-2/acceptance/01"), _) => (log, format!("test {name} ... ok")),
+                (Some("EZ-2/acceptance/01" | "EZ-3/acceptance/08"), _) => {
+                    (log, format!("test {name} ... ok"))
+                }
                 (
                     Some("EZ-5/acceptance/11"),
                     "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence"
@@ -551,6 +553,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn optimizer_precedence_requires_the_sdk_phase() {
+        let inventory = json!({"cases":[{
+            "case_id":"EZ-3/acceptance/08", "environment":"unit/spin",
+            "implementation":"ready", "sentinel":"tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport"
+        }]});
+        let passed = "test tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport ... ok\n";
+        validate_markers(&inventory, "", passed, "", "").unwrap();
+        for (native, sdk, asynchronous, wire) in [
+            (passed, "", "", ""),
+            ("", "", passed, ""),
+            ("", "", "", passed),
+            ("", "", "", ""),
+            (
+                "",
+                "test tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport ... ignored\n",
+                "",
+                "",
+            ),
+        ] {
+            assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+        }
     }
 
     #[test]

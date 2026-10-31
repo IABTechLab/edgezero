@@ -56,7 +56,7 @@ batch-only selector is removed. Cloudflare uses the selected Wrangler package's 
 with the inspector disabled: its network preview otherwise decodes malformed compressed bodies
 before application policy. The small Node bootstrap only starts/disposes that SDK; Rust still
 owns supervision and every assertion. This does not activate Cloudflare wire execution in CI
-or qualify hosted behavior. There are 76 ready and 435 planned acceptance legs.
+or qualify hosted behavior. There are 84 ready and 427 planned acceptance legs.
 
 Client-selection acceptance uses the existing adapter-owned phases: Axum's native handler
 and transport-factory tests, Fastly/Cloudflare's runtime library tests, and Spin's executable
@@ -64,6 +64,19 @@ SDK contracts. The handler observes router-state over adapter defaults and, on F
 router-state over prepare over default. Distinct supplied-client clocks identify the selected
 handle through a fixed preflight error without network I/O. The controller rejects a missing,
 failed or wrong-phase Spin proof. No extra runtime suite or CI job is introduced.
+
+Unsupported Image Optimizer precedence shares one `test-utils` conformance helper across the
+adapter-owned test phases. Real adapter validation and empty native batches are retained; expired
+requests produce attributed 504s without options and named 400s with unsupported options. Counted
+pending bodies, transport boundaries and timers prove zero activity, with a finite test poll budget.
+Fastly tests Begin/Batch only; its successful native optimizer Send/Follow qualification stays open.
+
+The existing wire phase separately executes ten marker cases: GET 200/204/304/302 and HEAD 200,
+each inheriting client-wide Off or explicitly overriding On. One shared fixture helper performs
+the sends. An independently owned bounded origin records actual method/path/token/port; persisted
+validation requires exact reports, HTTP bytes and origin receipts after cleanup. Existing redirect,
+batch, policy and normalization counts remain unchanged. Cloudflare retains its explicit local
+wire command rather than silently gaining CI or hosted qualification credit.
 
 Use `--suite outbound-wire`, `--suite ingress-fidelity` or the other focused suites for
 iteration. See [suite assertions and runtime setup](SUITES.md) for their exact contracts,

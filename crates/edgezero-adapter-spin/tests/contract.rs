@@ -867,6 +867,24 @@ mod tests {
         }
 
         #[test]
+        fn unsupported_optimizer_precedes_expiry_without_transport() {
+            use edgezero_core::outbound::OutboundSendMode;
+            use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;
+
+            block_on(check_unsupported_image_optimizer_preflight(
+                SpinOutboundClient::with_time,
+                "spin",
+                &[
+                    OutboundSendMode::Send,
+                    OutboundSendMode::Follow,
+                    OutboundSendMode::Begin,
+                    OutboundSendMode::Batch,
+                ],
+            ))
+            .expect("unsupported-mode conformance");
+        }
+
+        #[test]
         fn standard_dispatch_installs_the_application_outbound_clock() {
             async fn elapsed(ctx: RequestContext) -> Result<String, EdgeError> {
                 let client = ctx

@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; 435 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; 427 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -3147,11 +3147,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-08-unit-axum",
-      "sentinel": "ez_3_acceptance_08_unit_axum",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_08_unit_axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils",
+      "sentinel": "outbound::clock_tests::unsupported_optimizer_precedes_expiry_without_transport",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Unit, every adapter. Given an expired deadline and Image Optimizer options on a send mode where they are Unsupported, the unsupported-option 400 wins without reading the body, registering a backend, or sending. Without the unsupported option, the same request returns the attributed 504.",
-      "artifact_path": "outbound/EZ-3/acceptance/08/unit/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/axum/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3175,11 +3175,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-08-unit-fastly",
-      "sentinel": "ez_3_acceptance_08_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_08_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "request::synthesis_tests::unsupported_optimizer_precedes_expiry_without_transport",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Unit, every adapter. Given an expired deadline and Image Optimizer options on a send mode where they are Unsupported, the unsupported-option 400 wins without reading the body, registering a backend, or sending. Without the unsupported option, the same request returns the attributed 504.",
-      "artifact_path": "outbound/EZ-3/acceptance/08/unit/fastly.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/fastly/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3203,11 +3203,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-08-unit-cloudflare",
-      "sentinel": "ez_3_acceptance_08_unit_cloudflare",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_08_unit_cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils",
+      "sentinel": "request::tests::unsupported_optimizer_precedes_expiry_without_transport",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib",
       "expected": "Unit, every adapter. Given an expired deadline and Image Optimizer options on a send mode where they are Unsupported, the unsupported-option 400 wins without reading the body, registering a backend, or sending. Without the unsupported option, the same request returns the attributed 504.",
-      "artifact_path": "outbound/EZ-3/acceptance/08/unit/cloudflare.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/cloudflare/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3231,11 +3231,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-08-unit-spin",
-      "sentinel": "ez_3_acceptance_08_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_08_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Unit, every adapter. Given an expired deadline and Image Optimizer options on a send mode where they are Unsupported, the unsupported-option 400 wins without reading the body, registering a backend, or sending. Without the unsupported option, the same request returns the attributed 504.",
-      "artifact_path": "outbound/EZ-3/acceptance/08/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/sdk-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9823,11 +9823,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-7-acceptance-04-axum",
-      "sentinel": "ez_7_acceptance_04_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-7/acceptance/04",
+      "sentinel": "ez_7_acceptance_04_axum_runtime",
+      "command": "scripts/test_integration.sh --adapter axum --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/axum",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given 200, 204, HEAD 200, 304, and 302 responses from an origin, when the marker is off, then none carries the field. Under F's behavior, all of them carry it.",
-      "artifact_path": "outbound/EZ-7/acceptance/04/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9851,11 +9851,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-7-acceptance-04-viceroy",
-      "sentinel": "ez_7_acceptance_04_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-7/acceptance/04",
+      "sentinel": "ez_7_acceptance_04_fastly_runtime",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given 200, 204, HEAD 200, 304, and 302 responses from an origin, when the marker is off, then none carries the field. Under F's behavior, all of them carry it.",
-      "artifact_path": "outbound/EZ-7/acceptance/04/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9879,11 +9879,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-7-acceptance-04-workerd",
-      "sentinel": "ez_7_acceptance_04_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-7/acceptance/04",
+      "sentinel": "ez_7_acceptance_04_cloudflare_runtime",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given 200, 204, HEAD 200, 304, and 302 responses from an origin, when the marker is off, then none carries the field. Under F's behavior, all of them carry it.",
-      "artifact_path": "outbound/EZ-7/acceptance/04/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9907,11 +9907,11 @@
       "owner": "EdgeZero",
       "task": "P3",
       "substep": "EZ-7-acceptance-04-spin",
-      "sentinel": "ez_7_acceptance_04_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-7/acceptance/04",
+      "sentinel": "ez_7_acceptance_04_spin_runtime",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "**Axum, Viceroy 0.21.0, workerd, Spin 4.1.** Given 200, 204, HEAD 200, 304, and 302 responses from an origin, when the marker is off, then none carries the field. Under F's behavior, all of them carry it.",
-      "artifact_path": "outbound/EZ-7/acceptance/04/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {

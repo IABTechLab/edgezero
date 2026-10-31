@@ -328,6 +328,49 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
         "invalid wire request line",
     )?;
     let (method, target) = (parts[0], parts[1]);
+    if target.starts_with("/marker/") {
+        let tokens: Vec<_> = head
+            .fields
+            .iter()
+            .filter(|(name, _)| name == "x-request-token")
+            .map(|(_, value)| value)
+            .collect();
+        let [token] = tokens.as_slice() else {
+            return Err("missing or duplicate marker token".into());
+        };
+        require(
+            matches!(method, "GET" | "HEAD")
+                && !token.is_empty()
+                && token.len() <= 64
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && !head
+                    .fields
+                    .iter()
+                    .any(|(name, _)| name == "transfer-encoding")
+                && head
+                    .fields
+                    .iter()
+                    .filter(|(name, _)| name == "content-length")
+                    .count()
+                    <= 1
+                && head
+                    .fields
+                    .iter()
+                    .filter(|(name, _)| name == "content-length")
+                    .all(|(_, value)| value == "0")
+                && reader.buffer().is_empty(),
+            "invalid marker method, token or framing",
+        )?;
+        super::marker_response(&mut socket, method, target)?;
+        shared
+            .lock()
+            .wire
+            .push_back(json!({"port":port,"method":method,"target":target,"token":token}));
+        shared.wake.notify_all();
+        return Ok(());
+    }
     if target.starts_with("/lifetimes/") {
         require(
             method == "GET"
@@ -799,6 +842,60 @@ mod tests {
         socket.read_to_end(&mut body).unwrap();
         assert_eq!(body, b"A");
         assert_eq!(origins.take_requests().len(), 3);
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn marker_origin_preserves_actual_method_and_token_without_body_or_marker() {
+        let origins = WireOrigins::start().unwrap();
+        for (method, status) in [
+            ("GET", 200),
+            ("GET", 204),
+            ("HEAD", 200),
+            ("GET", 304),
+            ("GET", 302),
+        ] {
+            let path = format!("/marker/{}/{status}/absent", method.to_ascii_lowercase());
+            let request = format!(
+                "{method} {path} HTTP/1.1\r\nx-request-token: marker-control\r\nContent-Length: 0\r\n\r\n"
+            );
+            let response = exchange(&origins, 0, request.as_bytes());
+            assert_eq!(response, format!("HTTP/1.1 {status} Probe\r\nContent-Length: 0\r\nConnection: close\r\nLocation: /not-followed\r\n\r\n").as_bytes());
+            assert_eq!(
+                origins.take_wire().unwrap(),
+                json!({"port":origins.port(0),"method":method,"target":path,"token":"marker-control"})
+            );
+        }
+        assert!(origins.take_requests().is_empty());
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn marker_origin_rejects_wrong_method_token_and_framing() {
+        for request in [
+            "GET /marker/head/200/absent HTTP/1.1\r\nx-request-token: marker\r\n\r\n",
+            "POST /marker/get/200/absent HTTP/1.1\r\nx-request-token: marker\r\n\r\n",
+            "GET /marker/get/200/absent HTTP/1.1\r\n\r\n",
+            "GET /marker/get/200/absent HTTP/1.1\r\nx-request-token: bad token\r\n\r\n",
+            "GET /marker/get/200/absent HTTP/1.1\r\nx-request-token: a\r\nx-request-token: b\r\n\r\n",
+            "GET /marker/get/200/absent HTTP/1.1\r\nx-request-token: marker\r\nContent-Length: 1\r\n\r\n",
+            "GET /marker/get/200/absent HTTP/1.1\r\nx-request-token: marker\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+            "GET /marker/get/200/absent HTTP/1.1\r\nx-request-token: marker\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "GET /marker/get/999/absent HTTP/1.1\r\nx-request-token: marker\r\n\r\n",
+        ] {
+            let origins = WireOrigins::start().unwrap();
+            assert!(exchange(&origins, 0, request.as_bytes()).is_empty());
+            assert!(origins.take_wire().is_err());
+            assert!(origins.finish().is_err());
+        }
+        let origins = WireOrigins::start().unwrap();
+        let response = exchange(
+            &origins,
+            0,
+            b"HEAD /marker/head/200/absent HTTP/1.1\r\nx-request-token: marker\r\n\r\n",
+        );
+        assert!(response.starts_with(b"HTTP/1.1 200 Probe\r\n"));
+        assert_eq!(origins.take_wire().unwrap()["method"], "HEAD");
         origins.finish().unwrap();
     }
 

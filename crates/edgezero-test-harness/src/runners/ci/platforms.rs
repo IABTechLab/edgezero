@@ -54,7 +54,8 @@ fn validate_wire(events: &[Value], adapter: &str) -> Result<()> {
         cases.len() == 68 && receipts.iter().sum::<usize>() == 84,
         "incomplete redirect wire cases or origin receipts",
     )?;
-    super::super::wire::validate_batch_artifact(events, adapter)
+    super::super::wire::validate_batch_artifact(events, adapter)?;
+    super::super::wire::validate_marker_artifact(events, adapter)
 }
 
 fn validate_progress(events: &[Value]) -> Result<()> {
@@ -395,6 +396,7 @@ mod tests {
         let mut cases = (0..68).map(|index| json!({"event":format!("{adapter}-wire-case"),"origin_requests":if index < 16 {vec![json!({}),json!({})]} else {vec![json!({})]}})).collect::<Vec<_>>();
         cases.push(json!({"event":format!("{adapter}-wire-inventory"),"status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         cases.extend(super::super::super::wire::batch_recovery_artifact(adapter));
+        cases.extend(super::super::super::wire::marker_artifact(adapter));
         cases
     }
 

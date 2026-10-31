@@ -18,6 +18,18 @@ clippy card. G4's approved interface digest and G2's recorded feasibility dispos
 qualification cannot silently approve an API change or convert pending/failed provider evidence
 into a waiver.
 
+## Policy and Marker Binding (2026-10-30)
+
+EZ-3 acceptance 08 runs the same test-only native preflight conformance helper through each
+adapter's existing test phase. Require original request-deadline attribution, unsupported-option
+precedence, no eligible transport/body/timer work and bounded test polling; native empty batching
+is delegated rather than replaced. EZ-7 acceptance 04 runs ten real marker exchanges within the
+existing wire suites and requires exact persisted method/path/token/port, policy, markers and
+HTTP bytes after bounded origin cleanup. Keep all previous inventories and the Cloudflare explicit
+local-wire boundary. The inventory is 84 ready/427 planned; requirements, applicability and
+qualification gates are unchanged. Passing local commands do not qualify native optimizer mapping,
+candidate-specific resource/timing bounds or hosted behavior.
+
 ## Client Selection Binding (2026-10-30)
 
 EZ-2 acceptance 01 uses the existing Axum native, Fastly/Cloudflare runtime-library and Spin

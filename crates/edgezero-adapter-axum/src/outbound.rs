@@ -1009,6 +1009,24 @@ mod clock_tests {
     }
 
     #[test]
+    fn unsupported_optimizer_precedes_expiry_without_transport() {
+        use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;
+        use futures::executor::block_on;
+
+        block_on(check_unsupported_image_optimizer_preflight(
+            |time| AxumOutboundClient::try_with_time(time).expect("client"),
+            "axum",
+            &[
+                OutboundSendMode::Send,
+                OutboundSendMode::Follow,
+                OutboundSendMode::Begin,
+                OutboundSendMode::Batch,
+            ],
+        ))
+        .expect("unsupported-mode conformance");
+    }
+
+    #[test]
     fn image_optimizer_rejection_precedes_pending_body_and_expired_budget() {
         use edgezero_core::OutboundImageOptimizerOptions;
         use futures::executor::block_on;

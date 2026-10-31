@@ -33,6 +33,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   transient listener errors, and yield on empty Axum response chunks without DATA frames.
 - Make legacy API scans and selected-test execution guards fail closed on command errors,
   empty runs and missing executed sentinels. Preserve provider qualification limitations.
+- Share unsupported-option preflight conformance under core's `test-utils` feature and bind
+  adapter-owned execution without duplicating client wrappers. Add persisted ten-case native
+  proxy-marker proofs within existing wire suites, sharing fixture logic and bounded origins;
+  retain all prior inventories, SDK/runtime pins and separate hosted qualification gates.
 - Bind fixture readiness to an owned launch, embedded build identity and prescribed response,
   with absolute startup/capture deadlines and finite header/body capture. Keep unattested fault
   observations uncredited until recovery, reject later identity conflicts, and preserve failed

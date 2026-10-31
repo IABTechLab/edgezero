@@ -1433,6 +1433,19 @@ mod synthesis_tests {
     }
 
     #[test]
+    fn unsupported_optimizer_precedes_expiry_without_transport() {
+        use edgezero_core::outbound::OutboundSendMode;
+        use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;
+
+        executor::block_on(check_unsupported_image_optimizer_preflight(
+            FastlyOutboundClient::with_time,
+            "fastly",
+            &[OutboundSendMode::Begin, OutboundSendMode::Batch],
+        ))
+        .expect("unsupported-mode conformance");
+    }
+
+    #[test]
     fn synthesis_wraps_bare_kv_handle_under_default_when_no_registry() {
         let stores = Stores {
             kv: Some(kv_handle()),

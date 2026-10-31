@@ -453,22 +453,13 @@ async fn marker_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeE
         }
         return json_response(json!({"case":case,"markers":markers,"qualification":false}));
     }
-    let request = OutboundRequest::new(method, target)?
+    let mut request = OutboundRequest::new(method, target)?
         .proxy_marker(setting)
         .max_response_bytes(0);
-    let enabled = client.effective_proxy_marker_enabled(&request);
-    let response = client.send(request).await?;
-    let status = response.status().as_u16();
-    let markers: Vec<_> = response
-        .headers()
-        .get_all("x-edgezero-proxy")
-        .iter()
-        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
-        .collect();
-    response.into_bytes_bounded(0).await?;
-    json_response(
-        json!({"case":case,"status":status,"markers":markers,"enabled":enabled,"qualification":false}),
-    )
+    if let Some(token) = ctx.headers().get("x-request-token") {
+        request = request.header("x-request-token", token.clone())?;
+    }
+    json_response(crate::marker::run(&client, request, case).await?)
 }
 
 async fn coding_probe(ctx: RequestContext, case: &str) -> Result<Response, EdgeError> {

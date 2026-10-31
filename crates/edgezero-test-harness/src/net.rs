@@ -285,6 +285,38 @@ impl Drop for Backend {
         }
     }
 }
+fn marker_response(stream: &mut TcpStream, method: &str, path: &str) -> Result<()> {
+    let parts: Vec<_> = path
+        .strip_prefix("/marker/")
+        .ok_or("invalid marker path")?
+        .split('/')
+        .collect();
+    let [
+        expected_method @ ("get" | "head"),
+        status @ ("200" | "204" | "304" | "302"),
+        shape @ ("absent" | "upstream" | "nominated"),
+    ] = parts.as_slice()
+    else {
+        return Err("invalid marker path".into());
+    };
+    require(
+        method.eq_ignore_ascii_case(expected_method),
+        "marker origin method mismatch",
+    )?;
+    write!(
+        stream,
+        "HTTP/1.1 {status} Probe\r\nContent-Length: 0\r\nConnection: close\r\n"
+    )?;
+    if *shape != "absent" {
+        stream.write_all(b"x-edgezero-proxy: upstream\r\n")?;
+    }
+    if *shape == "nominated" {
+        stream.write_all(b"Connection: x-edgezero-proxy\r\n")?;
+    }
+    stream.write_all(b"Location: /not-followed\r\n\r\n")?;
+    Ok(())
+}
+
 fn serve(
     mut stream: TcpStream,
     receipts: Arc<Mutex<Vec<String>>>,
@@ -333,32 +365,8 @@ fn serve(
             &progress,
         );
     }
-    if let Some(path) = path.strip_prefix("/marker/") {
-        let parts: Vec<_> = path.split('/').collect();
-        let [
-            expected_method @ ("get" | "head"),
-            status @ ("200" | "204" | "304" | "302"),
-            shape @ ("absent" | "upstream" | "nominated"),
-        ] = parts.as_slice()
-        else {
-            return Err("invalid marker path".into());
-        };
-        require(
-            method.eq_ignore_ascii_case(expected_method),
-            "marker origin method mismatch",
-        )?;
-        write!(
-            stream,
-            "HTTP/1.1 {status} Probe\r\nContent-Length: 0\r\nConnection: close\r\n"
-        )?;
-        if *shape != "absent" {
-            stream.write_all(b"x-edgezero-proxy: upstream\r\n")?;
-        }
-        if *shape == "nominated" {
-            stream.write_all(b"Connection: x-edgezero-proxy\r\n")?;
-        }
-        stream.write_all(b"Location: /not-followed\r\n\r\n")?;
-        return Ok(());
+    if path.starts_with("/marker/") {
+        return marker_response(&mut stream, &method, &path);
     }
     if let Some(path) = path.strip_prefix("/coding/") {
         let (coding, status) = path.split_once('/').ok_or("invalid coding path")?;

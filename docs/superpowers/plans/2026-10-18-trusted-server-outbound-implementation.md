@@ -12,6 +12,46 @@
 
 ## Status and Authority
 
+### Unsupported Policy and Marker Acceptance (2026-10-30)
+
+EZ-3 acceptance 08 binds all four adapter test phases to one core `test-utils` conformance
+helper. Native validation/time/progress are delegated unchanged; the helper inspects and
+reconstructs empty prepared batches privately before forwarding them to the native client.
+Expired otherwise-valid requests differ only by optimizer presence: named 400 with unsupported
+options, original `RequestDeadline` 504 without them. Separate pending-body cases require zero
+polls, zero timers, zero eligible dispatch and exactly-once disposal. Follow must fail at hop
+zero without running policy. A finite poll budget makes broken ordering fail rather than hang.
+Fastly covers unsupported Begin/Batch only; native Send/Follow mapping and hosted optimizer
+qualification remain open. No production implementer API, capability or compatibility path changes.
+
+EZ-7 acceptance 04 binds ten actual origin exchanges per adapter in the existing wire runtime:
+GET 200/204/304/302 and HEAD 200, each inheriting client-wide Off or explicitly selecting On.
+The existing progress probe and Spin wire endpoint share the same send/report helper. A fresh
+bounded origin reuses the current marker renderer, validates framing/method/token and records
+actual method, path, port and token. Persisted readback requires ten unique reports, matching
+captured HTTP bodies/receipts and successful cleanup. Mutation tests reject omission, duplication,
+foreign metadata, wrong methods/statuses/policies, altered bytes and failed cleanup. Keep the
+68/84 redirect, six-case batch and Spin policy/normalization inventories unchanged. Cloudflare
+remains an explicitly executed local wire leg, not newly activated CI or hosted evidence.
+
+Read-only policy and runtime reviewers selected a shared conformance helper and fixture report
+tail over four repeated wrappers, synthetic successful transport or another runtime suite.
+Review added bounded negative polling and inventory-metadata mutation coverage. The first Axum
+marker run's text/binary capture mismatch is retained at `/private/tmp/pr275-policy-marker-axum-wire`;
+the corrected run uses the existing binary capture API, without changing transport or assertions.
+The inventory is 84 ready/427 planned. All 255 criteria/511 identities, expected text/digests,
+applicability, pending approvals, production policies, pins and hosted gates remain unchanged.
+These dirty-tree checks above `52d89c15` do not freeze or qualify a release candidate.
+
+Verification: all five root gates pass, with 2,625 workspace tests (32 binaries, one existing
+ignored), 384 controller tests (two existing ignored), 196 tooling tests and 56 shared-fixture
+tests passing. Strict native, three-target adapter WASM and shared/Spin-guest Clippy pass.
+Guarded Axum/Fastly/Cloudflare phases and the complete Spin CI run pass. Each real wire run
+retains ten marker observations plus its unchanged earlier inventories. Raw working-tree records
+are under `/private/tmp/pr275-policy-marker-{axum-wire-verified,fastly-wire,cloudflare-wire,spin-wire,spin-ci}`.
+The focused post-review poll-bound test also passes. No hosted run, runtime promotion or
+source-criterion change was performed.
+
 ### Client Selection Acceptance (2026-10-30)
 
 EZ-2 acceptance 01 now binds the four existing adapter-owned CI phases. Axum retains its

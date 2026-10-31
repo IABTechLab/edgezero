@@ -1,6 +1,7 @@
 pub mod assembly;
 pub mod batch_recovery;
 pub mod launch;
+pub mod marker;
 #[cfg(test)]
 mod outbound_test_support;
 #[cfg(feature = "qualification")]

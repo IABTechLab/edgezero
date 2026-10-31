@@ -16,6 +16,8 @@ mod scope;
 #[cfg(test)]
 mod scope_tests;
 mod task;
+#[cfg(feature = "test-utils")]
+pub mod test_support;
 
 use std::net::IpAddr;
 use std::num::NonZeroU64;
