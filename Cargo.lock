@@ -732,6 +732,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "httparse",
  "hyper",
  "hyper-util",
  "libc",

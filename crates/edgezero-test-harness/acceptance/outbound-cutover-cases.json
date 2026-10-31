@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; EZ-10 local buffered/streamed overflow acceptance 05/06 on all four runtimes and chunked-ingress acceptance 03 on Viceroy/workerd/Spin bind the existing guarded overflow suite; 382 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; EZ-10 local buffered/streamed overflow acceptance 05/06 on all four runtimes and chunked-ingress acceptance 03 on Viceroy/workerd/Spin bind the existing guarded overflow suite; EZ-10 core reader/declared-length acceptance 01/02, Axum pipeline/custom-renderer acceptance 03/07 and actual scaffold/demo acceptance 08 bind the existing owning commands; the shared core guard runs one complete library rather than only outbound::; 376 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -1036,7 +1036,7 @@
         "outbound::dispatch::tests::forwarded_buffered_and_taken_bodies_need_no_extra_reads",
         "outbound::dispatch::tests::failed_inbound_read_stops_forwarding_with_preserved_error"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Environment is unit. A GET whose streamed body yields only zero-length chunks and then ends is sent bodiless. A GET with a streamed body and an already expired deadline fails with 504, and the body is not read. A POST with a streamed body, and a GET with an empty buffered body, read nothing extra. A taken body forwards empty. A body whose read failed forwards the same error.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -3050,7 +3050,7 @@
       "task": "D1b",
       "substep": "EZ-3-acceptance-04-unit-core",
       "sentinel": "outbound::tests::two_slot_batches_separate_completion_and_input_index_order",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Given a batch ordered new, known, new, known, then both known-origin slots SHOULD be sent before the first registration, the run records the order, and collection restores input-index order. Unit, given slot 1 finishes before slot 0, `next` returns indices 1 then 0 while the collected vector remains indexed 0 then 1.\n\nViceroy 0.21.0:",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -3277,7 +3277,7 @@
       "task": "D1c",
       "substep": "EZ-4-acceptance-01-unit-core",
       "sentinel": "outbound::redirect_tests::connect_timeout_round_trip_and_follow_preserve_the_aggregate_budget",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Given a request with a 1 s connect timeout, when it goes through `into_parts` and `from_parts` and through a redirect-hop rebuild, then the connect timeout read back under EZ-4.11 is 1 s. A recording head-first client MUST also observe that setting through the prepared dispatch request without shortening its aggregate budget. Fastly and Spin mapping tests MUST observe the value passed to the provider timeout setter; Axum and Cloudflare retain their documented BestEffort acceptance.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -3960,7 +3960,7 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-01-unit-core",
       "sentinel": "outbound::tests::original_coding_retains_valid_compressed_bytes_and_representation_fields",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit.** Given gzip, deflate, and br fixtures that declare `Content-Length`, when they are delivered with the original coding and a decoded cap of 1 byte, then the bytes and both headers are unchanged and no cap error occurs.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -3995,7 +3995,7 @@
       "additional_sentinels": [
         "outbound::tests::original_coding_observed_caps_and_source_errors_are_preserved"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit.** Given the original coding is kept, when the declared length exceeds the encoded cap, then the request fails with the encoded-cap limit before the body is read. When the encoded bytes exceed the final cap in buffered mode, it fails with the final-cap limit (`ResponseLimitReason::BufferedBody` at F).",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -4027,7 +4027,7 @@
       "task": "P3",
       "substep": "EZ-5-acceptance-03-unit-core",
       "sentinel": "outbound::tests::original_coding_skips_decoder_but_keeps_transport_caps",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit.** Given a 206 with `Content-Encoding: gzip` and `Content-Range: bytes 10-19/100`, in decoding mode, then the response arrives undecoded with all three headers unchanged.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -4620,7 +4620,7 @@
         "outbound::tests::original_coding_declared_caps_fail_before_polling",
         "outbound::tests::original_coding_observed_caps_and_source_errors_are_preserved"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit and each adapter's response-policy path.** An identity payload with decoded cap 10 and encoded/final caps 20 rejects `Content-Length: 11` before polling the source and rejects 11 observed bytes when no length is declared. Both decoding choices return `ResponseLimitReason::DecodedBody`. A 10-byte control succeeds under both choices. A gzip body kept in original mode remains exempt from the decoded cap, while its encoded and final caps still apply.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -4796,7 +4796,7 @@
         "outbound::head::tests::bodyless_and_declared_reset_bodies_bypass_payload_processing",
         "outbound::head::tests::head_undeclared_reset_body_settles_once_without_payload_caps"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit and each adapter's actual normalization/response-policy path, both decoding choices and both response modes.** `Connection: content-encoding, content-length, etag` removes those fields before coding/length interpretation; a nominated malformed length does not become a framing error, and removed fields are never restored. A separate non-UTF-8 `ETag` is dropped. Missing or nominated-away coding is classified as identity and retains its decoded cap. Malformed surviving `Content-Length` still fails, and non-UTF-8 `Content-Encoding` retains F's passthrough classification rather than being silently dropped. Valid surviving representation fields remain unchanged in original mode and on a 206. A 204 still removes length and suppresses its body; a 205 still normalizes length to zero and preserves F's declared-body evidence and disposition; HEAD/304 keep bodyless handling without payload-cap rejection or body polling. EZ-5.9's separately adopted metadata change is the only permitted HEAD/304 difference. Keep F's `response_normalization_precedence_table` assertions unchanged. Provider-inexpressible raw fields are injected at the adapter-visible/shared-head unit boundary; provider-visible controls retain the existing header-fidelity limitations. These cases make no new raw-header fidelity claim.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -7380,7 +7380,7 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-13-unit-core",
       "sentinel": "outbound::dispatch::tests::facade_upload_rules_preserve_forwarded_begin_and_streamed_send",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Upload rules. Unit and every adapter. Begin rejects a POST with a streamed body as an invalid request before sending. Begin accepts a bodiless GET built from an inbound request. `send` forwards a POST with a streamed body.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -7842,7 +7842,7 @@
       "additional_sentinels": [
         "outbound::tests::batch_ledger_rejects_an_outcome_observed_at_observation_cutoff"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Arrival at the cutoff. Unit, injected clock. Given a slot whose response is complete exactly at the cutoff, then it is unresolved.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -8097,7 +8097,7 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-17-unit-core",
       "sentinel": "outbound::batch::tests::cancellation_includes_recorded_but_undelivered_indices",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Cancellation report. Unit and every adapter. Given a batch with one slot recorded but not delivered and one still in flight, when it is cancelled, then both indices are reported as undelivered.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -9174,7 +9174,7 @@
         "outbound::batch::tests::batch_recovery_returns_exact_nonclone_inputs",
         "outbound::batch::tests::accumulator_rejects_duplicate_index_count_and_conflict_before_mutation"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Mixed observation and collection. Unit and every adapter. Consume slot 0 with a nonblocking check, slot 1 with `next`, then collect a three-slot batch. The first two positions are `AlreadyDelivered`, never unresolved; the third is `Resolved` on success or `Unresolved` at cutoff. A driver failure after the first two deliveries preserves those states and its exact error. Merging into the matching accumulator restores all owned outcomes without replay or cloning; missing prior results, a foreign batch, duplicate insertion, and a conflicting slot are rejected without losing either input's results. Fresh-batch collection has no `AlreadyDelivered`, and `Completed` never contains `Unresolved`.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -9754,7 +9754,7 @@
       "task": "P3",
       "substep": "EZ-7-acceptance-01-unit-core",
       "sentinel": "outbound::tests::proxy_marker_off_preserves_upstream_and_consumes_no_header_budget",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit.** Given an upstream response with N fields and a header-count cap of exactly N, when the marker is off, then the response succeeds. When it is on, it fails with the header-count limit. The same holds for header bytes.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -9782,7 +9782,7 @@
       "task": "P3",
       "substep": "EZ-7-acceptance-02-unit-core",
       "sentinel": "outbound::tests::client_marker_default_is_shared_by_send_begin_and_two_slot_batch",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit.** Given a client handle set to omit the marker, when the application sends one request with no override, one with an explicit \"on\", one begun request, and one two-slot batch, then only the explicit \"on\" request carries the marker.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -9810,7 +9810,7 @@
       "task": "P3",
       "substep": "EZ-7-acceptance-03-unit-core",
       "sentinel": "outbound::tests::proxy_marker_off_preserves_upstream_and_consumes_no_header_budget",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "**Unit.** Given the marker is off and the upstream sends `x-edgezero-proxy: upstream`, then the field arrives unchanged.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10567,7 +10567,7 @@
         "outbound::redirect_tests::nonredirect_status_precedes_all_location_rules",
         "outbound::redirect_tests::plain_send_does_not_follow_a_scripted_redirect"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit, with a scripted upstream. For every status from 300 to 308 and each of GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS with a 5-byte buffered body (empty for GET and HEAD), the number of requests and the second request's method, body and body headers match EZ-9.6.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10610,7 +10610,7 @@
         "outbound::redirect_tests::replaying_empty_post_preserves_content_type",
         "outbound::redirect_tests::buffered_redirect_replay_shares_the_original_nonempty_allocation"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. A POST with `Expect: 100-continue` answered by 302 and then 307 sends POST, GET, GET, with the body and expectation only on the first request and no body headers on the later two. A POST with an empty buffered body and `Content-Type` answered by 307 sends `Content-Type` on both requests.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10652,7 +10652,7 @@
       "additional_sentinels": [
         "outbound::redirect_tests::replay_rule_precedes_limit_and_invalid_location"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. A streamed upload answered by 307 sends one request and reports \"body not replayable\".",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10697,7 +10697,7 @@
         "outbound::redirect_tests::follow_empty_get_scope_closed_from_eof_never_dispatches",
         "outbound::redirect_tests::follow_empty_get_scope_closed_from_source_drop_never_dispatches"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. A GET whose body is an empty unread stream, answered by 307, sends two requests with empty bodies and reports no stop reason.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10741,7 +10741,7 @@
         "outbound::redirect_tests::location_presence_and_method_rules_precede_limit_and_location_resolution",
         "outbound::redirect_tests::limit_precedes_invalid_location_and_policy"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. With limit 4 and five 302 responses to GET, five requests are sent and the result is a 302 with \"limit reached\" and four redirects followed. A PUT answered by 301 at the limit reports \"method not rewritable\". A 302 with no `Location` answering a PUT at the limit reports \"no location\". Limits 0 and 21 are rejected.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10780,7 +10780,7 @@
       "task": "P5",
       "substep": "EZ-9-acceptance-06-unit-core",
       "sentinel": "outbound::redirect_tests::origin_changes_strip_only_automatic_credentials_before_policy",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. `Authorization` and `Cookie` reach a same-origin hop and do not reach a hop that changes host, port, or only the scheme. A host authority override reaches a same-origin hop only. An `x-amz-date` header reaches both.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10824,7 +10824,7 @@
         "outbound::redirect_tests::unusable_locations_fail_at_the_answering_hop_before_policy",
         "outbound::redirect_tests::original_nontext_and_duplicate_location_evidence_survives_normalization"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. Relative, `../x`, `//b.example/x` and absolute `Location` values follow. A fragment never reaches the wire. A missing or empty value reports \"no location\". Two `Location` fields, user information, or an unusable http target give a 502 protocol failure.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10866,7 +10866,7 @@
       "additional_sentinels": [
         "outbound::redirect_tests::earlier_stop_rules_do_not_bypass_normal_header_filtering"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit, through actual response normalization and an application-supplied head-first client. A 302 containing `Location: /next` and a second `Location` with invalid UTF-8 still fails as a 502 protocol error and sends no next hop. A single invalid value also fails as 502 rather than reporting \"no location\". A method-not-rewritable or limit-reached control retains EZ-9.18's earlier stop reason. The public response retains the normal header-filtering behavior; immutable evidence, not an unfiltered header copy, enforces the redirect rule.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10912,7 +10912,7 @@
         "outbound::redirect_tests::policy_observes_normalized_head_and_next_request_before_any_next_dispatch",
         "outbound::redirect_tests::policy_returned_invalid_request_remains_a_client_error_at_the_selected_hop"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. A policy rejection returns the application's value with redirect number 1 and no second request. A policy stop returns the 3xx with \"stopped by policy\". A modified next request is sent exactly as returned. A `javascript:` target reaches the policy with no prepared request. A policy that asks to follow a prepared request there gets a 502 protocol failure.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -10956,7 +10956,7 @@
         "outbound::redirect_tests::stopped_pending_final_body_waits_only_until_the_original_deadline",
         "outbound::redirect_tests::transport_errors_keep_their_original_category_and_failed_hop_index"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit, through an application-supplied recording client implementing the shared head-first dispatch contract. A followed 302 whose body errors, one with `Content-Encoding: br` and an empty body, one declaring a 10 MiB `Content-Length` under a 1 MiB cap, and one whose body stays permanently pending each lead to the final 200, without waiting for intermediate body data. The client records every hop exactly once. Returning the same 302 as final by policy stop or limit applies ordinary decoding and caps and yields the corresponding error instead of hiding it.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -11005,7 +11005,7 @@
         "outbound::redirect_tests::policy_stop_clock_rewind_after_observed_head_is_internal",
         "outbound::redirect_tests::policy_error_survives_a_clock_rewind_after_observed_head"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. A deadline that passes after the first hop fails the second hop as a gateway timeout attributed to the deadline, and the second hop is not sent. Prepared hops retain the preceding request's per-call timeout unless the policy changes it. A fresh policy request with no deadline or a later deadline still cannot send or consume its final streamed body past the original absolute chain deadline; an earlier policy deadline shortens the budget. A synchronous policy cannot be preempted. If it returns an action after the original deadline expired, no next hop is sent and no late final success is returned; unsupported-option rejection still precedes budget rejection for a selected next request. If it rejects instead, its original application error remains unchanged under EZ-9.14.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -11050,7 +11050,7 @@
         "outbound::redirect_tests::freshly_built_policy_request_uses_its_own_default_caps_and_options",
         "outbound::redirect_tests::later_prepared_hops_inherit_policy_overrides_not_the_original_options"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. A policy modifying the prepared request retains every unchanged cap and option. A freshly built policy request uses its own caps and options, including constructor defaults, while still observing the original absolute chain deadline. A policy can deliberately re-sign a new origin's request without EdgeZero stripping its credentials afterward.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -11095,7 +11095,7 @@
         "outbound::redirect_tests::closing_callback_during_policy_prevents_the_next_dispatch",
         "outbound::redirect_tests::closing_callback_from_followed_source_drop_prevents_the_next_dispatch"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. Dropping a following call while hop 1 is in flight sends no hop 2.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -11134,7 +11134,7 @@
       "task": "P5",
       "substep": "EZ-9-acceptance-14-unit-core",
       "sentinel": "outbound::redirect_tests::followed_hop_logs_omit_query_names_values_and_fragments",
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. With logging captured at trace level, a two-hop chain whose URIs carry `?ts-ec=abc` logs neither `ts-ec` nor `abc`.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -11179,7 +11179,7 @@
         "outbound::redirect_tests::relative_and_absolute_locations_resolve_without_sending_fragments",
         "outbound::redirect_tests::origin_changes_strip_only_automatic_credentials_before_policy"
       ],
-      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. A following call made on an application-supplied recording client records one ordinary send per hop, with each hop's method, URI, headers and body.",
       "artifact_path": "outbound/unit/core/raw.log",
       "implementation": "ready",
@@ -11676,12 +11676,19 @@
       "owner": "EdgeZero",
       "task": "F2",
       "substep": "EZ-10-acceptance-01-unit-core",
-      "sentinel": "ez_10_acceptance_01_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_10_acceptance_01_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "context::tests::readers_classify_consumed_overflow_before_payload_parsing",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Environment is unit. Given a 9-byte body with no declared length, when it is read with a cap of 8 through `body_bytes`, `json_within`, `form_within`, an extractor, or `Body::into_bytes_bounded`, then the result is the 413 category and the response status is 413. For the `RequestContext` readers, a second read at any cap returns the same 413 without reading. Malformed JSON under the cap stays 400.",
-      "artifact_path": "outbound/EZ-10/acceptance/01/unit/core.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "body::tests::bounded_body_overflow_has_a_distinct_413_category",
+        "extractor::tests::body_extractors_preserve_overflow_category_at_every_boundary",
+        "context::tests::initial_drain_overflow_is_sticky_and_never_retries_source",
+        "context::tests::invalid_json_returns_bad_request",
+        "error::tests::request_overflow_origins_share_one_fixed_wire_contract"
+      ]
     },
     {
       "case_id": "EZ-10/acceptance/02",
@@ -11708,12 +11715,16 @@
       "owner": "EdgeZero",
       "task": "F2",
       "substep": "EZ-10-acceptance-02-unit-core",
-      "sentinel": "ez_10_acceptance_02_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_10_acceptance_02_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "context::tests::declared_overflow_does_not_read_or_poison_the_body",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Environment is unit. Given a request declaring `Content-Length: 10` with a 10-byte body, when it is read with a cap of 5, then the result is 413. With the inbound read deadline already passed, the result is 408. Record whether any body byte was read before the 413 (EZ-10.4 is SHOULD). Where none was, a later read of that request with a cap of 10 succeeds.",
-      "artifact_path": "outbound/EZ-10/acceptance/02/unit/core.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "context::tests::expired_deadline_wins_over_declared_overflow_without_polling",
+        "context::tests::padded_declared_length_rejects_without_consuming_the_body"
+      ]
     },
     {
       "case_id": "EZ-10/acceptance/03",
@@ -11740,12 +11751,15 @@
       "owner": "EdgeZero",
       "task": "F2",
       "substep": "EZ-10-acceptance-03-axum-http1-chunked",
-      "sentinel": "ez_10_acceptance_03_axum_http1_chunked",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-10/acceptance/03",
+      "sentinel": "connection::tests::chunked_overflow_keeps_pipelined_request_boundaries_and_error_policy",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Environment is Axum, Viceroy 0.21.0, workerd and Spin 4.1. A chunked POST of 2 KiB to a route capped at 1 KiB gets 413. On Axum, an HTTP/1 request pipelined after it is either refused by a connection close or answered from the correct offset.",
-      "artifact_path": "outbound/EZ-10/acceptance/03/axum/http1-chunked.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/axum/native-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "connection::tests::rejection_pipeline_guard_rejects_corrupted_second_response"
+      ]
     },
     {
       "case_id": "EZ-10/acceptance/03",
@@ -12156,11 +12170,11 @@
       "owner": "EdgeZero",
       "task": "F2",
       "substep": "EZ-10-acceptance-07-axum",
-      "sentinel": "ez_10_acceptance_07_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-10/acceptance/07",
+      "sentinel": "connection::tests::json_extractor_overflow_reaches_custom_renderer_without_retry_after",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Environment is Axum. An extractor route with a custom error renderer answers an oversized body with 413, and the response has no `Retry-After`.",
-      "artifact_path": "outbound/EZ-10/acceptance/07/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/native-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -12188,11 +12202,11 @@
       "owner": "EdgeZero",
       "task": "F2",
       "substep": "EZ-10-acceptance-08-axum-generated",
-      "sentinel": "ez_10_acceptance_08_axum_generated",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-10/acceptance/08",
+      "sentinel": "tests::generated_workspace_compiles",
+      "command": "scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds",
       "expected": "Environment is Axum, using the generated scaffold and the demo app. An over-cap request to an unmatched route gets 413.",
-      "artifact_path": "outbound/EZ-10/acceptance/08/axum/generated.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/overflow/generated/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -12220,11 +12234,11 @@
       "owner": "EdgeZero",
       "task": "F2",
       "substep": "EZ-10-acceptance-08-axum-demo",
-      "sentinel": "ez_10_acceptance_08_axum_demo",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-10/acceptance/08",
+      "sentinel": "tests::demo_fallbacks_enforce_body_cap_over_tcp",
+      "command": "scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging",
       "expected": "Environment is Axum, using the generated scaffold and the demo app. An over-cap request to an unmatched route gets 413.",
-      "artifact_path": "outbound/EZ-10/acceptance/08/axum/demo.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/overflow/demo/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {

@@ -812,24 +812,56 @@ mod tests {
                     "rejection must not even open an origin connection"
                 );
                 assert!(
-                    rejection_pipeline_is_safe(&response),
+                    rejection_pipeline_is_safe(&response, StatusCode::BAD_REQUEST),
                     "unread body bytes must not become a new request: {response}"
                 );
             }
         }
     }
 
-    fn rejection_pipeline_is_safe(response: &str) -> bool {
-        let mut responses = response.split("HTTP/1.1 ").skip(1);
-        match (responses.next(), responses.next(), responses.next()) {
-            (Some(first), None, None) => first.starts_with("400 "),
-            (Some(first), Some(second), None) => {
-                first.starts_with("400 ")
-                    && second.starts_with("200 ")
-                    && second.ends_with("healthy")
-            }
-            _ => false,
+    fn rejection_pipeline_is_safe(response: &str, expected_status: StatusCode) -> bool {
+        let Some((status, _, remainder)) = take_buffered_reply(response.as_bytes()) else {
+            return false;
+        };
+        if status != expected_status.as_u16() {
+            return false;
         }
+        if remainder.is_empty() {
+            return true;
+        }
+        take_buffered_reply(remainder).is_some_and(|(healthy_status, body, trailing)| {
+            healthy_status == StatusCode::OK.as_u16() && body == b"healthy" && trailing.is_empty()
+        })
+    }
+
+    fn take_buffered_reply(wire: &[u8]) -> Option<(u16, &[u8], &[u8])> {
+        let mut fields = [httparse::EMPTY_HEADER; 32];
+        let mut response = httparse::Response::new(&mut fields);
+        let httparse::Status::Complete(head_bytes) = response.parse(wire).ok()? else {
+            return None;
+        };
+        if response.version != Some(1) || head_bytes > 4096 {
+            return None;
+        }
+        // These fixtures use buffered responses with one unambiguous length.
+        let mut declared = None;
+        for field in response.headers.iter() {
+            if field.name.eq_ignore_ascii_case("transfer-encoding") {
+                return None;
+            }
+            if field.name.eq_ignore_ascii_case("content-length") {
+                if declared.is_some()
+                    || field.value.is_empty()
+                    || !field.value.iter().all(u8::is_ascii_digit)
+                {
+                    return None;
+                }
+                declared = Some(str::from_utf8(field.value).ok()?.parse::<usize>().ok()?);
+            }
+        }
+        let length = declared.filter(|length| *length <= 1024)?;
+        let end = head_bytes.checked_add(length)?;
+        Some((response.code?, wire.get(head_bytes..end)?, wire.get(end..)?))
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1288,16 +1320,53 @@ mod tests {
 
     #[test]
     fn rejection_pipeline_guard_rejects_corrupted_second_response() {
-        let rejected = "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n";
         let corrupt =
             "HTTP/1.1 405 Method Not Allowed\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
         let healthy = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 7\r\n\r\nhealthy";
-        assert!(rejection_pipeline_is_safe(rejected));
-        assert!(rejection_pipeline_is_safe(&format!("{rejected}{healthy}")));
-        assert!(!rejection_pipeline_is_safe(&format!("{rejected}{corrupt}")));
-        assert!(!rejection_pipeline_is_safe(&format!(
-            "{rejected}{corrupt}{healthy}"
-        )));
+        let prefixed = "HTTP/1.1 200 OK\r\ncontent-length: 12\r\n\r\nwronghealthy";
+        for status in [StatusCode::BAD_REQUEST, StatusCode::PAYLOAD_TOO_LARGE] {
+            let rejected = format!(
+                "HTTP/1.1 {} Error\r\ncontent-length: 0\r\n\r\n",
+                status.as_u16()
+            );
+            assert!(rejection_pipeline_is_safe(&rejected, status));
+            assert!(rejection_pipeline_is_safe(
+                &format!("{rejected}{healthy}"),
+                status
+            ));
+            for following in [
+                corrupt.to_owned(),
+                format!("{corrupt}{healthy}"),
+                format!("{healthy}{healthy}"),
+                prefixed.to_owned(),
+                "HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\nhealthy".to_owned(),
+                "HTTP/1.1 200 OK\r\ncontent-length: 7\r\ncontent-length: 7\r\n\r\nhealthy"
+                    .to_owned(),
+                "HTTP/1.1 200 OK\r\ncontent-length: +7\r\n\r\nhealthy".to_owned(),
+                "HTTP/1.1 200 OK\r\ncontent-length: 7\r\ntransfer-encoding: chunked\r\n\r\nhealthy"
+                    .to_owned(),
+                "HTTP/1.1 200 OK\r\ncontent-length: 7\r\n\r\nhealth".to_owned(),
+                format!("{healthy}trailing"),
+                format!(
+                    "HTTP/1.1 200 OK\r\nx-pad: {}\r\ncontent-length: 7\r\n\r\nhealthy",
+                    "x".repeat(4096)
+                ),
+                format!(
+                    "HTTP/1.1 200 OK\r\n{}content-length: 7\r\n\r\nhealthy",
+                    "x-field: x\r\n".repeat(32)
+                ),
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: 1025\r\n\r\n{}",
+                    "x".repeat(1025)
+                ),
+            ] {
+                assert!(!rejection_pipeline_is_safe(
+                    &format!("{rejected}{following}"),
+                    status
+                ));
+            }
+            assert!(!rejection_pipeline_is_safe(healthy, status));
+        }
     }
 
     #[tokio::test]
@@ -1363,10 +1432,10 @@ mod tests {
                 "{wire}"
             );
             // Closing on unread bytes is valid; if reused, the following request must be intact.
-            if wire.matches("HTTP/1.1 ").count() > 1 {
-                assert!(wire.contains("HTTP/1.1 200"), "{wire}");
-                assert!(wire.ends_with("healthy"), "{wire}");
-            }
+            assert!(
+                rejection_pipeline_is_safe(&wire, StatusCode::PAYLOAD_TOO_LARGE),
+                "{wire}"
+            );
         }
     }
 

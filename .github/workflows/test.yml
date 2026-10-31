@@ -157,7 +157,7 @@ jobs:
       - name: Shared outbound policy contracts
         if: matrix.suite == 'workspace'
         run: >-
-          scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::
+          scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib
 
       - name: Run Axum integration suite
         if: matrix.suite == 'axum'

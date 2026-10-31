@@ -73,6 +73,7 @@ edgezero-adapter-cloudflare = { path = "../edgezero-adapter-cloudflare", default
 edgezero-core = { path = "../edgezero-core", features = ["test-utils"] }
 flate2 = { workspace = true }
 http-body = { workspace = true }
+httparse = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 serde = { workspace = true }

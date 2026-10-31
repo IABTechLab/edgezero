@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind local body-reader, declared-length, Axum pipeline/custom-renderer and actual scaffold/demo
+  fallback acceptance. Preserve exact byte boundaries, sticky errors and recovery controls;
+  run one inventory-guarded core library without adding CI phases or changing production behavior.
 - Bind eleven local overflow acceptance legs to the existing suite after checked runtime cleanup
   and bounded persisted-evidence validation. Verify all four runtimes, including Cloudflare
   recovery through its canonical native listener; retain historical proxy failures and hosted gates.

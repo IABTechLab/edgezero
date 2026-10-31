@@ -250,7 +250,7 @@ suite, job or selector is added; frozen-candidate, consumer and hosted qualifica
 The core legs discover their bound primary/additional sentinels before running one outbound suite:
 
 ```sh
-scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::
+scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib
 ```
 
 The core policy bindings cover actual facade calls, not only validation helpers. A one-second
@@ -735,8 +735,32 @@ emitting acceptance sentinels. A generated 413 may omit its identity header only
 initial successful response attests the launch; a present conflicting identity always fails.
 Missing/duplicate cases, corrupt facts, collection errors, panic or failed cleanup cannot pass
 through a hard-coded coverage count. This binds EZ-10 criteria 05/06 on all four local runtimes
-and criterion 03 on Viceroy/workerd/Spin. Axum criterion 03 retains its separate pipelining
-requirement and remains unbound here. No hosted, raw-fidelity or whole-resource claim is added.
+and criterion 03 on Viceroy/workerd/Spin. The overflow suite alone does not prove Axum's separate
+pipelining clause; its complete criterion 03 binds the existing grouped native TCP command.
+No hosted, raw-fidelity or whole-resource claim is added.
+
+Six additional local legs use their existing owners rather than another suite. EZ-10 criteria
+01/02 bind the complete core-library guard above: preserve the original boundaries, add exact
+9-byte/cap-8 readers and a real capped extractor, count physical source polls including EOF,
+and require sticky 413 replay without rereading. A zero-read declared-length rejection remains
+recoverable at the larger cap, while an expired inbound deadline wins with sticky 408.
+All 30 earlier core bindings share that same broadened command; 32 ready core legs require all
+89 contributing sentinels before one library execution. No per-test CI list is added.
+
+Axum criteria 03/07 use its existing `--suite ci` native-test phase. Actual chunked overflow must
+close or produce exactly the correct healthy pipelined response. The test-only framed guard uses
+the existing pinned `httparse`, accepting one complete rejection or exactly a following 200
+with body `healthy` and no remainder. Its 32-field/4 KiB-head/1 KiB-body bounds and malformed,
+ambiguous, truncated, wrong-body and extra-response controls apply to these buffered test replies,
+not the server's ingress settings. The extractor/custom renderer must
+retain typed 413 and its custom body while removing the deliberately supplied `Retry-After`.
+Criterion 08 binds the existing `generated_workspace_compiles` and
+`demo_fallbacks_enforce_body_cap_over_tcp` guards. Despite the first test's historical name, it
+builds and launches the freshly generated Axum entrypoint and executes the shared 16-observation
+fallback TCP matrix; the demo guard launches the actual bundled application. Each checks both
+fallback routes with fixed/chunked boundary bodies, pending timeout, deferred unread tail and
+healthy recovery. These owning-test logs are local assertion evidence, not a hosted package or
+an independently recorded raw-wire trace.
 
 The earlier Wrangler front-proxy matrix remains failed historical evidence: ingress overflow
 returns 413, but the following valid POST returns a

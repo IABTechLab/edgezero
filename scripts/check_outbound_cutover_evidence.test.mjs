@@ -62,6 +62,14 @@ const encodingRuntimeKeys = new Set([
   "EZ-5/acceptance/06@viceroy",
   "EZ-5/acceptance/07@workerd",
 ]);
+const localOverflowProofKeys = new Set([
+  "EZ-10/acceptance/01@unit/core",
+  "EZ-10/acceptance/02@unit/core",
+  "EZ-10/acceptance/03@axum/http1-chunked",
+  "EZ-10/acceptance/07@axum",
+  "EZ-10/acceptance/08@axum/generated",
+  "EZ-10/acceptance/08@axum/demo",
+]);
 
 test("CI argument inspection preserves exact string values and trailing commas", () => {
   assert.deepEqual(
@@ -881,7 +889,7 @@ test("local assembled-app criteria bind guarded tests without closing pending le
     "no duplicate CI sentinel list",
   );
 });
-test("redirect core criteria bind every required test before one module execution", () => {
+test("redirect core criteria bind every required test before one library execution", () => {
   const manifest = JSON.parse(
     readFileSync(
       new URL(
@@ -901,10 +909,10 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 382,
+    planned: 376,
   });
   const command =
-    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
   const bindings = [
     [
       "01",
@@ -1093,12 +1101,12 @@ test("batch bindings require exact runtime and core identity proofs", () => {
   assert.equal(core.condition, null);
   assert.equal(
     core.command,
-    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
   );
   assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
   assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
   const selected = checker.readySentinels(manifest, "unit/core");
-  assert.equal(selected.length, 80);
+  assert.equal(selected.length, 89);
   for (const name of names) assert.ok(selected.includes(name));
   const bindings = [
     [
@@ -1273,7 +1281,7 @@ test("core policy conformance binds complete proofs without promoting provider l
     ],
   ];
   const command =
-    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
   const selected = checker.readySentinels(manifest, "unit/core");
   for (const [caseId, names] of bindings) {
     const rows = manifest.cases.filter((row) => row.case_id === caseId);
@@ -1483,7 +1491,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /382 other legs remain planned/);
+  assert.match(manifest.status, /376 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1526,7 +1534,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
     assert.equal(core.condition, null, caseId);
     assert.equal(
       core.command,
-      "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::",
+      "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       caseId,
     );
     assert.equal(core.artifact_path, "outbound/unit/core/raw.log", caseId);
@@ -1737,7 +1745,9 @@ test("overflow runtime acceptance binds only eleven complete local proofs", () =
     const key = `${row.case_id}@${row.environment}`;
     assert.equal(
       row.implementation,
-      overflowRuntimeKeys.has(key) ? "ready" : "planned",
+      overflowRuntimeKeys.has(key) || localOverflowProofKeys.has(key)
+        ? "ready"
+        : "planned",
       key,
     );
     if (!overflowRuntimeKeys.has(key)) continue;
@@ -1765,6 +1775,129 @@ test("overflow runtime acceptance binds only eleven complete local proofs", () =
         .includes(row.sentinel),
     );
   }
+});
+
+test("local reader and fallback acceptance reuse their complete owning commands", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  const coreCommand =
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
+  const native = manifest.cases.find(
+    (c) => c.environment === "axum/native-tcp",
+  );
+  const bindings = new Map([
+    [
+      "EZ-10/acceptance/01@unit/core",
+      [
+        coreCommand,
+        "context::tests::readers_classify_consumed_overflow_before_payload_parsing",
+        [
+          "body::tests::bounded_body_overflow_has_a_distinct_413_category",
+          "extractor::tests::body_extractors_preserve_overflow_category_at_every_boundary",
+          "context::tests::initial_drain_overflow_is_sticky_and_never_retries_source",
+          "context::tests::invalid_json_returns_bad_request",
+          "error::tests::request_overflow_origins_share_one_fixed_wire_contract",
+        ],
+        "outbound/unit/core/raw.log",
+      ],
+    ],
+    [
+      "EZ-10/acceptance/02@unit/core",
+      [
+        coreCommand,
+        "context::tests::declared_overflow_does_not_read_or_poison_the_body",
+        [
+          "context::tests::expired_deadline_wins_over_declared_overflow_without_polling",
+          "context::tests::padded_declared_length_rejects_without_consuming_the_body",
+        ],
+        "outbound/unit/core/raw.log",
+      ],
+    ],
+    [
+      "EZ-10/acceptance/03@axum/http1-chunked",
+      [
+        native.command,
+        "connection::tests::chunked_overflow_keeps_pipelined_request_boundaries_and_error_policy",
+        [
+          "connection::tests::rejection_pipeline_guard_rejects_corrupted_second_response",
+        ],
+        "outbound/redirect/axum/native-tests.log",
+      ],
+    ],
+    [
+      "EZ-10/acceptance/07@axum",
+      [
+        native.command,
+        "connection::tests::json_extractor_overflow_reaches_custom_renderer_without_retry_after",
+        [],
+        "outbound/redirect/axum/native-tests.log",
+      ],
+    ],
+    [
+      "EZ-10/acceptance/08@axum/generated",
+      [
+        "scripts/run_test_nonzero.sh --ignored generated_workspace_compiles cargo test --offline --locked -p edgezero-cli --test generated_project_builds",
+        "tests::generated_workspace_compiles",
+        [],
+        "outbound/overflow/generated/raw.log",
+      ],
+    ],
+    [
+      "EZ-10/acceptance/08@axum/demo",
+      [
+        "scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging",
+        "tests::demo_fallbacks_enforce_body_cap_over_tcp",
+        [],
+        "outbound/overflow/demo/raw.log",
+      ],
+    ],
+  ]);
+  assert.deepEqual(new Set(bindings.keys()), localOverflowProofKeys);
+  for (const [key, [command, sentinel, additional, artifact]] of bindings) {
+    const row = manifest.cases.find(
+      (c) => `${c.case_id}@${c.environment}` === key,
+    );
+    assert.equal(row.implementation, "ready", key);
+    assert.equal(row.command, command, key);
+    assert.equal(row.sentinel, sentinel, key);
+    assert.deepEqual(row.additional_sentinels ?? [], additional, key);
+    assert.equal(row.artifact_path, artifact, key);
+    assert.equal(row.applicability, "follow-up", key);
+    assert.equal(row.approval, null, key);
+    assert.equal(row.condition, null, key);
+    const selected = checker.readySentinels(manifest, row.environment, command);
+    for (const name of [sentinel, ...additional])
+      assert.ok(selected.includes(name), name);
+    assert.ok(ciOwnsCommand(workflow, command), key);
+  }
+  const readyCore = manifest.cases.filter(
+    (c) => c.environment === "unit/core" && c.implementation === "ready",
+  );
+  assert.equal(readyCore.length, 32);
+  assert.ok(readyCore.every((c) => c.command === coreCommand));
+  assert.deepEqual(
+    checker.readySentinels(manifest, "unit/core", coreCommand).sort(),
+    [
+      ...new Set(
+        readyCore.flatMap((c) => [
+          c.sentinel,
+          ...(c.additional_sentinels ?? []),
+        ]),
+      ),
+    ].sort(),
+  );
+  assert.ok(workflow.includes(coreCommand));
 });
 
 test("encoding runtime acceptance binds only its ten complete local proofs", () => {
@@ -1946,10 +2079,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 129);
+  assert.equal(ready.length, 135);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    382,
+    376,
   );
   assert.ok(
     ready.every(
@@ -1960,6 +2093,7 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
         forwardingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         encodingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         overflowRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
+        localOverflowProofKeys.has(`${c.case_id}@${c.environment}`) ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/22" &&

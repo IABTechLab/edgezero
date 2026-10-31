@@ -12,6 +12,70 @@
 
 ## Status and Authority
 
+### Reader And Fallback Acceptance (2026-10-31)
+
+Bind six more implemented local EZ-10 legs without changing production behavior: core reader
+and declared-length criteria 01/02, Axum pipeline and extractor/custom-renderer criteria 03/07,
+and actual generated/demo criterion 08. All 255 criteria/511 leg identities, expected source
+text/digests, follow-up applicability, approval records, pins and capabilities remain unchanged.
+Inventory is 135 ready/376 planned; executable readiness is not qualification or parent closure.
+
+Extend existing owner tests rather than introducing wrapper implementations. Preserve the
+original eight-byte cohort and six extractor variants; add exact nine-byte/cap-eight readers
+and a real `ValidatedJsonWithin<_, 8>` with valid JSON controls. Count physical source polls,
+including EOF. Consumed overflow replays the same typed 413 across all three context readers
+at smaller/equal/larger/max caps without another poll. Successful cached reads remain reusable
+after a stricter cap. A declared ten-byte body rejected at cap five records zero polls and then
+returns the exact ten bytes at cap ten. A separate counted ten-byte fixture verifies that an
+already-expired inbound deadline wins with sticky 408 and zero polling. Existing malformed
+JSON and rendered error-wire controls remain mandatory. Ordinary JSON fixtures use `json!`.
+
+Parameterize the existing Axum pipeline guard with the expected status. Preserve 400 controls
+and add 413: accept one rejection or exactly rejection then healthy 200, rejecting extra or
+corrupt responses. The former 400-only implementation fails the new positive 413 control before
+the helper is repaired. The actual 2 KiB/1 KiB chunked pipeline test now uses that strict guard,
+not a permissive search for any 200. The existing extractor TCP proof invokes a custom renderer
+with the typed inbound overflow and confirms 413/custom bytes without its injected retry header.
+
+Final evidence review also catches a suffix loophole: `wronghealthy` could pass the old healthy
+body check. Its framed CL12 counterexample fails before repair. Reuse workspace-pinned
+`httparse = "=1.10.1"` as an Axum dev dependency, adding only that dependency edge to the root
+lockfile, with no new resolved version or runtime dependency. The helper now consumes complete
+HTTP/1.1 buffered frames and requires exact healthy bytes/no trailing response. Negative controls
+cover duplicate/signed lengths, TE ambiguity, truncation, extra data and bounded headers/fields/body
+(4 KiB/32/1 KiB). These are test-evidence bounds, not production ingress limits. The corrected
+grouped Axum run is `/private/tmp/pr275-local-readers-axum-framed-ci`; the earlier pass alone does
+not supply this stronger framing proof. This repairs evidence, not an identified server defect.
+
+Broaden the one existing core CI guard from `--lib outbound::` to `--lib`, migrating all 30
+previous exact command bindings together. The 32 ready core legs require all 89 contributing
+sentinels; the inventory regression checks their complete union and the owning CI command.
+Keep Axum's grouped phase and both CLI guards unchanged. No new CI job, phase, per-test YAML
+list, selector, transport, compatibility API or demo/template implementation is introduced.
+
+The broadened core guard passes 1,103 tests, the grouped Axum command passes 289 native
+tests/27 contracts plus its fixture/wire phases, and the bundled-demo guard passes five tests.
+The fresh generated-workspace guard passes its owning test after host/all-three-WASM builds,
+strict Clippy, 33 generated core tests and the actual fallback TCP matrix. Each application runs
+the shared 16-observation matrix; owning-test success is not a separate authenticated raw-wire
+capture. These are working-tree local assertions, not frozen-candidate or hosted qualification.
+Raw owner logs are `/private/tmp/pr275-local-readers-core-guard-final.log`,
+`/private/tmp/pr275-local-readers-axum-framed-ci`,
+`/private/tmp/pr275-local-readers-demo-guard.log` and
+`/private/tmp/pr275-local-readers-generated-guard.log`.
+
+Final verification after the framing repair passes all five root gates: 2,636 tests across
+33 binaries with one existing ignored, formatting, strict Clippy, feature compilation and Spin
+WASM compilation. The standalone harness passes 409 tests/two existing ignored and strict
+Clippy; evidence tooling passes 58 and CI tooling 33. Docs/legacy/inventory and decoder/JSON-map
+audits pass. Independent specification, code-quality and final evidence reviews are clear after
+the framing finding is fixed. Initial test-only Clippy naming/type issues are repaired without
+suppressions. These local results neither freeze nor qualify a candidate.
+
+The four provider-response unit bindings for criterion 10, hosted HTTP/2, consumer end-to-end,
+other timing/lifecycle acceptance, resource decisions, candidate freeze and authorized hosted
+qualification remain open. The retained Cloudflare elapsed failure is not retried or waived.
+
 ### Local Overflow Acceptance (2026-10-31)
 
 The canonical direct Miniflare/workerd launcher, already shared by the fixture suites, resolves
@@ -607,9 +671,9 @@ Keep three different status questions separate:
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
   provider-local forwarding, client-selection, policy, marker, observation, encoding and overflow
-  checkpoints give 129 ready legs, with 382 still `planned`. This includes the strict Axum
-  pending-body proof, ten local encoding proofs and eleven local overflow legs. G1/Q3 binding
-  work remains unfinished, not evidence that 382 features
+  checkpoints give 135 ready legs, with 376 still `planned`. This includes the strict Axum
+  pending-body proof, ten local encoding proofs, eleven local overflow legs and six reader/fallback
+  proofs. G1/Q3 binding work remains unfinished, not evidence that 376 features
   are absent. Only the explicitly bound commands count as executable legs; unrelated checkpoint
   tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
@@ -3529,7 +3593,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-7 | P3; D1-D4 | Blocking | **Integrated through shared preparation and head finalization.** The facade resolves marker policy before dispatch; original fields and the optional marker are charged once across Send/Begin/Batch/Follow. | Complete remaining all-target marker/normalization acceptance bindings. |
 | EZ-8 | P1; D1d/D5 | Blocking; Fastly single-request Send/Follow only | **Send/Follow use the shared pipeline.** Direct native optimizer mapping is preserved without another fetch, buffering or serialization; unsupported modes/adapters reject before settlement. Actual-client Send/initial-Follow/later-hop controls reach Viceroy's native unavailable boundary. | Obtain successful optimized-first-hop redirect and hosted transformation/performance evidence. Blocking horizon remains UNKNOWN. |
 | EZ-9 | P1/P5; D1-D5 | Blocking; supplied clients use the same dispatch boundary | **Explicit Follow implemented.** Core owns the decision table, per-hop policy, immutable initial chain deadline, replay and unread disposal. Supplied-client, real-TCP Axum, actual local Spin/Viceroy and Cloudflare guest-boundary controls pass. | Bind full criterion-level acceptance; complete workerd/origin, successful optimizer redirect and consumer/hosted evidence. No compatibility transport. |
-| EZ-10 | F2 | Follow-up unless approved as promoted/present | **Local implementation and canonical overflow acceptance:** [typed overflow/uploads/rendering](#f2-overflow-checkpoint) and [all-target local evidence](#local-overflow-acceptance-2026-10-31); generated/demo TCP proof exists. Historical Wrangler proxy failures remain retained. | Remaining unit/extractor/generated-app bindings, Axum pipeline composition, hosted HTTP/2, consumer end-to-end and exact-candidate qualification. |
+| EZ-10 | F2 | Follow-up unless approved as promoted/present | **Local implementation and executable overflow/reader/fallback acceptance:** [all-target overflow evidence](#local-overflow-acceptance-2026-10-31) and [reader/fallback proofs](#reader-and-fallback-acceptance-2026-10-31). Historical Wrangler proxy failures remain retained. | Provider response-handling unit bindings, hosted HTTP/2, consumer end-to-end and exact-candidate qualification. |
 | EZ-11       | F3a                  | Follow-up                                                                 | **Not implemented:** cache tags.                                                                                                                                                                                                                                                  | Tag validation/deduplication, provider mapping, mode/support matrix and actual cache probes.                                                               |
 | EZ-12       | F3b                  | Follow-up                                                                 | **Not implemented:** TLS name-check policy.                                                                                                                                                                                                                                       | Typed setting/readback, backend-key isolation and trusted-chain/wrong-name fixture; no global verification bypass.                                         |
 | EZ-13 | F3c | Follow-up; closes with Unsupported evidence | **Unsupported retained with the required synchronous support hook integrated.** Spin authority and unsupported optimizer checks precede ordinary validation, timers and body polling. | Bind the complete activity/SDK limitation and consumer configuration-rejection evidence; do not promote support. |

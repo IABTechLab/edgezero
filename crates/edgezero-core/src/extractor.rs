@@ -1946,16 +1946,26 @@ mod tests {
 
     #[test]
     fn body_extractors_preserve_overflow_category_at_every_boundary() {
-        for extractor in 0_u8..6 {
+        #[derive(Debug, Deserialize, Validate)]
+        struct TinyPayload {
+            n: u8,
+        }
+
+        for extractor in 0_u8..7 {
             let cap = match extractor {
                 0 | 1 => DEFAULT_INBOUND_JSON_BYTES,
                 3 | 4 => DEFAULT_INBOUND_FORM_BYTES,
-                _ => 16,
+                2 | 5 => 16,
+                _ => 8,
             };
             for length in [cap - 1, cap, cap + 1] {
-                let body = if extractor <= 2 {
-                    let mut bytes =
-                        serde_json::to_vec(&serde_json::json!({"name": "demo"})).expect("JSON");
+                let body = if extractor <= 2 || extractor == 6 {
+                    let value = if extractor == 6 {
+                        serde_json::json!({"n":1_u8})
+                    } else {
+                        serde_json::json!({"name":"demo"})
+                    };
+                    let mut bytes = serde_json::to_vec(&value).expect("JSON");
                     bytes.resize(length, b' ');
                     Body::from(bytes)
                 } else {
@@ -1974,13 +1984,16 @@ mod tests {
                         3 => block_on(Form::<FormData>::from_request(&ctx)).map(|_| ()),
                         4 => block_on(ValidatedForm::<ValidatedFormData>::from_request(&ctx))
                             .map(|_| ()),
-                        _ => block_on(ValidatedFormWithin::<ValidatedFormData, 16>::from_request(
+                        5 => block_on(ValidatedFormWithin::<ValidatedFormData, 16>::from_request(
                             &ctx,
                         ))
                         .map(|_| ()),
+                        _ => block_on(ValidatedJsonWithin::<TinyPayload, 8>::from_request(&ctx))
+                            .map(|value| assert_eq!(value.0.n, 1)),
                     };
                 if length > cap {
                     let error = result.expect_err("overflow");
+                    assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
                     assert_eq!(error.kind(), "payload_too_large");
                     assert_eq!(
                         error.request_body_overflow_origin(),

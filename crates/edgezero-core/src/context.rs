@@ -1231,6 +1231,17 @@ mod tests {
         RequestContext::new(request, params)
     }
 
+    fn counted_body(bytes: Bytes) -> (Body, Rc<Cell<usize>>) {
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&polls);
+        let mut remaining = Some(bytes);
+        let body = Body::from_stream(stream::poll_fn(move |_| {
+            observed.set(observed.get().saturating_add(1));
+            Poll::Ready(remaining.take().map(Ok::<_, EdgeError>))
+        }));
+        (body, polls)
+    }
+
     #[test]
     fn uncapped_input_guard_skips_accounting_at_counter_overflow() {
         let request = request_builder().body(Body::empty()).expect("request");
@@ -1301,22 +1312,25 @@ mod tests {
 
     #[test]
     fn declared_overflow_does_not_read_or_poison_the_body() {
-        let polls = Rc::new(Cell::new(0_usize));
-        let observed = Rc::clone(&polls);
-        let body = Body::stream(
-            stream::iter([Bytes::from_static(b"0123456789")])
-                .inspect(move |_| observed.set(observed.get().saturating_add(1))),
-        );
+        let (body, polls) = counted_body(Bytes::from_static(b"0123456789"));
         let mut ctx = ctx("/body", body, PathParams::default());
         ctx.headers_mut()
             .insert("content-length", HeaderValue::from_static("10"));
 
         let error = block_on(ctx.body_bytes(5)).expect_err("declared overflow");
         assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error.kind(), "payload_too_large");
+        assert_eq!(
+            error.request_body_overflow_origin(),
+            Some(RequestBodyOverflowOrigin::Inbound)
+        );
         assert_eq!(polls.get(), 0);
         assert_eq!(ctx.body_kind(), BodyKind::Initial);
-        assert_eq!(block_on(ctx.body_bytes(10)).expect("larger cap").len(), 10);
-        assert_eq!(polls.get(), 1);
+        assert_eq!(
+            block_on(ctx.body_bytes(10)).expect("larger cap").as_ref(),
+            b"0123456789"
+        );
+        assert_eq!(polls.get(), 2);
     }
 
     #[test]
@@ -1336,11 +1350,7 @@ mod tests {
 
     #[test]
     fn expired_deadline_wins_over_declared_overflow_without_polling() {
-        let body = Body::from_stream(stream::poll_fn(
-            |_| -> Poll<Option<Result<Bytes, EdgeError>>> {
-                panic!("an expired reader must not poll its source")
-            },
-        ));
+        let (body, polls) = counted_body(Bytes::from_static(b"0123456789"));
         let mut ctx = ctx("/body", body, PathParams::default());
         ctx.headers_mut()
             .insert("content-length", HeaderValue::from_static("10"));
@@ -1352,46 +1362,65 @@ mod tests {
                 StatusCode::REQUEST_TIMEOUT
             );
         }
+        assert_eq!(polls.get(), 0);
         assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
     }
 
     #[test]
     fn readers_classify_consumed_overflow_before_payload_parsing() {
-        let json = serde_json::to_vec(&serde_json::json!("123456")).expect("JSON");
-        for (reader, bytes) in [
-            (0_u8, b"12345678".to_vec()),
-            (1, json),
-            (2, b"key=1234".to_vec()),
-        ] {
-            for cap in [7_usize, 8, 9] {
-                let ctx = ctx(
-                    "/body",
-                    Body::stream(stream::iter([Bytes::from(bytes.clone())])),
-                    PathParams::default(),
-                );
-                let result = match reader {
-                    0 => block_on(ctx.body_bytes(cap)).map(|_| ()),
-                    1 => block_on(ctx.json_within::<serde_json::Value>(cap)).map(|_| ()),
-                    _ => block_on(ctx.form_within::<BTreeMap<String, String>>(cap)).map(|_| ()),
-                };
-                if cap == 7 {
-                    let first = result.expect_err("overflow");
-                    let second = block_on(ctx.body_bytes(usize::MAX)).expect_err("sticky");
-                    assert_eq!(first.status(), StatusCode::PAYLOAD_TOO_LARGE);
-                    assert_eq!(second.kind(), "payload_too_large");
-                    assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
-                } else {
-                    result.expect("within cap");
-                    assert_eq!(
-                        block_on(ctx.body_bytes(7))
-                            .expect_err("cached cap")
-                            .status(),
-                        StatusCode::PAYLOAD_TOO_LARGE
-                    );
-                    assert_eq!(
-                        block_on(ctx.body_bytes(8)).expect("reusable cache").len(),
-                        8
-                    );
+        for length in [8_usize, 9] {
+            let json =
+                serde_json::to_vec(&serde_json::json!("x".repeat(length - 2))).expect("JSON");
+            for (reader, bytes) in [
+                (0_u8, vec![b'x'; length]),
+                (1, json),
+                (2, format!("key={}", "x".repeat(length - 4)).into_bytes()),
+            ] {
+                assert_eq!(bytes.len(), length);
+                for cap in [length - 1, length, length + 1] {
+                    let (body, polls) = counted_body(Bytes::from(bytes.clone()));
+                    let ctx = ctx("/body", body, PathParams::default());
+                    let read = |selected_reader, max| match selected_reader {
+                        0 => block_on(ctx.body_bytes(max)).map(|_| ()),
+                        1 => block_on(ctx.json_within::<serde_json::Value>(max)).map(|_| ()),
+                        _ => block_on(ctx.form_within::<BTreeMap<String, String>>(max)).map(|_| ()),
+                    };
+                    let result = read(reader, cap);
+                    if cap < length {
+                        let first = result.expect_err("overflow");
+                        assert_eq!(polls.get(), 1);
+                        for retry_reader in 0_u8..3 {
+                            for retry_cap in [0, length - 1, length, length + 1, usize::MAX] {
+                                let replay =
+                                    read(retry_reader, retry_cap).expect_err("sticky overflow");
+                                assert_eq!(replay.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                                assert_eq!(replay.kind(), first.kind());
+                                assert_eq!(replay.message(), first.message());
+                                assert_eq!(
+                                    replay.request_body_overflow_origin(),
+                                    Some(RequestBodyOverflowOrigin::Inbound)
+                                );
+                                assert_eq!(polls.get(), 1);
+                            }
+                        }
+                        assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+                    } else {
+                        result.expect("within cap");
+                        assert_eq!(polls.get(), 2);
+                        assert_eq!(
+                            block_on(ctx.body_bytes(length - 1))
+                                .expect_err("cached cap")
+                                .status(),
+                            StatusCode::PAYLOAD_TOO_LARGE
+                        );
+                        assert_eq!(
+                            block_on(ctx.body_bytes(length))
+                                .expect("reusable cache")
+                                .len(),
+                            length
+                        );
+                        assert_eq!(polls.get(), 2);
+                    }
                 }
             }
         }
@@ -1707,12 +1736,14 @@ mod tests {
 
     #[test]
     fn invalid_json_returns_bad_request() {
-        let body = Body::from(&b"not json"[..]);
-        let ctx = ctx("/echo", body, PathParams::default());
-        let err = block_on(ctx.json_within::<serde_json::Value>(DEFAULT_INBOUND_JSON_BYTES))
-            .expect_err("expected error");
-        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
-        assert!(err.message().contains("invalid JSON payload"));
+        for cap in [8, DEFAULT_INBOUND_JSON_BYTES] {
+            let body = Body::from(&b"not json"[..]);
+            let ctx = ctx("/echo", body, PathParams::default());
+            let err =
+                block_on(ctx.json_within::<serde_json::Value>(cap)).expect_err("expected error");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert!(err.message().contains("invalid JSON payload"));
+        }
     }
 
     #[test]
