@@ -35,7 +35,7 @@ use futures_util::stream;
 use std::collections::BTreeMap;
 
 use crate::config_store::FastlyConfigStore;
-use crate::context::FastlyRequestContext;
+use crate::context::{FastlyOutboundObservation, FastlyRequestContext};
 use crate::delivery::{
     DispatchOutcome, FastlyNoAttempt, FastlyNoAttemptReason, FastlyRequestDelivery,
     FastlyRequestHeadFailure, FastlyResponseDelivery, finish_request,
@@ -441,7 +441,15 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
     let mut scratch = Extensions::default();
+    if let Some(observation) = FastlyOutboundObservation::current() {
+        scratch.insert(observation);
+    }
     prepare(req, &mut scratch);
+    // Preparation may supply a client, but cannot substitute another callback's accounting.
+    scratch.remove::<FastlyOutboundObservation>();
+    if let Some(observation) = FastlyOutboundObservation::current() {
+        scratch.insert(observation);
+    }
     scratch
 }
 
@@ -829,6 +837,9 @@ fn into_core_request_head(
         client_ip: req.get_client_ip_addr(),
     };
     FastlyRequestContext::insert(&mut request, context);
+    if let Some(observation) = FastlyOutboundObservation::current() {
+        request.extensions_mut().insert(observation);
+    }
     request
         .extensions_mut()
         .insert(outbound_client(outbound_clock));
@@ -1262,6 +1273,67 @@ mod synthesis_tests {
     }
 
     #[test]
+    fn registration_observation_is_canonical_before_prepare_and_in_handler() {
+        use crate::context::{FastlyOutboundObservation, observation};
+        use edgezero_core::http::StatusCode;
+
+        let foreign = with_callback(|| {
+            observation::current()
+                .unwrap()
+                .configuration("foreign".into());
+            FastlyOutboundObservation::current().unwrap()
+        });
+        let router = RouterService::builder()
+            .get("/observation", |ctx: RequestContext| async move {
+                let handle = ctx
+                    .extensions()
+                    .get::<FastlyOutboundObservation>()
+                    .expect("canonical extension");
+                assert_eq!(
+                    handle.snapshot(),
+                    FastlyOutboundObservation::current().unwrap().snapshot()
+                );
+                assert_eq!(handle.snapshot().registration_count(), 0);
+                assert_eq!(handle.snapshot().configuration_count(), 0);
+                observation::current()
+                    .unwrap()
+                    .configuration("handler".into());
+                assert_eq!(
+                    handle.snapshot().configuration_count(),
+                    1,
+                    "handler must share the live canonical record"
+                );
+                Ok::<_, EdgeError>("observed")
+            })
+            .build();
+        let app = App::new(router);
+        let outcome = with_callback(|| {
+            FastlyService::new(&app).dispatch_with(
+                FastlyRequest::get("http://example.test/observation"),
+                |_, extensions| {
+                    assert!(
+                        extensions.get::<FastlyOutboundObservation>().is_some(),
+                        "installed before preparation"
+                    );
+                    extensions.insert(foreign);
+                },
+            )
+        })
+        .expect("native dispatch");
+        let envelope = outcome.into_envelope().expect("response envelope");
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+        else {
+            panic!("begin egress");
+        };
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(clock.now()));
+        let response = prepared.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body().as_bytes(), Some(b"observed".as_slice()));
+    }
+
+    #[test]
     fn router_state_client_precedes_prepare_and_adapter_default() {
         use edgezero_core::http::StatusCode;
         use edgezero_core::outbound::{OutboundRequest, OutboundTime};
@@ -1437,12 +1509,17 @@ mod synthesis_tests {
         use edgezero_core::outbound::OutboundSendMode;
         use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;
 
-        executor::block_on(check_unsupported_image_optimizer_preflight(
-            FastlyOutboundClient::with_time,
-            "fastly",
-            &[OutboundSendMode::Begin, OutboundSendMode::Batch],
-        ))
-        .expect("unsupported-mode conformance");
+        with_callback(|| {
+            executor::block_on(check_unsupported_image_optimizer_preflight(
+                FastlyOutboundClient::with_time,
+                "fastly",
+                &[OutboundSendMode::Begin, OutboundSendMode::Batch],
+            ))
+            .expect("unsupported-mode conformance");
+            let stats = FastlyOutboundObservation::current().unwrap().snapshot();
+            assert_eq!(stats.registration_count(), 0);
+            assert_eq!(stats.configuration_count(), 0);
+        });
     }
 
     #[test]

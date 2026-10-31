@@ -181,7 +181,7 @@ dispatch guards and their tests remain, not an alternate old backend policy.
       registration returns late, and return attributed 504 without sending an expired slot. Remove
       slack guards, constant, hook, and tests only together with verified bounded waits. Preserve
       router-state > prepare-hook > default-client precedence and cross-request Axum pooling.
-- [ ] Add `registration_observation_public_api` in the new external test file; compile every
+- [x] Add `registration_observation_public_api` in the new external test file; compile every
       getter plus Clone/Send/Sync handle bounds and Copy/equality snapshot bounds without private
       constructors or a Fastly SDK dependency. Run
       `scripts/run_test_nonzero.sh registration_observation_public_api cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --test outbound_public_api`.
@@ -193,7 +193,7 @@ dispatch guards and their tests remain, not an alternate old backend policy.
       the specified count/durations. Check zero-activity preflight, post-delivery work, helper reuse,
       Ok/Err/unwind exit and retained handle/client isolation across two callbacks. Retaining a
       handle retains only its frozen numbers, not an old exchange or configuration-key set.
-- [ ] Add `registration_warning_obeys_fifty_millisecond_boundary`; run
+- [x] Add `registration_warning_obeys_fifty_millisecond_boundary`; run
       `scripts/run_test_nonzero.sh registration_warning_obeys_fifty_millisecond_boundary cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils --lib`.
       Use an injected clock and recording logger for just below 50 ms, exactly 50 ms and above,
       including a failed registration. Expected: no warning below the boundary, one warn record

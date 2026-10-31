@@ -12,6 +12,44 @@
 
 ## Status and Authority
 
+### Fastly Registration Observations (2026-10-30)
+
+The approved `context::FastlyOutboundObservation` and immutable `FastlyOutboundStats` are now
+implemented. Existing Fastly callback/helper owners retain one recorder; their shared core
+provider family stores only a weak link. Public handles retain coherent numeric snapshots only.
+Callback exit freezes recording and releases configuration keys even when an accepted response
+body survives. Nested helpers preserve the outer record, and nested serving callbacks isolate it.
+Canonical handles are available before prepare and cannot be replaced through scratch extensions.
+
+Eligible canonical keys count before fallible backend-cache access. Expired preflight counts
+nothing, cache hits do not count registrations, and live budgets are checked again after locking.
+Actual registration calls are bracketed in the paired clock, including failures and late returns;
+late success stays cached while the original timeout wins. Fixed warnings run outside the cache
+mutex at 50 ms or longer. Backwards samples preserve outcomes and warn rather than fabricate time.
+
+EZ-2 acceptance 22 binds the existing guarded Fastly unit phase to the threshold test and its
+scope, accepted-body, cache, retained-client and request-extension companions. No new CI job or
+runtime selector is added. The inventory is 85 ready/426 planned, still unqualified; the frozen
+255 criteria/511 identities and all applicability/approval metadata are unchanged. Other D1b
+runtime accounting/performance proofs remain open. No deployment or pin promotion is authorized.
+
+The read-only closure audit also identified uncompleted local acceptance beyond this feature:
+native forwarding matrices outside Axum, connect-timeout capability metadata, complete encoding
+wire controls and the remaining lifetime/cancellation scenarios. Historical strict timing,
+Cloudflare overflow recovery and Fastly HEAD/205 reference-parity failures remain recorded,
+not waived. Consumer/hosted criteria, optimizer entitlement, resource-policy decisions and
+candidate freeze still require their separately authorized evidence. Green CI is not completion.
+
+Two independent read-only reviews selected callback-local recording over a second ownership
+registry. Review fixes exclude accounting overhead from timing, count eligible cache failures,
+retain post-lock expiry checks and distinguish a foreign extension from the live handle.
+All five root gates pass: 2,631 tests across 33 binaries, no failures and one existing ignored
+test; strict workspace Clippy, feature checks and formatting are clean. The guarded local
+Fastly WASI phase passes 291 tests, including every new acceptance sentinel, and strict Fastly
+WASI Clippy passes. The public API/native phases, 57 relevant tooling tests, docs/legacy audits
+and manifest validation pass. Logs are retained under `/private/tmp/pr275-fastly-observation-*`;
+these working-tree observations do not freeze or qualify a candidate.
+
 ### Unsupported Policy and Marker Acceptance (2026-10-30)
 
 EZ-3 acceptance 08 binds all four adapter test phases to one core `test-utils` conformance

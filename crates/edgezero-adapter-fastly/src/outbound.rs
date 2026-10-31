@@ -250,6 +250,7 @@ fn effective_connect_ms(configured: Option<Duration>, governing: Duration) -> Op
 
 #[cfg(feature = "fastly")]
 mod fastly_impl {
+    use crate::context::observation::{self, Recorder, Registration};
     use core::future::Future;
     use core::task::{Context, Poll};
     #[cfg(test)]
@@ -525,13 +526,17 @@ mod fastly_impl {
             parts: &OutboundRequestParts,
             budget: DispatchBudget,
             batch_started_at: Option<MonotonicInstant>,
+            observation: Option<Rc<Recorder>>,
         ) -> Result<Backend, EdgeError> {
             let registry = BACKENDS.get_or_init(|| Mutex::new(HashMap::new()));
+            let record = observation.clone();
+            let mut registration = Registration::new(observation, self.time.clock());
             let backend = cached_backend(
                 registry,
                 identity,
                 budget,
                 self.time.clock(),
+                record.as_deref(),
                 |name, settings| {
                     let target =
                         format!("{}:{}", parts.uri.host().unwrap_or_default(), settings.port);
@@ -553,7 +558,7 @@ mod fastly_impl {
                         }
                     }
                     register_backend_while_live(batch_started_at, budget, self.time.clock(), || {
-                        builder.finish()
+                        registration.run(|| builder.finish())
                     })
                 },
             )?;
@@ -565,6 +570,7 @@ mod fastly_impl {
             request: OutboundDispatchRequest,
         ) -> Result<PreparedRequest, EdgeError> {
             request.scope().check()?;
+            let observation = observation::for_scope(request.scope());
             let budget = request.budget();
             let (mut identity, ()) = backend_identity_view(request.request(), budget)?;
             let (mut parts, context) = request.into_parts();
@@ -577,7 +583,8 @@ mod fastly_impl {
             budget_remaining(budget, context.clock())?;
             let batch_start =
                 (context.mode() == OutboundSendMode::Batch).then_some(context.entered_at());
-            let backend = self.ensure_backend(identity, &parts, budget, batch_start)?;
+            let backend =
+                self.ensure_backend(identity, &parts, budget, batch_start, observation)?;
             budget_remaining(budget, context.clock())?;
             Ok(PreparedRequest {
                 backend,
@@ -956,6 +963,7 @@ mod fastly_impl {
         identity: BackendIdentity,
         budget: DispatchBudget,
         clock: &MonotonicClock,
+        observation: Option<&Recorder>,
         register: Register,
     ) -> Result<Value, EdgeError>
     where
@@ -966,6 +974,10 @@ mod fastly_impl {
         ) -> Result<Result<Value, BackendCreationError>, EdgeError>,
     {
         let name = backend_name(&identity);
+        budget_remaining(budget, clock)?;
+        if let Some(record) = observation {
+            record.configuration(name.clone());
+        }
         // Serialize registration and insertion; NameInUse alone cannot certify a configuration.
         let mut cache = registry.lock().map_err(|_poisoned| {
             EdgeError::internal(anyhow::anyhow!("Fastly backend cache was poisoned"))
@@ -3262,6 +3274,7 @@ mod fastly_impl {
                     identity.clone(),
                     budget,
                     &clock,
+                    None,
                     |name, settings| {
                         assert_eq!(name, backend_name(settings));
                         registered.set(registered.get() + 1);
@@ -3278,11 +3291,192 @@ mod fastly_impl {
                 .lock()
                 .expect("registry")
                 .insert(backend_name(&identity), (collision, 9));
-            let error = cached_backend(&registry, identity, budget, &clock, |_, _| {
+            let error = cached_backend(&registry, identity, budget, &clock, None, |_, _| {
                 panic!("collision must not register or reuse")
             })
             .expect_err("identity collision");
             assert!(matches!(error, EdgeError::Internal { .. }));
+        }
+
+        #[test]
+        fn registration_observation_tracks_cache_hits_failures_and_retries() {
+            use crate::context::FastlyOutboundObservation;
+            use crate::lifecycle::with_callback;
+
+            let start = MonotonicInstant::now();
+            let now = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&now);
+            let clock = MonotonicClock::new(move || *sampled.lock().unwrap());
+            let budget = clock_budget(start, Duration::from_millis(20));
+            let request = OutboundRequest::get("https://observation.example/").unwrap();
+            let (identity, _) = backend_identity(request, budget).unwrap();
+            let registry = Mutex::new(HashMap::new());
+
+            let retained = with_callback(|| {
+                let record = observation::current().unwrap();
+                let handle = FastlyOutboundObservation::current().unwrap();
+                for failed in [true, false, false] {
+                    let mut attempt = Registration::new(Some(Rc::clone(&record)), &clock);
+                    let result = cached_backend(
+                        &registry,
+                        identity.clone(),
+                        budget,
+                        &clock,
+                        Some(&record),
+                        |_, _| {
+                            Ok(attempt.run(|| {
+                                *now.lock().unwrap() += Duration::from_millis(5);
+                                if failed {
+                                    Err(BackendCreationError::Disallowed)
+                                } else {
+                                    Ok(7_u8)
+                                }
+                            }))
+                        },
+                    );
+                    assert_eq!(result.is_err(), failed);
+                    drop(attempt);
+                }
+                assert_eq!(handle.snapshot().configuration_count(), 1);
+                assert_eq!(handle.snapshot().registration_count(), 2);
+                assert_eq!(
+                    handle.snapshot().total_registration_duration(),
+                    Duration::from_millis(10)
+                );
+                assert_eq!(
+                    handle.snapshot().max_registration_duration(),
+                    Duration::from_millis(5)
+                );
+                handle
+            });
+            assert_eq!(retained.snapshot().registration_count(), 2);
+        }
+
+        #[test]
+        fn registration_observation_retains_late_success_without_renewing_budget() {
+            use crate::context::FastlyOutboundObservation;
+            use crate::lifecycle::with_callback;
+
+            let start = MonotonicInstant::now();
+            let now = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&now);
+            let clock = MonotonicClock::new(move || *sampled.lock().unwrap());
+            let budget = clock_budget(start, Duration::from_millis(20));
+            let request = OutboundRequest::get("https://observation.example/").unwrap();
+            let (identity, _) = backend_identity(request, budget).unwrap();
+            let registry = Mutex::new(HashMap::new());
+
+            let retained = with_callback(|| {
+                let record = observation::current().unwrap();
+                let handle = FastlyOutboundObservation::current().unwrap();
+                let mut late_identity = identity.clone();
+                late_identity.host = "late-observation.example".into();
+                let mut attempt = Registration::new(Some(Rc::clone(&record)), &clock);
+                let error = cached_backend(
+                    &registry,
+                    late_identity.clone(),
+                    budget,
+                    &clock,
+                    Some(&record),
+                    |_, _| {
+                        Ok(attempt.run(|| {
+                            *now.lock().unwrap() += Duration::from_millis(50);
+                            Ok(8_u8)
+                        }))
+                    },
+                )
+                .unwrap_err();
+                drop(attempt);
+                assert!(matches!(
+                    error,
+                    EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    registry.lock().unwrap().len(),
+                    1,
+                    "late success stays cached"
+                );
+                assert_eq!(handle.snapshot().configuration_count(), 1);
+                assert_eq!(handle.snapshot().registration_count(), 1);
+                assert_eq!(
+                    handle.snapshot().total_registration_duration(),
+                    Duration::from_millis(50)
+                );
+                assert_eq!(
+                    handle.snapshot().max_registration_duration(),
+                    Duration::from_millis(50)
+                );
+
+                let before_expired = handle.snapshot();
+                cached_backend::<u8, _>(
+                    &registry,
+                    identity.clone(),
+                    budget,
+                    &clock,
+                    Some(&record),
+                    |_, _| panic!("expired request must not register"),
+                )
+                .unwrap_err();
+                assert_eq!(handle.snapshot(), before_expired);
+                (handle, late_identity)
+            });
+            with_callback(|| {
+                let record = observation::current().unwrap();
+                let next_budget = clock_budget(clock.now(), Duration::from_secs(1));
+                assert_eq!(
+                    cached_backend(
+                        &registry,
+                        retained.1,
+                        next_budget,
+                        &clock,
+                        Some(&record),
+                        |_, _| panic!("late success must be reused")
+                    )
+                    .unwrap(),
+                    8
+                );
+                let stats = FastlyOutboundObservation::current().unwrap().snapshot();
+                assert_eq!(stats.configuration_count(), 1);
+                assert_eq!(stats.registration_count(), 0);
+                assert_eq!(stats.total_registration_duration(), Duration::ZERO);
+            });
+            assert_eq!(retained.0.snapshot().registration_count(), 1);
+        }
+
+        #[cfg(target_env = "p1")]
+        #[test]
+        fn retained_client_records_registration_in_each_invoking_callback() {
+            use crate::context::FastlyOutboundObservation;
+            use crate::lifecycle::with_callback;
+
+            let start = MonotonicInstant::now();
+            let client = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
+            let mut retained = None;
+            for registrations in [1, 0] {
+                let handle = with_callback(|| {
+                    let request =
+                        OutboundRequest::get("https://callback-registration-observation.example/")
+                            .unwrap();
+                    client
+                        .configure(testing::dispatch(request, client.time()))
+                        .expect("native registration");
+                    let handle = FastlyOutboundObservation::current().unwrap();
+                    assert_eq!(handle.snapshot().registration_count(), registrations);
+                    assert_eq!(handle.snapshot().configuration_count(), 1);
+                    handle
+                });
+                if let Some(previous) = retained.replace(handle) {
+                    assert_eq!(
+                        previous.snapshot().registration_count(),
+                        1,
+                        "retained handle stays frozen"
+                    );
+                }
+            }
+            assert!(FastlyOutboundObservation::current().is_none());
         }
 
         #[test]
@@ -3297,13 +3491,18 @@ mod fastly_impl {
                 BackendCreationError::Disallowed,
             ] {
                 let registry = Mutex::new(HashMap::new());
-                cached_backend::<u8, _>(&registry, identity.clone(), budget, &clock, |_, _| {
-                    Ok(Err(failure))
-                })
+                cached_backend::<u8, _>(
+                    &registry,
+                    identity.clone(),
+                    budget,
+                    &clock,
+                    None,
+                    |_, _| Ok(Err(failure)),
+                )
                 .expect_err("unverified registration must fail");
                 assert!(registry.lock().expect("registry").is_empty());
                 let backend =
-                    cached_backend(&registry, identity.clone(), budget, &clock, |_, _| {
+                    cached_backend(&registry, identity.clone(), budget, &clock, None, |_, _| {
                         Ok(Ok(7))
                     })
                     .expect("retry may register");
@@ -3318,11 +3517,12 @@ mod fastly_impl {
             let request = OutboundRequest::get("https://example.com/").expect("request");
             let (identity, _) = backend_identity(request, budget).expect("identity");
             let registry = Mutex::new(HashMap::new());
-            let clock = scripted_clock(vec![start, budget.deadline.instant()]);
-            let error = cached_backend(&registry, identity.clone(), budget, &clock, |_, _| {
-                Ok(Ok(7_u8))
-            })
-            .expect_err("late registration");
+            let clock = scripted_clock(vec![start, start, budget.deadline.instant()]);
+            let error =
+                cached_backend(&registry, identity.clone(), budget, &clock, None, |_, _| {
+                    Ok(Ok(7_u8))
+                })
+                .expect_err("late registration");
             assert!(matches!(
                 error,
                 EdgeError::GatewayTimeout {
@@ -3337,15 +3537,20 @@ mod fastly_impl {
                 identity.clone(),
                 budget,
                 &expired_clock,
+                None,
                 |_, _| panic!("expired cache hit must not register"),
             )
             .expect_err("cached backend does not renew an expired budget");
             let next_budget = clock_budget(budget.deadline.instant(), Duration::from_secs(1));
-            let backend =
-                cached_backend(&registry, identity, next_budget, &expired_clock, |_, _| {
-                    panic!("successful late registration must already be retained")
-                })
-                .expect("reuse under a new operation's budget");
+            let backend = cached_backend(
+                &registry,
+                identity,
+                next_budget,
+                &expired_clock,
+                None,
+                |_, _| panic!("successful late registration must already be retained"),
+            )
+            .expect("reuse under a new operation's budget");
             assert_eq!(backend, 7);
         }
 

@@ -56,7 +56,7 @@ batch-only selector is removed. Cloudflare uses the selected Wrangler package's 
 with the inspector disabled: its network preview otherwise decodes malformed compressed bodies
 before application policy. The small Node bootstrap only starts/disposes that SDK; Rust still
 owns supervision and every assertion. This does not activate Cloudflare wire execution in CI
-or qualify hosted behavior. There are 84 ready and 427 planned acceptance legs.
+or qualify hosted behavior. There are 85 ready and 426 planned acceptance legs.
 
 Client-selection acceptance uses the existing adapter-owned phases: Axum's native handler
 and transport-factory tests, Fastly/Cloudflare's runtime library tests, and Spin's executable

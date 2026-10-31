@@ -746,7 +746,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 427,
+    planned: 426,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -1278,6 +1278,46 @@ test("policy precedence and native marker proofs bind only their exact owning su
   }
 });
 
+test("Fastly registration observation binds its complete existing unit phase", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const row = manifest.cases.find(
+    (c) =>
+      c.case_id === "EZ-2/acceptance/22" && c.environment === "unit/fastly",
+  );
+  assert.equal(row.implementation, "ready");
+  assert.equal(
+    row.sentinel,
+    "context::tests::registration_warning_obeys_fifty_millisecond_boundary",
+  );
+  assert.equal(row.additional_sentinels.length, 8);
+  assert.ok(
+    row.additional_sentinels.includes(
+      "outbound::fastly_impl::tests::retained_client_records_registration_in_each_invoking_callback",
+    ),
+  );
+  assert.ok(
+    row.additional_sentinels.includes(
+      "request::synthesis_tests::registration_observation_is_canonical_before_prepare_and_in_handler",
+    ),
+  );
+  assert.equal(row.artifact_path, "outbound/unit/fastly/raw.log");
+  assert.match(
+    row.command,
+    /--features fastly,test-utils --target wasm32-wasip1 --lib$/,
+  );
+  const selected = checker.readySentinels(manifest, "unit/fastly", row.command);
+  for (const name of [row.sentinel, ...row.additional_sentinels])
+    assert.ok(selected.includes(name));
+});
+
 test("forwarding ordering and normalization core proofs bind only their reviewed legs", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -1288,7 +1328,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /427 other legs remain planned/);
+  assert.match(manifest.status, /426 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1510,10 +1550,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 84);
+  assert.equal(ready.length, 85);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    427,
+    426,
   );
   assert.ok(
     ready.every(
@@ -1521,6 +1561,8 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
         c.case_id.startsWith("EZ-9/acceptance/") ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
+        (c.case_id === "EZ-2/acceptance/22" &&
+          c.environment === "unit/fastly") ||
         (c.case_id === "EZ-3/acceptance/08" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-7/acceptance/04" &&

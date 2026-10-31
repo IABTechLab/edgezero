@@ -4,6 +4,8 @@
 //! metadata, extensions, and pending work must remain local to each callback.
 
 #[cfg(any(feature = "fastly", test))]
+use crate::context::observation::Guard as ObservationGuard;
+#[cfg(any(feature = "fastly", test))]
 use crate::outbound::scope;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::OutboundScopeOwner;
@@ -115,7 +117,10 @@ impl<T> Sandbox<T> {
     {
         self.requests = self.requests.saturating_add(1);
         let scope = OutboundScopeOwner::callback();
-        scope.with(|| handler(request, self))
+        scope.with(|| {
+            let _observation = ObservationGuard::enter();
+            handler(request, self)
+        })
     }
 }
 
@@ -124,7 +129,10 @@ pub(crate) fn with_callback<R>(action: impl FnOnce() -> R) -> R {
     if scope::capture().is_managed() {
         action()
     } else {
-        OutboundScopeOwner::callback().with(action)
+        OutboundScopeOwner::callback().with(|| {
+            let _observation = ObservationGuard::enter();
+            action()
+        })
     }
 }
 
@@ -227,6 +235,44 @@ mod tests {
         let context = testing::batch_context(1);
         let driver = bind_batch(context.scope(), source);
         OutboundBatch::from_driver(context, driver, testing::owner())
+    }
+
+    #[test]
+    fn nested_callbacks_restore_separate_registration_observations() {
+        use crate::context::{FastlyOutboundObservation, observation};
+
+        let mut sandbox = Sandbox::<()>::default();
+        let outer = sandbox.handle((), |(), _| {
+            let record = observation::current().unwrap();
+            record.configuration("outer".into());
+            let outer = FastlyOutboundObservation::current().unwrap();
+            let inner = Sandbox::<()>::default().handle((), |(), _| {
+                let inner_record = observation::current().unwrap();
+                inner_record.configuration("inner-one".into());
+                inner_record.configuration("inner-two".into());
+                FastlyOutboundObservation::current().unwrap()
+            });
+            assert_eq!(inner.snapshot().configuration_count(), 2);
+            assert_eq!(outer.snapshot().configuration_count(), 1);
+            record.configuration("post-inner".into());
+            assert_eq!(
+                FastlyOutboundObservation::current().unwrap().snapshot(),
+                outer.snapshot()
+            );
+            assert_eq!(inner.snapshot().configuration_count(), 2);
+            outer
+        });
+        assert_eq!(outer.snapshot().configuration_count(), 2);
+        sandbox.handle((), |(), _| {
+            assert_eq!(
+                FastlyOutboundObservation::current()
+                    .unwrap()
+                    .snapshot()
+                    .configuration_count(),
+                0
+            );
+        });
+        assert!(FastlyOutboundObservation::current().is_none());
     }
 
     #[test]

@@ -223,6 +223,25 @@ TLS identity, and provider timer budget. You do not predeclare those destination
 cannot prove that service entitlement, so `outbound-http` is BestEffort. A disabled service
 returns a typed 502 with an enablement diagnostic.
 
+`context::FastlyOutboundObservation::current()` exposes the current Fastly serving callback's
+registration statistics. The same handle is installed in request extensions before `prepare`;
+preparation cannot replace it with a handle from another request. Read `snapshot()` for actual
+registration attempts, distinct eligible configurations, total registration duration and longest
+registration duration. Cache hits count as configurations, not registrations. Failed and late
+registration attempts count; unsupported or already-expired preflight does not.
+
+Measurements bracket the provider registration call using the client's paired application clock.
+Calls lasting at least 50 ms emit a fixed warning without URLs, keys or provider diagnostics.
+A backwards clock preserves the transport outcome and emits a fixed warning instead of inventing
+a duration; a frozen clock contributes zero elapsed time. These observations do not bound host
+blocking or certify registration latency.
+
+The numeric handle is `Clone + Send + Sync`; snapshots are immutable and `Copy`. Retaining a
+handle does not retain requests, configuration keys, scopes or SDK work. Callback exit freezes
+its record, even if an accepted response body survives. Nested helpers and response cleanup do
+not freeze an active outer callback; a standalone helper owns only its fallback record.
+Outside EdgeZero's Fastly callback/helper lifecycle, `current()` returns `None`.
+
 Fastly also has documented deadline, upload, elastic-budget, batch-isolation, and lazy downstream
 streaming limitations. EdgeZero owns the low-level `stream_to_client` lifetime and writes portable
 response chunks without whole-body collection. Synchronous source polls and hostcalls cannot be

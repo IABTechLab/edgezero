@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Add Fastly request-scoped backend registration observations through `context::FastlyOutboundObservation`.
+  Count eligible configurations independently of provider attempts, time failed and late returns,
+  and warn at 50 ms without exposing request or provider details. Freeze numeric snapshots at
+  callback exit without retaining configuration keys, response bodies or outbound work.
 - Consolidate cross-runtime fixtures and acceptance assets under `edgezero-test-harness`.
   Replace the lifecycle-specific smoke launcher with `scripts/test_integration.sh` and
   use the same explicit per-adapter CI suites locally and in Actions. Move shared Spin
