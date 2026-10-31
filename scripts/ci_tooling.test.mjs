@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parse } from "yaml";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const helper = join(root, "scripts/ci_viceroy.sh");
@@ -25,23 +26,178 @@ function command(program, args, options = {}) {
   return result.stdout.trim();
 }
 
-function workflow(name) {
-  // Use the runner's standard-library YAML parser; no npm install for CI guards.
-  return JSON.parse(
-    command("ruby", [
-      "-ryaml",
-      "-rjson",
-      "-e",
-      "puts JSON.generate(YAML.load_file(ARGV.fetch(0)))",
-      join(root, `.github/workflows/${name}.yml`),
-    ]),
+function workflow(path) {
+  const value = parse(readFileSync(path, "utf8"), {
+    version: "1.2",
+    uniqueKeys: true,
+  });
+  assert.ok(
+    value && typeof value === "object" && !Array.isArray(value),
+    "workflow must be a mapping",
   );
+  assert.ok(
+    value.jobs && typeof value.jobs === "object" && !Array.isArray(value.jobs),
+    "workflow jobs must be a mapping",
+  );
+  return value;
 }
 
-const tests = workflow("test");
-const format = workflow("format");
+const tests = workflow(join(root, ".github/workflows/test.yml"));
+const format = workflow(join(root, ".github/workflows/format.yml"));
 const host = tests.jobs["host-tests"];
 const adapters = tests.jobs["adapter-wasm-tests"];
+
+const yamlContractName =
+  "workflow YAML preserves trigger keys and scalar types";
+
+test(yamlContractName, () => {
+  assert.deepEqual(tests.on, {
+    push: { branches: ["main"] },
+    pull_request: { branches: ["main"] },
+  });
+  assert.equal(host.strategy["fail-fast"], false);
+  const checkout = host.steps.find(
+    (step) => step.uses === "actions/checkout@v6",
+  );
+  assert.equal(checkout.with["persist-credentials"], false);
+  const toolchain = host.steps.find((step) =>
+    step.uses?.startsWith("actions-rust-lang/setup-rust-toolchain@"),
+  );
+  assert.equal(toolchain.with.cache, "false");
+  assert.equal(
+    tests.concurrency.group,
+    "${{ github.workflow }}-${{ github.ref }}",
+  );
+  const fetch = host.steps.find(
+    (step) => step.name === "Fetch dependencies (locked)",
+  );
+  assert.ok(fetch.run.startsWith("cargo fetch --locked\n"));
+  assert.ok(
+    fetch.run.includes("--manifest-path examples/app-demo/Cargo.toml\n"),
+  );
+});
+
+test("workflow parsing runs without external tools in PATH", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "edgezero-node-only-workflow-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const env = { ...process.env, PATH: directory };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--test",
+      "--test-reporter=tap",
+      "--test-name-pattern",
+      yamlContractName,
+      fileURLToPath(import.meta.url),
+    ],
+    { cwd: root, encoding: "utf8", env, timeout: 10_000 },
+  );
+  assert.equal(child.status, 0, child.stderr || child.error?.message);
+  assert.match(child.stdout, /^# pass 1$/m);
+});
+
+test("workflow parsing rejects malformed YAML, duplicate keys and non-mappings", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "edgezero-workflow-parser-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "workflow.yml");
+  writeFileSync(path, "jobs: {}\n");
+  assert.deepEqual(workflow(path), { jobs: {} });
+  for (const source of [
+    "jobs: [\n",
+    "jobs:\n  duplicate: {}\n  duplicate: {}\n",
+    "jobs: {}\njobs: {}\n",
+    "jobs: []\n",
+    "jobs: null\n",
+    "[]\n",
+    "",
+  ]) {
+    writeFileSync(path, source);
+    assert.throws(() => workflow(path));
+  }
+});
+
+const toolingInstall =
+  "npm ci --prefix scripts --ignore-scripts --no-audit --no-fund";
+const toolingTest = "node --test scripts/ci_tooling.test.mjs";
+
+test("tooling dependencies are locked and installed before CI and local guards", () => {
+  const owners = Object.values(tests.jobs).flatMap((job) =>
+    job.steps.filter((step) => step.run?.includes(toolingInstall)),
+  );
+  assert.equal(owners.length, 1);
+  assert.equal(owners[0].if, "matrix.suite == 'workspace'");
+  assert.equal(owners[0]["continue-on-error"], undefined);
+  assert.ok(
+    owners[0].run.indexOf(toolingInstall) < owners[0].run.indexOf(toolingTest),
+  );
+  const local = readFileSync(join(root, "scripts/run_tests.sh"), "utf8");
+  assert.ok(local.includes(toolingInstall));
+  assert.ok(local.indexOf(toolingInstall) < local.indexOf(toolingTest));
+  const manifest = JSON.parse(
+    readFileSync(join(root, "scripts/package.json"), "utf8"),
+  );
+  const lock = JSON.parse(
+    readFileSync(join(root, "scripts/package-lock.json"), "utf8"),
+  );
+  assert.equal(manifest.private, true);
+  assert.deepEqual(Object.keys(manifest.dependencies), ["yaml"]);
+  assert.match(manifest.dependencies.yaml, /^\d+\.\d+\.\d+$/);
+  assert.equal(
+    lock.packages["node_modules/yaml"].version,
+    manifest.dependencies.yaml,
+  );
+  assert.match(lock.packages["node_modules/yaml"].integrity, /^sha512-/);
+});
+
+test("tooling install failure prevents the Node guard from running", (t) => {
+  const step = host.steps.find((candidate) =>
+    candidate.run?.includes(toolingTest),
+  );
+  assert.ok(step);
+  const directory = mkdtempSync(join(tmpdir(), "edgezero-tooling-bootstrap-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const calls = join(directory, "calls.jsonl");
+  for (const executable of ["npm", "node"]) {
+    writeFileSync(
+      join(directory, executable),
+      `#!${process.execPath}
+const fs = require("node:fs");
+fs.appendFileSync(process.env.TOOLING_CALLS, JSON.stringify([${JSON.stringify(executable)}, ...process.argv.slice(2)]) + "\\n");
+process.exit(${JSON.stringify(executable)} === "npm" ? Number(process.env.INSTALL_STATUS) : 0);
+`,
+      { mode: 0o755 },
+    );
+  }
+  for (const status of [37, 0]) {
+    writeFileSync(calls, "");
+    const result = spawnSync(
+      "/bin/bash",
+      ["-euo", "pipefail", "-c", step.run],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: directory,
+          TOOLING_CALLS: calls,
+          INSTALL_STATUS: String(status),
+        },
+        timeout: 10_000,
+      },
+    );
+    assert.equal(result.status, status, result.stderr || result.error?.message);
+    const recorded = readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.deepEqual(
+      recorded,
+      status === 0
+        ? [toolingInstall.split(" "), toolingTest.split(" ")]
+        : [toolingInstall.split(" ")],
+    );
+  }
+});
 
 test("cross-runtime fixtures and acceptance assets have one integration-test home", () => {
   const home = join(root, "crates/edgezero-test-harness");

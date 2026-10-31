@@ -96,7 +96,9 @@ jobs:
 
       - name: CI tooling regressions
         if: matrix.suite == 'workspace'
-        run: node --test scripts/ci_tooling.test.mjs
+        run: |
+          npm ci --prefix scripts --ignore-scripts --no-audit --no-fund
+          node --test scripts/ci_tooling.test.mjs
 
       - name: Compile mandatory forwarding example
         if: matrix.suite == 'workspace'

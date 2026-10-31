@@ -32,6 +32,10 @@ section() {
   printf '%s\n' "=============================="
 }
 
+section "CI Tooling Contracts"
+run npm ci --prefix scripts --ignore-scripts --no-audit --no-fund
+run node --test scripts/ci_tooling.test.mjs
+
 section "Workspace Tests"
 run cargo test --workspace --all-targets
 

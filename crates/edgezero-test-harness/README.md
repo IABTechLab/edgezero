@@ -84,6 +84,17 @@ provider-specific tools, retained negative observations and hosted qualification
 
 ## Ownership
 
+Workflow/tooling guards remain in `scripts`, separate from cross-runtime integration tests.
+They use Node with one locked YAML-parser dependency, not an external language runtime:
+
+```sh
+npm ci --prefix scripts --ignore-scripts --no-audit --no-fund
+node --test scripts/ci_tooling.test.mjs
+```
+
+The workspace CI tooling step and local `scripts/run_tests.sh` install that dependency before
+running the guards. Installation failure stops verification; there is no fallback parser.
+
 ```text
 src/                         native controller, suites and evidence validators
 fixtures/reusable-app/       shared application and provider-specific guest entrypoints

@@ -13,6 +13,8 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Remove the implicit Ruby requirement from CI workflow guards. Use a locked Node YAML parser,
+  preserving existing assertions and check names with fail-closed CI/local dependency setup.
 - Publish `outbound-connect-timeout`: Fastly declares independent provider-backed support;
   Axum, Cloudflare and Spin retain BestEffort acceptance. Remove Fastly's fixed connect share
   without shortening the response-head budget, and declare flexible phase budgeting Native.
