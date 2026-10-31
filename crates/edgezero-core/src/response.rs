@@ -95,7 +95,7 @@ pub fn response_with_body(status: StatusCode, body: Body) -> Result<Response, Ed
 
     let mut builder = response_builder().status(status);
 
-    if let Body::Once(bytes) = &body
+    if let Some(bytes) = body.as_bytes()
         && !bytes.is_empty()
     {
         builder = builder

@@ -1,0 +1,680 @@
+# Capabilities
+
+Capabilities let an application state which portable runtime behaviors it depends on.
+`edgezero build`, `serve`, and `deploy` compare the manifest declaration with the selected
+adapter before starting the adapter command.
+
+## Declaration
+
+```toml
+[capabilities]
+required = ["outbound-deadlines"]
+optional = ["outbound-http"]
+
+[capabilities.outbound]
+hosts = ["https://api.example.com", "https://*.example.net:*"]
+```
+
+A capability cannot appear more than once or in both lists. `required` accepts `Native`
+and `BoundedCooperative`; it rejects `BestEffort` and `Unsupported`. `optional` never
+blocks an operation, but degraded and unavailable support is logged. A missing or malformed
+capability contract fails closed when it contains required entries.
+
+Support levels mean:
+
+- `Native`: fully supported without a documented deviation.
+- `BoundedCooperative`: enforced with a documented deterministic bound. No current outbound
+  matrix cell uses this level.
+- `BestEffort`: implemented, but with a documented behavioral deviation or an unverified
+  deployment prerequisite.
+- `Unsupported`: unavailable on that adapter.
+
+## Platform Memory Ceilings
+
+`Adapter::platform_metadata()` reports target-owned resource facts separately from behavioral
+capabilities. Runtime adapters install the same `PlatformMetadata` before `Hooks::configure`
+runs, so startup validation and CLI tooling use one canonical value. `Primary ceiling` excludes
+the separately published Fastly stack allowance. A source is shown only for a known fact; an
+unknown fact instead records why it is unknown.
+
+| Target                  | Primary ceiling           | Separate stack       | Scope         | Memory source / reason             | Live inbound requests | Population source / reason       | Host ingress/framing charge | Accounting source / reason    |
+| ----------------------- | ------------------------- | -------------------- | ------------- | ---------------------------------- | --------------------- | -------------------------------- | --------------------------- | ----------------------------- |
+| Axum                    | Unknown                   | Unknown              | Unknown       | Unknown: Operator configured       | Unknown               | Unknown: Operator configured     | Unknown                     | Unknown: Operator configured  |
+| Cloudflare Workers      | 128000000 bytes (128 MB)  | None                 | Per instance  | Platform limit: Cloudflare Workers | Unknown               | Unknown: Provider unpublished    | Unknown                     | Unknown: Provider unpublished |
+| Fastly Compute          | 128000000 bytes (128 MB)  | 1000000 bytes (1 MB) | Per execution | Platform limit: Fastly Compute     | 1                     | Platform limit: Fastly Compute   | Unknown                     | Unknown: Provider unpublished |
+| Spin (generic)          | Unknown                   | Unknown              | Unknown       | Unknown: Runtime configured        | Unknown               | Unknown: Runtime configured      | Unknown                     | Unknown: Runtime configured   |
+| Akamai Functions (Spin) | 134217728 bytes (128 MiB) | None                 | Per execution | Hosted default: Akamai Functions   | 1                     | Hosted default: Akamai Functions | Unknown                     | Unknown: Provider unpublished |
+
+Cloudflare's limit is shared by concurrent requests in one isolate, but the provider does not
+publish the maximum live inbound request population charged to that memory domain. Its limit of
+six simultaneous outbound connections applies to connections waiting for response headers within
+one invocation; it is not an inbound population bound. Fastly publishes per-execution heap and
+separate stack allowances with a population of one. Generic Spin leaves all three facts unknown
+because deployment configuration controls them. Applications deployed to Akamai Functions opt
+into `AKAMAI_FUNCTIONS_PLATFORM`, which publishes the hosted 128 MiB per-execution default and a
+population of one rather than changing the meaning of every Spin deployment.
+
+All current adapters receive host-parsed requests. Where the provider does not publish whether
+host parser, HPACK, or framing allocations count toward the memory ceiling, host-ingress
+accounting remains `Unknown: Provider unpublished`; guest-visible allocation data cannot fill in
+that fact. Unknown memory, population, or host-accounting facts make
+`PlatformMetadata::validate_memory_envelope` return `Indeterminate`, so only `Fits` is a complete
+validation result. A known minimum can still return `Exceeds` before all other facts are known.
+
+Sources: [Cloudflare Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
+[Fastly Compute resource limits](https://docs.fastly.com/products/compute-resource-limits), and
+[Akamai Functions quotas](https://techdocs.akamai.com/akamai-functions/docs/quotas-and-limits).
+
+## Ingress Matrix
+
+| Capability                       | Axum        | Cloudflare  | Fastly      | Spin        |
+| -------------------------------- | ----------- | ----------- | ----------- | ----------- |
+| `ingress-admission`              | Native      | Native      | Native      | Native      |
+| `ingress-admission-abort`        | Native      | BestEffort  | BestEffort  | BestEffort  |
+| `inbound-read-deadlines`         | Native      | BestEffort  | BestEffort  | BestEffort  |
+| `raw-ingress-head-limits`        | Unsupported | Unsupported | Unsupported | Unsupported |
+| `raw-ingress-framing-validation` | Unsupported | Unsupported | Unsupported | Unsupported |
+
+All standard adapters resolve the route and run the application admission policy before
+middleware, handler dispatch, or body polling. Axum can preempt an asynchronous body read.
+Cloudflare and Spin race pending reads against platform timers and enforce absolute checks
+around ready results; both require deployed probes before host-side teardown latency can be
+bounded. Fastly cannot preempt a synchronous host body read. Those limitations keep the three
+deadline cells at `BestEffort`.
+
+`AdmissionDecision::Abort` is a non-response outcome: it polls no body, invokes no middleware or
+handler, starts no response-egress lifecycle, and emits no HTTP response. Axum owns the HTTP/1
+connection and closes or resets it at that boundary, so its abort capability is `Native`.
+Cloudflare, Fastly, and Spin convert the outcome to a fixed provider error before response
+delivery; their hosts decide the transport effect, so those cells remain `BestEffort` pending
+deployed proof of a reset or close.
+
+The detached-egress decision factory can select the same non-response outcome for normalized
+request-head validation or admission-policy failures when an application cannot reserve a bounded
+response resource. Axum routes that decision through its proven connection-owned abort path.
+Cloudflare, Fastly, and Spin route it through their fixed pre-response provider error boundaries;
+this does not promote their `BestEffort` capability cells.
+
+All current adapters expose `IngressHeadAccounting::HostManaged` and
+`IngressFraming::HostManaged`. They perform defensive checks on the normalized request
+information they receive, but those checks do not prove parser-boundary accounting or
+ambiguous HTTP/1 framing rejection. Neither raw-ingress capability is currently available on
+any adapter.
+
+Axum additionally enforces a finite adapter-owned HTTP/1 connection pool, combined raw-head
+byte and field-count limits, and absolute idle-plus-header timeouts before admission. Its
+[bounded HTTP/1 ingress configuration](/guide/adapters/axum#bounded-http1-ingress) publishes the
+effective limits, accept-loop overshoot, parser storage assumptions, and response-header cache
+safety policy. These controls do not supply independent raw-target/field-section accounting or
+the strict framing policy, so they do not promote either raw-ingress capability above.
+
+Separately, Axum preserves transport-certified empty bodies (`is_end_stream()`) as buffered empty
+after admission for any method, without reading them. The body remains Initial, not Cached, and
+framing remains `HostManaged`. Local HTTP/1 GET/HEAD forwards with absent framing or
+`Content-Length: 0` succeed even after the inbound read deadline when passed through
+`into_request`; core's first `body_bytes` deadline check is unchanged and can still return 408.
+Unknown streams, including chunked-empty and nonempty GET controls that still return 400 without
+origin contact, retain their existing behavior. This narrow
+conversion checkpoint does not complete general GET/HEAD settlement, add a capability row or
+promote any matrix cell.
+
+Fastly preserves actual SDK body absence (`try_take_body() == None`) as buffered empty after
+admission, without constructing an SDK body. Every present SDK body stays lazy: zero host length
+does not certify EOF or account for SDK-prefetched bytes and pending writes. Normal Fastly
+`from_client()` requests carry a body handle even when bodiless, so general GET/HEAD forwarding
+remains unfinished. This changes no matrix cell or framing claim. See
+[Fastly ingress conversion](./adapters/fastly.md#ingress-body-conversion) for the SDK and deadline
+boundaries.
+
+Inbound readers and body extractors return 413 for byte-cap overflow, 400 for malformed
+payloads, and 408 for an expired admitted read deadline. Demo and scaffold fallback policies
+select 413 for overflow and 408 for timeout; applications may select their own bounded responses.
+
+Admission is body-blind. An application may opt into `ReadBodyBeforeFallback` for pre-resolved
+404/405 requests when it needs body-limit precedence: clean EOF at or below the selected cap
+retains the canonical 404/405, the first byte over returns the application-selected buffered
+`on_exceeded` response first, and expiration of the one absolute read deadline returns the
+application-selected buffered `on_timeout` response first. The application-supplied ingress
+grant remains live throughout the drain and is released before response conversion, when the
+core drain future is dropped, or when the finite read deadline terminates the drain. This path
+discards the body and invokes no route middleware, handler, or request context. `Refuse` remains
+the zero-read overload path, and ordinary admission retains the immediate, no-poll 404/405
+behavior. Axum dispatches the admission and fallback-drain future directly on its connection-local
+executor, so cancellation drops that future and its grant. Cloudflare, Fastly, and Spin retain the
+provider limitations described above.
+
+## Config Matrix
+
+| Capability                      | Axum        | Cloudflare  | Fastly      | Spin        |
+| ------------------------------- | ----------- | ----------- | ----------- | ----------- |
+| `config-read-allocation-bounds` | Unsupported | Unsupported | Unsupported | Unsupported |
+| `config-read-deadlines`         | BestEffort  | BestEffort  | BestEffort  | BestEffort  |
+
+Every adapter enforces per-value and cumulative guest-visible config byte caps before EdgeZero
+retains or processes a returned value. That does not bound provider-side materialization,
+parser allocation, SDK copies, or other work performed before the value reaches guest code, so
+`config-read-allocation-bounds` remains `Unsupported` everywhere.
+
+Axum's local config-store path now has [bounded startup snapshots](/guide/adapters/axum#snapshot-allocation-limits):
+actual file reads, flat-string parsing, per-key/value and entry caps, aggregate snapshot
+residency and startup staging are enforced before listener binding. Request reads clone
+shared `ConfigValue` handles without copying payloads. This narrower guarantee does not
+certify environment-backed secrets, fixed registry metadata, allocator overhead or all
+concurrent extraction allocations, so the broad capability is not promoted.
+
+Cloudflare bounded config reads request KV byte streams and use reusable 16 KiB Rust/JS
+BYOB buffers. With `L = min(max_backend_bytes, max_value_bytes)`, the requested payload
+storage is bounded conservatively by `2L + 32 KiB`, including accumulator relocation or
+the final shared-string copy. Invalid UTF-8 is rejected, not lossily expanded. There is no
+text/array-buffer fallback. Overflow, timeout and caller cancellation cancel an acquired
+reader; cancellation while waiting for KV acquisition cannot cancel the provider promise.
+An acquisition owner cancels any stream that arrives after abandonment. Cancel-promise
+rejections are consumed without publishing provider diagnostics. Ready reads check the
+application clock before and after each pull and yield to the task queue every 16 chunks.
+Bounded KV reads require `FinalizationRegistry` and fail before provider dispatch without it.
+Generated/demo Workers explicitly enable `enable_weak_ref`; GC timing remains nondeterministic,
+not part of the payload charge. See [Workers compatibility flags](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#enable-finalizationregistry-and-weakref).
+Opaque KV buffering, JS wrapper/GC retention and host teardown remain unqualified.
+
+Fastly bounded config reads use the pinned host ABI with one initialized caller-sized
+buffer, never retrying a `BUFLEN` result with the provider's requested length. Physical
+reads have an adapter ceiling of 32,000 bytes. Root reads allow at most
+`R = min(max_backend_bytes, max(max_value_bytes, 8000), 32000)`; pointer JSON is limited to
+8,000 bytes and chunk reads to 7,000 bytes and both remaining allowances. Validated
+declared totals must fit before any chunk fetch or reassembly allocation. The bounded
+resolver verifies chunk/transport hashes and layout without constructing an envelope
+`Value`; the extractor performs inner-envelope verification after its structural scan.
+A conservative requested guest-payload charge is `2V + R + 16P + 7000` bytes, with
+`V = max_value_bytes`, `P = 8000`, plus fixed objects and allocator overhead. This includes
+pointer/schema/index scratch, one chunk, reassembly and the shared-string copy; provider
+storage and synchronous-call interruption are excluded. Raw `get` and CLI integrity
+operations are not allocation-certified.
+
+Spin's list-valued host get still materializes a complete value. Stock Spin 4.1.0 has no
+configurable read-size cap in its KV interface; Akamai's published 1 MB default value quota
+does not establish an exact read-allocation or overridden-quota contract. Neither is used
+as a guessed allocation guarantee. A bounded host/backend interface or verified hosted
+enforcement is still required.
+
+The response-egress specification's evidence matrix
+(`docs/superpowers/specs/2026-09-08-response-egress-design.md`, section 8)
+distinguishes local ownership proofs from deployed lifecycle qualification. Opt-in fixtures and
+`scripts/qualify_response_egress.mjs` collect correlated terminal/source/resource evidence;
+they cannot certify peer delivery, same-instance recovery or provider allocation. No deployed
+artifact has been supplied for the current hosted adapters, so their guarantees are not promoted.
+
+Config reads use one absolute extraction deadline in the application's monotonic clock domain.
+Core passes that same clock through every root, Fastly chunk, and secret read. Adapters sample it
+before provider dispatch and after readiness, before propagating either success or provider
+failure, so equality expiry wins simultaneous readiness. Cloudflare and Spin also race asynchronous
+guest futures against native timers. A timer wake is checked against the injected clock and re-armed
+when it arrives early. This bounds EdgeZero's return but does not prove host-side cancellation. Axum
+and Fastly provider operations are synchronous and guest-nonpreemptible. No provider operation is
+proved cancellable within a finite wall-clock interval, so every adapter reports `BestEffort` for
+`config-read-deadlines`. Spin opens declared config labels inside that timed read, after ingress
+admission; Cloudflare and Fastly retain failed declared bindings as typed failing handles rather
+than treating them as absent. The
+[configuration design](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/specs/2026-06-16-blob-app-config.md#632-bounded-capability-scoped-extraction-reads)
+defines the normative accounting, cancellation, error, and promotion requirements.
+
+Declared **KV** stores use a separate policy on Fastly, Cloudflare and Spin: registry
+construction performs no provider opens, every declared ID remains present, and first use
+returns a typed `KvError::OpenFailed` on failure. Missing/invalid bindings map to 500;
+provider unavailability maps to 503. Settled open results are request-local; only warning
+membership for compiled IDs survives requests. Explicit required-store opening remains
+fail-fast, while KV-free routes can serve normally. Axum startup behavior is unchanged.
+See [declared KV failures](./kv.md#declared-store-failures). This does not strengthen
+config-read or provider-allocation capabilities.
+
+Application assembly is fallible. `Hooks::configure(&mut App) -> Result<(), EdgeError>` runs after
+the runtime adapter installs `PlatformMetadata` and before EdgeZero request conversion, body
+polling, or dispatch. The hard-cut, core-owned `App::build::<A>(platform)` constructor requires
+every caller to choose target metadata explicitly and propagates the configuration result. After
+successful configuration, core rejects changed platform facts, provenance, or unknown reasons
+rather than silently restoring them. Axum also completes assembly before binding its listener.
+
+## Response Egress Matrix
+
+| Capability                         | Axum       | Cloudflare | Fastly     | Spin       |
+| ---------------------------------- | ---------- | ---------- | ---------- | ---------- |
+| `buffered-response-content-length` | Native     | BestEffort | BestEffort | BestEffort |
+| `response-egress-abort`            | BestEffort | BestEffort | BestEffort | BestEffort |
+| `response-egress-backpressure`     | BestEffort | BestEffort | BestEffort | BestEffort |
+| `response-egress-completion`       | BestEffort | BestEffort | BestEffort | BestEffort |
+| `response-write-deadlines`         | BestEffort | BestEffort | BestEffort | BestEffort |
+
+`buffered-response-content-length` covers untransformed transmitted buffered payloads, including
+empty and framework-generated bodies. Core derives their exact length on Axum, Cloudflare and
+Spin; Fastly stages the complete native buffer before its SDK-equivalent Automatic handoff.
+HEAD/204/205/304 do not gain a core-derived length. Suppressed buffers are dropped and streams
+are never polled. Exact Fastly known-buffer HEAD/205 SDK parity remains unqualified: local SDK
+controls expose forbidden payload delivery and HTTP/2 protocol failures. The requester approved
+preserving strict suppression rather than restoring a HEAD body merely to reproduce SDK framing.
+Host transformations may recompute or omit the wire length. Serverless cells remain `BestEffort`
+pending frozen qualifying evidence: hosted Fastly HTTP/1.1 and HTTP/2 compression/parity, deployed
+Workers header delivery, and the pinned Spin runtime check. Local characterization alone is not
+hosted qualification.
+
+The remaining cells describe transport-observable client-response delivery, not response conversion.
+Every adapter now owns a response coordinator through its strongest available host boundary,
+uses the application's monotonic clock, applies one absolute write deadline, and emits one
+terminal report. The boundaries remain `BestEffort` because none proves end-client receipt:
+
+- Axum commits when Hyper accepts the response head, accounts payload frames as Hyper polls them,
+  closes the owned HTTP/1 connection on deadline, and reports clean source EOF as `HostHandoff`.
+- Cloudflare awaits JavaScript writer promises, races request abort/deadline signals, and keeps the
+  coordinator alive with `waitUntil`; deployed disconnect and completion timing remain unproved.
+- Fastly hands buffered heads and complete bodies to the host together, accounting transmitted
+  source bytes once at successful handoff; this is not proof of client receipt. Actual streams
+  account synchronous body-handle writes through `stream_to_client` close, but Fastly cannot
+  preempt a blocked source poll or hostcall and loses the body handle if `finish` itself fails.
+- Spin owns the WASI response/body/result writers through handoff and races pending operations
+  against its timer. An early successful host response-result observation is retired once without
+  ending pending body work; source EOF, writes and body-result publication must still succeed under
+  the same deadline; host teardown and network completion remain provider-observable only.
+
+Provider-owned buffering, SDK allocations, and bytes beyond each stated acceptance boundary are
+not included. These limitations block whole-response-lifetime certification.
+
+## Outbound Matrix
+
+| Capability                              | Axum                              | Cloudflare                        | Fastly                              | Spin                              |
+| --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------------------- | --------------------------------- |
+| `outbound-http`                         | Native                            | Native                            | BestEffort⁹                         | Native                            |
+| `outbound-authority-override`           | Native                            | BestEffort⁸                       | Native                              | Unsupported[^spin-authority]      |
+| `outbound-batch-cancellation`           | Native                            | BestEffort⁸                       | BestEffort⁴                         | BestEffort⁸                       |
+| `outbound-batch-completion-order`       | Native                            | Native                            | BestEffort⁴                         | Native                            |
+| `outbound-batch-slot-isolation`         | Native                            | Native                            | BestEffort⁴                         | Native                            |
+| `outbound-cache-bypass`                 | Native                            | Native                            | Native                              | Native                            |
+| `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting]   | Unsupported[^resource-accounting] |
+| `outbound-connect-timeout`              | BestEffort                        | BestEffort                        | Native[^connect-timeout]            | BestEffort                        |
+| `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                              | BestEffort[^spin-header-fidelity] |
+| `outbound-deadlines`                    | Native                            | BestEffort⁸                       | BestEffort¹                         | BestEffort⁸                       |
+| `outbound-failure-diagnostics`          | BestEffort                        | BestEffort                        | Native                              | Native                            |
+| `outbound-image-optimizer`              | Unsupported                       | Unsupported                       | BestEffort[^native-image-optimizer] | Unsupported                       |
+| `outbound-redirect-following`           | Native                            | Native                            | Native                              | Native                            |
+| `outbound-flexible-phase-budget`        | Native                            | Native                            | Native                              | BestEffort⁵                       |
+| `streamed-upload-deadlines`             | Native                            | BestEffort⁸                       | BestEffort²                         | BestEffort⁸                       |
+| `lazy-streamed-response-passthrough`    | Native³                           | Native                            | BestEffort⁶                         | BestEffort⁷                       |
+
+[^connect-timeout]:
+    This declares Fastly's independent provider-backed connect setting, not qualified hosted
+    timing. Viceroy does not enforce connect expiry; hosted precision and provider DNS/TLS
+    phase coverage remain unqualified. It does not establish blocking-call preemption or promote
+    `outbound-deadlines`. Other adapters accept the setting at BestEffort and retain their
+    aggregate deadline. Keep connect settings as configuration constants: on Fastly different
+    settings select different backend identities and connection pools. Fastly no longer reserves
+    a fixed connect share or shortens the response-head budget.
+
+[^native-image-optimizer]:
+    Fastly single sends with explicit native optimizer options use the SDK's synchronous
+    optimizer service. Region is required; only bodiless GET/HEAD with default caching are
+    supported. Viceroy has no optimizer and returns typed `ImageOptimizerUnavailable` (502).
+    The synchronous call cannot be interrupted and its full blocking horizon is unknown.
+    The original absolute deadline is checked before dispatch and after return; late results
+    are rejected, not granted additional budget. Existing response limits and lazy streamed
+    handling apply afterward. Begun requests and batch slots reject the option. Explicit redirect
+    following uses the same supported single-send mapping on each hop, without another fetch,
+    buffering or serialization. No hosted transformation, pooling or performance qualification is claimed.
+
+[^resource-accounting]:
+    Complete accounting includes provider parsing and field-section
+    materialization, informational responses, final headers, trailers, native receive chunks,
+    guest buffers and spare capacity, decoder state, allocator metadata, and runtime copies.
+    Current provider APIs do not expose or bound every term, so all adapters report
+    `Unsupported`. The narrower EdgeZero-owned limits below still apply.
+
+[^spin-authority]:
+    Spin's WASI HTTP authority also selects the connection target. An explicit HTTP authority
+    override is rejected before body polling or provider dispatch because the adapter cannot
+    preserve the required routing/TLS separation.
+
+¹ Fastly cannot preempt cold dynamic-backend registration or guest-to-origin writes. Before a
+cache-miss registration in `start_batch_until`, EdgeZero checks the original absolute deadline.
+Preparation that takes more than 25 ms while that deadline remains live no longer causes an
+internal dispatch-slack error. Expiry is rechecked after synchronous preparation and registration;
+a late return retains the original timeout cause without restarting the budget. A cold registration
+that passes the entry check can still block. Removing the fixed slack refusal does not make SDK
+host calls preemptible or provide one end-to-end wall-clock guarantee. Fastly's B31 aggregate policy
+anchors provider timers to the configured per-call timeout
+(clamped to seven days), or the original selected duration if no timeout is configured. It rounds
+up to milliseconds, then to the smallest of `2^0` through `2^29` milliseconds or the seven-day
+ceiling. Without an explicit connect timeout, connect, first-byte and between-bytes use that
+same value; an explicit connect setting changes only connect. There is no rigid phase split.
+Logical absolute deadlines and late-result rejection are unchanged. Provider timers can outlive a
+shorter caller deadline/cutoff substantially, so this is not prompt interruption.
+
+Versioned backend names depend on origin, authority, TLS and the selected timer configuration,
+not client identity or the later remaining budget. A guest-instance-wide verified registry shares
+successful registrations across clients and refuses unknown name collisions. There are at most
+31 deadline-only timer configurations per fixed origin/authority/TLS/connect-settings tuple,
+not a bound on arbitrary origins, registrations,
+memory or abandoned host work. Hosted pooling, resource lifetime and cancellation remain unqualified.
+
+² Fastly checks the absolute deadline between streamed upload chunks, but it cannot preempt a
+stalled source pull or host write.
+
+³ Axum preserves the portable non-`Send` stream on a connection-local executor and yields one
+payload frame at a time under Hyper demand. Unit and raw-socket tests prove first-frame delivery
+before source EOF. Socket/client completion remains separately BestEffort under the response-egress
+capabilities above.
+
+⁴ Fastly dispatches slots sequentially, then cooperatively services pending heads and demanded
+bodies within that operation. Each raw body read requires fresh matching timed readiness and
+reads at most 16 KiB; rotating slot service prevents a continuously-ready body from monopolizing
+the driver. An occupied result slot backpressures only its own exchange. Cached SDK Send heads
+retain their opaque cache state and use nonblocking polling with one shared positive 1 ms pulse.
+Cold backend registration can still delay dispatch; synchronous provider work and SDK cleanup
+remain non-preemptible. This is not callback-wide scheduling or a hosted isolation guarantee.
+Local error-preserving readiness requires the explicitly selected
+[Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md);
+the stock runtime still loses source errors.
+Hosted runtime behavior and resource ownership remain unqualified, so support stays BestEffort.
+
+⁵ Spin's host may reject phase
+timer settings and retain opaque defaults. Every connect-setting refusal falls back without
+an error under the unchanged aggregate deadline race. For first-byte/between-bytes settings,
+`NotSupported` is advisory; `Immutable` and `Other` remain typed setup errors. Spin cannot
+promise one fully elastic pool or bounded host teardown. Fastly's B31 timers no longer impose
+a fixed phase split; its separate deadline/host-blocking limitations remain unchanged.
+
+⁶ Fastly uses an undecorated, send-owning entrypoint and the low-level `stream_to_client` response
+lifetime. Scripted pump tests and the raw ABI Viceroy test prove the pieces, but the production
+`run_app` composition has not yet been exercised end to end under Viceroy. The lazy-passthrough
+cell therefore remains `BestEffort`; synchronous preemption and finish limitations separately
+keep the response-egress cells BestEffort.
+
+⁷ Spin writes one portable chunk at a time through the WASI body writer. Unit tests and target
+compilation prove the coordinator, but a live Spin component test has not yet established the
+generated production composition. Host teardown and network completion also lack deployed proof.
+
+⁸ Spin cancellation is cooperative until host teardown is observable within a documented
+bound. Cloudflare wires one owned `AbortController` through fetch and streamed body consumption,
+but no deployed host-observed cancellation artifact currently proves a finite cancellation bound;
+its outbound and streamed-upload deadline cells therefore remain `BestEffort`. Cloudflare also
+exposes normalized header strings rather than original raw octets and field boundaries, although
+it preserves the visible header semantics used by the client.
+
+⁹ Fastly outbound HTTP uses dynamic backends, which must be enabled on the deployed service.
+The CLI cannot currently prove that entitlement. If disabled, dispatch returns a typed 502
+with the documented enablement diagnostic.
+
+## Redirect Policy
+
+`outbound-redirect-following` reports shared redirect policy, not native deadlines, cancellation
+or complete resource bounds. The `Native` cells mean `HttpClient::follow` applies the same explicit
+limit, method/replay rules, target callback and head-first body disposition on all four adapters,
+using the same client dispatch and response policy as a plain send. Plain sends, begun requests
+and batches still return 3xx unfollowed. See [Following Redirects](./proxying.md#following-redirects)
+for credential, security, option inheritance and chain-deadline rules.
+
+Spin requires plain-HTTP origins and targets outside a narrowed host list to be declared. A target
+can pass the application policy and still fail at a provider boundary. Fastly dynamic-backend
+entitlement, B31 registration and non-preemptible host-call limits remain unchanged.
+
+Local redirect tests are not hosted qualification. Native Image Optimizer qualification remains
+open: its synchronous blocking horizon is unknown, and following retains its existing native call
+path without extra fetches, buffering or serialization. No deadline, cancellation, egress or
+resource-accounting capability is promoted by this row; the separate matrix cells still apply.
+
+## Provider Failure Diagnostics
+
+`outbound-failure-diagnostics` describes retention of available SDK failure evidence, not
+stronger transport guarantees. Read it with `EdgeError::provider_failure_detail()`; the closed
+catalogs are `AxumFailureKind`, `CloudflareFailureCause`, `FastlyFailureCause`, and
+`SpinFailureCause` in `edgezero_core::error_detail`.
+
+Fastly and Spin report `Native`: their existing SDK failure boundaries project typed causes and
+available numeric payloads without provider text. Fastly retains backend/send causes, DNS codes,
+TLS alert IDs, HTTP/2 frame/error codes, platform statuses and I/O kinds where supplied. Spin
+retains WASI error codes, DNS info codes, TLS alert IDs and size limits, plus preparation errors.
+Spin's text-only DNS rcode accepts only `NOERROR`, `FORMERR`, `SERVFAIL`, `NXDOMAIN`, `NOTIMP`,
+and `REFUSED`; other values become `Unknown`. A provider-hidden cause is not reconstructed:
+pinned Viceroy can report an internal cause where hosted Fastly may expose connection refusal.
+
+Axum and Cloudflare report `BestEffort` because their providers expose incomplete cause detail.
+Axum retains reqwest kind/connect/timeout predicates and an I/O kind when discoverable through
+its source chain. Cloudflare retains only allowlisted `AbortError`/`TypeError` exception names;
+SDK-erased or unrecognized causes remain `Unknown`. Neither promises complete DNS/TLS attribution.
+
+`Unknown` describes an observed opaque/unrecognized cause; absent optional codes remain absent.
+Timer-only expiry, late success, clean EOF and local validation do not invent provider evidence.
+The phase identifies the observed API boundary, not whether request bytes were sent. Detail is
+fixed-size and text-free: it carries no URLs, header values, body bytes or provider messages, and
+does not change framework wire responses or existing error classification. Framework code does
+not log provider detail; any future framework logging must be debug or lower. Application logging
+and correlation remain application-owned. Fixed framing-rule error logs are separate.
+
+This row publishes the implemented SDK projection, not full EZ-16 acceptance, invocation-bound
+scope ownership, explicit redirect following, hosted cause provenance, cancellation or client delivery.
+Local SDK/Node/WASI fixtures are not hosted qualification; the failed Fastly readiness gate
+remains open. Existing deadline, delivery and resource-accounting capability levels are unchanged.
+Applications that tolerate reduced detail can declare this capability optional; requiring it
+accepts Fastly/Spin and rejects the BestEffort Axum/Cloudflare cells.
+
+## Outbound Content-Type Provenance
+
+[^spin-header-fidelity]:
+    A local Spin 4.1 SDK-only WASI control observes `Connection` removed
+    before EdgeZero receives response fields, while a nominated extension field remains. EdgeZero
+    preserves the bytes/field boundaries that the host exposes, but cannot enforce or certify a
+    hidden nomination. Shared normalization still rejects malformed visible nomination lists and
+    strips visible nominated fields. This is not complete raw-header fidelity or hosted proof.
+
+`OutboundResponse::content_type_provenance()` reports original `Content-Type` evidence
+captured before EdgeZero drops non-UTF-8 values or hop-by-hop/connection-nominated fields.
+It is not MIME validation, an acceptance decision, or a debug-safety guarantee.
+
+| Provenance                   | Meaning                                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `SingleTextUnchanged`        | Exactly one original UTF-8 value, retained unchanged, with no later mutable header access.              |
+| `Ineligible(Missing)`        | No original value.                                                                                      |
+| `Ineligible(MultipleValues)` | Multiple original values, even identical values or a textual value plus one later dropped as non-UTF-8. |
+| `Ineligible(NonText)`        | Exactly one original value, not valid UTF-8.                                                            |
+| `Ineligible(Removed)`        | An original textual singleton was stripped, such as by `Connection: content-type`.                      |
+| `Ineligible(Modified)`       | Mutable header access invalidated an originally eligible response.                                      |
+| `Unknown`                    | The adapter cannot recover original bytes or field boundaries; this says nothing about MIME validity.   |
+
+Axum, Fastly, and Spin retain the original normalization metadata on buffered, streamed, and
+bodyless response paths. Cloudflare **always** reports `Unknown`, including for absent or
+apparently single values: Fetch string iteration has already lost original octets and multiplicity.
+Core does not trim, split commas, or MIME-validate. A known single
+`application/json, text/plain` value can be `SingleTextUnchanged`; the application must still
+reject it during MIME validation. A quoted comma does not imply multiple original values.
+
+```rust
+use edgezero_core::{ContentTypeProvenance, OutboundResponse};
+
+fn content_type_candidate(response: &OutboundResponse) -> Option<&str> {
+    if response.content_type_provenance() != ContentTypeProvenance::SingleTextUnchanged {
+        return None;
+    }
+    let value = response.headers().get("content-type")?;
+    let candidate = std::str::from_utf8(value.as_bytes()).ok()?;
+    // Application must MIME-validate and apply acceptance/redaction policy before use.
+    Some(candidate)
+}
+```
+
+`headers_mut()` conservatively marks headers dirty even without an edit or when only an
+unrelated field changes. The private original evidence stays immutable; the accessor returns
+`Ineligible(Modified)` for a previously eligible response. Originally ineligible or unknown
+evidence never upgrades, even if the application inserts a valid singleton or restores old bytes.
+
+For adapter authors, `OutboundHeaderInput::normalize(limiter, method, status, marker)` consumes
+the original headers and a `ResponseHeaderLimiter`, returning the normalized header map,
+`ResponseHeadNormalization { body_disposition, content_type_provenance }`, and immutable
+Location evidence. Pass a limiter that has not already charged this field section. This is the
+same operation used by all four adapters and `OutboundHead::new`: it charges original fields
+before filtering, captures original evidence, normalizes, then charges the optional synthetic
+marker against the same cumulative budget. The separate public `normalize_response_headers`
+and `insert_proxy_header` helpers are removed, not retained as compatibility aliases.
+
+Use the returned `.body_disposition` without a second normalization pass; a 205 must retain
+whether its original declared length requires immediate suppression. Pass the original
+`.content_type_provenance` (always `Unknown` for `ProviderFieldBoundariesUnknown`, including
+Cloudflare) explicitly to the six-argument
+`OutboundResponse::new(method, status, headers, body, clock, content_type_provenance)`;
+never infer it from the normalized header map. `into_parts()` returns the five-tuple
+`(method, status, headers, body, provenance)` without another normalization pass.
+
+`into_response()` performs final defensive normalization and carries effective
+`ContentTypeProvenance` in the resulting response's extensions without upgrading original
+ineligible/unknown evidence. That extension describes the **historical outbound boundary only**;
+it cannot certify later ordinary `http::Response` edits, which remain application-owned.
+Provenance adds only tiny enum metadata, no retained/copied raw headers or body, and no new
+capability or change to the matrix above.
+
+## Host Declarations
+
+`[capabilities.outbound].hosts` configures platform host plumbing; it is not an application
+authorization policy. Enforce user-controlled destination policy in application code.
+
+- Omitting `hosts` defaults to `https://*:*`. Cleartext is not granted implicitly.
+- `"*"` explicitly expands to both `http://*:*` and `https://*:*`.
+- A bare host or wildcard subdomain defaults to HTTPS and port 443.
+- An explicit scheme may be `http` or `https`; ports are `1..=65535` or `*`.
+- Paths, queries, fragments, user information, whitespace, non-ASCII names, and malformed
+  wildcards are rejected.
+
+Spin receives the canonicalized entries through `allowed_outbound_hosts`. Cloudflare does not
+need a build-time destination list. Fastly creates deterministic dynamic backends from the
+canonical target. Axum applies the same manifest validation even though the native client does
+not require provider host registration.
+
+## Limits And Accounting
+
+Each `OutboundRequest` owns independent limits:
+
+| Control                      | Scope                                                                                                       | Default |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ------- |
+| `max_request_body_bytes`     | Buffered or streamed request bytes                                                                          | 8 MiB   |
+| `max_encoded_response_bytes` | Upstream transport bytes before decoding                                                                    | Unset   |
+| `max_decoded_response_bytes` | Identity or EdgeZero-decoded gzip/deflate/Brotli output                                                     | Unset   |
+| `max_response_bytes`         | Final buffered response, including raw passthrough                                                          | 1 MiB   |
+| `max_response_header_bytes`  | Adapter-visible upstream header name/value bytes before normalization, plus `x-edgezero-proxy` when enabled | Unset   |
+| `max_response_header_count`  | Adapter-visible upstream header fields before normalization, plus `x-edgezero-proxy` when enabled           | Unset   |
+| `max_brotli_window_bits`     | Brotli stream header checked before decoder allocation                                                      | 24      |
+| `max_decoder_bytes`          | Pinned policy charge for Brotli/gzip/deflate decoder state                                                  | 32 MiB  |
+| `max_chunk_bytes`            | Maximum emitted item size after decoding or passthrough                                                     | Unset   |
+
+Request upload overflow is `EdgeError::PayloadTooLarge` with typed `OutboundUpload` origin;
+inbound reader overflow carries `Inbound` instead. Buffered uploads over their cap reject
+before provider dispatch on every adapter. Axum and Cloudflare prebuffer streamed uploads
+within the cap before contacting the origin. Fastly and Spin may already have sent the head
+and a prefix, but overflow aborts the upload rather than completing a truncated request.
+An ordinary upstream 413 remains a response and may retain `Retry-After`. EdgeZero-generated
+typed cap errors cannot carry that header after custom rendering or final egress preparation.
+This is not a claim of hosted qualification; see the follow-up plan's remaining runtime legs.
+
+The encoded counter applies to every response path. The decoded counter applies to identity
+and gzip/deflate/Brotli data decoded by EdgeZero, but not to unknown, stacked, parameterized, or other
+raw passthrough encodings, including recognized codings delivered as Original or in a 206 response.
+Identity keeps its decoded cap under both choices. The final buffered cap is independent of both. This separation lets
+an application permit a larger raw body while keeping decoded expansion small.
+
+`max_chunk_bytes` is an item-shape guarantee, not a source-allocation limit: splitting a
+`Bytes` value may retain its original allocation, and a provider may have already materialized
+the source chunk. Header controls cover every adapter-visible upstream field before EdgeZero
+normalization, including fields later stripped, and then charge EdgeZero's synthetic proxy marker
+only when enabled. `HttpClient::with_proxy_marker(false)` selects a relay default; request
+`OutboundProxyMarker::{Inherit, On, Off}` overrides it. The default remains on. Off neither adds
+nor removes upstream marker fields and consumes no synthetic byte/count budget. The effective
+inspector `client.effective_proxy_marker_enabled(&request)` is available before dispatch.
+They do not cover opaque parser allocations, informational blocks that the SDK hides, or
+provider-owned trailers. These exclusions are why
+`outbound-complete-resource-accounting` is `Unsupported` on every current adapter.
+
+For a buffered batch, bound both the number of requests and every per-slot cap. Core-retained payload
+is approximately the sum of buffered request bodies, configured final response caps, and one
+current chunk per actively draining slot. Adapter staging and host/runtime copies are outside
+that formula.
+
+## Encoding Boundaries
+
+An application-provided request body is sent with its declared `Content-Encoding`; EdgeZero
+does not silently recompress it. `ResponseDecoding::Decode` is the default and decodes only a single
+bare `gzip`, `deflate`, or `br` coding. `ResponseDecoding::Original` preserves encoded bytes without
+allocating a decoder. All 206 responses retain original coding under either choice. Surviving
+representation fields stay unchanged; ordinary normalization still removes nominated/non-text fields
+first. Neither choice changes request `Accept-Encoding`, and identity retains decoded limits.
+Multi-member gzip in Decode mode is drained through the final member and transport EOF.
+Unknown codings are typed as `Passthrough(Unsupported(token))`, compound codings as
+`Passthrough(Stacked)`, and malformed values as `Passthrough(Malformed)`; all remain encoded
+and retain `Content-Encoding`.
+
+Cloudflare has two separate manual-encoding controls. The outbound fetch requests raw encoded
+response bytes so EdgeZero can enforce transport and decode limits. When those bytes are later
+passed through to the downstream response, the converter also selects manual response-body
+encoding so Workers does not encode them again. The latter does not promise an exact streamed
+wire `Content-Length`, because Workers owns final framing.
+
+The pinned local workerd encoding cohort observes the same 37 gzip bytes and a matching
+`Content-Length: 37` through both buffered and streamed relay converters. This is a recorded
+local observation, not a hosted or universal framing guarantee. The existing wire phase retains
+the actual downstream headers, token-bound origin receipts and compressed bytes.
+
+Original-coding policy is wired through all four adapters. Local controlled-origin checks cover
+gzip/deflate/Brotli on Axum, pinned Viceroy 0.21.0, Spin 4.1 and workerd 2026-09-10, in buffered and
+streamed modes, including 206 and Decode controls. These are working-tree characterizations, not
+hosted qualification. The [Cloudflare record](../audits/evidence/2026-10-20-cloudflare-outbound.json)
+retains exact build tools, served artifacts and compatibility settings. The subsequent
+[relay record](../audits/evidence/2026-10-20-outbound-relay.json) goes beyond JSON reports: 24 actual
+downstream relay cases per local runtime preserve encoded bytes and surviving representation
+fields through the standard converters. Decode controls verify plain output. Host-selected framing
+is allowed; any observed Content-Length must match captured bytes. These finite local cases do not
+qualify hosted behavior, exact deadlines, cancellation or universal wire framing. No capability is promoted.
+
+## Batch Timing
+
+`HttpClient::start_batch_until` returns an adapter-owned `OutboundBatch`. Calling `next()` yields
+`OutboundBatchNext::Item` for each terminal slot at most once in observed completion order, paired
+with its original input index, followed by `Finished(Completed)` or `Finished(Cutoff)`. Callers can
+therefore retain completed results and cancel unresolved work at an application deadline.
+`HttpClient::send_all_until` is the fallible ordered collector over that same driver; on success it
+returns one `OutboundCollectedSlot` per input plus the typed termination reason. `Resolved`
+owns a newly collected outcome, `AlreadyDelivered` records an item already taken by `check` or
+`next`, and `Unresolved` records cutoff abandonment. `Completed` forbids `Unresolved`; `Cutoff`
+requires at least one. Explicit
+adapter failure, premature EOF, duplicate indices, and out-of-range indices return
+`OutboundBatchFailure`: its precise batch-level error remains separate from cutoff, and its
+index-aligned slots preserve sibling outcomes observed before the failure.
+Normal completion requires clean driver EOF after the last item, not merely the expected item
+count. Trailing driver failures and malformed events remain visible, including on empty batches.
+`elapsed` starts at the single method-entry monotonic snapshot and ends when that slot becomes
+terminal, including preflight validation, adapter setup, provider queueing, upload, headers,
+buffered body drain, and any delayed guest observation. It is not pure transport RTT.
+Preflight failures are timed from the same batch start, and a same-tick result may be zero.
+A successful outcome is contractually terminal and on time. `elapsed` is metadata, not a second
+lateness check; callers must not sample their clock after the whole batch returns to reinterpret an
+earlier `Ok`. Producer contexts expose the captured start and clock; consumer receipts do not
+expose an absolute terminal instant and cannot be reconstructed or mutated.
+On Axum, Cloudflare, and Spin, terminal instants are sampled synchronously as child futures are
+observed ready, so their samples follow poll-observation order in the shared monotonic clock
+domain. Once an observation reaches the cutoff, a later observation cannot carry an earlier
+on-time sample unless an injected clock violates its monotonic contract. Fastly retains its
+documented BestEffort completion-order limitation.
+
+Standard adapter wiring clones the application's monotonic clock into its outbound client, so
+ingress timing, dispatch budgets, slot elapsed values, error precedence, and deferred body
+streams remain in one clock domain. The low-level `OutboundResponse` constructor requires that
+clock explicitly, so third-party adapters cannot silently fall back to the process clock. A
+backwards injected clock cannot enlarge the method-entry budget; backwards elapsed sampling fails
+closed as an internal slot outcome with zero elapsed.
+
+Axum, Cloudflare, and Spin drive complete eligible exchanges concurrently. Fastly dispatches
+eligible requests before selecting pending handles, but guest dispatch is sequential and body
+drain remains observation-bound; a slot's elapsed value can therefore include sibling delay.
+The `outbound-batch-slot-isolation` and `outbound-batch-completion-order` rows expose those
+distinctions.
+
+Batch APIs accept buffered request bodies and buffered response mode only. Use `send` for a
+streamed upload or response, and consume a streamed response body inside the same concurrent task
+that issued it.
+
+## Missing Client
+
+Adapters inject `HttpClient` into request extensions. A handler obtains it with
+`RequestContext::http_client()`. The accessor returns `None` when custom/manual wiring omitted
+the client; handlers should return an explicit 501 or another application-selected fallback.
+The generated project demonstrates the 501 behavior.

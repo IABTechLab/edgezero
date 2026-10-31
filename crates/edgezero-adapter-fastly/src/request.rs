@@ -1,33 +1,51 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Display;
-use std::io::Read as _;
+#[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
+use std::io::Cursor;
+use std::io::Read;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::task::Poll;
 
+use bytes::Bytes;
 use edgezero_core::app::{App, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
-use edgezero_core::config_store::ConfigStoreHandle;
+use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::header::HOST;
-use edgezero_core::http::{Extensions, HeaderValue, Request, Uri, request_builder};
-use edgezero_core::ingress::{
-    CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, RequestIngress, TargetUnavailable,
+use edgezero_core::http::{
+    Extensions, HeaderValue, Method, Request, Response, Uri, request_builder,
 };
-use edgezero_core::key_value_store::KvHandle;
-use edgezero_core::proxy::ProxyHandle;
+use edgezero_core::ingress::{
+    CapturedTarget, HeaderFidelity, InboundOrigin, IngressBeginOutcome, IngressDispatchOutcome,
+    IngressFraming, IngressHeadAccounting, IngressHeadParts, OriginSource, PreparedIngress,
+    RequestIngress, TargetUnavailable,
+};
+use edgezero_core::key_value_store::{KvError, KvHandle, KvStoreOpenFailure};
+use edgezero_core::outbound::HttpClient;
+use edgezero_core::response_egress::ResponseEgressEnvelope;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
-use fastly::{Error as FastlyError, Request as FastlyRequest, Response as FastlyResponse};
+use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+use fastly::{Error as FastlyError, Request as FastlyRequest};
 use futures::executor;
+use futures_util::stream;
 use std::collections::BTreeMap;
 
 use crate::config_store::FastlyConfigStore;
-use crate::context::FastlyRequestContext;
+use crate::context::{FastlyOutboundObservation, FastlyRequestContext};
+use crate::delivery::{
+    DispatchOutcome, FastlyNoAttempt, FastlyNoAttemptReason, FastlyRequestDelivery,
+    FastlyRequestHeadFailure, FastlyResponseDelivery, finish_request,
+};
+use crate::init_fastly_abi;
 use crate::key_value_store::FastlyKvStore;
-use crate::proxy::FastlyProxyClient;
-use crate::response::{from_core_response, parse_uri};
+use crate::lifecycle::with_callback;
+use crate::outbound::drive_callback;
+use crate::outbound::{FastlyOutboundClient, native_time};
+use crate::response::{parse_uri, send_egress_response};
 use crate::secret_store::FastlySecretStore;
 
 const WARNED_STORE_CACHE_LIMIT: usize = 64;
@@ -98,7 +116,7 @@ enum ConfigSource {
 ///     .with_kv("sessions").require_kv()
 ///     .with_config("app_config")
 ///     .with_secrets()
-///     .dispatch(req)
+///     .send()
 /// ```
 pub struct FastlyService<'app> {
     app: &'app App,
@@ -112,31 +130,52 @@ struct KvSource {
     required: bool,
 }
 
+struct HeadConversionFailure {
+    cause: FastlyRequestHeadFailure,
+    error: EdgeError,
+}
+
 enum SecretSource {
     Off,
     On { required: bool },
 }
 
+impl DispatchOutcome {
+    #[cfg(any(test, feature = "test-utils"))]
+    fn into_envelope(self) -> Result<ResponseEgressEnvelope, FastlyError> {
+        match self {
+            Self::Detached(envelope) | Self::Routed(envelope) => Ok(envelope),
+            Self::Aborted => Err(FastlyError::msg("ingress admission aborted")),
+        }
+    }
+}
+
 impl<'app> FastlyService<'app> {
-    /// Resolve every wired store at request time and dispatch
-    /// against the wrapped `App`. Consumes the service so a builder
-    /// can't be reused with stale wiring.
-    ///
-    /// # Errors
-    /// Returns an error if a required store cannot be opened or
-    /// the underlying handler returns an error.
+    /// Test-only request-in/egress-envelope dispatch seam.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
     #[inline]
-    pub fn dispatch(self, req: FastlyRequest) -> Result<FastlyResponse, FastlyError> {
-        let ingress = capture_request_ingress(&req);
+    pub fn capture_egress_for_test(
+        self,
+        req: FastlyRequest,
+    ) -> Result<ResponseEgressEnvelope, FastlyError> {
+        self.dispatch_with(req, |_req, _extensions| {})
+            .map_err(|reason| FastlyError::msg(reason.message()))
+            .and_then(DispatchOutcome::into_envelope)
+    }
+
+    fn dispatch_with<Prepare>(
+        self,
+        req: FastlyRequest,
+        prepare: Prepare,
+    ) -> Result<DispatchOutcome, FastlyNoAttempt>
+    where
+        Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    {
+        let request_start = self.app.monotonic_now();
         let config_store = match self.config {
             ConfigSource::Handle(handle) => Some(handle),
-            ConfigSource::Name(name) => match FastlyConfigStore::try_open(&name) {
-                Ok(store) => Some(ConfigStoreHandle::new(Arc::new(store))),
-                Err(err) => {
-                    warn_missing_store_once(&name, &err.to_string());
-                    None
-                }
-            },
+            ConfigSource::Name(name) => Some(open_config_handle(&name)),
             ConfigSource::None => None,
         };
         let kv = match self.kv {
@@ -156,8 +195,8 @@ impl<'app> FastlyService<'app> {
                 secrets,
                 ..Default::default()
             },
-            ingress,
-            |_req, _extensions| {},
+            request_start,
+            prepare,
         )
     }
 
@@ -198,6 +237,83 @@ impl<'app> FastlyService<'app> {
         self
     }
 
+    fn run_request_with_delivery<State, Prepare, Finalize, Deliver>(
+        self,
+        req: FastlyRequest,
+        prepare: Prepare,
+        finalize: Finalize,
+        deliver: Deliver,
+    ) -> FastlyRequestDelivery<State>
+    where
+        Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+        Finalize: FnOnce(&mut Response) -> State,
+        Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+    {
+        with_callback(|| {
+            init_fastly_abi();
+            let outcome = self.dispatch_with(req, prepare);
+            finish_request(outcome, finalize, deliver)
+        })
+    }
+
+    /// Exercises the closed request/response lifecycle with an injected delivery boundary.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    #[inline]
+    pub fn run_request_with_hooks_for_test<State, Prepare, Finalize, Deliver>(
+        self,
+        req: FastlyRequest,
+        prepare: Prepare,
+        finalize: Finalize,
+        deliver: Deliver,
+    ) -> FastlyRequestDelivery<State>
+    where
+        Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+        Finalize: FnOnce(&mut Response) -> State,
+        Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+    {
+        self.run_request_with_delivery(req, prepare, finalize, deliver)
+    }
+
+    /// Resolve every wired store, receive the client request, and transmit its response.
+    ///
+    /// # Errors
+    /// Returns an error if a required store cannot be opened or
+    /// the underlying handler returns an error.
+    #[inline]
+    pub fn send(self) -> Result<(), FastlyError> {
+        with_callback(|| {
+            init_fastly_abi();
+            let req = FastlyRequest::from_client();
+            self.send_request_with_hooks(req, |_req, _extensions| {}, |_response| ())
+                .into_standard_result()
+                .map(|_state| ())
+        })
+    }
+
+    /// Runs an already-received request through the closed `EdgeZero` lifecycle.
+    ///
+    /// `prepare` may mutate the borrowed raw request and add portable extensions before conversion and
+    /// ingress validation. Insert a validated `SynthesizedResponseHeaders` to replace the app's
+    /// generated-error/fallback headers for this request, including an explicitly empty set.
+    /// `finalize` may mutate only a routed response before egress policy/framing. The
+    /// adapter retains response ownership and returns its disposition, last-body commitment and
+    /// exact terminal report. Routed hook state survives failed delivery and fallback. Detached
+    /// responses skip `finalize`. Inspect replacement permission before sending a native response.
+    #[inline]
+    pub fn send_request_with_hooks<State, Prepare, Finalize>(
+        self,
+        req: FastlyRequest,
+        prepare: Prepare,
+        finalize: Finalize,
+    ) -> FastlyRequestDelivery<State>
+    where
+        Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+        Finalize: FnOnce(&mut Response) -> State,
+    {
+        self.run_request_with_delivery(req, prepare, finalize, send_egress_response)
+    }
+
     /// Open the Fastly Config Store named `name` and inject its
     /// handle into request extensions. If the store is unavailable
     /// at request time, the dispatcher logs the warning once and
@@ -231,9 +347,9 @@ impl<'app> FastlyService<'app> {
 
     /// Open a Fastly KV Store by `name` and inject its handle.
     /// Non-required by default: an absent store logs once and
-    /// dispatch continues. Pair with `require_kv()` when the
-    /// manifest declares `[stores.kv]` and a missing store should
-    /// fail loudly.
+    /// dispatch continues. Pair with `require_kv()` to explicitly fail
+    /// before dispatch. Canonical metadata-driven declarations instead
+    /// open lazily and return typed failures only when used.
     #[must_use]
     #[inline]
     pub fn with_kv<S>(mut self, name: S) -> Self
@@ -269,18 +385,24 @@ impl<'app> FastlyService<'app> {
     }
 }
 
+fn detached_error_outcome(
+    app: &App,
+    error: EdgeError,
+    request_method: Method,
+    request_start: MonotonicInstant,
+) -> DispatchOutcome {
+    match app.detached_ingress_error_egress(error, request_method, request_start) {
+        IngressDispatchOutcome::Response(envelope) => DispatchOutcome::Detached(*envelope),
+        IngressDispatchOutcome::Aborted | _ => DispatchOutcome::Aborted,
+    }
+}
+
 fn dispatch_core_request(
     app: &App,
     mut core_request: Request,
     stores: Stores,
-) -> Result<FastlyResponse, FastlyError> {
-    insert_store_registries(&mut core_request, stores);
-    let response = executor::block_on(app.router().oneshot(core_request))
-        .map_err(|err| map_edge_error(&err))?;
-    from_core_response(response).map_err(|err| map_edge_error(&err))
-}
-
-fn insert_store_registries(core_request: &mut Request, stores: Stores) {
+    prepared: PreparedIngress,
+) -> DispatchOutcome {
     // Hard-cutoff: legacy bare handles are no longer
     // inserted into request extensions. `with_config_handle`
     // still accepts a `ConfigStoreHandle`, but the dispatcher
@@ -299,40 +421,128 @@ fn insert_store_registries(core_request: &mut Request, stores: Stores) {
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
+    let clock = prepared.monotonic_clock();
+    let entered = prepared.request_start();
+    let method = prepared.request_method().clone();
+    match executor::block_on(drive_callback(
+        Box::pin(app.dispatch_admitted(prepared, core_request)),
+        clock,
+        entered,
+    )) {
+        Ok(response) => DispatchOutcome::Routed(response),
+        Err(error) => detached_error_outcome(app, error, method, entered),
+    }
 }
 
-/// Run an app-provided closure against a scratch `Extensions` populated from the
-/// RAW `fastly::Request` (JA4 / H2 / etc.), BEFORE `into_core_request` consumes
-/// the request. Returns the scratch bag to be `extend`ed into the core request.
-fn apply_request_extend<F>(req: &FastlyRequest, extend: F) -> Extensions
+/// Run an app-provided closure against the borrowed raw request and a scratch extension bag before
+/// conversion consumes the request.
+fn apply_request_prepare<Prepare>(req: &mut FastlyRequest, prepare: Prepare) -> Extensions
 where
-    F: FnOnce(&FastlyRequest, &mut Extensions),
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
     let mut scratch = Extensions::default();
-    extend(req, &mut scratch);
+    if let Some(observation) = FastlyOutboundObservation::current() {
+        scratch.insert(observation);
+    }
+    prepare(req, &mut scratch);
+    // Preparation may supply a client, but cannot substitute another callback's accounting.
+    scratch.remove::<FastlyOutboundObservation>();
+    if let Some(observation) = FastlyOutboundObservation::current() {
+        scratch.insert(observation);
+    }
     scratch
 }
 
-fn dispatch_with_handles<F>(
+fn dispatch_with_handles<Prepare>(
     app: &App,
-    req: FastlyRequest,
+    mut req: FastlyRequest,
     stores: Stores,
-    ingress: RequestIngress,
-    extend: F,
-) -> Result<FastlyResponse, FastlyError>
+    request_start: MonotonicInstant,
+    prepare: Prepare,
+) -> Result<DispatchOutcome, FastlyNoAttempt>
 where
-    F: FnOnce(&FastlyRequest, &mut Extensions),
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
-    // Read raw-request signals into a scratch bag BEFORE conversion consumes `req`.
-    let scratch = apply_request_extend(&req, extend);
-    let mut core_request = convert_request(req).map_err(|err| map_edge_error(&err))?;
-    core_request.extensions_mut().extend(scratch);
-    core_request.extensions_mut().insert(ingress);
-    dispatch_core_request(app, core_request, stores)
+    let ingress = capture_request_ingress(&req);
+    let mut scratch = apply_request_prepare(&mut req, prepare);
+    scratch.remove::<RequestIngress>();
+    let synthesized_headers = scratch.remove::<edgezero_core::SynthesizedResponseHeaders>();
+    let mut head_request =
+        into_core_request_head(&req, app.monotonic_clock(), ingress).map_err(|failure| {
+            FastlyNoAttempt::new(
+                FastlyNoAttemptReason::RequestHeadConversion(failure.cause),
+                map_edge_error(&failure.error),
+            )
+        })?;
+    head_request.extensions_mut().extend(scratch);
+    let outcome = dispatch_ingress_reader(app, head_request, stores, request_start, move || {
+        Ok(req.try_take_body())
+    });
+    Ok(match (outcome, synthesized_headers) {
+        (DispatchOutcome::Detached(envelope), Some(headers)) => {
+            DispatchOutcome::Detached(envelope.with_synthesized_response_headers(headers))
+        }
+        (DispatchOutcome::Routed(envelope), Some(headers)) => {
+            DispatchOutcome::Routed(envelope.with_synthesized_response_headers(headers))
+        }
+        (unchanged, _) => unchanged,
+    })
 }
 
-/// Dispatch with per-id store registries built from baked metadata — the same
-/// store wiring [`run_app`](crate::run_app) uses.
+fn dispatch_ingress_reader<Source, MakeSource>(
+    app: &App,
+    mut head_request: Request,
+    stores: Stores,
+    request_start: MonotonicInstant,
+    make_source: MakeSource,
+) -> DispatchOutcome
+where
+    Source: Read + 'static,
+    MakeSource: FnOnce() -> Result<Option<Source>, EdgeError>,
+{
+    let request_method = head_request.method().clone();
+    let head_parts = IngressHeadParts::from_request(
+        &head_request,
+        IngressHeadAccounting::HostManaged,
+        IngressFraming::HostManaged,
+    );
+    if let Err(error) = head_parts.validate_normalized(app.ingress_head_limits()) {
+        return detached_error_outcome(app, error, request_method, request_start);
+    }
+    let prepared = match app.begin_ingress(head_parts, request_start) {
+        Ok(outcome) => match outcome {
+            IngressBeginOutcome::Admitted(prepared) => prepared,
+            IngressBeginOutcome::Refused(response) => {
+                return DispatchOutcome::Detached(response);
+            }
+            IngressBeginOutcome::Aborted => return DispatchOutcome::Aborted,
+            _ => {
+                return detached_error_outcome(
+                    app,
+                    EdgeError::internal(anyhow::anyhow!("unsupported ingress admission outcome")),
+                    request_method,
+                    request_start,
+                );
+            }
+        },
+        Err(error) => {
+            return detached_error_outcome(app, error, request_method, request_start);
+        }
+    };
+    let source = match make_source() {
+        Ok(source) => source,
+        Err(error) => {
+            return DispatchOutcome::Detached(app.admitted_error_egress(prepared, error));
+        }
+    };
+    *head_request.body_mut() = fastly_deadline_body(
+        source,
+        Some((prepared.read_deadline(), prepared.monotonic_clock())),
+    );
+    dispatch_core_request(app, head_request, stores, prepared)
+}
+
+/// Dispatch with per-id store registries built from baked metadata and closed lifecycle hooks.
 ///
 /// Fastly is `Multi` for all three kinds. Each declared ID is the stable
 /// resource-link alias opened by the runtime. Config always uses the logical ID
@@ -341,126 +551,97 @@ where
 ///
 /// ```rust,ignore
 /// let stores = MyHooks::stores();
-/// dispatch_with_registries(&app, req, stores, |_req, _extensions| {})
+/// send_request_with_registries_and_hooks(&app, stores, req, |_req, _extensions| {}, |_response| ())
 /// ```
 ///
 /// [`FastlyService`]'s bare-handle path binds `default_key: "default"` instead
 /// of the logical ID.
 ///
-/// KV failures escalate via `resolve_kv_handle`'s `kv_required=true` path;
-/// missing config / secret stores degrade silently with a one-time warning.
+/// Declared KV bindings open on first use, at most once per request, without blocking
+/// preparation or routes that ignore KV. Missing/invalid bindings fail at use with 500;
+/// transient open failures fail with 503. Explicit `FastlyService::require_kv()` still
+/// fails before dispatch. Failed declared config bindings remain typed failing handles, and secret
+/// bindings open their logical alias when extraction requests the value.
 ///
-/// # Errors
-/// Returns an error if a declared KV store cannot be opened, or if the
-/// underlying handler returns an error.
+/// Reports no-attempt, policy abort, detached or routed delivery. Declared KV opening errors are
+/// handled through the application's normal error response path when the store is used.
 #[inline]
-pub fn dispatch_with_registries<F>(
+pub fn send_with_registries_and_hooks<State, Prepare, Finalize>(
     app: &App,
-    req: FastlyRequest,
     stores: StoresMetadata,
-    extend: F,
-) -> Result<FastlyResponse, FastlyError>
+    prepare: Prepare,
+    finalize: Finalize,
+) -> FastlyRequestDelivery<State>
 where
-    F: FnOnce(&FastlyRequest, &mut Extensions),
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
 {
-    let ingress = capture_request_ingress(&req);
-    dispatch_with_registries_and_ingress(app, req, stores, ingress, extend)
+    with_callback(|| {
+        init_fastly_abi();
+        let req = FastlyRequest::from_client();
+        send_request_with_registries_and_hooks(app, stores, req, prepare, finalize)
+    })
 }
 
-/// Dispatch with logical store bindings and an already captured ingress snapshot.
+/// Deliver an already-received request through canonical admission and owned egress.
 ///
-/// The snapshot is inserted after the extension callback, preventing scratch
-/// metadata from replacing the supplied snapshot. Store semantics match
-/// [`dispatch_with_registries`].
+/// Use this inside a retained serving loop; it never receives another client request.
+/// Request registries, preparation, finalization, and body handles remain request-local.
 ///
-/// The caller must supply a snapshot captured from this same native request
-/// before mutation. Metadata construction and syntax validation do not establish
-/// its provenance or authenticate caller assertions.
-///
-/// # Errors
-/// Returns an error if a declared KV store cannot be opened or dispatch fails.
+/// Returns an owned disposition and delivery report without sending a second response.
+/// Routed finalization state is retained even when delivery fails or a fallback is delivered.
 #[inline]
-pub fn dispatch_with_registries_and_ingress<F>(
+pub fn send_request_with_registries_and_hooks<State, Prepare, Finalize>(
     app: &App,
-    req: FastlyRequest,
     stores: StoresMetadata,
-    ingress: RequestIngress,
-    extend: F,
-) -> Result<FastlyResponse, FastlyError>
+    req: FastlyRequest,
+    prepare: Prepare,
+    finalize: Finalize,
+) -> FastlyRequestDelivery<State>
 where
-    F: FnOnce(&FastlyRequest, &mut Extensions),
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
 {
-    let core_request = into_core_request_with_registries_and_ingress(req, stores, ingress, extend)?;
-    let response = executor::block_on(app.router().oneshot(core_request))
-        .map_err(|err| map_edge_error(&err))?;
-    from_core_response(response).map_err(|err| map_edge_error(&err))
+    with_callback(|| {
+        init_fastly_abi();
+        let request_start = app.monotonic_now();
+        let kv_registry = build_kv_registry(stores.kv);
+        let config_registry = build_config_registry(stores.config);
+        let secret_registry = build_secret_registry(stores.secrets);
+        let outcome = dispatch_with_handles(
+            app,
+            req,
+            Stores {
+                config_registry,
+                kv_registry,
+                secret_registry,
+                ..Default::default()
+            },
+            request_start,
+            prepare,
+        );
+        finish_request(outcome, finalize, send_egress_response)
+    })
 }
 
-/// Convert a Fastly request and insert the registries derived from baked store
-/// metadata, without dispatching or converting a response.
+/// Delivers an assembly failure for an already-received request without an application.
 ///
-/// The extension callback reads the native request before conversion. The
-/// registries are then built from the logical aliases linked to the deployed
-/// service version. Drive `app.router().oneshot(request)` with
-/// `futures::executor::block_on` when the caller needs response extensions or
-/// progressive streaming.
-///
-/// # Errors
-/// Returns an error if a declared KV store cannot be opened or the request
-/// cannot be converted, including an inbound body read failure.
+/// Drops the unread request and uses the default redacted renderer and finite write deadline.
+/// No preparation, finalization, store opening or app observer runs. The returned detached
+/// delivery owns the terminal report. Inspect commitment before an explicit native replacement;
+/// this helper never resends, and unknown or committed delivery never permits replacement.
 #[inline]
-pub fn into_core_request_with_registries<F>(
+pub fn send_assembly_error(
     req: FastlyRequest,
-    stores: StoresMetadata,
-    extend: F,
-) -> Result<Request, FastlyError>
-where
-    F: FnOnce(&FastlyRequest, &mut Extensions),
-{
-    let ingress = capture_request_ingress(&req);
-    into_core_request_with_registries_and_ingress(req, stores, ingress, extend)
-}
-
-/// Convert with store registries and an already captured ingress snapshot.
-///
-/// The snapshot is inserted after the extension callback, preventing scratch
-/// metadata from replacing the supplied snapshot. Store semantics match
-/// [`into_core_request_with_registries`].
-///
-/// The caller must supply a snapshot captured from this same native request
-/// before mutation. Metadata construction and syntax validation do not establish
-/// its provenance or authenticate caller assertions.
-///
-/// # Errors
-/// Returns an error if a declared KV store cannot be opened or the request
-/// cannot be converted, including an inbound body read failure.
-#[inline]
-pub(crate) fn into_core_request_with_registries_and_ingress<F>(
-    req: FastlyRequest,
-    stores: StoresMetadata,
-    ingress: RequestIngress,
-    extend: F,
-) -> Result<Request, FastlyError>
-where
-    F: FnOnce(&FastlyRequest, &mut Extensions),
-{
-    let kv_registry = build_kv_registry(stores.kv)?;
-    let config_registry = build_config_registry(stores.config);
-    let secret_registry = build_secret_registry(stores.secrets);
-    let scratch = apply_request_extend(&req, extend);
-    let mut core_request = convert_request(req).map_err(|err| map_edge_error(&err))?;
-    core_request.extensions_mut().extend(scratch);
-    core_request.extensions_mut().insert(ingress);
-    insert_store_registries(
-        &mut core_request,
-        Stores {
-            config_registry,
-            kv_registry,
-            secret_registry,
-            ..Default::default()
-        },
-    );
-    Ok(core_request)
+    error: EdgeError,
+    request_start: MonotonicInstant,
+    clock: MonotonicClock,
+) -> FastlyRequestDelivery<()> {
+    init_fastly_abi();
+    let method = req.get_method().clone();
+    drop(req);
+    let envelope = App::assembly_error_egress(error, method, request_start, clock);
+    FastlyRequestDelivery::Detached(send_egress_response(envelope))
 }
 
 /// Pure synthesis: collapse a `Stores` (which may carry both a
@@ -507,52 +688,42 @@ fn synthesise_store_registries(
     (config_registry, kv_registry, secret_registry)
 }
 
-fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Result<Option<KvRegistry>, FastlyError> {
-    let Some(meta) = kv_meta else {
-        return Ok(None);
-    };
+fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Option<KvRegistry> {
+    let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
-        // KV is required: if `[stores.kv]` is declared, an id failing to open
-        // is a runtime error rather than a silent degradation.
-        let Some(handle) = resolve_kv_handle(id, true)? else {
-            continue;
-        };
-        by_id.insert((*id).to_owned(), handle);
-    }
-    let default_id = meta.default.to_owned();
-    if !by_id.contains_key(&default_id) {
-        log::warn!(
-            "KV registry default id `{default_id}` could not be opened; dropping the KV registry"
+        by_id.insert(
+            (*id).to_owned(),
+            KvHandle::new(Arc::new(FastlyKvStore::declared(id))),
         );
     }
-    Ok(StoreRegistry::from_parts(by_id, default_id))
+    let default_id = meta.default.to_owned();
+    StoreRegistry::from_parts(by_id, default_id)
 }
 
 fn build_config_registry(config_meta: Option<StoreMetadata>) -> Option<ConfigRegistry> {
     let meta = config_meta?;
     let mut by_id: BTreeMap<String, ConfigStoreBinding> = BTreeMap::new();
     for id in meta.ids {
-        match FastlyConfigStore::try_open(id) {
-            Ok(store) => {
-                by_id.insert(
-                    (*id).to_owned(),
-                    ConfigStoreBinding {
-                        handle: ConfigStoreHandle::new(Arc::new(store)),
-                        default_key: (*id).to_owned(),
-                    },
-                );
-            }
-            Err(err) => warn_missing_store_once(id, &err.to_string()),
-        }
-    }
-    let default_id = meta.default.to_owned();
-    if !by_id.contains_key(&default_id) {
-        log::warn!(
-            "config registry default id `{default_id}` could not be opened; dropping the config registry"
+        by_id.insert(
+            (*id).to_owned(),
+            ConfigStoreBinding {
+                handle: open_config_handle(id),
+                default_key: (*id).to_owned(),
+            },
         );
     }
-    StoreRegistry::from_parts(by_id, default_id)
+    StoreRegistry::from_parts(by_id, meta.default.to_owned())
+}
+
+fn open_config_handle(store_name: &str) -> ConfigStoreHandle {
+    match FastlyConfigStore::try_open(store_name) {
+        Ok(store) => ConfigStoreHandle::new(Arc::new(store)),
+        Err(err) => {
+            warn_missing_store_once(store_name, &err.to_string());
+            ConfigStoreHandle::failed_open(ConfigStoreOpenFailure::InvalidConfiguration)
+        }
+    }
 }
 
 fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretRegistry> {
@@ -622,65 +793,240 @@ fn origin_from_runtime_uri<'header>(
     let runtime_origin =
         InboundOrigin::parse(scheme, uri.authority()?.as_str(), OriginSource::RuntimeUri).ok()?;
     let origin = InboundOrigin::parse(scheme, host, OriginSource::RuntimeUri).ok()?;
-    if !runtime_origin.same_authority(&origin) {
-        return None;
-    }
-    Some(runtime_origin)
+    runtime_origin
+        .same_authority(&origin)
+        .then_some(runtime_origin)
 }
 
-/// Convert a native request, capturing ingress before native mutation.
+/// Converts a request without eagerly reading its body.
 ///
 /// # Errors
-/// Returns an error if method, URI or body conversion fails.
+/// Returns a typed error for invalid request-head conversion.
 #[inline]
-pub fn into_core_request(req: FastlyRequest) -> Result<Request, EdgeError> {
+pub fn into_core_request(mut req: FastlyRequest) -> Result<Request, EdgeError> {
     let ingress = capture_request_ingress(&req);
-    into_core_request_with_ingress(req, ingress)
+    let request = into_core_request_head(&req, MonotonicClock::default(), ingress)
+        .map_err(|failure| failure.error)?;
+    Ok(attach_core_body(&mut req, request, None))
 }
 
-/// Convert a native request while retaining the supplied bounded snapshot.
-///
-/// The caller must establish the supplied snapshot's provenance and fidelity.
-/// Conversion retains its facts even if the native request has since changed.
-///
-/// # Errors
-/// Returns an error if method, URI or body conversion fails.
-#[inline]
-pub(crate) fn into_core_request_with_ingress(
-    req: FastlyRequest,
+fn into_core_request_head(
+    req: &FastlyRequest,
+    outbound_clock: MonotonicClock,
     ingress: RequestIngress,
-) -> Result<Request, EdgeError> {
-    let mut request = convert_request(req)?;
-    request.extensions_mut().insert(ingress);
-    Ok(request)
-}
-
-fn convert_request(mut req: FastlyRequest) -> Result<Request, EdgeError> {
+) -> Result<Request, HeadConversionFailure> {
     let method = req.get_method().clone();
-    let uri = parse_uri(req.get_url_str())?;
+    let uri = parse_uri(req.get_url_str()).map_err(|error| HeadConversionFailure {
+        cause: FastlyRequestHeadFailure::InvalidUri,
+        error,
+    })?;
 
     let mut builder = request_builder().method(method).uri(uri);
     for (name, value) in req.get_headers() {
         builder = builder.header(name.as_str(), value.as_bytes());
     }
 
-    let mut body = req.take_body();
-    let mut bytes = Vec::new();
-    body.read_to_end(&mut bytes).map_err(EdgeError::internal)?;
-
     let mut request = builder
-        .body(Body::from(bytes))
-        .map_err(EdgeError::internal)?;
+        .body(Body::empty())
+        .map_err(|error| HeadConversionFailure {
+            cause: FastlyRequestHeadFailure::RequestBuilder,
+            error: EdgeError::internal(error),
+        })?;
 
     let context = FastlyRequestContext {
         client_ip: req.get_client_ip_addr(),
     };
     FastlyRequestContext::insert(&mut request, context);
+    if let Some(observation) = FastlyOutboundObservation::current() {
+        request.extensions_mut().insert(observation);
+    }
     request
         .extensions_mut()
-        .insert(ProxyHandle::with_client(FastlyProxyClient));
+        .insert(outbound_client(outbound_clock));
+    request.extensions_mut().insert(ingress);
 
     Ok(request)
+}
+
+fn outbound_client(clock: MonotonicClock) -> HttpClient {
+    HttpClient::with_client(FastlyOutboundClient::with_time(native_time(clock)))
+}
+
+fn attach_core_body(
+    req: &mut FastlyRequest,
+    mut request: Request,
+    read_lifetime: Option<(Deadline, MonotonicClock)>,
+) -> Request {
+    *request.body_mut() = fastly_deadline_body(req.try_take_body(), read_lifetime);
+    request
+}
+
+fn fastly_deadline_body<Source>(
+    source: Option<Source>,
+    read_lifetime: Option<(Deadline, MonotonicClock)>,
+) -> Body
+where
+    Source: Read + 'static,
+{
+    // SDK host length omits unread/read-ahead and pending-write buffers; only absence is enough.
+    let Some(reader) = source else {
+        return Body::empty();
+    };
+    let mut native_body = Some(reader);
+    let mut terminal = false;
+    let stream = stream::poll_fn(move |_cx| {
+        if terminal {
+            return Poll::Ready(None);
+        }
+        if read_lifetime
+            .as_ref()
+            .is_some_and(|(deadline, clock)| deadline.is_expired_at(clock.now()))
+        {
+            terminal = true;
+            native_body.take();
+            return Poll::Ready(Some(Err(EdgeError::request_timeout(
+                "inbound body read deadline exceeded",
+            ))));
+        }
+
+        let Some(body) = native_body.as_mut() else {
+            terminal = true;
+            return Poll::Ready(None);
+        };
+        let mut chunk = vec![0_u8; 16 * 1024];
+        let result = body.read(&mut chunk);
+        if read_lifetime
+            .as_ref()
+            .is_some_and(|(deadline, clock)| deadline.is_expired_at(clock.now()))
+        {
+            terminal = true;
+            native_body.take();
+            return Poll::Ready(Some(Err(EdgeError::request_timeout(
+                "inbound body read deadline exceeded",
+            ))));
+        }
+        match result {
+            Ok(0) => {
+                terminal = true;
+                native_body.take();
+                Poll::Ready(None)
+            }
+            Ok(read) => {
+                chunk.truncate(read);
+                Poll::Ready(Some(Ok(Bytes::from(chunk))))
+            }
+            Err(error) => {
+                terminal = true;
+                native_body.take();
+                Poll::Ready(Some(Err(EdgeError::internal(error))))
+            }
+        }
+    });
+    Body::from_stream(stream)
+}
+
+/// Dispatches an observable reader through the production ingress body wrapper.
+#[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
+#[doc(hidden)]
+#[inline]
+pub fn dispatch_ingress_reader_for_test<Source>(
+    app: &App,
+    method: Method,
+    uri: Uri,
+    source: Source,
+) -> Result<ResponseEgressEnvelope, FastlyError>
+where
+    Source: Read + 'static,
+{
+    let request_start = app.monotonic_now();
+    let mut core_request = request_builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .map_err(|error| map_edge_error(&EdgeError::internal(error)))?;
+    core_request
+        .extensions_mut()
+        .insert(outbound_client(app.monotonic_clock()));
+    dispatch_ingress_reader(
+        app,
+        core_request,
+        Stores::default(),
+        request_start,
+        move || Ok(Some(source)),
+    )
+    .into_envelope()
+}
+
+/// Exercises admission ordering with observable reader construction and delivery closures.
+#[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
+#[doc(hidden)]
+#[inline]
+pub fn dispatch_ingress_with_for_test<Source, MakeSource, Deliver>(
+    app: &App,
+    method: Method,
+    uri: Uri,
+    make_source: MakeSource,
+    deliver: Deliver,
+) -> Result<(), FastlyError>
+where
+    Source: Read + 'static,
+    MakeSource: FnOnce() -> Result<Source, EdgeError>,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> Result<(), FastlyError>,
+{
+    let request_start = app.monotonic_now();
+    let mut core_request = request_builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .map_err(|error| map_edge_error(&EdgeError::internal(error)))?;
+    core_request
+        .extensions_mut()
+        .insert(outbound_client(app.monotonic_clock()));
+    let outcome = dispatch_ingress_reader(
+        app,
+        core_request,
+        Stores::default(),
+        request_start,
+        move || make_source().map(Some),
+    );
+    match outcome {
+        DispatchOutcome::Aborted => Err(FastlyError::msg("ingress admission aborted")),
+        DispatchOutcome::Detached(envelope) | DispatchOutcome::Routed(envelope) => {
+            deliver(envelope)
+        }
+    }
+}
+
+/// Exercises a reader-construction failure after admission through the production seam.
+#[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
+#[doc(hidden)]
+#[inline]
+pub fn dispatch_ingress_source_error_for_test(
+    app: &App,
+    method: Method,
+    uri: Uri,
+) -> Result<ResponseEgressEnvelope, FastlyError> {
+    let request_start = app.monotonic_now();
+    let mut core_request = request_builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .map_err(|error| map_edge_error(&EdgeError::internal(error)))?;
+    core_request
+        .extensions_mut()
+        .insert(outbound_client(app.monotonic_clock()));
+    dispatch_ingress_reader(
+        app,
+        core_request,
+        Stores::default(),
+        request_start,
+        || -> Result<Option<Cursor<Vec<u8>>>, EdgeError> {
+            Err(EdgeError::internal(anyhow::anyhow!(
+                "fastly source construction failed"
+            )))
+        },
+    )
+    .into_envelope()
 }
 
 fn map_edge_error(err: &EdgeError) -> FastlyError {
@@ -690,14 +1036,20 @@ fn map_edge_error(err: &EdgeError) -> FastlyError {
 fn resolve_kv_handle(
     kv_store_name: &str,
     kv_required: bool,
-) -> Result<Option<KvHandle>, FastlyError> {
+) -> Result<Option<KvHandle>, FastlyNoAttempt> {
     match FastlyKvStore::open(kv_store_name) {
         Ok(store) => Ok(Some(KvHandle::new(Arc::new(store)))),
         Err(err) => {
             if kv_required {
-                return Err(FastlyError::msg(format!(
-                    "KV store '{kv_store_name}' is explicitly configured but could not be opened: {err}"
-                )));
+                let reason = if let KvError::OpenFailed { reason } = &err {
+                    *reason
+                } else {
+                    KvStoreOpenFailure::Unavailable
+                };
+                return Err(FastlyNoAttempt::new(
+                    FastlyNoAttemptReason::RequiredStore(reason),
+                    FastlyError::new(err),
+                ));
             }
             warn_missing_kv_store_once(kv_store_name, &err);
             Ok(None)
@@ -758,17 +1110,48 @@ fn warn_missing_store_once(store_name: &str, detail: &str) {
 #[cfg(test)]
 mod synthesis_tests {
     use super::*;
-    use edgezero_core::config_store::{ConfigStore, ConfigStoreError, ConfigStoreHandle};
+    use edgezero_core::config_store::{
+        BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
+        finish_bounded_config_read,
+    };
+    use edgezero_core::context::RequestContext;
     use edgezero_core::key_value_store::{KvStore, NoopKvStore};
+    use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
+    use edgezero_core::router::RouterService;
     use edgezero_core::secret_store::{NoopSecretStore, SecretHandle};
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     struct StubConfig;
     #[async_trait::async_trait(?Send)]
     impl ConfigStore for StubConfig {
-        async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> Result<Option<edgezero_core::ConfigValue>, ConfigStoreError> {
             Ok(None)
+        }
+
+        async fn get_bounded(
+            &self,
+            key: &str,
+            clock: &MonotonicClock,
+            deadline: Deadline,
+            max_backend_bytes: u64,
+            max_value_bytes: u64,
+        ) -> Result<BoundedStoreRead<edgezero_core::ConfigValue>, ConfigStoreError> {
+            if deadline.is_expired_at(clock.now()) {
+                return Err(ConfigStoreError::DeadlineExceeded);
+            }
+            finish_bounded_config_read(
+                self.get(key).await,
+                clock,
+                deadline,
+                max_backend_bytes,
+                max_value_bytes,
+            )
         }
     }
 
@@ -786,14 +1169,97 @@ mod synthesis_tests {
     }
 
     #[test]
-    fn apply_request_extend_populates_scratch_from_raw_request() {
+    fn declared_kv_registry_construction_never_opens_a_provider() {
+        let registry = build_kv_registry(Some(StoreMetadata {
+            default: "unlinked_f8_fixture",
+            ids: &["unlinked_f8_fixture"],
+        }))
+        .expect("declared registry");
+        assert!(registry.named("unlinked_f8_fixture").is_some());
+        assert!(registry.default().is_some());
+        assert!(build_kv_registry(None).is_none());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn declared_kv_open_failure_retains_binding_and_recovers() {
+        use edgezero_core::http::StatusCode;
+
+        let metadata = StoreMetadata {
+            default: "unlinked_f8_fixture",
+            ids: &["unlinked_f8_fixture"],
+        };
+        let registry = build_kv_registry(Some(metadata)).expect("declared registry");
+        assert!(registry.named("unlinked_f8_fixture").is_some());
+        assert!(registry.named("undeclared").is_none());
+        let handle = registry.default().expect("declared default binding");
+        let first_error =
+            executor::block_on(handle.get_bytes("marker")).expect_err("unlinked store");
+        assert_eq!(
+            EdgeError::from(first_error).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        for error in [
+            executor::block_on(handle.exists("marker")).unwrap_err(),
+            executor::block_on(handle.put_bytes("marker", Bytes::from_static(b"value")))
+                .unwrap_err(),
+            executor::block_on(handle.put_bytes_with_ttl(
+                "marker",
+                Bytes::from_static(b"value"),
+                Duration::from_mins(1),
+            ))
+            .unwrap_err(),
+            executor::block_on(handle.delete("marker")).unwrap_err(),
+            executor::block_on(handle.list_keys_page("", None, 1)).unwrap_err(),
+        ] {
+            assert_eq!(
+                EdgeError::from(error).status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn explicitly_required_kv_failure_precedes_prepare_and_delivery() {
+        let app = App::new(RouterService::builder().build());
+        let prepared = AtomicUsize::new(0);
+        let delivered = AtomicUsize::new(0);
+        let result = FastlyService::new(&app)
+            .with_kv("unlinked_f8_fixture")
+            .require_kv()
+            .run_request_with_hooks_for_test(
+                FastlyRequest::get("https://example.com/"),
+                |_, _| {
+                    prepared.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| (),
+                |_| {
+                    delivered.fetch_add(1, Ordering::SeqCst);
+                    panic!("required store failure must not deliver")
+                },
+            );
+        let FastlyRequestDelivery::NoAttempt(reason) = result else {
+            panic!("explicit required store must fail before dispatch");
+        };
+        assert!(matches!(
+            reason.reason(),
+            FastlyNoAttemptReason::RequiredStore(_)
+        ));
+        assert!(!reason.message().contains("unlinked_f8_fixture"));
+        assert_eq!(prepared.load(Ordering::SeqCst), 0);
+        assert_eq!(delivered.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn apply_request_prepare_populates_scratch_from_raw_request() {
         use edgezero_core::http::Method;
 
         #[derive(Clone, Debug, PartialEq)]
         struct Ja4(String);
 
-        let raw = FastlyRequest::new(Method::GET, "http://example.test/");
-        let scratch = apply_request_extend(&raw, |req, extensions| {
+        let mut raw = FastlyRequest::new(Method::GET, "http://example.test/");
+        let scratch = apply_request_prepare(&mut raw, |req, extensions| {
             // A real closure would call req.get_tls_ja4(); deriving from the URL
             // keeps the assertion deterministic under Viceroy.
             let marker = req.get_url_str().to_owned();
@@ -804,6 +1270,201 @@ mod synthesis_tests {
             scratch.get::<Ja4>(),
             Some(&Ja4("http://example.test/".to_owned()))
         );
+    }
+
+    #[test]
+    fn registration_observation_is_canonical_before_prepare_and_in_handler() {
+        use crate::context::{FastlyOutboundObservation, observation};
+        use edgezero_core::http::StatusCode;
+
+        let foreign = with_callback(|| {
+            observation::current()
+                .unwrap()
+                .configuration("foreign".into());
+            FastlyOutboundObservation::current().unwrap()
+        });
+        let router = RouterService::builder()
+            .get("/observation", |ctx: RequestContext| async move {
+                let handle = ctx
+                    .extensions()
+                    .get::<FastlyOutboundObservation>()
+                    .expect("canonical extension");
+                assert_eq!(
+                    handle.snapshot(),
+                    FastlyOutboundObservation::current().unwrap().snapshot()
+                );
+                assert_eq!(handle.snapshot().registration_count(), 0);
+                assert_eq!(handle.snapshot().configuration_count(), 0);
+                observation::current()
+                    .unwrap()
+                    .configuration("handler".into());
+                assert_eq!(
+                    handle.snapshot().configuration_count(),
+                    1,
+                    "handler must share the live canonical record"
+                );
+                Ok::<_, EdgeError>("observed")
+            })
+            .build();
+        let app = App::new(router);
+        let outcome = with_callback(|| {
+            FastlyService::new(&app).dispatch_with(
+                FastlyRequest::get("http://example.test/observation"),
+                |_, extensions| {
+                    assert!(
+                        extensions.get::<FastlyOutboundObservation>().is_some(),
+                        "installed before preparation"
+                    );
+                    extensions.insert(foreign);
+                },
+            )
+        })
+        .expect("native dispatch");
+        let envelope = outcome.into_envelope().expect("response envelope");
+        let Ok((prepared, _, mut attempt, clock)) =
+            envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+        else {
+            panic!("begin egress");
+        };
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(clock.now()));
+        let response = prepared.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body().as_bytes(), Some(b"observed".as_slice()));
+    }
+
+    #[test]
+    fn router_state_client_precedes_prepare_and_adapter_default() {
+        use edgezero_core::http::StatusCode;
+        use edgezero_core::outbound::{OutboundRequest, OutboundTime};
+
+        for (state, prepare) in [(true, true), (false, true), (false, false)] {
+            let start = MonotonicInstant::now();
+            let state_calls = Arc::new(AtomicUsize::new(0));
+            let prepare_calls = Arc::new(AtomicUsize::new(0));
+            let supplied = |calls: &Arc<AtomicUsize>| {
+                let observed_calls = Arc::clone(calls);
+                let clock = MonotonicClock::new(move || {
+                    observed_calls.fetch_add(1, Ordering::SeqCst);
+                    start
+                });
+                HttpClient::with_client(FastlyOutboundClient::with_time(OutboundTime::new(
+                    clock,
+                    |_, _| panic!("invalid request must not register a timer"),
+                )))
+                .with_proxy_marker(false)
+            };
+            let state_client = supplied(&state_calls);
+            let prepare_client = supplied(&prepare_calls);
+            assert_eq!(state_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
+            let router =
+                RouterService::builder().get("/client", move |ctx: RequestContext| async move {
+                    let client = ctx.http_client().expect("selected HTTP client");
+                    assert_eq!(client.proxy_marker_enabled(), !state && !prepare);
+                    let error = client
+                        .send(
+                            OutboundRequest::get("https://example.com/")?
+                                .body(Body::from("invalid GET body")),
+                        )
+                        .await
+                        .expect_err("preflight rejection");
+                    assert!(matches!(error, EdgeError::BadRequest { .. }));
+                    assert_eq!(error.message(), "GET/HEAD request must not carry a body");
+                    Ok::<_, EdgeError>("selected")
+                });
+            let configured = if state {
+                router.with_state(state_client)
+            } else {
+                router
+            };
+            let app = App::new(configured.build());
+            let envelope = FastlyService::new(&app)
+                .dispatch_with(
+                    FastlyRequest::get("http://example.test/client"),
+                    move |_, extensions| {
+                        if prepare {
+                            extensions.insert(prepare_client);
+                        }
+                    },
+                )
+                .expect("native dispatch")
+                .into_envelope()
+                .expect("response envelope");
+            let Ok((prepared, _, mut attempt, clock)) =
+                envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+            else {
+                panic!("begin egress");
+            };
+            assert!(attempt.begin_writing());
+            assert!(attempt.complete(clock.now()));
+            let response = prepared.into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.body().as_bytes(), Some(b"selected".as_slice()));
+            assert_eq!(state_calls.load(Ordering::SeqCst) > 0, state);
+            assert_eq!(prepare_calls.load(Ordering::SeqCst) > 0, prepare && !state);
+        }
+    }
+
+    #[test]
+    fn standard_service_installs_the_exact_application_outbound_clock() {
+        use edgezero_core::http::Method;
+
+        async fn elapsed(ctx: RequestContext) -> Result<String, EdgeError> {
+            let client = ctx
+                .http_client()
+                .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("missing HTTP client")))?;
+            let request =
+                edgezero_core::OutboundRequest::get("https://example.com/")?.stream_response();
+            let results = client
+                .send_all_until(vec![request], Deadline::after(Duration::from_secs(1)))
+                .await
+                .map_err(|failure| failure.into_parts().0)?;
+            let elapsed = results
+                .slots()
+                .first()
+                .and_then(|slot| match slot {
+                    edgezero_core::OutboundCollectedSlot::Resolved(result) => Some(result),
+                    edgezero_core::OutboundCollectedSlot::AlreadyDelivered
+                    | edgezero_core::OutboundCollectedSlot::Unresolved => None,
+                })
+                .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("missing batch slot")))?
+                .elapsed;
+            Ok(elapsed.as_millis().to_string())
+        }
+
+        let start = MonotonicInstant::now();
+        let completed = start
+            .checked_add(Duration::from_millis(7))
+            .expect("completed instant");
+        let observations = Arc::new(AtomicUsize::new(0));
+        let clock_observations = Arc::clone(&observations);
+        let mut app = App::new(RouterService::builder().get("/clock", elapsed).build());
+        app.set_monotonic_clock(MonotonicClock::new(move || {
+            if clock_observations.fetch_add(1, Ordering::SeqCst) < 2 {
+                start
+            } else {
+                completed
+            }
+        }));
+        let request = FastlyRequest::new(Method::GET, "http://example.test/clock");
+
+        let envelope = FastlyService::new(&app)
+            .dispatch_with(request, |_request, _extensions| {})
+            .expect("dispatch")
+            .into_envelope()
+            .expect("response envelope");
+        let Ok((prepared, _, mut attempt, egress_clock)) =
+            envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+        else {
+            panic!("begin response egress");
+        };
+        assert!(attempt.begin_writing());
+        assert!(attempt.complete(egress_clock.now()));
+        let response = prepared.into_response();
+
+        assert_eq!(response.body().as_bytes(), Some(b"7".as_slice()));
+        assert!(observations.load(Ordering::SeqCst) >= 3);
     }
 
     #[test]
@@ -819,7 +1480,6 @@ mod synthesis_tests {
 
         async fn handler(ctx: RequestContext) -> Result<String, EdgeError> {
             let ja4 = ctx
-                .request()
                 .extensions()
                 .get::<Ja4>()
                 .map_or_else(|| "missing".to_owned(), |value| value.0.clone());
@@ -842,6 +1502,24 @@ mod synthesis_tests {
         let response = block_on(service.oneshot(core_request)).expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.body().as_bytes().expect("buffered"), b"t13d1516h2");
+    }
+
+    #[test]
+    fn unsupported_optimizer_precedes_expiry_without_transport() {
+        use edgezero_core::outbound::OutboundSendMode;
+        use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;
+
+        with_callback(|| {
+            executor::block_on(check_unsupported_image_optimizer_preflight(
+                FastlyOutboundClient::with_time,
+                "fastly",
+                &[OutboundSendMode::Begin, OutboundSendMode::Batch],
+            ))
+            .expect("unsupported-mode conformance");
+            let stats = FastlyOutboundObservation::current().unwrap().snapshot();
+            assert_eq!(stats.registration_count(), 0);
+            assert_eq!(stats.configuration_count(), 0);
+        });
     }
 
     #[test]
@@ -927,7 +1605,7 @@ mod synthesis_tests {
 
     // Regression for the `.with_secrets()` bug — the pre-fix
     // `resolve_secret_handle(false)` short-circuited to `None`, so the
-    // documented `.with_secrets().dispatch(...)` path silently ran
+    // documented `.with_secrets().send()` path silently ran
     // handlers without a `SecretRegistry`. After the fix, the handle
     // is always built when `SecretSource::On` is selected; `_required`
     // is reserved for whichever future per-secret-lookup availability
@@ -951,22 +1629,23 @@ mod synthesis_tests {
 #[cfg(test)]
 mod ingress_tests {
     use super::{
-        capture_request_ingress, dispatch_with_registries_and_ingress,
-        into_core_request_with_ingress, origin_from_runtime_uri,
+        Stores, capture_request_ingress, dispatch_with_handles, into_core_request_head,
+        origin_from_runtime_uri,
     };
     use crate::context::FastlyRequestContext;
+    use crate::delivery::DispatchOutcome;
     use async_trait::async_trait;
-    use edgezero_core::app::{App, StoresMetadata};
+    use edgezero_core::app::App;
     use edgezero_core::body::Body;
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::header::HOST;
-    use edgezero_core::http::{HeaderValue, Request, Response, Uri, response_builder};
+    use edgezero_core::http::{HeaderValue, Response, Uri, response_builder};
     use edgezero_core::ingress::{
         CapturedTarget, HeaderFidelity, OriginSource, Preservation, RequestIngress, TargetSource,
         TargetUnavailable,
     };
-    use edgezero_core::proxy::ProxyHandle;
     use edgezero_core::router::{PreDispatchHook, RouterService};
+    use edgezero_core::{HttpClient, MonotonicClock, PreDispatchRequest};
     use fastly::Request as FastlyRequest;
     use std::sync::Arc;
 
@@ -979,7 +1658,10 @@ mod ingress_tests {
 
     #[async_trait(?Send)]
     impl PreDispatchHook for VerifySnapshot {
-        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        async fn handle(
+            &self,
+            request: &mut PreDispatchRequest,
+        ) -> Result<Option<Response>, EdgeError> {
             assert_eq!(
                 request.extensions().get::<ScratchMarker>().is_some(),
                 self.scratch_expected
@@ -988,10 +1670,10 @@ mod ingress_tests {
                 .extensions()
                 .get::<RequestIngress>()
                 .expect("should expose chosen snapshot");
-            let CapturedTarget::Complete(target) = ingress.target() else {
-                panic!("should retain captured target")
-            };
-            assert_eq!(target.value(), "/reserved/%2e");
+            assert!(matches!(
+                ingress.target(),
+                CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
+            ));
             Ok(Some(
                 response_builder()
                     .status(204)
@@ -1107,15 +1789,16 @@ mod ingress_tests {
         native.append_header("cookie", b"a=\xff".as_slice());
         native.append_header("cookie", "b=2");
         let client_ip = native.get_client_ip_addr();
-        let core =
-            into_core_request_with_ingress(native, snapshot()).expect("should convert snapshot");
+        let core = into_core_request_head(&native, MonotonicClock::default(), snapshot())
+            .map_err(|failure| failure.error)
+            .expect("should convert snapshot");
         assert_eq!(
             FastlyRequestContext::get(&core)
                 .expect("should preserve context")
                 .client_ip,
             client_ip
         );
-        assert!(core.extensions().get::<ProxyHandle>().is_some());
+        assert!(core.extensions().get::<HttpClient>().is_some());
         assert_eq!(core.method().as_str(), "EXAMPLE-METHOD");
         let values: Vec<_> = core
             .headers()
@@ -1144,17 +1827,21 @@ mod ingress_tests {
                 }))
                 .build(),
         );
-        let response = dispatch_with_registries_and_ingress(
+        let outcome = dispatch_with_handles(
             &app,
             FastlyRequest::get("https://example.com/later"),
-            StoresMetadata::default(),
-            snapshot(),
+            Stores::default(),
+            app.monotonic_now(),
             |native, scratch| {
-                scratch.insert(capture_request_ingress(native));
+                native.set_url("https://spoof.example.com/changed");
+                scratch.insert(snapshot());
                 scratch.insert(ScratchMarker);
             },
         )
         .expect("should dispatch with chosen snapshot");
-        assert_eq!(response.get_status().as_u16(), 204);
+        let DispatchOutcome::Routed(mut envelope) = outcome else {
+            panic!("expected routed hook response")
+        };
+        assert_eq!(envelope.response_mut().status().as_u16(), 204);
     }
 }

@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+default-members = ["crates/fixture-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+edgezero-core = { path = "../../../edgezero-core", default-features = false }
+edgezero-adapter-fastly = { path = "../../../edgezero-adapter-fastly", features = ["fastly"] }
+edgezero-adapter-cloudflare = { path = "../../../edgezero-adapter-cloudflare", features = ["cloudflare"] }
+edgezero-adapter-spin = { path = "../../../edgezero-adapter-spin", features = ["spin"] }
+edgezero-adapter-axum = { path = "../../../edgezero-adapter-axum" }
+fixture-core = { path = "crates/fixture-core" }
+fixture-spin-support = { path = "crates/fixture-spin-support" }
+fastly = "=0.13.1"
+worker = { version = "=0.8.5", default-features = false, features = ["http"] }
+spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk.git", rev = "6c59ed5b4fcb377072763aee0b27a3abdd8edb72", default-features = false }
+futures = "0.3"
+serde_json = "1"
+log = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "deny"

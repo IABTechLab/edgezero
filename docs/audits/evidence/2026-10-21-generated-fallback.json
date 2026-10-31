@@ -1,0 +1,693 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-21",
+  "base_revision": "619c69bd2b2b24f35210c482b560cb46b1b96888",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "status": "pass-local-generated-demo-fallback-leg-only",
+  "requirement": "EZ-10.9 and EZ-10 acceptance criterion8; F2 local generated/demo Axum fallback leg",
+  "scope": "Existing edgezero new scaffold and bundled edgezero demo, through unchanged run_app/run_app_with_preflight Axum entrypoints over loopback HTTP/1.1; no replacement listener, router or application policy",
+  "commands": {
+    "generated": "CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=$PWD/target cargo test --offline --locked -p edgezero-cli --test generated_project_builds -- --ignored --nocapture",
+    "demo": "cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging -- --nocapture"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "installed_targets": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "wasm32-wasip1",
+      "wasm32-wasip2"
+    ]
+  },
+  "environment": {
+    "mode": "isolated temporary working directories, fresh loopback ports and local file stores; no hosted deployment, credentials or external origins",
+    "offline_generated": true,
+    "adapter_override_policy": "Clear inherited EDGEZERO__ overrides in server children only; explicitly select 127.0.0.1, reserved port and logging off",
+    "normal_dependency_changes": false,
+    "dev_dependency": "httparse =1.10.1, already in lockfile; add only the CLI dev-dependency edge"
+  },
+  "source_snapshot_scope": "Selected implementation, generator, fixture and CI inputs, not an authoritative complete candidate tree",
+  "source_sha256": {
+    "Cargo.toml": "527a6f29fd231afb35dea70ba3ec41b9c9e78ce52324cb20fe9ed6c75afb415b",
+    "Cargo.lock": "7f65719e408c31d4e6c32f2e168b00ace4f73de412ca6b5469b831bd151c04ac",
+    "crates/edgezero-cli/Cargo.toml": "ac6d584995247d98ea4250eb9f616c39c35b9806766479020b6428f6915eef16",
+    "crates/edgezero-cli/src/generator.rs": "9fd5b374b748e91319d673bdd76abf9b40679a7b7cb5a611ee3bfba5bc0d4e57",
+    "crates/edgezero-cli/src/scaffold.rs": "56521292effeab33f1d37cd1e379eac6ab494d357de226e9ac7c6a08bd4f56b8",
+    "crates/edgezero-cli/src/demo_server.rs": "40e751ba3a436bd1a8d558d1f2fa0a90c3d04685dc3ab3334c191fed14e99ea5",
+    "crates/edgezero-cli/src/templates/core/src/lib.rs.hbs": "19ae8ce1d6a47945d7b8676d826e54671007358903deb26bb353b2083030a93a",
+    "crates/edgezero-cli/src/templates/core/src/handlers.rs.hbs": "d457edd4d91435af010014b5fcc4f0b454aff1c2d528f17edc8cb8a4993dc362",
+    "crates/edgezero-cli/src/templates/root/edgezero.toml.hbs": "c074eff938039b2115a348ec127df45658343a91f9fe1647cd9365bdc66a5024",
+    "crates/edgezero-cli/tests/demo_logging.rs": "30599b60e7b6bdf323d489e0bae6b4a4f2d442af9539a981f6919d8a24b6d967",
+    "crates/edgezero-cli/tests/generated_project_builds.rs": "d41224e0eb1c95f3faffdfe01f93fd656cb53a24e2e94a253d545e9b05c307bf",
+    "crates/edgezero-cli/tests/support/fallback_tcp.rs": "464cecfc7d0108cfcd434450b99f13896eb4ee1a6fca287ba4fc19c56860c3e1",
+    "crates/edgezero-adapter-axum/src/templates/src/main.rs.hbs": "fc12412cb495e781a9368b9a0d8624e6509b9739ae348174fbe78bb75ec70726",
+    "crates/edgezero-adapter-axum/src/dev_server.rs": "8563f4b7fc83e6b163b3df3f561ba4c46b5189aed9a1956ecaec818a0ab5377e",
+    "crates/edgezero-adapter-axum/src/connection.rs": "ae594bdb9d745f953d394883a2fe87a6a231dd2aba5b18c15b8341e745eb9bbd",
+    "crates/edgezero-adapter-axum/src/request.rs": "0c61c652c7e3455d35b9802b26b6118b68c678bdfe01cc1215c7a9ec931cddef",
+    "crates/edgezero-adapter-axum/src/response.rs": "f35df64dcb1c90a19720739b10dd72903bc73d92a43734d80d1f38cdab29ac51",
+    "crates/edgezero-adapter-axum/src/service.rs": "642b85143cc3c0fa9b56154166791cbdb35146838fea6fd10776e85e32fb331a",
+    "crates/edgezero-core/src/app.rs": "96191a2045bd93b4f0db0aaa18b8a27a47683171beeb8b5e2c4180da144aee8e",
+    "crates/edgezero-core/src/body.rs": "304908d06d0cd7a1d846e3a6d36dc08e4e498728e06ae7c36050b8389f8fbb39",
+    "crates/edgezero-core/src/context.rs": "c9b9cca8120b1f81ba5e101272b9df654f459edbf10ea33759cfffd558b347ed",
+    "crates/edgezero-core/src/error.rs": "81d3b708862a18571235baa4dd03cd580b52af6807d092ba22f780ed28c22534",
+    "crates/edgezero-core/src/ingress.rs": "479c2a7dac88822ce5991c502852975d07092e4c690e98be909ef0062c944da5",
+    "crates/edgezero-core/src/router.rs": "43a0aa4239463670c967d324db28732c7f8341d60ceee2753a616936c64755a5",
+    "crates/edgezero-core/src/response_egress.rs": "e00790c1ecfc46a9a04893ceec2a946b434855816e5338592366f784f246aee2",
+    "examples/app-demo/crates/app-demo-core/src/lib.rs": "eed58298aa757f26c0d2bbfe20552f07725c873b691e5c9d3a0d8f6ac00190f0",
+    "examples/app-demo/edgezero.toml": "68890ea7e4bf1001877419e641c90c4a4fd6f66dfbe23c0bd551c3e75438d73a",
+    ".github/workflows/test.yml": "176fe8db29f7bcccccd576b81218a1fbd4084a53da036a937c94182ad351ba4b",
+    "scripts/run_test_nonzero.sh": "f4854db904339ab9197591be6dd4eccfb186fc602c79f8142affe0453a75ccf6",
+    "scripts/run_test_nonzero.test.mjs": "1c80689f6830b671822082449a997ae0f6a210ac6a2b4cb9ebf36a7ebf6ba18e"
+  },
+  "retained_artifacts": [
+    {
+      "path": "/private/tmp/edgezero-fallback-20261021-artifacts/generated-source.tar.gz",
+      "bytes": 49603,
+      "sha256": "986f50b434358a4f4bdd58572110d8b97cf057511f117c89414bfe9bb3e8d18a"
+    },
+    {
+      "path": "/private/tmp/edgezero-fallback-20261021-artifacts/generated-axum",
+      "bytes": 30022912,
+      "sha256": "095cb12b15550bfc8135a2a847d0bd6e39ed7e83522d3ac3a9958c371fc26e35"
+    },
+    {
+      "path": "/private/tmp/edgezero-fallback-20261021-artifacts/edgezero-demo",
+      "bytes": 53042936,
+      "sha256": "00fdb45604659b9e2fda7e0e5274da9ba43312e0d9fe4ee80a6de24795e1f5c3"
+    }
+  ],
+  "successful_runs": [
+    {
+      "app": "generated",
+      "exit_code": 0,
+      "raw_log": {
+        "path": "/private/tmp/edgezero-generated-fallback-20261021-b.log",
+        "bytes": 51829,
+        "sha256": "0a4408658580f08e1ee2a6843e0e4fd348e1238c3921aeecff5e983aec8daca6"
+      },
+      "test_summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 783.15s"
+    },
+    {
+      "app": "demo",
+      "exit_code": 0,
+      "raw_log": {
+        "path": "/private/tmp/edgezero-demo-fallback-20261021-b.log",
+        "bytes": 5461,
+        "sha256": "7bf82e9b9be9ec6e844a5010a5f84467ac1fd58410ecc9f392fde06d787dd8b3"
+      },
+      "test_summary": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.01s"
+    }
+  ],
+  "initial_failed_run": {
+    "exit_code": 101,
+    "raw_log": {
+      "path": "/private/tmp/edgezero-generated-fallback-20261021-a.log",
+      "bytes": 41046,
+      "sha256": "889b9e9191a172c5cf42508e5d2e0e364595d0c6ce0e5b1a5f56406675fc74ac"
+    },
+    "finding": "Native build succeeded but lexical manifest matching returned zero executables for a macOS /var versus /private/var alias; fixed with canonical path comparison",
+    "source_identity": "Earlier uncommitted harness state, not the successful final snapshot; no complete earlier source snapshot retained"
+  },
+  "coverage": {
+    "applications": 2,
+    "cases_per_application": 16,
+    "total": 32,
+    "boundary_cases_per_application": 12,
+    "framing": ["Content-Length", "chunked"],
+    "delivered_body_bytes": [4095, 4096, 4097],
+    "cap_bytes": 4096,
+    "fallbacks": {
+      "POST /missing": "404 under/exact cap, 413 above cap",
+      "POST /": "405 with Allow GET under/exact cap, 413 above cap"
+    },
+    "overflow_body": "request body too large\n",
+    "overflow_content_type_assertion": "text/plain; charset=utf-8",
+    "pending_timeout": "No body data or EOF; full408 response must arrive after4.5s and before8s, with exact request timeout newline body",
+    "pipeline": "Send the first4097-byte chunk without the terminal chunk; wait for complete413, then send remaining request-looking payload, terminal chunk and genuine health request. Require safe close or exactly the expected200 health response; fresh health succeeds"
+  },
+  "records": [
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "initial-health",
+      "responses": [
+        {
+          "status": 200,
+          "body": "scaffold-probe app",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/missing-fixed-4095",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\",\"status\":404}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/missing-fixed-4096",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\",\"status\":404}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/missing-fixed-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/missing-chunked-4095",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\",\"status\":404}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/missing-chunked-4096",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\",\"status\":404}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/missing-chunked-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/-fixed-4095",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\",\"status\":405}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/-fixed-4096",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\",\"status\":405}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/-fixed-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/-chunked-4095",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\",\"status\":405}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/-chunked-4096",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\",\"status\":405}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "/-chunked-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 5,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "pending-fallback-deadline",
+      "responses": [
+        {
+          "status": 408,
+          "body": "request timeout\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 5002,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "overflow-deferred-tail-close-or-health",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "generated",
+      "case": "recovery-health",
+      "responses": [
+        {
+          "status": 200,
+          "body": "scaffold-probe app",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "initial-health",
+      "responses": [
+        {
+          "status": 200,
+          "body": "app-demo app",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 1,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/missing-fixed-4095",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"status\":404,\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\"}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/missing-fixed-4096",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"status\":404,\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\"}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/missing-fixed-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/missing-chunked-4095",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"status\":404,\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\"}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/missing-chunked-4096",
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"status\":404,\"kind\":\"not_found\",\"message\":\"no route matched path: /missing\"}}",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/missing-chunked-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/-fixed-4095",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"status\":405,\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\"}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/-fixed-4096",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"status\":405,\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\"}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/-fixed-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/-chunked-4095",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"status\":405,\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\"}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/-chunked-4096",
+      "responses": [
+        {
+          "status": 405,
+          "body": "{\"error\":{\"status\":405,\"kind\":\"method_not_allowed\",\"message\":\"method POST not allowed; allowed: GET\"}}",
+          "allow": ["GET"],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "/-chunked-4097",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "pending-fallback-deadline",
+      "responses": [
+        {
+          "status": 408,
+          "body": "request timeout\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 5004,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "overflow-deferred-tail-close-or-health",
+      "responses": [
+        {
+          "status": 413,
+          "body": "request body too large\n",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    },
+    {
+      "event": "fallback-tcp",
+      "app": "demo",
+      "case": "recovery-health",
+      "responses": [
+        {
+          "status": 200,
+          "body": "app-demo app",
+          "allow": [],
+          "retry_after_count": 0
+        }
+      ],
+      "response_complete_ms": 0,
+      "status": "pass",
+      "qualification": false
+    }
+  ],
+  "bounds": {
+    "wire_capture_bytes": 8192,
+    "overflow_witness_bytes": 1,
+    "max_response_heads": 2,
+    "response_header_count": 32,
+    "max_buffered_response_body_bytes": 1024,
+    "client_connect_timeout_ms": 1000,
+    "client_absolute_read_budget_ms": 8000,
+    "initial_write_timeout_ms": 2000,
+    "deferred_write_timeout": "min(2 seconds, remaining read budget); per-write timeout, not a whole-exchange wall-clock guarantee",
+    "startup_watchdog_ms": 15000,
+    "startup_connect_probe_timeout_ms": 100,
+    "diagnostic_read_bytes": 65536,
+    "response_reader": "httparse header parsing; exactly one valid bounded Content-Length; reject TE, ambiguous lengths, missing/truncated heads/bodies and extra/trailing replies",
+    "cleanup": "Child liveness checked before/after probes and readiness; expected health body identifies application; direct child killed/reaped on guard drop including failure"
+  },
+  "verification": {
+    "root_fmt": "pass",
+    "root_clippy": "pass; workspace all-targets all-features -Dwarnings",
+    "root_tests": "pass; 793coretests, all native workspace targets",
+    "root_feature_check": "pass",
+    "root_spin_check": "pass;wasm32-wasip2",
+    "demo_contracts": "5passed",
+    "generated_workspace": "pass;22generatedcoretests, hoststrictclippy, nativebuild/TCP and threeWASMcompilationchecks",
+    "guards": [
+      "outbound docs contract",
+      "legacy API",
+      "Brotli dependency contract",
+      "7 sentinel-selection regressions; 25 combined with cutover checker tests"
+    ]
+  },
+  "limitations": [
+    "Local HTTP/1 evidence only, not hosted lifecycle or full allocation certification.",
+    "No capability promotion, changed production transport or application policy.",
+    "Cloudflare post-overflow proxy failure and Fastly failed G2 readiness gate remain open and unchanged.",
+    "Hosted FastlyHTTP2, TrustedServer end-to-end and later F7b composition qualification remain open.",
+    "Generated dependencies resolve from the offline cache with existing audited exact requirements; other compatible versions may differ from the root lockfile. The retained generated source archive includes its own lockfile."
+  ],
+  "ci_guard_verification": {
+    "command": "scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging",
+    "exit_code": 0,
+    "raw_log": {
+      "path": "/private/tmp/edgezero-demo-fallback-20261021-guard.log",
+      "bytes": 1330,
+      "sha256": "f9fb425d2a2b3afcebee27473e1731b9ff98c9912019185adde6b911843f8fe2"
+    },
+    "result": "5 passed, including the required fallback test and original logging tests; --include-ignored forces future ignored tests to execute",
+    "node_regressions": "7 passed, covering all selection modes, both phases, missing/zero tests and failure propagation"
+  }
+}

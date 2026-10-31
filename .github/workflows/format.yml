@@ -30,33 +30,47 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            tests/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Retrieve Rust version
         id: rust-version
-        run: echo "rust-version=$(grep '^rust ' .tool-versions | awk '{print $2}')" >> $GITHUB_OUTPUT
+        run: echo "rust-version=$(grep '^rust ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
         shell: bash
 
       - name: Set up rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: "false"
           components: "clippy, rustfmt"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
 
       - name: Fetch dependencies (locked)
-        run: cargo fetch --locked
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
 
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
       - name: Run cargo fmt (lifecycle fixtures)
-        run: cargo fmt --manifest-path tests/fixtures/reusable-app/Cargo.toml --all -- --check
+        run: cargo fmt --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml --all -- --check
+
+      - name: Run cargo fmt (test harness)
+        run: cargo fmt --manifest-path crates/edgezero-test-harness/Cargo.toml --all -- --check
+
+      - name: Run cargo fmt (ingress fixtures)
+        run: cargo fmt --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml --all -- --check
 
       - name: Run cargo clippy (native lifecycle fixtures)
-        run: cargo clippy --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -p fixture-core -p fixture-axum --all-targets -- -D warnings
+        run: |
+          cargo clippy --locked --manifest-path crates/edgezero-test-harness/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml -p fixture-core -p fixture-axum --all-targets -- -D warnings
 
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -84,8 +98,8 @@ jobs:
         working-directory: examples/app-demo
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-  adapter-wasm-clippy:
-    name: ${{ matrix.adapter }} wasm clippy
+  adapter-clippy:
+    name: ${{ matrix.check_name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -93,19 +107,32 @@ jobs:
         include:
           - adapter: cloudflare
             target: wasm32-unknown-unknown
-            features: cloudflare
+            check_name: cloudflare wasm clippy
+            feature_sets: |-
+              cloudflare
+              cloudflare,test-utils
           - adapter: fastly
             target: wasm32-wasip1
-            features: fastly
-          # The `cli` feature is a valid wasip1 build combination (the CLI host
-          # code compiled for the guest target); gate it so a dead-code or
-          # portability regression there is caught, not only in the fastly-only build.
-          - adapter: fastly
-            target: wasm32-wasip1
-            features: fastly cli
+            check_name: fastly wasm clippy
+            # The `cli` feature is valid on wasip1. Lint it independently so
+            # feature unification cannot mask target-specific cfg mistakes.
+            feature_sets: |-
+              fastly
+              fastly,cli
+              fastly,test-utils
+              fastly,cli,test-utils
           - adapter: spin
             target: wasm32-wasip2
-            features: spin
+            check_name: spin wasm clippy
+            feature_sets: |-
+              spin
+              spin,test-utils
+          - adapter: axum
+            target: native
+            check_name: axum native clippy
+            feature_sets: |-
+              axum
+              axum,test-utils
     steps:
       - uses: actions/checkout@v6
         with:
@@ -119,34 +146,79 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            tests/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/fixtures/request-fidelity/target/
           key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-clippy-
 
       - name: Retrieve Rust version
         id: rust-version
-        run: echo "rust-version=$(grep '^rust ' .tool-versions | awk '{print $2}')" >> $GITHUB_OUTPUT
+        run: echo "rust-version=$(grep '^rust ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
         shell: bash
 
       - name: Set up Rust tool chain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: "false"
           toolchain: ${{ steps.rust-version.outputs.rust-version }}
           components: clippy
 
       - name: Add wasm target
+        if: matrix.target != 'native'
         run: rustup target add ${{ matrix.target }}
 
       - name: Fetch dependencies (locked)
-        run: cargo fetch --locked
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
 
-      - name: Clippy ${{ matrix.adapter }} (${{ matrix.features }}) on ${{ matrix.target }}
-        run: cargo clippy -p edgezero-adapter-${{ matrix.adapter }} --features "${{ matrix.features }}" --target ${{ matrix.target }} --all-targets -- -D warnings
+      - name: Clippy ${{ matrix.adapter }} feature combinations on ${{ matrix.target }}
+        env:
+          ADAPTER: ${{ matrix.adapter }}
+          FEATURE_SETS: ${{ matrix.feature_sets }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          target_args=()
+          if [[ "${TARGET}" != "native" ]]; then
+            target_args=(--target "${TARGET}")
+          fi
+
+          while IFS= read -r features; do
+            echo "==> edgezero-adapter-${ADAPTER} ${TARGET} features=[${features}]"
+            cargo clippy \
+              --package "edgezero-adapter-${ADAPTER}" \
+              --no-default-features \
+              --features "${features}" \
+              "${target_args[@]}" \
+              --all-targets \
+              -- \
+              -D warnings
+          done <<<"${FEATURE_SETS}"
 
       - name: Clippy ${{ matrix.adapter }} lifecycle fixture
-        if: matrix.features != 'fastly cli'
-        run: cargo clippy --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-${{ matrix.adapter }} --target ${{ matrix.target }} --all-targets -- -D warnings
+        env:
+          ADAPTER: ${{ matrix.adapter }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          target_args=()
+          if [[ "${TARGET}" != "native" ]]; then
+            target_args=(--target "${TARGET}")
+          fi
+          cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml \
+            -p "fixture-${ADAPTER}" "${target_args[@]}" --all-targets -- -D warnings
+          if [[ "${ADAPTER}" == spin ]]; then
+            cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml \
+              -p fixture-spin-async -p fixture-spin-wire "${target_args[@]}" --all-targets -- -D warnings
+          fi
+
+      - name: Clippy ${{ matrix.adapter }} ingress fixture
+        if: matrix.adapter != 'axum'
+        run: >-
+          cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
+          --features ${{ matrix.adapter }} --target ${{ matrix.target }}
+          --all-targets -- -D warnings
 
   format-docs:
     runs-on: ubuntu-latest
@@ -162,7 +234,7 @@ jobs:
       - name: Retrieve Node.js version
         id: node-version
         working-directory: .
-        run: echo "node-version=$(grep '^nodejs ' .tool-versions | awk '{print $2}')" >> $GITHUB_OUTPUT
+        run: echo "node-version=$(grep '^nodejs ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
         shell: bash
 
       - name: Use Node.js
@@ -180,3 +252,6 @@ jobs:
 
       - name: Run Prettier (check)
         run: npm run format
+
+      - name: Build documentation
+        run: npm run build

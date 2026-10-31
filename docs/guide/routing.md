@@ -15,10 +15,15 @@ handler = "my_app_core::handlers::hello"
 
 [[triggers.http]]
 id = "echo"
+class = "interactive"
 path = "/echo/{name}"
 methods = ["GET", "POST"]
 handler = "my_app_core::handlers::echo"
 ```
+
+An optional `class` is opaque application metadata for ingress admission. It is available through
+`RouteMetadata::class()` for matched and method-not-allowed resolutions and does not change the
+route's stable identity.
 
 You can also build routes programmatically using convenience methods:
 
@@ -40,7 +45,7 @@ use edgezero_core::http::Method;
 
 let router = RouterService::builder()
     .route("/hello", Method::GET, hello_handler)
-    .route("/echo/{name}", Method::GET, echo_handler)
+    .route_with_class("/echo/{name}", Method::GET, "interactive", echo_handler)
     .route("/echo", Method::POST, echo_json_handler)
     .build();
 ```
@@ -111,7 +116,9 @@ RouterService::builder()
     .build()
 ```
 
-EdgeZero automatically returns `405 Method Not Allowed` for requests that match a path but use an unsupported method.
+EdgeZero automatically returns `405 Method Not Allowed` for requests that match a path but use an
+unsupported method. The response includes an `Allow` header containing the sorted, deduplicated
+method set registered for that path.
 
 ## Introspection Routes
 
@@ -175,32 +182,38 @@ Axum-style `:name` parameters are **not supported**. Use `{name}` instead.
 
 Routes are matched by specificity (static segments first, then parameters, then catch-alls).
 Registering two routes that conflict for the same method (for example, two routes that both look
-like `/users/{id}`) panics while the routes are registered (inside `build_app()`) with
+like `/users/{id}`) panics while the routes are registered (inside `App::build::<A>(platform)`) with
 `duplicate route definition for <path>`.
 When that happens depends on the adapter: Axum builds the router once at startup, so the conflict
-surfaces before any traffic, but the Fastly, Cloudflare, and Spin entry points call `build_app()`
-per request, so a conflicting route deploys successfully and then panics on the first request.
+surfaces before any traffic, but the Fastly, Cloudflare, and Spin entry points call
+`App::build::<A>(platform)` per request, so a conflicting route deploys successfully and then panics on
+the first request.
 Run the app under the Axum dev server before deploying to an edge target.
 
 ## Intercepting before dispatch
 
-Use an optional `PreDispatchHook` when handling a request must precede method
-and path lookup, including router-generated 404/405 responses. The hook receives
-the converted request before router state, introspection, request context,
-middleware or handlers. Its future can be non-`Send`.
+Use an optional `PreDispatchHook` to intercept an admitted request before
+handler, middleware or router-generated 404/405 fallback execution. Canonical
+adapter dispatch resolves the route during admission, before the hook. The hook
+cannot bypass admission or change that route selection. Direct
+`RouterService::call` and `RouterService::oneshot` instead perform their route
+lookup after the hook; they are not substitutes for canonical adapter admission.
+The hook receives a protected `PreDispatchRequest` before router state and
+introspection injection. Its future can be non-`Send`.
 
 ```rust
 use async_trait::async_trait;
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::{Request, Response, response_builder};
+use edgezero_core::http::{Response, response_builder};
+use edgezero_core::PreDispatchRequest;
 use edgezero_core::router::{PreDispatchHook, RouterService};
 
 struct ExampleHook;
 
 #[async_trait(?Send)]
 impl PreDispatchHook for ExampleHook {
-    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+    async fn handle(&self, request: &mut PreDispatchRequest) -> Result<Option<Response>, EdgeError> {
         if request.headers().contains_key("x-example-stop") {
             return Ok(Some(
                 response_builder()
@@ -218,21 +231,31 @@ let router = RouterService::builder()
     .build();
 ```
 
-`Ok(None)` continues with modified headers, extensions, remaining body and URI
+`Ok(None)` continues with modified headers, extensions, bounded body and URI
 query. The method and URI path must remain unchanged; changing either returns
-an internal error before route lookup or middleware. Consuming a stream does
-not restore it. `Ok(Some(response))` returns that response without normal router
-lifecycle work. Return a complete response when exact challenge or hardening
-headers matter. `Err(error)` stops dispatch; direct `Service::call` propagates it,
+an internal error before handler, middleware or fallback execution; canonical
+admission has already selected the route. Modified heads are checked again against
+the original ingress limits and normalized framing rules. Use `body_bytes(max)`
+for cached bounded reads, `transform_body(input_max, output_max, transform)` for
+buffered transformations, or `map_body(output_max, transform)` for synchronous
+per-chunk transformations. Raw body replacement is not exposed. Original input
+limits, read deadlines and sticky failures survive transformations, header and
+extension edits. A fallback input overflow or timeout retains its configured response
+even if the hook ignores the read error. `Ok(Some(response))` skips router state,
+introspection, middleware, handlers and fallback draining when no body-policy failure
+has occurred. An unread terminal hook never polls the body. In canonical dispatch,
+the response still uses the admitted response-egress policy and coordinator.
+Return a complete response when exact challenge or hardening headers matter.
+`Err(error)` stops dispatch; direct `Service::call` propagates it,
 while `RouterService::oneshot` renders it through the existing error response
 conversion.
 
 Register a value with `pre_dispatch_hook`, or an existing shared hook with
 `pre_dispatch_hook_arc`. A second registration panics during router construction.
 Router clones share the same hook instance.
-Without a hook, existing routing is unchanged. Adapter buffering, capability
-bootstrap and outer response finalizers can still run before or after this
-router boundary; the hook does not replace those layers.
+Without a hook, existing routing is unchanged. Admission, lazy request-body
+ownership, capability bootstrap and response egress retain their adapter-owned
+boundaries; the hook does not replace those layers.
 
 The hook value must be `Send + Sync + 'static`; it cannot hold `Rc` state,
 although its returned future may be non-`Send`. Adapter extensions such as
@@ -244,13 +267,14 @@ let ingress = request.extensions()
     .get::<edgezero_core::ingress::RequestIngress>();
 ```
 
-If the hook consumes the body and returns `Ok(None)`, the handler receives only
-what remains unless the hook replaces the body. Generated `app!` applications
+If the hook reads the body and returns `Ok(None)`, the handler receives the shared
+cached bytes, or the bounded transformed body. Sticky read or transform failures
+cannot be cleared by continuing. Generated `app!` applications
 cannot install a hook through the macro or modify the built router. A
 hand-written `Hooks` implementation does not inherit the generated metadata.
 Move your existing `app!` invocation **unchanged, including all arguments**
-(`owns_logging = …`, `state = …`), into a separate module. Delegate stores,
-logging, name and application configuration. For example, an application whose
+(`owns_logging = …`, `state = …`), into a separate module. Delegate the baked
+manifest, stores, logging, name and application configuration. For example, an application whose
 existing invocation uses `owns_logging = true, state = 42_u32` would keep them.
 If the invocation has no app name, scaffolded projects use
 `app!("../../edgezero.toml")`, which defines `App`; import it as
@@ -261,7 +285,7 @@ When combining this with the hook example above, omit its illustrative
 
 ```rust
 use edgezero_core::app::{App, Hooks, StoresMetadata};
-use edgezero_core::manifest::{ManifestLoader, ResolvedLoggingConfig};
+use edgezero_core::manifest::{BakedManifest, ResolvedLoggingConfig};
 use edgezero_core::router::RouterService;
 use std::sync::{Arc, LazyLock};
 
@@ -274,52 +298,53 @@ mod manifest_app {
 use manifest_app::ManifestApp;
 
 static MANIFEST_JSON: LazyLock<Arc<str>> = LazyLock::new(|| {
-    let manifest = ManifestLoader::load_from_str(include_str!("../edgezero.toml"));
-    serde_json::to_string(manifest.manifest()).expect("valid manifest").into()
+    Arc::from(ManifestApp::manifest_json().expect("manifest application"))
 });
 
 pub struct HookedApp;
 
 impl Hooks for HookedApp {
-    fn build_app() -> App {
-        let mut app = App::with_name(Self::routes(), Self::name());
-        Self::configure(&mut app);
-        app
-    }
-
-    fn routes() -> RouterService {
-        RouterService::builder()
+    fn routes() -> Result<RouterService, EdgeError> {
+        Ok(RouterService::builder()
             .pre_dispatch_hook(ExampleHook)
             .with_manifest_json(Arc::clone(&MANIFEST_JSON))
             .with_state(42_u32)
             // Re-register every manifest route and middleware here, in order.
-            .build()
+            .build())
     }
 
+    fn manifest() -> BakedManifest { ManifestApp::manifest() }
+    fn manifest_json() -> Option<&'static str> { ManifestApp::manifest_json() }
     fn stores() -> StoresMetadata { ManifestApp::stores() }
     fn logging_for(adapter: &str) -> ResolvedLoggingConfig {
         ManifestApp::logging_for(adapter)
     }
     fn owns_logging() -> bool { ManifestApp::owns_logging() }
     fn name() -> &'static str { ManifestApp::name() }
-    fn configure(app: &mut App) { ManifestApp::configure(app); }
+    fn configure(app: &mut App) -> Result<(), EdgeError> {
+        ManifestApp::configure(app)
+    }
 }
 ```
 
 This outline uses `ExampleHook` from above, with code in `src/lib.rs` and
-`edgezero.toml` at the crate root. Add direct `async-trait` and `serde_json`
-dependencies: core does not re-export those crates. The `app!` path is relative
-to the crate root; the `include_str!` path is relative to the source file.
+`edgezero.toml` at the crate root. Add a direct `async-trait` dependency:
+core does not re-export that crate. The `app!` path is relative to the crate
+root. The wrapper delegates `manifest()` and `manifest_json()` so adapter
+environment resolution and introspection keep the original baked contract.
 Import any names used by the original arguments into the nested module (for
 example, `use super::app_state;` for `state = app_state()`).
 Point every adapter entry point (`run_app::<…>`, `serve_app::<…>`,
-`dispatch_app::<…>`, their `_with_*` variants, and any `build_app()` call inside a
-custom `serve_custom`/`run_custom` callback) at `HookedApp`. Its `routes()` must explicitly
+`dispatch_app::<…>`, their `_with_*` variants, and any
+`App::build::<…>(platform)` call inside a custom `serve_custom`/`run_custom`
+callback) at `HookedApp`. Construct manual applications with
+`App::build::<HookedApp>(platform)?`, preserving fallible assembly and platform
+validation. Its `routes()` must explicitly
 re-register **all routes, manifest middleware and configured state**; delegating
 metadata alone does not preserve them. `with_manifest_json` above preserves
-manifest introspection. The lazy static parses and serializes the manifest once
-per runtime instance. Cloudflare isolates and reused Spin P3 instances share
-this cached JSON. Axum's `run_app` and Fastly's `serve_app` build the application once, so
+manifest introspection. The lazy static wraps the compile-time manifest JSON
+in an `Arc` once per runtime instance, without runtime TOML parsing.
+Cloudflare isolates and reused Spin P3 instances share this cached JSON. Axum's `run_app` and Fastly's `serve_app` build the application once, so
 `routes()` already runs once there. Classic Fastly Compute starts a fresh
 instance per request and pays the initialization cost each time. EdgeZero's
 spin-sdk 7 `#[http_service]` entry points export WASI P3 HTTP components.
@@ -327,8 +352,8 @@ spin-sdk 7 `#[http_service]` entry points export WASI P3 HTTP components.
 allow up to 128 requests per instance and 16 concurrent requests, controlled by
 `--max-instance-reuse-count` and `--max-instance-concurrent-reuse-count`.
 Fresh instances still pay the initialization cost; reuse is not guaranteed.
-The macro embeds its JSON at compile time; exposing that literal
-or registering hooks directly through `app!` is tracked in
+The macro embeds its JSON at compile time and exposes it through
+`Hooks::manifest_json()`. Registering hooks directly through `app!` is tracked in
 [issue #434](https://github.com/IABTechLab/edgezero/issues/434).
 This manual duplication must stay synchronized with `app!` and the manifest,
 including matching `.with_state(...)` to the original macro's state argument.

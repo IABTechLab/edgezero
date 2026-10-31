@@ -1,0 +1,1829 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-19 America/Los_Angeles",
+  "base_revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "command": "scripts/smoke_test_reusable_app.sh --adapter all --suite smoke",
+  "exit_code": 2,
+  "tool_overrides": {
+    "SPIN_BIN": "/opt/homebrew/bin/spin",
+    "WRANGLER_BIN": "/Users/ag/.asdf/installs/nodejs/24.12.0/bin/wrangler",
+    "WORKER_BUILD_BIN": "/Users/ag/.asdf/installs/rust/1.98.1/bin/worker-build"
+  },
+  "sdk": {
+    "fastly": "0.13.1",
+    "worker": "0.8.5",
+    "spin_sdk": "7.0.0",
+    "wasip3": "0.7.1+wasi-0.3.0",
+    "reqwest": "0.13.4"
+  },
+  "source_sha256": {
+    "tests/fixtures/reusable-app/crates/fixture-axum/Cargo.toml": "1c1421c7497a7aff305d31ecd4c3ee323eb646acd4d56f23cab765ab6a5e377c",
+    "tests/fixtures/reusable-app/crates/fixture-axum/src/bin/outbound_progress.rs": "35594150be188ed8598ea1aea6e291f9b00c6aeb558bc4a65de8ac0f9922b69f",
+    "tests/fixtures/reusable-app/crates/fixture-axum/src/main.rs": "43cbebe047abdf77b4d48f55fd4098eb9c57ac17bedd9e6621335104f1710474",
+    "tests/fixtures/reusable-app/crates/fixture-axum/src/progress.rs": "0c41390031d857f0589667b88bd27fc8e185b483cedc57ec2ee73c99d36a9e4a",
+    "tests/fixtures/reusable-app/crates/fixture-cloudflare/Cargo.toml": "96501fc975013ba68411cd6e0f77b6b0fe505dfe4ed8cef16620ef19b4c9784d",
+    "tests/fixtures/reusable-app/crates/fixture-cloudflare/src/lib.rs": "606245131f0c594154ca0a2eb63e5341999325bfb2de55887ab3264fa4b89559",
+    "tests/fixtures/reusable-app/crates/fixture-cloudflare/src/progress.rs": "305f70039af59501639916bd8cfb8db696613c73af670e953dd329a3eed14498",
+    "tests/fixtures/reusable-app/crates/fixture-cloudflare/wrangler.toml": "6c2a097879b98f4d4af3e2fea139215abc9fa0bfdc058500f28fd9f7d757aab3",
+    "tests/fixtures/reusable-app/crates/fixture-core/Cargo.toml": "f9c68c281c9b57269ee8065f46e9e1c3fcc9c58a562259e480f2125877a8f6c8",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/lib.rs": "72cd88d5d7d274fa52a4af249a6723e7b842680f08049961cd85d94ed77c2375",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/progress.rs": "c186ffe225ec39483328988e66cb2cb7b10821b622a98bdc4e37a9a4ada627b9",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification.rs": "321cda3626dbe5e68da4ea1e9b5f71f531c0630f2763196fff8b0e7b64f301db",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/Cargo.toml": "e82ea4713f86db533796367cee0c3f91191f33e7e1f0510d0cf1bdafd509a7e1",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/fastly.toml": "4444af855e1f5db54da213ddfc6a84ea34aa52f9fd868d047521b0ab78a3fd18",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/custom_rebuild_per_request.rs": "bb55c45b46bf7afa90546982f90093f1bd5dd10a1f2324c985aba49a64650ea3",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/custom_retained_app.rs": "229b248e9b52a0b433d17e64706569fcb3285818e9975337291107c4b2219d2b",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/custom_single_request.rs": "aeeeb95a1e0a994ea6c62b62977d45e13dc9cce45b6a83fa9135584ab63edff9",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/faults.rs": "c4771da94ddb7ca45e466f4872f1fb5ee9d49ea699b42ac9f01fdf9eeef32112",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/limit_lifetime.rs": "a71e6a90a3710d4a1651f2a4fb76bbe09fad89e9f4be57caa860b8d3cdfd7749",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/limit_memory.rs": "f608680fad1b9eb0f2d6c7e46ab81934ec05d9f0336a92234b550b28ce1b5e97",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/limit_requests.rs": "479f9c6f0787fb25e9a7f27e007ef5b9ee8ceada64b118688456dafd3b92e191",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/logger_negative.rs": "3474b8e2902a7cbddf84fdd98444af17f10898c16cae52588f82d64abe1a5227",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_progress.rs": "0b4a81e3678459801b9f5a9379de70160452317929936d1b6c85393c1249c704",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_readiness.rs": "90b959abd5250a230c04409518f6416436db5485c0a174deb9a6a0a5e51bad4e",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/qualification.rs": "8a0d6c5d0d29882ec48829a76aa20b5000aa76f87f07265208bc8f75f4268f84",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/rebuild_per_request.rs": "19ec8d044ec2841309c0d6da6e91ffc08343653235312214cc00571386794b87",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/retained_app.rs": "629635c72fe281cda10cb86c75329df67aa3ba53e9d6d93ffe0019eda951d27d",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/single_request.rs": "408f4a4cbc84e85d0d20b4a1d40c8404c6adaa2c02a059da30d52bbb12e4d4ae",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs": "0d727361a788ff8b10aa5d48b80b43bd43411a53ac32fbfb3fb605f9d6bc4768",
+    "tests/fixtures/reusable-app/crates/fixture-harness/Cargo.toml": "93580bf7575878ce3cb5d82ef3e7aea6d5c26baae6f467f469339858992fd141",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence.rs": "22f5c8ff413357b5684910249c635a4993d0cb912b3cc584c8f14cc2258efb18",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/main.rs": "1344e6fb8e4e22426ec5ceaacba210c034121970d8b49ece79e6ef3a871776b8",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/net.rs": "a4181724068841ef44f112a107566180b58c3a4618921c14eca3ceb823846a05",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/progress.rs": "6f257eb1816d2c693cfb3744409e3c75a5f17ef7a8623df72a7c70753cf42cd5",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs": "f07fd19c3937780e5a7973513ccd29dd4708c852f62f4b2dd3e14929181605f9",
+    "tests/fixtures/reusable-app/crates/fixture-spin/Cargo.toml": "7256c3384d5e3c675b8b9e7026d10630bc5fec9c3aaf3900bc740fcb4e1526b4",
+    "tests/fixtures/reusable-app/crates/fixture-spin/runtime-config.toml": "716d293f350f0e1cb00e4b20b3d428db1cb06f6fe6e0590815147839368916b8",
+    "tests/fixtures/reusable-app/crates/fixture-spin/spin.toml": "dfed653d283de300aea36feb4841ee731e20643dd60df83dc0907047fdb78d9c",
+    "tests/fixtures/reusable-app/crates/fixture-spin/src/lib.rs": "a08d5b6c4bfbfe067ffafb8d4996c67a1105c104676f3d9aed5ff66831ac794a",
+    "tests/fixtures/reusable-app/crates/fixture-spin/src/progress.rs": "58fec2e1968f40d38a40a8e38642d27be22d4bf520bb29fd8d58fffa688f2414",
+    "tests/fixtures/reusable-app/Cargo.toml": "7665200757e4e565d11fa7eb036215aa583d21fd543bca39fdbdce470fee11ae",
+    "tests/fixtures/reusable-app/Cargo.lock": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee",
+    "scripts/smoke_test_reusable_app.sh": "5ffedd5e84ae8f8f1e8f30e0ba4b7b4032ffdea48776844619f1e354197a7c1b",
+    "crates/edgezero-adapter-spin/src/response.rs": "03e8b98de3e4854810b4bdabba7783d3a66cacb5e91402e941609d7dfe567075"
+  },
+  "compiled_artifacts": [
+    {
+      "adapter": "fastly",
+      "path": "/private/tmp/edgezero-g3-smoke-reviewed/progress-fastly/artifacts/fixture-fastly-outbound-progress.wasm",
+      "sha256": "55adc3435a3669bfd51f8ca71d59438a506c7bbf26d6c1f5cba58c1df2db3c4d"
+    },
+    {
+      "adapter": "spin",
+      "path": "/private/tmp/edgezero-g3-smoke-reviewed/progress-spin/artifacts/fixture_spin.wasm",
+      "sha256": "a64232085f08c12227867bda98bc1b3e675dfbe3d4c0b47654e7f214ed782c1d"
+    },
+    {
+      "adapter": "axum",
+      "path": "/private/tmp/edgezero-g3-smoke-reviewed/progress-axum/artifacts/fixture-axum-outbound-progress",
+      "sha256": "177e42aa127c58093650ed09c34c721a7620535306d75d00d8b3905b9d29cc59"
+    }
+  ],
+  "retained_events_sha256": "7b3dac8381bc22d935666ade32d98aed1fa4b336f4786017e94a900c0522b41c",
+  "original_smoke_jsonl_sha256": "3530ea6e0373b19d2bd7706dc8244f13a9ebf9223b8a5c8187e2a2984c7c3eb9",
+  "events": [
+    {
+      "adapter": "fastly",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "source_state": "working-tree-characterization",
+      "version": "viceroy 0.21.0"
+    },
+    {
+      "adapter": "fastly",
+      "artifact": {
+        "bytes": 2102618,
+        "fnv1a64": "37f3f1d7020b98cd",
+        "path": "/private/tmp/edgezero-g3-smoke-reviewed/progress-fastly/artifacts/fixture-fastly-outbound-progress.wasm",
+        "purpose": "non-security build identity"
+      },
+      "event": "build",
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "variant": "fastly-outbound-progress"
+    },
+    {
+      "adapter": "fastly",
+      "case": "eager-single",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"case\":\"eager-single\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":101204500,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":1,\"token\":\"18e01eabad7fa510-4020-b7\"}",
+        "complete_ns": 325023500,
+        "event": "client_completed",
+        "first_byte_ns": 325012166,
+        "header_ns": 325009708,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:34 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eabad7fa510-4020-b7"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "fastly",
+        "case": "eager-single",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 101204500,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 1,
+        "token": "18e01eabad7fa510-4020-b7"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eabad7fa510-4020-b7/start",
+          "received_ns": 10122042
+        },
+        {
+          "path": "/g3/18e01eabad7fa510-4020-b7/slot-0",
+          "received_ns": 20145917
+        },
+        {
+          "path": "/g3/18e01eabad7fa510-4020-b7/end",
+          "received_ns": 121688208
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "fastly",
+      "case": "lazy-single",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"case\":\"lazy-single\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":102224750,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":1,\"token\":\"18e01eabc1a01868-4020-b8\"}",
+        "complete_ns": 444747125,
+        "event": "client_completed",
+        "first_byte_ns": 444735708,
+        "header_ns": 444733208,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:35 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eabc1a01868-4020-b8"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "fastly",
+        "case": "lazy-single",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 102224750,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 1,
+        "token": "18e01eabc1a01868-4020-b8"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eabc1a01868-4020-b8/start",
+          "received_ns": 12031042
+        },
+        {
+          "path": "/g3/18e01eabc1a01868-4020-b8/end",
+          "received_ns": 123043417
+        },
+        {
+          "path": "/g3/18e01eabc1a01868-4020-b8/slot-0",
+          "received_ns": 137460542
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "fastly",
+      "case": "eager-batch",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"case\":\"eager-batch\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":100725958,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0,0],\"slots\":2,\"token\":\"18e01eabdc652350-4020-b9\"}",
+        "complete_ns": 338682709,
+        "event": "client_completed",
+        "first_byte_ns": 338671750,
+        "header_ns": 338669250,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:34 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eabdc652350-4020-b9"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "fastly",
+        "case": "eager-batch",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 100725958,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0, 0],
+        "slots": 2,
+        "token": "18e01eabdc652350-4020-b9"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eabdc652350-4020-b9/start",
+          "received_ns": 11074750
+        },
+        {
+          "path": "/g3/18e01eabdc652350-4020-b9/slot-0",
+          "received_ns": 25963333
+        },
+        {
+          "path": "/g3/18e01eabdc652350-4020-b9/slot-1",
+          "received_ns": 25974708
+        },
+        {
+          "path": "/g3/18e01eabdc652350-4020-b9/end",
+          "received_ns": 123449125
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "fastly",
+      "case": "baseline-batch",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"case\":\"baseline-batch\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":103221292,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":2,\"token\":\"18e01eabf14abf50-4020-ba\"}",
+        "complete_ns": 329571959,
+        "event": "client_completed",
+        "first_byte_ns": 329557375,
+        "header_ns": 329554875,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:35 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eabf14abf50-4020-ba"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "fastly",
+        "case": "baseline-batch",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 103221292,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 2,
+        "token": "18e01eabf14abf50-4020-ba"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eabf14abf50-4020-ba/start",
+          "received_ns": 13548334
+        },
+        {
+          "path": "/g3/18e01eabf14abf50-4020-ba/slot-1",
+          "received_ns": 23572667
+        },
+        {
+          "path": "/g3/18e01eabf14abf50-4020-ba/slot-0",
+          "received_ns": 23579000
+        },
+        {
+          "path": "/g3/18e01eabf14abf50-4020-ba/end",
+          "received_ns": 131931750
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "fastly",
+      "case": "response-owned",
+      "client": {
+        "body": " {\"adapter\":\"fastly\",\"case\":\"response-owned\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":true,\"pause_ns\":101245250,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0,0],\"slots\":2,\"token\":\"18e01eac055a13d8-4020-bb\"}",
+        "complete_ns": 340075750,
+        "event": "client_completed",
+        "first_byte_ns": 18052541,
+        "header_ns": 18050083,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:35 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eac055a13d8-4020-bb"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "fastly",
+        "case": "response-owned",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": true,
+        "pause_ns": 101245250,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0, 0],
+        "slots": 2,
+        "token": "18e01eac055a13d8-4020-bb"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eac055a13d8-4020-bb/start",
+          "received_ns": 15133792
+        },
+        {
+          "path": "/g3/18e01eac055a13d8-4020-bb/slot-0",
+          "received_ns": 28608000
+        },
+        {
+          "path": "/g3/18e01eac055a13d8-4020-bb/slot-1",
+          "received_ns": 28619125
+        },
+        {
+          "path": "/g3/18e01eac055a13d8-4020-bb/end",
+          "received_ns": 128774167
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "fastly",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"has_body\":true,\"known_length\":0,\"source\":\"fastly-sdk-before-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 678541,
+        "event": "client_completed",
+        "first_byte_ns": 659583,
+        "header_ns": 658041,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:36 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eac1a02be48-4020-bc"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "Absent",
+      "probe": {
+        "adapter": "fastly",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "has_body": true,
+          "known_length": 0,
+          "source": "fastly-sdk-before-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "fastly",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"has_body\":true,\"known_length\":0,\"source\":\"fastly-sdk-before-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 484084,
+        "event": "client_completed",
+        "first_byte_ns": 476292,
+        "header_ns": 474584,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:36 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eac1a16e288-4020-bd"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "LengthZero",
+      "probe": {
+        "adapter": "fastly",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "has_body": true,
+          "known_length": 0,
+          "source": "fastly-sdk-before-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "fastly",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"has_body\":true,\"known_length\":null,\"source\":\"fastly-sdk-before-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 489958,
+        "event": "client_completed",
+        "first_byte_ns": 485292,
+        "header_ns": 484542,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:35 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eac1a275190-4020-be"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "ChunkedEmpty",
+      "probe": {
+        "adapter": "fastly",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "has_body": true,
+          "known_length": null,
+          "source": "fastly-sdk-before-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "fastly",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"body_kind_before\":\"Initial\",\"bytes_read\":4,\"case\":\"empty\",\"host_signal\":{\"has_body\":true,\"known_length\":4,\"source\":\"fastly-sdk-before-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 456083,
+        "event": "client_completed",
+        "first_byte_ns": 449458,
+        "header_ns": 447916,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:35 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eac1a374780-4020-bf"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "FixedBody",
+      "probe": {
+        "adapter": "fastly",
+        "body_kind_before": "Initial",
+        "bytes_read": 4,
+        "case": "empty",
+        "host_signal": {
+          "has_body": true,
+          "known_length": 4,
+          "source": "fastly-sdk-before-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "fastly",
+      "client": {
+        "body": "{\"adapter\":\"fastly\",\"body_kind_before\":\"Initial\",\"bytes_read\":4,\"case\":\"empty\",\"host_signal\":{\"has_body\":true,\"known_length\":null,\"source\":\"fastly-sdk-before-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 340000,
+        "event": "client_completed",
+        "first_byte_ns": 334917,
+        "header_ns": 334209,
+        "headers": [
+          ["content-type", "application/json"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:36 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eac1a47ed38-4020-c0"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "ChunkedBody",
+      "probe": {
+        "adapter": "fastly",
+        "body_kind_before": "Initial",
+        "bytes_read": 4,
+        "case": "empty",
+        "host_signal": {
+          "has_body": true,
+          "known_length": null,
+          "source": "fastly-sdk-before-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "fastly",
+      "attempted_empty_body_cases": 5,
+      "attempted_progress_cases": 5,
+      "empty_body_passes": 5,
+      "event": "progress-coverage",
+      "failures": [],
+      "limitations": [
+        "HTTP/2 and HTTP/3 not exercised",
+        "hosted execution pending",
+        "response-owned tests handler/dispatch return, not host callback return",
+        "missing-context detection unproved except native absent-runtime control",
+        "no cancellation or G2 readiness qualification"
+      ],
+      "origin_requests": 18,
+      "progress_passes": 5,
+      "qualification": false
+    },
+    {
+      "adapter": "cloudflare",
+      "observed": "wasm-bindgen 0.2.121",
+      "phase": "build-tooling",
+      "qualification": false,
+      "reason": "matching wasm-bindgen CLI unavailable; no download or dependency repin attempted",
+      "required_wasm_bindgen": "0.2.129",
+      "status": "unsupported"
+    },
+    {
+      "adapter": "spin",
+      "event": "progress-runtime",
+      "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "source_state": "working-tree-characterization",
+      "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+    },
+    {
+      "adapter": "spin",
+      "artifact": {
+        "bytes": 2252246,
+        "fnv1a64": "40d6c398386ba6a9",
+        "path": "/private/tmp/edgezero-g3-smoke-reviewed/progress-spin/artifacts/fixture_spin.wasm",
+        "purpose": "non-security build identity"
+      },
+      "event": "build",
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "variant": "spin-outbound-progress"
+    },
+    {
+      "adapter": "spin",
+      "case": "response-owned-ready",
+      "event": "response-stream-control",
+      "observation": {
+        "client": {
+          "body": " {\"adapter\":\"spin\",\"case\":\"response-owned-ready\",\"dispatch_returned\":true,\"dispatch_returned_at_first_poll\":true,\"handler_returned\":true,\"handler_returned_at_first_poll\":true,\"pause_ns\":458,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"token\":\"18e01ead1a4a5d10-4020-e1\"}",
+          "complete_ns": 2583125,
+          "event": "client_completed",
+          "first_byte_ns": 2568000,
+          "header_ns": 2561792,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Tue, 20 Oct 2026 03:19:40 GMT"]
+          ],
+          "status": 200,
+          "token": "18e01ead1a4a5d10-4020-e1"
+        },
+        "probe": {
+          "adapter": "spin",
+          "case": "response-owned-ready",
+          "dispatch_returned": true,
+          "dispatch_returned_at_first_poll": true,
+          "handler_returned": true,
+          "handler_returned_at_first_poll": true,
+          "pause_ns": 458,
+          "qualification": false,
+          "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+          "token": "18e01ead1a4a5d10-4020-e1"
+        }
+      },
+      "qualification": false,
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "case": "response-owned-timer-only",
+      "event": "response-stream-control",
+      "observation": {
+        "client": {
+          "body": " {\"adapter\":\"spin\",\"case\":\"response-owned-timer-only\",\"dispatch_returned\":true,\"dispatch_returned_at_first_poll\":true,\"handler_returned\":true,\"handler_returned_at_first_poll\":true,\"pause_ns\":103036834,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"token\":\"18e01ead1a7bd908-4020-e2\"}",
+          "complete_ns": 103701584,
+          "event": "client_completed",
+          "first_byte_ns": 568709,
+          "header_ns": 567250,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Tue, 20 Oct 2026 03:19:40 GMT"]
+          ],
+          "status": 200,
+          "token": "18e01ead1a7bd908-4020-e2"
+        },
+        "probe": {
+          "adapter": "spin",
+          "case": "response-owned-timer-only",
+          "dispatch_returned": true,
+          "dispatch_returned_at_first_poll": true,
+          "handler_returned": true,
+          "handler_returned_at_first_poll": true,
+          "pause_ns": 103036834,
+          "qualification": false,
+          "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+          "token": "18e01ead1a7bd908-4020-e2"
+        }
+      },
+      "qualification": false,
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "case": "sdk-stream-ready",
+      "event": "response-stream-control",
+      "observation": {
+        "client": {
+          "body": " {\"adapter\":\"spin\",\"case\":\"sdk-stream-ready\",\"pause_ns\":708,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sdk_native\":true,\"token\":\"18e01ead20b60a50-4020-e3\"}",
+          "complete_ns": 521875,
+          "event": "client_completed",
+          "first_byte_ns": 474625,
+          "header_ns": 473208,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Tue, 20 Oct 2026 03:19:40 GMT"]
+          ],
+          "status": 200,
+          "token": "18e01ead20b60a50-4020-e3"
+        },
+        "probe": {
+          "adapter": "spin",
+          "case": "sdk-stream-ready",
+          "pause_ns": 708,
+          "qualification": false,
+          "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+          "sdk_native": true,
+          "token": "18e01ead20b60a50-4020-e3"
+        }
+      },
+      "qualification": false,
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "case": "sdk-stream-timer-only",
+      "event": "response-stream-control",
+      "observation": {
+        "client": {
+          "body": " {\"adapter\":\"spin\",\"case\":\"sdk-stream-timer-only\",\"pause_ns\":103101000,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sdk_native\":true,\"token\":\"18e01ead20cdb4e8-4020-e4\"}",
+          "complete_ns": 103506000,
+          "event": "client_completed",
+          "first_byte_ns": 321833,
+          "header_ns": 320791,
+          "headers": [
+            ["content-type", "application/json"],
+            ["connection", "close"],
+            ["transfer-encoding", "chunked"],
+            ["date", "Tue, 20 Oct 2026 03:19:40 GMT"]
+          ],
+          "status": 200,
+          "token": "18e01ead20cdb4e8-4020-e4"
+        },
+        "probe": {
+          "adapter": "spin",
+          "case": "sdk-stream-timer-only",
+          "pause_ns": 103101000,
+          "qualification": false,
+          "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+          "sdk_native": true,
+          "token": "18e01ead20cdb4e8-4020-e4"
+        }
+      },
+      "qualification": false,
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "attempted": 4,
+      "event": "response-stream-control-coverage",
+      "failures": [],
+      "passes": 4,
+      "qualification": false
+    },
+    {
+      "adapter": "spin",
+      "case": "eager-single",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"case\":\"eager-single\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":false,\"handler_returned\":false,\"pause_ns\":101976875,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":1,\"token\":\"18e01ead27058ca0-4020-e5\"}",
+        "complete_ns": 340028917,
+        "event": "client_completed",
+        "first_byte_ns": 340016750,
+        "header_ns": 340014584,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:41 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead27058ca0-4020-e5"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "spin",
+        "case": "eager-single",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": false,
+        "handler_returned": false,
+        "pause_ns": 101976875,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 1,
+        "token": "18e01ead27058ca0-4020-e5"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01ead27058ca0-4020-e5/start",
+          "received_ns": 14436333
+        },
+        {
+          "path": "/g3/18e01ead27058ca0-4020-e5/slot-0",
+          "received_ns": 29487875
+        },
+        {
+          "path": "/g3/18e01ead27058ca0-4020-e5/end",
+          "received_ns": 131721291
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "case": "lazy-single",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"case\":\"lazy-single\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":false,\"handler_returned\":false,\"pause_ns\":103130542,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":1,\"token\":\"18e01ead3c291fe8-4020-e6\"}",
+        "complete_ns": 443248792,
+        "event": "client_completed",
+        "first_byte_ns": 443231625,
+        "header_ns": 443227917,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:41 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead3c291fe8-4020-e6"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "spin",
+        "case": "lazy-single",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": false,
+        "handler_returned": false,
+        "pause_ns": 103130542,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 1,
+        "token": "18e01ead3c291fe8-4020-e6"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01ead3c291fe8-4020-e6/start",
+          "received_ns": 15117333
+        },
+        {
+          "path": "/g3/18e01ead3c291fe8-4020-e6/end",
+          "received_ns": 127862917
+        },
+        {
+          "path": "/g3/18e01ead3c291fe8-4020-e6/slot-0",
+          "received_ns": 140740875
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "case": "eager-batch",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"case\":\"eager-batch\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":false,\"handler_returned\":false,\"pause_ns\":103500208,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0,0],\"slots\":2,\"token\":\"18e01ead56dca670-4020-e7\"}",
+        "complete_ns": 328527958,
+        "event": "client_completed",
+        "first_byte_ns": 328517208,
+        "header_ns": 328515000,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:41 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead56dca670-4020-e7"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "spin",
+        "case": "eager-batch",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": false,
+        "handler_returned": false,
+        "pause_ns": 103500208,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0, 0],
+        "slots": 2,
+        "token": "18e01ead56dca670-4020-e7"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01ead56dca670-4020-e7/start",
+          "received_ns": 15305375
+        },
+        {
+          "path": "/g3/18e01ead56dca670-4020-e7/slot-0",
+          "received_ns": 27055416
+        },
+        {
+          "path": "/g3/18e01ead56dca670-4020-e7/slot-1",
+          "received_ns": 27078333
+        },
+        {
+          "path": "/g3/18e01ead56dca670-4020-e7/end",
+          "received_ns": 126359666
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "case": "baseline-batch",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"case\":\"baseline-batch\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":false,\"handler_returned\":false,\"pause_ns\":103313083,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":2,\"token\":\"18e01ead6acbb158-4020-e8\"}",
+        "complete_ns": 443338792,
+        "event": "client_completed",
+        "first_byte_ns": 443327792,
+        "header_ns": 443325084,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:42 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead6acbb158-4020-e8"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "spin",
+        "case": "baseline-batch",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": false,
+        "handler_returned": false,
+        "pause_ns": 103313083,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 2,
+        "token": "18e01ead6acbb158-4020-e8"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01ead6acbb158-4020-e8/start",
+          "received_ns": 15133334
+        },
+        {
+          "path": "/g3/18e01ead6acbb158-4020-e8/end",
+          "received_ns": 123815667
+        },
+        {
+          "path": "/g3/18e01ead6acbb158-4020-e8/slot-1",
+          "received_ns": 136038084
+        },
+        {
+          "path": "/g3/18e01ead6acbb158-4020-e8/slot-0",
+          "received_ns": 136050459
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "case": "response-owned",
+      "client": {
+        "body": " {\"adapter\":\"spin\",\"case\":\"response-owned\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":true,\"handler_returned\":true,\"pause_ns\":102931250,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0,0],\"slots\":2,\"token\":\"18e01ead85ec3638-4020-e9\"}",
+        "complete_ns": 336475542,
+        "event": "client_completed",
+        "first_byte_ns": 15576750,
+        "header_ns": 15574625,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:42 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead85ec3638-4020-e9"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "spin",
+        "case": "response-owned",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": true,
+        "handler_returned": true,
+        "pause_ns": 102931250,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0, 0],
+        "slots": 2,
+        "token": "18e01ead85ec3638-4020-e9"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01ead85ec3638-4020-e9/start",
+          "received_ns": 15093292
+        },
+        {
+          "path": "/g3/18e01ead85ec3638-4020-e9/slot-0",
+          "received_ns": 26636792
+        },
+        {
+          "path": "/g3/18e01ead85ec3638-4020-e9/slot-1",
+          "received_ns": 26643625
+        },
+        {
+          "path": "/g3/18e01ead85ec3638-4020-e9/end",
+          "received_ns": 127325625
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "spin",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"end_stream\":false,\"raw_framing_evidence\":false,\"size_hint_lower\":0,\"size_hint_upper\":null,\"source\":\"spin-sdk-after-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 699709,
+        "event": "client_completed",
+        "first_byte_ns": 691375,
+        "header_ns": 689875,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:42 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead9ad2dbd8-4020-ea"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "Absent",
+      "probe": {
+        "adapter": "spin",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "end_stream": false,
+          "raw_framing_evidence": false,
+          "size_hint_lower": 0,
+          "size_hint_upper": null,
+          "source": "spin-sdk-after-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "spin",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"end_stream\":false,\"raw_framing_evidence\":false,\"size_hint_lower\":0,\"size_hint_upper\":0,\"source\":\"spin-sdk-after-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 562583,
+        "event": "client_completed",
+        "first_byte_ns": 558333,
+        "header_ns": 557667,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:42 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead9ae6ae10-4020-eb"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "LengthZero",
+      "probe": {
+        "adapter": "spin",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "end_stream": false,
+          "raw_framing_evidence": false,
+          "size_hint_lower": 0,
+          "size_hint_upper": 0,
+          "source": "spin-sdk-after-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "spin",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"end_stream\":false,\"raw_framing_evidence\":false,\"size_hint_lower\":0,\"size_hint_upper\":null,\"source\":\"spin-sdk-after-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 423584,
+        "event": "client_completed",
+        "first_byte_ns": 418792,
+        "header_ns": 417959,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:42 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead9af87ca8-4020-ec"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "ChunkedEmpty",
+      "probe": {
+        "adapter": "spin",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "end_stream": false,
+          "raw_framing_evidence": false,
+          "size_hint_lower": 0,
+          "size_hint_upper": null,
+          "source": "spin-sdk-after-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "spin",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"body_kind_before\":\"Initial\",\"bytes_read\":4,\"case\":\"empty\",\"host_signal\":{\"end_stream\":false,\"raw_framing_evidence\":false,\"size_hint_lower\":0,\"size_hint_upper\":4,\"source\":\"spin-sdk-after-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 525708,
+        "event": "client_completed",
+        "first_byte_ns": 517625,
+        "header_ns": 516125,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:42 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead9b08a178-4020-ed"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "FixedBody",
+      "probe": {
+        "adapter": "spin",
+        "body_kind_before": "Initial",
+        "bytes_read": 4,
+        "case": "empty",
+        "host_signal": {
+          "end_stream": false,
+          "raw_framing_evidence": false,
+          "size_hint_lower": 0,
+          "size_hint_upper": 4,
+          "source": "spin-sdk-after-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "spin",
+      "client": {
+        "body": "{\"adapter\":\"spin\",\"body_kind_before\":\"Initial\",\"bytes_read\":4,\"case\":\"empty\",\"host_signal\":{\"end_stream\":false,\"raw_framing_evidence\":false,\"size_hint_lower\":0,\"size_hint_upper\":null,\"source\":\"spin-sdk-after-conversion\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 530875,
+        "event": "client_completed",
+        "first_byte_ns": 525916,
+        "header_ns": 524833,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:42 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01ead9b1a0a80-4020-ee"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "ChunkedBody",
+      "probe": {
+        "adapter": "spin",
+        "body_kind_before": "Initial",
+        "bytes_read": 4,
+        "case": "empty",
+        "host_signal": {
+          "end_stream": false,
+          "raw_framing_evidence": false,
+          "size_hint_lower": 0,
+          "size_hint_upper": null,
+          "source": "spin-sdk-after-conversion"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "spin",
+      "attempted_empty_body_cases": 5,
+      "attempted_progress_cases": 5,
+      "empty_body_passes": 5,
+      "event": "progress-coverage",
+      "failures": [],
+      "limitations": [
+        "HTTP/2 and HTTP/3 not exercised",
+        "hosted execution pending",
+        "response-owned tests handler/dispatch return, not host callback return",
+        "missing-context detection unproved except native absent-runtime control",
+        "no cancellation or G2 readiness qualification"
+      ],
+      "origin_requests": 18,
+      "progress_passes": 5,
+      "qualification": false
+    },
+    {
+      "error": null,
+      "event": "spin-before-shutdown",
+      "qualification": false,
+      "sdk_terminal_evidence": "pass",
+      "worker_panic": false
+    },
+    {
+      "event": "spin-shutdown-observation",
+      "qualification": false,
+      "worker_panic_after_controlled_shutdown": true,
+      "worker_panic_before_shutdown": false
+    },
+    {
+      "adapter": "spin",
+      "case": "sdk-stream-ready",
+      "coordinator_ok": true,
+      "diagnostic_source": "fixture_stderr.txt",
+      "event": "sdk-stream-coordinator-terminal",
+      "qualification": false,
+      "token": "18e01ead20b60a50-4020-e3"
+    },
+    {
+      "adapter": "spin",
+      "case": "sdk-stream-timer-only",
+      "coordinator_ok": true,
+      "diagnostic_source": "fixture_stderr.txt",
+      "event": "sdk-stream-coordinator-terminal",
+      "qualification": false,
+      "token": "18e01ead20cdb4e8-4020-e4"
+    },
+    {
+      "adapter": "axum",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "source_state": "working-tree-characterization",
+      "version": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+    },
+    {
+      "adapter": "axum",
+      "artifact": {
+        "bytes": 8830832,
+        "fnv1a64": "82759be726f58616",
+        "path": "/private/tmp/edgezero-g3-smoke-reviewed/progress-axum/artifacts/fixture-axum-outbound-progress",
+        "purpose": "non-security build identity"
+      },
+      "event": "build",
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "variant": "axum-outbound-progress"
+    },
+    {
+      "adapter": "axum",
+      "case": "eager-single",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"case\":\"eager-single\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":103148292,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":1,\"token\":\"18e01eadfe9cf0b8-4020-f9\"}",
+        "complete_ns": 338707875,
+        "event": "client_completed",
+        "first_byte_ns": 338696708,
+        "header_ns": 338685667,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "281"],
+          ["date", "Tue, 20 Oct 2026 03:19:44 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eadfe9cf0b8-4020-f9"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "axum",
+        "case": "eager-single",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 103148292,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 1,
+        "token": "18e01eadfe9cf0b8-4020-f9"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eadfe9cf0b8-4020-f9/start",
+          "received_ns": 15085709
+        },
+        {
+          "path": "/g3/18e01eadfe9cf0b8-4020-f9/slot-0",
+          "received_ns": 30101250
+        },
+        {
+          "path": "/g3/18e01eadfe9cf0b8-4020-f9/end",
+          "received_ns": 126935584
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "axum",
+      "case": "lazy-single",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"case\":\"lazy-single\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":101493625,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":1,\"token\":\"18e01eae13597148-4020-fa\"}",
+        "complete_ns": 453004459,
+        "event": "client_completed",
+        "first_byte_ns": 452991459,
+        "header_ns": 452990500,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "280"],
+          ["date", "Tue, 20 Oct 2026 03:19:45 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae13597148-4020-fa"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "axum",
+        "case": "lazy-single",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 101493625,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 1,
+        "token": "18e01eae13597148-4020-fa"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eae13597148-4020-fa/start",
+          "received_ns": 14493917
+        },
+        {
+          "path": "/g3/18e01eae13597148-4020-fa/end",
+          "received_ns": 128970833
+        },
+        {
+          "path": "/g3/18e01eae13597148-4020-fa/slot-0",
+          "received_ns": 142713500
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "axum",
+      "case": "eager-batch",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"case\":\"eager-batch\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":102747416,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0,0],\"slots\":2,\"token\":\"18e01eae2e83aa88-4020-fb\"}",
+        "complete_ns": 333218625,
+        "event": "client_completed",
+        "first_byte_ns": 333205333,
+        "header_ns": 333204458,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "282"],
+          ["date", "Tue, 20 Oct 2026 03:19:45 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae2e83aa88-4020-fb"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "axum",
+        "case": "eager-batch",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 102747416,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0, 0],
+        "slots": 2,
+        "token": "18e01eae2e83aa88-4020-fb"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eae2e83aa88-4020-fb/start",
+          "received_ns": 12998708
+        },
+        {
+          "path": "/g3/18e01eae2e83aa88-4020-fb/slot-0",
+          "received_ns": 26726875
+        },
+        {
+          "path": "/g3/18e01eae2e83aa88-4020-fb/slot-1",
+          "received_ns": 26742375
+        },
+        {
+          "path": "/g3/18e01eae2e83aa88-4020-fb/end",
+          "received_ns": 130401000
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "axum",
+      "case": "baseline-batch",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"case\":\"baseline-batch\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":false,\"pause_ns\":105429125,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0],\"slots\":2,\"token\":\"18e01eae42add628-4020-fc\"}",
+        "complete_ns": 442574083,
+        "event": "client_completed",
+        "first_byte_ns": 442563958,
+        "header_ns": 442563375,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "283"],
+          ["date", "Tue, 20 Oct 2026 03:19:45 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae42add628-4020-fc"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "axum",
+        "case": "baseline-batch",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": false,
+        "pause_ns": 105429125,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0],
+        "slots": 2,
+        "token": "18e01eae42add628-4020-fc"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eae42add628-4020-fc/start",
+          "received_ns": 14984125
+        },
+        {
+          "path": "/g3/18e01eae42add628-4020-fc/end",
+          "received_ns": 123351750
+        },
+        {
+          "path": "/g3/18e01eae42add628-4020-fc/slot-1",
+          "received_ns": 134712375
+        },
+        {
+          "path": "/g3/18e01eae42add628-4020-fc/slot-0",
+          "received_ns": 134718542
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "axum",
+      "case": "response-owned",
+      "client": {
+        "body": " {\"adapter\":\"axum\",\"case\":\"response-owned\",\"consumer_polls_before_window_end\":0,\"dispatch_returned\":null,\"handler_returned\":true,\"pause_ns\":103145166,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sizes\":[0,0],\"slots\":2,\"token\":\"18e01eae5dcf2628-4020-fd\"}",
+        "complete_ns": 338570792,
+        "event": "client_completed",
+        "first_byte_ns": 13550917,
+        "header_ns": 13549667,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["transfer-encoding", "chunked"],
+          ["date", "Tue, 20 Oct 2026 03:19:45 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae5dcf2628-4020-fd"
+      },
+      "event": "outbound-progress",
+      "probe": {
+        "adapter": "axum",
+        "case": "response-owned",
+        "consumer_polls_before_window_end": 0,
+        "dispatch_returned": null,
+        "handler_returned": true,
+        "pause_ns": 103145166,
+        "protocol": "http1",
+        "qualification": false,
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "sizes": [0, 0],
+        "slots": 2,
+        "token": "18e01eae5dcf2628-4020-fd"
+      },
+      "qualification": false,
+      "receipts": [
+        {
+          "path": "/g3/18e01eae5dcf2628-4020-fd/start",
+          "received_ns": 13471833
+        },
+        {
+          "path": "/g3/18e01eae5dcf2628-4020-fd/slot-0",
+          "received_ns": 28462125
+        },
+        {
+          "path": "/g3/18e01eae5dcf2628-4020-fd/slot-1",
+          "received_ns": 28471500
+        },
+        {
+          "path": "/g3/18e01eae5dcf2628-4020-fd/end",
+          "received_ns": 123999500
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "adapter": "axum",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"known_empty\":null,\"source\":\"not-exposed-by-native-entrypoint\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 166334,
+        "event": "client_completed",
+        "first_byte_ns": 157625,
+        "header_ns": 157209,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "193"],
+          ["date", "Tue, 20 Oct 2026 03:19:46 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae72aed688-4020-fe"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "Absent",
+      "probe": {
+        "adapter": "axum",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "known_empty": null,
+          "source": "not-exposed-by-native-entrypoint"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "axum",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"known_empty\":null,\"source\":\"not-exposed-by-native-entrypoint\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 112250,
+        "event": "client_completed",
+        "first_byte_ns": 108583,
+        "header_ns": 108417,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "193"],
+          ["date", "Tue, 20 Oct 2026 03:19:46 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae72b984e8-4020-ff"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "LengthZero",
+      "probe": {
+        "adapter": "axum",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "known_empty": null,
+          "source": "not-exposed-by-native-entrypoint"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "axum",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"body_kind_before\":\"Initial\",\"bytes_read\":0,\"case\":\"empty\",\"host_signal\":{\"known_empty\":null,\"source\":\"not-exposed-by-native-entrypoint\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 118583,
+        "event": "client_completed",
+        "first_byte_ns": 113583,
+        "header_ns": 113458,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "193"],
+          ["date", "Tue, 20 Oct 2026 03:19:46 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae72c2c800-4020-100"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "ChunkedEmpty",
+      "probe": {
+        "adapter": "axum",
+        "body_kind_before": "Initial",
+        "bytes_read": 0,
+        "case": "empty",
+        "host_signal": {
+          "known_empty": null,
+          "source": "not-exposed-by-native-entrypoint"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "axum",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"body_kind_before\":\"Initial\",\"bytes_read\":4,\"case\":\"empty\",\"host_signal\":{\"known_empty\":null,\"source\":\"not-exposed-by-native-entrypoint\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 103375,
+        "event": "client_completed",
+        "first_byte_ns": 99625,
+        "header_ns": 99417,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "193"],
+          ["date", "Tue, 20 Oct 2026 03:19:46 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae72cc8048-4020-101"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "FixedBody",
+      "probe": {
+        "adapter": "axum",
+        "body_kind_before": "Initial",
+        "bytes_read": 4,
+        "case": "empty",
+        "host_signal": {
+          "known_empty": null,
+          "source": "not-exposed-by-native-entrypoint"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "axum",
+      "client": {
+        "body": "{\"adapter\":\"axum\",\"body_kind_before\":\"Initial\",\"bytes_read\":4,\"case\":\"empty\",\"host_signal\":{\"known_empty\":null,\"source\":\"not-exposed-by-native-entrypoint\"},\"method\":\"GET\",\"qualification\":false}",
+        "complete_ns": 99625,
+        "event": "client_completed",
+        "first_byte_ns": 95417,
+        "header_ns": 95292,
+        "headers": [
+          ["content-type", "application/json"],
+          ["connection", "close"],
+          ["content-length", "193"],
+          ["date", "Tue, 20 Oct 2026 03:19:46 GMT"]
+        ],
+        "status": 200,
+        "token": "18e01eae72d56988-4020-102"
+      },
+      "event": "inbound-empty-signal",
+      "framing": "ChunkedBody",
+      "probe": {
+        "adapter": "axum",
+        "body_kind_before": "Initial",
+        "bytes_read": 4,
+        "case": "empty",
+        "host_signal": {
+          "known_empty": null,
+          "source": "not-exposed-by-native-entrypoint"
+        },
+        "method": "GET",
+        "qualification": false
+      },
+      "protocol": "http1",
+      "qualification": false
+    },
+    {
+      "adapter": "axum",
+      "attempted_empty_body_cases": 5,
+      "attempted_progress_cases": 5,
+      "empty_body_passes": 5,
+      "event": "progress-coverage",
+      "failures": [],
+      "limitations": [
+        "HTTP/2 and HTTP/3 not exercised",
+        "hosted execution pending",
+        "response-owned tests handler/dispatch return, not host callback return",
+        "missing-context detection unproved except native absent-runtime control",
+        "no cancellation or G2 readiness qualification"
+      ],
+      "origin_requests": 18,
+      "progress_passes": 5,
+      "qualification": false
+    }
+  ],
+  "runtime_logs": {
+    "fastly": "2026-10-20T03:19:34.357723Z  WARN no backend definitions found in /private/tmp/edgezero-g3-smoke-reviewed/progress-fastly/fastly.toml\n",
+    "spin": "Using runtime config [key_value_store.fixture_config: spin], [key_value_store.fixture_kv: spin] from \"/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/crates/fixture-spin/runtime-config.toml\"\nLogging component stdio to \"/private/tmp/edgezero-g3-smoke-reviewed/progress-spin/.spin/logs/\"\n\nServing http://127.0.0.1:52760\nAvailable Routes:\n  fixture: http://127.0.0.1:52760 (wildcard)\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"case\":\"sdk-stream-ready\",\"coordinator_ok\":true,\"event\":\"sdk-stream-coordinator-terminal\",\"qualification\":false,\"token\":\"18e01ead20b60a50-4020-e3\"}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"case\":\"sdk-stream-timer-only\",\"coordinator_ok\":true,\"event\":\"sdk-stream-coordinator-terminal\",\"qualification\":false,\"token\":\"18e01ead20cdb4e8-4020-e4\"}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\nworker failed: worker panicked\n",
+    "axum": "2026-10-20T03:19:44.290Z INFO  [edgezero_adapter_axum::dev_server] [edgezero] axum HTTP/1 ingress limits: AxumIngressConfig { head_read_timeout: 10s, max_connections: 256, max_header_count: 100, max_raw_head_bytes: 65536 }\n2026-10-20T03:19:44.290Z INFO  [edgezero_adapter_axum::dev_server] [edgezero] axum config snapshot limits: ConfigStoreLimits { entries: 1024, file_bytes: 16777216, key_bytes: 1024, resident_bytes: 33554432, startup_bytes: 117440512, value_bytes: 8388608 }\n2026-10-20T03:19:44.290Z INFO  [edgezero_adapter_axum::dev_server] [edgezero] starting axum server on http://127.0.0.1:52827\n"
+  },
+  "spin_component_stderr": "{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"case\":\"sdk-stream-ready\",\"coordinator_ok\":true,\"event\":\"sdk-stream-coordinator-terminal\",\"qualification\":false,\"token\":\"18e01ead20b60a50-4020-e3\"}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"case\":\"sdk-stream-timer-only\",\"coordinator_ok\":true,\"event\":\"sdk-stream-coordinator-terminal\",\"qualification\":false,\"token\":\"18e01ead20cdb4e8-4020-e4\"}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n{\"event\":\"progress-dispatch-start\",\"qualification\":false}\n{\"event\":\"progress-dispatch-returned\",\"qualification\":false}\n",
+  "before_fix": {
+    "source_state": "intermediate uncommitted diagnostic build; full source snapshot not retained",
+    "compiled_binary_sha256": "bd4407f60bb52c0c967e29ca5244ea6ac358d6c46a96e10f5728a38694587ef9",
+    "production_response_at_base_sha256": "aab7390880450cb6b603dc579d479a54289d4299c8c221138dbbac425634c8e1",
+    "retained_events_sha256": "fb80d5278b97c8cda87d4d401f2679a403ebb5165a9a641ce22c6433be021448",
+    "events": [
+      {
+        "adapter": "spin",
+        "case": "response-owned-ready",
+        "error": "response ended before its status: UnexpectedEof",
+        "event": "response-stream-control",
+        "partial": null,
+        "qualification": false,
+        "status": "fail"
+      },
+      {
+        "adapter": "spin",
+        "case": "response-owned-timer-only",
+        "error": "response ended before its status: UnexpectedEof",
+        "event": "response-stream-control",
+        "partial": null,
+        "qualification": false,
+        "status": "fail"
+      },
+      {
+        "adapter": "spin",
+        "case": "sdk-stream-ready",
+        "event": "response-stream-control",
+        "observation": {
+          "client": {
+            "body": " {\"adapter\":\"spin\",\"case\":\"sdk-stream-ready\",\"pause_ns\":1083,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sdk_native\":true,\"token\":\"18e01dde2a0ed228-10994-2\"}",
+            "complete_ns": 1209792,
+            "event": "client_completed",
+            "first_byte_ns": 1198750,
+            "header_ns": 1192000,
+            "headers": [
+              ["content-type", "application/json"],
+              ["connection", "close"],
+              ["transfer-encoding", "chunked"],
+              ["date", "Tue, 20 Oct 2026 03:04:51 GMT"]
+            ],
+            "status": 200,
+            "token": "18e01dde2a0ed228-10994-2"
+          },
+          "probe": {
+            "adapter": "spin",
+            "case": "sdk-stream-ready",
+            "pause_ns": 1083,
+            "qualification": false,
+            "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+            "sdk_native": true,
+            "token": "18e01dde2a0ed228-10994-2"
+          }
+        },
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "spin",
+        "case": "sdk-stream-timer-only",
+        "event": "response-stream-control",
+        "observation": {
+          "client": {
+            "body": " {\"adapter\":\"spin\",\"case\":\"sdk-stream-timer-only\",\"pause_ns\":101280292,\"qualification\":false,\"revision\":\"7cccaf10734914161803317aec6c55c22c2bccc9\",\"sdk_native\":true,\"token\":\"18e01dde2a325400-10994-3\"}",
+            "complete_ns": 102082208,
+            "event": "client_completed",
+            "first_byte_ns": 718125,
+            "header_ns": 715125,
+            "headers": [
+              ["content-type", "application/json"],
+              ["connection", "close"],
+              ["transfer-encoding", "chunked"],
+              ["date", "Tue, 20 Oct 2026 03:04:51 GMT"]
+            ],
+            "status": 200,
+            "token": "18e01dde2a325400-10994-3"
+          },
+          "probe": {
+            "adapter": "spin",
+            "case": "sdk-stream-timer-only",
+            "pause_ns": 101280292,
+            "qualification": false,
+            "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+            "sdk_native": true,
+            "token": "18e01dde2a325400-10994-3"
+          }
+        },
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "spin",
+        "attempted": 4,
+        "event": "response-stream-control-coverage",
+        "failures": ["response-owned-ready", "response-owned-timer-only"],
+        "passes": 2,
+        "qualification": false
+      },
+      {
+        "adapter": "spin",
+        "attempted_empty_body_cases": 5,
+        "attempted_progress_cases": 5,
+        "empty_body_passes": 5,
+        "event": "progress-coverage",
+        "failures": ["response-owned"],
+        "limitations": [
+          "HTTP/2 and HTTP/3 not exercised",
+          "hosted execution pending",
+          "response-owned tests handler/dispatch return, not host callback return",
+          "missing-context detection unproved except native absent-runtime control",
+          "no cancellation or G2 readiness qualification"
+        ],
+        "origin_requests": 15,
+        "progress_passes": 4,
+        "qualification": false
+      }
+    ]
+  },
+  "retention": "Repository-retained local characterization, event and source hashes; not clean-candidate or hosted qualification. Compiled binaries and unrelated smoke history are identity-only.",
+  "remaining": [
+    "G2 Fastly readiness source-error preservation failed",
+    "Cloudflare matching CLI installation not approved",
+    "HTTP/2 and HTTP/3",
+    "provider scheduler-context rejection",
+    "hosted lifecycle evidence",
+    "native LocalSet presence/liveness detection",
+    "future public begin API integration",
+    "G4 API approval"
+  ]
+}

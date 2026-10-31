@@ -30,9 +30,9 @@ impl CloudflareRequestContext {
     }
 
     #[inline]
-    pub fn insert(request: &mut Request, env: Env, ctx: Context) {
+    pub fn insert(request: &mut Request, env: Env, ctx: Arc<Context>) {
         request.extensions_mut().insert(Self {
-            ctx: Arc::new(ctx),
+            ctx,
             env: Arc::new(env),
         });
     }

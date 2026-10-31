@@ -41,6 +41,8 @@ variables (see [the migration guide](../manifest-store-migration.md)).
 The portable store metadata baked into `App` by the `app!` macro
 drives which logical stores are exposed; no `edgezero.toml` needs to
 be loaded by the runtime.
+If `Hooks::configure` fails, `run_app` returns the source-preserving
+`application configuration failed` error before binding the listener.
 
 ## Development Server
 
@@ -78,21 +80,172 @@ cargo build -p my-app-adapter-axum --release
 
 The binary is placed in `target/release/my-app-adapter-axum`.
 
-## Proxy Client
+## Bounded HTTP/1 Ingress
 
-The Axum adapter provides a native HTTP client for proxying:
+The standard server entrypoints own a bounded pool of HTTP/1 connections. These limits apply
+before application admission, including to sockets that never finish a request head. No custom
+listener or router is needed. HTTP/2 is not enabled, and protocol upgrades cannot transfer the
+socket out of this pool.
+
+`run_app` resolves these runtime variables once, before application configuration or binding:
+
+| Variable (`EDGEZERO__ADAPTER__INGRESS__` prefix) | Default | Supported range |
+| ------------------------------------------------ | ------- | --------------- |
+| `MAX_CONNECTIONS`                                | 256     | 1–4096          |
+| `MAX_RAW_HEAD_BYTES`                             | 65536   | 8192–1048576    |
+| `MAX_HEADER_COUNT`                               | 100     | 1–1024          |
+| `HEAD_READ_TIMEOUT_MS`                           | 10000   | 1–120000        |
+
+Only missing settings use defaults. Explicit values must be unsigned decimal integers within
+the supported ranges; empty, signed, malformed, overflowing, and zero values fail startup.
+Diagnostics identify the setting, never its supplied value. The effective validated
+`AxumIngressConfig` is logged at `Info`. Applications can resolve the same configuration with
+`AxumIngressConfig::from_env(&EnvConfig::from_env())` and inspect its getters. Programmatic
+servers install the validated value in `AxumDevServerConfig::ingress`:
 
 ```rust
-use edgezero_adapter_axum::proxy::AxumProxyClient;
-use edgezero_core::proxy::ProxyService;
+use std::time::Duration;
+use edgezero_adapter_axum::{ingress_config::AxumIngressConfig, dev_server::AxumDevServerConfig};
 
-let client = AxumProxyClient::try_new()?;
-let response = ProxyService::new(client).forward(request).await?;
+let config = AxumDevServerConfig {
+    ingress: AxumIngressConfig::new(64, 16384, 64, Duration::from_secs(5))?,
+    ..AxumDevServerConfig::default()
+};
 ```
 
-This uses `reqwest` under the hood for outbound HTTP requests. `try_new` is
-fallible because it builds a `reqwest::Client`; it returns a `reqwest::Error` if
-the TLS backend cannot be initialised on the host.
+Manifest defaults can be supplied through adapter-filtered `[[environment.variables]]` entries.
+The Axum CLI forwards the selected manifest's defaults to its Cargo child without mutating the
+parent environment. An existing parent variable, including an empty one, takes precedence;
+duplicate applicable defaults retain declaration order, with the last taking precedence.
+Running the binary directly requires setting the runtime variables directly.
+
+### Connection Ownership And Deadlines
+
+Let `C` be `max_connections()`. At most `C` connection futures own parser state, sockets, and
+application work, including keep-alive connections. There is no per-connection spawned task or
+permit-waiter queue. The accept loop may own **one additional transient accepted socket**; if
+capacity is exhausted it closes that socket immediately, without a parser, response, or
+background task. Completed connections are reaped before accepting more work. Disconnect,
+parser failure, timeout, cancellation, and shutdown drop the single connection owner and release
+capacity; unwinding handler failures are isolated to their connection. Shutdown closes the
+owned connections rather than waiting indefinitely for a graceful drain.
+
+The first absolute idle-plus-header deadline starts when the accepted socket enters the pool,
+before its future is first polled. Each subsequent deadline starts when Hyper first polls the
+next request head after the previous exchange permits it. Idle keep-alive time and incomplete-head
+time share this budget; a byte arriving does **not** reset it. Pipelined bytes may already be
+buffered, so this is not a deadline starting at the network arrival of each pipelined request.
+An independent timer wakes without incoming data, and ready I/O and completed heads also check
+expiry before admission. Equality is expired. Slow/trickled or idle connections close when the
+deadline expires; an HTTP timeout response is not promised.
+
+After a complete head is accepted, the header clock is disarmed for application work. Existing
+application body-read and response-write deadlines remain in force. Infrastructure timers use
+the native Tokio monotonic clock, independently of an application's injectable clock, so a
+frozen application clock cannot disable pre-admission expiry. These timers are cooperatively
+scheduled: blocking application code can delay all work on the connection executor.
+
+### Wire Limits And Parser Storage
+
+Let `H = max_raw_head_bytes()` and `N = max_header_count()`. The pinned Hyper 1.12.0 parser
+rejects a complete raw head above `H` bytes or above `N` field lines **before** constructing an
+admitted request. The byte budget includes the entire request line, field names, colons,
+whitespace, line endings, and the final empty line. Duplicate field lines count separately.
+Request-line and header bytes share one combined budget, not independent allowances. Exactly
+`H` bytes and `N` fields pass the size/count checks; other protocol, type, or application validation
+can still reject an in-budget head. Hyper additionally limits request targets to 65534 bytes
+(414). Overflow closes the connection and Hyper attempts a bounded 431 response; other malformed
+syntax may receive a bounded 400 response. Expiry or disconnect can prevent response delivery.
+Application admission and rendering hooks do not run for raw parser rejections.
+
+`parser_buffer_bytes()` is Hyper's logical threshold `H`, **not** a hard allocation ceiling.
+The receive scratch audit pins Hyper 1.12.0, bytes 1.12.1, http 1.4.2, and Rust 1.95.0:
+
+- `parser_read_allocation_bytes()` reports the conservative requested-capacity bound `R = 4H`
+  for each receive backing allocation. Adaptive reads expose spare capacity and shared-buffer
+  splits can cause a larger replacement allocation than the logical threshold.
+- `parser_trailer_allocation_bytes()` reports `T = next_power_of_two(H)` for the separate raw
+  chunked-trailer buffer. Hyper applies its byte budget separately to trailers, whose completed
+  raw field section must be **strictly smaller** than `H`; this is not a combined head-plus-trailer
+  allowance. The trailer field count remains at most `N`.
+- Conservative simultaneous receive scratch, including an outstanding channel frame, replacement
+  allocation, raw trailer growth, and copied field bytes, is `3R + 2T + H`, **plus** parser/header
+  metadata, URI/method storage, and fixed connection state. These are requested capacities, not
+  allocator-resident bytes or a complete per-request memory certificate.
+- `parser_header_map_allocation_bytes()` reports `M`, a conservative per-map requested-capacity
+  charge covering both ordinary and adversarial collision-driven growth, duplicate-value storage,
+  and capacity retained across clear/reuse. For `P = max(100, N) + 1`, raw index capacity is bounded
+  by the largest power of two at most `10P`, bucket capacity by three quarters of that number,
+  and duplicate capacity by `next_power_of_two(max(4, P - 1))`. The getter uses public header-type
+  sizes plus conservative machine-word padding for private map nodes. Charge up to `1.5M` for
+  one map's reallocating peak, or `3.5M` for overlapping request, response/cache, and trailer maps.
+  An application-retained request map or admission's temporary header clone is an additional
+  owner, not included in those three maps.
+- Raw parse workspaces additionally retain the default 100-field inline arrays and, above that,
+  bounded heap arrays. On 64-bit native builds a conservative payload charge for these two
+  workspaces is `64 * max(100, N)` bytes, plus their fixed container state. Parsed URI/method data
+  and field-name/value backing bytes are separate charges bounded by the raw input sizes.
+
+Response header maps become reusable request-parser storage in Hyper. Before handoff, EdgeZero
+therefore bounds application response fields to `max_response_header_count() = max(100, N)`
+and `max_response_header_bytes() = H`. Field-byte accounting is the sum of name bytes, value
+bytes, and four bytes per field (`: ` and CRLF), including duplicates. EdgeZero copies the map
+and field data into fresh storage, discarding application-supplied spare capacity and large
+shared backing buffers; duplicate values and sensitive flags are preserved. Custom Hyper
+reason phrases are removed in favor of canonical status phrases. Hyper's own status line,
+framing, connection, and date fields need additional fixed overhead. An oversized response head
+closes the connection and reports a transport error to any active egress attempt; it does not
+allocate a replacement error response.
+
+The pool bounds retention of receive scratch, parser-generated error responses, and parser
+metadata, not arbitrary application allocations. A budget must additionally charge parsed
+request/response metadata and copies, application-held body frames, response buffers, handler
+state, stores, outbound exchanges, and allocator overhead. Kernel socket buffers, the OS listen
+backlog, and resources outside EdgeZero are excluded. The connection bound is not a published
+platform memory ceiling or a whole-process RSS guarantee.
+
+This combined HTTP/1 resource policy does not implement the stricter independent raw-target /
+field-section accounting or raw framing-rejection policy. Admission still receives
+`IngressHeadAccounting::HostManaged` and `IngressFraming::HostManaged`; both raw-ingress
+capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
+
+## Outbound HTTP
+
+The Axum adapter uses a `HttpClient` registered in the assembled app's router state when present,
+without initializing its default transport. Otherwise it injects `AxumOutboundClient`, backed by
+`reqwest` and the application clock. Handlers use `RequestContext::http_client()`; direct wiring
+can construct the adapter client with `AxumOutboundClient::try_new()`.
+
+After admission, request conversion preserves a transport-certified empty body
+(`http_body::Body::is_end_stream()`) as buffered empty without polling it. This applies to every
+method, not only GET/HEAD; headers and size hints alone never certify emptiness. The request
+context still reports Initial, not Cached, and ingress framing stays `HostManaged`.
+
+Local HTTP/1 TCP checks forward GET/HEAD with absent framing or `Content-Length: 0`, even with an
+expired inbound read deadline, without outbound body bytes or length/chunked framing. The demo
+and generated proxy handlers benefit through this same converter and their unchanged client API.
+This does not change core's first `body_bytes` deadline check: that accessor can still return 408
+for an initial buffered-empty body after expiry.
+
+Unknown GET/HEAD bodies are settled under the original outbound and admitted inbound deadlines.
+Chunked-empty EOF permits dispatch; the first nonempty byte returns 400 before origin contact.
+Unread rejected bytes cannot become the next HTTP/1 request. Other methods keep streamed uploads.
+Eager begin/batch work requires the existing Tokio local scheduling context; missing context
+returns a typed setup error before provider I/O. No capability level is promoted by this migration.
+
+Axum provides native total deadlines, completion-order batching, pending-future cancellation,
+batch slot isolation, cache bypass, wire-authority override, elastic phase budgeting, header
+fidelity, and streamed upload cancellation. Downstream responses run on a connection-local Hyper
+HTTP/1 executor, so portable non-`Send` streams remain lazy and are polled under Hyper demand.
+The connection supervisor enforces the absolute response-write deadline, but frame acceptance is
+not proof of socket or client receipt; response-egress capabilities therefore remain BestEffort.
+See [Capabilities](/guide/capabilities).
+
+For streamed responses with `Content-Length`, Axum retains only the final chunk until source EOF
+validates, because Hyper stops polling once the declared length is satisfied. A bad tail is not
+sent, and a pending tail remains subject to the write deadline. A declared zero-length stream is
+validated before handoff. Suppressed HEAD/status bodies are dropped without polling. Clean source
+EOF remains `HostHandoff`, not proof of socket flush or client receipt.
 
 ## Logging
 
@@ -100,9 +253,38 @@ The Axum adapter's `run_app` helper installs `simple_logger` at the level read f
 `EDGEZERO__LOGGING__LEVEL`, falling back to `info` when the variable is unset or
 unparseable. It does not read `edgezero.toml`, and `echo_stdout` has no effect on
 the runtime. To install a different logger, set `owns_logging = true` on your `app!`
-declaration so `run_app` skips its own logger, then install yours in `main`. Wiring
-`App::build_app()` and `AxumDevServer` by hand remains the fallback if you also need
-to control the bind address or store setup.
+declaration so `run_app` skips its own logger, then install yours in `main` **before** `run_app`.
+Logger setup now precedes application configuration, and setup failures are returned rather than
+ignored. For embedding startup validation, `run_app_with_preflight::<App, _>(check)` runs `check`
+after logging is ready and before configuration or listener binding. The bundled `edgezero demo`
+uses this for its capability gate instead of preinstalling a second CLI logger.
+
+Managed boot warnings use `edgezero::boot` at `Warn`, even when runtime logging is `Off`.
+Application-owned loggers can reuse the shared resolver and constants:
+
+```rust
+use edgezero_core::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET, resolve_logging_level};
+use edgezero_core::env_config::EnvConfig;
+
+let env = EnvConfig::from_env();
+simple_logger::SimpleLogger::new()
+    .with_level(resolve_logging_level(&env))
+    .with_module_level(BOOT_LOG_TARGET, BOOT_LOG_LEVEL)
+    .init()?;
+// Then call run_app::<App>() with owns_logging = true.
+```
+
+For custom bind addresses or store wiring, build an assembled application and pass it directly
+to `AxumDevServer::new(app)` or `AxumDevServer::with_config(app, config)`. These constructors no
+longer accept a router or rebuild default policies. All configured policies, state, clock, name
+and platform metadata are preserved. Attach store handles/registries with the server's setters.
+The standard `run_app` uses the same server construction and serving loop after startup setup.
+
+Use `server.run()` for a blocking runner, or
+`server.serve(listener, shutdown).await` for an already-bound Tokio listener. The listener's actual
+address takes precedence over `config.addr`. Resolving the shutdown future cancels active
+connections and waits for the local worker and its resources; it does not drain responses.
+Dropping the serving future signals cancellation but cannot wait for cleanup.
 
 ::: tip Logging status
 `run_app` wires logging automatically; custom entrypoints should install a logger explicitly.
@@ -110,31 +292,47 @@ to control the bind address or store setup.
 
 ## Testing
 
-The Axum adapter enables standard Rust testing:
+Enable `edgezero-adapter-axum`'s `test-utils` feature for `AxumTestServer`. It binds real TCP and
+runs the same bounded HTTP/1 parser, admission, body-read deadlines, response framing, streaming,
+write deadlines and egress coordinator as the production server, with its own local executor:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edgezero_core::app::Hooks;
-    use edgezero_core::http::{Request, Method};
+    use edgezero_adapter_axum::dev_server::{AxumDevServer, AxumDevServerConfig};
+    use edgezero_adapter_axum::test_utils::AxumTestServer;
+    use edgezero_core::app::App as EdgeZeroApp;
 
     #[tokio::test]
     async fn test_handler() {
-        let app = App::build_app();
-        let router = app.router();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("/hello")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
+        let app = EdgeZeroApp::build::<App>(edgezero_adapter_axum::AXUM_PLATFORM)
+            .expect("configured app");
+        let server = AxumDevServer::with_config(app, AxumDevServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            enable_ctrl_c: false,
+            ..AxumDevServerConfig::default()
+        });
+        let running = AxumTestServer::start(server).await.unwrap();
+        let response = reqwest::get(format!("http://{}/hello", running.address()))
+            .await.unwrap();
         assert_eq!(response.status(), 200);
+        running.shutdown().await.unwrap();
     }
 }
 ```
+
+Use an HTTP client such as `reqwest` in the application's dev-dependencies. Select loopback port
+zero explicitly to avoid port conflicts. `shutdown().await` cancels live connections, waits for
+resource cleanup and returns the serving result; dropping the handle only signals cancellation.
+Startup binding failures are returned by `start`, and later serving failures by `shutdown`.
+
+The helper skips logger initialization, startup preflight and metadata-driven store opening;
+attach stores to the supplied server explicitly. It does not install a global test executor.
+An app assembled with Cloudflare or Spin platform metadata keeps that metadata and all configured
+policies, but receives Axum connection context, not a Cloudflare or Spin provider request context.
+`router.oneshot` remains a routing-only unit-test facility: it skips this ingress and egress path.
+Begun-outbound-request coverage additionally depends on the separate eager-dispatch implementation.
 
 Run tests:
 
@@ -175,6 +373,10 @@ EDGEZERO__SECRETS__API_KEY=mysecret edgezero serve --adapter axum
 
 For local development, each declared `[stores.config]` id resolves to a
 local-file config store backed by `.edgezero/local-config-<id>.json`.
+The standard runner loads immutable snapshots before binding its listener.
+Missing files create empty declared stores. Malformed files retain typed failing
+bindings, while allocation-limit violations fail startup. Changes made by `config
+push` take effect after restart, not on the next request.
 The portable manifest carries no inline defaults — the
 pre-rewrite `[stores.config.defaults]` table is gone (see
 [the migration guide](../manifest-store-migration.md)).
@@ -219,12 +421,59 @@ flow — the bundled `edgezero config push` errors), which writes the same
 `.edgezero/local-config-<id>.json` files the runtime reads — no shell-out, no
 server to authenticate against.
 
+### Snapshot Allocation Limits
+
+Set `EDGEZERO__ADAPTER__CONFIG_STORE__<SETTING>` through the normal environment
+configuration/startup path. Absent settings use finite defaults; explicit invalid,
+zero, overflowing or inconsistent settings fail before listener binding.
+
+| Setting              | Default | Supported Range / Scope                                                    |
+| -------------------- | ------- | -------------------------------------------------------------------------- |
+| `MAX_FILE_BYTES`     | 16 MiB  | 1 byte to 256 MiB per file, including JSON syntax and escaping             |
+| `MAX_ENTRIES`        | 1024    | 1 to 65536 entries per file, including duplicate-key attempts              |
+| `MAX_KEY_BYTES`      | 1024    | 1 byte to 64 KiB decoded UTF-8 per key, no larger than the file cap        |
+| `MAX_VALUE_BYTES`    | 8 MiB   | 1 byte to 256 MiB decoded UTF-8 per value, no larger than the file cap     |
+| `MAX_RESIDENT_BYTES` | 32 MiB  | 1 byte to 256 MiB across every config snapshot in the startup registry     |
+| `MAX_STARTUP_BYTES`  | 112 MiB | 1 byte to 1 GiB across resident snapshots plus one file's reserved staging |
+
+These are requested-allocation charges, not an RSS ceiling. Stores load sequentially.
+For wire cap `W`, staging reserves `5 * max(W, 32)` bytes: input growth, escaped-string
+decoder growth (including old/new allocation overlap), and temporary decoded key/value
+strings. A separate 4096-byte read buffer lives on the stack. The startup limit must
+cover staging; every index/payload reservation also checks residency plus staging.
+This decoder allowance is audited against pinned `serde_json 1.0.150` and Rust 1.95.0;
+changing those allocation implementations requires repeating the audit.
+
+The sorted snapshot index reserves `MAX_ENTRIES * size_of::<(String, ConfigValue)>()`
+bytes per store. Each entry additionally charges key UTF-8 bytes, value UTF-8 bytes,
+two `Arc` reference counts and up to `size_of::<usize>() - 1` alignment bytes. Duplicate
+keys are rejected. Keys/values are size-checked before their owned copies; actual reads
+detect file growth and reject the first excess byte without appending it. Non-string
+values are rejected without constructing a JSON tree. Failed loads drop staging and
+partial snapshots. Diagnostics never contain file contents.
+
+`get` and `get_bounded` return `ConfigValue`, an independently owned, shared UTF-8
+payload. Clones allocate no payload and never retain the whole file. Bounded reads
+check both extraction caps and the injected deadline before returning an `Arc` clone;
+there is no request-time file read. Borrow with `as_str()` or `as_ref()`; `to_string()`
+is an explicit allocating boundary. Already-owned `from_map` inputs are caller allocations
+outside these startup-reader charges.
+
+Budget fixed manifest/registry/handle metadata separately, as well as allocator overhead,
+environment-backed secret reads, concurrently parsed config trees, typed outputs and
+application retention of returned handles. Canonical hashing streams into SHA-256 rather
+than staging a second full JSON string. The extractor drops its raw handle before resolving
+secrets. Kernel buffers, filesystem page cache, allocator fragmentation and total RSS are
+not guaranteed. Local file reads are synchronous; no finite startup I/O interruption is
+claimed. The broad `config-read-allocation-bounds` capability remains `Unsupported`;
+this bounded local config-snapshot path does not certify every secret/provider allocation.
+
 ## Container Deployment
 
 Build and deploy as a standard container:
 
 ```dockerfile
-FROM rust:1.75 as builder
+FROM rust:1.95.0 as builder
 WORKDIR /app
 COPY . .
 RUN cargo build -p my-app-adapter-axum --release
@@ -262,14 +511,14 @@ A typical development workflow:
 
 ## Differences from Edge Adapters
 
-| Aspect      | Axum           | Fastly/Cloudflare |
-| ----------- | -------------- | ----------------- |
-| Compilation | Native         | Wasm              |
-| Cold start  | ~0ms           | ~0ms (Wasm)       |
-| Memory      | Unlimited      | 128MB typical     |
-| Filesystem  | Full access    | Sandboxed         |
-| Network     | Direct         | Backend/fetch     |
-| Concurrency | Multi-threaded | Single-threaded   |
+| Aspect      | Axum                            | Fastly/Cloudflare |
+| ----------- | ------------------------------- | ----------------- |
+| Compilation | Native                          | Wasm              |
+| Cold start  | ~0ms                            | ~0ms (Wasm)       |
+| Memory      | Operator configured             | Provider quota    |
+| Filesystem  | Full access                     | Sandboxed         |
+| Network     | Direct                          | Backend/fetch     |
+| Concurrency | Bounded, connection-local async | Runtime dependent |
 
 ::: tip Development Parity
 While Axum provides a convenient development environment, always test on actual edge platforms before deploying. Provider-specific behaviour such as store backends and request context differs on the real targets.
@@ -287,14 +536,17 @@ performance or resource lifetimes.
 ## Ingress provenance
 
 Conversion captures runtime URI parts and retains the original HeaderMap and
-extensions. JSON buffering and non-JSON streaming are unchanged. The standard
+extensions. Canonical dispatch attaches the body lazily after admission, under
+the admitted limits and deadline. The standard
 plain HTTP listener supplies a private transport marker. Origin is available
 only with that marker and one valid Host consistent with any URI authority and
 scheme; forwarded headers do not supply a scheme. Generic conversion without
 the marker leaves origin unavailable.
 
-Raw TCP tests retain extension methods, tested path spelling, same-name
-duplicates and FF values. Hyper folds identical Content-Length values and
+The historical raw TCP observations imported from main `87456c70` retain
+extension methods, tested path spelling, same-name duplicates and FF values.
+Rerun the fixture with the merged candidate's dependencies before citing a new
+result. In that record, Hyper folds identical Content-Length values and
 rejects conflicting lengths before the hook. Common field multiplicity remains
 `Unknown`, including Content-Length: the runtime binding does not reveal whether
 the parser folded original fields. Global wire order remains unavailable.

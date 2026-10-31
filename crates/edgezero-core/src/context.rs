@@ -1,24 +1,436 @@
-use crate::body::Body;
-use crate::error::EdgeError;
-use crate::http::Request;
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    env, mem,
+    rc::Rc,
+    task::Poll,
+};
+
+use crate::body::{Body, BodyStream};
+use crate::config_store::ConfigExtractionLimits;
+use crate::error::{
+    BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin, ResponseLimitReason,
+    StoreExtractionReason,
+};
+use crate::error_detail::ProviderFailureDetail;
+use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use crate::http::{
+    Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Uri, Version,
+};
+use crate::ingress::{AdmittedIngress, IngressGrant};
+use crate::outbound::{ForwardedReadDeadline, HttpClient};
 use crate::params::PathParams;
-use crate::proxy::ProxyHandle;
+use crate::router::RouteMetadata;
 use crate::store_registry::{
     BoundConfigStore, BoundKvStore, BoundSecretStore, ConfigRegistry, ConfigStoreBinding,
     KvRegistry, SecretRegistry, StoreRegistry,
 };
+use crate::time::{Deadline, MonotonicClock, MonotonicInstant};
+use futures_util::{StreamExt as _, stream};
 use serde::de::DeserializeOwned;
+
+/// Default maximum body size accepted by JSON extractors (8 MiB).
+pub const DEFAULT_INBOUND_JSON_BYTES: usize = 8 * 1024 * 1024;
+/// Default maximum body size accepted by form extractors (1 MiB).
+pub const DEFAULT_INBOUND_FORM_BYTES: usize = 1024 * 1024;
+
+/// Non-consuming snapshot of inbound body ownership.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BodyKind {
+    Cached { len: usize },
+    Draining,
+    Initial,
+    Poisoned,
+    Taken,
+}
+
+/// Request-owned variable values supplied by an adapter that cannot expose process environment.
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeVariables(BTreeMap<String, String>);
+
+impl RuntimeVariables {
+    #[must_use]
+    #[inline]
+    pub fn from_vars<I>(vars: I) -> Self
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        Self(vars.into_iter().collect())
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+}
+
+enum BodyState {
+    Cached(bytes::Bytes),
+    Draining,
+    Initial(Body),
+    Poisoned(StoredError),
+    Taken,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FallbackDrainOutcome {
+    Complete,
+    Exceeded,
+    TimedOut,
+}
+
+#[derive(Clone, Copy)]
+enum FixedViolation {
+    Exceeded,
+    TimedOut,
+}
+
+// Raw input accounting is shared by source wrappers, never carried in mutable extensions.
+struct InputGuard {
+    clock: MonotonicClock,
+    complete: Cell<bool>,
+    consumed: Cell<usize>,
+    deadline: Option<Deadline>,
+    declared: Option<u64>,
+    failure: RefCell<Option<StoredError>>,
+    max: Option<usize>,
+    violation: Cell<Option<FixedViolation>>,
+}
+
+impl InputGuard {
+    fn check(&self) -> Result<(), EdgeError> {
+        if let Some(error) = &*self.failure.borrow() {
+            return Err(error.to_edge_error());
+        }
+        if self.complete.get() {
+            return Ok(());
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| deadline.is_expired_at(self.clock.now()))
+        {
+            return Err(self.fail_fixed(FixedViolation::TimedOut));
+        }
+        if self
+            .max
+            .zip(self.declared)
+            .is_some_and(|(max, declared)| u64::try_from(max).is_ok_and(|limit| declared > limit))
+        {
+            return Err(self.fail_fixed(FixedViolation::Exceeded));
+        }
+        Ok(())
+    }
+    fn fail(&self, error: EdgeError) -> EdgeError {
+        let mut failure = self.failure.borrow_mut();
+        failure.get_or_insert_with(|| StoredError::capture(&error));
+        error
+    }
+
+    fn fail_fixed(&self, violation: FixedViolation) -> EdgeError {
+        self.violation.set(Some(violation));
+        self.fail(match violation {
+            FixedViolation::Exceeded => {
+                EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound)
+            }
+            FixedViolation::TimedOut => {
+                EdgeError::request_timeout("inbound body read deadline exceeded")
+            }
+        })
+    }
+
+    fn observe(&self, len: usize) -> Result<(), EdgeError> {
+        let Some(max) = self.max else {
+            return Ok(());
+        };
+        let total = self
+            .consumed
+            .get()
+            .checked_add(len)
+            .filter(|total| *total <= max)
+            .ok_or_else(|| self.fail_fixed(FixedViolation::Exceeded))?;
+        self.consumed.set(total);
+        Ok(())
+    }
+
+    fn outcome(&self) -> Option<FallbackDrainOutcome> {
+        self.violation.get().map(|violation| match violation {
+            FixedViolation::Exceeded => FallbackDrainOutcome::Exceeded,
+            FixedViolation::TimedOut => FallbackDrainOutcome::TimedOut,
+        })
+    }
+}
+
+enum StoredError {
+    BadGateway(String, BadGatewayReason, Option<ProviderFailureDetail>),
+    BadRequest(String, Option<ProviderFailureDetail>),
+    ConfigOutOfDate(String, String),
+    GatewayTimeout(String, BudgetSource, Option<ProviderFailureDetail>),
+    Internal(String, Option<ProviderFailureDetail>),
+    MethodNotAllowed(Method, Vec<Method>),
+    NotFound(String),
+    NotImplemented(String),
+    PayloadTooLarge(RequestBodyOverflowOrigin),
+    RequestHeaderFieldsTooLarge(String),
+    RequestTimeout(String),
+    ResponseTooLarge(String, ResponseLimitReason),
+    ServiceUnavailable(String),
+    StoreExtraction(StoreExtractionReason, String, Option<String>),
+    UriTooLong(String),
+    Validation(String),
+}
+
+impl StoredError {
+    fn cancelled() -> Self {
+        Self::Internal("inbound body drain cancelled".to_owned(), None)
+    }
+
+    fn capture(error: &EdgeError) -> Self {
+        match error {
+            EdgeError::BadGateway {
+                message,
+                reason,
+                provider_detail,
+            } => Self::BadGateway(message.clone(), *reason, *provider_detail),
+            EdgeError::BadRequest {
+                message,
+                provider_detail,
+            } => Self::BadRequest(message.clone(), *provider_detail),
+            EdgeError::ConfigOutOfDate {
+                message,
+                field_path,
+            } => Self::ConfigOutOfDate(message.clone(), field_path.clone()),
+            EdgeError::GatewayTimeout {
+                message,
+                cause,
+                provider_detail,
+            } => Self::GatewayTimeout(message.clone(), *cause, *provider_detail),
+            EdgeError::Internal {
+                source,
+                provider_detail,
+            } => Self::Internal(source.to_string(), *provider_detail),
+            EdgeError::MethodNotAllowed { method, allowed } => {
+                Self::MethodNotAllowed(method.clone(), allowed.clone())
+            }
+            EdgeError::NotFound { path } => Self::NotFound(path.clone()),
+            EdgeError::NotImplemented { message } => Self::NotImplemented(message.clone()),
+            EdgeError::PayloadTooLarge { origin } => Self::PayloadTooLarge(*origin),
+            EdgeError::RequestHeaderFieldsTooLarge { message } => {
+                Self::RequestHeaderFieldsTooLarge(message.clone())
+            }
+            EdgeError::RequestTimeout { message } => Self::RequestTimeout(message.clone()),
+            EdgeError::ResponseTooLarge { message, reason } => {
+                Self::ResponseTooLarge(message.clone(), *reason)
+            }
+            EdgeError::ServiceUnavailable { message } => Self::ServiceUnavailable(message.clone()),
+            EdgeError::StoreExtraction {
+                reason,
+                message,
+                field_path,
+            } => Self::StoreExtraction(*reason, message.clone(), field_path.clone()),
+            EdgeError::UriTooLong { message } => Self::UriTooLong(message.clone()),
+            EdgeError::Validation { message } => Self::Validation(message.clone()),
+        }
+    }
+
+    fn to_edge_error(&self) -> EdgeError {
+        match self {
+            Self::BadGateway(message, reason, detail) => match detail {
+                Some(evidence) => {
+                    EdgeError::bad_gateway_with_detail(message.clone(), *reason, *evidence)
+                }
+                None => EdgeError::bad_gateway_with_reason(message.clone(), *reason),
+            },
+            Self::BadRequest(message, detail) => match detail {
+                Some(evidence) => EdgeError::bad_request_with_detail(message.clone(), *evidence),
+                None => EdgeError::bad_request(message.clone()),
+            },
+            Self::ConfigOutOfDate(message, field_path) => {
+                EdgeError::config_out_of_date(message.clone(), field_path.clone())
+            }
+            Self::GatewayTimeout(message, cause, detail) => match detail {
+                Some(evidence) => {
+                    EdgeError::gateway_timeout_with_detail(message.clone(), *cause, *evidence)
+                }
+                None => EdgeError::gateway_timeout_caused(message.clone(), *cause),
+            },
+            Self::Internal(rendered, detail) => match detail {
+                Some(evidence) => {
+                    EdgeError::internal_with_detail(anyhow::anyhow!(rendered.clone()), *evidence)
+                }
+                None => EdgeError::internal(anyhow::anyhow!(rendered.clone())),
+            },
+            Self::MethodNotAllowed(method, allowed) => EdgeError::MethodNotAllowed {
+                method: method.clone(),
+                allowed: allowed.clone(),
+            },
+            Self::NotFound(path) => EdgeError::not_found(path.clone()),
+            Self::NotImplemented(message) => EdgeError::not_implemented(message.clone()),
+            Self::PayloadTooLarge(origin) => EdgeError::payload_too_large(*origin),
+            Self::RequestHeaderFieldsTooLarge(message) => {
+                EdgeError::request_header_fields_too_large(message.clone())
+            }
+            Self::RequestTimeout(message) => EdgeError::request_timeout(message.clone()),
+            Self::ResponseTooLarge(message, reason) => {
+                EdgeError::response_too_large_with_reason(message.clone(), *reason)
+            }
+            Self::ServiceUnavailable(message) => EdgeError::service_unavailable(message.clone()),
+            Self::StoreExtraction(reason, message, field_path) => {
+                EdgeError::store_extraction(*reason, message.clone(), field_path.clone())
+            }
+            Self::UriTooLong(message) => EdgeError::uri_too_long(message.clone()),
+            Self::Validation(message) => EdgeError::validation(message.clone()),
+        }
+    }
+}
 
 /// Request context exposed to handlers and middleware.
 pub struct RequestContext {
+    body: RefCell<BodyState>,
+    config_extraction_limits: ConfigExtractionLimits,
+    ingress_grant: RefCell<Option<IngressGrant>>,
+    input_guard: Option<Rc<InputGuard>>,
+    monotonic_clock: MonotonicClock,
+    parts: RequestParts,
     path_params: PathParams,
-    request: Request,
+    read_deadline: Option<Deadline>,
+    request_start: MonotonicInstant,
+    route_metadata: Option<RouteMetadata>,
+}
+
+struct DrainGuard<'cell> {
+    armed: bool,
+    body: &'cell RefCell<BodyState>,
+}
+
+impl DrainGuard<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+)]
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(mut state) = self.body.try_borrow_mut()
+        {
+            *state = BodyState::Poisoned(StoredError::cancelled());
+        }
+    }
 }
 
 impl RequestContext {
+    /// Drains and caches the inbound body under the caller's byte cap.
+    ///
+    /// # Errors
+    /// Returns 413 on overflow, 408 on an admitted read deadline, and preserves a sticky
+    /// source error for every later accessor.
     #[inline]
-    pub fn body(&self) -> &Body {
-        self.request.body()
+    pub async fn body_bytes(&self, max: usize) -> Result<bytes::Bytes, EdgeError> {
+        let body = {
+            let mut state = self.body.borrow_mut();
+            if matches!(&*state, BodyState::Initial(_)) {
+                if let Some(guard) = &self.input_guard
+                    && let Err(error) = guard.check()
+                {
+                    let stored = StoredError::capture(&error);
+                    let returned = stored.to_edge_error();
+                    *state = BodyState::Poisoned(stored);
+                    return Err(returned);
+                }
+                if self.input_guard.is_none()
+                    && let Err(error) =
+                        check_read_deadline(self.read_deadline, &self.monotonic_clock)
+                {
+                    let stored = StoredError::capture(&error);
+                    let returned = stored.to_edge_error();
+                    *state = BodyState::Poisoned(stored);
+                    return Err(returned);
+                }
+                if self.input_guard.is_none() && declared_body_exceeds(&self.parts.headers, max) {
+                    return Err(EdgeError::payload_too_large(
+                        RequestBodyOverflowOrigin::Inbound,
+                    ));
+                }
+            }
+            match mem::replace(&mut *state, BodyState::Draining) {
+                BodyState::Cached(bytes) => {
+                    let result = check_cached_body(&bytes, max);
+                    *state = BodyState::Cached(bytes);
+                    return result;
+                }
+                BodyState::Draining => {
+                    *state = BodyState::Draining;
+                    return Err(EdgeError::internal(anyhow::anyhow!(
+                        "body read already in progress"
+                    )));
+                }
+                BodyState::Initial(body) => body,
+                BodyState::Poisoned(error) => {
+                    let returned = error.to_edge_error();
+                    *state = BodyState::Poisoned(error);
+                    return Err(returned);
+                }
+                BodyState::Taken => {
+                    *state = BodyState::Taken;
+                    return Err(EdgeError::internal(anyhow::anyhow!(
+                        "body already consumed via take_body"
+                    )));
+                }
+            }
+        };
+
+        let mut guard = DrainGuard {
+            armed: true,
+            body: &self.body,
+        };
+        let result = async {
+            let protected_body = prepare_protected_body(body, self.input_guard.as_deref())?;
+            let deadline = if self.input_guard.is_some() {
+                None
+            } else {
+                self.read_deadline
+            };
+            drain_body(protected_body, max, deadline, &self.monotonic_clock).await
+        }
+        .await;
+        match result {
+            Ok(bytes) => {
+                *self.body.borrow_mut() = BodyState::Cached(bytes.clone());
+                guard.disarm();
+                Ok(bytes)
+            }
+            Err(error) => {
+                let stored = StoredError::capture(&error);
+                let returned = stored.to_edge_error();
+                *self.body.borrow_mut() = BodyState::Poisoned(stored);
+                guard.disarm();
+                Err(returned)
+            }
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn body_kind(&self) -> BodyKind {
+        match &*self.body.borrow() {
+            BodyState::Cached(bytes) => BodyKind::Cached { len: bytes.len() },
+            BodyState::Draining => BodyKind::Draining,
+            BodyState::Initial(_) => BodyKind::Initial,
+            BodyState::Poisoned(_) => BodyKind::Poisoned,
+            BodyState::Taken => BodyKind::Taken,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn config_extraction_limits(&self) -> ConfigExtractionLimits {
+        self.config_extraction_limits
     }
 
     /// Resolve the [`BoundConfigStore`] for `id`. Strict lookup: when a
@@ -29,8 +441,8 @@ impl RequestContext {
     /// bug rather than a hand-wired single-handle adapter (spec hard-cutoff).
     #[inline]
     pub fn config_store(&self, id: &str) -> Option<BoundConfigStore> {
-        self.request
-            .extensions()
+        self.parts
+            .extensions
             .get::<ConfigRegistry>()
             .and_then(|registry| registry.named(id))
             .map(|binding| binding.handle)
@@ -40,10 +452,8 @@ impl RequestContext {
     #[must_use]
     #[inline]
     pub fn config_store_binding(&self, id: &str) -> Option<&ConfigStoreBinding> {
-        self.request
-            .extensions()
-            .get::<ConfigRegistry>()
-            .and_then(|registry| registry.named_ref(id))
+        let registry = self.parts.extensions.get::<ConfigRegistry>()?;
+        registry.named_ref(id)
     }
 
     /// Resolve the default [`BoundConfigStore`] — the wired registry's
@@ -51,8 +461,8 @@ impl RequestContext {
     /// See [`Self::config_store`] for the hard-cutoff rationale.
     #[inline]
     pub fn config_store_default(&self) -> Option<BoundConfigStore> {
-        self.request
-            .extensions()
+        self.parts
+            .extensions
             .get::<ConfigRegistry>()
             .and_then(StoreRegistry::default)
             .map(|binding| binding.handle)
@@ -63,10 +473,24 @@ impl RequestContext {
     #[must_use]
     #[inline]
     pub fn config_store_default_binding(&self) -> Option<&ConfigStoreBinding> {
-        self.request
-            .extensions()
-            .get::<ConfigRegistry>()
-            .and_then(|registry| registry.default_ref())
+        let registry = self.parts.extensions.get::<ConfigRegistry>()?;
+        registry.default_ref()
+    }
+
+    pub(crate) async fn discard_pre_dispatch_body(self) -> Result<FallbackDrainOutcome, EdgeError> {
+        if let Some(outcome) = self.fixed_input_outcome() {
+            return Ok(outcome);
+        }
+        let result = async {
+            let unread = self.take_body()?;
+            let body = prepare_protected_body(unread, self.input_guard.as_deref())?;
+            drain_body_discard(body).await
+        }
+        .await;
+        if let Some(outcome) = self.fixed_input_outcome() {
+            return Ok(outcome);
+        }
+        result.map(|()| FallbackDrainOutcome::Complete)
     }
 
     /// Clone a request extension of type `T`, if present. Used by the
@@ -78,40 +502,117 @@ impl RequestContext {
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.request.extensions().get::<T>().cloned()
+        self.parts.extensions.get::<T>().cloned()
     }
 
-    /// # Errors
-    /// Returns [`EdgeError::bad_request`] if the body cannot be deserialized as form-urlencoded data into `T`, or the body is streaming.
+    #[must_use]
     #[inline]
-    pub fn form<T>(&self) -> Result<T, EdgeError>
-    where
-        T: DeserializeOwned,
-    {
-        match self.request.body() {
-            Body::Once(bytes) => serde_urlencoded::from_bytes(bytes.as_ref())
-                .map_err(|err| EdgeError::bad_request(format!("invalid form payload: {err}"))),
-            Body::Stream(_) => Err(EdgeError::bad_request(
-                "streaming bodies are not supported for form extraction",
-            )),
+    pub fn extensions(&self) -> &Extensions {
+        &self.parts.extensions
+    }
+
+    #[inline]
+    pub fn extensions_mut(&mut self) -> &mut Extensions {
+        &mut self.parts.extensions
+    }
+
+    pub(crate) fn finish_pre_dispatch(
+        mut self,
+        params: PathParams,
+        route_metadata: Option<RouteMetadata>,
+        ingress: Option<AdmittedIngress>,
+    ) -> Self {
+        self.path_params = params;
+        self.route_metadata = route_metadata;
+        if let Some(admitted) = ingress {
+            let (request_start, read_deadline, grant, limits, clock) = admitted.into_parts();
+            self.config_extraction_limits = limits;
+            *self.ingress_grant.get_mut() = Some(grant);
+            self.monotonic_clock = clock;
+            self.read_deadline = Some(read_deadline);
+            self.request_start = request_start;
         }
+        self
     }
 
-    #[inline]
-    pub fn into_request(self) -> Request {
-        self.request
+    pub(crate) fn fixed_input_outcome(&self) -> Option<FallbackDrainOutcome> {
+        let guard = self.input_guard.as_ref()?;
+        guard.outcome()
     }
 
+    /// Buffers at most `max` bytes and deserializes form-urlencoded data.
+    ///
     /// # Errors
-    /// Returns [`EdgeError::bad_request`] if the body is not valid JSON for `T`.
+    /// Returns 413 on overflow, 400 on malformed input, and preserves body drain errors.
     #[inline]
-    pub fn json<T>(&self) -> Result<T, EdgeError>
+    pub async fn form_within<T>(&self, max: usize) -> Result<T, EdgeError>
     where
         T: DeserializeOwned,
     {
-        self.request
-            .body()
-            .to_json()
+        let bytes = self.body_bytes(max).await?;
+        serde_urlencoded::from_bytes(bytes.as_ref())
+            .map_err(|err| EdgeError::bad_request(format!("invalid form payload: {err}")))
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn headers(&self) -> &HeaderMap {
+        &self.parts.headers
+    }
+
+    #[inline]
+    pub fn headers_mut(&mut self) -> &mut HeaderMap {
+        &mut self.parts.headers
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn http_client(&self) -> Option<HttpClient> {
+        self.parts.extensions.get::<HttpClient>().cloned()
+    }
+
+    /// Reassembles the request while preserving an initial or cached body.
+    ///
+    /// # Errors
+    /// Returns the sticky body error or an internal error if a drain is in progress.
+    #[inline]
+    pub fn into_request(self) -> Result<Request, EdgeError> {
+        if let Some(guard) = &self.input_guard
+            && let Some(error) = &*guard.failure.borrow()
+        {
+            return Err(error.to_edge_error());
+        }
+        let body = match self.body.into_inner() {
+            BodyState::Cached(bytes) => Body::from(bytes),
+            BodyState::Draining => {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "body read in progress"
+                )));
+            }
+            BodyState::Initial(body) => body,
+            BodyState::Poisoned(error) => return Err(error.to_edge_error()),
+            BodyState::Taken => Body::empty(),
+        };
+        let mut parts = self.parts;
+        if let Some(deadline) = self.read_deadline {
+            parts
+                .extensions
+                .insert(ForwardedReadDeadline::new(deadline));
+        }
+        Ok(Request::from_parts(parts, body))
+    }
+
+    /// Buffers at most `max` bytes and deserializes JSON.
+    ///
+    /// # Errors
+    /// Returns 413 on overflow, 400 on malformed input, and preserves body drain errors.
+    #[inline]
+    pub async fn json_within<T>(&self, max: usize) -> Result<T, EdgeError>
+    where
+        T: DeserializeOwned,
+    {
+        let bytes = self.body_bytes(max).await?;
+        serde_json::from_slice(bytes.as_ref())
             .map_err(|err| EdgeError::bad_request(format!("invalid JSON payload: {err}")))
     }
 
@@ -122,10 +623,8 @@ impl RequestContext {
     /// the conventional `"default"` id (spec hard-cutoff).
     #[inline]
     pub fn kv_store(&self, id: &str) -> Option<BoundKvStore> {
-        self.request
-            .extensions()
-            .get::<KvRegistry>()
-            .and_then(|registry| registry.named(id))
+        let registry = self.parts.extensions.get::<KvRegistry>()?;
+        registry.named(id)
     }
 
     /// Resolve the default [`BoundKvStore`] — the wired registry's
@@ -133,18 +632,121 @@ impl RequestContext {
     /// See [`Self::kv_store`] for the hard-cutoff rationale.
     #[inline]
     pub fn kv_store_default(&self) -> Option<BoundKvStore> {
-        self.request
-            .extensions()
-            .get::<KvRegistry>()
-            .and_then(StoreRegistry::default)
+        let registry = self.parts.extensions.get::<KvRegistry>()?;
+        registry.default()
+    }
+
+    pub(crate) fn map_pre_dispatch_body<F>(
+        &mut self,
+        max_output: usize,
+        mut map: F,
+    ) -> Result<(), EdgeError>
+    where
+        F: FnMut(bytes::Bytes) -> Result<bytes::Bytes, EdgeError> + 'static,
+    {
+        let Some(guard) = self.input_guard.as_ref().map(Rc::clone) else {
+            return Err(EdgeError::internal(anyhow::anyhow!(
+                "protected input guard missing"
+            )));
+        };
+        let body = self.take_body()?;
+        match body.into_stream() {
+            Ok(source) => {
+                self.parts.headers.remove(CONTENT_LENGTH);
+                self.parts.headers.remove(TRANSFER_ENCODING);
+                *self.body.borrow_mut() =
+                    BodyState::Initial(map_protected_stream(source, guard, max_output, map));
+                Ok(())
+            }
+            Err(buffered_source) => {
+                let buffered = prepare_protected_body(buffered_source, Some(&guard))
+                    .map_err(|error| self.poison_protected_body(error))?;
+                let input = buffered.into_bytes().ok_or_else(|| {
+                    EdgeError::internal(anyhow::anyhow!("buffered body lost payload"))
+                })?;
+                match map(input).and_then(|bytes| check_cached_body(&bytes, max_output)) {
+                    Ok(bytes) => {
+                        self.parts.headers.remove(TRANSFER_ENCODING);
+                        self.parts
+                            .headers
+                            .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+                        *self.body.borrow_mut() = BodyState::Cached(bytes);
+                        Ok(())
+                    }
+                    Err(error) => Err(self.poison_protected_body(error)),
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn method(&self) -> &Method {
+        &self.parts.method
+    }
+
+    /// Returns the clock paired with this request's admitted ingress lifetime.
+    #[must_use]
+    #[inline]
+    pub fn monotonic_clock(&self) -> MonotonicClock {
+        self.monotonic_clock.clone()
     }
 
     #[inline]
     pub fn new(request: Request, params: PathParams) -> Self {
+        let (parts, body) = request.into_parts();
         Self {
+            body: RefCell::new(BodyState::Initial(body)),
+            config_extraction_limits: ConfigExtractionLimits::default(),
+            ingress_grant: RefCell::new(None),
+            input_guard: None,
+            monotonic_clock: MonotonicClock::default(),
+            parts,
             path_params: params,
-            request,
+            read_deadline: None,
+            request_start: MonotonicInstant::now(),
+            route_metadata: None,
         }
+    }
+    pub(crate) fn new_pre_dispatch(request: Request, ingress: Option<&AdmittedIngress>) -> Self {
+        let clock = ingress.map_or_else(MonotonicClock::default, AdmittedIngress::monotonic_clock);
+        let deadline = ingress.map(AdmittedIngress::read_deadline);
+        let guard = Rc::new(InputGuard {
+            clock: clock.clone(),
+            complete: Cell::new(false),
+            consumed: Cell::new(0),
+            deadline,
+            declared: declared_body_length(request.headers()),
+            failure: RefCell::new(None),
+            max: ingress.and_then(AdmittedIngress::fallback_max_body_bytes),
+            violation: Cell::new(None),
+        });
+        let (parts, raw_body) = request.into_parts();
+        let body = guard_input(raw_body, Rc::clone(&guard));
+        let request_start = ingress.map_or_else(|| clock.now(), AdmittedIngress::request_start);
+        Self {
+            body: RefCell::new(BodyState::Initial(body)),
+            config_extraction_limits: ConfigExtractionLimits::default(),
+            ingress_grant: RefCell::new(None),
+            input_guard: Some(guard),
+            monotonic_clock: clock,
+            parts,
+            path_params: PathParams::default(),
+            read_deadline: deadline,
+            request_start,
+            route_metadata: None,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn parts(&self) -> &RequestParts {
+        &self.parts
+    }
+
+    #[inline]
+    pub fn parts_mut(&mut self) -> &mut RequestParts {
+        &mut self.parts
     }
 
     /// # Errors
@@ -164,9 +766,16 @@ impl RequestContext {
         &self.path_params
     }
 
-    #[inline]
-    pub fn proxy_handle(&self) -> Option<ProxyHandle> {
-        self.request.extensions().get::<ProxyHandle>().cloned()
+    fn poison_protected_body(&self, failure: EdgeError) -> EdgeError {
+        let error = if let Some(guard) = &self.input_guard {
+            guard.fail(failure)
+        } else {
+            failure
+        };
+        let stored = StoredError::capture(&error);
+        let returned = stored.to_edge_error();
+        *self.body.borrow_mut() = BodyState::Poisoned(stored);
+        returned
     }
 
     /// # Errors
@@ -176,19 +785,31 @@ impl RequestContext {
     where
         T: DeserializeOwned,
     {
-        let query = self.request.uri().query().unwrap_or("");
+        let query = self.parts.uri.query().unwrap_or("");
         serde_urlencoded::from_str(query)
             .map_err(|err| EdgeError::bad_request(format!("invalid query string: {err}")))
     }
 
+    /// Absolute deadline governing the admitted inbound body, if this context entered
+    /// through the adapter admission seam.
+    #[must_use]
     #[inline]
-    pub fn request(&self) -> &Request {
-        &self.request
+    pub fn read_deadline(&self) -> Option<Deadline> {
+        self.read_deadline
     }
 
+    /// Monotonic instant captured at ingress entry or low-level context construction.
+    #[must_use]
     #[inline]
-    pub fn request_mut(&mut self) -> &mut Request {
-        &mut self.request
+    pub fn request_start(&self) -> MonotonicInstant {
+        self.request_start
+    }
+
+    /// Canonical matched route metadata, absent for low-level contexts.
+    #[must_use]
+    #[inline]
+    pub fn route_metadata(&self) -> Option<&RouteMetadata> {
+        self.route_metadata.as_ref()
     }
 
     /// Resolve the [`BoundSecretStore`] for `id`. Strict lookup: when a
@@ -198,10 +819,8 @@ impl RequestContext {
     /// registry under the conventional `"default"` id (spec hard-cutoff).
     #[inline]
     pub fn secret_store(&self, id: &str) -> Option<BoundSecretStore> {
-        self.request
-            .extensions()
-            .get::<SecretRegistry>()
-            .and_then(|registry| registry.named(id))
+        let registry = self.parts.extensions.get::<SecretRegistry>()?;
+        registry.named(id)
     }
 
     /// Resolve the default [`BoundSecretStore`] — the wired registry's
@@ -209,37 +828,397 @@ impl RequestContext {
     /// See [`Self::secret_store`] for the hard-cutoff rationale.
     #[inline]
     pub fn secret_store_default(&self) -> Option<BoundSecretStore> {
-        self.request
-            .extensions()
-            .get::<SecretRegistry>()
-            .and_then(StoreRegistry::default)
+        let registry = self.parts.extensions.get::<SecretRegistry>()?;
+        registry.default()
+    }
+
+    /// Consumes body ownership without buffering it.
+    ///
+    /// # Errors
+    /// Returns the sticky body error or an internal error if a drain is in progress.
+    #[inline]
+    pub fn take_body(&self) -> Result<Body, EdgeError> {
+        let mut state = self.body.borrow_mut();
+        if matches!(&*state, BodyState::Initial(_) | BodyState::Taken)
+            && let Some(guard) = &self.input_guard
+            && let Some(error) = &*guard.failure.borrow()
+        {
+            let stored = StoredError::capture(&error.to_edge_error());
+            let returned = stored.to_edge_error();
+            *state = BodyState::Poisoned(stored);
+            return Err(returned);
+        }
+        match mem::replace(&mut *state, BodyState::Taken) {
+            BodyState::Cached(bytes) => Ok(Body::from(bytes)),
+            BodyState::Draining => {
+                *state = BodyState::Draining;
+                Err(EdgeError::internal(anyhow::anyhow!(
+                    "body read in progress"
+                )))
+            }
+            BodyState::Initial(body) => Ok(body),
+            BodyState::Poisoned(error) => {
+                let returned = error.to_edge_error();
+                *state = BodyState::Poisoned(error);
+                Err(returned)
+            }
+            BodyState::Taken => {
+                *state = BodyState::Taken;
+                Ok(Body::empty())
+            }
+        }
+    }
+
+    /// Takes the application-owned ingress grant at most once.
+    #[must_use]
+    #[inline]
+    pub fn take_ingress_grant(&self) -> Option<IngressGrant> {
+        self.ingress_grant.borrow_mut().take()
+    }
+
+    pub(crate) async fn transform_pre_dispatch_body<F>(
+        &mut self,
+        max_input: usize,
+        max_output: usize,
+        transform: F,
+    ) -> Result<(), EdgeError>
+    where
+        F: FnOnce(bytes::Bytes) -> Result<bytes::Bytes, EdgeError>,
+    {
+        let input = self
+            .body_bytes(max_input)
+            .await
+            .map_err(|error| self.poison_protected_body(error))?;
+        let mut cancellation = DrainGuard {
+            armed: true,
+            body: &self.body,
+        };
+        let transformed = transform(input).and_then(|bytes| check_cached_body(&bytes, max_output));
+        match transformed {
+            Ok(bytes) => {
+                self.parts.headers.remove(TRANSFER_ENCODING);
+                self.parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+                *self.body.borrow_mut() = BodyState::Cached(bytes);
+                cancellation.disarm();
+                Ok(())
+            }
+            Err(error) => {
+                let returned = self.poison_protected_body(error);
+                cancellation.disarm();
+                Err(returned)
+            }
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn uri(&self) -> &Uri {
+        &self.parts.uri
+    }
+
+    /// Reads a request-scoped variable, or the process environment when the adapter provides none.
+    #[must_use]
+    #[inline]
+    pub fn variable(&self, name: &str) -> Option<String> {
+        if let Some(variables) = self.parts.extensions.get::<RuntimeVariables>() {
+            return variables.get(name).map(str::to_owned);
+        }
+        env::var(name).ok()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn version(&self) -> Version {
+        self.parts.version
+    }
+}
+
+fn prepare_protected_body(body: Body, policy: Option<&InputGuard>) -> Result<Body, EdgeError> {
+    if let Some(guard) = policy {
+        guard.check()?;
+        if !guard.complete.get()
+            && let Some(bytes) = body.as_bytes()
+        {
+            guard.observe(bytes.len())?;
+            guard.complete.set(true);
+        }
+    }
+    Ok(body)
+}
+
+fn guard_input(body: Body, guard: Rc<InputGuard>) -> Body {
+    let mut source = match body.into_stream() {
+        Ok(source) => Some(source),
+        Err(buffered) => return buffered,
+    };
+    Body::from_stream(stream::poll_fn(move |cx| {
+        let Some(current) = source.as_mut() else {
+            return Poll::Ready(None);
+        };
+        if let Err(error) = guard.check() {
+            drop(source.take());
+            return Poll::Ready(Some(Err(error)));
+        }
+        let next = current.poll_next_unpin(cx);
+        if let Err(error) = guard.check() {
+            drop(source.take());
+            return Poll::Ready(Some(Err(error)));
+        }
+        match next {
+            Poll::Ready(Some(Ok(bytes))) => match guard.observe(bytes.len()) {
+                Ok(()) => Poll::Ready(Some(Ok(bytes))),
+                Err(error) => {
+                    drop(source.take());
+                    Poll::Ready(Some(Err(error)))
+                }
+            },
+            Poll::Ready(Some(Err(error))) => {
+                if matches!(error, EdgeError::RequestTimeout { .. }) {
+                    guard.violation.set(Some(FixedViolation::TimedOut));
+                }
+                let recorded = guard.fail(error);
+                drop(source.take());
+                Poll::Ready(Some(Err(recorded)))
+            }
+            Poll::Ready(None) => {
+                guard.complete.set(true);
+                drop(source.take());
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }))
+}
+
+fn map_protected_stream<F>(input: BodyStream, guard: Rc<InputGuard>, max: usize, mut map: F) -> Body
+where
+    F: FnMut(bytes::Bytes) -> Result<bytes::Bytes, EdgeError> + 'static,
+{
+    let mut source = Some(input);
+    let mut emitted = 0_usize;
+    Body::from_stream(stream::poll_fn(move |cx| {
+        let Some(current) = source.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let next = match current.poll_next_unpin(cx) {
+            Poll::Ready(Some(result)) => result.and_then(&mut map).and_then(|bytes| {
+                guard.check()?;
+                let total = emitted
+                    .checked_add(bytes.len())
+                    .filter(|total| *total <= max)
+                    .ok_or_else(|| {
+                        EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound)
+                    })?;
+                emitted = total;
+                Ok(bytes)
+            }),
+            Poll::Ready(None) => {
+                drop(source.take());
+                return Poll::Ready(None);
+            }
+            Poll::Pending => return Poll::Pending,
+        };
+        if let Err(error) = next {
+            drop(source.take());
+            Poll::Ready(Some(Err(guard.fail(error))))
+        } else {
+            Poll::Ready(Some(next))
+        }
+    }))
+}
+
+fn check_cached_body(bytes: &bytes::Bytes, max: usize) -> Result<bytes::Bytes, EdgeError> {
+    if bytes.len() > max {
+        return Err(EdgeError::payload_too_large(
+            RequestBodyOverflowOrigin::Inbound,
+        ));
+    }
+    Ok(bytes.clone())
+}
+
+fn declared_body_length(headers: &HeaderMap) -> Option<u64> {
+    let mut values = headers.get_all("content-length").iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let raw = value.to_str().ok()?;
+    let text = raw.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<u64>().ok()
+}
+
+fn declared_body_exceeds(headers: &HeaderMap, max: usize) -> bool {
+    declared_body_length(headers).is_some_and(|length| {
+        usize::try_from(length).map_or(true, |native_length| native_length > max)
+    })
+}
+
+fn check_read_deadline(
+    deadline: Option<Deadline>,
+    monotonic_clock: &MonotonicClock,
+) -> Result<(), EdgeError> {
+    if deadline.is_some_and(|candidate| candidate.is_expired_at(monotonic_clock.now())) {
+        return Err(EdgeError::request_timeout(
+            "inbound body read deadline exceeded",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn drain_body(
+    body: Body,
+    max: usize,
+    deadline: Option<Deadline>,
+    monotonic_clock: &MonotonicClock,
+) -> Result<bytes::Bytes, EdgeError> {
+    check_read_deadline(deadline, monotonic_clock)?;
+    match body.into_stream() {
+        Err(buffered_body) => {
+            let bytes = buffered_body.into_bytes().ok_or_else(|| {
+                EdgeError::internal(anyhow::anyhow!("body conversion lost buffered payload"))
+            })?;
+            check_read_deadline(deadline, monotonic_clock)?;
+            check_cached_body(&bytes, max)
+        }
+        Ok(mut stream) => {
+            let mut buffered = Vec::new();
+            loop {
+                check_read_deadline(deadline, monotonic_clock)?;
+                let next = stream.next().await;
+                // Deadline wins a simultaneous body/error/EOF observation.
+                check_read_deadline(deadline, monotonic_clock)?;
+                let Some(result) = next else {
+                    return Ok(bytes::Bytes::from(buffered));
+                };
+                let chunk = result?;
+                let next_len = buffered.len().checked_add(chunk.len()).ok_or_else(|| {
+                    EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound)
+                })?;
+                if next_len > max {
+                    return Err(EdgeError::payload_too_large(
+                        RequestBodyOverflowOrigin::Inbound,
+                    ));
+                }
+                buffered.extend_from_slice(&chunk);
+            }
+        }
+    }
+}
+
+async fn drain_body_discard(body: Body) -> Result<(), EdgeError> {
+    match body.into_stream() {
+        Err(_buffered) => Ok(()),
+        Ok(mut stream) => {
+            while let Some(chunk) = stream.next().await {
+                chunk?;
+            }
+            Ok(())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::{HeaderValue, Method, StatusCode, Uri, request_builder};
+    use crate::config_store::ready_config_store_bounded_read;
+    use crate::http::{HeaderMap, HeaderValue, Method, StatusCode, request_builder};
+    use crate::outbound::{
+        HttpClient, IndependentOutboundProgress, OutboundBatch, OutboundBatchDriverEvent,
+        OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
+        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundPending,
+        OutboundPreparedBatch, OutboundProgressRuntime, OutboundRequest, OutboundSendMode,
+        OutboundTime,
+    };
     use crate::params::PathParams;
-    use crate::proxy::{ProxyClient, ProxyHandle, ProxyRequest, ProxyResponse};
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::executor::block_on;
+    use futures::future::pending;
     use futures::stream;
+    use futures::task::noop_waker_ref;
     use serde::{Deserialize, Serialize};
+    use std::cell::Cell;
     use std::collections::HashMap;
+    use std::future::Future as _;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+    use std::time::Duration;
 
-    struct DummyClient;
+    struct DummyOutboundClient;
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     struct PathData {
         id: String,
     }
 
-    #[async_trait(?Send)]
-    impl ProxyClient for DummyClient {
-        async fn send(&self, _request: ProxyRequest) -> Result<ProxyResponse, EdgeError> {
-            Ok(ProxyResponse::new(StatusCode::OK, Body::empty()))
+    impl OutboundHttpClient for DummyOutboundClient {
+        fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            let head = block_on(self.dispatch_head(request))?;
+            let outcome = block_on(head.finish());
+            Ok(OutboundPending::new(
+                Box::pin(async move { outcome }),
+                OutboundExchangeOwner::new(|| {}),
+            ))
+        }
+
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            let (_, context) = request.into_parts();
+            Box::pin(async move {
+                OutboundHead::new(
+                    StatusCode::OK,
+                    OutboundHeaderInput::new(
+                        "dummy",
+                        HeaderMap::new(),
+                        OutboundHeaderFidelity::AdapterVisibleFields,
+                    ),
+                    Box::pin(stream::empty()),
+                    context,
+                    OutboundExchangeOwner::new(|| {}),
+                )
+            })
+        }
+
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, slots) = batch.into_slots();
+            let completed = slots
+                .into_iter()
+                .map(|(index, request)| {
+                    let outcome = block_on(self.dispatch_head(request))
+                        .and_then(|head| block_on(head.finish()));
+                    OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at: context.clock().now(),
+                        outcome,
+                    }
+                })
+                .collect::<Vec<_>>();
+            OutboundBatch::from_driver(
+                context,
+                stream::iter(completed),
+                OutboundExchangeOwner::new(|| {}),
+            )
+        }
+
+        fn time(&self) -> OutboundTime {
+            OutboundTime::new(MonotonicClock::default(), |_, _| Box::pin(pending()))
+        }
+
+        fn validate_supported_options(
+            &self,
+            _: &OutboundRequest,
+            _: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            Ok(())
         }
     }
 
@@ -252,12 +1231,48 @@ mod tests {
         RequestContext::new(request, params)
     }
 
+    #[test]
+    fn uncapped_input_guard_skips_accounting_at_counter_overflow() {
+        let request = request_builder().body(Body::empty()).expect("request");
+        let context = RequestContext::new_pre_dispatch(request, None);
+        let guard = context.input_guard.as_ref().expect("protected input guard");
+        guard.consumed.set(usize::MAX);
+
+        guard.observe(1).expect("uncapped input must not overflow");
+
+        assert_eq!(guard.consumed.get(), usize::MAX);
+        assert!(guard.failure.borrow().is_none());
+        assert!(guard.outcome().is_none());
+    }
+
     fn params(map: &[(&str, &str)]) -> PathParams {
         let inner = map
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect::<HashMap<_, _>>();
         PathParams::new(inner)
+    }
+
+    #[test]
+    fn variable_reads_request_scoped_values() {
+        let mut request = request_builder()
+            .method(Method::GET)
+            .uri("/variables")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(RuntimeVariables::from_vars([(
+                "API_BASE_URL".to_owned(),
+                "https://api.example.com".to_owned(),
+            )]));
+        let ctx = RequestContext::new(request, PathParams::default());
+
+        assert_eq!(
+            ctx.variable("API_BASE_URL").as_deref(),
+            Some("https://api.example.com")
+        );
+        assert_eq!(ctx.variable("UNKNOWN_VARIABLE"), None);
     }
 
     // `RequestContext::config_handle()` was removed. The
@@ -272,7 +1287,8 @@ mod tests {
         }
         let body = Body::from("name=demo");
         let ctx = ctx("/submit", body, PathParams::default());
-        let parsed: FormData = ctx.form().expect("form data");
+        let parsed: FormData =
+            block_on(ctx.form_within(DEFAULT_INBOUND_FORM_BYTES)).expect("form data");
         assert_eq!(
             parsed,
             FormData {
@@ -284,15 +1300,381 @@ mod tests {
     }
 
     #[test]
-    fn form_streaming_body_not_supported() {
-        let stream = stream::iter(vec![Ok::<Bytes, anyhow::Error>(Bytes::from("name=demo"))]);
-        let body = Body::from_stream(stream);
-        let ctx = ctx("/submit", body, PathParams::default());
-        let err = ctx.form::<serde_json::Value>().expect_err("expected error");
-        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    fn declared_overflow_does_not_read_or_poison_the_body() {
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&polls);
+        let body = Body::stream(
+            stream::iter([Bytes::from_static(b"0123456789")])
+                .inspect(move |_| observed.set(observed.get().saturating_add(1))),
+        );
+        let mut ctx = ctx("/body", body, PathParams::default());
+        ctx.headers_mut()
+            .insert("content-length", HeaderValue::from_static("10"));
+
+        let error = block_on(ctx.body_bytes(5)).expect_err("declared overflow");
+        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(polls.get(), 0);
+        assert_eq!(ctx.body_kind(), BodyKind::Initial);
+        assert_eq!(block_on(ctx.body_bytes(10)).expect("larger cap").len(), 10);
+        assert_eq!(polls.get(), 1);
+    }
+
+    #[test]
+    fn padded_declared_length_rejects_without_consuming_the_body() {
+        let mut ctx = ctx("/body", Body::from("0123456789"), PathParams::default());
+        ctx.headers_mut()
+            .insert("content-length", HeaderValue::from_static(" 10 \t"));
+        assert_eq!(
+            block_on(ctx.body_bytes(5))
+                .expect_err("declared overflow")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(ctx.body_kind(), BodyKind::Initial);
+        assert_eq!(block_on(ctx.body_bytes(10)).expect("larger cap").len(), 10);
+    }
+
+    #[test]
+    fn expired_deadline_wins_over_declared_overflow_without_polling() {
+        let body = Body::from_stream(stream::poll_fn(
+            |_| -> Poll<Option<Result<Bytes, EdgeError>>> {
+                panic!("an expired reader must not poll its source")
+            },
+        ));
+        let mut ctx = ctx("/body", body, PathParams::default());
+        ctx.headers_mut()
+            .insert("content-length", HeaderValue::from_static("10"));
+        ctx.read_deadline = Some(Deadline::after(Duration::ZERO));
+
+        for cap in [5, 10] {
+            assert_eq!(
+                block_on(ctx.body_bytes(cap)).expect_err("expired").status(),
+                StatusCode::REQUEST_TIMEOUT
+            );
+        }
+        assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+    }
+
+    #[test]
+    fn readers_classify_consumed_overflow_before_payload_parsing() {
+        let json = serde_json::to_vec(&serde_json::json!("123456")).expect("JSON");
+        for (reader, bytes) in [
+            (0_u8, b"12345678".to_vec()),
+            (1, json),
+            (2, b"key=1234".to_vec()),
+        ] {
+            for cap in [7_usize, 8, 9] {
+                let ctx = ctx(
+                    "/body",
+                    Body::stream(stream::iter([Bytes::from(bytes.clone())])),
+                    PathParams::default(),
+                );
+                let result = match reader {
+                    0 => block_on(ctx.body_bytes(cap)).map(|_| ()),
+                    1 => block_on(ctx.json_within::<serde_json::Value>(cap)).map(|_| ()),
+                    _ => block_on(ctx.form_within::<BTreeMap<String, String>>(cap)).map(|_| ()),
+                };
+                if cap == 7 {
+                    let first = result.expect_err("overflow");
+                    let second = block_on(ctx.body_bytes(usize::MAX)).expect_err("sticky");
+                    assert_eq!(first.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(second.kind(), "payload_too_large");
+                    assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+                } else {
+                    result.expect("within cap");
+                    assert_eq!(
+                        block_on(ctx.body_bytes(7))
+                            .expect_err("cached cap")
+                            .status(),
+                        StatusCode::PAYLOAD_TOO_LARGE
+                    );
+                    assert_eq!(
+                        block_on(ctx.body_bytes(8)).expect("reusable cache").len(),
+                        8
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn body_bytes_drains_once_and_rechecks_each_callers_cap() {
+        let polls = Rc::new(Cell::new(0_u8));
+        let observed_polls = Rc::clone(&polls);
+        let body = Body::from_stream(stream::poll_fn(move |_cx| {
+            let current = observed_polls.get();
+            observed_polls.set(current.saturating_add(1));
+            match current {
+                0 => Poll::Ready(Some(Ok(Bytes::from_static(b"ok")))),
+                _ => Poll::Ready(None),
+            }
+        }));
+        let ctx = ctx("/body", body, PathParams::default());
+
+        assert_eq!(
+            block_on(ctx.body_bytes(2)).expect("exact cap"),
+            Bytes::from_static(b"ok")
+        );
+        let stricter = block_on(ctx.body_bytes(1)).expect_err("stricter cached cap");
+        assert_eq!(stricter.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            block_on(ctx.body_bytes(2)).expect("cached body remains usable"),
+            Bytes::from_static(b"ok")
+        );
+        assert_eq!(polls.get(), 2, "the source is drained exactly once");
+    }
+
+    #[test]
+    fn initial_drain_overflow_is_sticky_and_never_retries_source() {
+        let polls = Rc::new(Cell::new(0_u8));
+        let observed_polls = Rc::clone(&polls);
+        let body = Body::from_stream(stream::poll_fn(move |_cx| {
+            observed_polls.set(observed_polls.get().saturating_add(1));
+            Poll::Ready(Some(Ok(Bytes::from_static(b"too large"))))
+        }));
+        let ctx = ctx("/body", body, PathParams::default());
+
+        let first = block_on(ctx.body_bytes(3)).expect_err("overflow");
+        let second = block_on(ctx.body_bytes(usize::MAX)).expect_err("sticky overflow");
+        assert_eq!(first.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(second.status(), first.status());
+        assert_eq!(second.message(), first.message());
+        assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+        assert_eq!(polls.get(), 1, "a poisoned source must not be polled again");
+        assert_eq!(
+            ctx.take_body().expect_err("poison survives take").status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn source_error_replays_typed_fields_without_repolling() {
+        let body = Body::from_stream(stream::iter([Err(EdgeError::bad_gateway_with_reason(
+            "upstream body failed",
+            BadGatewayReason::Transport,
+        ))]));
+        let ctx = ctx("/body", body, PathParams::default());
+
+        for _ in 0_u8..2_u8 {
+            let error = block_on(ctx.body_bytes(32)).expect_err("sticky source error");
+            assert!(matches!(
+                error,
+                EdgeError::BadGateway {
+                    reason: BadGatewayReason::Transport,
+                    ..
+                }
+            ));
+            assert_eq!(error.message(), "upstream body failed");
+        }
+    }
+
+    #[test]
+    fn provider_diagnostics_survive_sticky_body_replay() {
+        use crate::error_detail::{
+            FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase,
+        };
+
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::ResponseBodyRead,
+            cause: FastlyFailureCause::ConnectionRefused,
+        };
+        for source in [
+            EdgeError::bad_request_with_detail("fixed request rejection", detail),
+            EdgeError::bad_gateway_with_detail(
+                "fixed transport category",
+                BadGatewayReason::Transport,
+                detail,
+            ),
+            EdgeError::gateway_timeout_with_detail(
+                "fixed timeout category",
+                BudgetSource::PerCallTimeout,
+                detail,
+            ),
+            EdgeError::internal_with_detail(anyhow::anyhow!("fixed internal category"), detail),
+        ] {
+            let expected_display = source.to_string();
+            let expected_message = source.message();
+            let expected_kind = source.kind();
+            let expected_status = source.status();
+            let polls = Rc::new(Cell::new(0_u8));
+            let observed = Rc::clone(&polls);
+            let mut pending_error = Some(source);
+            let body = Body::from_stream(stream::poll_fn(move |_task| {
+                observed.set(observed.get().saturating_add(1));
+                Poll::Ready(pending_error.take().map(Err))
+            }));
+            let context = ctx("/body", body, PathParams::default());
+            for _ in 0_u8..2 {
+                let replayed =
+                    block_on(context.body_bytes(32)).expect_err("sticky provider failure");
+                assert_eq!(replayed.provider_failure_detail(), Some(&detail));
+                assert_eq!(replayed.kind(), expected_kind);
+                assert_eq!(replayed.status(), expected_status);
+                if let EdgeError::BadGateway { reason, .. } = &replayed {
+                    assert_eq!(*reason, BadGatewayReason::Transport);
+                }
+                if let EdgeError::GatewayTimeout { cause, .. } = &replayed {
+                    assert_eq!(*cause, BudgetSource::PerCallTimeout);
+                }
+                assert_eq!(replayed.to_string(), expected_display);
+                assert_eq!(replayed.message(), expected_message);
+            }
+            assert_eq!(
+                context
+                    .take_body()
+                    .expect_err("poisoned body")
+                    .provider_failure_detail(),
+                Some(&detail)
+            );
+            assert_eq!(
+                context
+                    .into_request()
+                    .expect_err("poisoned request body")
+                    .provider_failure_detail(),
+                Some(&detail)
+            );
+            assert_eq!(polls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn cancelled_drain_poison_is_sticky() {
+        let body = Body::from_stream(stream::poll_fn(|_cx| Poll::Pending));
+        let ctx = ctx("/body", body, PathParams::default());
+        let mut first = Box::pin(ctx.body_bytes(32));
+        let mut task = Context::from_waker(noop_waker_ref());
+        assert!(matches!(first.as_mut().poll(&mut task), Poll::Pending));
+        assert_eq!(ctx.body_kind(), BodyKind::Draining);
+
+        drop(first);
+        assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+        let error = block_on(ctx.body_bytes(32)).expect_err("cancel poison");
+        assert_eq!(
+            error.message(),
+            "internal error: inbound body drain cancelled"
+        );
+    }
+
+    #[test]
+    fn reentrant_read_errors_without_disrupting_first_drain() {
+        let step = Rc::new(Cell::new(0_u8));
+        let observed_step = Rc::clone(&step);
+        let body = Body::from_stream(stream::poll_fn(move |_cx| match observed_step.get() {
+            0 => {
+                observed_step.set(1);
+                Poll::Pending
+            }
+            1 => {
+                observed_step.set(2);
+                Poll::Ready(Some(Ok(Bytes::from_static(b"ok"))))
+            }
+            _ => Poll::Ready(None),
+        }));
+        let ctx = ctx("/body", body, PathParams::default());
+        let mut first = Box::pin(ctx.body_bytes(2));
+        let mut task = Context::from_waker(noop_waker_ref());
+        assert!(matches!(first.as_mut().poll(&mut task), Poll::Pending));
+
+        let reentrant = block_on(ctx.body_bytes(2)).expect_err("reentrant read");
+        assert_eq!(
+            reentrant.message(),
+            "internal error: body read already in progress"
+        );
+        let Poll::Ready(first_result) = first.as_mut().poll(&mut task) else {
+            panic!("scripted drain should complete");
+        };
+        assert_eq!(first_result.expect("first read"), Bytes::from_static(b"ok"));
+        drop(first);
+        assert_eq!(ctx.body_kind(), BodyKind::Cached { len: 2 });
+    }
+
+    #[test]
+    fn expired_read_deadline_wins_and_poison_is_request_timeout() {
+        let mut ctx = ctx("/body", Body::from("available"), PathParams::default());
+        ctx.read_deadline = Some(Deadline::after(Duration::ZERO));
+
+        let first = block_on(ctx.body_bytes(32)).expect_err("expired");
+        let second = block_on(ctx.body_bytes(32)).expect_err("sticky expired");
+        assert_eq!(first.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(second.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(matches!(second, EdgeError::RequestTimeout { .. }));
+    }
+
+    #[test]
+    fn injected_clock_controls_read_deadline_and_sticky_poison() {
+        let start = MonotonicInstant::now();
+        let now = Arc::new(Mutex::new(start));
+        let observed_now = Arc::clone(&now);
+        let mut ctx = ctx("/body", Body::from("available"), PathParams::default());
+        ctx.monotonic_clock =
+            MonotonicClock::new(move || *observed_now.lock().expect("clock lock"));
+        let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
+        ctx.read_deadline = Some(Deadline::at_instant(deadline));
+        *now.lock().expect("clock lock") = deadline;
+
+        let first = block_on(ctx.body_bytes(32)).expect_err("expired");
+        let second = block_on(ctx.body_bytes(32)).expect_err("sticky expired");
+        assert_eq!(first.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(second.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+    }
+
+    #[test]
+    fn take_body_and_into_request_cover_initial_cached_and_taken() {
+        let initial_stream = Body::from_stream(stream::iter([Ok(Bytes::from_static(b"stream"))]));
+        let initial = ctx("/initial", initial_stream, PathParams::default());
+        assert!(initial.take_body().expect("initial body").is_stream());
         assert!(
-            err.message()
-                .contains("streaming bodies are not supported for form extraction")
+            initial
+                .take_body()
+                .expect("taken becomes empty")
+                .into_bytes()
+                .is_some_and(|body_bytes| body_bytes.is_empty())
+        );
+        assert_eq!(initial.body_kind(), BodyKind::Taken);
+
+        let cached = ctx("/cached", Body::from("cached"), PathParams::default());
+        assert_eq!(
+            block_on(cached.body_bytes(6)).expect("cache"),
+            Bytes::from_static(b"cached")
+        );
+        assert_eq!(
+            cached.take_body().expect("cached body").into_bytes(),
+            Some(Bytes::from_static(b"cached"))
+        );
+
+        let reassembled = ctx("/request", Body::from("body"), PathParams::default());
+        assert_eq!(
+            block_on(reassembled.body_bytes(4)).expect("cache"),
+            Bytes::from_static(b"body")
+        );
+        let request = reassembled.into_request().expect("reassembled request");
+        assert_eq!(request.uri().path(), "/request");
+        assert_eq!(
+            request.into_body().into_bytes(),
+            Some(Bytes::from_static(b"body"))
+        );
+    }
+
+    #[test]
+    fn poisoned_into_request_returns_the_stored_error() {
+        let ctx = ctx("/request", Body::from("oversized"), PathParams::default());
+        let first = block_on(ctx.body_bytes(1)).expect_err("overflow");
+        let later = ctx.into_request().expect_err("poisoned request");
+        assert_eq!(later.status(), first.status());
+        assert_eq!(later.message(), first.message());
+    }
+
+    #[test]
+    fn form_streaming_body_is_bounded_and_supported() {
+        let stream = stream::iter(vec![Ok::<Bytes, anyhow::Error>(Bytes::from("name=demo"))]);
+        let body = Body::from_external_stream(stream);
+        let ctx = ctx("/submit", body, PathParams::default());
+        let parsed: serde_json::Value =
+            block_on(ctx.form_within(DEFAULT_INBOUND_FORM_BYTES)).expect("form data");
+        assert_eq!(
+            parsed.get("name").and_then(|value| value.as_str()),
+            Some("demo")
         );
     }
 
@@ -300,7 +1682,8 @@ mod tests {
     fn form_value_deserialises_successfully() {
         let body = Body::from("name=demo");
         let ctx = ctx("/submit", body, PathParams::default());
-        let parsed: serde_json::Value = ctx.form().expect("form data");
+        let parsed: serde_json::Value =
+            block_on(ctx.form_within(DEFAULT_INBOUND_FORM_BYTES)).expect("form data");
         assert_eq!(
             parsed.get("name").and_then(|value| value.as_str()),
             Some("demo")
@@ -310,13 +1693,14 @@ mod tests {
     #[test]
     fn invalid_form_returns_bad_request() {
         #[expect(dead_code, reason = "field exercised only via Deserialize")]
-        #[derive(Deserialize)]
+        #[derive(Debug, Deserialize)]
         struct FormData {
             age: u8,
         }
         let body = Body::from("age=not-a-number");
         let ctx = ctx("/submit", body, PathParams::default());
-        let err = ctx.form::<FormData>().err().expect("expected error");
+        let err = block_on(ctx.form_within::<FormData>(DEFAULT_INBOUND_FORM_BYTES))
+            .expect_err("expected error");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert!(err.message().contains("invalid form payload"));
     }
@@ -325,7 +1709,8 @@ mod tests {
     fn invalid_json_returns_bad_request() {
         let body = Body::from(&b"not json"[..]);
         let ctx = ctx("/echo", body, PathParams::default());
-        let err = ctx.json::<serde_json::Value>().expect_err("expected error");
+        let err = block_on(ctx.json_within::<serde_json::Value>(DEFAULT_INBOUND_JSON_BYTES))
+            .expect_err("expected error");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert!(err.message().contains("invalid JSON payload"));
     }
@@ -371,13 +1756,29 @@ mod tests {
         })
         .expect("json body");
         let ctx = ctx("/echo", body, PathParams::default());
-        let parsed: Payload = ctx.json().expect("json payload");
+        let parsed: Payload =
+            block_on(ctx.json_within(DEFAULT_INBOUND_JSON_BYTES)).expect("json payload");
         assert_eq!(
             parsed,
             Payload {
                 name: "demo".into()
             }
         );
+    }
+
+    #[test]
+    fn http_client_is_retrieved_when_present() {
+        let mut request = request_builder()
+            .method(Method::GET)
+            .uri("/outbound")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(HttpClient::with_client(DummyOutboundClient));
+
+        let ctx = RequestContext::new(request, PathParams::default());
+        assert!(ctx.http_client().is_some());
     }
 
     // `RequestContext::kv_handle()` was removed. The
@@ -391,29 +1792,6 @@ mod tests {
         assert_eq!(parsed, PathData { id: "42".into() });
         let serialized = serde_json::to_string(&parsed).expect("serialize");
         assert!(serialized.contains("42"));
-    }
-
-    #[test]
-    fn proxy_handle_forwards_with_dummy_client() {
-        let handle = ProxyHandle::with_client(DummyClient);
-        let request = ProxyRequest::new(Method::GET, Uri::from_static("https://example.com"));
-        let response = block_on(handle.forward(request)).expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[test]
-    fn proxy_handle_is_retrieved_when_present() {
-        let mut request = request_builder()
-            .method(Method::GET)
-            .uri("/proxy")
-            .body(Body::empty())
-            .expect("request");
-        request
-            .extensions_mut()
-            .insert(ProxyHandle::with_client(DummyClient));
-
-        let ctx = RequestContext::new(request, PathParams::default());
-        assert!(ctx.proxy_handle().is_some());
     }
 
     #[test]
@@ -445,21 +1823,25 @@ mod tests {
             Body::from("payload"),
             params(&[("id", "123")]),
         );
-        assert_eq!(ctx.request().uri().path(), "/items/123");
-        ctx.request_mut()
-            .headers_mut()
+        assert_eq!(ctx.uri().path(), "/items/123");
+        ctx.headers_mut()
             .insert("x-test", HeaderValue::from_static("value"));
         assert_eq!(
-            ctx.request()
-                .headers()
+            ctx.headers()
                 .get("x-test")
                 .and_then(|value| value.to_str().ok()),
             Some("value")
         );
         assert_eq!(ctx.path_params().get("id"), Some("123"));
-        assert_eq!(ctx.body().as_bytes().expect("buffered"), b"payload");
+        assert_eq!(
+            block_on(ctx.body_bytes(7)).expect("buffered"),
+            Bytes::from_static(b"payload")
+        );
+        assert!(ctx.route_metadata().is_none());
+        assert!(ctx.read_deadline().is_none());
+        assert!(ctx.take_ingress_grant().is_none());
 
-        let request = ctx.into_request();
+        let request = ctx.into_request().expect("request");
         assert_eq!(request.uri().path(), "/items/123");
     }
 
@@ -545,9 +1927,14 @@ mod tests {
         struct FixedStore(&'static str);
         #[async_trait(?Send)]
         impl ConfigStore for FixedStore {
-            async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
-                Ok(Some(self.0.to_owned()))
+            async fn get(
+                &self,
+                _key: &str,
+            ) -> Result<Option<crate::ConfigValue>, ConfigStoreError> {
+                Ok(Some(self.0.into()))
             }
+
+            ready_config_store_bounded_read!();
         }
 
         let primary_handle = ConfigStoreHandle::new(Arc::new(FixedStore("primary")));
@@ -583,13 +1970,13 @@ mod tests {
         let resolved = ctx.config_store("analytics").expect("analytics handle");
         assert_eq!(
             block_on(resolved.get("key")).expect("config value"),
-            Some("analytics".to_owned())
+            Some(crate::ConfigValue::from("analytics"))
         );
         assert!(ctx.config_store("unknown").is_none());
         let default = ctx.config_store_default().expect("default handle");
         assert_eq!(
             block_on(default.get("key")).expect("default config value"),
-            Some("primary".to_owned())
+            Some(crate::ConfigValue::from("primary"))
         );
     }
 
@@ -663,9 +2050,14 @@ mod tests {
         struct AnyStore;
         #[async_trait(?Send)]
         impl ConfigStore for AnyStore {
-            async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
+            async fn get(
+                &self,
+                _key: &str,
+            ) -> Result<Option<crate::ConfigValue>, ConfigStoreError> {
                 Ok(None)
             }
+
+            ready_config_store_bounded_read!();
         }
 
         let binding = ConfigStoreBinding {
@@ -710,9 +2102,14 @@ mod tests {
         struct AnyStore;
         #[async_trait(?Send)]
         impl ConfigStore for AnyStore {
-            async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
+            async fn get(
+                &self,
+                _key: &str,
+            ) -> Result<Option<crate::ConfigValue>, ConfigStoreError> {
                 Ok(None)
             }
+
+            ready_config_store_bounded_read!();
         }
 
         let registry: ConfigRegistry = StoreRegistry::new(

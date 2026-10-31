@@ -6,7 +6,7 @@ use crate::scaffold::{
 use edgezero_adapter::scaffold;
 use edgezero_adapter::scaffold::AdapterBlueprint;
 use handlebars::Handlebars;
-use serde_json::{Map, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::{self, Write as _};
@@ -217,7 +217,7 @@ pub fn generate_new(args: &NewArgs) -> Result<(), GeneratorError> {
 
     let adapter_artifacts = collect_adapter_data(&layout, &repo_root, &mut workspace_dependencies)?;
 
-    let mut data_map = build_base_data(
+    let mut data_value = build_base_data(
         &layout,
         &core_crate_line,
         &cli_crate_line,
@@ -225,13 +225,13 @@ pub fn generate_new(args: &NewArgs) -> Result<(), GeneratorError> {
         &workspace_dependencies,
     );
 
-    for context in &adapter_artifacts.contexts {
-        for (key, value) in &context.data_entries {
-            data_map.insert(key.clone(), Value::String(value.clone()));
+    if let Some(data_map) = data_value.as_object_mut() {
+        for context in &adapter_artifacts.contexts {
+            for (key, value) in &context.data_entries {
+                data_map.insert(key.clone(), json!(value));
+            }
         }
     }
-
-    let data_value = Value::Object(data_map);
 
     render_templates(&layout, &adapter_artifacts.contexts, &data_value)?;
     initialize_git_repo(&layout.out_dir);
@@ -246,7 +246,7 @@ pub fn generate_new(args: &NewArgs) -> Result<(), GeneratorError> {
 
 fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     let mut deps = BTreeMap::new();
-    deps.insert("bytes".to_owned(), "bytes = \"1\"".to_owned());
+    deps.insert("bytes".to_owned(), "bytes = \"=1.12.1\"".to_owned());
     deps.insert("anyhow".to_owned(), "anyhow = \"1\"".to_owned());
     deps.insert(
         "futures".to_owned(),
@@ -269,10 +269,10 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     );
     deps.insert(
         "worker".to_owned(),
-        "worker = { version = \"0.8\", default-features = false, features = [\"http\"] }"
+        "worker = { version = \"=0.8.5\", default-features = false, features = [\"http\"] }"
             .to_owned(),
     );
-    deps.insert("fastly".to_owned(), "fastly = \"0.13\"".to_owned());
+    deps.insert("fastly".to_owned(), "fastly = \"=0.13.1\"".to_owned());
     deps.insert("once_cell".to_owned(), "once_cell = \"1\"".to_owned());
     deps.insert(
         "tokio".to_owned(),
@@ -281,7 +281,12 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     deps.insert("tracing".to_owned(), "tracing = \"0.1\"".to_owned());
     deps.insert(
         "spin-sdk".to_owned(),
-        "spin-sdk = { version = \"7\", default-features = false }".to_owned(),
+        concat!(
+            "spin-sdk = { version = \"=7.0.0\", ",
+            "git = \"https://github.com/stackpop/spin-rust-sdk.git\", ",
+            "rev = \"6c59ed5b4fcb377072763aee0b27a3abdd8edb72\", default-features = false }",
+        )
+        .to_owned(),
     );
     // Core depends on `validator` for `#[derive(Validate)]` on the
     // generated `<Name>Config` struct. Pinned to the same
@@ -564,70 +569,37 @@ fn build_base_data(
     cli_crate_line: &str,
     artifacts: &AdapterArtifacts,
     workspace_dependencies: &BTreeMap<String, String>,
-) -> Map<String, Value> {
-    let mut data = Map::new();
-    data.insert("name".into(), Value::String(layout.name.clone()));
-    data.insert("proj_core".into(), Value::String(layout.core_name.clone()));
-    data.insert("proj_cli".into(), Value::String(layout.cli_name.clone()));
-    data.insert(
-        "proj_core_mod".into(),
-        Value::String(layout.core_mod.clone()),
-    );
-    data.insert("proj_mod".into(), Value::String(layout.project_mod.clone()));
-    data.insert(
-        "NameUpperCamel".into(),
-        Value::String(layout.upper_camel.clone()),
-    );
-    data.insert("EnvPrefix".into(), Value::String(layout.env_prefix.clone()));
-    data.insert(
-        "dep_edgezero_core".into(),
-        Value::String(core_crate_line.to_owned()),
-    );
-    data.insert(
-        "dep_edgezero_cli".into(),
-        Value::String(cli_crate_line.to_owned()),
-    );
-
+) -> Value {
     let adapter_list_str = artifacts
         .adapter_ids
         .iter()
         .map(|id| format!("\"{id}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    data.insert("adapter_list".into(), Value::String(adapter_list_str));
-    data.insert(
-        "workspace_members".into(),
-        Value::String(artifacts.workspace_members.join("\n")),
-    );
-    data.insert(
-        "adapter_manifest_sections".into(),
-        Value::String(artifacts.manifest_sections.clone()),
-    );
-    data.insert(
-        "readme_adapter_crates".into(),
-        Value::String(artifacts.readme_adapter_crates.clone()),
-    );
-    data.insert(
-        "readme_adapter_dev".into(),
-        Value::String(artifacts.readme_adapter_dev.clone()),
-    );
-
     let workspace_dep_lines = workspace_dependencies
         .values()
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
-    data.insert(
-        "workspace_dependencies".into(),
-        Value::String(workspace_dep_lines),
-    );
-
-    data.insert(
-        "tool_versions_contents".into(),
-        Value::String(build_tool_versions(&artifacts.adapter_ids)),
-    );
-
-    data
+    json!({
+        "name": layout.name,
+        "proj_core": layout.core_name,
+        "proj_cli": layout.cli_name,
+        "proj_core_mod": layout.core_mod,
+        "proj_mod": layout.project_mod,
+        "NameUpperCamel": layout.upper_camel,
+        "EnvPrefix": layout.env_prefix,
+        "dep_edgezero_core": core_crate_line,
+        "dep_edgezero_cli": cli_crate_line,
+        "adapter_list": adapter_list_str,
+        "native_image_example": artifacts.adapter_ids.iter().any(|id| id == "fastly"),
+        "workspace_members": artifacts.workspace_members.join("\n"),
+        "adapter_manifest_sections": artifacts.manifest_sections,
+        "readme_adapter_crates": artifacts.readme_adapter_crates,
+        "readme_adapter_dev": artifacts.readme_adapter_dev,
+        "workspace_dependencies": workspace_dep_lines,
+        "tool_versions_contents": build_tool_versions(&artifacts.adapter_ids),
+    })
 }
 
 /// Render the `.tool-versions` body for a scaffolded project,
@@ -642,10 +614,7 @@ fn build_base_data(
 /// - `fastly` → `fastly` (the Fastly CLI we shell out to for
 ///   provision + config push) plus `viceroy` (what
 ///   `fastly compute serve` uses for local emulation).
-/// - `spin` → no asdf pin; the Spin CLI is install-flow-managed
-///   (<https://spinframework.dev/install>). A header comment points
-///   the operator at the URL when `spin` is in the adapter set so
-///   they don't wonder why everything else is pinned but spin.
+/// - `spin` → `spin` (the runtime used by `spin build` and `spin up`).
 /// - `axum` → no extra pin (uses the host Rust toolchain only).
 ///
 /// Versions are pulled from this repo's own `.tool-versions` (see
@@ -660,24 +629,16 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
         lines.push("fastly 16.0.0".to_owned());
         lines.push("viceroy 0.21.0".to_owned());
     }
+    if has("spin") {
+        lines.push("spin 4.1.0".to_owned());
+    }
     lines.push("rust 1.98.1".to_owned());
     // Sort + dedup so the file is stable regardless of adapter
     // declaration order (and asdf doesn't care).
     lines.sort();
     lines.dedup();
     let mut body = lines.join("\n");
-    if has("spin") {
-        body.push_str(concat!(
-            "\n\n# Spin is not asdf-managed in this scaffold; install via\n",
-            "# https://spinframework.dev/install\n",
-            "# Requires Spin 4.1 or newer: spin-sdk 7 imports\n",
-            "# wasi:http/types@0.3.0, which Spin 4.0.x does not provide.\n",
-            "# On an older runtime the component builds and its tests\n",
-            "# pass, then the wasm linker rejects it at startup.\n",
-        ));
-    } else {
-        body.push('\n');
-    }
+    body.push('\n');
     body
 }
 
@@ -811,8 +772,11 @@ fn initialize_git_repo(out_dir: &Path) {
 mod tests {
     use super::*;
     use crate::test_support::path_mutation_guard;
+    use edgezero_adapter::cli_support::validate_spin_outbound_host_contract;
+    use edgezero_core::Capability;
     use edgezero_core::app_config::app_name_prefix;
-    use edgezero_core::test_env::PathPrepend as PathOverride;
+    use edgezero_core::manifest::ManifestLoader;
+    use edgezero_core::test_env::{PathPrepend as PathOverride, env_lock};
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -874,73 +838,415 @@ mod tests {
 
     // ---------- build_tool_versions ----------
 
+    fn dependency_requirement<'manifest>(
+        dependencies: &'manifest toml::Value,
+        name: &str,
+    ) -> Option<&'manifest str> {
+        let dependency = dependencies.get(name)?;
+        dependency
+            .as_str()
+            .or_else(|| dependency.get("version")?.as_str())
+    }
+
+    fn dependency_git_source<'manifest>(
+        dependencies: &'manifest toml::Value,
+        name: &str,
+    ) -> (
+        Option<&'manifest toml::Value>,
+        Option<&'manifest toml::Value>,
+    ) {
+        let dependency = dependencies.get(name);
+        (
+            dependency.and_then(|value| value.get("git")),
+            dependency.and_then(|value| value.get("rev")),
+        )
+    }
+
+    fn workspace_dependencies(manifest: &str) -> toml::Value {
+        let parsed: toml::Value = toml::from_str(manifest).expect("valid Cargo manifest");
+        parsed["workspace"]["dependencies"].clone()
+    }
+
     #[test]
     fn seeded_dependencies_track_the_edgezero_workspace() {
-        // The seeds above are hardcoded, but a generated crate takes
-        // `edgezero-core` as a path/version dependency and re-derives
-        // `#[derive(Validate)]` against whatever `validator` the workspace
-        // resolves. If the two majors drift apart the generated app fails to
-        // compile with a confusing "trait bound not satisfied" error, so the
-        // shared crates are checked against the root manifest here.
-        let root_manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"));
-        let seeds = seed_workspace_dependencies();
-        for crate_name in ["validator", "axum", "fastly", "worker", "simple_logger"] {
-            let want = root_manifest
-                .lines()
-                .find(|line| line.starts_with(&format!("{crate_name} = ")))
-                .unwrap_or_else(|| panic!("root Cargo.toml must declare {crate_name}"));
-            let want_version = extract_version(want)
-                .unwrap_or_else(|| panic!("no version in root {crate_name} line: {want}"));
-            let got = seeds
-                .get(crate_name)
-                .unwrap_or_else(|| panic!("scaffold must seed {crate_name}"));
-            let got_version = extract_version(got)
-                .unwrap_or_else(|| panic!("no version in seeded {crate_name} line: {got}"));
+        let root = workspace_dependencies(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Cargo.toml"
+        )));
+        for name in [
+            "bytes",
+            "validator",
+            "axum",
+            "fastly",
+            "worker",
+            "simple_logger",
+            "spin-sdk",
+        ] {
+            let seeds = seed_workspace_dependencies();
+            let seed: toml::Value = toml::from_str(&seeds[name]).expect("valid dependency seed");
+            let want = dependency_requirement(&root, name).expect("root dependency version");
             assert_eq!(
-                got_version, want_version,
-                "scaffold seeds {crate_name} {got_version}, workspace uses {want_version}"
+                dependency_requirement(&seed, name),
+                Some(want),
+                "{name} seed drifted"
             );
+            if name == "spin-sdk" {
+                assert_eq!(
+                    dependency_git_source(&seed, name),
+                    dependency_git_source(&root, name),
+                    "{name} seed source drifted"
+                );
+            }
         }
+    }
 
-        // `spin-sdk` is spelled `~7.0` in the workspace and `7` in the seed,
-        // so only the major is comparable. It is worth comparing anyway: a
-        // major mismatch here is the one that survives every compile-time
-        // check and dies at `spin up` with a WIT linker error.
-        let want_spin = root_manifest
-            .lines()
-            .find(|line| line.starts_with("spin-sdk = "))
-            .and_then(extract_version)
-            .map(major_of)
-            .expect("root Cargo.toml must declare spin-sdk");
-        let got_spin = seeds
-            .get("spin-sdk")
-            .and_then(|line| extract_version(line))
-            .map(major_of)
-            .expect("scaffold must seed spin-sdk");
+    #[test]
+    fn independent_dependencies_track_the_edgezero_workspace() {
+        let root = workspace_dependencies(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Cargo.toml"
+        )));
+        for (manifest, needs_validator) in [
+            (
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../examples/app-demo/Cargo.toml"
+                )),
+                true,
+            ),
+            (
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml"
+                )),
+                false,
+            ),
+        ] {
+            let dependencies = workspace_dependencies(manifest);
+            for name in ["validator", "fastly", "worker", "spin-sdk"] {
+                if name == "validator" && !needs_validator {
+                    continue; // The reusable fixture does not derive app configuration.
+                }
+                assert_eq!(
+                    dependency_requirement(&dependencies, name),
+                    dependency_requirement(&root, name),
+                    "{name} differs in an independent workspace"
+                );
+                if name == "spin-sdk" {
+                    assert_eq!(
+                        dependency_git_source(&dependencies, name),
+                        dependency_git_source(&root, name),
+                        "{name} source differs in an independent workspace"
+                    );
+                }
+            }
+        }
+        let smoke = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/actions/deploy-fastly/tests/make-smoke-fixture.sh"
+        ));
+        let marker = "cat >crates/fixture-app-cli/Cargo.toml <<'TOML'\n";
+        let manifest = smoke
+            .split_once(marker)
+            .expect("fixture manifest heredoc")
+            .1
+            .split_once("\nTOML")
+            .expect("fixture manifest end")
+            .0;
+        let parsed: toml::Value = toml::from_str(manifest).expect("valid fixture Cargo manifest");
         assert_eq!(
-            got_spin, want_spin,
-            "scaffold seeds spin-sdk major {got_spin}, workspace uses {want_spin}"
+            dependency_requirement(&parsed["dependencies"], "validator"),
+            dependency_requirement(&root, "validator"),
+            "deploy fixture validator differs"
+        );
+        let spin: toml::Value = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-spin/Cargo.toml"
+        )))
+        .expect("valid fixture member manifest");
+        assert_eq!(
+            spin["dependencies"]["spin-sdk"]["workspace"].as_bool(),
+            Some(true)
         );
     }
 
-    /// Leading major from a requirement string, ignoring any range
-    /// operator — `~7.0`, `^7.1`, `7` and `=7.0.1` all yield `7`.
-    fn major_of(version: &str) -> &str {
-        version
-            .trim_start_matches(['~', '^', '=', '>', '<', ' '])
-            .split('.')
-            .next()
-            .unwrap_or(version)
+    #[test]
+    fn dependency_requirement_preserves_exact_pins_and_table_order() {
+        let parsed: toml::Value = toml::from_str(
+            r#"
+# validator = "wrong"
+validator = { features = ["derive"], version = "0.21" } # 99.0
+spin-sdk = "=7.0.0"
+unpinned = { path = "somewhere" }
+"#,
+        )
+        .expect("valid dependency fixture");
+        assert_eq!(dependency_requirement(&parsed, "validator"), Some("0.21"));
+        assert_eq!(dependency_requirement(&parsed, "spin-sdk"), Some("=7.0.0"));
+        assert_ne!(dependency_requirement(&parsed, "spin-sdk"), Some("7"));
+        assert_eq!(dependency_requirement(&parsed, "unpinned"), None);
+        assert_eq!(dependency_requirement(&parsed, "absent"), None);
     }
 
-    /// Pull the `version = "X"` (or bare `crate = "X"`) value out of a
-    /// dependency line, for comparing a seeded pin against the workspace.
-    fn extract_version(line: &str) -> Option<&str> {
-        let after = line.split_once("version = \"").map_or_else(
-            || line.split_once("= \"").map(|(_, rest)| rest),
-            |(_, rest)| Some(rest),
-        )?;
-        after.split_once('"').map(|(version, _)| version)
+    fn locked_package<'value>(
+        lock: &'value toml::Value,
+        name: &str,
+    ) -> Result<&'value toml::Value, String> {
+        let entries = lock
+            .get("package")
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| "missing lock packages".to_owned())?;
+        let mut matches = entries
+            .iter()
+            .filter(|entry| entry["name"].as_str() == Some(name));
+        let entry = matches
+            .next()
+            .ok_or_else(|| format!("missing {name} lock entry"))?;
+        if matches.next().is_some() {
+            return Err(format!("duplicate {name} lock entry"));
+        }
+        if entry.get("version").and_then(toml::Value::as_str).is_none() {
+            return Err(format!("missing {name} lock version"));
+        }
+        Ok(entry)
+    }
+
+    fn fidelity_dependency_contract(
+        root: &toml::Value,
+        root_lock: &toml::Value,
+        fixture: &toml::Value,
+        fixture_lock: &toml::Value,
+    ) -> Result<(), String> {
+        let dependencies = fixture
+            .get("dependencies")
+            .ok_or_else(|| "missing fixture dependencies".to_owned())?;
+        for name in ["fastly", "worker", "wasm-bindgen", "spin-sdk"] {
+            let expected = locked_package(root_lock, name)?;
+            let actual = locked_package(fixture_lock, name)?;
+            let requirement = dependency_requirement(dependencies, name)
+                .and_then(|value| value.strip_prefix('='))
+                .map(str::trim);
+            if requirement != expected["version"].as_str() {
+                return Err(format!(
+                    "{name} requires the exact workspace-locked version"
+                ));
+            }
+            for field in ["version", "source", "checksum"] {
+                if actual.get(field) != expected.get(field) {
+                    return Err(format!("{name} lock {field} differs"));
+                }
+            }
+        }
+        if dependency_git_source(dependencies, "spin-sdk")
+            != dependency_git_source(root, "spin-sdk")
+        {
+            return Err("Spin SDK Git source or revision differs".to_owned());
+        }
+        let builder = fixture
+            .get("package")
+            .and_then(|package| package.get("metadata"))
+            .and_then(|metadata| metadata.get("request-fidelity"))
+            .and_then(|metadata| metadata.get("worker-build"))
+            .and_then(toml::Value::as_str);
+        if builder != locked_package(root_lock, "worker")?["version"].as_str() {
+            return Err("worker-build metadata differs".to_owned());
+        }
+        Ok(())
+    }
+
+    fn fidelity_contract_inputs() -> (toml::Value, toml::Value, toml::Value, toml::Value) {
+        (
+            workspace_dependencies(include_str!("../../../Cargo.toml")),
+            toml::from_str(include_str!("../../../Cargo.lock")).expect("workspace lock"),
+            toml::from_str(include_str!(
+                "../../../crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml"
+            ))
+            .expect("fidelity manifest"),
+            toml::from_str(include_str!(
+                "../../../crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.lock"
+            ))
+            .expect("fidelity lock"),
+        )
+    }
+
+    #[test]
+    fn request_fidelity_dependencies_track_the_edgezero_workspace() {
+        let (root, root_lock, fixture, fixture_lock) = fidelity_contract_inputs();
+        fidelity_dependency_contract(&root, &root_lock, &fixture, &fixture_lock)
+            .expect("fidelity dependency identities");
+    }
+
+    #[test]
+    fn request_fidelity_dependency_contract_rejects_missing_duplicate_and_drifted_pins() {
+        let (root, root_lock, fixture, fixture_lock) = fidelity_contract_inputs();
+        for name in ["fastly", "worker", "wasm-bindgen", "spin-sdk"] {
+            for requirement in [None, Some("^99.0.0"), Some("=99.0.0"), Some("^0.13.1")] {
+                let mut changed = fixture.clone();
+                if let Some(value) = requirement {
+                    changed["dependencies"][name]["version"] =
+                        toml::Value::String(value.to_owned());
+                    changed["dependencies"][name]
+                        .as_table_mut()
+                        .unwrap()
+                        .insert(
+                            "test_version".to_owned(),
+                            toml::Value::String(format!(
+                                "={}",
+                                locked_package(&root_lock, name).unwrap()["version"]
+                                    .as_str()
+                                    .unwrap()
+                            )),
+                        );
+                } else {
+                    changed["dependencies"].as_table_mut().unwrap().remove(name);
+                }
+                assert!(
+                    fidelity_dependency_contract(&root, &root_lock, &changed, &fixture_lock)
+                        .is_err(),
+                    "{name}: {requirement:?}"
+                );
+            }
+            for change_root in [false, true] {
+                for field in ["version", "source", "checksum", "missing", "duplicate"] {
+                    let mut root_changed = root_lock.clone();
+                    let mut fixture_changed = fixture_lock.clone();
+                    let lock = if change_root {
+                        &mut root_changed
+                    } else {
+                        &mut fixture_changed
+                    };
+                    let entries = lock["package"].as_array_mut().unwrap();
+                    let index = entries
+                        .iter()
+                        .position(|entry| entry["name"].as_str() == Some(name))
+                        .unwrap();
+                    match field {
+                        "missing" => {
+                            entries.remove(index);
+                        }
+                        "duplicate" => {
+                            entries.push(entries[index].clone());
+                        }
+                        _ => {
+                            entries[index]
+                                .as_table_mut()
+                                .unwrap()
+                                .insert(field.to_owned(), toml::Value::String("drift".to_owned()));
+                        }
+                    }
+                    assert!(
+                        fidelity_dependency_contract(
+                            &root,
+                            &root_changed,
+                            &fixture,
+                            &fixture_changed
+                        )
+                        .is_err(),
+                        "{name}: root={change_root}, {field}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn request_fidelity_dependency_contract_rejects_missing_metadata_and_sources() {
+        let (root, root_lock, fixture, fixture_lock) = fidelity_contract_inputs();
+        for key in ["git", "rev"] {
+            let mut changed = fixture.clone();
+            changed["dependencies"]["spin-sdk"]
+                .as_table_mut()
+                .unwrap()
+                .remove(key);
+            assert!(
+                fidelity_dependency_contract(&root, &root_lock, &changed, &fixture_lock).is_err()
+            );
+        }
+        for key in ["worker-build", "request-fidelity"] {
+            let mut changed = fixture.clone();
+            if key == "worker-build" {
+                changed["package"]["metadata"]["request-fidelity"]
+                    .as_table_mut()
+                    .unwrap()
+                    .remove(key);
+            } else {
+                changed["package"]["metadata"]
+                    .as_table_mut()
+                    .unwrap()
+                    .remove(key);
+            }
+            assert!(
+                fidelity_dependency_contract(&root, &root_lock, &changed, &fixture_lock).is_err()
+            );
+        }
+        for text in [
+            "[dependencies]\nworker = \"=0.8.5\"\nworker = \"^0.8.5\"",
+            "[package.metadata.request-fidelity]\nworker-build = \"0.8.5\"\nworker-build = \"0.8.5\"",
+        ] {
+            toml::from_str::<toml::Value>(text).expect_err("duplicate dependency or tool pin");
+        }
+    }
+
+    #[test]
+    fn dependency_git_source_detects_drift_without_changing_version_checks() {
+        let pinned: toml::Value = toml::from_str(
+            r#"
+spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk", rev = "0123456789abcdef0123456789abcdef01234567" }
+"#,
+        )
+        .expect("valid pinned dependency");
+        let source = dependency_git_source(&pinned, "spin-sdk");
+        assert_eq!(
+            source,
+            (pinned["spin-sdk"].get("git"), pinned["spin-sdk"].get("rev"))
+        );
+        let reordered: toml::Value = toml::from_str(
+            r#"
+[spin-sdk]
+rev = "0123456789abcdef0123456789abcdef01234567"
+version = "=7.0.0"
+git = "https://github.com/stackpop/spin-rust-sdk"
+"#,
+        )
+        .expect("valid reordered dependency");
+        assert_eq!(dependency_git_source(&reordered, "spin-sdk"), source);
+        for (field, replacement) in [
+            (
+                "git",
+                Some("https://github.com/spinframework/spin-rust-sdk"),
+            ),
+            ("rev", Some("89abcdef0123456789abcdef0123456789abcdef01")),
+            ("git", None),
+            ("rev", None),
+        ] {
+            let mut drifted = pinned.clone();
+            let dependency = drifted["spin-sdk"]
+                .as_table_mut()
+                .expect("dependency table");
+            if let Some(value) = replacement {
+                dependency.insert(field.to_owned(), toml::Value::String(value.to_owned()));
+            } else {
+                dependency.remove(field);
+            }
+            assert_eq!(
+                dependency_requirement(&drifted, "spin-sdk"),
+                dependency_requirement(&pinned, "spin-sdk"),
+                "source drift must not change the version fixture"
+            );
+            assert_ne!(
+                dependency_git_source(&drifted, "spin-sdk"),
+                source,
+                "{field}"
+            );
+        }
+        let registry: toml::Value = toml::from_str("spin-sdk = \"=7.0.0\"").unwrap();
+        assert_eq!(
+            dependency_requirement(&registry, "spin-sdk"),
+            dependency_requirement(&pinned, "spin-sdk")
+        );
+        assert_eq!(dependency_git_source(&registry, "spin-sdk"), (None, None));
+        assert_ne!(dependency_git_source(&registry, "spin-sdk"), source);
+        assert_eq!(dependency_git_source(&registry, "absent"), (None, None));
     }
 
     #[test]
@@ -1018,20 +1324,12 @@ mod tests {
     }
 
     #[test]
-    fn build_tool_versions_spin_adds_install_hint_comment_not_asdf_pin() {
-        // Spin is install-flow-managed (not consistently asdf-
-        // managed in our toolchain), so don't write a brittle pin
-        // we can't honour — explain why with an inline hint so the
-        // operator isn't left guessing.
+    fn build_tool_versions_pins_spin_runtime() {
         let out = build_tool_versions(&["spin".to_owned()]);
         assert!(out.contains("rust 1.98.1"));
         assert!(
-            !out.contains("spin "),
-            "must NOT pin spin via asdf shape: {out}"
-        );
-        assert!(
-            out.contains("spinframework.dev/install"),
-            "must point operators at the spin install URL: {out}"
+            out.contains("spin 4.1.0"),
+            "must pin the verified Spin runtime: {out}"
         );
     }
 
@@ -1053,6 +1351,7 @@ mod tests {
         for pin in [
             "nodejs 24.20.0",
             "fastly 16.0.0",
+            "spin 4.1.0",
             "viceroy 0.21.0",
             "rust 1.98.1",
         ] {
@@ -1062,8 +1361,6 @@ mod tests {
                 "`{pin}` must appear exactly once in: {out}"
             );
         }
-        // Spin install hint present.
-        assert!(out.contains("spinframework.dev/install"));
         // Stable order (alphabetical).
         let pin_block = out.split("\n\n").next().expect("pin block").to_owned();
         let lines: Vec<&str> = pin_block.lines().collect();
@@ -1108,6 +1405,110 @@ mod tests {
             perms.set_mode(0o755);
             fs::set_permissions(&git_path, perms).expect("chmod");
         }
+    }
+
+    fn with_generated_demo_app(assertions: impl FnOnce(&Path)) {
+        let _process_lock = path_mutation_guard().lock().expect("process env lock");
+        let _lock = env_lock().lock().expect("env lock");
+        let temp = TempDir::new().expect("temp dir");
+        let bin_dir = temp.path().join("bin");
+        write_git_stub(&bin_dir);
+        let _path_guard = PathOverride::new(&bin_dir);
+
+        let args = NewArgs {
+            name: "demo-app".into(),
+            dir: Some(temp.path().to_string_lossy().into_owned()),
+        };
+        generate_new(&args).expect("scaffold succeeds");
+        assertions(&temp.path().join("demo-app"));
+    }
+
+    #[test]
+    fn generated_readme_links_canonical_documentation() {
+        with_generated_demo_app(|project_dir| {
+            let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README.md");
+            for page in ["capabilities", "blob-app-config-migration"] {
+                assert!(
+                    readme.contains(&format!(
+                        "https://iabtechlab.github.io/edgezero/guide/{page}"
+                    )),
+                    "generated README must link to the canonical {page} guide"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn generated_manifest_declares_outbound_http_optional() {
+        with_generated_demo_app(|project_dir| {
+            let source =
+                fs::read_to_string(project_dir.join("edgezero.toml")).expect("read manifest");
+            let manifest = ManifestLoader::load_from_str(&source);
+            assert_eq!(
+                manifest.manifest().capabilities.optional,
+                [Capability::OutboundHttp, Capability::OutboundImageOptimizer]
+            );
+            let hosts = manifest
+                .manifest()
+                .capabilities
+                .outbound
+                .hosts
+                .as_deref()
+                .expect("generated outbound hosts");
+            assert_eq!(hosts, ["https://*:*"]);
+            let image = manifest
+                .manifest()
+                .triggers
+                .http
+                .iter()
+                .find(|route| route.id.as_deref() == Some("image-demo"))
+                .expect("Fastly image route");
+            assert_eq!(image.adapters, ["fastly"]);
+
+            let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README.md");
+            assert!(
+                readme.contains("may fail at runtime"),
+                "generated README must explain optional capability behavior"
+            );
+            assert!(
+                readme.contains("promote `outbound-http` to `required`"),
+                "generated README must explain how to require outbound success"
+            );
+        });
+    }
+
+    #[test]
+    fn generated_spin_hosts_default_to_https_only() {
+        with_generated_demo_app(|project_dir| {
+            let app_manifest_path = project_dir.join("edgezero.toml");
+            let spin_manifest_path = project_dir.join("crates/demo-app-adapter-spin/spin.toml");
+            let source = fs::read_to_string(&spin_manifest_path).expect("read spin.toml");
+            let manifest: toml::Value = toml::from_str(&source).expect("parse spin.toml");
+            let hosts = manifest
+                .get("component")
+                .and_then(|components| components.get("demo-app-adapter-spin"))
+                .and_then(|component| component.get("allowed_outbound_hosts"))
+                .and_then(toml::Value::as_array)
+                .expect("allowed outbound hosts");
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0].as_str(), Some("https://*:*"));
+            assert!(
+                hosts.iter().all(|host| {
+                    host.as_str()
+                        .is_some_and(|value| !value.starts_with("http://"))
+                }),
+                "generated Spin manifest must not grant cleartext implicitly"
+            );
+            let app_manifest = ManifestLoader::from_path(&app_manifest_path)
+                .expect("parse generated edgezero.toml");
+            validate_spin_outbound_host_contract(
+                app_manifest.manifest(),
+                &app_manifest_path,
+                &spin_manifest_path,
+                None,
+            )
+            .expect("generated application and selected Spin component must remain aligned");
+        });
     }
 
     fn assert_scaffold_files(project_dir: &Path) {
@@ -1232,6 +1633,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the scaffold contract is clearest as one exhaustive generated-workspace assertion"
+    )]
     fn assert_scaffold_workspace(project_dir: &Path) {
         let cargo_toml =
             fs::read_to_string(project_dir.join("Cargo.toml")).expect("read Cargo.toml");
@@ -1249,6 +1654,7 @@ mod tests {
         }
         assert!(cargo_toml.contains("[workspace.lints.clippy]"));
         assert!(cargo_toml.contains("blanket_clippy_restriction_lints = \"allow\""));
+        assert_scaffold_sdk_dependencies(&cargo_toml);
 
         // Generated from a checkout: edgezero crates must resolve to local
         // path dependencies, not the Git fallback (whose `edgezero-cli` has
@@ -1264,6 +1670,27 @@ mod tests {
 
         let manifest =
             fs::read_to_string(project_dir.join("edgezero.toml")).expect("read edgezero.toml");
+        let manifest_value: toml::Value = toml::from_str(&manifest).expect("parse edgezero.toml");
+        assert_eq!(
+            manifest_value
+                .get("capabilities")
+                .and_then(|capabilities| capabilities.get("optional"))
+                .and_then(toml::Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(toml::Value::as_str),
+            Some("outbound-http"),
+            "generated manifest must explicitly opt into portable outbound HTTP"
+        );
+        assert_eq!(
+            manifest_value
+                .get("capabilities")
+                .and_then(|capabilities| capabilities.get("outbound"))
+                .and_then(|outbound| outbound.get("hosts"))
+                .and_then(toml::Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(toml::Value::as_str),
+            Some("https://*:*")
+        );
         assert!(manifest.contains("[adapters.cloudflare.adapter]"));
         assert!(manifest.contains("[adapters.fastly.adapter]"));
         assert!(
@@ -1348,6 +1775,37 @@ mod tests {
         }
     }
 
+    fn assert_scaffold_sdk_dependencies(cargo_toml: &str) {
+        assert!(
+            cargo_toml.contains("fastly = \"=0.13.1\""),
+            "generated Fastly adapter must use the current SDK release line"
+        );
+        assert!(
+            cargo_toml.contains(concat!(
+                "worker = { version = \"=0.8.5\", default-features = false, ",
+                "features = [\"http\"] }",
+            )),
+            "generated Cloudflare adapter must use the current SDK release"
+        );
+        let generated = workspace_dependencies(cargo_toml);
+        let root = workspace_dependencies(include_str!("../../../Cargo.toml"));
+        assert_eq!(
+            dependency_requirement(&generated, "spin-sdk"),
+            dependency_requirement(&root, "spin-sdk"),
+            "generated Spin adapter must use the current SDK version"
+        );
+        assert_eq!(
+            dependency_git_source(&generated, "spin-sdk"),
+            dependency_git_source(&root, "spin-sdk"),
+            "generated Spin adapter must use the exact SDK source and revision"
+        );
+        assert_eq!(
+            generated["spin-sdk"]["default-features"].as_bool(),
+            Some(false),
+            "generated Spin adapter must keep SDK default features disabled"
+        );
+    }
+
     fn assert_scaffold_crate_lints(project_dir: &Path) {
         for crate_dir in [
             "crates/demo-app-core",
@@ -1374,9 +1832,237 @@ mod tests {
     /// templates shipped a production `.expect(...)` in the `stream` handler,
     /// infallible `IntoResponse` test usage, and adapter host stubs that
     /// tripped `print_stderr` / `exit`.
-    fn assert_generated_sources_are_lint_clean(project_dir: &Path) {
+    fn fallback_initializer_block(core_lib: &str) -> &str {
+        const VARIANT: &str = "AdmissionDecision::ReadBodyBeforeFallback";
+        let variant_start = core_lib
+            .find(VARIANT)
+            .expect("fallback decision initializer");
+        let after_variant = core_lib
+            .get(variant_start..)
+            .expect("fallback decision start boundary");
+        let open_brace = after_variant
+            .find('{')
+            .and_then(|offset| variant_start.checked_add(offset))
+            .expect("fallback decision opening brace");
+        let mut depth = 0_usize;
+
+        let after_open_brace = core_lib
+            .get(open_brace..)
+            .expect("fallback opening brace boundary");
+        for (offset, character) in after_open_brace.char_indices() {
+            match character {
+                '{' => depth = depth.checked_add(1).expect("fallback brace depth"),
+                '}' => {
+                    depth = depth.checked_sub(1).expect("balanced fallback braces");
+                    if depth == 0 {
+                        let block_end = open_brace
+                            .checked_add(offset)
+                            .and_then(|end| end.checked_add(character.len_utf8()))
+                            .expect("fallback initializer end");
+                        return core_lib
+                            .get(variant_start..block_end)
+                            .expect("fallback initializer boundaries");
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        panic!("fallback decision closing brace");
+    }
+
+    fn normalize_source_whitespace(source: &str) -> String {
+        source.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn assert_generated_fallback_policy(core_lib: &str) {
+        let fallback = normalize_source_whitespace(fallback_initializer_block(core_lib));
+        assert!(
+            core_lib.contains("FALLBACK_INGRESS_BODY_BYTES: usize = 4 * 1024")
+                && fallback.contains("completion: ResponseEgressCompletion::empty()")
+                && fallback.contains("grant: IngressGrant::empty()")
+                && fallback.contains("max_body_bytes: FALLBACK_INGRESS_BODY_BYTES")
+                && fallback.contains(concat!(
+                    "on_exceeded: BufferedIngressResponse::text( ",
+                    "StatusCode::PAYLOAD_TOO_LARGE, ",
+                    "\"request body too large\\n\", ),",
+                ))
+                && fallback.contains(concat!(
+                    "on_timeout: BufferedIngressResponse::text( ",
+                    "StatusCode::REQUEST_TIMEOUT, ",
+                    "\"request timeout\\n\", ),",
+                )),
+            "generated admission policy must bound fallback reads with exact terminal responses",
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "generated admission policy must bound fallback reads with exact terminal responses"
+    )]
+    fn generated_fallback_policy_rejects_swapped_terminal_mappings() {
+        assert_generated_fallback_policy(
+            r#"AdmissionDecision::ReadBodyBeforeFallback {
+                completion: ResponseEgressCompletion::empty(),
+                grant: IngressGrant::empty(),
+                max_body_bytes: FALLBACK_INGRESS_BODY_BYTES,
+                on_exceeded: BufferedIngressResponse::text(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "request timeout\n",
+                ),
+                on_timeout: BufferedIngressResponse::text(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body too large\n",
+                ),
+            }
+            const FALLBACK_INGRESS_BODY_BYTES: usize = 4 * 1024;
+            on_exceeded: BufferedIngressResponse::text(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body too large\n",
+                ),
+            on_timeout: BufferedIngressResponse::text(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "request timeout\n",
+                ),"#,
+        );
+    }
+
+    fn assert_generated_axum_entrypoint(project_dir: &Path) {
+        let axum_main =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/src/main.rs"))
+                .expect("read axum main.rs");
+        assert!(
+            !axum_main.contains("process::exit")
+                && !axum_main.contains("EdgeZeroAxumService")
+                && !axum_main.contains("into_axum_response")
+                && axum_main.contains("run_app::<demo_app_core::App>()"),
+            "generated Axum entrypoint must use the connection-owning runner",
+        );
+    }
+
+    fn assert_generated_cloudflare_entrypoint(project_dir: &Path) {
+        let entrypoint =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-cloudflare/src/lib.rs"))
+                .expect("read Cloudflare lib.rs");
+        assert!(
+            entrypoint.contains("run_app::<demo_app_core::App>(req, env, ctx).await")
+                && !entrypoint.contains("from_core_response"),
+            "generated Cloudflare entrypoint must use the context-owning runner",
+        );
+        let manifest = fs::read_to_string(
+            project_dir.join("crates/demo-app-adapter-cloudflare/wrangler.toml"),
+        )
+        .expect("read Cloudflare wrangler.toml");
+        let parsed: toml::Value = toml::from_str(&manifest).expect("parse Wrangler manifest");
+        let flags = parsed
+            .get("compatibility_flags")
+            .and_then(toml::Value::as_array)
+            .expect("Cloudflare compatibility flags");
+        for required in ["enable_request_signal", "enable_weak_ref"] {
+            assert!(
+                flags.iter().any(|flag| flag.as_str() == Some(required)),
+                "generated Cloudflare manifest must enable {required}"
+            );
+        }
+    }
+
+    fn assert_generated_fastly_entrypoint(project_dir: &Path) {
+        let entrypoint =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-fastly/src/main.rs"))
+                .expect("read fastly main.rs");
+        assert!(
+            entrypoint.contains("reason ="),
+            "adapter attributes must carry a reason for allow_attributes_without_reason",
+        );
+        assert!(
+            !entrypoint.contains("#[fastly::main]")
+                && !entrypoint.contains("Request")
+                && !entrypoint.contains("Response")
+                && entrypoint.contains("pub fn main() -> Result<(), fastly::Error>")
+                && entrypoint.contains("run_app::<demo_app_core::App>()"),
+            "generated Fastly entrypoint must let EdgeZero own request receipt and response delivery",
+        );
+    }
+
+    fn assert_generated_spin_entrypoint(project_dir: &Path) {
+        let entrypoint =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-spin/src/lib.rs"))
+                .expect("read Spin lib.rs");
+        assert!(
+            !entrypoint.contains("IntoResponse")
+                && !entrypoint.contains("SpinFullResponse")
+                && !entrypoint.contains("FullBody")
+                && entrypoint.contains("anyhow::Result<edgezero_adapter_spin::SpinResponse>")
+                && entrypoint.contains("run_app::<demo_app_core::App>(req)"),
+            "generated Spin entrypoint must return EdgeZero's raw WASIp3 response type",
+        );
+    }
+
+    fn assert_generated_core_lifecycle(project_dir: &Path) {
+        let core_lib = fs::read_to_string(project_dir.join("crates/demo-app-core/src/lib.rs"))
+            .expect("read core lib.rs");
+        assert!(
+            core_lib.contains("configure = crate::configure_app"),
+            "generated app macro must install the lifecycle configuration callback",
+        );
+        assert!(
+            core_lib.contains("fn configure_app(app: &mut EdgeZeroApp) -> Result<(), EdgeError>")
+                && core_lib.contains("Ok(())"),
+            "generated lifecycle configuration must propagate initialization failures",
+        );
+        assert!(
+            core_lib.contains("set_ingress_admission_policy"),
+            "generated app must configure ingress admission",
+        );
+        let memory_behavior_tests = [
+            "platform_memory_startup_accepts_fit",
+            "platform_memory_startup_preserves_primary_excess",
+            "platform_memory_startup_preserves_stack_excess",
+            "platform_memory_startup_keeps_indeterminate_distinct_from_fit",
+            "platform_memory_startup_preserves_validation_error",
+            "platform_memory_validation_accounts_for_both_stack_shapes",
+        ];
+        assert!(
+            core_lib.contains("platform_memory_startup(app.platform())")
+                && core_lib.contains("platform.validate_memory_envelope(envelope)")
+                && core_lib.contains("MemoryEnvelopeValidation::Fits")
+                && core_lib.contains("MemoryEnvelopeValidation::Exceeds")
+                && core_lib.contains("MemoryEnvelopeValidation::Indeterminate")
+                && core_lib.contains("PlatformMemoryStartupError::UnsupportedValidationOutcome")
+                && memory_behavior_tests
+                    .into_iter()
+                    .all(|test_name| core_lib.contains(test_name))
+                && !core_lib.contains("Semaphore")
+                && !core_lib.contains("set_ingress_concurrency"),
+            "generated app must carry typed memory startup behavior without adding a concurrency gate",
+        );
+        assert!(
+            core_lib.contains("completion: ResponseEgressCompletion::empty()")
+                && core_lib.contains("grant: IngressGrant::empty()")
+                && !core_lib.contains("ResponsePermit")
+                && !core_lib.contains("AdmissionLease")
+                && !core_lib.contains("ResponseEgressCompletion::late_bound")
+                && !core_lib.contains("set_detached_response_egress_decision_factory"),
+            "generated apps must use the minimal core-owned lifecycle defaults",
+        );
+        assert!(
+            core_lib.contains(
+                "EdgeZeroApp::build::<super::App>(edgezero_core::PlatformMetadata::default())"
+            ),
+            "generated tests must handle fallible application assembly",
+        );
+        assert_generated_fallback_policy(&core_lib);
+    }
+
+    fn assert_generated_outbound_handler(project_dir: &Path) {
         let handlers = fs::read_to_string(project_dir.join("crates/demo-app-core/src/handlers.rs"))
             .expect("read handlers.rs");
+        assert!(
+            handlers.contains("ctx.take_ingress_grant().is_some()")
+                && !handlers.contains("AdmissionLease")
+                && !handlers.contains("install_response_permit"),
+            "generated admission handler must demonstrate one-time grant consumption without a fake permit",
+        );
         assert!(
             handlers.contains("pub async fn stream() -> Result<Response, EdgeError>"),
             "stream handler must be fallible, not panic via expect()",
@@ -1389,45 +2075,130 @@ mod tests {
             handlers.contains(".into_response()"),
             "handler tests must use the fallible IntoResponse pattern",
         );
-
-        let axum_main =
-            fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/src/main.rs"))
-                .expect("read axum main.rs");
         assert!(
-            !axum_main.contains("process::exit"),
-            "axum host entrypoint must return Result, not call process::exit",
+            handlers.contains("HttpClient::with_client(TestOutboundClient::default())"),
+            "generated tests must execute the portable outbound client",
+        );
+        assert!(
+            handlers.contains("fn generated_outbound_http_smoke()"),
+            "generated core must contain the outbound smoke sentinel",
+        );
+        for required in [
+            ".response_decoding(ResponseDecoding::Original)",
+            ".with_proxy_marker(false)",
+            ".cache_policy(",
+            ".max_request_body_bytes(",
+            ".max_encoded_response_bytes(",
+            ".max_decoded_response_bytes(",
+            ".max_response_bytes(",
+            ".max_response_header_bytes(",
+            ".max_response_header_count(",
+            ".max_chunk_bytes(",
+            ".max_brotli_window_bits(",
+            ".max_decoder_bytes(",
+            ".timeout(",
+            "send_all_until(",
+            "map_err(|failure| failure.into_parts().0)",
+            "OutboundBatchTermination::Completed",
+            "OutboundBatchTermination::Cutoff",
+            "OutboundBatch::from_driver",
+            "OutboundBatchDriverEvent::Item {",
+            "OutboundCollectedSlot::AlreadyDelivered",
+            "OutboundCollectedSlot::Resolved",
+            "OutboundCollectedSlot::Unresolved",
+            "OutboundPreparedBatch",
+            "BodyPayload::Stream",
+            "let (payload, body_owner) = response.into_body().into_parts();",
+            "fn progress(&self) -> Rc<dyn OutboundProgressRuntime>",
+            "Rc::new(IndependentOutboundProgress)",
+            "OutboundDispatchRequest",
+            "OutboundHead::new",
+            "request.into_parts()",
+            "batch.into_slots()",
+            "OutboundExchangeOwner::new",
+            "let completed_at = self.time.clock().now();",
+            "time: OutboundTime",
+            "self.time.clone()",
+            "generated_outbound_client_retains_its_clock_in_responses",
+            "scripted_batch_preserves_receipts_through_mixed_collection",
+            "scripted_batch_cutoff_retains_only_earlier_completions",
+            "scripted_batch_expired_cutoff_keeps_preflight_outcomes",
+            "OutboundBatchDriverEvent::Cutoff",
+            "OutboundBatch::cutoff(context)",
+            "FanoutSlotOutcome::Unresolved",
+            "OutboundCachePolicy::Bypass",
+            "slot.elapsed",
+        ] {
+            assert!(
+                handlers.contains(required),
+                "generated outbound example must contain `{required}`",
+            );
+        }
+        assert!(
+            !handlers.contains(".send_all("),
+            "generated outbound example must not retain the removed send_all API",
+        );
+        assert!(
+            !handlers.contains("max_brotli_decoder_bytes")
+                && !handlers.contains("MAX_BROTLI_DECODER_BYTES"),
+            "generated outbound example must use the generalized decoder budget",
+        );
+        assert!(
+            handlers.contains("ResponseEgressDeadline::after(RESPONSE_EGRESS_BUDGET)")
+                && !handlers.contains(concat!("ResponseEgressDeadline::", "new(")),
+            "generated responses must use an egress-start-relative deadline",
+        );
+        assert!(
+            handlers.contains(".variable(\"API_BASE_URL\")"),
+            "generated handlers must read runtime variables through the request context",
+        );
+    }
+
+    fn assert_generated_route_and_provider_manifests(project_dir: &Path) {
+        let manifest =
+            fs::read_to_string(project_dir.join("edgezero.toml")).expect("read edgezero.toml");
+        assert!(
+            manifest.contains("[[environment.variables]]\nname = \"API_BASE_URL\""),
+            "generated manifest must declare the upstream runtime variable",
+        );
+        assert!(
+            manifest.contains("path = \"/admission\"")
+                && manifest.contains("class = \"diagnostic\""),
+            "generated manifest must wire the admission diagnostic class",
+        );
+        assert!(
+            manifest.contains("path = \"/fanout\"") && manifest.contains("class = \"outbound\""),
+            "generated manifest must wire the outbound fanout class",
         );
 
-        let fastly_main =
-            fs::read_to_string(project_dir.join("crates/demo-app-adapter-fastly/src/main.rs"))
-                .expect("read fastly main.rs");
+        let spin_manifest =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-spin/spin.toml"))
+                .expect("read spin.toml");
         assert!(
-            fastly_main.contains("reason ="),
-            "adapter attributes must carry a reason for allow_attributes_without_reason",
+            spin_manifest.contains("allowed_outbound_hosts = [\"https://*:*\"]"),
+            "generated Spin hosts must default to HTTPS only",
         );
+    }
+
+    fn assert_generated_sources_are_lint_clean(project_dir: &Path) {
+        assert_generated_core_lifecycle(project_dir);
+        assert_generated_outbound_handler(project_dir);
+        assert_generated_route_and_provider_manifests(project_dir);
+        assert_generated_axum_entrypoint(project_dir);
+        assert_generated_cloudflare_entrypoint(project_dir);
+        assert_generated_fastly_entrypoint(project_dir);
+        assert_generated_spin_entrypoint(project_dir);
     }
 
     #[test]
     fn generate_new_scaffolds_workspace_layout() {
-        let _path_lock = path_mutation_guard().lock().expect("path guard");
-        let temp = TempDir::new().expect("temp dir");
-        let bin_dir = temp.path().join("bin");
-        write_git_stub(&bin_dir);
-        let _path_guard = PathOverride::new(&bin_dir);
-
-        let args = NewArgs {
-            name: "demo-app".into(),
-            dir: Some(temp.path().to_string_lossy().into_owned()),
-        };
-
-        generate_new(&args).expect("scaffold succeeds");
-
-        let project_dir = temp.path().join("demo-app");
-        assert_scaffold_files(&project_dir);
-        assert_scaffold_workspace(&project_dir);
-        assert_scaffold_app_config(&project_dir);
-        assert_scaffold_crate_lints(&project_dir);
-        assert_scaffold_cli_full_command_set(&project_dir);
+        with_generated_demo_app(|project_dir| {
+            assert_scaffold_files(project_dir);
+            assert_scaffold_workspace(project_dir);
+            assert_scaffold_app_config(project_dir);
+            assert_scaffold_crate_lints(project_dir);
+            assert_scaffold_cli_full_command_set(project_dir);
+        });
     }
 
     /// The scaffolded `<name>-cli` must

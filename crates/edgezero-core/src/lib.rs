@@ -24,18 +24,26 @@ pub mod config_store;
 pub mod context;
 pub mod env_config;
 pub mod error;
+pub mod error_detail;
 pub mod extractor;
 pub mod handler;
 pub mod http;
 pub mod ingress;
 pub mod introspection;
 pub mod key_value_store;
+pub mod logging;
 pub mod manifest;
 pub mod middleware;
+pub mod outbound;
 pub mod params;
-pub mod proxy;
+pub mod platform;
+pub mod pre_dispatch;
 pub mod responder;
 pub mod response;
+pub mod response_egress;
+#[doc(hidden)]
+pub mod response_egress_framing;
+pub mod response_headers;
 pub mod router;
 pub mod secret_store;
 pub mod store_registry;
@@ -43,5 +51,132 @@ pub mod store_registry;
 /// module docs. Enable via the `test-utils` feature in `[dev-dependencies]`.
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_env;
+pub mod time;
+
+pub use body::{Body, BodyPayload, BodyStream};
+pub use compression::{
+    BROTLI_DECODER_FIXED_CHARGE_BYTES, ContentEncoding, FLATE_DECODER_FIXED_CHARGE_BYTES,
+    PassthroughReason, brotli_decoder_memory_charge, classify_content_encoding,
+    decode_brotli_stream, decode_deflate_stream, decode_gzip_stream,
+};
+pub use config_store::{
+    BoundedStoreRead, ConfigExtractionLimits, ConfigValue, DEFAULT_CONFIG_BACKEND_BYTES,
+    DEFAULT_CONFIG_BLOB_BYTES, DEFAULT_CONFIG_EXTRACTION_BYTES, DEFAULT_CONFIG_EXTRACTION_TIMEOUT,
+    DEFAULT_CONFIG_JSON_DEPTH, DEFAULT_CONFIG_JSON_NODES, DEFAULT_CONFIG_SECRET_BYTES,
+};
 
 pub use edgezero_macros::{AppConfig, action, app};
+pub use error::{
+    BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin,
+    ResponseLimitReason, StoreExtractionReason,
+};
+pub use error_detail::{
+    AxumFailureCause, AxumFailureKind, CloudflareFailureCause, FastlyFailureCause,
+    ProviderFailureAdapter, ProviderFailureDetail, ProviderFailurePhase, SpinDnsRcode,
+    SpinFailureCause, SpinFieldSize, SpinTimeoutOption,
+};
+pub use ingress::{
+    AdmissionDecision, AdmittedIngress, BufferedIngressResponse, DEFAULT_INBOUND_READ_BUDGET,
+    DEFAULT_MAX_REQUEST_HEADER_BYTES, DEFAULT_MAX_REQUEST_HEADER_COUNT,
+    DEFAULT_MAX_REQUEST_TARGET_BYTES, IngressAdmissionOutcome, IngressBeginOutcome,
+    IngressDispatchOutcome, IngressFraming, IngressGrant, IngressHead, IngressHeadAccounting,
+    IngressHeadLimits, IngressHeadParts, PreparedIngress,
+};
+pub use logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET, resolve_logging_level};
+pub use manifest::{
+    AtomicHost, BakedManifest, Capability, CapabilitySupport, HostParseError, HostPat,
+    ManifestCapabilities, ManifestContract, ManifestOutboundCapability, Port, Scheme,
+    canonicalize_outbound_host,
+};
+pub use outbound::{
+    ContentTypeIneligibility, ContentTypeProvenance, DEFAULT_MAX_DECODER_BYTES,
+    DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_OUTBOUND_REQUEST_BODY_BYTES, HttpClient,
+    IndependentOutboundProgress, OutboundBatch, OutboundBatchAccumulator, OutboundBatchCheck,
+    OutboundBatchContext, OutboundBatchDriverEvent, OutboundBatchFailure,
+    OutboundBatchInsertFailure, OutboundBatchItem, OutboundBatchMergeFailure, OutboundBatchNext,
+    OutboundBatchResults, OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot,
+    OutboundCropFocus, OutboundDispatchRequest, OutboundExchangeOwner, OutboundFollowFailure,
+    OutboundFollowResult, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
+    OutboundHeaderInput, OutboundHttpClient, OutboundImageFormat, OutboundImageOptimizerOptions,
+    OutboundImageOptimizerRegion, OutboundLocationEvidence, OutboundPending, OutboundPreparedBatch,
+    OutboundProgressRuntime, OutboundProxyMarker, OutboundRedirectAction, OutboundRedirectContext,
+    OutboundRedirectLimit, OutboundRedirectStopReason, OutboundRequest, OutboundRequestParts,
+    OutboundResizeFilter, OutboundResponse, OutboundResponseContext, OutboundScope,
+    OutboundScopeKind, OutboundScopeOwner, OutboundSendMode, OutboundSlotResult, OutboundTask,
+    OutboundTime, PROXY_HEADER, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
+    ResponseHeadNormalization, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
+    collect_response_stream, collect_response_stream_until_with_clock,
+    enforce_payload_content_length, limit_decoded_stream, limit_encoded_stream,
+    normalize_for_dispatch, rechunk_stream, validate_for_dispatch,
+};
+pub use platform::{
+    HostIngressMemoryAccounting, InboundRequestPopulationBound, MemoryCeiling, MemoryCeilingScope,
+    MemoryEnvelope, MemoryEnvelopeValidation, MemoryEnvelopeValidationError, MemoryResource,
+    MemoryValidationIndeterminateReason, PlatformFact, PlatformMetadata, PlatformResourceSource,
+    PlatformUnknownReason,
+};
+pub use pre_dispatch::PreDispatchRequest;
+pub use response_egress::{
+    DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
+    DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead,
+    RESPONSE_EGRESS_FALLBACK_SAFETY_BUDGET, ResponseEgressAttempt, ResponseEgressBeginFailure,
+    ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressDeadline,
+    ResponseEgressEnvelope, ResponseEgressFallbackDisposition, ResponseEgressFramingFailures,
+    ResponseEgressHead, ResponseEgressObserver, ResponseEgressObserverHandle,
+    ResponseEgressOutcome, ResponseEgressPolicy, ResponseEgressPolicyCallback,
+    ResponseEgressPreparationError, ResponseEgressReport, ResponseEgressResource,
+    ResponseEgressResourceInstallError, ResponseEgressSourceFailure,
+    default_response_egress_policy,
+};
+#[doc(inline)]
+pub use response_egress_framing::ResponseEgressFramingError;
+pub use response_headers::{
+    MAX_SYNTHESIZED_RESPONSE_HEADER_BYTES, MAX_SYNTHESIZED_RESPONSE_HEADER_COUNT,
+    SynthesizedResponseHeaders, SynthesizedResponseHeadersError,
+};
+pub use router::{ResolvedDispatch, RouteId, RouteInfo, RouteMetadata, RouteResolution};
+pub use time::{
+    DEADLINE_FAR_FUTURE, DEFAULT_NO_DEADLINE_BUDGET, Deadline, DispatchBudget, MonotonicClock,
+    MonotonicInstant, dispatch_budget,
+};
+
+#[cfg(test)]
+mod public_config_extraction_contract_tests {
+    use std::time::Duration;
+
+    #[test]
+    fn bounded_config_types_and_defaults_are_root_exports() {
+        let limits = crate::ConfigExtractionLimits::default();
+        let _: crate::BoundedStoreRead<crate::ConfigValue> = crate::BoundedStoreRead {
+            backend_bytes: 0,
+            value: None,
+        };
+        assert_eq!(limits.max_blob_bytes, crate::DEFAULT_CONFIG_BLOB_BYTES);
+        assert_eq!(
+            limits.max_backend_bytes,
+            crate::DEFAULT_CONFIG_BACKEND_BYTES
+        );
+        assert_eq!(limits.max_secret_bytes, crate::DEFAULT_CONFIG_SECRET_BYTES);
+        assert_eq!(limits.max_json_depth, crate::DEFAULT_CONFIG_JSON_DEPTH);
+        assert_eq!(limits.max_json_nodes, crate::DEFAULT_CONFIG_JSON_NODES);
+        assert_eq!(
+            limits.max_total_bytes,
+            crate::DEFAULT_CONFIG_EXTRACTION_BYTES
+        );
+        assert_eq!(limits.timeout, crate::DEFAULT_CONFIG_EXTRACTION_TIMEOUT);
+        assert_eq!(crate::DEADLINE_FAR_FUTURE, Duration::from_hours(168));
+        assert_eq!(crate::DEFAULT_NO_DEADLINE_BUDGET, Duration::from_secs(30));
+    }
+}
+
+#[cfg(test)]
+mod public_response_egress_contract_tests {
+    #[test]
+    fn late_bound_resource_types_are_root_exports() {
+        let (resource, completion) = crate::ResponseEgressCompletion::late_bound::<Vec<u8>>();
+        let _: crate::ResponseEgressResource<Vec<u8>> = resource;
+        let _: crate::ResponseEgressResourceInstallError =
+            crate::ResponseEgressResourceInstallError::Closed;
+        drop(completion);
+    }
+}

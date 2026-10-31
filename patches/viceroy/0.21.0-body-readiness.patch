@@ -1,0 +1,284 @@
+diff --git a/src/body.rs b/src/body.rs
+index 5f86628..465abab 100644
+--- a/src/body.rs
++++ b/src/body.rs
+@@ -42,6 +42,8 @@ pub enum Chunk {
+     Channel(mpsc::Receiver<StreamingBodyItem>),
+     /// A version of `HttpBody` that assumes that the interior data is gzip-compressed.
+     CompressedHttpBody(DecoderState, hyper::Body),
++    /// An owned source error observed by readiness but not yet consumed by a reader.
++    Error(error::Error),
+ }
+ 
+ impl Chunk {
+@@ -180,13 +182,21 @@ impl Body {
+         Ok(String::from_utf8(self.read_into_vec().await?).expect("Body was not UTF-8"))
+     }
+ 
+-    /// Block until the body has a chunk ready (or is known to be empty).
++    /// Block until a nonempty chunk, an error, or end-of-stream is ready to read.
+     pub async fn await_ready(&mut self) {
+-        // Attempt to read a chunk, blocking until one is available (or `None` signals end of stream)
+-        if let Some(Ok(chunk)) = self.data().await {
+-            // If we did get a chunk, put it back; subsequent read attempts will find this chunk without
+-            // additional blocking.
+-            self.chunks.push_front(chunk.into())
++        loop {
++            match self.data().await {
++                Some(Ok(chunk)) if chunk.is_empty() => tokio::task::yield_now().await,
++                Some(Ok(chunk)) => {
++                    self.chunks.push_front(chunk.into());
++                    return;
++                }
++                Some(Err(error)) => {
++                    self.chunks.push_front(Chunk::Error(error));
++                    return;
++                }
++                None => return,
++            }
+         }
+     }
+ 
+@@ -271,6 +281,7 @@ impl HttpBody for Body {
+     ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+         while let Some(mut chunk) = self.chunks.pop_front() {
+             match chunk {
++                Chunk::Error(error) => return Poll::Ready(Some(Err(error))),
+                 Chunk::HttpBody(mut body) => {
+                     let body_mut = &mut body;
+                     pin_mut!(body_mut);
+@@ -374,9 +385,10 @@ impl HttpBody for Body {
+                                     // put the body back, so we can poll it again next time
+                                     self.chunks.push_front(chunk);
+                                     if resulting_bytes.is_empty() {
+-                                        // If we got no bytes from this chunk, it might be just the gzip header
+-                                        // we'll continue the loop to process more chunks
+-                                        continue;
++                                        // Readiness must yield so selection deadlines and siblings
++                                        // progress even when the source only produces empty frames.
++                                        cx.waker().wake_by_ref();
++                                        return self.check_timeout_on_pending(cx);
+                                     } else {
+                                         return Poll::Ready(Some(Ok(resulting_bytes)));
+                                     }
+@@ -416,6 +428,7 @@ impl HttpBody for Body {
+                 // If this is a streaming body or a compressed chunk, immediately give up on the hint.
+                 Chunk::Channel(_) => return SizeHint::default(),
+                 Chunk::CompressedHttpBody(_, _) => return SizeHint::default(),
++                Chunk::Error(_) => return SizeHint::default(),
+                 Chunk::HttpBody(body) => {
+                     // An `HttpBody` size hint will either be exact, or wide open. If the latter,
+                     // bail out with a wide-open range.
+@@ -442,6 +455,212 @@ mod tests {
+ 
+     use crate::body::Chunk;
+ 
++    fn readiness_source(
++        chunks: Vec<Result<Bytes, std::io::Error>>,
++        pending: bool,
++    ) -> (
++        crate::body::Body,
++        std::sync::Arc<std::sync::atomic::AtomicUsize>,
++    ) {
++        let mut chunks = std::collections::VecDeque::from(chunks);
++        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let observed = polls.clone();
++        let stream = futures::stream::poll_fn(move |_| {
++            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            match chunks.pop_front() {
++                Some(chunk) => std::task::Poll::Ready(Some(chunk)),
++                None if pending => std::task::Poll::Pending,
++                None => std::task::Poll::Ready(None),
++            }
++        });
++        (hyper::Body::wrap_stream(stream).into(), polls)
++    }
++
++    #[tokio::test]
++    async fn readiness_preserves_bytes_without_polling_the_source_again() {
++        use futures::FutureExt;
++        use std::sync::atomic::Ordering;
++        let (mut body, polls) = readiness_source(vec![Ok(Bytes::from_static(b"abc"))], true);
++        body.await_ready().await;
++        let ready_polls = polls.load(Ordering::Relaxed);
++        let mut one = [0; 1];
++        assert!(matches!(body.read(&mut one).now_or_never(), Some(Ok(1))));
++        assert_eq!(&one, b"a");
++        body.await_ready().await;
++        let mut remaining = [0; 16 * 1024];
++        assert!(matches!(
++            body.read(&mut remaining).now_or_never(),
++            Some(Ok(2))
++        ));
++        assert_eq!(&remaining[..2], b"bc");
++        assert_eq!(polls.load(Ordering::Relaxed), ready_polls);
++        assert!(body.await_ready().now_or_never().is_none());
++    }
++
++    #[tokio::test]
++    async fn readiness_empty_frame_does_not_authorize_a_pending_read() {
++        use futures::FutureExt;
++        let (mut body, _) = readiness_source(vec![Ok(Bytes::new())], true);
++        assert!(body.await_ready().now_or_never().is_none());
++    }
++
++    #[tokio::test]
++    async fn readiness_skips_empty_frames_before_data_and_eof() {
++        use futures::FutureExt;
++        use std::sync::atomic::Ordering;
++        let (mut body, polls) = readiness_source(
++            vec![
++                Ok(Bytes::new()),
++                Ok(Bytes::from_static(b"x")),
++                Ok(Bytes::new()),
++            ],
++            false,
++        );
++        body.await_ready().await;
++        let mut byte = [0; 1];
++        let ready_polls = polls.load(Ordering::Relaxed);
++        assert!(matches!(body.read(&mut byte).now_or_never(), Some(Ok(1))));
++        assert_eq!(polls.load(Ordering::Relaxed), ready_polls);
++        body.await_ready().await;
++        let eof_polls = polls.load(Ordering::Relaxed);
++        assert!(matches!(body.read(&mut byte).now_or_never(), Some(Ok(0))));
++        assert_eq!(polls.load(Ordering::Relaxed), eof_polls);
++    }
++
++    #[tokio::test]
++    async fn readiness_repeated_observation_retains_the_original_error() {
++        use futures::FutureExt;
++        use http_body::Body;
++        use std::sync::atomic::Ordering;
++        let identity = std::sync::Arc::new(std::io::Error::other("readiness sentinel"));
++        let (mut body, polls) = readiness_source(
++            vec![
++                Ok(Bytes::new()),
++                Err(std::io::Error::other(identity.clone())),
++            ],
++            false,
++        );
++        body.await_ready().await;
++        let ready_polls = polls.load(Ordering::Relaxed);
++        body.await_ready().await;
++        body.await_ready().await;
++        let Some(Some(Err(crate::Error::HyperError(error)))) = body.data().now_or_never() else {
++            panic!("readiness lost the typed source error");
++        };
++        assert!(
++            std::error::Error::source(&error)
++                .and_then(|error| error.downcast_ref::<std::io::Error>())
++                .and_then(|error| error.get_ref())
++                .and_then(|error| error.downcast_ref::<std::sync::Arc<std::io::Error>>())
++                .is_some_and(|error| std::sync::Arc::ptr_eq(error, &identity))
++        );
++        assert_eq!(polls.load(Ordering::Relaxed), ready_polls);
++        assert!(body.data().await.is_none());
++    }
++
++    #[tokio::test]
++    async fn readiness_retained_error_survives_append() {
++        use futures::FutureExt;
++        let (sender, receiver) = tokio::sync::mpsc::channel(1);
++        drop(sender);
++        let mut source: crate::body::Body = receiver.into();
++        source.await_ready().await;
++        let mut body = crate::body::Body::empty();
++        body.append(source);
++        assert_eq!(body.len(), None);
++        let mut byte = [0; 1];
++        assert!(matches!(
++            body.read(&mut byte).now_or_never(),
++            Some(Err(crate::Error::UnfinishedStreamingBody))
++        ));
++        assert!(matches!(body.read(&mut byte).now_or_never(), Some(Ok(0))));
++    }
++
++    #[tokio::test]
++    async fn readiness_cancellation_keeps_a_later_source_error() {
++        use futures::FutureExt;
++        let (sender, receiver) = futures::channel::mpsc::unbounded();
++        let mut body: crate::body::Body = hyper::Body::wrap_stream(receiver).into();
++        assert!(body.await_ready().now_or_never().is_none());
++        sender
++            .unbounded_send(Err::<Bytes, _>(std::io::Error::other("later error")))
++            .unwrap();
++        body.await_ready().await;
++        let mut byte = [0; 1];
++        assert!(matches!(
++            body.read(&mut byte).now_or_never(),
++            Some(Err(crate::Error::HyperError(_)))
++        ));
++    }
++
++    #[tokio::test]
++    async fn readiness_empty_source_does_not_hide_a_ready_sibling() {
++        use futures::{
++            FutureExt,
++            future::{Either, select},
++        };
++        let (mut pending, _) = readiness_source(vec![Ok(Bytes::new())], true);
++        let (mut ready, _) = readiness_source(vec![Ok(Bytes::from_static(b"x"))], true);
++        let selected = select(pending.await_ready().boxed(), ready.await_ready().boxed()).await;
++        assert!(matches!(selected, Either::Right(_)));
++    }
++
++    #[tokio::test]
++    async fn readiness_decoder_no_output_yields_to_the_selection_timer() {
++        use futures::FutureExt;
++        use std::task::Poll;
++        let mut polls = 0;
++        let empty = futures::stream::poll_fn(move |_| {
++            polls += 1;
++            assert!(
++                polls < 1024,
++                "empty compressed frames monopolized a readiness poll"
++            );
++            Poll::Ready(Some(Ok::<_, std::io::Error>(Bytes::new())))
++        });
++        let mut body: crate::body::Body =
++            Chunk::compressed_body(hyper::Body::wrap_stream(empty)).into();
++        assert!(body.await_ready().now_or_never().is_none());
++        drop(body);
++        let empty = futures::stream::repeat_with(|| Ok::<_, std::io::Error>(Bytes::new()));
++        let mut body: crate::body::Body =
++            Chunk::compressed_body(hyper::Body::wrap_stream(empty)).into();
++        assert!(
++            tokio::time::timeout(std::time::Duration::from_millis(5), body.await_ready())
++                .await
++                .is_err()
++        );
++    }
++
++    #[tokio::test]
++    async fn readiness_preserves_decoder_error() {
++        use futures::FutureExt;
++        let mut body: crate::body::Body =
++            Chunk::compressed_body(hyper::Body::from("invalid gzip")).into();
++        body.await_ready().await;
++        let mut byte = [0; 1];
++        assert!(matches!(
++            body.read(&mut byte).now_or_never(),
++            Some(Err(crate::Error::IoError(_)))
++        ));
++    }
++
++    #[tokio::test]
++    async fn readiness_preserves_between_bytes_timeout_without_repolling_source() {
++        use futures::FutureExt;
++        use std::sync::atomic::Ordering;
++        let (mut body, polls) = readiness_source(Vec::new(), true);
++        body.set_between_bytes_timeout(std::time::Duration::from_millis(1));
++        body.await_ready().await;
++        let ready_polls = polls.load(Ordering::Relaxed);
++        let mut byte = [0; 1];
++        assert!(matches!(
++            body.read(&mut byte).now_or_never(),
++            Some(Err(crate::Error::BetweenBytesTimeout))
++        ));
++        assert_eq!(polls.load(Ordering::Relaxed), ready_polls);
++    }
++
+     /// Proptest strategy: get a set of Bytes.
+     fn some_bytes() -> impl Strategy<Value = Bytes> {
+         proptest::collection::vec(any::<u8>(), 0..16).prop_map(|v| v.into())

@@ -4,15 +4,15 @@
 
 EdgeZero is a portable HTTP workload toolkit in Rust. Write once, deploy to
 Fastly Compute, Cloudflare Workers, Fermyon Spin, or native Axum servers. The
-codebase is a Cargo workspace with 8 crates under `crates/`, an example app
-under `examples/app-demo/`, a VitePress documentation site under `docs/`, and
-CI workflows under `.github/workflows/`.
+codebase has an eight-crate production Cargo workspace and an isolated test
+runner under `crates/`, an example app under `examples/app-demo/`, a VitePress
+documentation site under `docs/`, and CI workflows under `.github/workflows/`.
 
 ## Workspace Layout
 
 ```
 crates/
-  edgezero-core/              # Core: routing, extractors, middleware, proxy, body, errors
+  edgezero-core/              # Core: routing, extractors, middleware, outbound HTTP, body, errors
   edgezero-macros/            # Proc macros: #[action], #[app]
   edgezero-adapter/           # Adapter registry and traits
   edgezero-adapter-fastly/    # Fastly Compute bridge (wasm32-wasip1)
@@ -20,6 +20,7 @@ crates/
   edgezero-adapter-spin/      # Fermyon Spin bridge (wasm32-wasip2)
   edgezero-adapter-axum/      # Axum/Tokio bridge (native, dev server)
   edgezero-cli/               # CLI lib + bin: new, build, deploy, serve, auth, provision, config (validate|push), demo
+  edgezero-test-harness/      # Standalone native integration-test runner (own workspace/lockfile)
 examples/app-demo/            # Reference app with all 4 adapters (excluded from workspace)
 docs/                         # VitePress documentation site (Node.js)
 scripts/                      # Build/deploy/test helper scripts
@@ -134,11 +135,13 @@ impl Middleware for MyMiddleware {
 }
 ```
 
-### Proxy
+### Outbound HTTP
 
-Use `ProxyService` with adapter-specific clients (`FastlyProxyClient`,
-`CloudflareProxyClient`, `SpinProxyClient`). Keep proxy logic provider-agnostic
-in core.
+Handlers obtain `HttpClient` from `RequestContext::http_client()`, construct
+`OutboundRequest` values, and consume `OutboundResponse` or per-slot
+`OutboundSlotResult` outcomes. Keep provider transport logic in adapter-specific
+`*OutboundClient` implementations and use the capability matrix for behavioral
+differences.
 
 ### Logging
 
@@ -157,6 +160,9 @@ in core.
 - **Async tests** use `futures::executor::block_on` (not Tokio) for WASM compat.
 - **Minimal changes**: every change should impact as little code as possible.
   Avoid unnecessary refactoring, docstrings on untouched code, or premature abstractions.
+- **JSON construction**: use `serde_json::json!` for ordinary JSON values and fixtures;
+  serialize typed structs directly. Keep raw JSON for syntax or exact-byte tests,
+  static-input APIs, and last-resort fallbacks that must avoid serialization.
 - **Feature gates**: platform-specific code goes behind `fastly`, `cloudflare`,
   `spin`, or `axum` features. Core stays `default-features = false` for WASM targets.
 - **No direct `http` crate imports** in application code — use `edgezero_core` re-exports.
@@ -168,7 +174,7 @@ Each adapter follows the same structure:
 - `context.rs` — platform-specific request context
 - `request.rs` — platform request → core request conversion
 - `response.rs` — core response → platform response conversion
-- `proxy.rs` — platform-specific proxy client
+- `outbound.rs` — platform-specific outbound HTTP client
 - `logger.rs` — platform-specific logging init
 - `cli.rs` — adapter dispatch behind the `cli` feature: `build` / `deploy` / `serve` (legacy) plus `Adapter::execute` for `auth` (login/logout/status) and dedicated trait methods `provision` (Stage 6 — platform-resource creation) and `push_config_entries` (Stage 7 — `config push` writeback). Self-registers via `#[ctor]` into the `edgezero-adapter` registry.
 

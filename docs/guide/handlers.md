@@ -202,17 +202,17 @@ async fn inspect(ctx: RequestContext) -> Result<Text<String>, EdgeError> {
 
 `RequestContext` provides these methods:
 
-| Method           | Returns                                    |
-| ---------------- | ------------------------------------------ |
-| `request()`      | `&Request` - full HTTP request             |
-| `path_params()`  | `&PathParams` - raw path parameters        |
-| `path::<T>()`    | Deserialize path params to `T`             |
-| `query::<T>()`   | Deserialize query string to `T`            |
-| `json::<T>()`    | Deserialize JSON body to `T`               |
-| `form::<T>()`    | Deserialize form body to `T`               |
-| `body()`         | `&Body` - raw request body                 |
-| `into_request()` | `Request` - consume context, take request  |
-| `proxy_handle()` | `Option<ProxyHandle>` - adapter proxy hook |
+| Method           | Returns                                             |
+| ---------------- | --------------------------------------------------- |
+| `request()`      | `&Request` - full HTTP request                      |
+| `path_params()`  | `&PathParams` - raw path parameters                 |
+| `path::<T>()`    | Deserialize path params to `T`                      |
+| `query::<T>()`   | Deserialize query string to `T`                     |
+| `json::<T>()`    | Deserialize JSON body to `T`                        |
+| `form::<T>()`    | Deserialize form body to `T`                        |
+| `body()`         | `&Body` - raw request body                          |
+| `into_request()` | `Request` - consume context, take request           |
+| `http_client()`  | `Option<HttpClient>` - adapter outbound HTTP client |
 
 ### Store Extractors
 
@@ -324,15 +324,230 @@ edgezero_core::app!("edgezero.toml", state = crate::app_state());
 allowed per `app!` — to share more than one value, wrap them in an aggregate
 app-state struct and register that.
 
+For fallible state, use `state = crate::load_state()?`, where the call returns
+`Result<T, EdgeError>`. The generated `build_router()` returns `Result`; `?`
+propagates the original error before configuration and registers `T`, not `Result<T, EdgeError>`.
+Never turn a transient initialization error into a successful error-response router or cache it
+in `OnceLock<Result<_, _>>`. Retain only successfully assembled state or applications.
+
 > **Make `app_state()` cheap.** The macro emits the `state` expression inside the
 > generated `build_router()`, which each adapter's `run_app` calls through
-> `A::build_app()` — **once at startup** for long-lived runtimes (Axum), but
-> **once per request** on the default Fastly, Cloudflare and Spin entry points.
-> Fastly starts a fresh Wasm instance by default; Cloudflare and Spin also
-> rebuild the app per request.
+> `App::build::<A>(platform)` — **once at startup** for Axum, but **once per
+> invocation** for the default Fastly, Cloudflare, and Spin entry points.
+> Opt-in retained paths build only until an app is successfully retained; host
+> eviction can require fresh initialization on any request. A reused Fastly
+> sandbox does not imply that the app is retained unless the entry point chooses it.
 > So the `state` expression runs on that cadence: build heavy state **once** and
 > hand out clones (e.g. a `OnceLock<Arc<AppState>>` as above, or a `static`), and
 > let `T = Arc<AppState>` so each call is just a refcount bump. Do **not** `Arc::new(HeavyThing::build())` directly in the `state` expression.
+
+### Configuring the application lifecycle
+
+Macro-driven apps can customize the generated `App` through the existing
+`Hooks::configure` seam without replacing manifest-driven routing:
+
+```rust
+use edgezero_core::{
+    AdmissionDecision, DetachedResponseEgressDecision, EdgeError, IngressGrant,
+    ResponseEgressCompletion, DEFAULT_RESPONSE_WRITE_BUDGET,
+};
+use std::time::Duration;
+
+fn configure_app(app: &mut edgezero_core::app::App) -> Result<(), EdgeError> {
+    app.set_ingress_admission_policy(|head| AdmissionDecision::Admit {
+        completion: ResponseEgressCompletion::empty(),
+        grant: IngressGrant::empty(),
+        read_deadline: head.read_deadline_after(Duration::from_secs(30)),
+    });
+    app.set_detached_response_egress_decision_factory(|head| {
+        DetachedResponseEgressDecision::Send {
+            completion: ResponseEgressCompletion::empty(),
+            deadline: head.write_deadline_after(DEFAULT_RESPONSE_WRITE_BUDGET),
+        }
+    });
+    Ok(())
+}
+
+edgezero_core::app!("edgezero.toml", configure = crate::configure_app);
+```
+
+`configure = <expr>` must evaluate to a callable that accepts `&mut App` and returns
+`Result<(), EdgeError>`. It is
+invoked after the manifest router is built and before the app begins serving, so
+it can install ingress admission, request-head limits, config extraction limits,
+the monotonic clock, an error-response renderer, and response-egress policy or observation hooks. Keep the
+callback cheap for the same adapter-lifecycle reasons as `state = <expr>` above. A configuration
+error prevents EdgeZero request conversion, body polling, and dispatch; Axum also fails before
+binding its listener.
+
+`App::build::<A>(PLATFORM) -> Result<App, EdgeError>` is the hook-based assembly
+path. `Hooks::routes() -> Result<RouterService, EdgeError>` builds routes and their
+state first; its original error skips configuration and produces no app. The
+macro-generated `build_router()` also returns `Result`, without an infallible
+compatibility helper.
+
+For state loaded from provider bindings, asynchronous reads or explicit settings,
+build the router yourself, then call `App::from_router::<A>(router, PLATFORM)`.
+It does not call `A::routes`: it applies the same application name, configuration
+and complete platform-metadata check as `App::build`, exactly once. Raw constructors
+such as `App::new` do not apply hooks and are not substitutes for this assembly path.
+
+`App::state::<T>() -> Option<&T>` borrows the exact registered type from the
+router's existing state registry, without a request, copying the value or rebuilding
+it. Configuration may read state before choosing policies. For `with_state(Arc<S>)`,
+read `state::<Arc<S>>()`; handlers' `State<Arc<S>>` shares those same interiors.
+Missing types return `None`, and repeated registration of one type remains
+last-write-wins. `RouterService::state` exposes the same borrowed view.
+
+Both assembly paths install the selected platform before calling `Hooks::configure`
+and reject a successful configuration that replaces that metadata. Publish or retain
+only the completed successful app, never an initialization error. Retaining the app
+does not retain request admission grants, registries, bodies, or response-egress
+resources; those are fresh for every dispatch. See
+[application retention](/guide/adapters/overview#opt-in-application-retention).
+
+All standard Fastly, Cloudflare and Spin entrypoints deliver route/state or configuration
+failures through the same default error renderer and canonical adapter response converter.
+The error's status is preserved; internal details remain off the wire. Full failure details
+are logged once per failed attempt on `edgezero::boot`, so install the application's logging
+backend before assembly when the adapter does not provide one. Axum logs its failed assembly
+once on the same boot target and fails startup before binding, without constructing a response.
+
+No successful app configuration exists on failure, even if `configure` installed some policies
+before returning an error. The failure response therefore uses no configured renderer,
+application headers, completion factory, egress policy or observer. It uses the default finite
+write budget anchored to the request start captured before assembly. This deadline does not
+interrupt synchronous initialization itself. Fastly retained serving keeps its app slot empty
+and retries on the next request when failure-response delivery succeeds; transport failures
+retain their existing terminal behavior.
+
+Custom entrypoints can construct the same envelope without an app using
+`App::assembly_error_egress(error, method, request_start, clock)`. Use the adapter's
+`request::send_assembly_error` helper to release the unread native request and enter its
+existing converter once. Fastly returns `FastlyRequestDelivery::Detached` with the exact
+terminal report; Cloudflare and Spin return their adapter-owned response. The supplied
+start and clock must share one monotonic domain. Never send a second native response after
+unknown or committed delivery. Fastly's confirmed `NotCommitted` replacement permission
+remains an explicit caller decision outside EdgeZero accounting, never an automatic resend.
+
+Use the synchronous error renderer when framework and handler errors must use an application-owned,
+fixed-size wire body:
+
+```rust
+use edgezero_core::{Body, EdgeError, Response};
+
+fn configure_app(app: &mut edgezero_core::app::App) -> Result<(), EdgeError> {
+    app.set_error_response_renderer(|error| Response::new(Body::from(error.kind())));
+    Ok(())
+}
+```
+
+The renderer handles admitted routing/handler errors, post-admission conversion errors, and
+detached normalized-ingress errors. EdgeZero reapplies mandatory protocol metadata after the
+callback, including the error's status, so the status returned by the callback is ignored;
+canonical 405 responses therefore retain their sorted, deduplicated `Allow` field.
+Effective `config_out_of_date` responses retain `Retry-After: 60`.
+Typed request-body overflow responses always retain status 413 and lose `Retry-After`, even
+when a custom renderer adds it. This does not remove an upstream 413 response's retry policy.
+Explicit admission refusals and fallback `on_exceeded`/`on_timeout` responses are already complete
+application responses and bypass this renderer. Avoid serializing `error.to_string()` when the
+body must remain bounded or diagnostics must remain private.
+
+Every response-producing admission decision owns one explicit `ResponseEgressCompletion`. Use
+`ResponseEgressCompletion::empty()` when there is no response-scoped resource. To hold a permit
+acquired during admission through terminal egress, move it directly into
+`ResponseEgressCompletion::new(move |report| ... )`. The completion is non-clone.
+It never belongs in response extensions. It follows admitted, refused, fallback, handler-error,
+and middleware-error responses into the adapter's exactly-once egress attempt.
+`AdmissionDecision::Abort` is different: it returns no response and therefore owns no completion.
+
+A handler can place a response-specific write bound in the response extensions without teaching
+the global policy callback about application response categories:
+
+```rust
+use edgezero_core::ResponseEgressDeadline;
+use std::time::Duration;
+
+response
+    .extensions_mut()
+    .insert(ResponseEgressDeadline::after(Duration::from_secs(2)));
+```
+
+`after(duration)` starts at the injected-clock instant when response egress begins. EdgeZero
+clamps the duration to seven days and fails closed to that start instant on arithmetic overflow.
+Use `ResponseEgressDeadline::at(deadline)` when the application already owns an absolute cutoff,
+such as a queue-through-egress deadline. EdgeZero removes either extension in `begin()`, exposes
+the resolved absolute value to the policy callback, and enforces the earlier application or policy
+deadline. The retired `new()` and unresolved `deadline()` APIs are not available.
+
+Use `left.join(right)` when two independently owned completion actions must follow the same
+response. The joined completion invokes the left callback and then the right callback with the
+same borrowed terminal report, at most once. Abandoning it before terminal egress releases the
+resources captured by both children. On unwind-capable targets, each child has an independent
+panic boundary, so a left-callback panic does not suppress the right callback. On panic-abort
+targets, termination may occur before the right callback runs. Joining callbacks does not
+strengthen the adapter's documented provider-completion boundary.
+
+When the handler acquires the permit later, use EdgeZero's late-bound resource owner. Put the
+non-clone installer in the typed `IngressGrant` and transfer its paired completion with the
+admission decision. The handler consumes the grant and installs the permit; terminal completion
+takes and drops it:
+
+```rust
+use edgezero_core::{
+    IngressGrant, ResponseEgressCompletion, ResponseEgressResource,
+    ResponseEgressResourceInstallError,
+};
+
+struct Permit;
+
+struct AdmissionLease {
+    response_resource: ResponseEgressResource<Permit>,
+}
+
+impl AdmissionLease {
+    fn install(&self, permit: Permit) -> Result<(), ResponseEgressResourceInstallError> {
+        self.response_resource.install(permit)
+    }
+}
+
+fn response_lifecycle() -> (IngressGrant, ResponseEgressCompletion) {
+    let (response_resource, completion) = ResponseEgressCompletion::late_bound();
+    (
+        IngressGrant::new(AdmissionLease { response_resource }),
+        completion,
+    )
+}
+```
+
+`install` consumes the permit. A second install returns `AlreadyInstalled`; an install after
+terminal completion or pre-egress abandonment returns `Closed`. Both failures release the rejected
+permit before returning. `ResponseEgressResourceInstallError` implements `std::error::Error`, so a
+handler returning `Result<_, EdgeError>` can use
+`lease.install(permit).map_err(EdgeError::internal)?`. Do not keep the permit only in a
+handler-local guard: that releases it when the handler returns, before response transmission. If
+the response envelope is abandoned before egress begins, dropping the completion closes the
+surviving installer and releases an installed permit without fabricating a terminal report.
+
+Normalized request-head rejections happen before admission; admission-policy errors can also fail
+before an admission decision transfers its completion. Configure
+`App::set_detached_response_egress_decision_factory` to return
+`DetachedResponseEgressDecision::Send { completion, deadline }` when those responses need an
+application-owned completion resource. Every `Send` deadline is mandatory and absolute in the
+request's injected monotonic-clock domain. Construct relative deadlines with
+`head.write_deadline_after(duration)`, which anchors to captured `request_start`, clamps to
+`DEADLINE_FAR_FUTURE`, and fails closed to `request_start` on arithmetic overflow. The default
+factory combines `ResponseEgressCompletion::empty()` with `DEFAULT_RESPONSE_WRITE_BUDGET` measured
+from request start. The effective bound is the earlier of the factory deadline and the default
+response-egress policy, so a later factory deadline cannot extend the default policy and the policy
+cannot extend an earlier factory deadline. Admission-selected detached responses retain their
+response-owned deadline path and are outside this factory contract.
+
+Return `DetachedResponseEgressDecision::Abort` when no bounded response resource is available.
+`Abort` creates no response or egress attempt and invokes no completion callback, observer,
+handler, middleware, or body poll. Raw parser failures that occur before EdgeZero receives a
+request, and platform-to-core head-conversion failures that occur before a normalized head exists,
+remain outside this hook.
 
 ## Response Types
 
@@ -425,12 +640,22 @@ async fn update_user(
 
 Extractors return `EdgeError` on failure, which automatically converts to appropriate HTTP responses:
 
-| Error                 | Status Code              |
-| --------------------- | ------------------------ |
-| JSON parse error      | 400 Bad Request          |
-| Validation error      | 422 Unprocessable Entity |
-| Missing path param    | 400 Bad Request          |
-| Type conversion error | 400 Bad Request          |
+| Error                  | Status Code              |
+| ---------------------- | ------------------------ |
+| JSON parse error       | 400 Bad Request          |
+| Body byte-cap overflow | 413 Payload Too Large    |
+| Inbound read deadline  | 408 Request Timeout      |
+| Validation error       | 422 Unprocessable Entity |
+| Missing path param     | 400 Bad Request          |
+| Type conversion error  | 400 Bad Request          |
+
+`body_bytes`, `json_within`, `form_within`, and the body extractors return
+`EdgeError::PayloadTooLarge` for overflow; malformed JSON or form input remains 400.
+`request_body_overflow_origin()` distinguishes `RequestBodyOverflowOrigin::Inbound` from
+`OutboundUpload` without parsing messages. The origin is not serialized. An oversized single
+normalized `Content-Length` rejects without reading, unless the read deadline has already
+expired (408). This early rejection and a stricter cached cap remain reusable at a larger cap;
+overflow while consuming a stream is sticky and never retries the source.
 
 For custom error handling, return `Result`:
 
@@ -463,6 +688,9 @@ EdgeError::validation("Field too short")          // 422
 EdgeError::internal("Unexpected failure")         // 500
 EdgeError::internal(some_error)                   // 500 (from any error type)
 ```
+
+`method_not_allowed` sorts and deduplicates the structured method list. Its response includes the
+required `Allow` header; this remains true when an application error renderer supplies the body.
 
 ## Custom Extractors
 
