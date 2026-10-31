@@ -816,6 +816,57 @@ mod tests {
         }
 
         #[test]
+        fn router_state_client_overrides_adapter_default() {
+            for state in [true, false] {
+                let start = MonotonicInstant::now();
+                let calls = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&calls);
+                let supplied = HttpClient::with_client(SpinOutboundClient::with_time(
+                    preflight_time(MonotonicClock::new(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        start
+                    })),
+                ))
+                .with_proxy_marker(false);
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                let router = RouterService::builder().get(
+                    "/client",
+                    move |ctx: RequestContext| async move {
+                        let client = ctx.http_client().expect("selected HTTP client");
+                        assert_eq!(client.proxy_marker_enabled(), !state);
+                        let error = client
+                            .send(
+                                OutboundRequest::get("https://example.com/")?
+                                    .body(Body::from("invalid GET body")),
+                            )
+                            .await
+                            .expect_err("preflight rejection");
+                        assert!(matches!(error, EdgeError::BadRequest { .. }));
+                        assert_eq!(error.message(), "GET/HEAD request must not carry a body");
+                        Ok::<_, EdgeError>("selected")
+                    },
+                );
+                let configured = if state {
+                    router.with_state(supplied)
+                } else {
+                    router
+                };
+                let app = App::new(configured.build());
+                let response = block_on(dispatch_ingress_stream(
+                    &app,
+                    Method::GET,
+                    "/client".parse().expect("URI"),
+                    empty::<Result<Bytes, io::Error>>(),
+                ))
+                .expect("native dispatch");
+                let captured = capture_response(response);
+                assert_eq!(captured.status(), StatusCode::OK);
+                assert_eq!(captured_response_body(captured).as_ref(), b"selected");
+                assert_eq!(calls.load(Ordering::SeqCst) > 0, state);
+            }
+        }
+
+        #[test]
         fn standard_dispatch_installs_the_application_outbound_clock() {
             async fn elapsed(ctx: RequestContext) -> Result<String, EdgeError> {
                 let client = ctx

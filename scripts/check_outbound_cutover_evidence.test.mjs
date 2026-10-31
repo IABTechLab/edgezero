@@ -746,7 +746,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 439,
+    planned: 435,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -1153,6 +1153,72 @@ test("core policy conformance binds complete proofs without promoting provider l
   }
 });
 
+test("client precedence binds each adapter's executable owning phase", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  const expected = {
+    axum: [
+      "test_utils::tests::state_client_skips_real_transport_initialization",
+      "outbound/unit/axum/raw.log",
+    ],
+    fastly: [
+      "request::synthesis_tests::router_state_client_precedes_prepare_and_adapter_default",
+      "outbound/unit/fastly/raw.log",
+    ],
+    cloudflare: [
+      "request::tests::router_state_client_overrides_adapter_default",
+      "outbound/unit/cloudflare/raw.log",
+    ],
+    spin: [
+      "tests::ingress_contract::router_state_client_overrides_adapter_default",
+      "outbound/redirect/spin/sdk-tests.log",
+    ],
+  };
+  for (const [adapter, [sentinel, artifact]] of Object.entries(expected)) {
+    const row = manifest.cases.find(
+      (c) =>
+        c.case_id === "EZ-2/acceptance/01" &&
+        c.environment === `unit/${adapter}`,
+    );
+    assert.ok(row, adapter);
+    assert.equal(row.implementation, "ready");
+    assert.equal(row.applicability, "blocking");
+    assert.equal(row.approval, null);
+    assert.equal(row.condition, null);
+    assert.equal(row.sentinel, sentinel);
+    assert.equal(row.artifact_path, artifact);
+    if (adapter === "spin") {
+      assert.equal(row.command, spinCiCommand);
+    } else {
+      assert.ok(ciOwnsCommand(workflow, row.command), adapter);
+      assert.ok(
+        checker
+          .readySentinels(manifest, `unit/${adapter}`, row.command)
+          .includes(sentinel),
+      );
+      if (adapter === "axum") {
+        assert.deepEqual(row.additional_sentinels, [
+          "service::tests::state_client_skips_real_transport_initialization_factory",
+        ]);
+      } else {
+        assert.match(row.command, /--target wasm32-/);
+        assert.match(row.command, /--lib$/);
+      }
+    }
+  }
+});
+
 test("forwarding ordering and normalization core proofs bind only their reviewed legs", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -1163,7 +1229,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /439 other legs remain planned/);
+  assert.match(manifest.status, /435 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1385,15 +1451,17 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 72);
+  assert.equal(ready.length, 76);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    439,
+    435,
   );
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
+        (c.case_id === "EZ-2/acceptance/01" &&
+          /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-6/acceptance/22" &&
           ["axum", "viceroy", "workerd", "spin"].includes(c.environment)) ||
         (c.environment === "unit/core" &&
@@ -1592,12 +1660,14 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
     /super::wire::validate_spin_artifact\(\s*&read_events\(\s*&wire_dir\.join\("events\.jsonl"\)\s*\)\?\s*\)\?/,
   );
   assert.match(wire, /pub\(super\) fn validate_spin_artifact\(/);
+  assert.match(ci, /let\s+sdk_log\s*=\s*phase\(\s*"spin",\s*"sdk-tests"/);
   assert.match(ci, /let\s+async_log\s*=\s*phase\(\s*"spin",\s*"async"/);
   assert.match(ci, /let\s+wire_log\s*=\s*phase\(\s*"spin",\s*"wire"/);
   assert.match(
     ci,
-    /validate_markers\(\s*&inventory,\s*&fs::read_to_string\(native_log\)\?,\s*&fs::read_to_string\(async_log\)\?,\s*&fs::read_to_string\(wire_log\)\?,?\s*\)\?/,
+    /validate_markers\(\s*&inventory,\s*&fs::read_to_string\(native_log\)\?,\s*&fs::read_to_string\(sdk_log\)\?,\s*&fs::read_to_string\(async_log\)\?,\s*&fs::read_to_string\(wire_log\)\?,?\s*\)\?/,
   );
+  assert.match(ci, /Some\("EZ-2\/acceptance\/01"\)\s*=>\s*sdk_log/);
   assert.match(ci, /Some\("EZ-5\/acceptance\/09"\)\s*=>\s*async_log/);
   assert.match(ci, /Some\("EZ-5\/acceptance\/10"\)\s*=>\s*wire_log/);
   assert.match(ci, /Some\("EZ-5\/acceptance\/11"\)\s*=>\s*wire_log/);

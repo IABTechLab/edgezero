@@ -18,6 +18,17 @@ clippy card. G4's approved interface digest and G2's recorded feasibility dispos
 qualification cannot silently approve an API change or convert pending/failed provider evidence
 into a waiver.
 
+## Client Selection Binding (2026-10-30)
+
+EZ-2 acceptance 01 uses the existing Axum native, Fastly/Cloudflare runtime-library and Spin
+SDK-contract phases. Axum's recording client and skipped factory remain required; the other
+adapters identify the client retrieved inside a handler through its supplied clock, including
+Fastly's prepare precedence and default-only controls. No outbound transport is needed for
+these selection proofs. Spin's persisted phase validator rejects missing/failed/misplaced
+contract passes. The inventory is 76 ready/435 planned; all 255 criteria and 511 reviewed
+identities remain unchanged. Readiness does not close candidate freeze, retained timing failures,
+consumer composition, native Image Optimizer or hosted qualification gates.
+
 ## Scoped Qualification Boundary (2026-10-24)
 
 The requester's [scoped timing and native integration amendment](../../audits/2026-10-18-outbound-api-approval.md#scoped-timing-and-native-integration-amendment)

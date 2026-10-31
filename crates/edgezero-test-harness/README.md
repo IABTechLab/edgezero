@@ -56,7 +56,14 @@ batch-only selector is removed. Cloudflare uses the selected Wrangler package's 
 with the inspector disabled: its network preview otherwise decodes malformed compressed bodies
 before application policy. The small Node bootstrap only starts/disposes that SDK; Rust still
 owns supervision and every assertion. This does not activate Cloudflare wire execution in CI
-or qualify hosted behavior. There are 72 ready and 439 planned acceptance legs.
+or qualify hosted behavior. There are 76 ready and 435 planned acceptance legs.
+
+Client-selection acceptance uses the existing adapter-owned phases: Axum's native handler
+and transport-factory tests, Fastly/Cloudflare's runtime library tests, and Spin's executable
+SDK contracts. The handler observes router-state over adapter defaults and, on Fastly,
+router-state over prepare over default. Distinct supplied-client clocks identify the selected
+handle through a fixed preflight error without network I/O. The controller rejects a missing,
+failed or wrong-phase Spin proof. No extra runtime suite or CI job is introduced.
 
 Use `--suite outbound-wire`, `--suite ingress-fidelity` or the other focused suites for
 iteration. See [suite assertions and runtime setup](SUITES.md) for their exact contracts,

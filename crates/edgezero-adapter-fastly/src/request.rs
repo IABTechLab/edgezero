@@ -1262,6 +1262,79 @@ mod synthesis_tests {
     }
 
     #[test]
+    fn router_state_client_precedes_prepare_and_adapter_default() {
+        use edgezero_core::http::StatusCode;
+        use edgezero_core::outbound::{OutboundRequest, OutboundTime};
+
+        for (state, prepare) in [(true, true), (false, true), (false, false)] {
+            let start = MonotonicInstant::now();
+            let state_calls = Arc::new(AtomicUsize::new(0));
+            let prepare_calls = Arc::new(AtomicUsize::new(0));
+            let supplied = |calls: &Arc<AtomicUsize>| {
+                let observed_calls = Arc::clone(calls);
+                let clock = MonotonicClock::new(move || {
+                    observed_calls.fetch_add(1, Ordering::SeqCst);
+                    start
+                });
+                HttpClient::with_client(FastlyOutboundClient::with_time(OutboundTime::new(
+                    clock,
+                    |_, _| panic!("invalid request must not register a timer"),
+                )))
+                .with_proxy_marker(false)
+            };
+            let state_client = supplied(&state_calls);
+            let prepare_client = supplied(&prepare_calls);
+            assert_eq!(state_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
+            let router =
+                RouterService::builder().get("/client", move |ctx: RequestContext| async move {
+                    let client = ctx.http_client().expect("selected HTTP client");
+                    assert_eq!(client.proxy_marker_enabled(), !state && !prepare);
+                    let error = client
+                        .send(
+                            OutboundRequest::get("https://example.com/")?
+                                .body(Body::from("invalid GET body")),
+                        )
+                        .await
+                        .expect_err("preflight rejection");
+                    assert!(matches!(error, EdgeError::BadRequest { .. }));
+                    assert_eq!(error.message(), "GET/HEAD request must not carry a body");
+                    Ok::<_, EdgeError>("selected")
+                });
+            let configured = if state {
+                router.with_state(state_client)
+            } else {
+                router
+            };
+            let app = App::new(configured.build());
+            let envelope = FastlyService::new(&app)
+                .dispatch_with(
+                    FastlyRequest::get("http://example.test/client"),
+                    move |_, extensions| {
+                        if prepare {
+                            extensions.insert(prepare_client);
+                        }
+                    },
+                )
+                .expect("native dispatch")
+                .into_envelope()
+                .expect("response envelope");
+            let Ok((prepared, _, mut attempt, clock)) =
+                envelope.begin(ResponseEgressFramingMode::HostAutomatic)
+            else {
+                panic!("begin egress");
+            };
+            assert!(attempt.begin_writing());
+            assert!(attempt.complete(clock.now()));
+            let response = prepared.into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.body().as_bytes(), Some(b"selected".as_slice()));
+            assert_eq!(state_calls.load(Ordering::SeqCst) > 0, state);
+            assert_eq!(prepare_calls.load(Ordering::SeqCst) > 0, prepare && !state);
+        }
+    }
+
+    #[test]
     fn standard_service_installs_the_exact_application_outbound_clock() {
         use edgezero_core::http::Method;
 

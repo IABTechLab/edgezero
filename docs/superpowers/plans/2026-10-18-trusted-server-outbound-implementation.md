@@ -12,6 +12,32 @@
 
 ## Status and Authority
 
+### Client Selection Acceptance (2026-10-30)
+
+EZ-2 acceptance 01 now binds the four existing adapter-owned CI phases. Axum retains its
+handler-level recording-client and skipped-default-factory proofs. Fastly exercises the real
+prepare/conversion/dispatch path with state plus prepare, prepare only and default-only cases.
+Cloudflare and Spin exercise state/default selection through their adapter dispatch paths.
+Supplied clients have distinct frozen-clock observation counters; the handler retrieves its
+client and triggers a fixed invalid-GET preflight error, without outbound I/O or timer work.
+Default-only controls retain the adapter's default marker setting. Spin's CI validator requires
+its contract proof in the SDK phase and rejects missing, failed and wrong-phase observations.
+
+Read-only selection and acceptance reviewers chose this finite proof/binding checkpoint over
+new scripted transports or a second runtime marker suite. Production APIs, precedence, SDK
+and runtime pins, acceptance identities/text/digests and pending approvals are unchanged.
+The inventory has 76 ready and 435 planned legs; this is executable acceptance readiness,
+not exact-candidate or hosted qualification. Remaining resource/timing evidence and external
+Image Optimizer/consumer qualification gates stay open.
+
+Verification: all five root gates, 2,623 workspace tests, 380 controller tests (two existing
+ignored), strict native/three-target WASM Clippy and guarded Axum/Fastly/Cloudflare phases pass.
+The fresh complete Spin CI run at `/private/tmp/pr275-client-precedence-spin-ci` passes with the
+new 33-test SDK contract target and its separate 19-test resource target. Review repaired the
+new guard's initially conflated SDK/async inputs and added malformed/wrong-phase negatives;
+existing async-component proofs retain their original phase. These dirty-tree observations
+above `0b949f0e` are not frozen-candidate qualification records.
+
 ### Cloudflare Native Wire Recovery (2026-10-30)
 
 The full 68-exchange/84-origin-receipt redirect matrix and six-case/32-receipt batch matrix now

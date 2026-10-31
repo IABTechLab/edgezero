@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; 439 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08 and Axum acceptance 09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters, EZ-3 core acceptance 04 (ordering clause only), EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; 435 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no other forwarding runtime-leg credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -1885,11 +1885,14 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-01-unit-axum",
-      "sentinel": "ez_2_acceptance_01_unit_axum",
-      "command": "scripts/run_test_nonzero.sh ez_2_acceptance_01_unit_axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils",
+      "sentinel": "test_utils::tests::state_client_skips_real_transport_initialization",
+      "additional_sentinels": [
+        "service::tests::state_client_skips_real_transport_initialization_factory"
+      ],
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Given a client in router state, another inserted through Fastly `prepare`, and the adapter default, when a handler calls `RequestContext::http_client`, then it receives the router-state client. Given only the `prepare` client and the default, it receives the `prepare` client. The router-state case holds on Axum, Cloudflare, and Spin against their defaults.\n\nViceroy 0.21.0, one inbound request per case:",
-      "artifact_path": "outbound/EZ-2/acceptance/01/unit/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/axum/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -1923,11 +1926,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-01-unit-fastly",
-      "sentinel": "ez_2_acceptance_01_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_2_acceptance_01_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "request::synthesis_tests::router_state_client_precedes_prepare_and_adapter_default",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Given a client in router state, another inserted through Fastly `prepare`, and the adapter default, when a handler calls `RequestContext::http_client`, then it receives the router-state client. Given only the `prepare` client and the default, it receives the `prepare` client. The router-state case holds on Axum, Cloudflare, and Spin against their defaults.\n\nViceroy 0.21.0, one inbound request per case:",
-      "artifact_path": "outbound/EZ-2/acceptance/01/unit/fastly.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/fastly/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -1961,11 +1964,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-01-unit-cloudflare",
-      "sentinel": "ez_2_acceptance_01_unit_cloudflare",
-      "command": "scripts/run_test_nonzero.sh ez_2_acceptance_01_unit_cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils",
+      "sentinel": "request::tests::router_state_client_overrides_adapter_default",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib",
       "expected": "Given a client in router state, another inserted through Fastly `prepare`, and the adapter default, when a handler calls `RequestContext::http_client`, then it receives the router-state client. Given only the `prepare` client and the default, it receives the `prepare` client. The router-state case holds on Axum, Cloudflare, and Spin against their defaults.\n\nViceroy 0.21.0, one inbound request per case:",
-      "artifact_path": "outbound/EZ-2/acceptance/01/unit/cloudflare.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/cloudflare/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -1999,11 +2002,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-01-unit-spin",
-      "sentinel": "ez_2_acceptance_01_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_2_acceptance_01_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "tests::ingress_contract::router_state_client_overrides_adapter_default",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Given a client in router state, another inserted through Fastly `prepare`, and the adapter default, when a handler calls `RequestContext::http_client`, then it receives the router-state client. Given only the `prepare` client and the default, it receives the `prepare` client. The router-state case holds on Axum, Cloudflare, and Spin against their defaults.\n\nViceroy 0.21.0, one inbound request per case:",
-      "artifact_path": "outbound/EZ-2/acceptance/01/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/sdk-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {

@@ -1973,6 +1973,58 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn router_state_client_overrides_adapter_default() {
+        use edgezero_core::OutboundTime;
+
+        let _timers = NumericTimeoutGuard::install();
+        for state in [true, false] {
+            let start = MonotonicInstant::now();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&calls);
+            let clock = MonotonicClock::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                start
+            });
+            let supplied = HttpClient::with_client(CloudflareOutboundClient::with_time(
+                OutboundTime::new(clock, |_, _| {
+                    panic!("invalid request must not register a timer")
+                }),
+            ))
+            .with_proxy_marker(false);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let router =
+                RouterService::builder().get("/client", move |ctx: RequestContext| async move {
+                    let client = ctx.http_client().expect("selected HTTP client");
+                    assert_eq!(client.proxy_marker_enabled(), !state);
+                    let error = client
+                        .send(
+                            OutboundRequest::get("https://example.com/")?
+                                .body(Body::from("invalid GET body")),
+                        )
+                        .await
+                        .expect_err("preflight rejection");
+                    assert!(matches!(error, EdgeError::BadRequest { .. }));
+                    assert_eq!(error.message(), "GET/HEAD request must not carry a body");
+                    Ok::<_, EdgeError>("selected")
+                });
+            let configured = if state {
+                router.with_state(supplied)
+            } else {
+                router
+            };
+            let app = App::new(configured.build());
+            let (env, context) = env_context();
+            let mut response = CloudflareService::new(&app)
+                .dispatch(native_request(Method::Get, "/client", None), env, context)
+                .await
+                .expect("native dispatch");
+            assert_eq!(response.status_code(), StatusCode::OK.as_u16());
+            assert_eq!(response.bytes().await.expect("response body"), b"selected");
+            assert_eq!(calls.load(Ordering::SeqCst) > 0, state);
+        }
+    }
+
+    #[wasm_bindgen_test]
     async fn standard_service_installs_the_exact_application_outbound_clock() {
         async fn elapsed(ctx: RequestContext) -> Result<Response, EdgeError> {
             let client = ctx

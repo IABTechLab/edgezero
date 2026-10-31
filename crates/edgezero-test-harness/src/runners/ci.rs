@@ -42,6 +42,7 @@ fn validate_ingress(path: &Path, baseline: &Path) -> Result<()> {
 fn validate_markers(
     inventory: &Value,
     native_log: &str,
+    sdk_log: &str,
     async_log: &str,
     wire_log: &str,
 ) -> Result<()> {
@@ -54,6 +55,7 @@ fn validate_markers(
         .filter(|case| case["environment"] == "unit/spin" && case["implementation"] == "ready")
     {
         let log = match case["case_id"].as_str() {
+            Some("EZ-2/acceptance/01") => sdk_log,
             Some("EZ-5/acceptance/09") => async_log,
             Some("EZ-5/acceptance/10") => wire_log,
             Some("EZ-5/acceptance/11") => wire_log,
@@ -82,6 +84,7 @@ fn validate_markers(
                 "invalid Spin sentinel name",
             )?;
             let (log, expected) = match (case["case_id"].as_str(), name) {
+                (Some("EZ-2/acceptance/01"), _) => (log, format!("test {name} ... ok")),
                 (
                     Some("EZ-5/acceptance/11"),
                     "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence"
@@ -218,7 +221,7 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         run,
         records,
     )?;
-    phase(
+    let sdk_log = phase(
         "spin",
         "sdk-tests",
         Command::new("bash")
@@ -328,6 +331,7 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
     validate_markers(
         &inventory,
         &fs::read_to_string(native_log)?,
+        &fs::read_to_string(sdk_log)?,
         &fs::read_to_string(async_log)?,
         &fs::read_to_string(wire_log)?,
     )?;
@@ -410,6 +414,58 @@ mod tests {
     }
 
     #[test]
+    fn client_precedence_requires_the_sdk_phase() {
+        let inventory = json!({"cases":[{
+            "case_id":"EZ-2/acceptance/01", "environment":"unit/spin",
+            "implementation":"ready", "sentinel":"tests::ingress_contract::router_state_client_overrides_adapter_default"
+        }]});
+        let passed =
+            "test tests::ingress_contract::router_state_client_overrides_adapter_default ... ok\n";
+        validate_markers(&inventory, "", passed, "", "").unwrap();
+        for (native, sdk, asynchronous, wire) in [
+            (passed, "", "", ""),
+            ("", "", passed, ""),
+            ("", "", "", passed),
+            ("", "", "", ""),
+            (
+                "",
+                "test tests::ingress_contract::router_state_client_overrides_adapter_default ... FAILED\n",
+                "",
+                "",
+            ),
+        ] {
+            assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+        }
+        for rejected in [
+            passed.replace(" ... ok", " ... ignored"),
+            passed.trim_end().trim_end_matches("ok").to_owned(),
+            format!("prefix {passed}"),
+            passed.replace(" ... ok", " ... ok suffix"),
+            passed
+                .trim_start_matches("test ")
+                .replace(" ... ok", ": passed"),
+        ] {
+            assert!(validate_markers(&inventory, "", &rejected, "", "").is_err());
+        }
+        for sentinel in [Value::Null, json!(7), json!(""), json!("bad sentinel")] {
+            let mut changed = inventory.clone();
+            changed["cases"][0]["sentinel"] = sentinel;
+            assert!(validate_markers(&changed, "", passed, "", "").is_err());
+        }
+        let mut missing = inventory.clone();
+        missing["cases"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("sentinel");
+        assert!(validate_markers(&missing, "", passed, "", "").is_err());
+        for additional in [Value::Null, json!("not an array"), json!([7])] {
+            let mut changed = inventory.clone();
+            changed["cases"][0]["additional_sentinels"] = additional;
+            assert!(validate_markers(&changed, "", passed, "", "").is_err());
+        }
+    }
+
+    #[test]
     fn markers_require_a_ready_criterion_and_its_own_phase() {
         let inventory = json!({"cases":[
             {"case_id":"EZ-5/acceptance/09","environment":"unit/spin","implementation":"ready","sentinel":"async_case"},
@@ -417,6 +473,7 @@ mod tests {
         ]});
         validate_markers(
             &inventory,
+            "",
             "",
             "async_case: passed\n",
             "wire_case: passed\n",
@@ -428,13 +485,20 @@ mod tests {
             (" async_case: passed\n", "wire_case: passed\n"),
             ("async_case: failed\n", "wire_case: passed\n"),
         ] {
-            assert!(validate_markers(&inventory, "", async_log, wire_log).is_err());
+            assert!(validate_markers(&inventory, "", "", async_log, wire_log).is_err());
         }
-        assert!(validate_markers(&json!({"cases":[]}), "", "", "").is_err());
+        assert!(validate_markers(&json!({"cases":[]}), "", "", "", "").is_err());
         let mut unknown = inventory;
         unknown["cases"][0]["case_id"] = json!("EZ-5/acceptance/12");
         assert!(
-            validate_markers(&unknown, "", "async_case: passed\n", "wire_case: passed\n").is_err()
+            validate_markers(
+                &unknown,
+                "",
+                "",
+                "async_case: passed\n",
+                "wire_case: passed\n"
+            )
+            .is_err()
         );
     }
 
@@ -448,7 +512,7 @@ mod tests {
         let sdk = "ez_5_acceptance_11_native_spin: passed\n";
         let wire = "ez_5_acceptance_11_wire_spin: passed\n";
         let inventory = json!({"cases":[{"case_id":"EZ-5/acceptance/11","environment":"unit/spin","implementation":"ready","sentinel":"ez_5_acceptance_11_wire_spin","additional_sentinels":[names[0],names[1],"ez_5_acceptance_11_native_spin"]}]});
-        validate_markers(&inventory, &native, sdk, wire).unwrap();
+        validate_markers(&inventory, &native, "", sdk, wire).unwrap();
         for missing in 0..3 {
             let mut changed = inventory.clone();
             changed["cases"][0]["additional_sentinels"]
@@ -456,7 +520,7 @@ mod tests {
                 .unwrap()
                 .remove(missing);
             assert!(
-                validate_markers(&changed, &native, sdk, wire).is_err(),
+                validate_markers(&changed, &native, "", sdk, wire).is_err(),
                 "omitted mandatory normalization proof {missing}"
             );
         }
@@ -465,7 +529,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("additional_sentinels");
-        assert!(validate_markers(&omitted, &native, sdk, wire).is_err());
+        assert!(validate_markers(&omitted, &native, "", sdk, wire).is_err());
         for (native_log, sdk_log, wire_log) in [
             ("", sdk, wire),
             (&native, "", wire),
@@ -473,14 +537,15 @@ mod tests {
             (sdk, &native, wire),
             (wire, sdk, &native),
         ] {
-            assert!(validate_markers(&inventory, native_log, sdk_log, wire_log).is_err());
+            assert!(validate_markers(&inventory, native_log, "", sdk_log, wire_log).is_err());
         }
         let missing = native.lines().skip(1).collect::<Vec<_>>().join("\n");
-        assert!(validate_markers(&inventory, &missing, sdk, wire).is_err());
+        assert!(validate_markers(&inventory, &missing, "", sdk, wire).is_err());
         assert!(
             validate_markers(
                 &inventory,
                 &native.replace(" ... ok", " ... FAILED"),
+                "",
                 sdk,
                 wire
             )
