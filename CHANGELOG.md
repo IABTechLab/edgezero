@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Record bounded lifecycle-source wait-return, write-start and completion phases, and report
+  source-timeline and guest head/body verdicts independently. Keep whole-case assertions and
+  strict timing targets unchanged; diagnostic passes cannot override an elapsed or other failure.
 - Repair local lifecycle-source scheduling and EOF evidence, and stamp custom Fastly callback
   responses with the existing launch identity. Preserve strict timing failures, original
   deadlines and capability levels; local measurement repairs are not hosted qualification.

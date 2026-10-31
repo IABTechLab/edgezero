@@ -921,6 +921,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
     if !wait_until(shared, head_at) {
         return Ok(false);
     }
+    let wait_returned = Instant::now();
     let chunked = exchange.role == "origin";
     let head = if chunked {
         b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice()
@@ -938,12 +939,14 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         (!matches!(exchange.case, Case::Handoff | Case::Cleanup)).then_some(head_at),
     );
     event["write_started_us"] = json!(offset(write_started, exchange.anchor));
+    event["wait_returned_us"] = json!(offset(wait_returned, exchange.anchor));
     record(shared, exchange, event)?;
     let chunk_count = chunks.len();
     for (index, (at, bytes)) in chunks.into_iter().enumerate() {
         if !wait_until(shared, at) {
             return Ok(false);
         }
+        let wait_returned = Instant::now();
         let write_started = Instant::now();
         if chunked {
             write!(socket, "{:X}\r\n", bytes.len())?;
@@ -969,6 +972,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         );
         event["bytes"] = json!(bytes);
         event["write_started_us"] = json!(offset(write_started, exchange.anchor));
+        event["wait_returned_us"] = json!(offset(wait_returned, exchange.anchor));
         if let Some((started, ended, result)) = &terminal {
             event["terminal_frame"] = json!({"write_started_us":offset(*started,exchange.anchor),
                 "completed_us":offset(*ended,exchange.anchor),"status":if result.is_ok(){"pass"}else{"fail"},

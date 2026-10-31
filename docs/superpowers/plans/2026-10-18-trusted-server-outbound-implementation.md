@@ -12,6 +12,60 @@
 
 ## Status and Authority
 
+### Lifecycle Phase Evidence (2026-10-31)
+
+Separate source wait/dispatch/write timing from guest head/body timing without changing any
+production transport, scheduling loop, deadline, cutoff, capability or frozen acceptance target.
+Capture the original wait's return before each scheduled head/chunk write. Sealed-case checks,
+including late C, require schedule <= wait return <= write start <= completion. A bounded
+`timing_diagnostics` record computes source-timeline and guest head/body verdicts independently
+and reports wait lateness, post-wait delay and write duration. Both phases still participate in
+the whole-case validator. Neither diagnostic can override another failed assertion; guest
+head/body does not include bidder elapsed or every batch contract. No new suite or CI job.
+
+Two regression tests cover missing/early/late wait witnesses on all four source roles, separate
+guest-only failures, and source failures in each of the three measured phases. The missing-field
+mutation fails against the old validator before restoration; the final harness passes 406 tests
+with two existing ignored. Existing source event and connection bounds remain unchanged.
+
+An isolated diagnostic temporarily sampled the real Axum Send and Cloudflare Fetch futures'
+first observed Ready result through existing request-scoped provider state, with only fixed
+numeric data serialized after timed operations. It added no production API, request, executor
+or alternate scheduler. These instrumented runs receive no acceptance credit:
+
+- `/private/tmp/pr275-sdk-readiness-diagnostic-axum` passes 10/10 but does not reproduce the
+  earlier 131.432 ms head miss. Its fast-origin SDK-Ready-to-collection gap is approximately
+  25-56 microseconds, allowing independent timestamp truncation and including instrumentation,
+  normalization and publication. It does not explain the earlier run.
+- `/private/tmp/pr275-sdk-readiness-diagnostic-cloudflare` passes 9/10, missing the slow-origin
+  guest head at 706 ms while its source timeline passes. The reconstructed SDK-Ready sample
+  spans 704-706 ms and guest collection observes 706 ms; this does not isolate a core queueing
+  delay. Ready observation is not the original JS promise settlement or physical receipt.
+  Millisecond-aligned samples alone do not prove frozen or stale provider-clock behavior.
+
+All temporary adapter/guest tracing is removed before the final canonical runs. Those retained
+artifacts are `/private/tmp/pr275-phase-witness-final-{axum,cloudflare,fastly,spin}`:
+
+| Runtime | Passed | Result Boundary |
+| --- | --- | --- |
+| Axum | 10/10 | No miss in this run; root verification builds/tests overlapped part of this run, so it is not an isolated scheduling benchmark. |
+| workerd | 9/10 | Slow-origin A elapsed is 153 ms versus 146 +/-5 ms. Source-timeline and guest head/body diagnostics both pass; the separate elapsed assertion still fails. |
+| Repaired Viceroy | 20/20 | Twelve timeline/cleanup and eight callback cases; local repaired runtime only. |
+| Spin | 10/10 | Local runtime evidence only. |
+
+The last three runtimes run serially after the root gates finish. No unchanged failed run is
+retried for passing credit. Earlier Axum/workerd misses and failed experiments remain retained;
+the current elapsed miss is not evidence of an identified arrival-stamping defect. No provider
+latency is inferred by subtracting source and guest timestamps across unsynchronized clocks.
+
+All five root gates pass again: 2,636 tests/33 binaries/one existing ignored, formatting, strict
+Clippy, feature compilation and Spin WASM compilation. Harness Clippy, 56 evidence-tooling tests,
+docs/legacy and Brotli/flate/JSON-map dependency audits pass. Independent code/evidence reviews
+find no scoped correctness defect; one explicitly confirms the Cloudflare elapsed assertion
+must remain failed. Inventory stays 118 ready/393 planned, unqualified. Production, demo,
+generator, pins and requirements are unchanged. Remaining timing/lifecycle acceptance, candidate
+freeze, consumer composition and authorized hosted qualification remain open.
+
 ### Lifecycle Measurement Repair (2026-10-30)
 
 Investigate retained strict failures without changing production transports, guest deadlines,

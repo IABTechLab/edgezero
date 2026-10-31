@@ -216,7 +216,8 @@ fn checks(
             "origin":origin,"source_error":source_error,"client_error":reply.as_ref().err().map(ToString::to_string),
             "partial_client":reply.as_ref().err().and_then(|error|error.downcast_ref::<net::InterruptedResponse>())
                 .map(|partial|json!({"status":partial.status,"body_bytes":partial.body,"reason":partial.reason})),
-            "clock_correlation":clock_correlation,"timeout_contract":timeout_contract,"body_phase_evidence":if case == "pending-body-cutoff" {
+            "clock_correlation":clock_correlation,"timeout_contract":timeout_contract,
+            "timing_diagnostics":timing_diagnostics(case,&report,&origin),"body_phase_evidence":if case == "pending-body-cutoff" {
                 Some("host-head-written-only")
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
@@ -1677,7 +1678,8 @@ fn validate_late_c(origin: &[Value], aligned: i128) -> Result<()> {
             entry["scenario_scheduled_us"] == 900000
                 && number(entry, "scheduled_us")? == scheduled
                 && entry["schedule_basis"] == "initial-receipts-minimum-upper-bound"
-                && started >= scheduled
+                && number(entry, "wait_returned_us")? >= scheduled
+                && started >= number(entry, "wait_returned_us")?
                 && started <= actual
                 && actual <= number(closed, "at_us")?,
             "late C source schedule or phase order changed",
@@ -1700,6 +1702,11 @@ fn validate_late_c(origin: &[Value], aligned: i128) -> Result<()> {
 }
 
 fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()> {
+    validate_guest_timeline(case, events)?;
+    validate_source_timeline(case, origin)
+}
+
+fn validate_guest_timeline(case: &str, events: &[Value]) -> Result<()> {
     let slow = matches!(case, "slow-origin" | "timeout-before-cutoff");
     let head = event(events, "origin-head")?;
     within(
@@ -1712,8 +1719,12 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
         number(body, "at_us")? + number(body, "duration_us")?,
         if slow { 1_300_000 } else { 260_000 },
         "origin EOF missed scenario time",
-    )?;
-    let origin = origin.as_array().unwrap();
+    )
+}
+
+fn validate_source_timeline(case: &str, origin: &Value) -> Result<()> {
+    let slow = matches!(case, "slow-origin" | "timeout-before-cutoff");
+    let origin = origin.as_array().ok_or("missing source timeline")?;
     let request = origin
         .iter()
         .find(|entry| entry["op"] == "request" && entry["role"] == "origin")
@@ -1790,7 +1801,9 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
                 "host schedule was reanchored after registration",
             )?;
             require(
-                started >= scheduled && started <= actual,
+                number(entry, "wait_returned_us")? >= scheduled
+                    && started >= number(entry, "wait_returned_us")?
+                    && started <= actual,
                 "origin write began before its schedule or after its completion",
             )?;
             within(actual, scheduled, "origin scheduling target missed")?;
@@ -1821,6 +1834,40 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
         validate_late_c(origin, aligned)?;
     }
     Ok(())
+}
+
+fn timing_diagnostics(case: &str, report: &Value, origin: &Value) -> Option<Value> {
+    if !matches!(
+        case,
+        "slow-origin" | "timeout-before-cutoff" | "fast-origin"
+    ) {
+        return None;
+    }
+    let guest = report["events"]
+        .as_array()
+        .ok_or_else(|| "missing guest timeline".into())
+        .and_then(|events| validate_guest_timeline(case, events));
+    let source = validate_source_timeline(case, origin);
+    let metrics = (|| -> Result<Vec<Value>> {
+        let entries = origin.as_array().ok_or("missing source timeline")?;
+        require(entries.len() <= 32, "source phase count exceeds its bound")?;
+        entries.iter().filter(|entry|entry.get("scheduled_us").is_some() && matches!(entry["op"].as_str(),Some("head"|"chunk")))
+            .map(|entry| {
+                let scheduled=number(entry,"scheduled_us")?;
+                let waited=number(entry,"wait_returned_us")?;
+                let started=number(entry,"write_started_us")?;
+                let completed=number(entry,"at_us")?;
+                Ok(json!({"role":entry["role"],"op":entry["op"],
+                    "wait_lateness_us":waited.checked_sub(scheduled).ok_or("source wait returned early")?,
+                    "post_wait_us":started.checked_sub(waited).ok_or("source write preceded wait return")?,
+                    "write_duration_us":completed.checked_sub(started).ok_or("source write completed before it started")?}))
+            }).collect()
+    })();
+    let verdict = |result: Result<()>| json!({"status":if result.is_ok(){"pass"}else{"fail"},"error":result.err().map(|error|error.to_string())});
+    Some(
+        json!({"scope":"sealed-origin-timeline-only","source_timeline":verdict(source),"guest_head_body":verdict(guest),
+        "source_phases":metrics.as_ref().ok(),"metrics_error":metrics.as_ref().err().map(ToString::to_string)}),
+    )
 }
 
 #[cfg(test)]
@@ -3221,11 +3268,11 @@ mod tests {
                     .as_array_mut()
                     .unwrap()
                     .push(json!({"op":"head","role":role,
-                    "at_us":head+1000,"write_started_us":head+1000,"scheduled_us":head+1000,"scenario_scheduled_us":head,
+                    "at_us":head+1000,"write_started_us":head+1000,"wait_returned_us":head+1000,"scheduled_us":head+1000,"scenario_scheduled_us":head,
                     "schedule_basis":"initial-receipts-minimum-upper-bound"}));
                 for (time, byte) in chunks {
                     let mut chunk = json!({"op":"chunk","role":role,"bytes":[byte],
-                        "at_us":time+1000,"write_started_us":time+1000,"scheduled_us":time+1000,"scenario_scheduled_us":time,
+                        "at_us":time+1000,"write_started_us":time+1000,"wait_returned_us":time+1000,"scheduled_us":time+1000,"scenario_scheduled_us":time,
                         "schedule_basis":"initial-receipts-minimum-upper-bound"});
                     if role == "origin" && time == if slow { 1300000 } else { 260000 } {
                         chunk["terminal_frame"] = json!({"write_started_us":time+1000,"completed_us":time+1000,"status":"pass","error":null});
@@ -3541,6 +3588,108 @@ mod tests {
             .find(|entry| entry["op"] == "mediator-send")
             .unwrap()["duration_us"] = json!(1000000);
         assert!(validate("fast-origin", "sample", &extended, &origin).is_err());
+    }
+
+    #[test]
+    fn source_and_guest_timing_failures_are_reported_independently() {
+        for case in ["slow-origin", "fast-origin"] {
+            let (report, origin) = sample(case);
+            let valid = timing_diagnostics(case, &report, &origin).unwrap();
+            assert_eq!(valid["source_timeline"]["status"], "pass");
+            assert_eq!(valid["guest_head_body"]["status"], "pass");
+            assert!(valid["metrics_error"].is_null());
+            let mut late_guest = report.clone();
+            let head = late_guest["events"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|e| e["op"] == "origin-head")
+                .unwrap();
+            head["duration_us"] = json!(number(head, "duration_us").unwrap() + 6000);
+            let verdict = timing_diagnostics(case, &late_guest, &origin).unwrap();
+            assert_eq!(verdict["source_timeline"]["status"], "pass");
+            assert_eq!(verdict["guest_head_body"]["status"], "fail");
+            assert!(validate(case, "sample", &late_guest, &origin).is_err());
+            for (stage, expected) in [
+                ("wait", [6000, 0, 0]),
+                ("post-wait", [0, 6000, 0]),
+                ("write", [0, 0, 6000]),
+            ] {
+                let mut delayed = origin.clone();
+                let chunk = delayed
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|e| e["role"] == "a" && e["op"] == "chunk")
+                    .unwrap();
+                if stage == "wait" {
+                    chunk["wait_returned_us"] =
+                        json!(number(chunk, "wait_returned_us").unwrap() + 6000);
+                }
+                if stage != "write" {
+                    chunk["write_started_us"] =
+                        json!(number(chunk, "write_started_us").unwrap() + 6000);
+                }
+                chunk["at_us"] = json!(number(chunk, "at_us").unwrap() + 6000);
+                let verdict = timing_diagnostics(case, &report, &delayed).unwrap();
+                assert_eq!(verdict["source_timeline"]["status"], "fail");
+                assert_eq!(verdict["guest_head_body"]["status"], "pass");
+                let phases = verdict["source_phases"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e["role"] == "a" && e["op"] == "chunk")
+                    .unwrap();
+                assert_eq!(
+                    [
+                        number(phases, "wait_lateness_us").unwrap(),
+                        number(phases, "post_wait_us").unwrap(),
+                        number(phases, "write_duration_us").unwrap()
+                    ],
+                    expected
+                );
+                assert!(validate(case, "sample", &report, &delayed).is_err());
+            }
+        }
+        assert!(timing_diagnostics("caps-while-waiting", &Value::Null, &Value::Null).is_none());
+    }
+
+    #[test]
+    fn timeline_requires_original_wait_return_between_schedule_and_write() {
+        for case in ["slow-origin", "fast-origin"] {
+            let (report, origin) = sample(case);
+            validate(case, "sample", &report, &origin).unwrap();
+            for role in ["origin", "a", "b", "c"] {
+                for op in ["head", "chunk"] {
+                    for mutation in ["missing", "before-schedule", "after-write"] {
+                        let mut changed = origin.clone();
+                        let write = changed
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|e| e["role"] == role && e["op"] == op)
+                            .unwrap();
+                        match mutation {
+                            "missing" => {
+                                write.as_object_mut().unwrap().remove("wait_returned_us");
+                            }
+                            "before-schedule" => {
+                                write["wait_returned_us"] =
+                                    json!(number(write, "scheduled_us").unwrap() - 1)
+                            }
+                            _ => {
+                                write["wait_returned_us"] =
+                                    json!(number(write, "write_started_us").unwrap() + 1)
+                            }
+                        }
+                        assert!(
+                            validate(case, "sample", &report, &changed).is_err(),
+                            "{case}: {role}: {op}: {mutation}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

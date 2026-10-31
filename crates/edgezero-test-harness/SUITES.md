@@ -1317,6 +1317,16 @@ close, independently of guest EOF. Framing completes before diagnostic formattin
 missing, failed or inverted terminal evidence fails validation. Late guest observations and
 late source writes still fail their original strict checks.
 
+Sealed slow/fast/timeout sources also record `wait_returned_us` immediately after the original
+scheduled wait. Validation requires schedule <= wait return <= write start <= write completion,
+including late C. Each case's bounded `timing_diagnostics` reports independent `source_timeline`
+and `guest_head_body` verdicts, plus wait lateness, post-wait delay and write duration for at most
+32 source records. These fields are diagnostic only: the guest phase covers origin head/body,
+not bidder elapsed, batch semantics or the whole case. Both phases may pass while a separate
+assertion still fails; neither replaces the unchanged whole-case validator or timing targets.
+Missing or inverted phase samples fail validation rather than being clamped to zero.
+Source timestamps do not establish SDK readiness, peer receipt or cross-clock transport latency.
+
 The CPU case makes exactly one bounded calibration Send through the same injected client after
 consuming the origin. It carries the actual origin-head observation and request-send samples,
 uses a 64-byte buffered cap, a 1-second timeout and an absolute 520 ms safety deadline, and
