@@ -981,8 +981,10 @@ real-ingress legs now bind the existing Fastly, workerd and Spin wire phases alo
 Axum/core proofs. Spin preserves explicit CL=0 without constructing a read source. The native
 Cloudflare fixture launcher removes the dev proxy; production serve/deploy is unchanged.
 See the master plan's real-ingress checkpoint for evidence and supersession of the historical
-Axum-only sequencing note below. Strict Axum pending-body timing criterion 06, hosted and
-consumer qualification remain open; this does not close P2 as a whole.
+Axum-only sequencing note below. The subsequent criterion 06 TCP proof enforces the unchanged
+200/205 ms and 100/105 ms windows, with an aged inbound deadline and actual Pending witness.
+Hosted and consumer qualification remain open; this does not close P2 as a whole or waive
+the separate recorded EZ-6 lifetime failures.
 
 **Files:** Modify core `src/outbound.rs`, `context.rs`, `body.rs`; four adapters' `src/request.rs`
 and `src/outbound.rs`; Axum `src/connection.rs` tests; adapter `tests/contract.rs`.

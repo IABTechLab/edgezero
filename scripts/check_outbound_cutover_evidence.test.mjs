@@ -701,7 +701,7 @@ test("local assembled-app criteria bind guarded tests without closing pending le
     assert.ok(c, criterion);
     const sentinel = `test_utils::tests::${name}`;
     const command =
-      "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets";
+      "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets";
     assert.equal(c.implementation, "ready", criterion);
     assert.equal(c.environment, "axum/native-tcp", criterion);
     assert.equal(c.applicability, "follow-up", criterion);
@@ -760,7 +760,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 404,
+    planned: 403,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -1342,7 +1342,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /404 other legs remain planned/);
+  assert.match(manifest.status, /403 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1448,7 +1448,7 @@ test("Axum forwarding modes retain actual ingress tests and unproved sibling leg
     "utf8",
   );
   const command =
-    "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets";
+    "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets";
   const selected = [];
   for (const [criterion, name] of [
     ["09", "forwarded_post_options_and_delete_preserve_actual_ingress"],
@@ -1495,7 +1495,71 @@ test("Axum forwarding modes retain actual ingress tests and unproved sibling leg
       c.case_id === "EZ-1/acceptance/06" &&
       c.environment === "axum/http1-chunked",
   );
-  assert.equal(pending.implementation, "planned", "strict timing remains open");
+  assert.equal(
+    pending.implementation,
+    "ready",
+    "strict timing has its own TCP proof",
+  );
+});
+
+test("Axum pending-body timing binds both cases to the existing guarded phase", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const row = manifest.cases.find(
+    (c) =>
+      c.case_id === "EZ-1/acceptance/06" &&
+      c.environment === "axum/http1-chunked",
+  );
+  assert.equal(row.implementation, "ready");
+  assert.equal(
+    row.sentinel,
+    "connection::tests::pending_chunked_forward_preserves_original_deadlines_over_tcp",
+  );
+  assert.equal(row.artifact_path, "outbound/redirect/axum/native-tests.log");
+  assert.deepEqual(row.additional_sentinels, [
+    "connection::tests::forwarding_pending_witness_does_not_count_ready_source_errors",
+    "connection::tests::timed_error_reader_rejects_oversized_heads_and_trailing_bytes",
+  ]);
+  assert.equal(
+    row.command,
+    manifest.cases.find((c) => c.environment === "axum/native-tcp").command,
+  );
+  const environments =
+    "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked";
+  assert.ok(row.command.includes(`--inventory ${environments} cargo test `));
+  assert.ok(
+    checker
+      .readySentinels(manifest, environments, row.command)
+      .includes(row.sentinel),
+  );
+  for (const name of row.additional_sentinels)
+    assert.ok(
+      checker
+        .readySentinels(manifest, environments, row.command)
+        .includes(name),
+    );
+  assert.ok(
+    ciOwnsCommand(
+      readFileSync(
+        new URL("../.github/workflows/test.yml", import.meta.url),
+        "utf8",
+      ),
+      row.command,
+    ),
+  );
+  const hosted = manifest.cases.find(
+    (c) => c.case_id === row.case_id && c.environment.startsWith("hosted"),
+  );
+  assert.equal(hosted.implementation, "planned");
+  assert.equal(row.applicability, "blocking");
+  assert.equal(row.approval, null);
 });
 
 test("real-ingress forwarding binds only its 22 owning runtime legs", () => {
@@ -1545,8 +1609,7 @@ test("real-ingress forwarding binds only its 22 owning runtime legs", () => {
     (c) =>
       c.case_id.startsWith("EZ-1/") &&
       (c.environment.startsWith("hosted") ||
-        c.environment.startsWith("consumer") ||
-        c.environment === "axum/http1-chunked"),
+        c.environment.startsWith("consumer")),
   )) {
     assert.equal(
       row.implementation,
@@ -1624,15 +1687,17 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 107);
+  assert.equal(ready.length, 108);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    404,
+    403,
   );
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
+        (c.case_id === "EZ-1/acceptance/06" &&
+          c.environment === "axum/http1-chunked") ||
         forwardingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
@@ -1753,7 +1818,7 @@ test("adapter policy bindings run real SDK suites and keep conditional metadata 
   }
   const guarded = checker.readySentinels(
     manifest,
-    "axum/native-tcp,unit/axum,axum/http1,axum",
+    "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked",
     manifest.cases.find((c) => c.environment === "axum/native-tcp")?.command,
   );
   for (const [criterion, environment] of [

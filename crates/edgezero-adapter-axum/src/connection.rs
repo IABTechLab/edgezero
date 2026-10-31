@@ -306,7 +306,7 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Notify;
     use tokio::task::{LocalSet, spawn_local};
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
 
     use super::{ConnectionExit, serve_http1};
     use crate::ingress_config::AxumIngressConfig;
@@ -325,11 +325,19 @@ mod tests {
         Pending,
     }
 
+    #[derive(Clone)]
+    struct ForwardDeadlineState {
+        probe: ForwardReadProbe,
+        target: Uri,
+        times: Arc<Mutex<Option<ForwardTimes>>>,
+    }
+
     #[derive(Clone, Default)]
     struct ForwardReadProbe {
         bytes: Arc<AtomicUsize>,
         drops: Arc<AtomicUsize>,
         eofs: Arc<AtomicUsize>,
+        pending: Arc<AtomicUsize>,
         polls: Arc<AtomicUsize>,
     }
 
@@ -348,6 +356,11 @@ mod tests {
             release: Arc<Notify>,
         },
         Redirect(Uri),
+    }
+
+    struct ForwardTimes {
+        anchor: MonotonicInstant,
+        terminal: MonotonicInstant,
     }
 
     #[derive(Clone, Default)]
@@ -388,7 +401,10 @@ mod tests {
                     Poll::Ready(None) => {
                         observed.eofs.fetch_add(1, Ordering::SeqCst);
                     }
-                    Poll::Ready(Some(Err(_))) | Poll::Pending => {}
+                    Poll::Pending => {
+                        observed.pending.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Poll::Ready(Some(Err(_))) => {}
                 }
                 result
             }));
@@ -510,6 +526,107 @@ mod tests {
         let request = edgezero_core::OutboundRequest::from_request(ctx.into_request()?, target)?
             .timeout(Duration::from_secs(1));
         client.send(request).await?.into_response()
+    }
+
+    #[edgezero_core::action]
+    async fn forward_pending_deadline(
+        ctx: RequestContext,
+        State(state): State<ForwardDeadlineState>,
+    ) -> Result<CoreResponse, EdgeError> {
+        let clock = ctx.monotonic_clock();
+        let request_start = ctx.request_start();
+        let inbound_deadline = ctx.read_deadline().expect("admitted read deadline");
+        let client = ctx.http_client().expect("native outbound client");
+        if inbound_deadline.instant().duration_since(request_start) == Duration::from_millis(100) {
+            sleep(Duration::from_millis(20)).await;
+        }
+        let request =
+            OutboundRequest::from_request(state.probe.observe(ctx.into_request()?), state.target)?
+                .timeout(Duration::from_millis(200));
+        let started = clock.now();
+        let error = client
+            .send(request)
+            .await
+            .expect_err("body remains pending");
+        let ended = clock.now();
+        let outbound_deadline = started
+            .checked_add(Duration::from_millis(200))
+            .expect("outbound deadline");
+        let anchor = if inbound_deadline.instant() < outbound_deadline {
+            assert!(matches!(error, EdgeError::RequestTimeout { .. }));
+            request_start
+        } else {
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: edgezero_core::BudgetSource::PerCallTimeout,
+                    ..
+                }
+            ));
+            started
+        };
+        *state.times.lock().expect("timing observation") = Some(ForwardTimes {
+            anchor,
+            terminal: ended,
+        });
+        Err(error)
+    }
+
+    async fn read_timed_error_response(
+        socket: TcpStream,
+    ) -> (String, MonotonicInstant, MonotonicInstant) {
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+        let mut reader = BufReader::new(socket);
+        let mut wire = String::new();
+        {
+            let mut limited_head = (&mut reader).take(4097);
+            loop {
+                let mut line = String::new();
+                assert!(
+                    limited_head
+                        .read_line(&mut line)
+                        .await
+                        .expect("response header")
+                        > 0
+                );
+                assert!(
+                    wire.len().saturating_add(line.len()) <= 4096,
+                    "bounded error response head"
+                );
+                let complete = line == "\r\n";
+                wire.push_str(&line);
+                if complete {
+                    break;
+                }
+            }
+        }
+        let head_at = MonotonicInstant::now();
+        let length = wire
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("response length"))
+            })
+            .expect("canonical error uses explicit length");
+        assert!(length <= 1024, "bounded canonical error body");
+        let mut body = vec![0; length];
+        reader
+            .read_exact(&mut body)
+            .await
+            .expect("complete framed error body");
+        let completed_at = MonotonicInstant::now();
+        let mut trailing = [0];
+        assert_eq!(
+            reader
+                .read(&mut trailing)
+                .await
+                .expect("clean connection shutdown"),
+            0,
+            "one complete response only"
+        );
+        (wire, head_at, completed_at)
     }
 
     async fn record_forwarded_request(
@@ -1032,6 +1149,141 @@ mod tests {
         assert!(receipt.is_none());
         assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
         assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[expect(
+        clippy::print_stderr,
+        reason = "bounded timing evidence is emitted only after measured response and cleanup"
+    )]
+    async fn pending_chunked_forward_preserves_original_deadlines_over_tcp() {
+        for (read_budget, expected, budget) in [
+            (
+                Duration::from_secs(10),
+                "HTTP/1.1 504",
+                Duration::from_millis(200),
+            ),
+            (
+                Duration::from_millis(100),
+                "HTTP/1.1 408",
+                Duration::from_millis(100),
+            ),
+        ] {
+            LocalSet::new()
+                .run_until(async {
+                    let origin = TcpListener::bind("127.0.0.1:0").await.expect("origin");
+                    let target = format!("http://{}/asset", origin.local_addr().expect("origin address"))
+                        .parse::<Uri>().expect("target");
+                    let probe = ForwardReadProbe::default();
+                    let times = Arc::new(Mutex::new(None::<ForwardTimes>));
+                    let router = RouterService::builder()
+                        .with_state(ForwardDeadlineState { target, probe: probe.clone(), times: Arc::clone(&times) })
+                        .get("/", forward_pending_deadline)
+                        .build();
+                    let mut app = App::new(router);
+                    app.set_ingress_admission_policy(move |head| AdmissionDecision::Admit {
+                        completion: ResponseEgressCompletion::empty(),
+                        grant: IngressGrant::empty(),
+                        read_deadline: head.read_deadline_after(read_budget),
+                    });
+                    let state = AxumServiceState::from_app(app);
+                    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+                    let address = listener.local_addr().expect("listener address");
+                    let server = async {
+                        let (socket, peer) = listener.accept().await.expect("accept client");
+                        let responses = EgressConnection::default();
+                        let service = state.for_connection(peer, responses.clone());
+                        serve_http1(socket, service, responses, AxumIngressConfig::default()).await
+                    };
+                    let client = async {
+                        let mut socket = TcpStream::connect(address).await.expect("client");
+                        let started = MonotonicInstant::now();
+                        socket.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                            .await.expect("write headers without chunks or EOF");
+                        let written = MonotonicInstant::now();
+                        let (wire, head_at, completed_at) = read_timed_error_response(socket).await;
+                        (wire, started, written, head_at, completed_at)
+                    };
+                    let (exit, (wire, started, written, head_at, completed_at)) = timeout(Duration::from_secs(2), join(server, client))
+                        .await.expect("bounded pending request and cleanup");
+                    let measured = times.lock().expect("timings").take().expect("terminal observation");
+                    let terminal_elapsed = measured.terminal.duration_since(measured.anchor);
+                    let client_elapsed = completed_at.duration_since(measured.anchor);
+                    eprintln!("{}", serde_json::json!({"event":"pending-forward-timing",
+                        "expected":expected,"budget_us":budget.as_micros(),
+                        "client_total_us":completed_at.duration_since(started).as_micros(),
+                        "header_write_us":written.duration_since(started).as_micros(),
+                        "terminal_elapsed_us":terminal_elapsed.as_micros(),
+                        "response_head_us":head_at.duration_since(measured.anchor).as_micros(),
+                        "response_complete_us":client_elapsed.as_micros()}));
+                    assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
+                    assert!(wire.starts_with(expected), "{wire}");
+                    assert!(terminal_elapsed >= budget && terminal_elapsed <= budget + Duration::from_millis(5),
+                        "handler terminal took {terminal_elapsed:?}, expected {budget:?} + at most 5 ms");
+                    assert!(client_elapsed >= terminal_elapsed && client_elapsed <= budget + Duration::from_millis(5),
+                        "complete client response took {client_elapsed:?}, expected {budget:?} + at most 5 ms");
+                    assert!(origin.accept().now_or_never().is_none(), "no origin connection");
+                    assert!(probe.polls.load(Ordering::SeqCst) > 0, "actual source entered pending");
+                    assert!(probe.pending.load(Ordering::SeqCst) > 0, "actual Pending observation");
+                    assert_eq!(probe.bytes.load(Ordering::SeqCst), 0);
+                    assert_eq!(probe.eofs.load(Ordering::SeqCst), 0);
+                    assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                })
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn forwarding_pending_witness_does_not_count_ready_source_errors() {
+        let probe = ForwardReadProbe::default();
+        let request = CoreRequest::new(Body::from_stream(poll_fn(|_| {
+            Poll::Ready(Some(Err(EdgeError::bad_request("fixture source error"))))
+        })));
+        let error = probe
+            .observe(request)
+            .into_body()
+            .into_bytes_bounded(8)
+            .await
+            .expect_err("ready source error");
+        assert!(matches!(error, EdgeError::BadRequest { .. }));
+        assert_eq!(probe.polls.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.pending.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.bytes.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.eofs.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn timed_error_reader_rejects_oversized_heads_and_trailing_bytes() {
+        use std::panic::AssertUnwindSafe;
+
+        for wire in [
+            format!(
+                "HTTP/1.1 504 Gateway Timeout\r\nx-test: {}",
+                "x".repeat(4097)
+            ),
+            "HTTP/1.1 504 Gateway Timeout\r\ncontent-length: 0\r\n\r\nx".to_owned(),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let address = listener.local_addr().expect("address");
+            let (accepted, connected) = join(listener.accept(), TcpStream::connect(address)).await;
+            let (mut sender, _) = accepted.expect("accept");
+            let receiver = connected.expect("connect");
+            sender
+                .write_all(wire.as_bytes())
+                .await
+                .expect("malformed response");
+            let result = timeout(
+                Duration::from_secs(1),
+                AssertUnwindSafe(read_timed_error_response(receiver)).catch_unwind(),
+            )
+            .await
+            .expect("bounded rejection without sender EOF");
+            assert!(
+                result.is_err(),
+                "malformed framing must not produce a timing sample"
+            );
+        }
     }
 
     #[test]

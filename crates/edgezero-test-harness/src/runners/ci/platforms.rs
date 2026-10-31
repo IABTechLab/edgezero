@@ -105,7 +105,7 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
                     &[
                         "--include-ignored",
                         "--inventory",
-                        "axum/native-tcp,unit/axum,axum/http1,axum",
+                        "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked",
                     ],
                     &[
                         "test",

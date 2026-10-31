@@ -493,7 +493,10 @@ const inventory = JSON.parse(
   ),
 );
 for (const [environment, mode] of [
-  ["axum/native-tcp,unit/axum,axum/http1,axum", "--include-ignored"],
+  [
+    "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked",
+    "--include-ignored",
+  ],
   ["unit/core", null],
   ["unit/cloudflare", null],
   ["unit/fastly", null],

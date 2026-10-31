@@ -214,8 +214,13 @@ existing capture/deadline limits, joins cleanup, then reopens its persisted evid
 printing acceptance sentinels. Parent validation requires the group; mutations reject omission,
 duplication, reassociation, impossible source reports, unframed/trailing bytes and cleanup failure.
 Chunk boundaries are not prescribed. Existing redirect, batch, marker and normalization counts
-stay unchanged. Strict Axum 200/205 ms and 100/105 ms timing, hosted and consumer criteria remain
-separate gates, not inferred from these successful functional cases.
+stay unchanged. The separate co-located Axum pending-body TCP proof covers criterion 06's
+unchanged 200/205 ms and 100/105 ms windows, including 20 ms of work before forwarding under
+the original ingress deadline. Its actual Pending witness has a ready-error negative control.
+The existing grouped native phase requires both tests and retains `native-tests.log`; passing
+libtest output proves the assertions, while focused `--nocapture` runs retain numeric samples.
+These measurements use complete framed responses, not later connection cleanup. Hosted and
+consumer criteria and the unrelated strict lifetime probes remain separate gates.
 
 The pinned inspector's [network preview](https://github.com/cloudflare/workerd/blob/v1.20260415.1/src/workerd/io/worker.c%2B%2B#L4389)
 decompresses bodies independently of the application's manual-fetch policy. Enabling only CDP

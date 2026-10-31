@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind Axum's pending chunked-GET deadline acceptance to the existing grouped TCP gate.
+  Preserve the original 200/205 ms and 100/105 ms windows, prove Pending and source release,
+  and measure framed responses before connection cleanup without changing production timers.
 - Add real-ingress forwarding acceptance to the existing Fastly, Cloudflare and Spin wire
   suites, including empty GET/HEAD framing, first-byte rejection, streamed uploads, eager Begin,
   cached batches, redirects and zero-read unsupported-option rejection. Preserve Spin's explicit

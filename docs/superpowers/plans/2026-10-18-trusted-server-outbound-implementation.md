@@ -12,6 +12,45 @@
 
 ## Status and Authority
 
+### Axum Pending-Body Timing Acceptance (2026-10-30)
+
+The missing EZ-1 criterion 06 native TCP proof is implemented. Both fixed cases use the real
+`AxumServiceState`/`serve_http1` path while the client keeps its write side open and sends no
+chunk or terminator: 200 ms outbound timeout yields attributed 504 by 205 ms; the original
+100 ms ingress deadline yields 408 by 105 ms. The latter ages the request by 20 ms before
+forwarding without restarting its admission clock. The outbound measurement conservatively
+starts immediately before the facade call, not at a fabricated internal dispatch timestamp.
+
+The handler stores terminal timestamps; the client timestamps complete Content-Length-framed
+responses before EOF and joined cleanup. Numeric diagnostics run afterward. Actual source
+Pending, zero payload/EOF, exactly one release and no origin connection are required. A ready
+source-error negative control cannot satisfy the Pending witness. Baseline and reviewed TCP
+runs passed with unchanged production code; this is an evidence repair, not a timer fix. The
+unrelated retained EZ-6 lifetime failures are neither replaced nor waived.
+
+One environment joins the existing grouped Axum guard; no job, selector or second execution
+is added. Criterion 06 and its negative control are mandatory discovered sentinels. Its artifact
+is the actual `outbound/redirect/axum/native-tests.log`, not the older native raw-log placeholder.
+Older rows still need their canonical export mapping reconciled during Q3 candidate assembly.
+Passing libtest output asserts both windows; focused `--nocapture` logs additionally retain the
+numeric observations. The inventory is 108 ready/403 planned, still unqualified, with all frozen
+255 criteria/511 identities, expected text/digests, applicability and approvals unchanged.
+
+Two independent path/measurement investigations selected the existing TCP boundary over a
+production timer change. Independent code and evidence review added the aged-deadline control,
+explicit Pending witness and real phase-log binding. Hosted/consumer qualification, other
+encoding/lifetime/cancellation acceptance and candidate freeze remain open.
+
+Final verification passes all five root gates: 2,636 workspace tests in 33 binaries, zero
+failures and one existing ignored test; strict Clippy, formatting and feature/Spin checks.
+The isolated harness passes 390 tests with two existing ignored, and tooling passes 152.
+The complete Axum CI suite passes 289 native tests, 27 contracts, fixture compilation and its
+unchanged wire inventories. The final focused run observes complete 504/408 responses at
+202.081/102.596 ms from their original anchors. Logs remain under
+`/private/tmp/pr275-axum-settlement-*`, with the reviewed CI artifact under
+`/private/tmp/pr275-axum-settlement-reviewed-ci`. No retry-based credit, deadline relaxation,
+production transport change, hosted deployment or qualification promotion is performed.
+
 ### Real-Ingress Forwarding Acceptance (2026-10-30)
 
 The existing wire suites now cover real inbound conversion and `from_request` on Fastly,
@@ -348,8 +387,8 @@ Keep three different status questions separate:
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
   provider-local forwarding, client-selection, policy, marker and observation checkpoints give
-  107 ready legs, with 404 still `planned`. G1/Q3 binding work remains unfinished, not evidence
-  that 404 features are absent. Only the explicitly bound
+  108 ready legs, with 403 still `planned`, including the subsequent strict Axum pending-body
+  proof. G1/Q3 binding work remains unfinished, not evidence that 403 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
