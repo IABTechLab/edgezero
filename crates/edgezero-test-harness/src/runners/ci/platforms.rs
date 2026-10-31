@@ -55,7 +55,11 @@ fn validate_wire(events: &[Value], adapter: &str) -> Result<()> {
         "incomplete redirect wire cases or origin receipts",
     )?;
     super::super::wire::validate_batch_artifact(events, adapter)?;
-    super::super::wire::validate_marker_artifact(events, adapter)
+    super::super::wire::validate_marker_artifact(events, adapter)?;
+    if adapter != "axum" {
+        super::super::wire::validate_forwarding_artifact(events, adapter)?;
+    }
+    Ok(())
 }
 
 fn validate_progress(events: &[Value]) -> Result<()> {
@@ -397,6 +401,9 @@ mod tests {
         cases.push(json!({"event":format!("{adapter}-wire-inventory"),"status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         cases.extend(super::super::super::wire::batch_recovery_artifact(adapter));
         cases.extend(super::super::super::wire::marker_artifact(adapter));
+        if adapter != "axum" {
+            cases.extend(super::super::super::wire::forwarding_artifact(adapter));
+        }
         cases
     }
 
@@ -409,6 +416,18 @@ mod tests {
             let mut changed = events.clone();
             changed.pop();
             assert!(validate_wire(&changed, adapter).is_err());
+            if adapter != "axum" {
+                let without_forwarding = events
+                    .iter()
+                    .filter(|event| {
+                        !event["event"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("inbound-forwarding-"))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert!(validate_wire(&without_forwarding, adapter).is_err());
+            }
             let mut changed = events.clone();
             changed.remove(0);
             assert!(validate_wire(&changed, adapter).is_err());

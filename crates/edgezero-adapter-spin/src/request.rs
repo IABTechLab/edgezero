@@ -23,7 +23,7 @@ use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
 #[cfg(test)]
 use edgezero_core::http::request_builder;
-use edgezero_core::http::{Method, Request, RequestParts};
+use edgezero_core::http::{HeaderMap, Method, Request, RequestParts};
 use edgezero_core::ingress::{
     IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
     IngressHeadParts, PreparedIngress,
@@ -93,8 +93,23 @@ fn detached_error_envelope(
 pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
     let (parts, body) = req.into_parts();
     let mut request = into_core_request_head(parts, MonotonicClock::default());
-    *request.body_mut() = Body::from_external_stream(body.stream());
+    if !explicit_empty_body(request.headers()) {
+        *request.body_mut() = Body::from_external_stream(body.stream());
+    }
     Ok(request)
+}
+
+fn explicit_empty_body(headers: &HeaderMap) -> bool {
+    use edgezero_core::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+    let mut lengths = headers.get_all(CONTENT_LENGTH).iter();
+    !headers.contains_key(TRANSFER_ENCODING)
+        && lengths.next().is_some_and(|field| {
+            field.to_str().is_ok_and(|text| {
+                let trimmed = text.trim();
+                !trimmed.is_empty() && trimmed.bytes().all(|byte| byte == b'0')
+            })
+        })
+        && lengths.next().is_none()
 }
 
 /// Begins canonical detached delivery of an assembly error without a configured app.
@@ -408,16 +423,18 @@ where
                 return Ok(deliver(egress)?);
             }
         };
-        let source = match make_source() {
-            Ok(source) => source,
-            Err(error) => return Ok(deliver(app.admitted_error_egress(prepared, error))?),
-        };
-        *head_request.body_mut() = deadline_body_with_timer(
-            source,
-            prepared.read_deadline(),
-            prepared.monotonic_clock(),
-            make_timer,
-        );
+        if !explicit_empty_body(head_request.headers()) {
+            let source = match make_source() {
+                Ok(source) => source,
+                Err(error) => return Ok(deliver(app.admitted_error_egress(prepared, error))?),
+            };
+            *head_request.body_mut() = deadline_body_with_timer(
+                source,
+                prepared.read_deadline(),
+                prepared.monotonic_clock(),
+                make_timer,
+            );
+        }
         dispatch_core_request(app, head_request, stores, prepared, deliver).await
     })
     .await
@@ -623,15 +640,25 @@ fn resolve_secret_handle(secrets_enabled: bool) -> Option<SecretHandle> {
 #[cfg(test)]
 mod synthesis_tests {
     use super::*;
+    use bytes::Bytes;
+    use edgezero_core::ResponseEgressCompletion;
     use edgezero_core::config_store::{
         BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
         finish_bounded_config_read,
     };
+    use edgezero_core::context::RequestContext;
+    use edgezero_core::http::Response;
+    use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::key_value_store::{KvStore, NoopKvStore};
     use edgezero_core::router::RouterService;
     use edgezero_core::secret_store::{NoopSecretStore, SecretHandle};
+    use futures_util::stream::pending;
+    use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::collections::VecDeque;
+    use std::future::Pending;
+    use std::io::Error as IoError;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -677,6 +704,67 @@ mod synthesis_tests {
 
     fn secret_handle() -> SecretHandle {
         SecretHandle::new(Arc::new(NoopSecretStore))
+    }
+
+    #[test]
+    fn explicit_zero_length_skips_source_after_read_deadline() {
+        #[edgezero_core::action]
+        async fn forwarded(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let request = ctx.into_request()?;
+            let buffered = !request.body().is_stream();
+            assert!(request.into_body().into_bytes_bounded(8).await?.is_empty());
+            assert!(buffered, "certified empty body must stay buffered");
+            Ok(Response::new(Body::empty()))
+        }
+
+        for (headers, status, constructions) in [
+            (vec![("content-length", "0")], 200, 0),
+            (vec![], 408, 1),
+            (
+                vec![("content-length", "0"), ("transfer-encoding", "chunked")],
+                400,
+                0,
+            ),
+            (
+                vec![("content-length", "0"), ("content-length", "0")],
+                400,
+                0,
+            ),
+            (vec![("content-length", "invalid")], 400, 0),
+        ] {
+            let now = MonotonicInstant::now();
+            let mut app = App::new(RouterService::builder().get("/forward", forwarded).build());
+            app.set_monotonic_clock(MonotonicClock::new(move || now));
+            app.set_ingress_admission_policy(|head| {
+                assert_eq!(head.framing(), IngressFraming::HostManaged);
+                AdmissionDecision::Admit {
+                    completion: ResponseEgressCompletion::empty(),
+                    grant: IngressGrant::empty(),
+                    read_deadline: head.read_deadline_after(Duration::ZERO),
+                }
+            });
+            let mut request = request_builder().uri("/forward");
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let constructed = Rc::new(Cell::new(0_u8));
+            let count = Rc::clone(&constructed);
+            let mut envelope = block_on(dispatch_ingress_stream_with_timer_and(
+                &app,
+                request.body(Body::empty()).expect("head"),
+                Stores::default(),
+                now,
+                move || {
+                    count.set(count.get() + 1);
+                    Ok(pending::<Result<Bytes, IoError>>())
+                },
+                |_| -> Pending<()> { panic!("expired read must not construct a timer") },
+                Ok,
+            ))
+            .expect("response");
+            assert_eq!(envelope.response_mut().status().as_u16(), status);
+            assert_eq!(constructed.get(), constructions);
+        }
     }
 
     #[test]

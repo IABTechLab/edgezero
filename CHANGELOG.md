@@ -13,6 +13,13 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Add real-ingress forwarding acceptance to the existing Fastly, Cloudflare and Spin wire
+  suites, including empty GET/HEAD framing, first-byte rejection, streamed uploads, eager Begin,
+  cached batches, redirects and zero-read unsupported-option rejection. Preserve Spin's explicit
+  `Content-Length: 0` as buffered empty input without constructing a read stream or timer.
+  Launch Cloudflare fixtures on one direct Miniflare/workerd listener using Wrangler's public
+  configuration mapper; remove the dev-proxy launcher without changing application build,
+  deployment or local CLI commands. Keep hosted qualification and strict timing evidence separate.
 - Remove the implicit Ruby requirement from CI workflow guards. Use a locked Node YAML parser,
   preserving existing assertions and check names with fail-closed CI/local dependency setup.
 - Publish `outbound-connect-timeout`: Fastly declares independent provider-backed support;

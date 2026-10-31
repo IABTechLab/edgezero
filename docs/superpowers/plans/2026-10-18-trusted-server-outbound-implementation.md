@@ -12,6 +12,53 @@
 
 ## Status and Authority
 
+### Real-Ingress Forwarding Acceptance (2026-10-30)
+
+The existing wire suites now cover real inbound conversion and `from_request` on Fastly,
+Cloudflare and Spin, sharing one fixture handler and bounded origin recorder. The 53 ingress
+cases cover empty GET/HEAD framing, first-nonempty-item rejection, streamed POST/PUT/PATCH,
+bodiless OPTIONS/DELETE, Begin before collection, streamed-Begin refusal, cached batch input,
+one-settlement 307 following and zero-read unsupported-option rejection. Original source errors,
+deadlines, method/body bytes and framing remain intact. Fastly's rejection controls also require
+zero backend configuration and registration. Successful cleanup and persisted readback precede
+sentinels; parent validation requires the complete group. Fragmentation is not a fixed boundary.
+
+Spin's explicit `Content-Length: 0` now stays buffered without source/timer construction, including
+after the inbound read deadline. Missing length remains unknown, framing stays `HostManaged`,
+and explicit `body_bytes` deadline precedence is unchanged. Actual Spin red evidence recorded
+the former 408 before the repair; the native ingress matrix now passes. The co-located private
+regression is WASM-compiled; plain Wasmtime cannot execute that lib-test component's Spin KV
+imports, so its build is not represented as an executed unit test.
+
+The pending workerd request exposed a test-boundary problem: EdgeZero returned the correct 400
+with zero reads, but Wrangler's outer dev proxy withheld it until client disconnect. Disabling
+only dev body draining did not fix it. The approved replacement uses the pinned Wrangler public
+configuration mapper and one native Miniflare/workerd listener; the same pending request passes
+without draining, finishing the body or changing the adapter. Compatibility, KV seeds, staging,
+launch identity and cleanup remain tested. No alternative launcher remains; application build,
+deployment and `edgezero serve` are unchanged. Hosted guarantees are not promoted.
+
+The inventory activates 22 provider-local EZ-1 legs and retains all 255 criteria/511 identities,
+source text/digests, applicability and approvals: 107 ready, 404 planned, `qualified: false`.
+The remaining local EZ-1 gate is Axum criterion 06's strict 200/205 ms and 100/105 ms timing.
+Hosted criteria 02/05/06 and consumer criterion 13 remain open. These functional proofs do not
+waive the recorded lifetime, overflow-recovery, SDK-parity or external qualification failures.
+
+Independent read-only fixture, provider-boundary and evidence reviews selected one shared
+handler and the pinned public configuration mapper rather than repeated transport controls.
+Review caught the actual KV mapping shape, nested empty SDK defaults, shutdown cancellation
+classification and impossible source-counter combinations; each repair has regression coverage.
+Cloudflare smoke assertions follow the captured host body signal, never infer it from framing.
+
+Verification passes all five root gates: 2,633 tests across 33 binaries, zero failures and one
+existing ignored test; strict workspace Clippy, formatting and both feature/target checks.
+The isolated harness passes 390 tests with two existing ignored; shared fixtures pass 56 tests
+and tooling passes 150. Native and relevant WASM Clippy, docs/manifest, legacy and decoder-pin
+audits pass. Full Fastly and Spin CI suites, native Cloudflare wire and Cloudflare smoke suites
+pass. Runtime records remain under `/private/tmp/pr275-ez1-{fastly-ci,spin-ci,cloudflare-native-final,cloudflare-smoke-verified}`;
+failed earlier probes remain retained. These local observations do not freeze a candidate,
+qualify hosted behavior or close the other planned encoding, lifetime and cancellation criteria.
+
 ### Connect Capability Publication (2026-10-30)
 
 The missing EZ-4.9 declaration is implemented: `outbound-connect-timeout` is Native on Fastly
@@ -288,7 +335,7 @@ Keep three different status questions separate:
   snapshot. A foundation or a local checkpoint does not complete its parent task. No full P1-P6
   or D1-D6 migration task is closed by the checkpoints recorded so far.
 - **Executable acceptance coverage:** G1's
-  [inventory](../../../tests/fixtures/reusable-app/outbound-cutover-cases.json) covers 255 source
+  [inventory](../../../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json) covers 255 source
   criteria and 511 split/environment legs. Its `implementation: planned | ready` field describes
   readiness of that leg's declared command/sentinel, not overall feature implementation.
   EZ-23 local criteria 01-12 and EZ-9 core criteria 01-15 plus local runtime criteria 16/17 are
@@ -299,9 +346,10 @@ Keep three different status questions separate:
   [native policy checkpoint](#native-response-policy-and-evidence-validation-checkpoint-2026-10-29)
   adds each adapter's unit criterion 09, Axum/Cloudflare/Fastly unit criteria 10/11 and Axum
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
-  the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14, giving
-  67 legs, with 444 still
-  `planned`. G1/Q3 binding work remains unfinished, not evidence that 444 features are absent. Only the explicitly bound
+  the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
+  provider-local forwarding, client-selection, policy, marker and observation checkpoints give
+  107 ready legs, with 404 still `planned`. G1/Q3 binding work remains unfinished, not evidence
+  that 404 features are absent. Only the explicitly bound
   commands count as executable legs; unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
@@ -3211,7 +3259,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 
 | Requirement | Implementation Tasks | Production Applicability                                                  | Current Implementation / Checkpoint                                                                                                                                                                                                                                               | Next Unclosed Work                                                                                                                                         |
 | ----------- | -------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| EZ-1 | P2; D1-D4 | Blocking, including actual ingress forwarding | **Shared settlement implemented in the worktree.** Certified-empty conversion remains zero-read; unknown GET/HEAD sources settle before dispatch with paired 408/504 deadlines, preserved source errors and hidden deadline provenance across parts. Fastly's approved slack retirement removes the later false rejection. | Complete all-target/runtime acceptance bindings and hosted forwarding evidence. Fastly synchronous inbound reads remain BestEffort. |
+| EZ-1 | P2; D1-D4 | Blocking, including actual ingress forwarding | **Shared settlement and local functional ingress acceptance implemented.** The current checkpoint binds 22 serverless legs alongside existing Axum/core proofs. Spin preserves explicit CL=0 without constructing a read stream. | Strict Axum pending-body timing criterion 06, hosted and consumer acceptance. Fastly synchronous inbound reads remain BestEffort. |
 | EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial implementation:** [B31 existing-path identity/timers](#existing-path-b31-implementation-checkpoint-2026-10-25); [current-operation multiplexer](#current-operation-multiplexer-checkpoint-2026-10-25). Historical mixed/full-buffer readiness failures remain retained. | Callback-wide ownership, remaining modes and registration observations. F1 retirement, hosted pooling and resource qualification remain separate.          |
 | EZ-3 | D1/D5 | Blocking; bounded waits and original budgets retained | **Approved retirement locally verified.** Remove the 25 ms rejection, exported constant and injection hook. A 26 ms settlement no longer rejects a live budget; dispatch/registration still reject actual expiry and backwards clocks. | Bind bounded-wait acceptance and run the M7 comparison. Preserve original deadlines and B31; hosted/runtime promotion remains separate. |
 | EZ-4 | P1; D1-D4 | Blocking; Native/BestEffort distinctions retained | **Configured mapping implemented locally.** Connect setting/readback/round-trip, zero rejection, Fastly stable backend mapping, Spin advisory setter/refusal and configured-vs-unconfigured timeout causes are covered. Axum preserves its shared pool and accepts BestEffort aggregate enforcement; Cloudflare does likewise. Follow retains those settings. | Bind the complete mode/adapter matrices, update capability rows only with evidence, and obtain controlled hosted connect-expiry proof. |

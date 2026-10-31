@@ -54,6 +54,18 @@ mod sdk {
     impl Guest for BodylessWire {
         async fn handle(request: Request) -> Result<Response, ErrorCode> {
             let path = request.get_path_with_query().unwrap_or_default();
+            if path.starts_with("/progress/forward/") {
+                let incoming = SpinRequest::from_request(request)?;
+                let app = fixture_core::qualification::forwarding::application(
+                    edgezero_adapter_spin::SPIN_PLATFORM,
+                    json!({"source":"spin-sdk-before-conversion"}),
+                );
+                return edgezero_adapter_spin::dispatch_app::<HandoffHooks>(&app, incoming)
+                    .await
+                    .map_err(|_| {
+                        ErrorCode::InternalError(Some("forwarding fixture failed".to_owned()))
+                    });
+            }
             if path == "/handoff" {
                 let incoming = SpinRequest::from_request(request)?;
                 return edgezero_adapter_spin::run_app::<HandoffHooks>(incoming)

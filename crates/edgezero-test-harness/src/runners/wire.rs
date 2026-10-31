@@ -3,11 +3,21 @@ use crate::net::WireOrigins;
 use std::io::Read as _;
 
 mod batch_recovery;
+mod forwarding;
 mod marker;
 mod normalization;
 
 pub(super) fn validate_marker_artifact(events: &[Value], adapter: &str) -> Result<()> {
     marker::validate_artifact(events, adapter)
+}
+
+pub(super) fn validate_forwarding_artifact(events: &[Value], adapter: &str) -> Result<()> {
+    forwarding::validate_artifact(events, adapter)
+}
+
+#[cfg(test)]
+pub(super) fn forwarding_artifact(adapter: &str) -> Vec<Value> {
+    forwarding::tests::artifact(adapter)
 }
 
 #[cfg(test)]
@@ -304,6 +314,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
     normalization::validate_artifact(events, origin_port)?;
     batch_recovery::validate_artifact(events, "spin")?;
     marker::validate_artifact(events, "spin")?;
+    forwarding::validate_artifact(events, "spin")?;
     Ok(())
 }
 
@@ -929,6 +940,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         normalization::run(port, &origins, matrix.records)?;
         batch_recovery::run("spin", port, matrix.records)?;
         marker::run("spin", port, matrix.records)?;
+        forwarding::run("spin", port, matrix.records)?;
         running.check_running()?;
         Ok((baseline, policy))
     })();
@@ -970,6 +982,9 @@ fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Resul
             matrix.run()?;
             batch_recovery::run(name, port, matrix.records)?;
             marker::run(name, port, matrix.records)?;
+            if name != "axum" {
+                forwarding::run(name, port, matrix.records)?;
+            }
             Ok((matrix.exchanges, matrix.dispatches))
         },
     )?;
@@ -1034,7 +1049,7 @@ pub(super) fn progress_suite<T>(
             records.push(
                 json!({"event":"workerd-configuration","adapter":"cloudflare",
                 "configuration":fs::read_to_string(run.join("wrangler.toml"))?,
-                "launcher":"wrangler-api","inspector":false,"qualification":false}),
+                "launcher":"miniflare-native","inspector":false,"qualification":false}),
             )?;
         }
         let origins = origins.insert(WireOrigins::start()?);
@@ -1297,6 +1312,7 @@ mod tests {
         values.extend(normalization::tests::artifact(first));
         values.extend(batch_recovery::tests::artifact("spin"));
         values.extend(marker::tests::artifact("spin"));
+        values.extend(forwarding::tests::artifact("spin"));
         values
     }
 

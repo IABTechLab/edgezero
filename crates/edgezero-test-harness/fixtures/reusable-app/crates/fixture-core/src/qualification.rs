@@ -1,5 +1,6 @@
 //! Opt-in, synthetic hosted probes through standard application/adaptor lifecycles.
 
+pub mod forwarding;
 pub mod framing;
 mod lifetimes;
 mod overflow;

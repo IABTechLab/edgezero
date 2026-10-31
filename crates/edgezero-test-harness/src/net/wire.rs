@@ -43,6 +43,52 @@ struct State {
     lifetimes: HashMap<String, lifetimes::Lifetime>,
 }
 
+pub fn validate_forward_capture(receipt: &Value) -> Result<()> {
+    let payload = receipt["payload"]
+        .as_str()
+        .filter(|value| value.len() <= 8)
+        .ok_or("invalid forwarding payload")?;
+    let encoded = receipt["encoded_body_hex"]
+        .as_str()
+        .filter(|value| {
+            value.len() <= 256
+                && value.len() % 2 == 0
+                && value.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+        .ok_or("invalid forwarding encoded body")?;
+    let lengths: Vec<String> = serde_json::from_value(receipt["content_length"].clone())?;
+    let encodings: Vec<String> = serde_json::from_value(receipt["transfer_encoding"].clone())?;
+    require(
+        lengths.len() <= 1
+            && encodings.len() <= 1
+            && (lengths.is_empty() || encodings.is_empty())
+            && lengths.iter().all(|v| v == &payload.len().to_string())
+            && encodings.iter().all(|v| v == "chunked")
+            && (payload.is_empty() || !lengths.is_empty() || !encodings.is_empty()),
+        "invalid forwarding capture framing",
+    )?;
+    let mut wire = b"POST / HTTP/1.1\r\n".to_vec();
+    for (name, values) in [
+        ("Content-Length", &lengths),
+        ("Transfer-Encoding", &encodings),
+    ] {
+        for value in values {
+            write!(wire, "{name}: {value}\r\n")?;
+        }
+    }
+    wire.extend_from_slice(b"\r\n");
+    for index in (0..encoded.len()).step_by(2) {
+        wire.push(u8::from_str_radix(&encoded[index..index + 2], 16)?);
+    }
+    let mut reader = BufReader::new(std::io::Cursor::new(wire));
+    let head = read_head(&mut reader, &mut 0, Profile::Wire).map_err(|error| error.name())?;
+    let (decoded, _) = capture_wire_body(&mut reader, &head).map_err(|error| error.name())?;
+    require(
+        decoded == payload.as_bytes() && reader.read(&mut [0])? == 0,
+        "forwarding capture bytes disagree with framing",
+    )
+}
+
 #[derive(Default)]
 struct Shared {
     state: Mutex<State>,
@@ -196,6 +242,16 @@ impl WireOrigins {
         std::mem::take(&mut self.shared.lock().requests)
     }
 
+    pub fn accepted(&self) -> usize {
+        self.shared.lock().accepted
+    }
+
+    pub fn finish_counted(self) -> Result<usize> {
+        let shared = Arc::clone(&self.shared);
+        self.finish()?;
+        Ok(shared.lock().accepted)
+    }
+
     pub fn finish(mut self) -> Result<()> {
         self.shutdown();
         let state = self.shared.lock();
@@ -328,6 +384,83 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
         "invalid wire request line",
     )?;
     let (method, target) = (parts[0], parts[1]);
+    if let Some(tail) = target.strip_prefix("/forward/") {
+        let (operation, token) = tail.split_once('/').ok_or("invalid forwarding target")?;
+        require(
+            matches!(operation, "send" | "begin" | "confirm" | "follow" | "final")
+                && !token.is_empty()
+                && token.len() <= 64
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+            "invalid forwarding operation or token",
+        )?;
+        let tokens: Vec<_> = head
+            .fields
+            .iter()
+            .filter(|(name, _)| name == "x-request-token")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        require(tokens == [token], "forwarding token changed")?;
+        let (body, encoded) =
+            capture_wire_body(&mut reader, &head).map_err(|error| error.name())?;
+        reader.get_mut().deadline = Instant::now() + Duration::from_millis(50);
+        let mut extra = [0];
+        match reader.read(&mut extra) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) => {}
+            Ok(_) => return Err("unframed forwarding bytes".into()),
+            Err(error) => return Err(error.into()),
+        }
+        require(
+            body.len() <= 8 && body.is_ascii(),
+            "forwarding origin body exceeds bound",
+        )?;
+        let fields = |field| {
+            head.fields
+                .iter()
+                .filter(|(name, _)| name == field)
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>()
+        };
+        let gate = format!("forward-{token}");
+        if operation == "confirm" {
+            shared.wait(IO_BUDGET, |state| {
+                state
+                    .wire
+                    .iter()
+                    .any(|event| event["token"] == token && event["operation"] == "begin")
+            })?;
+            shared.release(&gate)?;
+        }
+        shared.lock().wire.push_back(json!({"port":port,"method":method,"target":target,"token":token,"operation":operation,
+            "content_length":fields("content-length"),"transfer_encoding":fields("transfer-encoding"),
+            "encoded_body_hex":encoded.iter().map(|b| format!("{b:02x}")).collect::<String>(),"payload":String::from_utf8(body)?}));
+        shared.wake.notify_all();
+        if operation == "begin" {
+            shared.wait(IO_BUDGET, |state| state.gates.get(&gate) == Some(&true))?;
+        }
+        if operation == "follow" {
+            write!(
+                socket,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{second}/forward/final/{token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )?;
+        } else if operation == "confirm" {
+            socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")?;
+        } else {
+            socket.write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Length: 3\r\nConnection: close\r\n\r\n",
+            )?;
+            if method != "HEAD" {
+                socket.write_all(b"end")?;
+            }
+        }
+        return Ok(());
+    }
     if target.starts_with("/marker/") {
         let tokens: Vec<_> = head
             .fields
@@ -747,6 +880,26 @@ mod tests {
         let mut response = Vec::new();
         socket.read_to_end(&mut response).unwrap();
         response
+    }
+
+    #[test]
+    fn forwarding_origin_rejects_unframed_chunk_terminator_before_receipt() {
+        let origins = WireOrigins::start().unwrap();
+        let observed = Arc::clone(&origins.shared);
+        let mut socket = TcpStream::connect(("127.0.0.1", origins.port(0))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket.write_all(b"GET /forward/send/trailing HTTP/1.1\r\nx-request-token: trailing\r\nContent-Length: 0\r\n\r\n0\r\n\r\n").unwrap();
+        let _peer_close = socket.read_to_end(&mut Vec::new());
+        assert!(
+            origins
+                .finish()
+                .unwrap_err()
+                .to_string()
+                .contains("unframed forwarding bytes")
+        );
+        assert!(observed.lock().wire.is_empty());
     }
 
     #[test]

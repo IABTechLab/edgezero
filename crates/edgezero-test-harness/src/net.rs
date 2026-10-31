@@ -14,7 +14,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-pub use wire::WireOrigins;
+pub use wire::{WireOrigins, validate_forward_capture};
 
 pub type Signal = Arc<(Mutex<bool>, Condvar)>;
 static CLIENT_EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
@@ -651,6 +651,71 @@ enum Capture<'a> {
     Text,
     Binary,
     Headers(&'a [(&'a str, &'a str)]),
+    Forward {
+        method: &'a str,
+        framing: ForwardFraming,
+        origin: &'a str,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ForwardFraming {
+    Absent,
+    Zero,
+    ChunkedEmpty,
+    FiveBytes,
+    ThreeBytes,
+    Pending,
+}
+
+impl ForwardFraming {
+    fn wire(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Absent => ("", ""),
+            Self::Zero => ("Content-Length: 0\r\n", ""),
+            Self::ChunkedEmpty => ("Transfer-Encoding: chunked\r\n", "0\r\n\r\n"),
+            Self::FiveBytes => ("Content-Length: 5\r\n", "abcde"),
+            Self::ThreeBytes => ("Transfer-Encoding: chunked\r\n", "3\r\nabc\r\n0\r\n\r\n"),
+            Self::Pending => ("Transfer-Encoding: chunked\r\n", ""),
+        }
+    }
+}
+
+pub fn forward_request(
+    port: u16,
+    case: &str,
+    method: &str,
+    framing: ForwardFraming,
+    token: &str,
+    origin: &str,
+) -> Result<Value> {
+    require(
+        matches!(
+            method,
+            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "OPTIONS" | "DELETE"
+        ) && [case, token].iter().all(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }) && origin.len() <= 256
+            && origin.bytes().all(|byte| byte.is_ascii_graphic()),
+        "invalid forwarding request",
+    )?;
+    request_with_framing(
+        port,
+        &format!("/progress/forward/{case}"),
+        token,
+        None,
+        None,
+        None,
+        Capture::Forward {
+            method,
+            framing,
+            origin,
+        },
+    )
 }
 
 pub fn binary_request(port: u16, path: &str, token: &str, backend: Option<&str>) -> Result<Value> {
@@ -873,10 +938,19 @@ fn exchange(
         |f| f.wire().0.to_owned(),
     );
     let body = framing.map_or(body, |f| f.wire().1);
+    let method = match capture {
+        Capture::Forward { method, .. } => method,
+        _ if probe => "POST",
+        _ => "GET",
+    };
+    let (framing_header, body) = match capture {
+        Capture::Forward { framing, .. } => (framing.wire().0.to_owned(), framing.wire().1),
+        _ => (framing_header, body),
+    };
     write!(
         stream,
         "{} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-request-token: {token}\r\n{framing_header}Connection: close\r\n",
-        if probe { "POST" } else { "GET" },
+        method,
     )?;
     if let Some(url) = backend {
         write!(stream, "x-fixture-backend: {url}\r\n")?;
@@ -885,6 +959,9 @@ fn exchange(
         for (name, value) in headers {
             write!(stream, "{name}: {value}\r\n")?;
         }
+    }
+    if let Capture::Forward { origin, .. } = capture {
+        write!(stream, "x-origin: {origin}\r\n")?;
     }
     write!(stream, "\r\n{body}")?;
     stream.flush()?;
@@ -931,7 +1008,7 @@ fn exchange(
     let capture_limit = match capture {
         Capture::Text => MAX_TEXT,
         Capture::Binary => 256,
-        Capture::Headers(_) => 64 * 1024,
+        Capture::Headers(_) | Capture::Forward { .. } => 64 * 1024,
     };
     let outcome = (|| -> Result<()> {
         let mut read_part = |reader: &mut BufReader<BoundedStream>, count: usize| -> Result<()> {
@@ -966,7 +1043,13 @@ fn exchange(
             }
             Ok(())
         };
-        if chunked {
+        if method == "HEAD" {
+            let mut extra = [0];
+            require(
+                reader.read(&mut extra)? == 0,
+                "HEAD response carried body bytes",
+            )?;
+        } else if chunked {
             loop {
                 line.clear();
                 capture_require(
@@ -1046,7 +1129,9 @@ fn exchange(
     let mut event = json!({"event":"client_completed","token":token,"status":status,"headers":headers,"header_ns":header_ns,"first_byte_ns":first_byte_ns.unwrap_or(header_ns),"complete_ns":start.elapsed().as_nanos() as u64});
     match capture {
         Capture::Text => event["body"] = json!(String::from_utf8(bytes)?),
-        Capture::Binary | Capture::Headers(_) => event["body_bytes"] = json!(bytes),
+        Capture::Binary | Capture::Headers(_) | Capture::Forward { .. } => {
+            event["body_bytes"] = json!(bytes)
+        }
     }
     crate::startup::annotate_response(port, &mut event);
     CLIENT_EVENTS.lock().unwrap().push(event.clone());
@@ -1055,6 +1140,76 @@ fn exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarding_client_preserves_original_method_and_explicit_framing() {
+        for (method, framing) in [
+            ("GET", ForwardFraming::Absent),
+            ("HEAD", ForwardFraming::Zero),
+            ("GET", ForwardFraming::ChunkedEmpty),
+            ("GET", ForwardFraming::FiveBytes),
+            ("POST", ForwardFraming::ThreeBytes),
+            ("PUT", ForwardFraming::ThreeBytes),
+            ("PATCH", ForwardFraming::ThreeBytes),
+            ("OPTIONS", ForwardFraming::Absent),
+            ("DELETE", ForwardFraming::Absent),
+            ("GET", ForwardFraming::Pending),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let origin = "http://127.0.0.1:1234/forward/send/wire";
+            let expected = format!(
+                "{method} /progress/forward/send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-request-token: wire\r\n{}Connection: close\r\nx-origin: {origin}\r\n\r\n{}",
+                framing.wire().0,
+                framing.wire().1
+            );
+            let server = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut received = vec![0; expected.len()];
+                socket.read_exact(&mut received).unwrap();
+                assert_eq!(received, expected.as_bytes());
+                socket
+                    .write_all(
+                        b"HTTP/1.1 201 Created\r\nContent-Length: 3\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                if method != "HEAD" {
+                    socket.write_all(b"end").unwrap();
+                }
+            });
+            let response = forward_request(port, "send", method, framing, "wire", origin).unwrap();
+            server.join().unwrap();
+            assert_eq!(response["status"], 201);
+            assert_eq!(
+                response["body_bytes"],
+                json!(if method == "HEAD" {
+                    b"".as_slice()
+                } else {
+                    b"end".as_slice()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn forwarding_client_rejects_injection_before_connecting() {
+        for (case, method, token, origin) in [
+            ("send", "GET\r\nx: injected", "wire", "http://127.0.0.1:1/"),
+            ("send", "GET", "wire\r\nx: injected", "http://127.0.0.1:1/"),
+            ("send/elsewhere", "GET", "wire", "http://127.0.0.1:1/"),
+            ("send", "GET", "wire", "http://127.0.0.1:1/\r\nx: injected"),
+        ] {
+            assert_eq!(
+                forward_request(0, case, method, ForwardFraming::Absent, token, origin)
+                    .unwrap_err()
+                    .to_string(),
+                "invalid forwarding request"
+            );
+        }
+    }
 
     fn binary_reply(wire: Vec<u8>) -> Result<Value> {
         captured_reply(wire, |port| {

@@ -38,6 +38,20 @@ const digest = (value) => createHash("sha256").update(value).digest("hex");
 const clone = (value) => structuredClone(value);
 const spinCiCommand =
   "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin";
+const forwardingRuntimeKeys = new Set([
+  ...["viceroy", "workerd", "spin"].map(
+    (environment) => `EZ-1/acceptance/01@${environment}/http1`,
+  ),
+  ...["04", "09", "10", "12", "14"].flatMap((criterion) =>
+    ["viceroy", "workerd", "spin"].map(
+      (environment) => `EZ-1/acceptance/${criterion}@${environment}`,
+    ),
+  ),
+  "EZ-1/acceptance/03@workerd",
+  "EZ-1/acceptance/08@workerd",
+  "EZ-1/acceptance/08@spin/content-length-0",
+  "EZ-1/acceptance/11@viceroy",
+]);
 
 test("CI argument inspection preserves exact string values and trailing commas", () => {
   assert.deepEqual(
@@ -746,7 +760,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 426,
+    planned: 404,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -1328,7 +1342,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /426 other legs remain planned/);
+  assert.match(manifest.status, /404 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1419,7 +1433,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
   }
 });
 
-test("Axum forwarding modes bind actual ingress tests without promoting sibling legs", () => {
+test("Axum forwarding modes retain actual ingress tests and unproved sibling legs", () => {
   const manifest = JSON.parse(
     readFileSync(
       new URL(
@@ -1463,7 +1477,9 @@ test("Axum forwarding modes bind actual ingress tests without promoting sibling 
     )) {
       assert.equal(
         sibling.implementation,
-        "planned",
+        forwardingRuntimeKeys.has(`${caseId}@${sibling.environment}`)
+          ? "ready"
+          : "planned",
         `${caseId}@${sibling.environment}`,
       );
     }
@@ -1480,6 +1496,64 @@ test("Axum forwarding modes bind actual ingress tests without promoting sibling 
       c.environment === "axum/http1-chunked",
   );
   assert.equal(pending.implementation, "planned", "strict timing remains open");
+});
+
+test("real-ingress forwarding binds only its 22 owning runtime legs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const forwarding = {
+    ...manifest,
+    cases: manifest.cases.filter((c) =>
+      forwardingRuntimeKeys.has(`${c.case_id}@${c.environment}`),
+    ),
+  };
+  assert.equal(forwardingRuntimeKeys.size, 22);
+  for (const key of forwardingRuntimeKeys) {
+    const row = manifest.cases.find(
+      (c) => `${c.case_id}@${c.environment}` === key,
+    );
+    assert.equal(row?.implementation, "ready", key);
+    assert.equal(row.applicability, "blocking", key);
+    assert.equal(row.approval, null, key);
+    assert.equal(row.condition, null, key);
+    const environment = row.environment.split("/")[0];
+    const owner = manifest.cases.find(
+      (c) =>
+        c.case_id === "EZ-6/acceptance/22" && c.environment === environment,
+    );
+    assert.equal(row.command, owner.command, key);
+    assert.equal(row.artifact_path, owner.artifact_path, key);
+    assert.equal(
+      row.sentinel,
+      `${row.case_id.toLowerCase().replaceAll(/[^a-z0-9]/g, "_")}_${row.environment.replaceAll(/[^a-z0-9]/g, "_")}`,
+      key,
+    );
+    assert.ok(
+      checker
+        .readySentinels(forwarding, row.environment, row.command)
+        .includes(row.sentinel),
+    );
+  }
+  for (const row of manifest.cases.filter(
+    (c) =>
+      c.case_id.startsWith("EZ-1/") &&
+      (c.environment.startsWith("hosted") ||
+        c.environment.startsWith("consumer") ||
+        c.environment === "axum/http1-chunked"),
+  )) {
+    assert.equal(
+      row.implementation,
+      "planned",
+      `${row.case_id}@${row.environment}`,
+    );
+  }
 });
 
 test("redirect runtime bindings retain exact output paths and leave unproved legs planned", () => {
@@ -1550,15 +1624,16 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 85);
+  assert.equal(ready.length, 107);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    426,
+    404,
   );
   assert.ok(
     ready.every(
       (c) =>
         c.case_id.startsWith("EZ-9/acceptance/") ||
+        forwardingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/22" &&

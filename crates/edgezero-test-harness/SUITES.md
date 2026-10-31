@@ -166,8 +166,8 @@ dates retain explicit `enable_weak_ref`. No runtime pin or provider support clai
 Cloudflare batch and redirect evidence share the same full wire command and artifact; the
 temporary batch-only selector is removed. The initial inspector-enabled full run aborted
 workerd on malformed gzip. A controlled inspector-only toggle reproduced that failure, while
-the same Rust guest/origin passed without network inspection. The public Wrangler API now
-launches fixtures with `dev.inspector: false`, retaining config, bindings, KV persistence and
+the same Rust guest/origin passed without network inspection. That checkpoint used the public
+Wrangler API with `dev.inspector: false`, retaining config, bindings, KV persistence and
 the original 68/84 redirect plus six/32 batch inventories. The inspector defect remains open;
 this is not a provider repair or hosted qualification. The first Spin rerun also failed startup
 identity checking before an isolated unchanged-code pass. Failed attempts remain negative evidence.
@@ -177,18 +177,52 @@ identity checking before an isolated unchanged-code pass. Failed attempts remain
 The Rust controller resolves Node and the selected `WRANGLER_BIN` npm executable and invokes
 the small `fixture-cloudflare/serve.cjs` bootstrap. Wrangler must resolve from that exact
 installation; shell/version-manager wrappers cannot silently fall back to another package.
-The bootstrap uses public `unstable_startWorker`, `ready`, `dispose` and the `raw` error stream.
-Late SDK errors fail the run with a sanitized diagnostic and reuse exactly-once disposal. Rust owns
+The bootstrap now uses public `unstable_getMiniflareWorkerOptions` and Wrangler's selected
+Miniflare dependency to start one direct workerd HTTP listener. The previous dev-proxy launcher
+is removed, not retained as an alternate path. Compatibility date/flags, module rules, staged
+module root, variable overrides and KV namespace IDs are preserved; `<persist>/v3` matches the
+existing CLI seed. Unsupported defines, external workers, remote bindings and service/proxy
+configuration fail closed. Inspection, live reload, telemetry and remote metadata lookup are off.
+Readiness must report the configured loopback address. Runtime errors use a sanitized logger,
+while guest console telemetry remains separate. Startup/signal/error paths share exactly-once
+`dispose`; readiness alone is not a runtime-lifetime guarantee. Rust owns
 startup deadlines, HTTP assertions, process-group cancellation, escalation and cleanup checks.
 Console/lifecycle telemetry and seeded KV bindings remain covered by the same smoke suite.
 No SDK/runtime pin changes or extra CI job accompany this launcher change.
+
+The dev proxy withheld a pending-upload 400 after EdgeZero had returned it with zero body polls;
+disabling Wrangler's unused-body middleware alone did not repair that behavior. The identical
+request and guest pass through the native listener without completing or draining the upload.
+This test-launcher replacement does not change `edgezero serve`, build/deploy commands or hosted
+support declarations, and it does not repair the separate Wrangler dev-proxy behavior.
+
+### Real-Ingress Forwarding
+
+The existing wire phase also runs one shared forwarding handler through real adapter ingress:
+17 Fastly cases and 18 each on Cloudflare and Spin. GET/HEAD cover absent framing, explicit CL=0
+and terminating-only chunks. Other cases cover five-byte GET rejection, POST/PUT/PATCH `abc`,
+lengthless OPTIONS/DELETE, Begin before collection, streamed-Begin refusal, cached-empty batch,
+one-settlement 307 following and a pending unsupported request with zero reads. Cloudflare and
+Spin add expired-inbound-deadline controls; Cloudflare records original body presence and keeps
+the unknown-body outcome conditional, while Spin uses its explicit CL=0 exception.
+
+Token-bound origin receipts retain method, port, raw framing, encoded bytes and decoded payload.
+An origin barrier proves Begin dispatch before collection. Passive guest counters preserve the
+original buffered/streamed representation and errors; Fastly also records backend/configuration
+counts, requiring zero setup for rejected requests. Each group reuses the bounded origin and
+existing capture/deadline limits, joins cleanup, then reopens its persisted evidence before
+printing acceptance sentinels. Parent validation requires the group; mutations reject omission,
+duplication, reassociation, impossible source reports, unframed/trailing bytes and cleanup failure.
+Chunk boundaries are not prescribed. Existing redirect, batch, marker and normalization counts
+stay unchanged. Strict Axum 200/205 ms and 100/105 ms timing, hosted and consumer criteria remain
+separate gates, not inferred from these successful functional cases.
 
 The pinned inspector's [network preview](https://github.com/cloudflare/workerd/blob/v1.20260415.1/src/workerd/io/worker.c%2B%2B#L4389)
 decompresses bodies independently of the application's manual-fetch policy. Enabling only CDP
 `Network.enable` reproduces its fatal malformed-gzip error. Keep inspection disabled for these
 runtime acceptance runs; do not reinterpret the retained inspector-on failure as passing.
 
-The core legs discover all 80 bound primary/additional sentinels before running one outbound suite:
+The core legs discover their bound primary/additional sentinels before running one outbound suite:
 
 ```sh
 scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::

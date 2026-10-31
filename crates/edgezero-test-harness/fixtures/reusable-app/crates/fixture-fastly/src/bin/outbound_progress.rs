@@ -110,12 +110,19 @@ fn main() -> Result<(), fastly::Error> {
         .between_bytes_timeout(Duration::from_secs(2))
         .finish()?;
     }
-    let mut app = progress::application(
-        Arc::new(Runtime),
-        signal,
-        None,
-        edgezero_adapter_fastly::FASTLY_PLATFORM,
-    )?;
+    let mut app = if request.get_path().starts_with("/progress/forward/") {
+        fixture_core::qualification::forwarding::application(
+            edgezero_adapter_fastly::FASTLY_PLATFORM,
+            signal,
+        )
+    } else {
+        progress::application(
+            Arc::new(Runtime),
+            signal,
+            None,
+            edgezero_adapter_fastly::FASTLY_PLATFORM,
+        )?
+    };
     let headers_probe = fixture_core::qualification::response_headers::enabled();
     let probe_token = request
         .get_header_str("x-request-token")
@@ -137,6 +144,13 @@ fn main() -> Result<(), fastly::Error> {
         edgezero_adapter_fastly::request::FastlyService::new(&app).send_request_with_hooks(
             request,
             |request, scratch| {
+                if request.get_path().starts_with("/progress/forward/") {
+                    scratch.insert(fixture_core::qualification::forwarding::BackendSnapshot(|| {
+                        let stats = edgezero_adapter_fastly::context::FastlyOutboundObservation::current()
+                            .expect("canonical forwarding callback").snapshot();
+                        json!({"configurations":stats.configuration_count(),"registrations":stats.registration_count()})
+                    }));
+                }
                 if !headers_probe { return; }
                 use edgezero_core::{SynthesizedResponseHeaders, SynthesizedResponseHeadersError};
                 let mode = request.get_header_str("x-fixture-synthesized-mode").unwrap_or("app");

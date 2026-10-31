@@ -96,13 +96,20 @@ pub async fn dispatch(
     // Inspect the original object without cloning or consuming its body.
     let signal = json!({"source":"workerd-before-conversion", "body_absent":request.inner().body().is_none()});
     let returned = Arc::new(progress::DispatchReturn::default());
-    let app = progress::application(
-        Arc::new(Runtime),
-        signal,
-        Some(Arc::clone(&returned)),
-        edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM,
-    )
-    .map_err(|_| worker::Error::RustError("progress probe configuration failed".into()))?;
+    let app = if request.path().starts_with("/progress/forward/") {
+        fixture_core::qualification::forwarding::application(
+            edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM,
+            signal,
+        )
+    } else {
+        progress::application(
+            Arc::new(Runtime),
+            signal,
+            Some(Arc::clone(&returned)),
+            edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM,
+        )
+        .map_err(|_| worker::Error::RustError("progress probe configuration failed".into()))?
+    };
     let response =
         edgezero_adapter_cloudflare::dispatch_app::<ProgressHooks>(&app, request, env, ctx).await;
     returned.mark_returned();

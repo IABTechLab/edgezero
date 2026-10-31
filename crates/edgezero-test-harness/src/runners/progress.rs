@@ -579,14 +579,16 @@ fn validate_empty_signal(name: &str, framing: net::Framing, probe: &Value) -> Re
         "empty-body premise discarded or invented body bytes",
     )?;
     if name == "cloudflare" {
-        let absent = matches!(framing, net::Framing::Absent | net::Framing::LengthZero);
+        let absent = probe["host_signal"]["body_absent"]
+            .as_bool()
+            .ok_or("missing original Workers body signal")?;
         require(
             probe["adapter"] == name && probe["case"] == "empty" && probe["method"] == "GET",
             "empty-body probe identity mismatch",
         )?;
         require(
             probe["host_signal"]["source"] == "workerd-before-conversion"
-                && probe["host_signal"]["body_absent"] == absent,
+                && (!absent || expected == 0),
             "missing or contradictory original Workers body signal",
         )?;
         require(
@@ -673,8 +675,8 @@ fn checks(name: &str, port: u16, revision: &str, records: &mut Records) -> Resul
         let result = (|| -> Result<()> {
             let reply = net::framed_request(port, framing)?;
             let probe = guest(&reply)?;
-            validate_empty_signal(name, framing, &probe)?;
-            records.push(json!({"event":"inbound-empty-signal","adapter":name,"framing":format!("{framing:?}"),"protocol":"http1","probe":probe,"client":reply,"qualification":false}))
+            records.push(json!({"event":"inbound-empty-signal","adapter":name,"framing":format!("{framing:?}"),"protocol":"http1","probe":probe,"client":reply,"qualification":false}))?;
+            validate_empty_signal(name, framing, &probe)
         })();
         match result {
             Ok(()) => empty_count += 1,
@@ -972,8 +974,11 @@ mod tests {
     fn cloudflare_empty_signal_requires_the_original_host_snapshot() {
         for (framing, bytes, absent) in [
             (net::Framing::Absent, 0, true),
+            (net::Framing::Absent, 0, false),
             (net::Framing::LengthZero, 0, true),
+            (net::Framing::LengthZero, 0, false),
             (net::Framing::ChunkedEmpty, 0, false),
+            (net::Framing::ChunkedEmpty, 0, true),
             (net::Framing::FixedBody, 4, false),
             (net::Framing::ChunkedBody, 4, false),
         ] {
@@ -981,6 +986,12 @@ mod tests {
                 "bytes_read":bytes,"body_is_stream":!absent,"body_kind_before":"Initial",
                 "host_signal":{"source":"workerd-before-conversion","body_absent":absent}});
             validate_empty_signal("cloudflare", framing, &probe).unwrap();
+            if bytes > 0 {
+                let mut fabricated = probe.clone();
+                fabricated["host_signal"]["body_absent"] = json!(true);
+                fabricated["body_is_stream"] = json!(false);
+                assert!(validate_empty_signal("cloudflare", framing, &fabricated).is_err());
+            }
             for change in [
                 "missing",
                 "missing-boolean",
