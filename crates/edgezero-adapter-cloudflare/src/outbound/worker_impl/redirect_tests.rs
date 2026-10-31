@@ -80,6 +80,47 @@ async fn bytes(reply: OutboundResponse, maximum: u64) -> Vec<u8> {
 }
 
 #[wasm_bindgen_test]
+async fn declared_encoded_cap_rejects_malformed_gzip_before_polling() {
+    let _timers = NumericTimeoutGuard::install();
+    let client = HttpClient::with_client(CloudflareOutboundClient::new());
+    let fixture = response(
+        200,
+        &[b'a'; 11],
+        &json!([["content-encoding", "gzip"], ["content-length", "11"]]),
+    );
+    let (probe, _restore) = fetch_script(&json!([fixture, fixture]));
+    let plain = client
+        .send(request("declared", 10).max_encoded_response_bytes(10))
+        .await
+        .expect_err("declared encoded cap");
+    let followed = client
+        .follow(
+            request("declared", 10).max_encoded_response_bytes(10),
+            OutboundRedirectLimit::new(1).expect("limit"),
+            |_| -> Result<OutboundRedirectAction, Infallible> {
+                panic!("a final head must not invoke redirect policy")
+            },
+        )
+        .await
+        .expect_err("declared encoded cap");
+    let OutboundFollowFailure::Hop { index, error } = followed;
+    assert_eq!(index, 0);
+    for failure in [plain, error] {
+        assert!(matches!(
+            failure,
+            EdgeError::ResponseTooLarge {
+                reason: ResponseLimitReason::EncodedBody,
+                ..
+            }
+        ));
+    }
+    let seen = observations(&probe);
+    assert_eq!(seen["requests"].as_array().expect("requests").len(), 2);
+    assert_eq!(seen["pulls"], json!([0_u64, 0_u64]));
+    assert_eq!(seen["aborts"], json!([1_u64, 1_u64]));
+}
+
+#[wasm_bindgen_test]
 async fn follow_without_redirect_matches_actual_fetch_coding_and_limits() {
     let _timers = NumericTimeoutGuard::install();
     let client = HttpClient::with_client(CloudflareOutboundClient::new());

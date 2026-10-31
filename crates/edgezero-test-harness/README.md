@@ -50,10 +50,13 @@ evidence before reporting a runtime pass. Criterion 22 also requires the same-ca
 identity tests for private duplicate/conflicting receipt cases, once rather than per adapter.
 Missing or corrupt companion evidence grants no runtime acceptance credit.
 
-Axum, Fastly and Spin execute this matrix in their existing CI wire phase. Use
-`--suite outbound-batch` for the same focused matrix on any one adapter. Cloudflare's ready
-batch leg uses that focused local command; this does not activate its separate redirect suite
-in CI or qualify hosted behavior. There are 72 ready and 439 planned acceptance legs.
+Axum, Fastly and Spin execute this matrix in their existing CI wire phase. Cloudflare's
+ready batch and redirect legs share one `--suite outbound-wire` command. The temporary
+batch-only selector is removed. Cloudflare uses the selected Wrangler package's public API
+with the inspector disabled: its network preview otherwise decodes malformed compressed bodies
+before application policy. The small Node bootstrap only starts/disposes that SDK; Rust still
+owns supervision and every assertion. This does not activate Cloudflare wire execution in CI
+or qualify hosted behavior. There are 72 ready and 439 planned acceptance legs.
 
 Use `--suite outbound-wire`, `--suite ingress-fidelity` or the other focused suites for
 iteration. See [suite assertions and runtime setup](SUITES.md) for their exact contracts,

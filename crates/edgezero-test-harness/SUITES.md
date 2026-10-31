@@ -150,8 +150,8 @@ fails before execution; no additional CI test-name list is maintained.
 
 ### Mixed Batch Recovery
 
-`--suite outbound-batch` selects the batch portion of the same native wire runner. It requires
-one explicit adapter and runs six cases: mixed check/next/collect and fresh collection, each
+The native wire runner requires one explicit adapter and includes six batch cases:
+mixed check/next/collect and fresh collection, each
 with Completed, Cutoff and exact typed progress failure. Three gated native HTTP requests per
 case preserve the first two original receipts and elapsed values. Failed insert/merge attempts
 restore the owned outcomes from both equal-sized batches. Foreign probes fail preflight, so
@@ -163,10 +163,30 @@ Axum, Fastly and Spin run it within their existing CI wire phase. Cloudflare's f
 is recorded in the inventory and requires the local workerd, Wrangler and matching guest build
 tools described below. Its modern fixture date uses default weak references; older scaffold
 dates retain explicit `enable_weak_ref`. No runtime pin or provider support claim changes.
-The 2026-10-30 full Cloudflare redirect run still aborts local workerd on a malformed-gzip head
-before the batch matrix; its independent failure is retained and a batch pass gives no redirect
-credit. The first Spin rerun failed startup identity checking; an isolated unchanged-code rerun
-passed. Neither failed attempt is converted into passing or hosted qualification evidence.
+Cloudflare batch and redirect evidence share the same full wire command and artifact; the
+temporary batch-only selector is removed. The initial inspector-enabled full run aborted
+workerd on malformed gzip. A controlled inspector-only toggle reproduced that failure, while
+the same Rust guest/origin passed without network inspection. The public Wrangler API now
+launches fixtures with `dev.inspector: false`, retaining config, bindings, KV persistence and
+the original 68/84 redirect plus six/32 batch inventories. The inspector defect remains open;
+this is not a provider repair or hosted qualification. The first Spin rerun also failed startup
+identity checking before an isolated unchanged-code pass. Failed attempts remain negative evidence.
+
+### Cloudflare Runtime Launch
+
+The Rust controller resolves Node and the selected `WRANGLER_BIN` npm executable and invokes
+the small `fixture-cloudflare/serve.cjs` bootstrap. Wrangler must resolve from that exact
+installation; shell/version-manager wrappers cannot silently fall back to another package.
+The bootstrap uses public `unstable_startWorker`, `ready`, `dispose` and the `raw` error stream.
+Late SDK errors fail the run with a sanitized diagnostic and reuse exactly-once disposal. Rust owns
+startup deadlines, HTTP assertions, process-group cancellation, escalation and cleanup checks.
+Console/lifecycle telemetry and seeded KV bindings remain covered by the same smoke suite.
+No SDK/runtime pin changes or extra CI job accompany this launcher change.
+
+The pinned inspector's [network preview](https://github.com/cloudflare/workerd/blob/v1.20260415.1/src/workerd/io/worker.c%2B%2B#L4389)
+decompresses bodies independently of the application's manual-fetch policy. Enabling only CDP
+`Network.enable` reproduces its fatal malformed-gzip error. Keep inspection disabled for these
+runtime acceptance runs; do not reinterpret the retained inspector-on failure as passing.
 
 The core legs discover all 80 bound primary/additional sentinels before running one outbound suite:
 

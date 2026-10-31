@@ -842,11 +842,11 @@ fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Proc
     }
 }
 
-pub(super) fn run(name: &str, run: &Path, records: &mut Records, batch_only: bool) -> Result<()> {
+pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     match name {
-        "cloudflare" => return progress_wire("cloudflare", run, records, batch_only),
-        "axum" => return progress_wire("axum", run, records, batch_only),
-        "fastly" => return progress_wire("fastly", run, records, batch_only),
+        "cloudflare" => return progress_wire("cloudflare", run, records),
+        "axum" => return progress_wire("axum", run, records),
+        "fastly" => return progress_wire("fastly", run, records),
         _ => {}
     }
     require(name == "spin", "wire suite requires Spin")?;
@@ -900,14 +900,9 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records, batch_only: boo
         .arg("--disable-cache");
     command.args(["--env", &format!("{}={nonce}", startup::NONCE)]);
     let mut process = None;
-    let outcome = (|| -> Result<_> {
+    let outcome: Result<((usize, usize), (usize, usize))> = (|| {
         let running = process.insert(Process::start(&mut command, &log, port)?);
         controls(port, &origins, &component_logs, running)?;
-        if batch_only {
-            batch_recovery::run("spin", port, records)?;
-            running.check_running()?;
-            return Ok(None);
-        }
         let mut matrix = Matrix {
             adapter: "spin",
             endpoint: "/p5",
@@ -923,9 +918,9 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records, batch_only: boo
         normalization::run(port, &origins, matrix.records)?;
         batch_recovery::run("spin", port, matrix.records)?;
         running.check_running()?;
-        Ok(Some((baseline, policy)))
+        Ok((baseline, policy))
     })();
-    let result = finish_wire(
+    let ((exchanges, dispatches), (policy_cases, policy_receipts)) = finish_wire(
         "spin",
         &mut process,
         Some(origins),
@@ -933,9 +928,6 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records, batch_only: boo
         records,
         outcome,
     )?;
-    let Some(((exchanges, dispatches), (policy_cases, policy_receipts))) = result else {
-        return Ok(());
-    };
     records.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":exchanges,"origin_requests":dispatches,
         "bodyless_controls":4,"upload_controls":1,"scope_controls":1,"handoff_controls":1,"qualification":false}))?;
     records.push(
@@ -947,26 +939,13 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records, batch_only: boo
     Ok(())
 }
 
-fn progress_wire(
-    name: &'static str,
-    run: &Path,
-    records: &mut Records,
-    batch_only: bool,
-) -> Result<()> {
+fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Result<()> {
     let result = progress_suite(
         name,
-        if batch_only {
-            "outbound-batch"
-        } else {
-            "outbound-wire"
-        },
+        "outbound-wire",
         run,
         records,
         |port, origins, records| {
-            if batch_only {
-                batch_recovery::run(name, port, records)?;
-                return Ok(None);
-            }
             let mut matrix = Matrix {
                 adapter: name,
                 endpoint: "/progress/redirect",
@@ -978,10 +957,10 @@ fn progress_wire(
             };
             matrix.run()?;
             batch_recovery::run(name, port, matrix.records)?;
-            Ok(Some((matrix.exchanges, matrix.dispatches)))
+            Ok((matrix.exchanges, matrix.dispatches))
         },
     )?;
-    if let Some(Some((exchanges, dispatches))) = result {
+    if let Some((exchanges, dispatches)) = result {
         records.push(
             json!({"event":format!("{name}-wire-inventory"),"status":"pass",
             "exchanges":exchanges,"origin_requests":dispatches,"qualification":false}),
@@ -1041,7 +1020,8 @@ pub(super) fn progress_suite<T>(
                 .env("WRANGLER_LOG_PATH", run.join("wrangler-logs"));
             records.push(
                 json!({"event":"workerd-configuration","adapter":"cloudflare",
-                "configuration":fs::read_to_string(run.join("wrangler.toml"))?,"qualification":false}),
+                "configuration":fs::read_to_string(run.join("wrangler.toml"))?,
+                "launcher":"wrangler-api","inspector":false,"qualification":false}),
             )?;
         }
         let origins = origins.insert(WireOrigins::start()?);

@@ -9313,9 +9313,9 @@
       "substep": "EZ-6-acceptance-22-workerd",
       "sentinel": "ez_6_acceptance_22_cloudflare_runtime",
       "companion_case": "EZ-6/acceptance/22@unit/core",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-batch --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/batch/workerd",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "Mixed observation and collection. Unit and every adapter. Consume slot 0 with a nonblocking check, slot 1 with `next`, then collect a three-slot batch. The first two positions are `AlreadyDelivered`, never unresolved; the third is `Resolved` on success or `Unresolved` at cutoff. A driver failure after the first two deliveries preserves those states and its exact error. Merging into the matching accumulator restores all owned outcomes without replay or cloning; missing prior results, a foreign batch, duplicate insertion, and a conflicting slot are rejected without losing either input's results. Fresh-batch collection has no `AlreadyDelivered`, and `Completed` never contains `Unresolved`.",
-      "artifact_path": "outbound/batch/workerd/events.jsonl",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
       "implementation": "ready",
       "comparison": false
     },

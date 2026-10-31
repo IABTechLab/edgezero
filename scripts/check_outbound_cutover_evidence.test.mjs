@@ -1010,13 +1010,13 @@ test("batch bindings require exact runtime and core identity proofs", () => {
     assert.equal(
       row.command,
       adapter === "cloudflare"
-        ? "scripts/test_integration.sh --adapter cloudflare --suite outbound-batch --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/batch/workerd"
+        ? "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd"
         : `scripts/test_integration.sh --adapter ${adapter} --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/${adapter}`,
     );
     assert.equal(
       row.artifact_path,
       adapter === "cloudflare"
-        ? "outbound/batch/workerd/events.jsonl"
+        ? "outbound/redirect/workerd/events.jsonl"
         : `outbound/redirect/${adapter}/wire/events.jsonl`,
     );
     for (const companion of [undefined, "EZ-6/acceptance/13@unit/core"]) {

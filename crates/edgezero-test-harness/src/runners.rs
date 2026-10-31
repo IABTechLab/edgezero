@@ -291,8 +291,8 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
     }
-    if matches!(args.suite.as_str(), "outbound-wire" | "outbound-batch") {
-        return wire::run("fastly", run, records, args.suite == "outbound-batch");
+    if args.suite == "outbound-wire" {
+        return wire::run("fastly", run, records);
     }
     if args.suite == "response-framing" {
         return framing::run("fastly", run, records);
@@ -1220,8 +1220,8 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
     if args.suite == "outbound-lifetimes" {
         return lifetimes::run(name, run, records);
     }
-    if matches!(args.suite.as_str(), "outbound-wire" | "outbound-batch") {
-        return wire::run(name, run, records, args.suite == "outbound-batch");
+    if args.suite == "outbound-wire" {
+        return wire::run(name, run, records);
     }
     if args.suite == "synthesized-headers" {
         return response_headers::run(name, run, records);
@@ -1373,7 +1373,14 @@ fn provider_command(
     run: &Path,
     port: u16,
 ) -> Result<Command> {
-    let mut command = Command::new(exe);
+    let mut command = if name == "cloudflare" {
+        let node = executable("NODE_BIN", "node").ok_or("Node.js is required for Wrangler")?;
+        let mut command = Command::new(node);
+        command.arg(package.join("serve.cjs")).arg(exe);
+        command
+    } else {
+        Command::new(exe)
+    };
     let identity_mode = if name == "axum" {
         exe.file_name()
             .and_then(|name| name.to_str())
@@ -1416,22 +1423,19 @@ fn provider_command(
                 .arg(&state)
                 .current_dir(package),
         )?;
-        command
-            .arg("--config")
-            .arg(run.join("wrangler.toml"))
-            .args([
-                "dev",
-                "--local",
-                "--ip",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-                "--var",
-                &format!("FIXTURE_MODE:{mode}"),
-                "--persist-to",
-            ])
-            .arg(state);
-        command.args(["--var", &format!("{}:{nonce}", startup::NONCE)]);
+        command.arg(serde_json::to_string(&json!({
+            "config":run.join("wrangler.toml"),
+            "sendMetrics":false,
+            "bindings":{
+                "FIXTURE_MODE":{"type":"plain_text","value":mode},
+                startup::NONCE:{"type":"plain_text","value":nonce},
+            },
+            "dev":{
+                "inspector":false,"remote":false,"watch":false,"liveReload":false,
+                "server":{"hostname":"127.0.0.1","port":port},
+                "persist":state,
+            },
+        }))?);
     } else {
         let manifest = fs::read_to_string(package.join("spin.toml"))?
             .replace(
@@ -2240,6 +2244,153 @@ mod tests {
             document["compatibility_flags"].as_array().unwrap(),
             &[toml::Value::String("enable_request_signal".to_owned())]
         );
+    }
+
+    #[test]
+    fn cloudflare_runtime_command_preserves_binding_and_inspector_contract() {
+        let run = tempfile::tempdir().unwrap();
+        let package = fixture_root().join("crates/fixture-cloudflare");
+        let cli = Path::new("/usr/bin/true");
+        let command = provider_command(
+            "cloudflare",
+            "retained",
+            cli,
+            run.path(),
+            &package,
+            run.path(),
+            1234,
+        )
+        .unwrap();
+        let arguments = command.get_args().collect::<Vec<_>>();
+        assert_eq!(arguments.len(), 3);
+        assert_eq!(arguments[0], package.join("serve.cjs"));
+        assert_eq!(arguments[1], cli);
+        let options: Value = serde_json::from_str(arguments[2].to_str().unwrap()).unwrap();
+        assert_eq!(options["config"], json!(run.path().join("wrangler.toml")));
+        assert_eq!(options["sendMetrics"], false);
+        assert_eq!(
+            options["dev"],
+            json!({"inspector":false,"remote":false,"watch":false,"liveReload":false,
+            "server":{"hostname":"127.0.0.1","port":1234},"persist":run.path().join("retained/worker-state")})
+        );
+        let nonce = command
+            .get_envs()
+            .find_map(|(key, value)| (key == startup::NONCE).then_some(value).flatten())
+            .unwrap();
+        assert_eq!(
+            options["bindings"],
+            json!({"FIXTURE_MODE":{"type":"plain_text","value":"retained"},
+            startup::NONCE:{"type":"plain_text","value":nonce.to_str().unwrap()}})
+        );
+        startup::require_configured(&command).unwrap();
+    }
+
+    #[test]
+    fn wrangler_api_bootstrap_preserves_options_and_owned_shutdown() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("node_modules/wrangler");
+        fs::create_dir_all(package.join("bin")).unwrap();
+        fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&json!({"name":"wrangler","main":"index.cjs"})).unwrap(),
+        )
+        .unwrap();
+        fs::write(package.join("bin/wrangler.js"), "// fixture CLI").unwrap();
+        fs::write(package.join("index.cjs"), r#"
+exports.unstable_startWorker = async (options) => {
+  console.log(JSON.stringify(options));
+  if (options.failure === 'api') throw new Error('private-fixture-token');
+  const live = setInterval(() => {}, 60000);
+  const raw = new (require('node:events').EventEmitter)();
+  const worker = {
+    raw,
+    ready: options.failure === 'ready' ? Promise.reject(new Error('private-fixture-token')) : Promise.resolve(),
+    dispose: async () => { clearInterval(live); console.log('disposed'); if (options.failure === 'stop-event') raw.emit('error',new Error('private-fixture-token')); await new Promise(resolve => setTimeout(resolve,10)); if (options.failure === 'dispose') throw new Error('private-fixture-token'); }
+  };
+  const stop = () => { process.kill(process.pid, 'SIGTERM'); setImmediate(() => process.kill(process.pid, 'SIGINT')); };
+  if (options.failure === 'starting') { stop(); await new Promise(setImmediate); }
+  else if (options.failure === 'waiting') { worker.ready = new Promise(() => {}); setImmediate(stop); }
+  else if (options.failure === 'runtime') setImmediate(() => raw.emit('error',new Error('private-fixture-token')));
+  else if (options.failure !== 'ready') setImmediate(stop);
+  return worker;
+};
+"#).unwrap();
+        let node = executable("NODE_BIN", "node").expect("Node.js test prerequisite");
+        let bootstrap = fixture_root().join("crates/fixture-cloudflare/serve.cjs");
+        let capture = |command: &mut Command, name: &str, expected: i32| {
+            let stdout = root.path().join(format!("{name}.stdout"));
+            let log = root.path().join(format!("{name}.log"));
+            let mut process = Process::spawn_with_stdout(command, &log, &stdout).unwrap();
+            let status = process
+                .0
+                .wait_until(Instant::now() + Duration::from_secs(5))
+                .unwrap();
+            if status.is_none() {
+                let cleanup = process.finish();
+                panic!("bootstrap did not exit within its deadline: {name}; {cleanup:?}");
+            }
+            let text = fs::read_to_string(&stdout).unwrap();
+            let diagnostic = fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                status.unwrap().code(),
+                Some(expected),
+                "{name}: {diagnostic}"
+            );
+            process.wait_exit_code(expected).unwrap();
+            (text, diagnostic)
+        };
+        for failure in [
+            "none",
+            "starting",
+            "waiting",
+            "ready",
+            "dispose",
+            "runtime",
+            "api",
+            "stop-event",
+        ] {
+            let options = json!({"config":"/fixture/staged/wrangler.toml","sendMetrics":false,
+                "bindings":{"FIXTURE_MODE":{"type":"plain_text","value":"retained"},
+                    startup::NONCE:{"type":"plain_text","value":"owned-launch"}},
+                "dev":{"inspector":false,"remote":false,"watch":false,"liveReload":false,
+                    "server":{"hostname":"127.0.0.1","port":1234},"persist":"/fixture/persist"},"failure":failure});
+            let expected = i32::from(!matches!(
+                failure,
+                "none" | "starting" | "waiting" | "stop-event"
+            ));
+            let (text, diagnostic) = capture(
+                Command::new(&node)
+                    .arg(&bootstrap)
+                    .arg(package.join("bin/wrangler.js"))
+                    .arg(serde_json::to_string(&options).unwrap()),
+                failure,
+                expected,
+            );
+            let mut lines = text.lines();
+            assert_eq!(
+                serde_json::from_str::<Value>(lines.next().unwrap()).unwrap(),
+                options
+            );
+            assert_eq!(
+                lines.collect::<Vec<_>>(),
+                if failure == "api" {
+                    Vec::new()
+                } else {
+                    vec!["disposed"]
+                },
+                "{failure}"
+            );
+            assert!(!diagnostic.contains("private-fixture-token"));
+        }
+        let wrong = root.path().join("bin/wrangler");
+        fs::create_dir_all(wrong.parent().unwrap()).unwrap();
+        fs::write(&wrong, "// not the selected package").unwrap();
+        let (text, _) = capture(
+            Command::new(node).arg(bootstrap).arg(wrong).arg("{}"),
+            "wrong-package",
+            1,
+        );
+        assert!(text.is_empty());
     }
     #[test]
     fn builds_share_a_fixed_target_directory() {

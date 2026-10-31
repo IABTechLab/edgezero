@@ -12,7 +12,41 @@
 
 ## Status and Authority
 
+### Cloudflare Native Wire Recovery (2026-10-30)
+
+The full 68-exchange/84-origin-receipt redirect matrix and six-case/32-receipt batch matrix now
+pass on the pinned local workerd. The initial failure was the provider's inspector network
+preview, not a missing application cap: the same compiled guest and Rust origin pass under
+direct Miniflare, while enabling only CDP `Network.enable` reproduces the fatal gzip decode.
+The native Send/Follow regression retains malformed encoded bytes, typed header-limit precedence,
+zero source pulls and exactly-once abort. No request/response limit or assertion is weakened.
+
+One Cloudflare fixture launcher now uses the selected Wrangler package's public API with
+inspection disabled. A small Node SDK bootstrap preserves config, bindings, nonce and KV
+persistence, awaits readiness and disposes once; Rust retains all supervision and assertions.
+The full smoke suite preserves both application modes, console telemetry, KV and ownership.
+Remove the temporary batch-only selector: batch and redirect evidence share one full wire run.
+Package-selection, startup/shutdown and error tests guard the launcher contract. Independent
+read-only fixture and runtime reviews selected this path over a runtime patch or a second
+transport. The inspector-enabled negative evidence and provider defect remain explicitly open.
+
+Acceptance readiness remains 72/439; all reviewed identities, requirements, applicability,
+decisions, SDK/runtime pins and hosted gates are unchanged. This resolves local full-wire
+execution, not frozen-candidate, consumer, Image Optimizer or hosted qualification.
+
+Verification: all five root gates pass, with 2,623 workspace tests, 379 controller tests,
+100 Cloudflare WASM unit tests, strict native/WASM Clippy and 194 tooling tests passing.
+The controlled inspector-on failure is retained at
+`/private/tmp/pr275-cloudflare-app-fetch-inspector2.log`; the passing local full wire and
+two-mode smoke observations are in `/private/tmp/pr275-cloudflare-recovery-final-wire` and
+`/private/tmp/pr275-cloudflare-recovery-final-smoke`. These are working-tree characterizations
+above `80f73757`, not frozen-candidate qualification records. Review also closed a late-SDK-error
+propagation gap and moved subprocess lifecycle tests under bounded Rust-owned cleanup.
+
 ### Mixed Batch Recovery Acceptance (2026-10-30)
+
+This historical checkpoint's temporary focused selector and full-wire failure are superseded
+by the native wire recovery above; its failed observations remain retained.
 
 EZ-6 acceptance 22 now binds all four native runtime legs to six shared controlled-origin cases:
 mixed nonblocking check/next/collect and fresh collection, each with completion, cutoff and an

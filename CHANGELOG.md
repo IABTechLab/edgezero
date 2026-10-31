@@ -110,6 +110,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   cutoff, typed failure and lossless recovery checks. Require same-candidate core identity
   evidence and persisted runtime readback; reuse existing CI phases and one focused matrix.
   Keep unrelated runtime failures and hosted qualification open.
+- Launch Cloudflare fixtures through the selected Wrangler API without inspector body previews,
+  preserving Rust supervision, bindings, telemetry and shutdown. Restore the unchanged full
+  redirect matrix and consolidate batch evidence into that run; remove the temporary batch-only
+  selector. Retain the inspector defect and hosted qualification as separate limitations.
 - Extend bodyless policy through all four native adapter head/source paths and the full policy
   matrix through Axum, Cloudflare and Fastly. Keep unsupported
   raw fields explicitly shared-head-only, distinguish adapter buffer failures from reporter limits,
