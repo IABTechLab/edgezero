@@ -529,8 +529,9 @@ invalid; a longer connect setting cannot extend the aggregate budget. Keep it a 
 constant: Fastly includes connect settings in stable backend identity, so different settings can
 use different connection pools. First-byte time is not reduced by a fixed connect share.
 
-Fastly maps the setting to its SDK; hosted expiry and provider DNS/TLS phase coverage still need
-qualification. Spin passes it as an advisory WASI option and retains the aggregate race if the
+`outbound-connect-timeout` declares Fastly's provider-backed setting as Native; this is not a
+hosted timing qualification. Viceroy does not enforce connect expiry, and hosted precision and
+provider DNS/TLS phase coverage still need qualification. Spin passes it as an advisory WASI option and retains the aggregate race if the
 host refuses it. Axum and Cloudflare accept it at BestEffort, retaining aggregate enforcement;
 they do not create per-request clients to emulate an independent phase timer.
 

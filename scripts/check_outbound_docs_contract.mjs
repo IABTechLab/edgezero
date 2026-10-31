@@ -144,6 +144,7 @@ const expectedOutboundRows = [
     'Unsupported',
     'Unsupported',
   ],
+  ['outbound-connect-timeout', 'BestEffort', 'BestEffort', 'Native', 'BestEffort'],
   ['outbound-header-fidelity', 'Native', 'BestEffort', 'Native', 'BestEffort'],
   ['outbound-deadlines', 'Native', 'BestEffort', 'BestEffort', 'BestEffort'],
   [
@@ -165,7 +166,7 @@ const expectedOutboundRows = [
     'outbound-flexible-phase-budget',
     'Native',
     'Native',
-    'BestEffort',
+    'Native',
     'BestEffort',
   ],
   [
@@ -418,6 +419,91 @@ const redirectCapabilityFragments = [
   'Native Image Optimizer qualification remains open',
   'synchronous blocking horizon is unknown',
 ]
+
+function connectTimeoutDocumentationContractError(capability, proxy) {
+  for (const [name, source, fragments] of [
+    [
+      'capabilities',
+      capability,
+      [
+        'not qualified hosted timing',
+        'Viceroy does not enforce connect expiry',
+        'does not establish blocking-call preemption',
+        'Keep connect settings as configuration constants',
+        'Fastly no longer reserves a fixed connect share or shortens the response-head budget',
+        'Without an explicit connect timeout',
+        'an explicit connect setting changes only connect',
+      ],
+    ],
+    [
+      'proxy guide',
+      proxy,
+      [
+        'not a hosted timing qualification',
+        'Viceroy does not enforce connect expiry',
+        'hosted precision and provider DNS/TLS phase coverage still need qualification',
+        'First-byte time is not reduced by a fixed connect share',
+      ],
+    ],
+  ]) {
+    const normalized = source.replace(/\s+/gu, ' ')
+    for (const fragment of fragments) {
+      if (!normalized.includes(fragment))
+        return `${name} is missing connect-timeout boundary: ${fragment}`
+    }
+  }
+  return null
+}
+
+function runConnectTimeoutDocumentationContractSelfTests() {
+  const capability = `This is not qualified hosted timing.
+Viceroy does not enforce connect expiry. It does not establish blocking-call preemption.
+Keep connect settings as configuration constants.
+Fastly no longer reserves a fixed connect share or shortens the response-head budget.
+Without an explicit connect timeout, defaults apply; an explicit connect setting changes only connect.`
+  const proxy = `This is not a hosted timing qualification.
+Viceroy does not enforce connect expiry; hosted precision and provider DNS/TLS phase coverage still need qualification.
+First-byte time is not reduced by a fixed connect share.`
+  if (connectTimeoutDocumentationContractError(capability, proxy) !== null)
+    fail('valid connect-timeout documentation rejected')
+  for (const [changedCapability, changedProxy] of [
+    [capability.replace('no longer reserves', 'reserves'), proxy],
+    [
+      capability.replace(
+        'not qualified hosted timing',
+        'qualified hosted timing'
+      ),
+      proxy,
+    ],
+    [
+      capability.replace('does not establish blocking-call preemption', ''),
+      proxy,
+    ],
+    [
+      capability.replace(
+        'an explicit connect setting changes only connect',
+        ''
+      ),
+      proxy,
+    ],
+    [
+      capability,
+      proxy.replace(
+        'not a hosted timing qualification',
+        'a hosted timing qualification'
+      ),
+    ],
+    [capability, proxy.replace('Viceroy does not enforce connect expiry', '')],
+  ]) {
+    if (
+      connectTimeoutDocumentationContractError(
+        changedCapability,
+        changedProxy
+      ) === null
+    )
+      fail('invalid connect-timeout documentation accepted')
+  }
+}
 
 function redirectDocumentationContractError(guide, capability) {
   const section = guide.match(
@@ -1437,6 +1523,7 @@ runObservationCutoffContractSelfTests()
 runHeaderNormalizationContractSelfTests()
 runLiveOutboundContractSelfTests()
 runRedirectDocumentationContractSelfTests()
+runConnectTimeoutDocumentationContractSelfTests()
 if (
   process.argv.includes('--observation-cutoff-self-test') ||
   process.argv.includes('--redirect-self-test')
@@ -1678,6 +1765,11 @@ const hardCutSurfaces = [
   [fastlyGuidePath, readFileSync(fastlyGuidePath, 'utf8')],
   [scaffoldReadmePath, readFileSync(scaffoldReadmePath, 'utf8')],
 ]
+const connectDocumentationError = connectTimeoutDocumentationContractError(
+  capabilitySource,
+  hardCutSurfaces[2][1]
+)
+if (connectDocumentationError !== null) fail(connectDocumentationError)
 const redirectDocumentationError = redirectDocumentationContractError(
   hardCutSurfaces[2][1],
   capabilitySource

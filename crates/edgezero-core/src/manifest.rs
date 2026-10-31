@@ -97,6 +97,7 @@ pub enum Capability {
     OutboundBatchSlotIsolation,
     OutboundCacheBypass,
     OutboundCompleteResourceAccounting,
+    OutboundConnectTimeout,
     OutboundDeadlines,
     /// Retains text-free provider causes at existing SDK failure boundaries.
     /// Does not recover causes hidden by the provider or qualify hosted transport behavior.
@@ -142,6 +143,7 @@ impl Capability {
             Self::OutboundBatchSlotIsolation => "outbound-batch-slot-isolation",
             Self::OutboundCacheBypass => "outbound-cache-bypass",
             Self::OutboundCompleteResourceAccounting => "outbound-complete-resource-accounting",
+            Self::OutboundConnectTimeout => "outbound-connect-timeout",
             Self::OutboundDeadlines => "outbound-deadlines",
             Self::OutboundFailureDiagnostics => "outbound-failure-diagnostics",
             Self::OutboundFlexiblePhaseBudget => "outbound-flexible-phase-budget",
@@ -1701,6 +1703,32 @@ env = "APP_TOKEN"
     }
 
     #[test]
+    fn outbound_connect_timeout_capability_round_trip() {
+        let name = "outbound-connect-timeout";
+        let capability: Capability =
+            serde_json::from_value(serde_json::json!(name)).expect("connect timeout capability");
+        assert_eq!(capability.as_str(), name);
+        assert_eq!(
+            serde_json::to_value(capability).unwrap(),
+            serde_json::json!(name)
+        );
+        for disposition in ["required", "optional"] {
+            let source = format!("[capabilities]\n{disposition} = [\"{name}\"]\n");
+            let loader = ManifestLoader::try_load_from_str(&source).expect("connect manifest");
+            let serialized = toml::to_string(loader.manifest()).unwrap();
+            let reparsed = ManifestLoader::try_load_from_str(&serialized).unwrap();
+            let declared = &reparsed.manifest().capabilities;
+            let (selected, other) = if disposition == "required" {
+                (&declared.required, &declared.optional)
+            } else {
+                (&declared.optional, &declared.required)
+            };
+            assert_eq!(selected, &[capability]);
+            assert!(other.is_empty());
+        }
+    }
+
+    #[test]
     fn outbound_redirect_following_capability_round_trip() {
         let name = "outbound-redirect-following";
         let capability: Capability =
@@ -1776,6 +1804,7 @@ required = [
     "outbound-batch-slot-isolation",
     "outbound-cache-bypass",
     "outbound-complete-resource-accounting",
+    "outbound-connect-timeout",
     "outbound-deadlines",
     "outbound-failure-diagnostics",
     "outbound-flexible-phase-budget",
@@ -1811,6 +1840,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             Capability::OutboundBatchSlotIsolation,
             Capability::OutboundCacheBypass,
             Capability::OutboundCompleteResourceAccounting,
+            Capability::OutboundConnectTimeout,
             Capability::OutboundDeadlines,
             Capability::OutboundFailureDiagnostics,
             Capability::OutboundFlexiblePhaseBudget,
@@ -1850,6 +1880,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             "outbound-batch-slot-isolation",
             "outbound-cache-bypass",
             "outbound-complete-resource-accounting",
+            "outbound-connect-timeout",
             "outbound-deadlines",
             "outbound-failure-diagnostics",
             "outbound-flexible-phase-budget",

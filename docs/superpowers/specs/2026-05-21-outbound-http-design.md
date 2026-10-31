@@ -9,6 +9,22 @@
 
 ## 1. Overview
 
+### Independent Connect Supersession (2026-10-30)
+
+The independent `connect_timeout` setting is implemented across prepared Send, Begin, Batch and
+Follow requests. It has its own readback and typed `BudgetSource::ConnectTimeout` without
+shortening response-head or aggregate budgets. Fastly passes the explicit setting in milliseconds;
+it declares `outbound-connect-timeout` and split-free `outbound-flexible-phase-budget` Native.
+Axum, Cloudflare and Spin declare connect settings BestEffort. Viceroy does not enforce connect
+expiry, so hosted precision and DNS/TLS phase coverage remain unqualified; deadline interruption,
+SDK cancellation and resource accounting retain their existing limitations.
+
+This supersedes statements below that independent Connect is unimplemented or that all three
+Fastly timers always share one value: an explicit connect setting changes only connect. B31's
+31 deadline-only configurations apply per fixed origin/authority/TLS/connect-settings tuple.
+Keep that setting a configuration constant to avoid pool fragmentation. Independent idle-body
+policy remains separate adoption work; no idle-policy implementation or hosted promotion follows.
+
 ### Explicit Redirect Following Supersession (2026-10-27)
 
 The explicit `HttpClient::follow` API and [redirect guide](../../guide/proxying.md#following-redirects)
@@ -3920,11 +3936,12 @@ Capability matrix (all four adapters):
 | `outbound-batch-slot-isolation` | Native | Native | BestEffort⁴ | Native |
 | `outbound-cache-bypass` | Native | Native | Native | Native |
 | `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] |
+| `outbound-connect-timeout` | BestEffort | BestEffort | Native[^connect-timeout] | BestEffort |
 | `outbound-header-fidelity` | Native | BestEffort⁸ | Native | BestEffort⁸ |
 | `outbound-deadlines` | Native | BestEffort⁸ | BestEffort¹ | BestEffort⁸ |
 | `outbound-failure-diagnostics` | BestEffort | BestEffort | Native | Native |
 | `outbound-image-optimizer` | Unsupported | Unsupported | BestEffort[^native-image-optimizer] | Unsupported |
-| `outbound-flexible-phase-budget` | Native | Native | BestEffort⁵ | BestEffort⁵ |
+| `outbound-flexible-phase-budget` | Native | Native | Native | BestEffort⁵ |
 | `streamed-upload-deadlines` | Native | BestEffort⁸ | BestEffort² | BestEffort⁸ |
 | `lazy-streamed-response-passthrough` | Native³ | Native | BestEffort⁶ | BestEffort⁷ |
 
@@ -4046,18 +4063,19 @@ stops reading stalls that write unbounded, and the guest cannot abort a dispatch
 which is **`BestEffort` on Fastly** (footnote 1) — a label that already covers this gap;
 buffering narrows the exposure to the write phase, it does not remove it.
 
-⁵ `outbound-flexible-phase-budget` captures whether the adapter treats the request
-budget as one elastic pool. Axum and Cloudflare have one authoritative total timer
-(reqwest's `.timeout(..)` and `worker::Delay`); a slow connect followed by fast
-headers/body inside the total budget succeeds. On Fastly the budget is
-**rigidly split** (§4.3 — `connect = budget/4`, `first_byte = 3*budget/4`,
-`between_bytes = budget`); a request that takes more than `budget/4` on connect-phase
-work fails at the connect timer even though the rest of the budget would have
-sufficed. This is a documented `BestEffort` deviation — the platform-level cause is
-that Fastly's `BackendBuilder` exposes per-phase timers and no total-budget timer.
-Apps that need elastic budget allocation (slow-connect workloads, mixed-latency
-upstreams) declare this capability required and get the hard build failure on
-Fastly per §3.5.3. Spin also runs an outer monotonic total race, but WASI permits any
+[^connect-timeout]: Fastly declares its independent provider-backed connect setting Native,
+not hosted timing qualification. Viceroy does not enforce connect expiry; hosted precision and
+provider DNS/TLS phase coverage remain unqualified. This does not establish blocking-call
+preemption or promote `outbound-deadlines`. Other adapters accept the setting at BestEffort.
+Keep connect settings as configuration constants because Fastly includes them in backend identity
+and different settings select different connection pools.
+
+⁵ `outbound-flexible-phase-budget` describes the absence of an artificial aggregate-budget
+split, not prompt host interruption. Fastly's B31 timers are ceiling-rounded from the original
+budget/configured timeout. Without an explicit connect setting, no phase receives a shorter
+share; an explicit connect timeout never shortens the response-head budget. Fastly therefore
+declares this capability Native while deadlines, cancellation and hosted timing retain their
+separate limitations. Spin runs an outer monotonic total race, but WASI permits any
 `RequestOptions` phase-timer setter to return `NotSupported`. In that case an opaque host
 default can fail earlier than the configured total budget, so the static capability is
 `BestEffort` even though the guest-visible outer race remains. Promotion requires a target
@@ -6049,9 +6067,10 @@ fn start_batch_until(
   the honest value is `BestEffort`, so a `required outbound-deadlines` correctly hard-fails
   on Fastly rather than fooling the gate),
   `outbound-failure-diagnostics` = `Native` for available typed SDK causes and numeric fields,
-  `outbound-flexible-phase-budget` = `BestEffort` (footnote 5 — rigid 1/4 connect +
-  3/4 first-byte split per §4.3 can fail a request that would have fit within the
-  total budget), `outbound-batch-slot-isolation` = `BestEffort` (footnote 4 — sequential
+  `outbound-connect-timeout` = `Native` for its independent provider-backed setting,
+  with hosted precision still unqualified (connect-timeout footnote),
+  `outbound-flexible-phase-budget` = `Native` (footnote 5 — no fixed connect share or
+  shortened response-head budget), `outbound-batch-slot-isolation` = `BestEffort` (footnote 4 — sequential
   cold registration can delay sibling dispatch and a selected buffered response body can delay
   the next selection/result observation),
   `streamed-upload-deadlines` = `BestEffort` (footnote 2 — no preemption of a
@@ -7464,11 +7483,10 @@ Adapter-specific work:
    non-trivial without an async reactor and is **deferred**. The
    `outbound-batch-slot-isolation` capability (§3.5.1 footnote 4) lets apps declare the
    requirement explicitly and get a hard build failure on Fastly until this lands.
-9. **Fastly independent Connect/idle policy.** The B31 aggregate checkpoint removes the
-   rigid phase split, but it does not implement independently configured Connect/idle limits
-   or prove host interruption. Those settings need complete identity/mode integration and
-   separately qualified provider behavior under the adoption plan; do not restore a ratio knob
-   or infer a capability promotion from coupled timers.
+9. **Fastly independent idle policy and hosted connect proof.** Independent Connect is implemented
+   under the supersession above. Independent idle limits and qualified host interruption remain
+   separate work; do not infer those guarantees from the split-free aggregate timers or restore
+   a ratio knob.
 10. **Spin target documentation drift.** Implementation verification uses
     `wasm32-wasip2` for Spin SDK 7. Any remaining comment that associates Spin with
     `wasm32-wasip1` should be corrected when the implementation touches that file, but

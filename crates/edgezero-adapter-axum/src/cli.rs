@@ -139,6 +139,7 @@ impl Adapter for AxumCliAdapter {
     fn capability(&self, capability: Capability) -> CapabilitySupport {
         match capability {
             Capability::ConfigReadDeadlines
+            | Capability::OutboundConnectTimeout
             | Capability::OutboundFailureDiagnostics
             | Capability::ResponseEgressAbort
             | Capability::ResponseEgressBackpressure
@@ -855,6 +856,8 @@ mod tests {
 
     #[test]
     fn adapter_capability_matrix_matches_contracts() {
+        let connect = AXUM_ADAPTER.capability(Capability::OutboundConnectTimeout);
+        assert_eq!(connect, CapabilitySupport::BestEffort);
         for (capability, support) in [
             (
                 Capability::ConfigReadAllocationBounds,

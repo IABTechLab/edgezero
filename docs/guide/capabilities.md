@@ -287,14 +287,24 @@ not included. These limitations block whole-response-lifetime certification.
 | `outbound-batch-slot-isolation`         | Native                            | Native                            | BestEffort⁴                         | Native                            |
 | `outbound-cache-bypass`                 | Native                            | Native                            | Native                              | Native                            |
 | `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting]   | Unsupported[^resource-accounting] |
+| `outbound-connect-timeout`              | BestEffort                        | BestEffort                        | Native[^connect-timeout]            | BestEffort                        |
 | `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                              | BestEffort[^spin-header-fidelity] |
 | `outbound-deadlines`                    | Native                            | BestEffort⁸                       | BestEffort¹                         | BestEffort⁸                       |
 | `outbound-failure-diagnostics`          | BestEffort                        | BestEffort                        | Native                              | Native                            |
 | `outbound-image-optimizer`              | Unsupported                       | Unsupported                       | BestEffort[^native-image-optimizer] | Unsupported                       |
 | `outbound-redirect-following`           | Native                            | Native                            | Native                              | Native                            |
-| `outbound-flexible-phase-budget`        | Native                            | Native                            | BestEffort⁵                         | BestEffort⁵                       |
+| `outbound-flexible-phase-budget`        | Native                            | Native                            | Native                              | BestEffort⁵                       |
 | `streamed-upload-deadlines`             | Native                            | BestEffort⁸                       | BestEffort²                         | BestEffort⁸                       |
 | `lazy-streamed-response-passthrough`    | Native³                           | Native                            | BestEffort⁶                         | BestEffort⁷                       |
+
+[^connect-timeout]:
+    This declares Fastly's independent provider-backed connect setting, not qualified hosted
+    timing. Viceroy does not enforce connect expiry; hosted precision and provider DNS/TLS
+    phase coverage remain unqualified. It does not establish blocking-call preemption or promote
+    `outbound-deadlines`. Other adapters accept the setting at BestEffort and retain their
+    aggregate deadline. Keep connect settings as configuration constants: on Fastly different
+    settings select different backend identities and connection pools. Fastly no longer reserves
+    a fixed connect share or shortens the response-head budget.
 
 [^native-image-optimizer]:
     Fastly single sends with explicit native optimizer options use the SDK's synchronous
@@ -329,14 +339,16 @@ host calls preemptible or provide one end-to-end wall-clock guarantee. Fastly's 
 anchors provider timers to the configured per-call timeout
 (clamped to seven days), or the original selected duration if no timeout is configured. It rounds
 up to milliseconds, then to the smallest of `2^0` through `2^29` milliseconds or the seven-day
-ceiling. Connect, first-byte and between-bytes use that same value; there is no rigid phase split.
+ceiling. Without an explicit connect timeout, connect, first-byte and between-bytes use that
+same value; an explicit connect setting changes only connect. There is no rigid phase split.
 Logical absolute deadlines and late-result rejection are unchanged. Provider timers can outlive a
 shorter caller deadline/cutoff substantially, so this is not prompt interruption.
 
 Versioned backend names depend on origin, authority, TLS and the selected timer configuration,
 not client identity or the later remaining budget. A guest-instance-wide verified registry shares
 successful registrations across clients and refuses unknown name collisions. There are at most
-31 timer configurations per fixed transport tuple, not a bound on arbitrary origins, registrations,
+31 deadline-only timer configurations per fixed origin/authority/TLS/connect-settings tuple,
+not a bound on arbitrary origins, registrations,
 memory or abandoned host work. Hosted pooling, resource lifetime and cancellation remain unqualified.
 
 ² Fastly checks the absolute deadline between streamed upload chunks, but it cannot preempt a
@@ -359,12 +371,12 @@ Local error-preserving readiness requires the explicitly selected
 the stock runtime still loses source errors.
 Hosted runtime behavior and resource ownership remain unqualified, so support stays BestEffort.
 
-⁵ Fastly uses coupled B31 provider timers, but blocking host operations cannot be preempted
-and those timers are not one fully elastic end-to-end pool. Spin's host may reject phase
+⁵ Spin's host may reject phase
 timer settings and retain opaque defaults. Every connect-setting refusal falls back without
 an error under the unchanged aggregate deadline race. For first-byte/between-bytes settings,
-`NotSupported` is advisory; `Immutable` and `Other` remain typed setup errors. Neither adapter
-can promise one fully elastic pool or bounded host teardown.
+`NotSupported` is advisory; `Immutable` and `Other` remain typed setup errors. Spin cannot
+promise one fully elastic pool or bounded host teardown. Fastly's B31 timers no longer impose
+a fixed phase split; its separate deadline/host-blocking limitations remain unchanged.
 
 ⁶ Fastly uses an undecorated, send-owning entrypoint and the low-level `stream_to_client` response
 lifetime. Scripted pump tests and the raw ABI Viceroy test prove the pieces, but the production

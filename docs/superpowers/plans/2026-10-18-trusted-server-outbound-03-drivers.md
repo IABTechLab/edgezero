@@ -210,6 +210,10 @@ and fixture qualification/hosted probe cases from G2.
 
 **Dependencies:** D1b and P1/P5; independent of Image Optimizer horizon/entitlement approval.
 
+- [x] Publish EZ-4.9 connect-timeout metadata on all four adapters and Fastly's split-free
+      flexible-phase declaration. The existing native CLI matrix tests own these assertions;
+      their results are not adapter SDK/runtime timing proof. Preserve hosted precision,
+      DNS/TLS phase coverage, preemption and qualification caveats in guides and the checker.
 - [ ] Add `connect_timeout_reaches_provider_settings` and
       `connect_expiry_preserves_governing_budget_precedence` from plan 02. Exercise Send/Begin/Batch
       and permitted Follow hops; observe the actual platform mapping, full response-head budget,

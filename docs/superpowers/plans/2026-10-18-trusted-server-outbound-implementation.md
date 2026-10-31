@@ -12,6 +12,33 @@
 
 ## Status and Authority
 
+### Connect Capability Publication (2026-10-30)
+
+The missing EZ-4.9 declaration is implemented: `outbound-connect-timeout` is Native on Fastly
+and BestEffort on Axum, Cloudflare and Spin. Fastly's split-free flexible phase budgeting is
+Native; no deadline, cancellation, scheduling or resource-accounting capability changes.
+Core manifest round trips cover required/optional placement, and all four existing native CLI
+matrix tests verify the declarations. No transport, provider timer, runtime pin or CI job changes.
+
+The public guide, forwarding guide and normative matrix now agree. Native describes the
+provider-backed setting, not qualified hosted precision: Viceroy does not enforce connect expiry,
+DNS/TLS phase coverage remains unqualified and blocking calls stay non-preemptible. The existing
+docs checker rejects lost/inverted caveats and the stale fixed-share claim. Review corrected
+the default-timer wording and narrowed the B31 cardinality statement to a fixed connect setting.
+
+This closes the previously recorded metadata implementation gap, not all D1c runtime acceptance.
+Inventory bindings remain unchanged at 85 ready/426 planned: native CLI metadata proof must not
+be attributed to the separate adapter SDK/runtime phases. Consumer/hosted evidence, strict local
+timing and the remaining forwarding/encoding/lifetime scenarios stay open. No candidate freeze,
+hosted deployment or provider qualification is authorized by this publication.
+
+Two independent read-only reviews found no remaining issue after the timer-wording and
+checker fixes. Final verification passes all five root gates: 2,633 tests across 33 binaries,
+zero failures and one existing ignored; strict workspace Clippy, formatting, workspace feature
+checks and the Spin target check. The 85 manifest tests, five tests in the four adapter CLI
+matrix cards, documentation checker/self-tests, 57 relevant tooling tests, legacy scan and
+unchanged manifest/digest validation pass. Logs remain under `/private/tmp/pr275-connect-capability-*`.
+
 ### Fastly Registration Observations (2026-10-30)
 
 The approved `context::FastlyOutboundObservation` and immutable `FastlyOutboundStats` are now

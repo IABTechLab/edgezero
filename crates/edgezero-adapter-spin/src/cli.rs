@@ -152,6 +152,7 @@ impl Adapter for SpinCliAdapter {
             | Capability::IngressAdmissionAbort
             | Capability::LazyStreamedResponsePassthrough
             | Capability::OutboundBatchCancellation
+            | Capability::OutboundConnectTimeout
             | Capability::OutboundDeadlines
             | Capability::OutboundFlexiblePhaseBudget
             | Capability::OutboundHeaderFidelity
@@ -1394,6 +1395,10 @@ mod tests {
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundDeadlines, CapabilitySupport::BestEffort),
+            (
+                Capability::OutboundConnectTimeout,
+                CapabilitySupport::BestEffort,
+            ),
             (
                 Capability::OutboundFailureDiagnostics,
                 CapabilitySupport::Native,

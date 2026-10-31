@@ -2041,7 +2041,9 @@ impl Adapter for FastlyCliAdapter {
             Capability::IngressAdmission
             | Capability::OutboundAuthorityOverride
             | Capability::OutboundCacheBypass
+            | Capability::OutboundConnectTimeout
             | Capability::OutboundFailureDiagnostics
+            | Capability::OutboundFlexiblePhaseBudget
             | Capability::OutboundHeaderFidelity
             | Capability::OutboundRedirectFollowing => CapabilitySupport::Native,
             Capability::BufferedResponseContentLength
@@ -2053,7 +2055,6 @@ impl Adapter for FastlyCliAdapter {
             | Capability::OutboundBatchCompletionOrder
             | Capability::OutboundBatchSlotIsolation
             | Capability::OutboundDeadlines
-            | Capability::OutboundFlexiblePhaseBudget
             | Capability::OutboundHttp
             | Capability::OutboundImageOptimizer
             | Capability::ResponseEgressAbort
@@ -6931,12 +6932,16 @@ mod tests {
             ),
             (Capability::OutboundDeadlines, CapabilitySupport::BestEffort),
             (
+                Capability::OutboundConnectTimeout,
+                CapabilitySupport::Native,
+            ),
+            (
                 Capability::OutboundFailureDiagnostics,
                 CapabilitySupport::Native,
             ),
             (
                 Capability::OutboundFlexiblePhaseBudget,
-                CapabilitySupport::BestEffort,
+                CapabilitySupport::Native,
             ),
             (
                 Capability::OutboundAuthorityOverride,

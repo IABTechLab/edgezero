@@ -143,6 +143,7 @@ impl Adapter for CloudflareCliAdapter {
             | Capability::IngressAdmissionAbort
             | Capability::OutboundAuthorityOverride
             | Capability::OutboundBatchCancellation
+            | Capability::OutboundConnectTimeout
             | Capability::OutboundHeaderFidelity
             | Capability::OutboundDeadlines
             | Capability::OutboundFailureDiagnostics
@@ -1340,6 +1341,10 @@ mod tests {
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundDeadlines, CapabilitySupport::BestEffort),
+            (
+                Capability::OutboundConnectTimeout,
+                CapabilitySupport::BestEffort,
+            ),
             (
                 Capability::OutboundFailureDiagnostics,
                 CapabilitySupport::BestEffort,

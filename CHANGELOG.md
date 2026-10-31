@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Publish `outbound-connect-timeout`: Fastly declares independent provider-backed support;
+  Axum, Cloudflare and Spin retain BestEffort acceptance. Remove Fastly's fixed connect share
+  without shortening the response-head budget, and declare flexible phase budgeting Native.
+  Hosted timing qualification, DNS/TLS phase coverage and blocking-call interruption stay separate.
 - Add Fastly request-scoped backend registration observations through `context::FastlyOutboundObservation`.
   Count eligible configurations independently of provider attempts, time failed and late returns,
   and warn at 50 ms without exposing request or provider details. Freeze numeric snapshots at
