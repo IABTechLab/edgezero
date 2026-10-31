@@ -725,13 +725,25 @@ two already accepted socket budgets may remain. This is a finite observation, no
 provider work can never resume. Client captures are bounded to 4 KiB and reads to six seconds.
 First-byte timing is explicitly unmeasured; header/completion times use the client clock.
 
-The retained local matrix passes all eleven cases on Axum, Viceroy and Spin. The exact 2048-byte
-ingress case passes on all four targets. On pinned local
-Wrangler/Miniflare/workerd, ingress overflow returns 413, but the following valid POST returns a
+The canonical local matrix passes all eleven cases on each of Axum, repaired Viceroy, Spin and
+the direct Miniflare/workerd listener. The unchanged Cloudflare sequence recovers immediately
+from ingress overflow to the following valid upload, without retries, recovery sleeps or drains.
+Runtime cleanup is checked explicitly. After settlement, the bounded persisted JSONL reader
+revalidates all eleven ordered cases, unique request tokens, response bytes/status/headers,
+origin completion/abort evidence, matching client captures and owned startup identity before
+emitting acceptance sentinels. A generated 413 may omit its identity header only after the
+initial successful response attests the launch; a present conflicting identity always fails.
+Missing/duplicate cases, corrupt facts, collection errors, panic or failed cleanup cannot pass
+through a hard-coded coverage count. This binds EZ-10 criteria 05/06 on all four local runtimes
+and criterion 03 on Viceroy/workerd/Spin. Axum criterion 03 retains its separate pipelining
+requirement and remains unbound here. No hosted, raw-fidelity or whole-resource claim is added.
+
+The earlier Wrangler front-proxy matrix remains failed historical evidence: ingress overflow
+returns 413, but the following valid POST returns a
 proxy-generated 500 before fixture entry. A JavaScript-only body-cancellation control reproduces
 the follow-on failure without EdgeZero; the native connection-pool mechanism remains unproven.
-The suite retains the failure and exits 1, without retries, recovery sleeps, drains or capability
-promotion. See [the original evidence](../../docs/audits/evidence/2026-10-21-outbound-overflow.json)
+Those failed runs are not relabelled by the canonical pass or promoted to qualification.
+See [the original evidence](../../docs/audits/evidence/2026-10-21-outbound-overflow.json)
 and [the boundary/recovery checkpoint](../../docs/audits/evidence/2026-10-21-overflow-boundaries.json).
 Omitting `Connection: close` does not eliminate the failure. Diagnostic requests sent directly
 to Wrangler's own user-worker listener recover for both the JavaScript control and the actual
@@ -739,7 +751,10 @@ EdgeZero artifact. This narrows the failing boundary to the front-proxy path, no
 connection-pool mechanism. That diagnostic topology is not a replacement acceptance entrypoint.
 The collector's Drop test gates worker exit and mutation-checks that Drop waits for its join;
 it does not certify provider cancellation after the finite observation window.
-Cloudflare recovery, hosted HTTP/2 and end-to-end qualification remain open. The separate
+The shared canonical native launcher subsequently replaces the front-proxy launcher for all
+Cloudflare fixture suites, not only this diagnostic. Local recovery now passes through that
+entrypoint; the historical diagnostic alone did not supply acceptance. Hosted HTTP/2 and
+end-to-end qualification remain open. The separate
 [generated-app/demo TCP proof](../../docs/audits/evidence/2026-10-21-generated-fallback.json)
 passes through their unchanged Axum entrypoints: fixed/chunked 4 KiB boundaries on both fallback
 routes, exact 413/no-retry output, 405 Allow, the five-second pending-read 408, and a request-looking

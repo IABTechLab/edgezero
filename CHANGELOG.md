@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind eleven local overflow acceptance legs to the existing suite after checked runtime cleanup
+  and bounded persisted-evidence validation. Verify all four runtimes, including Cloudflare
+  recovery through its canonical native listener; retain historical proxy failures and hosted gates.
 - Record bounded lifecycle-source wait-return, write-start and completion phases, and report
   source-timeline and guest head/body verdicts independently. Keep whole-case assertions and
   strict timing targets unchanged; diagnostic passes cannot override an elapsed or other failure.

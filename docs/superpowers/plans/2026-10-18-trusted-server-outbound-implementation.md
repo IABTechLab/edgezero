@@ -12,6 +12,53 @@
 
 ## Status and Authority
 
+### Local Overflow Acceptance (2026-10-31)
+
+The canonical direct Miniflare/workerd launcher, already shared by the fixture suites, resolves
+the old local overflow-to-upload recovery failure without another transport or production fix.
+An unchanged eleven-case baseline passes at
+`/private/tmp/pr275-native-overflow-baseline-cloudflare`. Earlier Wrangler front-proxy failures
+remain failed historical topology evidence; neither the old direct-listener diagnostic nor a
+passing sibling case retroactively qualifies them.
+
+The existing overflow runner now explicitly checks runtime shutdown, settles owned startup
+identity/client captures/logs, and rereads bounded persisted evidence before printing acceptance
+sentinels. Reuse the existing response/origin validators: require all eleven cases in their
+original order, unique bounded tokens, exact adapter and matching client facts, coherent launch
+identity, completed origin collection and successful cleanup without panic. Keep generated
+413/no-retry output, ordinary upstream 413/retry retention and each adapter's zero-contact or
+incomplete-upload rules. Generated errors may lack a launch header only after successful initial
+attestation; a present mismatched header fails. No origin/body cap, observation window, SDK pin,
+production API, demo/template contract, CI job or suite selector changes.
+
+Fresh guarded execution `/private/tmp/pr275-overflow-acceptance-all` passes 44/44 cases:
+eleven each on Axum, repaired Viceroy, workerd and Spin, with four checked cleanups and owned
+startup attestations. Bind eleven existing EZ-10 legs: criteria 05/06 on all four runtimes and
+criterion 03 on the three serverless runtimes. Axum 03 remains planned because its pipelining
+clause needs an explicitly composed same-candidate TCP proof. Hosted HTTP/2, consumer end-to-end,
+unit/extractor/generated-app bindings and exact-candidate qualification are not supplied by this
+suite. Follow-up applicability, approvals, all 255 criteria/511 leg identities and frozen source
+digests are unchanged. Inventory is now 129 ready/382 planned, still unqualified.
+
+Three colocated mutation tests reject reordered cases and missing/duplicate/foreign case or
+lifecycle records, capture disagreement, corrupt overflow/retry/origin facts, complete streamed overflow
+and failed cleanup. The first two are observed failing before the readback checks are
+implemented. The inventory test separately fails while these legs remain planned.
+The final harness passes 409 tests with two existing ignored; evidence-tooling tests pass 57
+and strict harness Clippy passes. The initial sandboxed TCP test denial supplies no coverage;
+the successful full run has explicit loopback permission.
+
+All five standard root gates pass: 2,636 tests across 33 binaries with one existing ignored,
+formatting, strict Clippy, feature compilation and Spin WASM compilation. Docs, legacy,
+inventory and decoder/JSON-map dependency audits pass. Independent spec and code-quality
+reviews find no scoped defect; these checks do not freeze or qualify a candidate.
+
+The separate Cloudflare elapsed investigation finds no collection-time restamping or renewed
+budget. Its terminal host-event yield remains mandatory for frozen-clock freshness and is not
+removed to shorten the measurement. The retained 153 ms versus 146 +/-5 ms failure remains open;
+the existence of that yield does not prove historical causality. Other timing/lifecycle
+acceptance, resource decisions, candidate freeze and authorized hosted qualification remain open.
+
 ### Lifecycle Phase Evidence (2026-10-31)
 
 Separate source wait/dispatch/write timing from guest head/body timing without changing any
@@ -559,9 +606,10 @@ Keep three different status questions separate:
   adds each adapter's unit criterion 09, Axum/Cloudflare/Fastly unit criteria 10/11 and Axum
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
-  provider-local forwarding, client-selection, policy, marker and observation checkpoints give
-  118 ready legs, with 393 still `planned`, including the strict Axum pending-body proof and
-  ten local encoding proofs. G1/Q3 binding work remains unfinished, not evidence that 393 features
+  provider-local forwarding, client-selection, policy, marker, observation, encoding and overflow
+  checkpoints give 129 ready legs, with 382 still `planned`. This includes the strict Axum
+  pending-body proof, ten local encoding proofs and eleven local overflow legs. G1/Q3 binding
+  work remains unfinished, not evidence that 382 features
   are absent. Only the explicitly bound commands count as executable legs; unrelated checkpoint
   tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
@@ -3481,7 +3529,7 @@ map; completing its executable bindings is an explicit open task, not hidden by 
 | EZ-7 | P3; D1-D4 | Blocking | **Integrated through shared preparation and head finalization.** The facade resolves marker policy before dispatch; original fields and the optional marker are charged once across Send/Begin/Batch/Follow. | Complete remaining all-target marker/normalization acceptance bindings. |
 | EZ-8 | P1; D1d/D5 | Blocking; Fastly single-request Send/Follow only | **Send/Follow use the shared pipeline.** Direct native optimizer mapping is preserved without another fetch, buffering or serialization; unsupported modes/adapters reject before settlement. Actual-client Send/initial-Follow/later-hop controls reach Viceroy's native unavailable boundary. | Obtain successful optimized-first-hop redirect and hosted transformation/performance evidence. Blocking horizon remains UNKNOWN. |
 | EZ-9 | P1/P5; D1-D5 | Blocking; supplied clients use the same dispatch boundary | **Explicit Follow implemented.** Core owns the decision table, per-hop policy, immutable initial chain deadline, replay and unread disposal. Supplied-client, real-TCP Axum, actual local Spin/Viceroy and Cloudflare guest-boundary controls pass. | Bind full criterion-level acceptance; complete workerd/origin, successful optimizer redirect and consumer/hosted evidence. No compatibility transport. |
-| EZ-10       | F2                   | Follow-up unless approved as promoted/present                             | **Local implementation with a known failure:** [typed overflow/uploads/rendering](#f2-overflow-checkpoint); generated/demo TCP proof exists.                                                                                                                                      | Cloudflare front-proxy recovery failure, required hosted HTTP/2 and consumer end-to-end acceptance. Passing sibling cases do not waive the failure.        |
+| EZ-10 | F2 | Follow-up unless approved as promoted/present | **Local implementation and canonical overflow acceptance:** [typed overflow/uploads/rendering](#f2-overflow-checkpoint) and [all-target local evidence](#local-overflow-acceptance-2026-10-31); generated/demo TCP proof exists. Historical Wrangler proxy failures remain retained. | Remaining unit/extractor/generated-app bindings, Axum pipeline composition, hosted HTTP/2, consumer end-to-end and exact-candidate qualification. |
 | EZ-11       | F3a                  | Follow-up                                                                 | **Not implemented:** cache tags.                                                                                                                                                                                                                                                  | Tag validation/deduplication, provider mapping, mode/support matrix and actual cache probes.                                                               |
 | EZ-12       | F3b                  | Follow-up                                                                 | **Not implemented:** TLS name-check policy.                                                                                                                                                                                                                                       | Typed setting/readback, backend-key isolation and trusted-chain/wrong-name fixture; no global verification bypass.                                         |
 | EZ-13 | F3c | Follow-up; closes with Unsupported evidence | **Unsupported retained with the required synchronous support hook integrated.** Spin authority and unsupported optimizer checks precede ordinary validation, timers and body polling. | Bind the complete activity/SDK limitation and consumer configuration-rejection evidence; do not promote support. |

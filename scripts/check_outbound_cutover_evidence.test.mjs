@@ -901,7 +901,7 @@ test("redirect core criteria bind every required test before one module executio
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 393,
+    planned: 382,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib outbound::";
@@ -1483,7 +1483,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /393 other legs remain planned/);
+  assert.match(manifest.status, /382 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1703,6 +1703,70 @@ test("Axum pending-body timing binds both cases to the existing guarded phase", 
   assert.equal(row.approval, null);
 });
 
+const overflowRuntimeKeys = new Set([
+  ...["viceroy", "workerd", "spin"].map(
+    (environment) => `EZ-10/acceptance/03@${environment}/http1-chunked`,
+  ),
+  ...["axum", "viceroy", "workerd", "spin"].flatMap((environment) =>
+    ["05", "06"].map(
+      (criterion) => `EZ-10/acceptance/${criterion}@${environment}`,
+    ),
+  ),
+]);
+
+test("overflow runtime acceptance binds only eleven complete local proofs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const adapters = {
+    axum: "axum",
+    viceroy: "fastly",
+    workerd: "cloudflare",
+    spin: "spin",
+  };
+  assert.equal(overflowRuntimeKeys.size, 11);
+  for (const row of manifest.cases.filter((c) =>
+    c.case_id.startsWith("EZ-10/"),
+  )) {
+    const key = `${row.case_id}@${row.environment}`;
+    assert.equal(
+      row.implementation,
+      overflowRuntimeKeys.has(key) ? "ready" : "planned",
+      key,
+    );
+    if (!overflowRuntimeKeys.has(key)) continue;
+    const environment = row.environment.split("/")[0];
+    const adapter = adapters[environment];
+    assert.equal(
+      row.command,
+      `scripts/test_integration.sh --adapter ${adapter} --suite outbound-overflow --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/overflow/${environment}`,
+    );
+    assert.equal(
+      row.artifact_path,
+      `outbound/overflow/${environment}/events.jsonl`,
+    );
+    assert.equal(row.sentinel, key.toLowerCase().replaceAll(/[^a-z0-9]/g, "_"));
+    assert.equal(row.applicability, "follow-up");
+    assert.equal(row.approval, null);
+    assert.equal(row.condition, null);
+    assert.ok(
+      checker
+        .readySentinels(
+          { ...manifest, cases: [row] },
+          row.environment,
+          row.command,
+        )
+        .includes(row.sentinel),
+    );
+  }
+});
+
 test("encoding runtime acceptance binds only its ten complete local proofs", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -1882,10 +1946,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 118);
+  assert.equal(ready.length, 129);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    393,
+    382,
   );
   assert.ok(
     ready.every(
@@ -1895,6 +1959,7 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
           c.environment === "axum/http1-chunked") ||
         forwardingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         encodingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
+        overflowRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/22" &&
