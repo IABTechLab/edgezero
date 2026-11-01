@@ -39,9 +39,8 @@ run node --test scripts/ci_tooling.test.mjs
 section "Workspace Tests"
 run cargo test --workspace --all-targets
 
-section "Dependency Contracts"
-run node scripts/check_serde_json_map_contract.mjs
-run node scripts/check_flate_dependency_contract.mjs
+section "Repository Dependency And Forwarding Checks"
+run scripts/test_integration.sh check
 
 section "Outbound Contract Tests"
 run node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_legacy_api.test.mjs

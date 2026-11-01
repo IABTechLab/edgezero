@@ -2218,7 +2218,10 @@ try {
 }
 const normalizedBrotliAuditSource = brotliAuditSource.replace(/\s+/gu, ' ')
 const expectedBrotliDependencies = JSON.parse(
-  readFileSync('scripts/brotli_dependency_contract.json', 'utf8')
+  readFileSync(
+    'crates/edgezero-test-harness/acceptance/dependencies/brotli.json',
+    'utf8'
+  )
 )
 const auditedBrotliDependencies = new Map(
   [

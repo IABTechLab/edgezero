@@ -273,9 +273,7 @@ test("identical rustdoc and outbound/dependency audits execute only in the works
     "cargo doc --offline --locked --workspace --all-features --no-deps",
     "bash scripts/check_outbound_legacy_api.sh",
     "node scripts/check_outbound_docs_contract.mjs",
-    "node scripts/check_brotli_dependency_contract.mjs",
-    "node scripts/check_flate_dependency_contract.mjs",
-    "node scripts/check_serde_json_map_contract.mjs",
+    "scripts/test_integration.sh check",
   ]) {
     const owners = [tests, format].flatMap((flow) =>
       Object.values(flow.jobs).flatMap((job) =>
@@ -294,6 +292,43 @@ test("identical rustdoc and outbound/dependency audits execute only in the works
       s.run?.includes("node --test scripts/ci_tooling.test.mjs"),
     ),
   );
+});
+
+test("consolidated static checks follow every locked dependency fetch", () => {
+  const check = host.steps.findIndex((step) =>
+    step.run?.includes("scripts/test_integration.sh check"),
+  );
+  assert.ok(check >= 0);
+  assert.equal(
+    host.steps[check].run,
+    "CARGO_NET_OFFLINE=true scripts/test_integration.sh check",
+  );
+  const fetches = [
+    "cargo fetch --locked",
+    "cargo fetch --locked --manifest-path examples/app-demo/Cargo.toml",
+    "cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml",
+    "cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml",
+  ];
+  for (const command of fetches) {
+    const fetch = host.steps.findIndex((step) =>
+      step.run?.split("\n").some((line) => line.trim() === command),
+    );
+    assert.ok(fetch >= 0 && fetch < check, command);
+  }
+  for (const path of [
+    "check_brotli_dependency_contract.mjs",
+    "check_flate_dependency_contract.mjs",
+    "check_serde_json_map_contract.mjs",
+    "check_forwarding_example.mjs",
+    "check_forwarding_example.test.mjs",
+  ]) {
+    assert.ok(
+      !readFileSync(join(root, ".github/workflows/test.yml"), "utf8").includes(
+        path,
+      ),
+      path,
+    );
+  }
 });
 
 test("adapter Clippy caches cover both isolated fixture build roots", () => {

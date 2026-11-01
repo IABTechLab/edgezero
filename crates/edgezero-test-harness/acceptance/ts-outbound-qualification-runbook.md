@@ -100,14 +100,14 @@ Freeze, package acceptance and release/push authorization are different decision
 ## Implemented Preparation Commands
 
 These commands are runnable now from the repository root; their results are development checks,
-not exact-candidate acceptance. Install the worktree's `.tool-versions` and fetch all three
+not exact-candidate acceptance. Install the worktree's `.tool-versions` and fetch the required
 locked Cargo workspaces as described in Q2 before offline checks.
 
 ```sh
 node --test scripts/check_outbound_cutover_evidence.test.mjs
 node scripts/check_outbound_cutover_evidence.mjs --manifest
-node --test scripts/check_forwarding_example.test.mjs
-node scripts/check_forwarding_example.mjs
+scripts/test_integration.sh check
+cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml checks::forwarding::
 scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
 ```
 

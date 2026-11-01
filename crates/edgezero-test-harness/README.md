@@ -84,8 +84,22 @@ provider-specific tools, retained negative observations and hosted qualification
 
 ## Ownership
 
-Workflow/tooling guards remain in `scripts`, separate from cross-runtime integration tests.
-They use Node with one locked YAML-parser dependency, not an external language runtime:
+Static repository checks use this Rust harness without starting provider runtimes or creating
+fixture output:
+
+```sh
+scripts/test_integration.sh check
+scripts/test_integration.sh check dependencies
+scripts/test_integration.sh check forwarding
+```
+
+The combined command audits both decoder contracts with one metadata snapshot per root,
+demo and reusable-fixture workspace, separately checks the no-CLI JSON feature graph,
+and compiles the actual forwarding guide example. Fetch locked dependencies first.
+The harness tests include real compiler-negative controls and static-command regressions.
+
+Remaining workflow/tooling guards are being consolidated from `scripts`. They currently
+use Node with one locked YAML-parser dependency:
 
 ```sh
 npm ci --prefix scripts --ignore-scripts --no-audit --no-fund
@@ -97,9 +111,11 @@ running the guards. Installation failure stops verification; there is no fallbac
 
 ```text
 src/                         native controller, suites and evidence validators
+src/checks/                  static dependency audits and forwarding doctest
 fixtures/reusable-app/       shared application and provider-specific guest entrypoints
 fixtures/request-fidelity/   raw-ingress applications and observation baseline
 acceptance/                  outbound case inventory and external runbook source
+acceptance/dependencies/     independent audited decoder contract data
 ```
 
 The controller and the two guest workspaces retain separate manifests and lockfiles.

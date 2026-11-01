@@ -1,3 +1,4 @@
+mod checks;
 mod evidence;
 mod fidelity;
 mod net;
@@ -31,10 +32,6 @@ pub struct Args {
     record_observations: bool,
 }
 impl Args {
-    fn parse() -> Result<Self> {
-        Self::parse_from(std::env::args().skip(1))
-    }
-
     fn parse_from<I>(arguments: I) -> Result<Self>
     where
         I: IntoIterator<Item = String>,
@@ -713,8 +710,16 @@ fn rustc() -> PathBuf {
         .filter(|rustc| rustc.is_file())
         .unwrap_or_else(|| "rustc".into())
 }
-fn run() -> Result<i32> {
-    let args = Args::parse()?;
+fn run(arguments: Vec<String>) -> Result<i32> {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "check")
+    {
+        ctrlc::set_handler(request_cancellation)?;
+        checks::run(&arguments[1..])?;
+        return Ok(0);
+    }
+    let args = Args::parse_from(arguments)?;
     ctrlc::set_handler(request_cancellation)?;
     let path = args
         .output
@@ -806,7 +811,11 @@ fn run() -> Result<i32> {
     Ok(code)
 }
 fn main() {
-    match run() {
+    exit_result(run(std::env::args().skip(1).collect()));
+}
+
+fn exit_result(result: Result<i32>) -> ! {
+    match result {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("edgezero-test-harness: {error}");
@@ -1101,6 +1110,101 @@ mod process_tests {
         }
     }
 
+    fn static_check_command(fixture: &Fixture, selection: &str) -> Command {
+        let mut command = fixture.command("static-check");
+        command
+            .current_dir(&fixture.0)
+            .env(
+                "EDGEZERO_STATIC_CHECK_ARGS",
+                json!(["check", selection]).to_string(),
+            )
+            .env("FASTLY_CLI", "/missing/fastly")
+            .env("SPIN_CLI", "/missing/spin");
+        command
+    }
+
+    fn fixture_runs() -> std::collections::BTreeSet<PathBuf> {
+        match fs::read_dir(fixture_root().join(".runs")) {
+            Ok(entries) => entries.map(|entry| entry.unwrap().path()).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(error) => panic!("cannot observe fixture runs: {error}"),
+        }
+    }
+
+    #[test]
+    fn static_check_help_runs_without_provider_tools_or_fixture_output() {
+        let fixture = Fixture::new();
+        let before = fixture_runs();
+        let output = checks::output_until(
+            &mut static_check_command(&fixture, "--help"),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(output.contains("check [all|dependencies|forwarding]"));
+        assert_eq!(fixture_runs(), before);
+        assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn unknown_static_check_fails_without_starting_a_runtime() {
+        let fixture = Fixture::new();
+        let before = fixture_runs();
+        let error = checks::output_until(
+            &mut static_check_command(&fixture, "unknown"),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown static check"), "{error}");
+        assert_eq!(fixture_runs(), before);
+        assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn dependency_checks_share_one_metadata_snapshot_per_workspace() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let wrapper = fixture.0.join("cargo-wrapper");
+        let calls = fixture.0.join("calls.log");
+        fs::write(&wrapper, "#!/bin/sh\nprintf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$CHECK_CALLS\"\nexec \"$REAL_CARGO\" \"$@\"\n").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = static_check_command(&fixture, "dependencies");
+        command
+            .env("CARGO", &wrapper)
+            .env(
+                "REAL_CARGO",
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .env("CHECK_CALLS", &calls);
+        checks::output_until(
+            &mut command,
+            64 * 1024,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap();
+        let calls = fs::read_to_string(calls).unwrap();
+        let metadata = calls
+            .lines()
+            .filter(|line| line.contains("\tmetadata "))
+            .collect::<Vec<_>>();
+        assert_eq!(metadata.len(), 3, "{calls}");
+        let roots = metadata
+            .iter()
+            .map(|line| line.split_once('\t').unwrap().0)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(roots.len(), 3, "{calls}");
+        for line in metadata {
+            assert!(
+                line.ends_with("metadata --locked --offline --format-version 1 --all-features"),
+                "{line}"
+            );
+        }
+        assert_eq!(calls.lines().count(), 4, "{calls}");
+        assert_eq!(calls.lines().filter(|line| line.ends_with("tree --locked --offline --package edgezero-cli --no-default-features --edges features,no-dev --invert serde_json")).count(), 1, "{calls}");
+    }
+
     fn until(mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !done() {
@@ -1119,6 +1223,12 @@ mod process_tests {
             return;
         };
         let path = PathBuf::from(std::env::var_os("EDGEZERO_PROCESS_TEST_DIR").unwrap());
+        if mode == "static-check" {
+            let arguments =
+                serde_json::from_str(&std::env::var("EDGEZERO_STATIC_CHECK_ARGS").unwrap())
+                    .unwrap();
+            exit_result(run(arguments));
+        }
         if mode == "checked-controller" {
             ctrlc::set_handler(request_cancellation).unwrap();
             let fixture = Fixture(path.clone());

@@ -12,6 +12,38 @@
 
 ## Status and Authority
 
+### Rust Check Consolidation (2026-10-31)
+
+The approved [tooling consolidation plan](./2026-10-31-test-tooling-consolidation.md) starts
+with static dependency audits and the mandatory forwarding doctest. One existing harness
+command, `CARGO_NET_OFFLINE=true scripts/test_integration.sh check`, replaces four workspace
+CI steps; five JavaScript files are removed without compatibility wrappers. Audited decoder
+JSON data moves byte-for-byte under the harness's `acceptance/dependencies/`. Both decoder
+audits share exactly one locked/offline metadata snapshot per root/demo/reusable workspace;
+the no-CLI JSON-map feature query remains separate. Actual Cargo-invocation tests prove the
+three metadata calls and one feature query, rather than asserting source text alone.
+
+Forwarding tests still extract the actual guide, require exactly one compiled non-ignored
+doctest, and exercise real compiler failures, fence injection and non-executed handler bodies.
+Static commands run before provider parsing or fixture initialization. CLI controls share the
+existing owned process helper, 30-second deadlines and actual fixture-root observations.
+Review catches and repairs a final-stderr-cap race with a deterministic failing control;
+both output streams are rechecked after command cleanup. Both scoped reviewers clear the fixes.
+
+Verification passes the combined check command, 427 harness tests/two existing ignored and
+strict harness Clippy. All five root gates pass, including 2,636 tests/33 binaries/one existing
+ignored; CI tooling passes 34 and unchanged evidence tooling passes 58. Retained logs are
+`/private/tmp/pr275-rust-tooling-harness-final.log`,
+`/private/tmp/pr275-rust-tooling-harness-clippy.log`,
+`/private/tmp/pr275-rust-tooling-check-final.log` and the matching `workspace-tests`,
+`workspace-clippy`, `feature-check` and `spin-check` logs under that prefix.
+
+Evidence-validator and remaining guard ports are separate pending checkpoints, not completed
+by this move. All 255 criteria/511 identities and the 135 ready/376 planned inventory remain
+unchanged and unqualified. No runtime, production API, decoder pin, capability or demo/template
+behavior changes. Cloudflare timing, resource decisions, consumer/hosted qualification and
+candidate freeze remain open; this is tooling ownership, not acceptance or capability promotion.
+
 ### Reader And Fallback Acceptance (2026-10-31)
 
 Bind six more implemented local EZ-10 legs without changing production behavior: core reader

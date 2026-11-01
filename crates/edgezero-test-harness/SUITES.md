@@ -369,8 +369,8 @@ Blocking EZ-1.14 has a supplementary compile-only prerequisite owned by Q1 (chec
 Q2 (workspace CI). Run from the repository root:
 
 ```sh
-node --test scripts/check_forwarding_example.test.mjs
-node scripts/check_forwarding_example.mjs
+scripts/test_integration.sh check forwarding
+cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml checks::forwarding::
 ```
 
 The checker extracts the actual `Forward An Inbound Request` fence in `docs/guide/proxying.md`,
@@ -379,6 +379,14 @@ It compiles item definitions with an empty entrypoint; the network handler is ne
 Missing/duplicate fences, weakening annotations, zero tests and compile failures fail the gate.
 Regression tests include the missing `into_request()?` mutation and embedded-fence bypasses
 through real compilation.
+
+The workspace CI runs `CARGO_NET_OFFLINE=true scripts/test_integration.sh check` once,
+combining this example with the Brotli, flate and no-CLI JSON-map audits. Both decoder
+contracts share one locked/offline all-features metadata snapshot per root, demo and reusable
+workspace; the no-CLI feature query stays separate. Existing JSON contracts retain independent
+audited expectations. Static checks bypass runtime initialization and fixture-run creation.
+Their Rust tests replace the removed JavaScript checkers and forwarding tests; the existing
+full harness test command owns the regression coverage. Evidence tooling migration is separate.
 
 This CI prerequisite is outside the reviewed 511 environment legs. It grants no runtime
 forwarding acceptance and does not adopt optional EZ-25.42's broader guide checker. P2's real

@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Consolidate Brotli/flate/JSON-map dependency audits and the mandatory forwarding doctest
+  into the existing Rust test harness. Share Cargo metadata per workspace, retain real
+  compiler-negative controls, and remove five JavaScript files and three redundant CI steps.
 - Bind local body-reader, declared-length, Axum pipeline/custom-renderer and actual scaffold/demo
   fallback acceptance. Preserve exact byte boundaries, sticky errors and recovery controls;
   run one inventory-guarded core library without adding CI phases or changing production behavior.

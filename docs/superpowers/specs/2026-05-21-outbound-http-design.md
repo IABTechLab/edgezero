@@ -3411,7 +3411,8 @@ These are per-response controls, not aggregate batch limits.
    `compression-codecs 0.4.38`, and `compression-core 0.4.32`. Core constructs
    `async_compression`'s reader with the explicitly
    pinned `compression_codecs::BrotliDecoder`, and CI runs
-   `scripts/check_brotli_dependency_contract.mjs` against both root and demo lockfiles. The
+   `scripts/test_integration.sh check dependencies` against root, demo and reusable-fixture
+   lockfiles with one metadata snapshot per workspace shared by both decoder audits. The
    checked-in [decoder memory audit](../../audits/2026-09-27-brotli-decoder-memory-accounting.md)
    derives a 3,442,530-byte allocation-payload subtotal for that graph, including the ring
    allocation's 66-byte write-ahead/dictionary slack beyond `2^WBITS`. The 16 MiB fixed charge

@@ -100,11 +100,9 @@ jobs:
           npm ci --prefix scripts --ignore-scripts --no-audit --no-fund
           node --test scripts/ci_tooling.test.mjs
 
-      - name: Compile mandatory forwarding example
+      - name: Repository dependency and forwarding checks
         if: matrix.suite == 'workspace'
-        run: |
-          node --test scripts/check_forwarding_example.test.mjs
-          node scripts/check_forwarding_example.mjs
+        run: CARGO_NET_OFFLINE=true scripts/test_integration.sh check
 
       - name: Outbound evidence tool contracts
         if: matrix.suite == 'workspace'
@@ -117,18 +115,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --offline --locked --workspace --all-features --no-deps
-
-      - name: Brotli dependency contract
-        if: matrix.suite == 'workspace'
-        run: node scripts/check_brotli_dependency_contract.mjs
-
-      - name: Flate dependency contract
-        if: matrix.suite == 'workspace'
-        run: node scripts/check_flate_dependency_contract.mjs
-
-      - name: Serde JSON map contract
-        if: matrix.suite == 'workspace'
-        run: node scripts/check_serde_json_map_contract.mjs
 
       # `validator` is pinned in four places cargo cannot reconcile (this
       # workspace, the excluded demo workspace, the scaffold seeds, and the

@@ -11,8 +11,9 @@ This audit pins the flate decoder graph used by `edgezero-core` for HTTP
 - `adler2 2.0.1`, `crc32fast 1.5.0`, and `simd-adler32 0.3.9`
 
 The lockfile versions, registry source, checksums, metadata graph, and direct
-normal dependencies are enforced by `scripts/check_flate_dependency_contract.mjs`
-for both the root workspace and the excluded `examples/app-demo` workspace.
+normal dependencies are enforced by `scripts/test_integration.sh check dependencies`
+for the root, excluded `examples/app-demo` and reusable-fixture workspaces. Both
+decoder contracts share one metadata snapshot per workspace; audited values are unchanged.
 
 ## Charge
 
