@@ -27,17 +27,17 @@ struct HeadScript {
 }
 
 struct Capture {
-    time: OutboundTime,
     record_batch: bool,
     script: Option<HeadScript>,
+    time: OutboundTime,
 }
 
 impl Capture {
     fn new(time: OutboundTime, record_batch: bool) -> Self {
         Self {
-            time,
             record_batch,
             script: None,
+            time,
         }
     }
 }

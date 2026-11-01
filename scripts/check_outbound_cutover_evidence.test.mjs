@@ -1540,6 +1540,48 @@ test("Fastly optimizer mapping retains its recording SDK and preflight proofs", 
   }
 });
 
+test("approved focus wording separates numeric errors from compile-time invariants", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const spec = readFileSync(
+    new URL(
+      "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const requirement = spec
+    .split("\n")
+    .find((line) => line.startsWith("- **EZ-8.3**"));
+  assert.match(requirement, /Invalid numeric values MUST be rejected/);
+  assert.match(requirement, /MUST be unrepresentable.*compile-fail/);
+  const criterion = manifest.cases.find(
+    (c) => c.case_id === "EZ-8/acceptance/01" && c.environment === "unit/core",
+  );
+  assert.match(criterion.expected, /Compile-fail tests MUST reject/);
+  assert.equal(
+    criterion.implementation,
+    "planned",
+    "wording approval is not executable acceptance",
+  );
+  assert.deepEqual(validateManifest(manifest, spec), {
+    criteria: 255,
+    legs: 511,
+    planned: 360,
+  });
+  const stale = structuredClone(manifest);
+  stale.source_digest =
+    "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70";
+  assert.throws(() => validateManifest(stale, spec), /source document changed/);
+});
+
 test("client precedence binds each adapter's executable owning phase", () => {
   const manifest = JSON.parse(
     readFileSync(

@@ -238,6 +238,10 @@ pub enum OutboundResizeFilter {
 /// ```
 /// ```compile_fail
 /// use edgezero_core::OutboundCropFocus;
+/// let _ = OutboundCropFocus::Percent { y: 75 };
+/// ```
+/// ```compile_fail
+/// use edgezero_core::OutboundCropFocus;
 /// let _ = OutboundCropFocus::Smart { x: 25, y: 75 };
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

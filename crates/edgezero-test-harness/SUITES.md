@@ -338,7 +338,7 @@ scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo te
 Raw capability logs bind `outbound/unit/{adapter}/capabilities.log`; the other unit owners bind
 their existing raw logs, with Spin SDK output under `outbound/redirect/spin/sdk-tests.log`.
 Exact commands and sentinels are in the acceptance inventory. Fastly timeout-setter observation,
-literal runtime errors for unrepresentable focus shapes, and hosted optimizer performance remain
+complete typed-focus compiler-test ownership, and hosted optimizer performance remain
 planned; nearby helper or compile-fail tests do not substitute for those assertions.
 
 ### Provider Boundary
@@ -365,6 +365,12 @@ Fastly EZ-4/01 stays planned: pinned Viceroy's timeout getters return Unsupporte
 registration path discards the connect value. The failed SDK-getter probe is retained at
 `/private/tmp/pr275-provider-settings-fastly.log`, not converted into a helper-value pass.
 No SDK/runtime pin, transport, capability or hosted qualification is changed by these bindings.
+
+The separately approved typed-focus amendment keeps numeric client errors and makes invalid
+smart-plus-offset or one-coordinate combinations unrepresentable. Three Rustdoc compile-fail
+examples cover both coordinate omissions and smart-plus-offset. EZ-8/01 remains planned until
+complete numeric/compiler CI ownership is bound; the current core `--lib` command does not run
+Rustdoc, and a local compiler pass is not an automatic acceptance promotion.
 
 ### Batch Recovery
 

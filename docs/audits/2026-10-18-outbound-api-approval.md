@@ -14,6 +14,10 @@ later, narrower approval separately. The [scoped timing and native integration a
 records the subsequent implementation authorization. Neither supplies a newly approved
 whole-contract digest or changes the frozen Interfaces signatures.
 
+The [typed-focus invariant amendment](#scoped-typed-focus-invariant-amendment) records the
+requester's later approval of the two EZ-8 wording corrections and their affected inventory
+digests. It changes neither the portable API nor any other requirement or qualification gate.
+
 The inspected checkout is PR 275 at `7cccaf10734914161803317aec6c55c22c2bccc9` plus the uncommitted
 G1-G3 work and Spin response-egress repair. Its local characterization does not qualify that commit.
 The [implementation index](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md)
@@ -25,6 +29,7 @@ There is no compatibility branch, alternate transport or lazy default proposed h
 | G4-API               | Approved, API only                       | AG; scoped exact-digest conversation reply | 2026-10-19    | `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a`  |
 | G4-SCOPE-CAPTURE     | Authorized scoped architectural redesign | Requester; explicit conversation reply     | 2026-10-27    | Structured ownership design below; not the earlier closure proposal |
 | G4-FASTLY-SLACK      | Approved, scoped retirement              | Requester; explicit conversation reply     | 2026-10-27    | Remove slack rejection; retain original deadlines, B31 and limits   |
+| G4-FOCUS-INVARIANT   | Approved, scoped wording only            | Requester; explicit conversation reply     | 2026-10-31    | EZ-8.3 and acceptance 01; no API or qualification approval           |
 | G4-FASTLY-POLICY     | Pending; local primitive failed          | Unset                                      | Unset         | Unset                                                               |
 | G4-FASTLY-B31        | Approved, scoped implementation only     | Requester; scoped conversation reply       | 2026-10-25    | Proposal referenced below; not new whole-contract digest approval   |
 | G4-OPTIMIZER-HORIZON | Pending; finite rule unproved            | Unset                                      | Unset         | Unset                                                               |
@@ -142,8 +147,9 @@ consolidations of the selected architecture, not independent compatibility imple
 | ---------------------------------------- | ------------------------------------------------------------------ |
 | Interfaces SHA-256                       | `b69a75ba96b69c0979c05b8711f9cacbaad0abef6a6caa053ed77d21916bbba4` |
 | Complete plan SHA-256                    | `10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b` |
+| Historical complete-plan snapshot        | `2be1dd8704553395ef4f85f914fb75119f351635` |
 | Interfaces size                          | 856 LF-terminated lines, 53,795 UTF-8 bytes                        |
-| Unchanged normative requirements SHA-256 | `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70` |
+| Normative requirements SHA-256 at this amendment | `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70` |
 
 These identify the implemented scope proposal; they do not overwrite the original AG approval
 subject or convert scoped conversation authorization into a new exact-digest review.
@@ -182,10 +188,13 @@ the published documentation site. The identities below are historical, not the a
 | Complete source-file SHA-256   | `c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80`         |
 | Normative requirements SHA-256 | `5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec`         |
 
-Run from the repository/worktree root to verify the original subject and historical region amendment. The extraction includes
+Run from the repository/worktree root to verify the original subject and scoped amendments. The extraction includes
 the trailing blank lines before the next task; it does not normalize whitespace or line endings.
 Any changed Interfaces byte needs a new digest and review. Changes elsewhere in the plan or in
 the requirements also require reviewing their effect, not silently refreshing these identities.
+The complete-plan identity above belongs to the recorded historical snapshot. Later tracking
+edits changed the complete file, not its Interfaces section. Verify that historical whole-file
+identity and the current frozen Interfaces separately; neither blesses later whole-plan changes.
 
 ```sh
 node --input-type=module <<'JS'
@@ -222,11 +231,42 @@ const currentStart = current.indexOf('## Interfaces: Proposed Hard-Cut Contract\
 const currentEnd = current.indexOf('## Task P1:', currentStart);
 assert.ok(currentStart >= 0 && currentEnd > currentStart);
 assert.equal(digest(current.slice(currentStart, currentEnd)), 'b69a75ba96b69c0979c05b8711f9cacbaad0abef6a6caa053ed77d21916bbba4');
-assert.equal(digest(current), '10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b');
-assert.equal(digest(readFileSync(requirementsPath)), 'a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70');
-console.log('Historical and scope-amendment identities match; authorization remains separately scoped.');
+const scopeSnapshot = execFileSync('git', ['show', `2be1dd8704553395ef4f85f914fb75119f351635:${path}`]);
+assert.equal(digest(scopeSnapshot), '10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b');
+const preFocus = execFileSync('git', ['show', `fc973719c1c4840e3eca7fec235924998a0d9d5b:${requirementsPath}`]);
+assert.equal(digest(preFocus), 'a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70');
+assert.equal(digest(readFileSync(requirementsPath)), 'd434beb87106405004315a016b5d5787ec07c3adc25080504f2cb4264a4a11c2');
+console.log('Historical and scoped-amendment identities match; authorization remains separately scoped.');
 JS
 ```
+
+### Scoped Typed Focus Invariant Amendment
+
+**Approved, wording only: requester, 2026-10-31.** The conversation question proposed:
+
+> Invalid numeric values still return a client error, while smart-plus-offset and one-offset-only
+> combinations must be unrepresentable and covered by compile-fail tests. Update only the affected
+> requirement/inventory digests, retain all acceptance identities and hosted gates, and add no raw
+> parser or compatibility API.
+
+The requester replied `Approve typed-invariant wording correction`. This authorizes only
+EZ-8.3 and its first acceptance criterion: numeric builder validation remains a client-class error;
+the portable crop-focus type prevents smart-plus-offset and either one-coordinate shape. The
+three Rustdoc compile-fail examples cover smart-plus-offset, x-only and y-only construction.
+No API, unsafe construction bypass, raw parser, compatibility wrapper or runtime policy is added.
+
+| Verification identity | SHA-256 |
+| --- | --- |
+| Requirements before this amendment, at `fc973719` | `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70` |
+| Requirements after the approved wording correction | `d434beb87106405004315a016b5d5787ec07c3adc25080504f2cb4264a4a11c2` |
+| Updated EZ-8 acceptance 01 | `4981c8d675cb5b06b33dae2c362e82bb2bd060d84387e3ddefb959092be8cd6c` |
+
+Only the manifest's document digest and that criterion's expected text/digest change. All 255
+criteria, 511 environment/split identities, applicability and prior approvals remain intact.
+The criterion stays planned until its numeric and compiler proofs have complete CI ownership;
+approval or a local Rustdoc pass cannot silently substitute for that acceptance binding.
+The original exact-digest API approval, current Interfaces and hosted/provider qualification
+remain separate and unchanged.
 
 ### Scoped Region Enum Amendment
 

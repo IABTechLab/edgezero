@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Clarify the approved crop-focus invariant: invalid numeric options retain client-class errors;
+  smart-plus-offset and one-coordinate shapes are prevented by the type and compile-fail examples.
+  Preserve acceptance identities and qualification gates without adding a parser or compatibility API.
 - Bind four provider-boundary acceptance legs with mandatory same-candidate core companions.
   Verify real Spin host options, Cloudflare aggregate fetch deadlines, Axum shared-pool acceptance,
   and Fastly prepared Send/Follow SDK mapping without changing production behavior. Retain the

@@ -12,6 +12,33 @@
 
 ## Status and Authority
 
+### Typed Focus And CLI Lint Follow-Up (2026-10-31)
+
+The requester approved the [typed-focus wording amendment](../../audits/2026-10-18-outbound-api-approval.md#scoped-typed-focus-invariant-amendment).
+EZ-8.3 and acceptance 01 now distinguish numeric builder errors from invalid combinations that
+the public enum makes unrepresentable. Added the symmetric y-only compile-fail example beside
+the existing x-only and smart-plus-offset examples. No option type, builder, runtime behavior,
+parser or compatibility API changes. Only the whole-document digest and acceptance 01's text/digest
+change in the inventory; all identities, other criterion digests, applicability and approvals stay.
+
+This closes the wording question, not automatic compiler-test ownership. EZ-8/01 remains planned:
+the existing core `--lib` owner cannot certify Rustdoc execution. Local compiler and numeric
+checks remain separate from a future complete CI binding. Inventory stays 151 ready/360 planned,
+unqualified; no hosted or provider gate is closed by this amendment.
+
+CI at `fc973719` passes formatting and workspace all-feature Clippy, then fails the existing
+Fastly CLI-only Clippy step on capture-fixture field order. Reproduced that exact feature set,
+ordered the private fields alphabetically, and retained every field and behavior without a suppression.
+Verified the no-default-feature library path too; all-features validation must not mask a narrower build.
+
+Verification: all five root gates pass, including 2,637 tests across 33 binaries with one existing
+ignored test. The exact CLI-only Clippy command, CLI tests and no-default-feature library Clippy
+pass. The core inventory owner passes 1,103 tests; Fastly's guarded WASM library passes 293;
+all three focus Rustdoc compile-fail examples pass. Tooling passes 193 tests, including 62 evidence
+tests. Documentation, manifest, formatting, historical/current audit identities and scoped reviews
+pass. Logs are `/private/tmp/pr275-focus-*` and `/private/tmp/pr275-provider-settings-fastly-*`.
+These local results do not close compiler CI ownership, hosted qualification or candidate freeze.
+
 ### Provider Boundary Acceptance (2026-10-31)
 
 The requester approved the next local provider-boundary pass. Four more blocking legs are
@@ -49,10 +76,9 @@ Debug-string parsing, SDK copies or another runtime patch; EZ-4/01 on Fastly sta
 The recording optimizer test proves prepared-hop mapping, not submitted host claims, transformed
 output, successful native optimized redirects or performance. Existing native-unavailability
 controls remain separate; hosted optimizer/timing qualification and candidate freeze stay open.
-The scoped numeric-error versus unrepresentable-focus wording correction has been proposed;
-until separately approved, EZ-8.3, its first acceptance criterion and all source digests remain
-unchanged, and EZ-8/01 remains planned. Original deadlines, B31, caps, direct native IO, SDK/runtime
-pins, capabilities, demo and generator contracts are unchanged.
+The later typed-focus amendment above governs the approved wording correction; it does not
+activate EZ-8/01 or retroactively change this checkpoint's verification. Original deadlines, B31,
+caps, direct native IO, SDK/runtime pins, capabilities, demo and generator contracts are unchanged.
 
 Verification: all five root gates pass, including 2,637 tests across 33 binaries with one
 existing ignored test. The unchanged core companion guard passes 1,103 tests; the harness
@@ -64,7 +90,7 @@ Dependency/forwarding checks, docs contract, formatting, manifest and legacy gua
 Scoped reviews are clear after retaining Axum's original two 1 ms controls and 1-second total
 deadline. Logs and complete runtime artifacts are `/private/tmp/pr275-provider-settings-*`.
 These results qualify no frozen candidate or hosted provider; the two explicit local gaps above
-remain open. The requirements SHA-256 remains
+remain open. The requirements SHA-256 at this checkpoint (`fc973719`) is
 `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70`.
 
 ### Unit Settings Acceptance (2026-10-31)
