@@ -1420,6 +1420,106 @@ mod worker_impl {
         }
 
         #[wasm_bindgen_test]
+        async fn configured_connect_timeout_preserves_aggregate_fetch_budget() {
+            let _timers = NumericTimeoutGuard::install();
+            let (success_probe, restore_success) = fetch_probe(false);
+            let success_client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let original = OutboundRequest::get("https://fixture.invalid/")
+                .expect("request")
+                .connect_timeout(Duration::from_secs(1))
+                .timeout(Duration::from_secs(4));
+            let success_request =
+                OutboundRequest::from_parts(original.into_parts()).expect("round trip");
+            assert_eq!(
+                success_request.connect_timeout_setting(),
+                Some(Duration::from_secs(1))
+            );
+            let response = success_client
+                .send(success_request)
+                .await
+                .expect("accepted setting");
+            assert_eq!(response.into_bytes_bounded(5).await.expect("body"), "ready");
+            assert_eq!(
+                Reflect::get(&success_probe, &JsValue::from_str("calls"))
+                    .expect("calls")
+                    .as_f64(),
+                Some(1.0_f64)
+            );
+            drop(restore_success);
+            for cause in [BudgetSource::PerCallTimeout, BudgetSource::RequestDeadline] {
+                let (probe, _restore) = fetch_probe(true);
+                let start = MonotonicInstant::now();
+                let now = Arc::new(Mutex::new(start));
+                let deadline = start.checked_add(Duration::from_secs(4)).expect("deadline");
+                let (wake, timer_receiver) = oneshot::channel();
+                let pending_receiver = Arc::new(Mutex::new(Some(timer_receiver)));
+                let time =
+                    OutboundTime::new(controlled_clock(Arc::clone(&now)), move |until, _| {
+                        assert_eq!(
+                            until.instant(),
+                            deadline,
+                            "connect setting cannot replace the budget"
+                        );
+                        let receiver = pending_receiver
+                            .lock()
+                            .expect("timer slot")
+                            .take()
+                            .expect("one fetch timer");
+                        Box::pin(async move {
+                            receiver.await.expect("timer wake");
+                            Ok(())
+                        })
+                    });
+                let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+                let mut request = OutboundRequest::get("https://fixture.invalid/")
+                    .expect("request")
+                    .connect_timeout(Duration::from_secs(1));
+                request = if cause == BudgetSource::PerCallTimeout {
+                    request.timeout(Duration::from_secs(4))
+                } else {
+                    request
+                        .timeout(Duration::from_secs(6))
+                        .deadline(Deadline::at_instant(deadline))
+                };
+                let mut send = client.send(request);
+                poll_fn(|cx| {
+                    assert!(send.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                HostEventYield::after(Duration::from_millis(1))
+                    .await
+                    .expect("fetch microtask");
+                let signal = Reflect::get(&probe, &JsValue::from_str("signal"))
+                    .expect("signal")
+                    .dyn_into::<web_sys::AbortSignal>()
+                    .expect("abort signal");
+                *now.lock().expect("clock") = start
+                    .checked_add(Duration::from_secs(2))
+                    .expect("live budget");
+                poll_fn(|cx| {
+                    assert!(send.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(!signal.aborted(), "no synthetic connect-phase expiry");
+                *now.lock().expect("clock") = deadline;
+                wake.send(()).expect("pending fetch timer");
+                let error = send.await.expect_err("aggregate expiry");
+                assert!(
+                    matches!(error, EdgeError::GatewayTimeout { cause: observed, .. } if observed == cause)
+                );
+                assert!(signal.aborted());
+                assert_eq!(
+                    Reflect::get(&probe, &JsValue::from_str("aborts"))
+                        .expect("aborts")
+                        .as_f64(),
+                    Some(1.0_f64)
+                );
+            }
+        }
+
+        #[wasm_bindgen_test]
         async fn clamped_batch_cutoff_uses_actual_observation_cutoff() {
             for (elapsed_hours, unresolved) in [(168_u64, false), (192, true)] {
                 let start = MonotonicInstant::now();

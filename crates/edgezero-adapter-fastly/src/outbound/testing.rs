@@ -21,7 +21,26 @@ std::thread_local! {
     static BATCH: RefCell<Option<OutboundBatchContext>> = const { RefCell::new(None) };
 }
 
-struct Capture(OutboundTime, bool);
+struct HeadScript {
+    dispatch: Box<dyn Fn(OutboundDispatchRequest) -> OutboundFuture<OutboundHead> + Send + Sync>,
+    validate: fn(&OutboundRequest, OutboundSendMode) -> Result<(), EdgeError>,
+}
+
+struct Capture {
+    time: OutboundTime,
+    record_batch: bool,
+    script: Option<HeadScript>,
+}
+
+impl Capture {
+    fn new(time: OutboundTime, record_batch: bool) -> Self {
+        Self {
+            time,
+            record_batch,
+            script: None,
+        }
+    }
+}
 
 impl OutboundHttpClient for Capture {
     fn begin(&self, _: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
@@ -31,6 +50,9 @@ impl OutboundHttpClient for Capture {
     }
 
     fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+        if let Some(script) = &self.script {
+            return (script.dispatch)(request);
+        }
         DISPATCH.with(|saved| saved.replace(Some(request)));
         Box::pin(pending())
     }
@@ -41,31 +63,34 @@ impl OutboundHttpClient for Capture {
 
     fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
         let (context, _) = batch.into_slots();
-        if !self.1 {
+        if !self.record_batch {
             return OutboundBatch::cutoff(context);
         }
         let cutoff = context.observation_cutoff();
         BATCH.with(|saved| saved.replace(Some(context)));
-        HttpClient::with_client(Capture(self.0.clone(), false))
+        HttpClient::with_client(Capture::new(self.time.clone(), false))
             .start_batch_until(Vec::new(), cutoff)
     }
 
     fn time(&self) -> OutboundTime {
-        self.0.clone()
+        self.time.clone()
     }
 
     fn validate_supported_options(
         &self,
-        _: &OutboundRequest,
-        _: OutboundSendMode,
+        request: &OutboundRequest,
+        mode: OutboundSendMode,
     ) -> Result<(), EdgeError> {
+        if let Some(script) = &self.script {
+            return (script.validate)(request, mode);
+        }
         Ok(())
     }
 }
 
 #[cfg(feature = "fastly")]
 pub(super) fn dispatch(request: OutboundRequest, time: OutboundTime) -> OutboundDispatchRequest {
-    let mut future = HttpClient::with_client(Capture(time, false)).send(request);
+    let mut future = HttpClient::with_client(Capture::new(time, false)).send(request);
     assert!(
         future
             .as_mut()
@@ -101,7 +126,7 @@ pub(super) fn batch_context_at(
         }),
         |_, _| Box::pin(pending()),
     );
-    let client = HttpClient::with_client(Capture(time, true));
+    let client = HttpClient::with_client(Capture::new(time, true));
     let requests = repeat_with(|| {
         OutboundRequest::get("https://example.com/")
             .unwrap()
@@ -135,7 +160,7 @@ pub(crate) fn batch_context_using(
     .take(slot_count)
     .collect();
     drop(
-        HttpClient::with_client(Capture(time, true))
+        HttpClient::with_client(Capture::new(time, true))
             .start_batch_until(requests, observation_cutoff),
     );
     BATCH.with(|saved| {
@@ -148,7 +173,7 @@ pub(crate) fn batch_context_using(
 
 #[cfg(not(feature = "fastly"))]
 pub(crate) fn client(time: OutboundTime) -> HttpClient {
-    HttpClient::with_client(Capture(time, false))
+    HttpClient::with_client(Capture::new(time, false))
 }
 
 pub(crate) fn owner() -> OutboundExchangeOwner {
@@ -158,6 +183,175 @@ pub(crate) fn owner() -> OutboundExchangeOwner {
 std::thread_local! { static START: MonotonicInstant = MonotonicInstant::now(); }
 pub(crate) fn instant() -> MonotonicInstant {
     START.with(|start| *start)
+}
+
+#[cfg(feature = "fastly")]
+fn optimizer_options_fixture() -> (
+    edgezero_core::OutboundImageOptimizerOptions,
+    serde_json::Value,
+) {
+    use edgezero_core::{
+        OutboundCropFocus, OutboundImageFormat, OutboundImageOptimizerOptions,
+        OutboundImageOptimizerRegion, OutboundResizeFilter,
+    };
+    use fastly::image_optimizer::{
+        Area, Crop, Format, ImageOptimizerOptions, ImageOptimizerRegion, PixelsOrPercentage,
+        PointOrOffset, Position, ResizeAlgorithm,
+    };
+    let options = OutboundImageOptimizerOptions::new()
+        .region(OutboundImageOptimizerRegion::Asia)
+        .preserve_origin_query(true)
+        .format(OutboundImageFormat::WebP)
+        .quality(100)
+        .expect("quality")
+        .resize_filter(OutboundResizeFilter::Lanczos3)
+        .width(320)
+        .expect("width")
+        .height(180)
+        .expect("height")
+        .crop(16, 9, OutboundCropFocus::Percent { x: 0, y: 100 })
+        .expect("crop");
+    let mut expected = ImageOptimizerOptions::from_region(ImageOptimizerRegion::Asia);
+    expected.preserve_query_string_on_origin_request = Some(true);
+    expected.format = Some(Format::WebP);
+    expected.quality = Some(100);
+    expected.resize_filter = Some(ResizeAlgorithm::Lanczos3);
+    expected.width = Some(PixelsOrPercentage::Pixels(320));
+    expected.height = Some(PixelsOrPercentage::Pixels(180));
+    expected.crop = Some(Crop {
+        size: Area::AspectRatio((16, 9)),
+        mode: None,
+        position: Some(Position {
+            x: Some(PointOrOffset::Offset(0)),
+            y: Some(PointOrOffset::Offset(100)),
+        }),
+    });
+    (
+        options,
+        serde_json::to_value(expected).expect("expected SDK values"),
+    )
+}
+
+#[cfg(feature = "fastly")]
+fn optimizer_reply(index: usize, context: edgezero_core::OutboundResponseContext) -> OutboundHead {
+    use edgezero_core::http::{HeaderMap, StatusCode};
+    use edgezero_core::{OutboundHeaderFidelity, OutboundHeaderInput};
+    use futures_util::{StreamExt as _, stream};
+
+    let mut headers = HeaderMap::new();
+    let status = if index == 1 {
+        headers.insert("location", "/next".parse().expect("location"));
+        StatusCode::FOUND
+    } else {
+        assert!(index < 3, "exactly one send and two Follow hops");
+        StatusCode::OK
+    };
+    OutboundHead::new(
+        status,
+        OutboundHeaderInput::new(
+            "fastly-recording",
+            headers,
+            OutboundHeaderFidelity::AdapterVisibleFields,
+        ),
+        stream::empty().boxed_local(),
+        context,
+        owner(),
+    )
+    .expect("scripted head")
+}
+
+#[cfg(feature = "fastly")]
+#[test]
+fn image_optimizer_follow_uses_native_mapping_on_each_prepared_hop() {
+    use std::cell::Cell;
+    use std::sync::{Arc, Mutex};
+
+    use edgezero_core::http::StatusCode;
+    use edgezero_core::{OutboundRedirectAction, OutboundRedirectLimit};
+    use futures_util::future::FutureExt as _;
+
+    let start = instant();
+    let time = OutboundTime::new(MonotonicClock::new(move || start), |_, _| {
+        Box::pin(pending())
+    });
+    let (options, expected) = optimizer_options_fixture();
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&records);
+    let mut capture = Capture::new(time, false);
+    capture.script = Some(HeadScript {
+        validate: super::validate_supported_options,
+        dispatch: Box::new(move |request| {
+            let (parts, context) = request.into_parts();
+            let attached_options = parts.image_optimizer.expect("attached options");
+            let native = super::image_optimizer::native_options(&attached_options)
+                .expect("production mapper");
+            let mut entries = observed.lock().expect("records");
+            let index = entries.len();
+            entries.push((
+                context.mode(),
+                parts.uri,
+                attached_options,
+                serde_json::to_value(native).expect("SDK values"),
+            ));
+            Box::pin(async move { Ok(optimizer_reply(index, context)) })
+        }),
+    });
+    let client = HttpClient::with_client(capture);
+    let request = || {
+        OutboundRequest::get("https://fixture.invalid/first?width=8")
+            .expect("request")
+            .timeout(Duration::from_secs(15))
+            .image_optimizer(options.clone())
+    };
+    client
+        .send(request())
+        .now_or_never()
+        .expect("scripted send resolves")
+        .expect("send");
+    let policies = Rc::new(Cell::new(0_usize));
+    let observed_policies = Rc::clone(&policies);
+    let policy_options = options.clone();
+    let response = client
+        .follow(
+            request(),
+            OutboundRedirectLimit::new(1).expect("limit"),
+            move |context| {
+                observed_policies.set(observed_policies.get().saturating_add(1));
+                assert_eq!(
+                    context
+                        .prepared_request()
+                        .expect("prepared hop")
+                        .image_optimizer_options(),
+                    Some(&policy_options)
+                );
+                Ok::<_, ()>(OutboundRedirectAction::FollowPrepared)
+            },
+        )
+        .now_or_never()
+        .expect("scripted Follow resolves")
+        .expect("follow");
+    assert_eq!(response.response().status(), StatusCode::OK);
+    assert_eq!(policies.get(), 1);
+    let entries = records.lock().expect("records");
+    assert_eq!(entries.len(), 3);
+    for ((mode, target, attached, native), (expected_mode, expected_target)) in
+        entries.iter().zip([
+            (
+                OutboundSendMode::Send,
+                "https://fixture.invalid/first?width=8",
+            ),
+            (
+                OutboundSendMode::Follow,
+                "https://fixture.invalid/first?width=8",
+            ),
+            (OutboundSendMode::Follow, "https://fixture.invalid/next"),
+        ])
+    {
+        assert_eq!(*mode, expected_mode);
+        assert_eq!(target.to_string(), expected_target);
+        assert_eq!(*attached, options);
+        assert_eq!(*native, expected);
+    }
 }
 
 #[cfg(feature = "fastly")]

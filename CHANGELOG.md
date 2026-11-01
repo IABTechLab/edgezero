@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind four provider-boundary acceptance legs with mandatory same-candidate core companions.
+  Verify real Spin host options, Cloudflare aggregate fetch deadlines, Axum shared-pool acceptance,
+  and Fastly prepared Send/Follow SDK mapping without changing production behavior. Retain the
+  pinned Viceroy timeout-getter limitation and hosted optimizer qualification gates.
 - Bind twelve unit-settings proofs to existing CI owners: zero-connect rejection and capability
   metadata on all four adapters, plus optimizer readback and unsupported-mode precedence.
   Preserve original deadlines and leave provider-setter, native optimizer Follow and hosted proofs open.

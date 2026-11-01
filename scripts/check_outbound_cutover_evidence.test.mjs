@@ -909,7 +909,7 @@ test("redirect core criteria bind every required test before one library executi
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 364,
+    planned: 360,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
@@ -1308,6 +1308,10 @@ test("core policy conformance binds complete proofs without promoting provider l
         !(
           caseId === "EZ-5/acceptance/10" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(row.environment)
+        ) &&
+        !(
+          caseId === "EZ-4/acceptance/01" &&
+          /^unit\/(axum|cloudflare|spin)$/.test(row.environment)
         ),
     )) {
       assert.equal(
@@ -1389,8 +1393,7 @@ test("unit settings acceptance binds only proved zero-connect capabilities and o
       activated++;
     }
     const optimizer = row("EZ-8/acceptance/03", environment);
-    if (adapter === "fastly") assert.equal(optimizer.implementation, "planned");
-    else {
+    if (adapter !== "fastly") {
       assert.equal(optimizer.implementation, "ready");
       assert.equal(optimizer.sentinel, owner.sentinel);
       assert.equal(optimizer.command, owner.command);
@@ -1398,10 +1401,6 @@ test("unit settings acceptance binds only proved zero-connect capabilities and o
       assert.equal(optimizer.applicability, "blocking");
       activated++;
     }
-    assert.equal(
-      row("EZ-4/acceptance/01", environment).implementation,
-      "planned",
-    );
   }
   const core = row("EZ-8/acceptance/03", "unit/core");
   assert.equal(core.implementation, "ready");
@@ -1419,6 +1418,126 @@ test("unit settings acceptance binds only proved zero-connect capabilities and o
     "planned",
   );
   assert.equal(++activated, 12);
+});
+
+test("connect mapping requires actual provider proofs and the same-candidate core companion", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const spec = readFileSync(
+    new URL(
+      "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  for (const [adapter, names] of [
+    [
+      "axum",
+      [
+        "configured_connect_timeout_reuses_shared_keep_alive_transport",
+        "connect_timeout_acceptance_preserves_governing_deadline_without_emulation",
+      ],
+    ],
+    [
+      "cloudflare",
+      [
+        "outbound::worker_impl::clock_tests::configured_connect_timeout_preserves_aggregate_fetch_budget",
+      ],
+    ],
+    ["spin", ["tests::configured_connect_timeout_reaches_host_options"]],
+  ]) {
+    const row = manifest.cases.find(
+      (c) =>
+        c.case_id === "EZ-4/acceptance/01" &&
+        c.environment === `unit/${adapter}`,
+    );
+    assert.equal(row.implementation, "ready");
+    assert.deepEqual(
+      [row.sentinel, ...(row.additional_sentinels ?? [])],
+      names,
+    );
+    assert.equal(row.companion_case, "EZ-4/acceptance/01@unit/core");
+    const owner = manifest.cases.find(
+      (c) =>
+        c.case_id === "EZ-4/acceptance/02" && c.environment === row.environment,
+    );
+    assert.equal(row.command, owner.command);
+    assert.equal(row.artifact_path, owner.artifact_path);
+    for (const companion of [undefined, "EZ-7/acceptance/01@unit/core"]) {
+      const altered = structuredClone(manifest);
+      altered.cases.find(
+        (c) => c.case_id === row.case_id && c.environment === row.environment,
+      ).companion_case = companion;
+      assert.throws(
+        () => validateManifest(altered, spec),
+        /connect.*companion/,
+      );
+    }
+  }
+  assert.equal(
+    manifest.cases.find(
+      (c) =>
+        c.case_id === "EZ-4/acceptance/01" && c.environment === "unit/fastly",
+    ).implementation,
+    "planned",
+  );
+});
+
+test("Fastly optimizer mapping retains its recording SDK and preflight proofs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const spec = readFileSync(
+    new URL(
+      "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const row = manifest.cases.find(
+    (c) =>
+      c.case_id === "EZ-8/acceptance/03" && c.environment === "unit/fastly",
+  );
+  const owner = manifest.cases.find(
+    (c) =>
+      c.case_id === "EZ-4/acceptance/02" && c.environment === row.environment,
+  );
+  assert.equal(row.implementation, "ready");
+  assert.equal(row.command, owner.command);
+  assert.equal(row.artifact_path, owner.artifact_path);
+  assert.deepEqual(
+    [row.sentinel, ...row.additional_sentinels],
+    [
+      "outbound::testing::image_optimizer_follow_uses_native_mapping_on_each_prepared_hop",
+      "outbound::image_optimizer::tests::image_optimizer_native_mapping_matches_sdk",
+      "outbound::image_optimizer::tests::image_optimizer_native_crop_and_dimensions_match_sdk",
+      "request::synthesis_tests::unsupported_optimizer_precedes_expiry_without_transport",
+    ],
+  );
+  assert.equal(row.companion_case, "EZ-8/acceptance/03@unit/core");
+  for (const companion of [undefined, "EZ-4/acceptance/01@unit/core"]) {
+    const altered = structuredClone(manifest);
+    altered.cases.find(
+      (c) => c.case_id === row.case_id && c.environment === row.environment,
+    ).companion_case = companion;
+    assert.throws(
+      () => validateManifest(altered, spec),
+      /optimizer.*companion/,
+    );
+  }
 });
 
 test("client precedence binds each adapter's executable owning phase", () => {
@@ -1596,7 +1715,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /364 other legs remain planned/);
+  assert.match(manifest.status, /360 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -2184,10 +2303,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 147);
+  assert.equal(ready.length, 151);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    364,
+    360,
   );
   assert.ok(
     ready.every(
@@ -2201,10 +2320,16 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
         localOverflowProofKeys.has(`${c.case_id}@${c.environment}`) ||
         (["EZ-4/acceptance/02", "EZ-4/acceptance/04"].includes(c.case_id) &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
+        (c.case_id === "EZ-4/acceptance/01" &&
+          /^unit\/(axum|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-8/acceptance/03" &&
-          ["unit/core", "unit/axum", "unit/cloudflare", "unit/spin"].includes(
-            c.environment,
-          )) ||
+          [
+            "unit/core",
+            "unit/axum",
+            "unit/fastly",
+            "unit/cloudflare",
+            "unit/spin",
+          ].includes(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/22" &&
@@ -2420,7 +2545,7 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
   );
   assert.match(
     ci,
-    /Some\(\s*"EZ-2\/acceptance\/01"\s*\|\s*"EZ-3\/acceptance\/08"\s*\|\s*"EZ-4\/acceptance\/02"\s*\|\s*"EZ-8\/acceptance\/03"\s*,?\s*\)\s*=>\s*sdk_log/,
+    /Some\(\s*"EZ-2\/acceptance\/01"\s*\|\s*"EZ-3\/acceptance\/08"\s*\|\s*"EZ-4\/acceptance\/01"\s*\|\s*"EZ-4\/acceptance\/02"\s*\|\s*"EZ-8\/acceptance\/03"\s*,?\s*\)\s*=>\s*sdk_log/,
   );
   assert.match(ci, /Some\("EZ-5\/acceptance\/09"\)\s*=>\s*async_log/);
   assert.match(ci, /Some\("EZ-5\/acceptance\/10"\)\s*=>\s*wire_log/);

@@ -314,8 +314,8 @@ This binds local execution only, without adopting optional metadata or qualifyin
 
 Twelve additional blocking legs reuse existing owners: EZ-4/02 (zero connect timeout) and
 EZ-4/04 (capability metadata) on every adapter, plus EZ-8/03 (optimizer readback or unsupported
-modes) in core and on Axum, Cloudflare and Spin. The inventory is 147 ready/364 planned,
-unqualified. No CI job, phase or per-test YAML list is added.
+modes) in core and on Axum, Cloudflare and Spin. That checkpoint starts at 147 ready/364 planned;
+Provider Boundary below adds four more. No CI job, phase or per-test YAML list is added.
 
 The zero-timeout helper uses actual native clients through Send, Begin, Follow and Batch;
 counted pending GET sources, timer tripwires and expired positive-setting controls establish
@@ -337,10 +337,34 @@ scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo te
 
 Raw capability logs bind `outbound/unit/{adapter}/capabilities.log`; the other unit owners bind
 their existing raw logs, with Spin SDK output under `outbound/redirect/spin/sdk-tests.log`.
-Exact commands and sentinels are in the acceptance inventory. Adapter connect-setter/readback
-legs, supported Fastly native Follow, literal runtime errors for unrepresentable focus shapes,
-and hosted optimizer performance remain planned; nearby helper or compile-fail tests do not
-substitute for those assertions.
+Exact commands and sentinels are in the acceptance inventory. Fastly timeout-setter observation,
+literal runtime errors for unrepresentable focus shapes, and hosted optimizer performance remain
+planned; nearby helper or compile-fail tests do not substitute for those assertions.
+
+### Provider Boundary
+
+EZ-4/01 on Axum, Cloudflare and Spin and EZ-8/03 on Fastly reuse their existing unit owners,
+bringing the inventory to 151 ready/360 planned, unqualified. Each requires its same-candidate
+core companion for request readback, rebuilding and prepared-hop carriage. The checker rejects
+deleted/substituted companions and grants no credit without matching passing evidence.
+
+Axum proves acceptance with both 1 ms and 1 s settings on one pooled connection, plus governing
+deadline attribution. Cloudflare uses its real client and existing SDK fetch probe with a paired
+clock/timer; an accepted connect setting cannot introduce an early timeout, and aggregate expiry
+aborts once. Spin's SDK phase calls production `request_options` and reads actual host getters,
+not an injected setter recorder. Missing or wrong-phase Spin markers fail persisted readback.
+
+Fastly's existing private capture fixture now supports scripted heads without changing its
+default pending-capture behavior. Send and both prepared Follow hops invoke the production SDK
+mapper and compare all fields with independently constructed SDK options. Serialization is
+test-only, not another production representation. Separate native mapping and Begin/Batch
+preflight sentinels remain mandatory. This is recording-boundary proof, not submitted host-claim
+readback, successful hosted transforms or performance.
+
+Fastly EZ-4/01 stays planned: pinned Viceroy's timeout getters return Unsupported, and its
+registration path discards the connect value. The failed SDK-getter probe is retained at
+`/private/tmp/pr275-provider-settings-fastly.log`, not converted into a helper-value pass.
+No SDK/runtime pin, transport, capability or hosted qualification is changed by these bindings.
 
 ### Batch Recovery
 

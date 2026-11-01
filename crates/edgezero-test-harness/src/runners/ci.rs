@@ -69,8 +69,8 @@ fn validate_markers(
         }
         let log = match case["case_id"].as_str() {
             Some(
-                "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/02"
-                | "EZ-8/acceptance/03",
+                "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/01"
+                | "EZ-4/acceptance/02" | "EZ-8/acceptance/03",
             ) => sdk_log,
             Some("EZ-5/acceptance/09") => async_log,
             Some("EZ-5/acceptance/10") => wire_log,
@@ -102,8 +102,8 @@ fn validate_markers(
             let (log, expected) = match (case["case_id"].as_str(), name) {
                 (
                     Some(
-                        "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/02"
-                        | "EZ-8/acceptance/03",
+                        "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/01"
+                        | "EZ-4/acceptance/02" | "EZ-8/acceptance/03",
                     ),
                     _,
                 ) => (log, format!("test {name} ... ok")),
@@ -580,22 +580,26 @@ mod tests {
         for (id, sentinel) in [
             (
                 "EZ-3/acceptance/08",
-                "unsupported_optimizer_precedes_expiry_without_transport",
+                "tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport",
             ),
             (
                 "EZ-8/acceptance/03",
-                "unsupported_optimizer_precedes_expiry_without_transport",
+                "tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport",
             ),
             (
                 "EZ-4/acceptance/02",
-                "zero_connect_timeout_rejects_before_transport",
+                "tests::ingress_contract::zero_connect_timeout_rejects_before_transport",
+            ),
+            (
+                "EZ-4/acceptance/01",
+                "tests::configured_connect_timeout_reaches_host_options",
             ),
         ] {
             let inventory = json!({"cases":[{
                 "case_id":id, "environment":"unit/spin",
-                "implementation":"ready", "sentinel":format!("tests::ingress_contract::{sentinel}")
+                "implementation":"ready", "sentinel":sentinel
             }]});
-            let passed = format!("test tests::ingress_contract::{sentinel} ... ok\n");
+            let passed = format!("test {sentinel} ... ok\n");
             validate_markers(&inventory, "", &passed, "", "").unwrap();
             let ignored = passed.replace(" ... ok", " ... ignored");
             for (native, sdk, asynchronous, wire) in [

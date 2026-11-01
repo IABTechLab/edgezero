@@ -441,12 +441,16 @@ async fn configured_connect_timeout_reuses_shared_keep_alive_transport() {
         }
     });
     let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
-    for _ in 0_u8..2 {
+    for connect in [
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+        Duration::from_secs(1),
+    ] {
         let response = client
             .send(
                 OutboundRequest::get(&target)
                     .expect("request")
-                    .connect_timeout(Duration::from_millis(1))
+                    .connect_timeout(connect)
                     .timeout(Duration::from_secs(1)),
             )
             .await

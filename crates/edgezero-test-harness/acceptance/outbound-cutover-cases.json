@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; EZ-10 local buffered/streamed overflow acceptance 05/06 on all four runtimes and chunked-ingress acceptance 03 on Viceroy/workerd/Spin bind the existing guarded overflow suite; EZ-10 core reader/declared-length acceptance 01/02, Axum pipeline/custom-renderer acceptance 03/07 and actual scaffold/demo acceptance 08 bind the existing owning commands; the shared core guard runs one complete library rather than only outbound::; EZ-4 zero-connect rejection and capability metadata on all four adapters plus EZ-8 optimizer readback in core and unsupported modes on Axum/Cloudflare/Spin bind twelve additional unit legs; provider-setter observations, runtime-only invalid focus wording and Fastly optimizer Follow mapping remain planned; 364 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; EZ-10 local buffered/streamed overflow acceptance 05/06 on all four runtimes and chunked-ingress acceptance 03 on Viceroy/workerd/Spin bind the existing guarded overflow suite; EZ-10 core reader/declared-length acceptance 01/02, Axum pipeline/custom-renderer acceptance 03/07 and actual scaffold/demo acceptance 08 bind the existing owning commands; the shared core guard runs one complete library rather than only outbound::; EZ-4 zero-connect rejection and capability metadata on all four adapters plus EZ-8 optimizer readback in core and unsupported modes on Axum/Cloudflare/Spin bind twelve additional unit legs; Axum/Cloudflare/Spin connect-setting boundary proofs and Fastly prepared optimizer mapping bind four more unit legs with mandatory same-candidate core companions; Fastly timeout-setter observation and runtime-only invalid focus wording remain planned; 360 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -3307,12 +3307,16 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-01-unit-axum",
-      "sentinel": "ez_4_acceptance_01_unit_axum",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_01_unit_axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils",
+      "sentinel": "configured_connect_timeout_reuses_shared_keep_alive_transport",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Given a request with a 1 s connect timeout, when it goes through `into_parts` and `from_parts` and through a redirect-hop rebuild, then the connect timeout read back under EZ-4.11 is 1 s. A recording head-first client MUST also observe that setting through the prepared dispatch request without shortening its aggregate budget. Fastly and Spin mapping tests MUST observe the value passed to the provider timeout setter; Axum and Cloudflare retain their documented BestEffort acceptance.",
-      "artifact_path": "outbound/EZ-4/acceptance/01/unit/axum.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/unit/axum/raw.log",
+      "implementation": "ready",
+      "comparison": false,
+      "companion_case": "EZ-4/acceptance/01@unit/core",
+      "additional_sentinels": [
+        "connect_timeout_acceptance_preserves_governing_deadline_without_emulation"
+      ]
     },
     {
       "case_id": "EZ-4/acceptance/01",
@@ -3369,12 +3373,13 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-01-unit-cloudflare",
-      "sentinel": "ez_4_acceptance_01_unit_cloudflare",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_01_unit_cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils",
+      "sentinel": "outbound::worker_impl::clock_tests::configured_connect_timeout_preserves_aggregate_fetch_budget",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib",
       "expected": "Given a request with a 1 s connect timeout, when it goes through `into_parts` and `from_parts` and through a redirect-hop rebuild, then the connect timeout read back under EZ-4.11 is 1 s. A recording head-first client MUST also observe that setting through the prepared dispatch request without shortening its aggregate budget. Fastly and Spin mapping tests MUST observe the value passed to the provider timeout setter; Axum and Cloudflare retain their documented BestEffort acceptance.",
-      "artifact_path": "outbound/EZ-4/acceptance/01/unit/cloudflare.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/unit/cloudflare/raw.log",
+      "implementation": "ready",
+      "comparison": false,
+      "companion_case": "EZ-4/acceptance/01@unit/core"
     },
     {
       "case_id": "EZ-4/acceptance/01",
@@ -3400,12 +3405,13 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-01-unit-spin",
-      "sentinel": "ez_4_acceptance_01_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_01_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "tests::configured_connect_timeout_reaches_host_options",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Given a request with a 1 s connect timeout, when it goes through `into_parts` and `from_parts` and through a redirect-hop rebuild, then the connect timeout read back under EZ-4.11 is 1 s. A recording head-first client MUST also observe that setting through the prepared dispatch request without shortening its aggregate budget. Fastly and Spin mapping tests MUST observe the value passed to the provider timeout setter; Axum and Cloudflare retain their documented BestEffort acceptance.",
-      "artifact_path": "outbound/EZ-4/acceptance/01/unit/spin.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/spin/sdk-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "companion_case": "EZ-4/acceptance/01@unit/core"
     },
     {
       "case_id": "EZ-4/acceptance/02",
@@ -10137,12 +10143,18 @@
       "owner": "EdgeZero",
       "task": "D1d",
       "substep": "EZ-8-acceptance-03-unit-fastly",
-      "sentinel": "ez_8_acceptance_03_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_8_acceptance_03_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "outbound::testing::image_optimizer_follow_uses_native_mapping_on_each_prepared_hop",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Unit. Given a request with options attached, the application reads back options equal to the ones it attached. The same holds for the next request of a followed redirect (EZ-9). A recording Fastly boundary observes `Follow` on the initial and next hop and invokes the same Image Optimizer mapping as `Send`; `Begin` and `Batch` still reject before body polling or provider work. Other adapters reject the options in all four modes before dispatch.",
-      "artifact_path": "outbound/EZ-8/acceptance/03/unit/fastly.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/unit/fastly/raw.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "outbound::image_optimizer::tests::image_optimizer_native_mapping_matches_sdk",
+        "outbound::image_optimizer::tests::image_optimizer_native_crop_and_dimensions_match_sdk",
+        "request::synthesis_tests::unsupported_optimizer_precedes_expiry_without_transport"
+      ],
+      "companion_case": "EZ-8/acceptance/03@unit/core"
     },
     {
       "case_id": "EZ-8/acceptance/03",

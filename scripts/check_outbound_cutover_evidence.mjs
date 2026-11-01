@@ -255,6 +255,24 @@ export function validateManifest(
         c.companion_case === "EZ-6/acceptance/22@unit/core",
         `${id}: private identity companion required`,
       );
+    if (
+      c.case_id === "EZ-4/acceptance/01" &&
+      c.implementation === "ready" &&
+      /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)
+    )
+      requireFact(
+        c.companion_case === "EZ-4/acceptance/01@unit/core",
+        `${id}: connect mapping requires its core companion`,
+      );
+    if (
+      c.case_id === "EZ-8/acceptance/03" &&
+      c.implementation === "ready" &&
+      c.environment === "unit/fastly"
+    )
+      requireFact(
+        c.companion_case === "EZ-8/acceptance/03@unit/core",
+        `${id}: optimizer mapping requires its core companion`,
+      );
     requireFact(
       !isAbsolute(c.artifact_path) &&
         !c.artifact_path.split(/[\\/]/).includes(".."),

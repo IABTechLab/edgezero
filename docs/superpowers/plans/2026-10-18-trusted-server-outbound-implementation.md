@@ -12,6 +12,61 @@
 
 ## Status and Authority
 
+### Provider Boundary Acceptance (2026-10-31)
+
+The requester approved the next local provider-boundary pass. Four more blocking legs are
+executable: EZ-4/01 on Axum, Cloudflare and Spin, and EZ-8/03 on Fastly. Inventory is now
+151 ready/360 planned, unqualified. Reuse the existing same-candidate `companion_case`
+mechanism: core owns parts/Follow readback and prepared-budget carriage; adapters own native
+mapping or their documented BestEffort acceptance. Missing or substituted core companions
+fail manifest validation and missing/failed/foreign-candidate evidence receives no release credit.
+No new CI job, phase, provider wrapper or production API is introduced.
+
+- [x] Extend the actual Axum pooled-connection contract with both 1 ms and 1 s settings;
+      retain its original-budget stalled-TLS controls.
+- [x] Exercise the actual Cloudflare client at the existing fetch boundary. A successful
+      positive setting reaches fetch; a stalled fetch stays pending beyond the connect setting,
+      then a paired timer wakes at the unchanged governing deadline and aborts once. Cover both
+      per-call and caller-deadline attribution without asserting independent connect enforcement.
+- [x] Call Spin's production `request_options` and read actual host-resource getters. Observe
+      nanoseconds, remaining aggregate head/body budgets, a longer-than-budget setting and a
+      one-nanosecond setting, without replacing the mapping with an injected setter callback.
+- [x] Extend the existing private Fastly capture fixture, retaining its default pending-capture
+      behavior. The real facade prepares Send, Follow and the next Follow hop; each invokes
+      production `native_options`, compared with independently built SDK values for every option.
+      SDK serialization exists only in this test comparison. Retain the SDK mapping matrix and
+      actual-client Begin/Batch preflight proof in the same binding, plus core's readback companion.
+- [x] Complete full owning suites, workspace gates and scoped review before publishing.
+
+**Fastly timeout readback remains open.** The exploratory production `configure()`/SDK-getter
+probe reaches registration, then the SDK aborts because pinned Viceroy returns Unsupported for
+the getters. Its legacy registration path also discards the connect-timeout value; successful
+registration therefore cannot prove numeric retention. Preserve
+`/private/tmp/pr275-provider-settings-fastly.log` and the diagnostic attempts. Remove the unusable
+probe from the executable suite, not its failure evidence. Do not substitute helper values,
+Debug-string parsing, SDK copies or another runtime patch; EZ-4/01 on Fastly stays planned.
+
+The recording optimizer test proves prepared-hop mapping, not submitted host claims, transformed
+output, successful native optimized redirects or performance. Existing native-unavailability
+controls remain separate; hosted optimizer/timing qualification and candidate freeze stay open.
+The scoped numeric-error versus unrepresentable-focus wording correction has been proposed;
+until separately approved, EZ-8.3, its first acceptance criterion and all source digests remain
+unchanged, and EZ-8/01 remains planned. Original deadlines, B31, caps, direct native IO, SDK/runtime
+pins, capabilities, demo and generator contracts are unchanged.
+
+Verification: all five root gates pass, including 2,637 tests across 33 binaries with one
+existing ignored test. The unchanged core companion guard passes 1,103 tests; the harness
+passes 428 with two existing ignored tests and strict Clippy. Fastly's complete guarded WASM
+library passes 293 tests, Cloudflare's passes 104, and the complete Axum and pinned Spin CI
+suites pass, including 35 Spin contract tests and 20 SDK-resource tests. Strict Clippy passes
+on all three changed WASM paths. Tooling passes 192 tests, with 61 in the evidence validator.
+Dependency/forwarding checks, docs contract, formatting, manifest and legacy guards pass.
+Scoped reviews are clear after retaining Axum's original two 1 ms controls and 1-second total
+deadline. Logs and complete runtime artifacts are `/private/tmp/pr275-provider-settings-*`.
+These results qualify no frozen candidate or hosted provider; the two explicit local gaps above
+remain open. The requirements SHA-256 remains
+`a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70`.
+
 ### Unit Settings Acceptance (2026-10-31)
 
 The requester selected the low-cost unit-acceptance pass. Bind twelve existing blocking legs:
@@ -757,7 +812,8 @@ Keep three different status questions separate:
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
   provider-local forwarding, client-selection, policy, marker, observation, encoding and overflow
-  checkpoints plus the unit-settings pass give 147 ready legs, with 364 still `planned`.
+  checkpoints plus the unit-settings and provider-boundary passes give 151 ready legs,
+  with 360 still `planned`.
   This includes the strict Axum pending-body proof, ten local encoding proofs, eleven local
   overflow legs and six reader/fallback proofs. G1/Q3 binding work remains unfinished, not evidence
   that these features are absent. Only the explicitly bound commands count as executable legs;

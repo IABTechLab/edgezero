@@ -14,7 +14,7 @@ mod tests {
     use edgezero_adapter_spin::outbound::SpinOutboundClient;
     use edgezero_adapter_spin::outbound::test_support::{
         map_spin_dispatch_error, map_spin_host_error, map_spin_preparation_header, request_fields,
-        request_target_errors, request_timeout_settings, set_timeout_option,
+        request_options, request_target_errors, request_timeout_settings, set_timeout_option,
     };
     use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
     use edgezero_core::error_detail::{
@@ -28,7 +28,7 @@ mod tests {
         OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
         OutboundRequest, OutboundSendMode, OutboundTime,
     };
-    use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+    use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant, dispatch_budget};
     use futures::executor::block_on;
     use spin_sdk::wasip3::http::types::{
         DnsErrorPayload, ErrorCode, FieldSizePayload, Fields, HeaderError, Request, RequestOptions,
@@ -442,6 +442,44 @@ mod tests {
         options
             .set_between_bytes_timeout(Some(3_000_000))
             .expect("between-bytes timeout is supported");
+    }
+
+    #[test]
+    fn configured_connect_timeout_reaches_host_options() {
+        let start = MonotonicInstant::now();
+        let observed = start
+            .checked_add(Duration::from_secs(3))
+            .expect("preparation");
+        let time = preflight_time(MonotonicClock::new(move || observed));
+        for (configured, expected) in [
+            (None, 7_000_000_000),
+            (Some(Duration::from_secs(1)), 1_000_000_000),
+            (Some(Duration::from_secs(20)), 7_000_000_000),
+            (Some(Duration::from_nanos(1)), 1),
+        ] {
+            let mut original = OutboundRequest::get("http://fixture.invalid/")
+                .expect("request")
+                .timeout(Duration::from_secs(10));
+            if let Some(connect) = configured {
+                original = original.connect_timeout(connect);
+            }
+            let request = OutboundRequest::from_parts(original.into_parts()).expect("round trip");
+            assert_eq!(request.connect_timeout_setting(), configured);
+            let budget = dispatch_budget(&request, start, None).expect("original budget");
+            let options = request_options(budget, &time, request.connect_timeout_setting())
+                .expect("native host options");
+            assert_eq!(options.get_connect_timeout(), Some(expected));
+            assert_eq!(options.get_first_byte_timeout(), Some(7_000_000_000));
+            assert_eq!(options.get_between_bytes_timeout(), Some(7_000_000_000));
+            assert_eq!(budget.duration, Duration::from_secs(10));
+            assert_eq!(budget.cause, BudgetSource::PerCallTimeout);
+            assert_eq!(
+                budget.deadline.instant(),
+                start
+                    .checked_add(Duration::from_secs(10))
+                    .expect("original deadline")
+            );
+        }
     }
 
     #[test]
