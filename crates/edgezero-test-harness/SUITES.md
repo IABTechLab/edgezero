@@ -337,14 +337,14 @@ scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo te
 
 Raw capability logs bind `outbound/unit/{adapter}/capabilities.log`; the other unit owners bind
 their existing raw logs, with Spin SDK output under `outbound/redirect/spin/sdk-tests.log`.
-Exact commands and sentinels are in the acceptance inventory. Fastly timeout-setter observation,
-complete typed-focus compiler-test ownership, and hosted optimizer performance remain
-planned; nearby helper or compile-fail tests do not substitute for those assertions.
+Exact commands and sentinels are in the acceptance inventory. Fastly timeout-setter observation
+and hosted optimizer performance remain planned; nearby helper tests do not substitute for those
+assertions. The separate focus compiler owner is described below.
 
 ### Provider Boundary
 
 EZ-4/01 on Axum, Cloudflare and Spin and EZ-8/03 on Fastly reuse their existing unit owners,
-bringing the inventory to 151 ready/360 planned, unqualified. Each requires its same-candidate
+bringing that checkpoint to 151 ready/360 planned, unqualified. Each requires its same-candidate
 core companion for request readback, rebuilding and prepared-hop carriage. The checker rejects
 deleted/substituted companions and grants no credit without matching passing evidence.
 
@@ -366,11 +366,31 @@ registration path discards the connect value. The failed SDK-getter probe is ret
 `/private/tmp/pr275-provider-settings-fastly.log`, not converted into a helper-value pass.
 No SDK/runtime pin, transport, capability or hosted qualification is changed by these bindings.
 
-The separately approved typed-focus amendment keeps numeric client errors and makes invalid
-smart-plus-offset or one-coordinate combinations unrepresentable. Three Rustdoc compile-fail
-examples cover both coordinate omissions and smart-plus-offset. EZ-8/01 remains planned until
-complete numeric/compiler CI ownership is bound; the current core `--lib` command does not run
-Rustdoc, and a local compiler pass is not an automatic acceptance promotion.
+### Focus Compiler Owner
+
+EZ-8/01 binds the existing workspace command, bringing the inventory to 152 ready/359 planned,
+still unqualified:
+
+```sh
+CARGO_NET_OFFLINE=true scripts/test_integration.sh check
+```
+
+For focused local iteration use `scripts/test_integration.sh check image-optimizer`. Both paths
+require all three existing numeric tests, then compile the actual three focus examples plus one
+valid-variant control. Missing, duplicate, changed, ignored or weakened examples fail before
+credit. Individually identified discovery and successful execution must agree; an unrelated
+compiler failure cannot satisfy a negative proof.
+
+The Rust checks share the existing bounded process and compiler-artifact plumbing. Numeric and
+compiler output, four normalized compiler markers and the aggregate sentinel are retained at
+`target/outbound/unit/core/image-optimizer.log`, relative to `CARGO_TARGET_DIR` when overridden.
+The check clears stale success before starting, validates the complete proof set and reads the
+file back before publishing success. Evidence packaging binds `outbound/unit/core/image-optimizer.log`
+to the candidate/build through the existing exporter; a local log is not qualification.
+
+The other 33 core rows and their 90 library sentinels remain on the unchanged `--lib` command.
+That library owner still does not execute Rustdoc. No new CI job, step or per-test YAML list is
+added, and the approved numeric-error/type-invariant wording and source digests are unchanged.
 
 ### Batch Recovery
 
@@ -447,7 +467,7 @@ Regression tests include the missing `into_request()?` mutation and embedded-fen
 through real compilation.
 
 The workspace CI runs `CARGO_NET_OFFLINE=true scripts/test_integration.sh check` once,
-combining this example with the Brotli, flate and no-CLI JSON-map audits. Both decoder
+combining this example with the focus compiler owner and Brotli, flate and no-CLI JSON-map audits. Both decoder
 contracts share one locked/offline all-features metadata snapshot per root, demo and reusable
 workspace; the no-CLI feature query stays separate. Existing JSON contracts retain independent
 audited expectations. Static checks bypass runtime initialization and fixture-run creation.

@@ -18,6 +18,17 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SPEC = "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md";
 const INVENTORY =
   "crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json";
+const FOCUS_COMMAND =
+  "CARGO_NET_OFFLINE=true scripts/test_integration.sh check";
+const FOCUS_PROOFS = [
+  "outbound::image_optimizer::tests::image_optimizer_quality_accepts_exactly_zero_through_one_hundred",
+  "outbound::image_optimizer::tests::image_optimizer_dimensions_and_crop_reject_zero_without_invented_maxima",
+  "outbound::image_optimizer::tests::image_optimizer_crop_checks_both_public_percent_payloads",
+  "image_optimizer_focus_valid",
+  "image_optimizer_focus_x_only",
+  "image_optimizer_focus_y_only",
+  "image_optimizer_focus_smart_offsets",
+];
 // Updating the reviewed environment/split set requires a separate policy review.
 const REVIEWED_LEG_SET_SHA256 =
   "5ad5ad13cb3a0ea9d96307f1ec150649a21357490b4b9b26ae59027e0e539ec9";
@@ -263,6 +274,20 @@ export function validateManifest(
       requireFact(
         c.companion_case === "EZ-4/acceptance/01@unit/core",
         `${id}: connect mapping requires its core companion`,
+      );
+    if (
+      c.case_id === "EZ-8/acceptance/01" &&
+      c.implementation === "ready" &&
+      c.environment === "unit/core"
+    )
+      requireFact(
+        c.command === FOCUS_COMMAND &&
+          c.sentinel === "ez_8_acceptance_01_unit_core" &&
+          c.artifact_path === "outbound/unit/core/image-optimizer.log" &&
+          JSON.stringify(c.additional_sentinels) ===
+            JSON.stringify(FOCUS_PROOFS) &&
+          c.companion_case === undefined,
+        `${id}: focus compiler owner must retain numeric, positive and all three negative proofs`,
       );
     if (
       c.case_id === "EZ-8/acceptance/03" &&

@@ -12,6 +12,49 @@
 
 ## Status and Authority
 
+### Focus Compiler Acceptance (2026-11-01)
+
+Bind only EZ-8/acceptance/01 in core to the existing grouped Rust workspace check,
+`CARGO_NET_OFFLINE=true scripts/test_integration.sh check`. No CI job, step, YAML list,
+production API, runtime policy or dependency is added. The other 33 core library bindings keep
+their existing command, 90 sentinels and raw artifact; compiler proofs are not library coverage.
+
+- [x] Require all three existing numeric sentinels through the unchanged nonzero guard.
+- [x] Extract the three actual focus Rustdoc examples, rejecting missing, duplicate, changed,
+      unclosed or weakened examples. Compile one legal-variant control and all three negative
+      shapes with Rustdoc; discovery and passed identities must match without ignored tests.
+- [x] Share the existing bounded compiler/artifact plumbing with the forwarding check, retaining
+      its original regression suite. Treat compiler/process failure as failure, never as proof
+      that a negative example was correctly rejected.
+- [x] Persist both numeric and compiler output plus the seven contributing markers in
+      `target/outbound/unit/core/image-optimizer.log` (under the configured target directory when
+      overridden). Clear an earlier artifact before work; validate and read back the new log
+      before emitting its aggregate sentinel. Candidate/build attribution remains the existing
+      evidence-assembly responsibility, not a claim supplied by a local file.
+- [x] Pin the ready inventory row to that command, artifact, aggregate and complete proof set;
+      reject numeric-only, unrelated or incomplete ownership. Preserve all 255 criteria and 511
+      identities, requirements/source digests, applicability and approval records.
+- [x] Finish the owning suites, grouped check, strict lint, docs checks and independent review
+      before committing and pushing this checkpoint.
+
+Verification: the complete harness passes 434 tests with two existing ignored tests, and strict
+all-target harness Clippy passes. The unchanged core inventory command passes 1,103 tests;
+tooling passes 194 tests, including 63 evidence tests. The actual grouped workspace check passes,
+retaining the three numeric and four compiler proofs. Documentation format/lint/build, root and
+harness formatting, manifest, audit identities and scoped reviews pass. Red controls demonstrate
+missing ownership, malformed token boundaries and stale evidence after an earlier aggregate
+failure; real Rustdoc rejects an unexpectedly valid negative and a broken positive control.
+The first full run exposed the old help assertion and denied existing TCP/process cleanup
+operations; the corrected, permission-enabled rerun passes. Final logs and raw proof output are
+`/private/tmp/pr275-focus-owner-*` and
+the target artifact above. Production Rust/WASM suites are unchanged, not claimed as fresh reruns
+by this harness-only checkpoint. No hosted or exact-candidate qualification is supplied.
+
+Inventory is 152 ready/359 planned, still unqualified. This closes the local compiler-owner gap
+recorded by the earlier typed-focus amendment; it does not retroactively change that approval or
+close Fastly timeout readback, successful native optimizer redirects, candidate freeze, consumer
+acceptance or hosted qualification.
+
 ### Typed Focus And CLI Lint Follow-Up (2026-10-31)
 
 The requester approved the [typed-focus wording amendment](../../audits/2026-10-18-outbound-api-approval.md#scoped-typed-focus-invariant-amendment).
@@ -838,8 +881,8 @@ Keep three different status questions separate:
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
   provider-local forwarding, client-selection, policy, marker, observation, encoding and overflow
-  checkpoints plus the unit-settings and provider-boundary passes give 151 ready legs,
-  with 360 still `planned`.
+  checkpoints plus the unit-settings, provider-boundary and focus-compiler passes give 152 ready legs,
+  with 359 still `planned`.
   This includes the strict Axum pending-body proof, ten local encoding proofs, eleven local
   overflow legs and six reader/fallback proofs. G1/Q3 binding work remains unfinished, not evidence
   that these features are absent. Only the explicitly bound commands count as executable legs;

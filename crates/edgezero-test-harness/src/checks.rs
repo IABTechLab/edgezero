@@ -10,15 +10,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod compiler;
 mod dependencies;
 mod forwarding;
+mod image_optimizer;
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn static_checks_have_one_explicit_selection_without_runtime_arguments() {
         assert!(super::select(&[]).is_ok());
-        for name in ["dependencies", "forwarding", "all"] {
+        for name in ["dependencies", "forwarding", "image-optimizer", "all"] {
             assert!(super::select(&[name.into()]).is_ok(), "{name}");
         }
         for args in [vec!["unknown".into()], vec!["all".into(), "extra".into()]] {
@@ -73,6 +75,18 @@ mod tests {
         std::fs::write(&stderr, b"late stderr exceeds cap").unwrap();
         assert!(super::read_output(&stdout, &stderr, 4).is_err());
     }
+
+    #[test]
+    fn an_earlier_aggregate_failure_clears_previous_focus_success() {
+        let root = tempfile::tempdir().unwrap();
+        let artifact = root
+            .path()
+            .join("target/outbound/unit/core/image-optimizer.log");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, "test ez_8_acceptance_01_unit_core ... ok\n").unwrap();
+        assert!(super::run_at(super::Selection::All, root.path(), &artifact).is_err());
+        assert_eq!(std::fs::read_to_string(&artifact).unwrap(), "");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +94,7 @@ enum Selection {
     All,
     Dependencies,
     Forwarding,
+    ImageOptimizer,
 }
 
 fn select(args: &[String]) -> Result<Selection> {
@@ -89,26 +104,44 @@ fn select(args: &[String]) -> Result<Selection> {
             "all" => Ok(Selection::All),
             "dependencies" => Ok(Selection::Dependencies),
             "forwarding" => Ok(Selection::Forwarding),
-            _ => Err("unknown static check; use check [all|dependencies|forwarding]".into()),
+            "image-optimizer" => Ok(Selection::ImageOptimizer),
+            _ => Err(
+                "unknown static check; use check [all|dependencies|forwarding|image-optimizer]"
+                    .into(),
+            ),
         },
-        _ => Err("use check [all|dependencies|forwarding]".into()),
+        _ => Err("use check [all|dependencies|forwarding|image-optimizer]".into()),
     }
 }
 
 pub fn run(args: &[String]) -> Result<()> {
     if args == ["--help"] {
         println!(
-            "edgezero-test-harness check [all|dependencies|forwarding]\nStatic repository checks; no provider runtime or fixture output."
+            "edgezero-test-harness check [all|dependencies|forwarding|image-optimizer]\nRepository checks; no provider runtime or fixture initialization."
         );
         return Ok(());
     }
     let selection = select(args)?;
     let root = crate::repository_root();
+    run_at(selection, &root, &image_optimizer::artifact_path(&root))
+}
+
+fn run_at(
+    selection: Selection,
+    root: &std::path::Path,
+    focus_artifact: &std::path::Path,
+) -> Result<()> {
+    if matches!(selection, Selection::All | Selection::ImageOptimizer) {
+        image_optimizer::invalidate(focus_artifact)?;
+    }
     if matches!(selection, Selection::All | Selection::Dependencies) {
-        dependencies::run(&root)?;
+        dependencies::run(root)?;
     }
     if matches!(selection, Selection::All | Selection::Forwarding) {
-        forwarding::run(&root)?;
+        forwarding::run(root)?;
+    }
+    if matches!(selection, Selection::All | Selection::ImageOptimizer) {
+        image_optimizer::run(root, focus_artifact)?;
     }
     Ok(())
 }

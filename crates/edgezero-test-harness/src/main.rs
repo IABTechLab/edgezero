@@ -1141,7 +1141,7 @@ mod process_tests {
             Instant::now() + Duration::from_secs(30),
         )
         .unwrap();
-        assert!(output.contains("check [all|dependencies|forwarding]"));
+        assert!(output.contains("check [all|dependencies|forwarding|image-optimizer]"));
         assert_eq!(fixture_runs(), before);
         assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
     }

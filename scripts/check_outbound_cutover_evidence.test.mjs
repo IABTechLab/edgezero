@@ -909,7 +909,7 @@ test("redirect core criteria bind every required test before one library executi
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 360,
+    planned: 359,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
@@ -1108,7 +1108,7 @@ test("batch bindings require exact runtime and core identity proofs", () => {
   );
   assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
   assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
-  const selected = checker.readySentinels(manifest, "unit/core");
+  const selected = checker.readySentinels(manifest, "unit/core", core.command);
   assert.equal(selected.length, 90);
   for (const name of names) assert.ok(selected.includes(name));
   const bindings = [
@@ -1413,10 +1413,7 @@ test("unit settings acceptance binds only proved zero-connect capabilities and o
       "outbound::redirect_tests::image_optimizer_options_survive_every_prepared_follow_hop",
     ],
   );
-  assert.equal(
-    row("EZ-8/acceptance/01", "unit/core").implementation,
-    "planned",
-  );
+  assert.equal(row("EZ-8/acceptance/01", "unit/core").implementation, "ready");
   assert.equal(++activated, 12);
 });
 
@@ -1568,18 +1565,104 @@ test("approved focus wording separates numeric errors from compile-time invarian
   assert.match(criterion.expected, /Compile-fail tests MUST reject/);
   assert.equal(
     criterion.implementation,
-    "planned",
-    "wording approval is not executable acceptance",
+    "ready",
+    "the grouped compiler owner must implement the approved criterion",
   );
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 360,
+    planned: 359,
   });
   const stale = structuredClone(manifest);
   stale.source_digest =
     "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70";
   assert.throws(() => validateManifest(stale, spec), /source document changed/);
+});
+
+test("focus acceptance cannot be activated with numeric-only or unowned proofs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const spec = readFileSync(
+    new URL(
+      "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  for (const command of [
+    "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
+    "CARGO_NET_OFFLINE=true scripts/test_integration.sh check forwarding",
+  ]) {
+    const invalid = structuredClone(manifest);
+    const row = invalid.cases.find(
+      (c) =>
+        c.case_id === "EZ-8/acceptance/01" && c.environment === "unit/core",
+    );
+    row.implementation = "ready";
+    row.command = command;
+    assert.throws(
+      () => validateManifest(invalid, spec),
+      /focus compiler owner/,
+    );
+  }
+  const owner = manifest.cases.find(
+    (c) => c.case_id === "EZ-8/acceptance/01" && c.environment === "unit/core",
+  );
+  assert.equal(owner.implementation, "ready");
+  assert.equal(
+    owner.command,
+    "CARGO_NET_OFFLINE=true scripts/test_integration.sh check",
+  );
+  assert.equal(owner.sentinel, "ez_8_acceptance_01_unit_core");
+  assert.equal(owner.artifact_path, "outbound/unit/core/image-optimizer.log");
+  assert.equal(owner.additional_sentinels.length, 7);
+  const flow = parse(
+    readFileSync(
+      new URL("../.github/workflows/test.yml", import.meta.url),
+      "utf8",
+    ),
+  );
+  const owners = Object.entries(flow.jobs).flatMap(([job, value]) =>
+    value.steps
+      .filter((step) => step.run?.trim() === owner.command)
+      .map((step) => ({ job, step })),
+  );
+  assert.equal(owners.length, 1);
+  assert.equal(owners[0].job, "host-tests");
+  assert.equal(owners[0].step.if, "matrix.suite == 'workspace'");
+  for (let index = 0; index < owner.additional_sentinels.length; index++) {
+    const invalid = structuredClone(manifest);
+    invalid.cases
+      .find(
+        (c) =>
+          c.case_id === owner.case_id && c.environment === owner.environment,
+      )
+      .additional_sentinels.splice(index, 1);
+    assert.throws(
+      () => validateManifest(invalid, spec),
+      /focus compiler owner/,
+    );
+  }
+  for (const [field, value] of [
+    ["sentinel", "numeric_only"],
+    ["artifact_path", "outbound/unit/core/raw.log"],
+  ]) {
+    const invalid = structuredClone(manifest);
+    invalid.cases.find(
+      (c) => c.case_id === owner.case_id && c.environment === owner.environment,
+    )[field] = value;
+    assert.throws(
+      () => validateManifest(invalid, spec),
+      /focus compiler owner/,
+    );
+  }
 });
 
 test("client precedence binds each adapter's executable owning phase", () => {
@@ -1757,7 +1840,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /360 other legs remain planned/);
+  assert.match(manifest.status, /359 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -2150,13 +2233,18 @@ test("local reader and fallback acceptance reuse their complete owning commands"
   const readyCore = manifest.cases.filter(
     (c) => c.environment === "unit/core" && c.implementation === "ready",
   );
-  assert.equal(readyCore.length, 33);
-  assert.ok(readyCore.every((c) => c.command === coreCommand));
+  assert.equal(readyCore.length, 34);
+  const libraryCore = readyCore.filter((c) => c.command === coreCommand);
+  assert.equal(libraryCore.length, 33);
+  assert.deepEqual(
+    readyCore.filter((c) => c.command !== coreCommand).map((c) => c.case_id),
+    ["EZ-8/acceptance/01"],
+  );
   assert.deepEqual(
     checker.readySentinels(manifest, "unit/core", coreCommand).sort(),
     [
       ...new Set(
-        readyCore.flatMap((c) => [
+        libraryCore.flatMap((c) => [
           c.sentinel,
           ...(c.additional_sentinels ?? []),
         ]),
@@ -2345,10 +2433,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 151);
+  assert.equal(ready.length, 152);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    360,
+    359,
   );
   assert.ok(
     ready.every(
@@ -2399,6 +2487,7 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
             "EZ-7/acceptance/01",
             "EZ-7/acceptance/02",
             "EZ-7/acceptance/03",
+            "EZ-8/acceptance/01",
           ].includes(c.case_id)) ||
         (/^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment) &&
           ["09", "10", "11"].some(

@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind numeric and compiler focus acceptance to the existing grouped Rust check, reusing its
+  compiler runner. Retain raw proof output and reject missing, skipped or substituted proofs
+  without adding CI jobs or changing production behavior.
 - Clarify the approved crop-focus invariant: invalid numeric options retain client-class errors;
   smart-plus-offset and one-coordinate shapes are prevented by the type and compile-fail examples.
   Preserve acceptance identities and qualification gates without adding a parser or compatibility API.
