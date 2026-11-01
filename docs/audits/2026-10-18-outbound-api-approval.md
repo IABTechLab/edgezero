@@ -29,7 +29,7 @@ There is no compatibility branch, alternate transport or lazy default proposed h
 | G4-API               | Approved, API only                       | AG; scoped exact-digest conversation reply | 2026-10-19    | `c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a`  |
 | G4-SCOPE-CAPTURE     | Authorized scoped architectural redesign | Requester; explicit conversation reply     | 2026-10-27    | Structured ownership design below; not the earlier closure proposal |
 | G4-FASTLY-SLACK      | Approved, scoped retirement              | Requester; explicit conversation reply     | 2026-10-27    | Remove slack rejection; retain original deadlines, B31 and limits   |
-| G4-FOCUS-INVARIANT   | Approved, scoped wording only            | Requester; explicit conversation reply     | 2026-10-31    | EZ-8.3 and acceptance 01; no API or qualification approval           |
+| G4-FOCUS-INVARIANT   | Approved, scoped wording only            | Requester; explicit conversation reply     | 2026-10-31    | EZ-8.3 and acceptance 01; no API or qualification approval          |
 | G4-FASTLY-POLICY     | Pending; local primitive failed          | Unset                                      | Unset         | Unset                                                               |
 | G4-FASTLY-B31        | Approved, scoped implementation only     | Requester; scoped conversation reply       | 2026-10-25    | Proposal referenced below; not new whole-contract digest approval   |
 | G4-OPTIMIZER-HORIZON | Pending; finite rule unproved            | Unset                                      | Unset         | Unset                                                               |
@@ -143,12 +143,12 @@ serves outbound and downstream egress; one core predicate handles earlier-own-de
 classification. Nonblocking completion observation does not drive SDK progress. These are
 consolidations of the selected architecture, not independent compatibility implementations.
 
-| Scope Amendment Identity (2026-10-27)    | Value                                                              |
-| ---------------------------------------- | ------------------------------------------------------------------ |
-| Interfaces SHA-256                       | `b69a75ba96b69c0979c05b8711f9cacbaad0abef6a6caa053ed77d21916bbba4` |
-| Complete plan SHA-256                    | `10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b` |
-| Historical complete-plan snapshot        | `2be1dd8704553395ef4f85f914fb75119f351635` |
-| Interfaces size                          | 856 LF-terminated lines, 53,795 UTF-8 bytes                        |
+| Scope Amendment Identity (2026-10-27)            | Value                                                              |
+| ------------------------------------------------ | ------------------------------------------------------------------ |
+| Interfaces SHA-256                               | `b69a75ba96b69c0979c05b8711f9cacbaad0abef6a6caa053ed77d21916bbba4` |
+| Complete plan SHA-256                            | `10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b` |
+| Historical complete-plan snapshot                | `2be1dd8704553395ef4f85f914fb75119f351635`                         |
+| Interfaces size                                  | 856 LF-terminated lines, 53,795 UTF-8 bytes                        |
 | Normative requirements SHA-256 at this amendment | `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70` |
 
 These identify the implemented scope proposal; they do not overwrite the original AG approval
@@ -255,11 +255,11 @@ the portable crop-focus type prevents smart-plus-offset and either one-coordinat
 three Rustdoc compile-fail examples cover smart-plus-offset, x-only and y-only construction.
 No API, unsafe construction bypass, raw parser, compatibility wrapper or runtime policy is added.
 
-| Verification identity | SHA-256 |
-| --- | --- |
-| Requirements before this amendment, at `fc973719` | `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70` |
+| Verification identity                              | SHA-256                                                            |
+| -------------------------------------------------- | ------------------------------------------------------------------ |
+| Requirements before this amendment, at `fc973719`  | `a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70` |
 | Requirements after the approved wording correction | `d434beb87106405004315a016b5d5787ec07c3adc25080504f2cb4264a4a11c2` |
-| Updated EZ-8 acceptance 01 | `4981c8d675cb5b06b33dae2c362e82bb2bd060d84387e3ddefb959092be8cd6c` |
+| Updated EZ-8 acceptance 01                         | `4981c8d675cb5b06b33dae2c362e82bb2bd060d84387e3ddefb959092be8cd6c` |
 
 Only the manifest's document digest and that criterion's expected text/digest change. All 255
 criteria, 511 environment/split identities, applicability and prior approvals remain intact.
