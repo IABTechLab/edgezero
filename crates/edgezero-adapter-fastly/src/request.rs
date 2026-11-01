@@ -1505,6 +1505,21 @@ mod synthesis_tests {
     }
 
     #[test]
+    fn zero_connect_timeout_rejects_before_transport() {
+        use edgezero_core::outbound::test_support::check_zero_connect_timeout_preflight;
+
+        with_callback(|| {
+            executor::block_on(check_zero_connect_timeout_preflight(
+                FastlyOutboundClient::with_time,
+            ))
+            .expect("zero connect timeout conformance");
+            let stats = FastlyOutboundObservation::current().unwrap().snapshot();
+            assert_eq!(stats.registration_count(), 0);
+            assert_eq!(stats.configuration_count(), 0);
+        });
+    }
+
+    #[test]
     fn unsupported_optimizer_precedes_expiry_without_transport() {
         use edgezero_core::outbound::OutboundSendMode;
         use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;

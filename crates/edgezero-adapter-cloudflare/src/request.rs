@@ -2025,6 +2025,15 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn zero_connect_timeout_rejects_before_transport() {
+        use edgezero_core::outbound::test_support::check_zero_connect_timeout_preflight;
+
+        check_zero_connect_timeout_preflight(CloudflareOutboundClient::with_time)
+            .await
+            .expect("zero connect timeout conformance");
+    }
+
+    #[wasm_bindgen_test]
     async fn unsupported_optimizer_precedes_expiry_without_transport() {
         use edgezero_core::outbound::OutboundSendMode;
         use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;

@@ -458,6 +458,14 @@ mod tests {
         );
         assert_eq!(options.clone(), options);
         assert_ne!(changed, options);
+        let request = OutboundRequest::get("https://example.com/image")
+            .expect("request")
+            .image_optimizer(options.clone());
+        assert_eq!(request.image_optimizer_options(), Some(&options));
+        let parts = request.into_parts();
+        assert_eq!(parts.image_optimizer, Some(options.clone()));
+        let rebuilt = OutboundRequest::from_parts(parts).expect("request round trip");
+        assert_eq!(rebuilt.image_optimizer_options(), Some(&options));
     }
 
     #[test]

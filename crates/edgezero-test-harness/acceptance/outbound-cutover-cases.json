@@ -2,7 +2,7 @@
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
   "source_digest": "a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; EZ-10 local buffered/streamed overflow acceptance 05/06 on all four runtimes and chunked-ingress acceptance 03 on Viceroy/workerd/Spin bind the existing guarded overflow suite; EZ-10 core reader/declared-length acceptance 01/02, Axum pipeline/custom-renderer acceptance 03/07 and actual scaffold/demo acceptance 08 bind the existing owning commands; the shared core guard runs one complete library rather than only outbound::; 376 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
+  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; EZ-10 local buffered/streamed overflow acceptance 05/06 on all four runtimes and chunked-ingress acceptance 03 on Viceroy/workerd/Spin bind the existing guarded overflow suite; EZ-10 core reader/declared-length acceptance 01/02, Axum pipeline/custom-renderer acceptance 03/07 and actual scaffold/demo acceptance 08 bind the existing owning commands; the shared core guard runs one complete library rather than only outbound::; EZ-4 zero-connect rejection and capability metadata on all four adapters plus EZ-8 optimizer readback in core and unsupported modes on Axum/Cloudflare/Spin bind twelve additional unit legs; provider-setter observations, runtime-only invalid focus wording and Fastly optimizer Follow mapping remain planned; 364 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -3431,11 +3431,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-02-unit-axum",
-      "sentinel": "ez_4_acceptance_02_unit_axum",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_02_unit_axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils",
+      "sentinel": "outbound::clock_tests::zero_connect_timeout_rejects_before_transport",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Given a connect timeout of zero, when the request is sent on any adapter, then it fails with 400 before anything is sent.",
-      "artifact_path": "outbound/EZ-4/acceptance/02/unit/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/axum/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3462,11 +3462,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-02-unit-fastly",
-      "sentinel": "ez_4_acceptance_02_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_02_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "request::synthesis_tests::zero_connect_timeout_rejects_before_transport",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Given a connect timeout of zero, when the request is sent on any adapter, then it fails with 400 before anything is sent.",
-      "artifact_path": "outbound/EZ-4/acceptance/02/unit/fastly.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/fastly/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3493,11 +3493,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-02-unit-cloudflare",
-      "sentinel": "ez_4_acceptance_02_unit_cloudflare",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_02_unit_cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils",
+      "sentinel": "request::tests::zero_connect_timeout_rejects_before_transport",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib",
       "expected": "Given a connect timeout of zero, when the request is sent on any adapter, then it fails with 400 before anything is sent.",
-      "artifact_path": "outbound/EZ-4/acceptance/02/unit/cloudflare.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/cloudflare/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3524,11 +3524,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-02-unit-spin",
-      "sentinel": "ez_4_acceptance_02_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_02_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "tests::ingress_contract::zero_connect_timeout_rejects_before_transport",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Given a connect timeout of zero, when the request is sent on any adapter, then it fails with 400 before anything is sent.",
-      "artifact_path": "outbound/EZ-4/acceptance/02/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/sdk-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3586,11 +3586,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-04-unit-axum",
-      "sentinel": "ez_4_acceptance_04_unit_axum",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_04_unit_axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils",
+      "sentinel": "cli::tests::adapter_capability_matrix_matches_contracts",
+      "command": "scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts",
       "expected": "Each adapter's capability metadata reports the EZ-4.9 levels.\n\nAxum and workerd:",
-      "artifact_path": "outbound/EZ-4/acceptance/04/unit/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/axum/capabilities.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3617,11 +3617,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-04-unit-fastly",
-      "sentinel": "ez_4_acceptance_04_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_04_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "cli::tests::adapter_capability_matrix_matches_contracts",
+      "command": "scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts",
       "expected": "Each adapter's capability metadata reports the EZ-4.9 levels.\n\nAxum and workerd:",
-      "artifact_path": "outbound/EZ-4/acceptance/04/unit/fastly.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/fastly/capabilities.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3648,11 +3648,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-04-unit-cloudflare",
-      "sentinel": "ez_4_acceptance_04_unit_cloudflare",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_04_unit_cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils",
+      "sentinel": "cli::tests::adapter_capability_matrix_matches_contracts",
+      "command": "scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts",
       "expected": "Each adapter's capability metadata reports the EZ-4.9 levels.\n\nAxum and workerd:",
-      "artifact_path": "outbound/EZ-4/acceptance/04/unit/cloudflare.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/cloudflare/capabilities.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3679,11 +3679,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-04-unit-spin",
-      "sentinel": "ez_4_acceptance_04_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_04_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "cli::tests::adapter_capability_matrix_matches_contracts",
+      "command": "scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts",
       "expected": "Each adapter's capability metadata reports the EZ-4.9 levels.\n\nAxum and workerd:",
-      "artifact_path": "outbound/EZ-4/acceptance/04/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/spin/capabilities.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10060,12 +10060,15 @@
       "owner": "EdgeZero",
       "task": "D1d",
       "substep": "EZ-8-acceptance-03-unit-core",
-      "sentinel": "ez_8_acceptance_03_unit_core",
-      "command": "scripts/run_test_nonzero.sh ez_8_acceptance_03_unit_core cargo test --offline --locked -p edgezero-core --no-default-features --features test-utils",
+      "sentinel": "outbound::image_optimizer::tests::image_optimizer_readbacks_preserve_independent_settings_and_replacement",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib",
       "expected": "Unit. Given a request with options attached, the application reads back options equal to the ones it attached. The same holds for the next request of a followed redirect (EZ-9). A recording Fastly boundary observes `Follow` on the initial and next hop and invokes the same Image Optimizer mapping as `Send`; `Begin` and `Batch` still reject before body polling or provider work. Other adapters reject the options in all four modes before dispatch.",
-      "artifact_path": "outbound/EZ-8/acceptance/03/unit/core.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/unit/core/raw.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "outbound::redirect_tests::image_optimizer_options_survive_every_prepared_follow_hop"
+      ]
     },
     {
       "case_id": "EZ-8/acceptance/03",
@@ -10097,11 +10100,11 @@
       "owner": "EdgeZero",
       "task": "D1d",
       "substep": "EZ-8-acceptance-03-unit-axum",
-      "sentinel": "ez_8_acceptance_03_unit_axum",
-      "command": "scripts/run_test_nonzero.sh ez_8_acceptance_03_unit_axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils",
+      "sentinel": "outbound::clock_tests::unsupported_optimizer_precedes_expiry_without_transport",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Unit. Given a request with options attached, the application reads back options equal to the ones it attached. The same holds for the next request of a followed redirect (EZ-9). A recording Fastly boundary observes `Follow` on the initial and next hop and invokes the same Image Optimizer mapping as `Send`; `Begin` and `Batch` still reject before body polling or provider work. Other adapters reject the options in all four modes before dispatch.",
-      "artifact_path": "outbound/EZ-8/acceptance/03/unit/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/axum/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10171,11 +10174,11 @@
       "owner": "EdgeZero",
       "task": "D1d",
       "substep": "EZ-8-acceptance-03-unit-cloudflare",
-      "sentinel": "ez_8_acceptance_03_unit_cloudflare",
-      "command": "scripts/run_test_nonzero.sh ez_8_acceptance_03_unit_cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils",
+      "sentinel": "request::tests::unsupported_optimizer_precedes_expiry_without_transport",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib",
       "expected": "Unit. Given a request with options attached, the application reads back options equal to the ones it attached. The same holds for the next request of a followed redirect (EZ-9). A recording Fastly boundary observes `Follow` on the initial and next hop and invokes the same Image Optimizer mapping as `Send`; `Begin` and `Batch` still reject before body polling or provider work. Other adapters reject the options in all four modes before dispatch.",
-      "artifact_path": "outbound/EZ-8/acceptance/03/unit/cloudflare.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/unit/cloudflare/raw.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10208,11 +10211,11 @@
       "owner": "EdgeZero",
       "task": "D1d",
       "substep": "EZ-8-acceptance-03-unit-spin",
-      "sentinel": "ez_8_acceptance_03_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_8_acceptance_03_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Unit. Given a request with options attached, the application reads back options equal to the ones it attached. The same holds for the next request of a followed redirect (EZ-9). A recording Fastly boundary observes `Follow` on the initial and next hop and invokes the same Image Optimizer mapping as `Send`; `Begin` and `Batch` still reject before body polling or provider work. Other adapters reject the options in all four modes before dispatch.",
-      "artifact_path": "outbound/EZ-8/acceptance/03/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/sdk-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {

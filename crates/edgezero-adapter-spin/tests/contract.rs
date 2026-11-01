@@ -867,6 +867,16 @@ mod tests {
         }
 
         #[test]
+        fn zero_connect_timeout_rejects_before_transport() {
+            use edgezero_core::outbound::test_support::check_zero_connect_timeout_preflight;
+
+            block_on(check_zero_connect_timeout_preflight(
+                SpinOutboundClient::with_time,
+            ))
+            .expect("zero connect timeout conformance");
+        }
+
+        #[test]
         fn unsupported_optimizer_precedes_expiry_without_transport() {
             use edgezero_core::outbound::OutboundSendMode;
             use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;

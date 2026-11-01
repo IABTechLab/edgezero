@@ -909,7 +909,7 @@ test("redirect core criteria bind every required test before one library executi
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 376,
+    planned: 364,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
@@ -1067,8 +1067,11 @@ test("redirect core criteria bind every required test before one library executi
       .readySentinels(manifest, "unit/core")
       .filter((name) => name.startsWith("outbound::redirect_tests::")),
     [
-      "outbound::redirect_tests::connect_timeout_round_trip_and_follow_preserve_the_aggregate_budget",
-      ...required,
+      ...new Set([
+        "outbound::redirect_tests::connect_timeout_round_trip_and_follow_preserve_the_aggregate_budget",
+        "outbound::redirect_tests::image_optimizer_options_survive_every_prepared_follow_hop",
+        ...required,
+      ]),
     ],
   );
 });
@@ -1106,7 +1109,7 @@ test("batch bindings require exact runtime and core identity proofs", () => {
   assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
   assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
   const selected = checker.readySentinels(manifest, "unit/core");
-  assert.equal(selected.length, 89);
+  assert.equal(selected.length, 90);
   for (const name of names) assert.ok(selected.includes(name));
   const bindings = [
     [
@@ -1316,6 +1319,108 @@ test("core policy conformance binds complete proofs without promoting provider l
   }
 });
 
+test("unit settings acceptance binds only proved zero-connect capabilities and optimizer readback", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  const prefixes = {
+    axum: "outbound::clock_tests",
+    fastly: "request::synthesis_tests",
+    cloudflare: "request::tests",
+    spin: "tests::ingress_contract",
+  };
+  const row = (id, environment) => {
+    const found = manifest.cases.find(
+      (c) => c.case_id === id && c.environment === environment,
+    );
+    assert.ok(found, `${id}@${environment}`);
+    return found;
+  };
+  let activated = 0;
+  for (const [adapter, prefix] of Object.entries(prefixes)) {
+    const environment = `unit/${adapter}`;
+    const owner = row("EZ-3/acceptance/08", environment);
+    const zero = row("EZ-4/acceptance/02", environment);
+    assert.equal(zero.implementation, "ready");
+    assert.equal(
+      zero.sentinel,
+      `${prefix}::zero_connect_timeout_rejects_before_transport`,
+    );
+    assert.equal(zero.command, owner.command);
+    assert.equal(zero.artifact_path, owner.artifact_path);
+    if (adapter === "spin") assert.equal(zero.command, spinCiCommand);
+    else {
+      assert.ok(ciOwnsCommand(workflow, zero.command));
+      assert.ok(
+        checker
+          .readySentinels(manifest, environment, zero.command)
+          .includes(zero.sentinel),
+      );
+    }
+    const capability = row("EZ-4/acceptance/04", environment);
+    assert.equal(capability.implementation, "ready");
+    assert.equal(
+      capability.sentinel,
+      "cli::tests::adapter_capability_matrix_matches_contracts",
+    );
+    assert.equal(
+      capability.command,
+      `scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-${adapter} --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts`,
+    );
+    assert.equal(
+      capability.artifact_path,
+      `outbound/unit/${adapter}/capabilities.log`,
+    );
+    assert.ok(ciOwnsCommand(workflow, capability.command));
+    for (const bound of [zero, capability]) {
+      assert.equal(bound.applicability, "blocking");
+      assert.equal(bound.approval, null);
+      assert.equal(bound.condition, null);
+      activated++;
+    }
+    const optimizer = row("EZ-8/acceptance/03", environment);
+    if (adapter === "fastly") assert.equal(optimizer.implementation, "planned");
+    else {
+      assert.equal(optimizer.implementation, "ready");
+      assert.equal(optimizer.sentinel, owner.sentinel);
+      assert.equal(optimizer.command, owner.command);
+      assert.equal(optimizer.artifact_path, owner.artifact_path);
+      assert.equal(optimizer.applicability, "blocking");
+      activated++;
+    }
+    assert.equal(
+      row("EZ-4/acceptance/01", environment).implementation,
+      "planned",
+    );
+  }
+  const core = row("EZ-8/acceptance/03", "unit/core");
+  assert.equal(core.implementation, "ready");
+  assert.equal(core.command, row("EZ-4/acceptance/01", "unit/core").command);
+  assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
+  assert.deepEqual(
+    [core.sentinel, ...core.additional_sentinels],
+    [
+      "outbound::image_optimizer::tests::image_optimizer_readbacks_preserve_independent_settings_and_replacement",
+      "outbound::redirect_tests::image_optimizer_options_survive_every_prepared_follow_hop",
+    ],
+  );
+  assert.equal(
+    row("EZ-8/acceptance/01", "unit/core").implementation,
+    "planned",
+  );
+  assert.equal(++activated, 12);
+});
+
 test("client precedence binds each adapter's executable owning phase", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -1491,7 +1596,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /376 other legs remain planned/);
+  assert.match(manifest.status, /364 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -1884,7 +1989,7 @@ test("local reader and fallback acceptance reuse their complete owning commands"
   const readyCore = manifest.cases.filter(
     (c) => c.environment === "unit/core" && c.implementation === "ready",
   );
-  assert.equal(readyCore.length, 32);
+  assert.equal(readyCore.length, 33);
   assert.ok(readyCore.every((c) => c.command === coreCommand));
   assert.deepEqual(
     checker.readySentinels(manifest, "unit/core", coreCommand).sort(),
@@ -2079,10 +2184,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 135);
+  assert.equal(ready.length, 147);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    376,
+    364,
   );
   assert.ok(
     ready.every(
@@ -2094,6 +2199,12 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
         encodingRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         overflowRuntimeKeys.has(`${c.case_id}@${c.environment}`) ||
         localOverflowProofKeys.has(`${c.case_id}@${c.environment}`) ||
+        (["EZ-4/acceptance/02", "EZ-4/acceptance/04"].includes(c.case_id) &&
+          /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
+        (c.case_id === "EZ-8/acceptance/03" &&
+          ["unit/core", "unit/axum", "unit/cloudflare", "unit/spin"].includes(
+            c.environment,
+          )) ||
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/22" &&
@@ -2309,7 +2420,7 @@ test("Spin ready bindings use one CI invocation and Rust persisted owning-phase 
   );
   assert.match(
     ci,
-    /Some\("EZ-2\/acceptance\/01"\s*\|\s*"EZ-3\/acceptance\/08"\)\s*=>\s*sdk_log/,
+    /Some\(\s*"EZ-2\/acceptance\/01"\s*\|\s*"EZ-3\/acceptance\/08"\s*\|\s*"EZ-4\/acceptance\/02"\s*\|\s*"EZ-8\/acceptance\/03"\s*,?\s*\)\s*=>\s*sdk_log/,
   );
   assert.match(ci, /Some\("EZ-5\/acceptance\/09"\)\s*=>\s*async_log/);
   assert.match(ci, /Some\("EZ-5\/acceptance\/10"\)\s*=>\s*wire_log/);

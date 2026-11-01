@@ -54,8 +54,24 @@ fn validate_markers(
         .iter()
         .filter(|case| case["environment"] == "unit/spin" && case["implementation"] == "ready")
     {
+        if case["case_id"] == "EZ-4/acceptance/04" {
+            // CLI-only metadata has a separate workspace owner, not a runtime-log proof.
+            require(
+                case["command"]
+                    == "scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts"
+                    && case["sentinel"]
+                        == "cli::tests::adapter_capability_matrix_matches_contracts"
+                    && case["artifact_path"] == "outbound/unit/spin/capabilities.log"
+                    && case.get("additional_sentinels").is_none(),
+                "Spin capability criterion must retain its exact separate CLI owner",
+            )?;
+            continue;
+        }
         let log = match case["case_id"].as_str() {
-            Some("EZ-2/acceptance/01" | "EZ-3/acceptance/08") => sdk_log,
+            Some(
+                "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/02"
+                | "EZ-8/acceptance/03",
+            ) => sdk_log,
             Some("EZ-5/acceptance/09") => async_log,
             Some("EZ-5/acceptance/10") => wire_log,
             Some("EZ-5/acceptance/11") => wire_log,
@@ -84,9 +100,13 @@ fn validate_markers(
                 "invalid Spin sentinel name",
             )?;
             let (log, expected) = match (case["case_id"].as_str(), name) {
-                (Some("EZ-2/acceptance/01" | "EZ-3/acceptance/08"), _) => {
-                    (log, format!("test {name} ... ok"))
-                }
+                (
+                    Some(
+                        "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/02"
+                        | "EZ-8/acceptance/03",
+                    ),
+                    _,
+                ) => (log, format!("test {name} ... ok")),
                 (
                     Some("EZ-5/acceptance/11"),
                     "outbound::head::tests::adapter_visible_normalization_preserves_policy_precedence"
@@ -557,25 +577,62 @@ mod tests {
 
     #[test]
     fn optimizer_precedence_requires_the_sdk_phase() {
-        let inventory = json!({"cases":[{
-            "case_id":"EZ-3/acceptance/08", "environment":"unit/spin",
-            "implementation":"ready", "sentinel":"tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport"
-        }]});
-        let passed = "test tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport ... ok\n";
-        validate_markers(&inventory, "", passed, "", "").unwrap();
-        for (native, sdk, asynchronous, wire) in [
-            (passed, "", "", ""),
-            ("", "", passed, ""),
-            ("", "", "", passed),
-            ("", "", "", ""),
+        for (id, sentinel) in [
             (
-                "",
-                "test tests::ingress_contract::unsupported_optimizer_precedes_expiry_without_transport ... ignored\n",
-                "",
-                "",
+                "EZ-3/acceptance/08",
+                "unsupported_optimizer_precedes_expiry_without_transport",
+            ),
+            (
+                "EZ-8/acceptance/03",
+                "unsupported_optimizer_precedes_expiry_without_transport",
+            ),
+            (
+                "EZ-4/acceptance/02",
+                "zero_connect_timeout_rejects_before_transport",
             ),
         ] {
-            assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+            let inventory = json!({"cases":[{
+                "case_id":id, "environment":"unit/spin",
+                "implementation":"ready", "sentinel":format!("tests::ingress_contract::{sentinel}")
+            }]});
+            let passed = format!("test tests::ingress_contract::{sentinel} ... ok\n");
+            validate_markers(&inventory, "", &passed, "", "").unwrap();
+            let ignored = passed.replace(" ... ok", " ... ignored");
+            for (native, sdk, asynchronous, wire) in [
+                (passed.as_str(), "", "", ""),
+                ("", "", passed.as_str(), ""),
+                ("", "", "", passed.as_str()),
+                ("", "", "", ""),
+                ("", ignored.as_str(), "", ""),
+            ] {
+                assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn capability_markers_require_their_separate_exact_cli_owner() {
+        let sdk = json!({"case_id":"EZ-3/acceptance/08", "environment":"unit/spin", "implementation":"ready", "sentinel":"sdk_control"});
+        let capability = json!({"case_id":"EZ-4/acceptance/04", "environment":"unit/spin", "implementation":"ready",
+            "sentinel":"cli::tests::adapter_capability_matrix_matches_contracts",
+            "command":"scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts",
+            "artifact_path":"outbound/unit/spin/capabilities.log"});
+        let inventory = json!({"cases":[sdk, capability.clone()]});
+        validate_markers(&inventory, "", "test sdk_control ... ok\n", "", "").unwrap();
+        assert!(validate_markers(&inventory, "", "", "", "").is_err());
+        for (field, value) in [
+            ("command", json!("cargo test")),
+            ("command", Value::Null),
+            ("sentinel", json!("runtime_case")),
+            (
+                "artifact_path",
+                json!("outbound/redirect/spin/sdk-tests.log"),
+            ),
+            ("additional_sentinels", json!(["unowned"])),
+        ] {
+            let mut altered = inventory.clone();
+            altered["cases"][1][field] = value;
+            assert!(validate_markers(&altered, "", "test sdk_control ... ok\n", "", "").is_err());
         }
     }
 

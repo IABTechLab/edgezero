@@ -12,6 +12,60 @@
 
 ## Status and Authority
 
+### Unit Settings Acceptance (2026-10-31)
+
+The requester selected the low-cost unit-acceptance pass. Bind twelve existing blocking legs:
+EZ-4 criterion 02 (zero connect timeout) and 04 (capability metadata) on all four adapters;
+EZ-8 criterion 03 in core and on Axum, Cloudflare and Spin. Inventory is 147 ready/364 planned,
+still unqualified. Keep all 511 identities, frozen source text/digests, approvals and applicability.
+
+Use actual native clients for zero-connect checks, not another provider wrapper. Send, Begin
+and Follow use counted pending GET sources; Batch uses its required buffered-empty shape.
+Live and already-expired budgets must both produce the specific typed 400 before source polling
+or timer creation, and pending sources release exactly once. A positive connect setting with an
+expired request deadline remains attributed 504. Polling is bounded. Fastly additionally checks
+zero backend configurations/registrations inside its existing callback context. The new helper's
+stub fails before implementation; the existing Batch body-shape precedence is not changed.
+
+Strengthen existing optimizer tests with request attachment and parts round-trip, then compare
+every populated setting against the original on both recorded prepared Follow hops. Reuse the
+non-Fastly adapters' existing four-mode unsupported-option proofs. All 89 prior core sentinels
+remain required, with one new unique readback sentinel, making 90 across 33 core legs.
+
+Reuse the existing native Axum and real Fastly/Cloudflare WASM library commands. Spin's existing
+SDK phase owns zero-connect and optimizer markers; the persisted-log validator rejects missing,
+ignored and wrong-phase proofs. Capability rows bind the existing separately guarded CLI tests.
+Spin accepts that separate ownership only for the exact command, sentinel and artifact with no
+additional unowned sentinels. No new CI job, phase, per-test YAML list or runtime capability.
+
+Do not overstate nearby coverage: all four adapter EZ-4/01 readback/setter legs remain planned;
+helper timer values do not prove actual Fastly/Spin setter invocation. Fastly EZ-8/03 still needs
+its native supported Follow-boundary proof. EZ-8/01 remains planned: numeric validation and
+compile-fail focus examples pass separately, but the frozen criterion asks for runtime client
+errors for two shapes the typed enum cannot represent. Do not add a redundant raw parser or
+silently reinterpret that requirement. Hosted Image Optimizer performance is unaffected/open.
+
+Verification: all five root gates pass, including 2,637 tests across 33 binaries with one
+existing ignored test. The core inventory guard passes all 1,103 tests and requires every
+bound sentinel. The isolated harness passes 428 tests with two existing ignored tests and
+strict Clippy. Evidence/CI/shell/legacy tooling passes 190 tests; manifest validation remains
+255 criteria/511 legs, unqualified. The combined dependency/forwarding check and documentation,
+formatting and legacy checks pass. Two scoped reviews found no code/binding defect; their stale
+dashboard-count finding is corrected.
+
+All twelve binding owners pass: Axum's complete existing CI suite, Fastly's 292-test WASM
+library, Cloudflare's 103-test WASM library, Spin's complete pinned CI suite (including 35
+contract tests and 19 SDK-resource tests), and the four separate one-test CLI capability guards.
+Strict Clippy passes on all three changed WASM test-utils paths. Both existing focus compile-fail
+examples also pass separately without activating the literal runtime-error criterion.
+
+Logs are `/private/tmp/pr275-unit-settings-*`; the Axum and pinned Spin CI directories retain
+their full artifacts. Keep the initial Spin setup failure at `spin-ci` (ambient Wasmtime
+differs from the pin) and Cloudflare's initial `cloudflare-units.log` runner-schema mismatch.
+Separate successful runs explicitly select the existing pinned Wasmtime 48.0.2 and matching
+wasm-bindgen 0.2.128 runner; no SDK/runtime pin changes or erased failures. These are local
+execution results, not frozen-candidate or hosted qualification.
+
 ### Rust Check Consolidation (2026-10-31)
 
 The approved [tooling consolidation plan](./2026-10-31-test-tooling-consolidation.md) starts
@@ -703,11 +757,11 @@ Keep three different status questions separate:
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
   provider-local forwarding, client-selection, policy, marker, observation, encoding and overflow
-  checkpoints give 135 ready legs, with 376 still `planned`. This includes the strict Axum
-  pending-body proof, ten local encoding proofs, eleven local overflow legs and six reader/fallback
-  proofs. G1/Q3 binding work remains unfinished, not evidence that 376 features
-  are absent. Only the explicitly bound commands count as executable legs; unrelated checkpoint
-  tests do not activate another leg.
+  checkpoints plus the unit-settings pass give 147 ready legs, with 364 still `planned`.
+  This includes the strict Axum pending-body proof, ten local encoding proofs, eleven local
+  overflow legs and six reader/fallback proofs. G1/Q3 binding work remains unfinished, not evidence
+  that these features are absent. Only the explicitly bound commands count as executable legs;
+  unrelated checkpoint tests do not activate another leg.
 - **Qualification:** Q3 has not frozen a candidate; Q4 has no accepted candidate-specific package
   or returned hosted/consumer qualification. `ready` commands and green CI cannot substitute for
   passing, exact-candidate evidence. The inventory check remains `qualified: false`.

@@ -284,8 +284,10 @@ async CLI component, actual HTTP wire matrix and ingress probes as distinct phas
 The CLI and HTTP components live in `crates/fixture-spin-async` and
 `crates/fixture-spin-wire` in this workspace; unit/SDK tests remain in the adapter crate.
 Pinned Wasmtime and Spin must already be installed (`WASMTIME_BIN`/`SPIN_BIN` may select them).
-The Rust runner checks every ready `unit/spin` marker in its owning phase and
+The Rust runner checks every ready runtime-owned `unit/spin` marker in its owning phase and
 reopens the persisted JSONL to validate complete wire, policy and representation inventories.
+The capability-metadata row is separately owned by the existing exact CLI command in Unit Settings;
+it cannot use an SDK log as a substitute.
 Criterion 11 requires both native shared-head tests, the CLI component's native SDK bodyless/205
 proof, and eight real-wire 200/206 representation controls. Pending source polls are distinct from
 delivered items; the 205 producer join is deadline-bounded. Readback rejects missing proof phases,
@@ -307,6 +309,40 @@ not bypassing trailer or completion acknowledgement. A host library test is not 
 substitute for that SDK execution. Grouped inventory selection requires at least one
 ready sentinel in every selected environment and deduplicates names before the one suite run.
 This binds local execution only, without adopting optional metadata or qualifying hosted behavior.
+
+### Unit Settings
+
+Twelve additional blocking legs reuse existing owners: EZ-4/02 (zero connect timeout) and
+EZ-4/04 (capability metadata) on every adapter, plus EZ-8/03 (optimizer readback or unsupported
+modes) in core and on Axum, Cloudflare and Spin. The inventory is 147 ready/364 planned,
+unqualified. No CI job, phase or per-test YAML list is added.
+
+The zero-timeout helper uses actual native clients through Send, Begin, Follow and Batch;
+counted pending GET sources, timer tripwires and expired positive-setting controls establish
+preflight precedence. Batch retains its required buffered-empty body shape. Core readback
+compares all populated optimizer options with the original across parts rebuilding and both
+recorded prepared Follow hops. Non-Fastly adapters reuse their four-mode unsupported checks.
+
+Core uses the guard above. Axum uses its existing grouped native suite; Fastly and Cloudflare
+use their inventory-guarded WASM libraries. Spin's synchronous SDK phase owns its zero-timeout
+and unsupported-option tests; missing, ignored and wrong-phase markers fail readback. Capability
+metadata is separately owned by the existing CLI-only guard, once per adapter:
+
+```sh
+scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+scripts/run_test_nonzero.sh adapter_capability_matrix_matches_contracts cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features cli --lib adapter_capability_matrix_matches_contracts
+```
+
+Raw capability logs bind `outbound/unit/{adapter}/capabilities.log`; the other unit owners bind
+their existing raw logs, with Spin SDK output under `outbound/redirect/spin/sdk-tests.log`.
+Exact commands and sentinels are in the acceptance inventory. Adapter connect-setter/readback
+legs, supported Fastly native Follow, literal runtime errors for unrepresentable focus shapes,
+and hosted optimizer performance remain planned; nearby helper or compile-fail tests do not
+substitute for those assertions.
+
+### Batch Recovery
 
 Core criterion 22 uses exactly three slots under Completed, Cutoff and an original typed driver
 failure, with both fresh collection and check/next/collect. Terminal production is held until
@@ -752,8 +788,9 @@ Six additional local legs use their existing owners rather than another suite. E
 9-byte/cap-8 readers and a real capped extractor, count physical source polls including EOF,
 and require sticky 413 replay without rereading. A zero-read declared-length rejection remains
 recoverable at the larger cap, while an expired inbound deadline wins with sticky 408.
-All 30 earlier core bindings share that same broadened command; 32 ready core legs require all
-89 contributing sentinels before one library execution. No per-test CI list is added.
+All 30 earlier core bindings share that same broadened command; the settings checkpoint brings
+the total to 33 ready core legs requiring all 90 contributing sentinels before one library
+execution. No per-test CI list is added.
 
 Axum criteria 03/07 use its existing `--suite ci` native-test phase. Actual chunked overflow must
 close or produce exactly the correct healthy pipelined response. The test-only framed guard uses

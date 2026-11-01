@@ -1594,10 +1594,19 @@ fn image_optimizer_options_survive_every_prepared_follow_hop() {
     ]);
     let options = OutboundImageOptimizerOptions::new()
         .region(OutboundImageOptimizerRegion::Asia)
+        .format(super::OutboundImageFormat::WebP)
+        .quality(100)
+        .expect("quality")
+        .resize_filter(super::OutboundResizeFilter::Lanczos3)
         .width(320)
         .expect("width")
+        .height(180)
+        .expect("height")
+        .crop(16, 9, super::OutboundCropFocus::Percent { x: 0, y: 100 })
+        .expect("crop")
         .preserve_origin_query(true);
     let expected = options.clone();
+    let original = options.clone();
     let result = fixture.client.follow(
         request(Method::GET).image_optimizer(options),
         limit(4),
@@ -1614,12 +1623,16 @@ fn image_optimizer_options_survive_every_prepared_follow_hop() {
     );
     success(block_on(result));
     let state = fixture.state.borrow();
+    assert_eq!(state.records.len(), 2);
     assert_eq!(state.records[0].mode, OutboundSendMode::Follow);
     assert_eq!(state.records[1].mode, OutboundSendMode::Follow);
     assert_eq!(
         state.records[0].parts.image_optimizer,
         state.records[1].parts.image_optimizer
     );
+    for record in &state.records {
+        assert_eq!(record.parts.image_optimizer.as_ref(), Some(&original));
+    }
 }
 
 #[test]

@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind twelve unit-settings proofs to existing CI owners: zero-connect rejection and capability
+  metadata on all four adapters, plus optimizer readback and unsupported-mode precedence.
+  Preserve original deadlines and leave provider-setter, native optimizer Follow and hosted proofs open.
 - Consolidate Brotli/flate/JSON-map dependency audits and the mandatory forwarding doctest
   into the existing Rust test harness. Share Cargo metadata per workspace, retain real
   compiler-negative controls, and remove five JavaScript files and three redundant CI steps.

@@ -230,6 +230,81 @@ where
     Ok(())
 }
 
+/// Checks zero connect-timeout rejection on an actual adapter before source or timer activity.
+///
+/// # Errors
+/// Returns an internal error if any dispatch mode polls the source, arms a timer, or fails
+/// to return the specific client error within a finite number of polls.
+#[inline]
+pub async fn check_zero_connect_timeout_preflight<Client, Factory>(
+    factory: Factory,
+) -> Result<(), EdgeError>
+where
+    Client: OutboundHttpClient + 'static,
+    Factory: FnOnce(OutboundTime) -> Client,
+{
+    let now = MonotonicInstant::now();
+    let calls = Arc::new(Calls::default());
+    let timer_calls = Arc::clone(&calls);
+    let clock = MonotonicClock::new(move || now);
+    let cutoff = clock.deadline_after(Duration::from_secs(1));
+    let time = OutboundTime::new(clock, move |_, _| {
+        timer_calls.timers.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(invalid()) })
+    });
+    let client = HttpClient::with_client(factory(time));
+    let mut source_count = 0_usize;
+    for mode in [
+        OutboundSendMode::Send,
+        OutboundSendMode::Begin,
+        OutboundSendMode::Follow,
+        OutboundSendMode::Batch,
+    ] {
+        for expired in [false, true] {
+            let mut request = OutboundRequest::get("http://127.0.0.1:9/zero-connect")?
+                .connect_timeout(Duration::ZERO)
+                .deadline(if expired {
+                    Deadline::at_instant(now)
+                } else {
+                    cutoff
+                });
+            if mode != OutboundSendMode::Batch {
+                let source = SourceDrop(Arc::clone(&calls));
+                let observed = Arc::clone(&calls);
+                source_count = source_count.saturating_add(1);
+                request = request.body(Body::from_stream(stream_poll_fn(move |_| {
+                    let _keep_alive = &source;
+                    observed.bodies_polled.fetch_add(1, Ordering::SeqCst);
+                    Poll::<Option<Result<Bytes, EdgeError>>>::Pending
+                })));
+            }
+            let error = bounded_error(error_for(&client, mode, request, cutoff)).await?;
+            ensure(
+                matches!(error, EdgeError::BadRequest { .. })
+                    && error.message() == "connect timeout must be positive"
+                    && calls.timers.load(Ordering::SeqCst) == 0
+                    && calls.bodies_polled.load(Ordering::SeqCst) == 0,
+            )?;
+        }
+        ensure(calls.bodies_dropped.load(Ordering::SeqCst) == source_count)?;
+        let control = OutboundRequest::get("http://127.0.0.1:9/positive-connect")?
+            .connect_timeout(Duration::from_secs(1))
+            .deadline(Deadline::at_instant(now));
+        let error = bounded_error(error_for(&client, mode, control, cutoff)).await?;
+        ensure(
+            matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::RequestDeadline,
+                    ..
+                }
+            ) && calls.timers.load(Ordering::SeqCst) == 0
+                && calls.bodies_polled.load(Ordering::SeqCst) == 0,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
