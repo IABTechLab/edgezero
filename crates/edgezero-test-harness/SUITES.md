@@ -368,8 +368,7 @@ No SDK/runtime pin, transport, capability or hosted qualification is changed by 
 
 ### Focus Compiler Owner
 
-EZ-8/01 binds the existing workspace command, bringing the inventory to 152 ready/359 planned,
-still unqualified:
+EZ-8/01 binds the existing workspace command; compiler readiness remains distinct from qualification:
 
 ```sh
 CARGO_NET_OFFLINE=true scripts/test_integration.sh check
@@ -391,6 +390,26 @@ to the candidate/build through the existing exporter; a local log is not qualifi
 The other 33 core rows and their 90 library sentinels remain on the unchanged `--lib` command.
 That library owner still does not execute Rustdoc. No new CI job, step or per-test YAML list is
 added, and the approved numeric-error/type-invariant wording and source digests are unchanged.
+
+### Fastly Dispatch Guard
+
+EZ-3/01 uses the existing guarded Fastly library command:
+
+```sh
+scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib
+```
+
+The production Send-path proof keeps its original 500 ms budget through a 26 ms GET/HEAD
+settlement, reaches SDK `send_async`, observes a pending lease and verifies its release.
+Live-budget/equality-expiry and backwards-clock controls are mandatory additional sentinels.
+The checker rejects helper-only substitution, omitted controls, another command or another raw
+artifact. These tests already run in the existing CI owner; there is no additional invocation.
+
+The raw path is `outbound/unit/fastly/raw.log`. Current inventory is 153 ready/358 planned,
+still unqualified. SDK dispatch is not proof of origin receipt, a successful completed response,
+host cancellation, batch-registration behavior or hosted latency. Keep those separate acceptance
+legs and all failed lifecycle observations open. Local execution continues to use the explicitly
+tracked readiness repair, without changing a production SDK/runtime pin.
 
 ### Batch Recovery
 

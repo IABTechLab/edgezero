@@ -12,6 +12,44 @@
 
 ## Status and Authority
 
+### Fastly Post-Preparation Dispatch Acceptance (2026-11-01)
+
+Bind only EZ-3/acceptance/01 in `unit/fastly` to the existing inventory-guarded WASM library
+and `outbound/unit/fastly/raw.log`. This is a binding-only checkpoint: no production code,
+test implementation, CI invocation, YAML step, dependency, runtime pin or requirement changes.
+
+The primary proof uses GET and HEAD with the original 500 ms budget. Body settlement advances
+the injected clock by 26 ms; the prepared request retains its original entry time, absolute
+deadline, duration and timeout source. Production backend configuration succeeds, and the
+production Send path calls SDK `send_async` before acquiring the observed pending lease.
+Dropping the future releases that lease. This establishes SDK dispatch, not origin receipt,
+successful response completion or a hosted timing guarantee.
+
+Two mandatory controls in the same library log retain live-budget acceptance, actual expiry
+at equality and backwards-clock rejection. The checker pins the real SDK proof, both controls,
+exact command and raw path. Negative mutations reject helper-only substitution, missing controls,
+an unowned command and a different artifact. No new test invocation is added.
+
+- [x] Match the complete criterion to its existing SDK/clock proofs and bind only that leg.
+- [x] Add a failing ownership regression, implement the exact proof-set guard and update counts.
+- [x] Complete scoped reviews after the guarded Fastly library, tooling and formatting/docs
+      checks, before committing and pushing.
+
+Verification: the existing inventory-guarded Fastly WASM library passes all 293 tests
+in the tracked repaired Viceroy, with no ignored or filtered cases. Tooling passes 195 tests,
+including 64 evidence tests; documentation format/lint/build, manifest, root formatting and audit
+identity checks and independent spec/quality reviews pass. Structural comparison confirms only
+this leg's binding fields changed.
+The missing-guard mutation fails before the checker change and passes afterward. Logs are
+`/private/tmp/pr275-dispatch-binding-*`. No fresh full production-workspace or other-provider
+rerun is claimed for this binding-only checkpoint, and no hosted qualification is supplied.
+
+Inventory is 153 ready/358 planned, unqualified. All 255 criteria and 511 identities, normative
+digests, applicability and approval records remain intact. The batch-registration cases,
+configured-connect/provider readback, lifecycle timing, successful native optimizer redirects,
+candidate freeze, consumer acceptance and hosted qualification remain open. Existing lifecycle
+diagnostic passes do not override failed whole-case assertions or create a missing CI owner.
+
 ### Focus Compiler Acceptance (2026-11-01)
 
 Bind only EZ-8/acceptance/01 in core to the existing grouped Rust workspace check,
@@ -881,8 +919,8 @@ Keep three different status questions separate:
   forwarding criteria 01/04/08. The Spin host-wire checkpoint below adds its unit criterion 10:
   the subsequent Axum forwarding-mode checkpoint binds criteria 09/10/11/12/14. The current
   provider-local forwarding, client-selection, policy, marker, observation, encoding and overflow
-  checkpoints plus the unit-settings, provider-boundary and focus-compiler passes give 152 ready legs,
-  with 359 still `planned`.
+  checkpoints plus the unit-settings, provider-boundary, focus-compiler and Fastly post-preparation
+  dispatch passes give 153 ready legs, with 358 still `planned`.
   This includes the strict Axum pending-body proof, ten local encoding proofs, eleven local
   overflow legs and six reader/fallback proofs. G1/Q3 binding work remains unfinished, not evidence
   that these features are absent. Only the explicitly bound commands count as executable legs;

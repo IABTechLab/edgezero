@@ -909,7 +909,7 @@ test("redirect core criteria bind every required test before one library executi
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 359,
+    planned: 358,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
@@ -1417,6 +1417,72 @@ test("unit settings acceptance binds only proved zero-connect capabilities and o
   assert.equal(++activated, 12);
 });
 
+test("Fastly dispatch retirement cannot use helper-only or incomplete proofs", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const spec = readFileSync(
+    new URL(
+      "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const command =
+    "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib";
+  const proofs = [
+    "outbound::fastly_impl::tests::get_head_empty_settlement_after_26ms_reaches_sdk_dispatch",
+    "outbound::fastly_impl::tests::dispatch_accepts_live_budget_after_preparation",
+    "outbound::fastly_impl::tests::dispatch_budget_rejects_backwards_clock",
+  ];
+  const configured = structuredClone(manifest);
+  const row = configured.cases.find(
+    (c) =>
+      c.case_id === "EZ-3/acceptance/01" && c.environment === "unit/fastly",
+  );
+  assert.equal(row.implementation, "ready");
+  assert.equal(row.command, command);
+  assert.equal(row.sentinel, proofs[0]);
+  assert.deepEqual(row.additional_sentinels, proofs.slice(1));
+  assert.equal(row.artifact_path, "outbound/unit/fastly/raw.log");
+  assert.equal(row.applicability, "blocking");
+  assert.equal(row.approval, null);
+  assert.equal(row.condition, null);
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  assert.ok(ciOwnsCommand(workflow, command));
+  const selected = checker.readySentinels(manifest, "unit/fastly", command);
+  for (const proof of proofs) assert.ok(selected.includes(proof));
+  validateManifest(configured, spec);
+  for (const [field, value] of [
+    ["command", "cargo test --lib"],
+    [
+      "sentinel",
+      "outbound::fastly_impl::tests::cold_backend_registration_uses_the_original_deadline",
+    ],
+    ["additional_sentinels", [proofs[1]]],
+    ["additional_sentinels", [proofs[2]]],
+    ["artifact_path", "outbound/unit/core/raw.log"],
+  ]) {
+    const invalid = structuredClone(configured);
+    invalid.cases.find(
+      (c) => c.case_id === row.case_id && c.environment === row.environment,
+    )[field] = value;
+    assert.throws(
+      () => validateManifest(invalid, spec),
+      /Fastly dispatch-retirement proofs/,
+    );
+  }
+});
+
 test("connect mapping requires actual provider proofs and the same-candidate core companion", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -1571,7 +1637,7 @@ test("approved focus wording separates numeric errors from compile-time invarian
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 359,
+    planned: 358,
   });
   const stale = structuredClone(manifest);
   stale.source_digest =
@@ -1840,7 +1906,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /359 other legs remain planned/);
+  assert.match(manifest.status, /358 other legs remain planned/);
   assert.match(manifest.status, /EZ-1 core acceptance 07/);
   assert.match(manifest.status, /EZ-3 core acceptance 04/);
   const bindings = [
@@ -2433,10 +2499,10 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 152);
+  assert.equal(ready.length, 153);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    359,
+    358,
   );
   assert.ok(
     ready.every(
@@ -2463,6 +2529,8 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
         (c.case_id === "EZ-2/acceptance/01" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||
         (c.case_id === "EZ-2/acceptance/22" &&
+          c.environment === "unit/fastly") ||
+        (c.case_id === "EZ-3/acceptance/01" &&
           c.environment === "unit/fastly") ||
         (c.case_id === "EZ-3/acceptance/08" &&
           /^unit\/(axum|fastly|cloudflare|spin)$/.test(c.environment)) ||

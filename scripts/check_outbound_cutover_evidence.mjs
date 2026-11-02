@@ -276,6 +276,24 @@ export function validateManifest(
         `${id}: connect mapping requires its core companion`,
       );
     if (
+      c.case_id === "EZ-3/acceptance/01" &&
+      c.implementation === "ready" &&
+      c.environment === "unit/fastly"
+    )
+      requireFact(
+        c.command ===
+          "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib" &&
+          c.sentinel ===
+            "outbound::fastly_impl::tests::get_head_empty_settlement_after_26ms_reaches_sdk_dispatch" &&
+          JSON.stringify(c.additional_sentinels) ===
+            JSON.stringify([
+              "outbound::fastly_impl::tests::dispatch_accepts_live_budget_after_preparation",
+              "outbound::fastly_impl::tests::dispatch_budget_rejects_backwards_clock",
+            ]) &&
+          c.artifact_path === "outbound/unit/fastly/raw.log",
+        `${id}: Fastly dispatch-retirement proofs must retain SDK dispatch, expiry and clock guards`,
+      );
+    if (
       c.case_id === "EZ-8/acceptance/01" &&
       c.implementation === "ready" &&
       c.environment === "unit/core"

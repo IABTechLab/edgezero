@@ -13,6 +13,8 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bind Fastly's post-preparation dispatch acceptance to its existing SDK-pending proof and
+  expiry/clock guards, without changing production behavior or adding CI invocations.
 - Bind numeric and compiler focus acceptance to the existing grouped Rust check, reusing its
   compiler runner. Retain raw proof output and reject missing, skipped or substituted proofs
   without adding CI jobs or changing production behavior.
