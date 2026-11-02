@@ -4,6 +4,12 @@ mod callback;
 mod cleanup;
 mod protocol;
 
+#[derive(Clone, Copy)]
+struct AdapterBoundary<'a> {
+    name: &'a str,
+    origin: &'a str,
+}
+
 struct CapsClockBounds {
     epoch: [i128; 2],
     host_epoch: [i128; 2],
@@ -121,10 +127,8 @@ fn checks(
         executed += 1;
         let token = token();
         origins.register_lifetime(&token, case)?;
-        let backend = format!(
-            "http://127.0.0.1:{}/lifetimes/{token}/{case}",
-            origins.port(0)
-        );
+        let backend_origin = format!("http://127.0.0.1:{}", origins.port(0));
+        let backend = format!("{backend_origin}/lifetimes/{token}/{case}");
         let source_anchor = origins.mark_lifetime_start(&token)?;
         let prefix_bytes = if case == "response-handoff" {
             serde_json::to_vec(&handoff_prelude(
@@ -183,7 +187,16 @@ fn checks(
             )?;
             let bytes: Vec<u8> = serde_json::from_value(reply["body_bytes"].clone())?;
             report = decode_report(adapter, case, &token, &bytes)?;
-            validate(case, &token, &report, &origin)?;
+            validate(
+                AdapterBoundary {
+                    name: adapter,
+                    origin: &backend_origin,
+                },
+                case,
+                &token,
+                &report,
+                &origin,
+            )?;
             if case == "response-handoff" {
                 validate_handoff_dispatch(adapter, &report)?;
             }
@@ -217,8 +230,8 @@ fn checks(
             "partial_client":reply.as_ref().err().and_then(|error|error.downcast_ref::<net::InterruptedResponse>())
                 .map(|partial|json!({"status":partial.status,"body_bytes":partial.body,"reason":partial.reason})),
             "clock_correlation":clock_correlation,"timeout_contract":timeout_contract,
-            "timing_diagnostics":timing_diagnostics(case,&report,&origin),"body_phase_evidence":if case == "pending-body-cutoff" {
-                Some("host-head-written-only")
+            "timing_diagnostics":timing_diagnostics(case,&report,&origin),"body_phase_evidence":if case == "pending-body-cutoff" && result.is_ok() {
+                Some(if matches!(adapter, "axum" | "cloudflare") { "sdk-read-pending" } else { "host-head-written-only" })
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
                 "header_ns":reply["header_ns"],"headers":reply["headers"]})),"qualification":false}))?;
@@ -327,7 +340,13 @@ fn pending_cutoff(case: &str) -> bool {
     matches!(case, "pending-head-cutoff" | "pending-body-cutoff")
 }
 
-fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<()> {
+fn validate(
+    boundary: AdapterBoundary<'_>,
+    case: &str,
+    token: &str,
+    report: &Value,
+    origin: &Value,
+) -> Result<()> {
     require(
         report["schema"] == 1
             && report["case"] == case
@@ -388,6 +407,9 @@ fn validate(case: &str, token: &str, report: &Value, origin: &Value) -> Result<(
         return validate_handoff(report, events, origin);
     }
     if pending_cutoff(case) {
+        if matches!(boundary.name, "axum" | "cloudflare") {
+            validate_native_pending(boundary.origin, case, token, report, events)?;
+        }
         return validate_pending_cutoff(case, report, events, origin);
     }
     if case == "caps-while-waiting" {
@@ -1439,6 +1461,75 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
     )
 }
 
+fn validate_native_pending(
+    backend_origin: &str,
+    case: &str,
+    token: &str,
+    report: &Value,
+    events: &[Value],
+) -> Result<()> {
+    let snapshots = report["native_body"]
+        .as_array()
+        .ok_or("missing native SDK body evidence")?;
+    require(snapshots.len() == 3, "missing or extra native SDK witness")?;
+    let batch = event(events, "batch-start")?;
+    let next = event(events, "next")?;
+    let returned = number(next, "at_us")? + number(next, "duration_us")?;
+    for (snapshot, role) in snapshots.iter().zip(["a", "b", "c"]) {
+        let prepared = &snapshot["preparation"];
+        let entered = number(prepared, "entered_at_us")?;
+        require(
+            snapshot["invalid"] == false
+                && snapshot["attachments"] == 1
+                && snapshot["preparations"] == 1
+                && prepared["mode"] == "Batch"
+                && prepared["cause"] == "BatchCutoff"
+                && prepared["deadline_at_us"] == 200_000
+                && prepared["target_uri"]
+                    == format!("{backend_origin}/lifetimes/{token}/{case}/{role}")
+                && entered >= number(batch, "at_us")?
+                && entered <= number(next, "at_us")?
+                && entered < 200_000,
+            "native SDK witness is reused, foreign or has different dispatch policies",
+        )?;
+        if case == "pending-body-cutoff" {
+            let read = &snapshot["first_read"];
+            let head = number(snapshot, "head_at_us")?;
+            let started = number(read, "started_at_us")?;
+            let observed = number(read, "observed_at_us")?;
+            let released = number(snapshot, "released_at_us")?;
+            require(
+                snapshot["heads"] == 1
+                    && read["pending"] == true
+                    && snapshot["reads"].as_u64().is_some_and(|count| count > 0)
+                    && snapshot["ready_reads"] == 0
+                    && entered <= head
+                    && head <= started
+                    && started <= observed
+                    && observed < 200_000
+                    && observed <= returned
+                    && snapshot["source_acquisitions"] == 1
+                    && snapshot["source_releases"] == 1
+                    && (200_000..=returned).contains(&released),
+                "native SDK body read was not pending before cutoff or its owner was not released",
+            )?;
+        } else {
+            require(
+                snapshot["heads"] == 0
+                    && snapshot["head_at_us"].is_null()
+                    && snapshot["first_read"].is_null()
+                    && snapshot["reads"] == 0
+                    && snapshot["ready_reads"] == 0
+                    && snapshot["source_acquisitions"] == 0
+                    && snapshot["source_releases"] == 0
+                    && snapshot["released_at_us"].is_null(),
+                "head-only cutoff unexpectedly reached the native body",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_pending_cutoff(
     case: &str,
     report: &Value,
@@ -1874,6 +1965,11 @@ fn timing_diagnostics(case: &str, report: &Value, origin: &Value) -> Option<Valu
 mod tests {
     use super::*;
 
+    const AXUM: AdapterBoundary<'static> = AdapterBoundary {
+        name: "axum",
+        origin: "http://127.0.0.1:8080",
+    };
+
     #[test]
     fn suite_failures_preserve_original_timing_tail_and_both_wrapper_diagnostics() {
         let error = combined_count(
@@ -1950,7 +2046,7 @@ mod tests {
     #[test]
     fn response_handoff_requires_pending_original_work_and_post_prefix_success() {
         let (report, origin) = handoff_sample();
-        validate("response-handoff", "handoff", &report, &origin).unwrap();
+        validate(AXUM, "response-handoff", "handoff", &report, &origin).unwrap();
         for path in [
             "callback_scope_closed",
             "body_scope_live",
@@ -1959,17 +2055,17 @@ mod tests {
             let mut changed = report.clone();
             changed["handoff"][path] = json!(false);
             assert!(
-                validate("response-handoff", "handoff", &changed, &origin).is_err(),
+                validate(AXUM, "response-handoff", "handoff", &changed, &origin).is_err(),
                 "{path}"
             );
         }
         for slot in 0..3 {
             let mut changed = report.clone();
             changed["slots"][slot] = json!("Unresolved");
-            assert!(validate("response-handoff", "handoff", &changed, &origin).is_err());
+            assert!(validate(AXUM, "response-handoff", "handoff", &changed, &origin).is_err());
             let mut changed = report.clone();
             changed["items"][slot]["slot_error"] = json!(true);
-            assert!(validate("response-handoff", "handoff", &changed, &origin).is_err());
+            assert!(validate(AXUM, "response-handoff", "handoff", &changed, &origin).is_err());
         }
     }
 
@@ -1980,15 +2076,15 @@ mod tests {
         for item in changed["items"].as_array_mut().unwrap() {
             item["elapsed_us"] = json!(0);
         }
-        assert!(validate("response-handoff", "handoff", &changed, &origin).is_err());
+        assert!(validate(AXUM, "response-handoff", "handoff", &changed, &origin).is_err());
         let mut late = report.clone();
         late["events"][5]["at_us"] = json!(800000);
-        validate("response-handoff", "handoff", &late, &origin).unwrap();
+        validate(AXUM, "response-handoff", "handoff", &late, &origin).unwrap();
         late["items"][2]["elapsed_us"] = json!(499999);
-        validate("response-handoff", "handoff", &late, &origin).unwrap();
+        validate(AXUM, "response-handoff", "handoff", &late, &origin).unwrap();
         late["events"][1]["at_us"] = json!(34001);
         late["events"][2]["at_us"] = json!(34101);
-        assert!(validate("response-handoff", "handoff", &late, &origin).is_err());
+        assert!(validate(AXUM, "response-handoff", "handoff", &late, &origin).is_err());
     }
 
     #[test]
@@ -2102,7 +2198,7 @@ mod tests {
             let mut changed = origin.clone();
             changed.as_array_mut().unwrap().remove(index);
             assert!(
-                validate("response-handoff", "handoff", &report, &changed).is_err(),
+                validate(AXUM, "response-handoff", "handoff", &report, &changed).is_err(),
                 "missing {index}"
             );
         }
@@ -2117,7 +2213,7 @@ mod tests {
                     .unwrap();
                 entry["write_started_us"] = json!(40099);
                 assert!(
-                    validate("response-handoff", "handoff", &report, &changed).is_err(),
+                    validate(AXUM, "response-handoff", "handoff", &report, &changed).is_err(),
                     "early {role} {op}"
                 );
             }
@@ -2129,7 +2225,7 @@ mod tests {
                 .find(|entry| entry["role"] == role && entry["op"] == "closed")
                 .unwrap();
             entry["reason"] = json!("peer_closed_after_cutoff");
-            assert!(validate("response-handoff", "handoff", &report, &changed).is_err());
+            assert!(validate(AXUM, "response-handoff", "handoff", &report, &changed).is_err());
         }
         let mut tied = origin.clone();
         for entry in tied
@@ -2143,9 +2239,9 @@ mod tests {
                 entry["write_started_us"] = json!(40000);
             }
         }
-        validate("response-handoff", "handoff", &report, &tied).unwrap();
+        validate(AXUM, "response-handoff", "handoff", &report, &tied).unwrap();
         tied.as_array_mut().unwrap().swap(8, 9);
-        assert!(validate("response-handoff", "handoff", &report, &tied).is_err());
+        assert!(validate(AXUM, "response-handoff", "handoff", &report, &tied).is_err());
         let mut late = origin.clone();
         for entry in late
             .as_array_mut()
@@ -2155,7 +2251,7 @@ mod tests {
         {
             entry["at_us"] = json!(40500);
         }
-        validate("response-handoff", "handoff", &report, &late).unwrap();
+        validate(AXUM, "response-handoff", "handoff", &report, &late).unwrap();
         let mut cleanup = origin.clone();
         for entry in cleanup
             .as_array_mut()
@@ -2165,7 +2261,7 @@ mod tests {
         {
             entry["at_us"] = json!(61000);
         }
-        validate("response-handoff", "handoff", &report, &cleanup).unwrap();
+        validate(AXUM, "response-handoff", "handoff", &report, &cleanup).unwrap();
     }
 
     #[test]
@@ -2244,7 +2340,7 @@ mod tests {
     #[test]
     fn caps_evidence_requires_the_raw_slot_error_before_source_completion() {
         let (report, origin) = caps_sample();
-        validate("caps-while-waiting", "sample", &report, &origin).unwrap();
+        validate(AXUM, "caps-while-waiting", "sample", &report, &origin).unwrap();
         for (field, value) in [
             ("slot_error", json!(false)),
             ("slot_error", Value::Null),
@@ -2252,12 +2348,12 @@ mod tests {
         ] {
             let mut changed = report.clone();
             changed["items"][0][field] = value;
-            assert!(validate("caps-while-waiting", "sample", &changed, &origin).is_err());
+            assert!(validate(AXUM, "caps-while-waiting", "sample", &changed, &origin).is_err());
         }
         for reason in ["DecodedBody", "EncodedBody", "Unspecified"] {
             let mut changed = report.clone();
             changed["items"][0]["outcome"]["error"]["reason"] = json!(reason);
-            assert!(validate("caps-while-waiting", "sample", &changed, &origin).is_err());
+            assert!(validate(AXUM, "caps-while-waiting", "sample", &changed, &origin).is_err());
         }
     }
 
@@ -2279,7 +2375,7 @@ mod tests {
                 }
             }
             assert!(
-                validate("caps-while-waiting", "sample", &report, &impossible).is_err(),
+                validate(AXUM, "caps-while-waiting", "sample", &report, &impossible).is_err(),
                 "{role}"
             );
             let mut late_close = origin.clone();
@@ -2290,7 +2386,7 @@ mod tests {
                 .find(|entry| entry["role"] == role && entry["op"] == "closed")
                 .unwrap();
             closed["at_us"] = json!(300000);
-            validate("caps-while-waiting", "sample", &report, &late_close).unwrap();
+            validate(AXUM, "caps-while-waiting", "sample", &report, &late_close).unwrap();
         }
     }
 
@@ -2305,7 +2401,7 @@ mod tests {
             entry["write_started_us"] = json!(at);
             entry["at_us"] = json!(at + 1);
         }
-        assert!(validate("caps-while-waiting", "sample", &report, &bunched).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &bunched).is_err());
         let mut late = origin.clone();
         for entry in late
             .as_array_mut()
@@ -2319,7 +2415,7 @@ mod tests {
                 }
             }
         }
-        assert!(validate("caps-while-waiting", "sample", &report, &late).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &late).is_err());
     }
 
     #[test]
@@ -2327,10 +2423,10 @@ mod tests {
         let (report, origin) = caps_sample();
         let mut impossible = report.clone();
         impossible["items"][0]["elapsed_us"] = json!(499999);
-        assert!(validate("caps-while-waiting", "sample", &impossible, &origin).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &impossible, &origin).is_err());
         let mut possible = report.clone();
         possible["items"][0]["elapsed_us"] = json!(175950);
-        validate("caps-while-waiting", "sample", &possible, &origin).unwrap();
+        validate(AXUM, "caps-while-waiting", "sample", &possible, &origin).unwrap();
     }
 
     #[test]
@@ -2346,7 +2442,7 @@ mod tests {
             let mut changed = report.clone();
             *changed.pointer_mut(path).unwrap() = value;
             assert!(
-                validate("caps-while-waiting", "sample", &changed, &origin).is_err(),
+                validate(AXUM, "caps-while-waiting", "sample", &changed, &origin).is_err(),
                 "{path}"
             );
         }
@@ -2367,7 +2463,7 @@ mod tests {
                 .unwrap();
             piece[field] = value;
             assert!(
-                validate("caps-while-waiting", "sample", &report, &changed).is_err(),
+                validate(AXUM, "caps-while-waiting", "sample", &report, &changed).is_err(),
                 "{field}"
             );
         }
@@ -2379,7 +2475,7 @@ mod tests {
             .find(|entry| entry["op"] == "response-returned")
             .unwrap();
         returned["at_us"] = json!(173428);
-        let error = validate("caps-while-waiting", "sample", &report, &unproven).unwrap_err();
+        let error = validate(AXUM, "caps-while-waiting", "sample", &report, &unproven).unwrap_err();
         assert!(error.to_string().contains("contradictory shared epochs"));
         let mut early = origin.clone();
         let head = early
@@ -2389,7 +2485,7 @@ mod tests {
             .find(|entry| entry["role"] == "a" && entry["op"] == "head")
             .unwrap();
         head["content_encoding"] = json!("identity");
-        assert!(validate("caps-while-waiting", "sample", &report, &early).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &early).is_err());
     }
 
     #[test]
@@ -2398,17 +2494,17 @@ mod tests {
         for field in ["observer", "token", "case"] {
             let mut changed = origin.clone();
             changed.as_array_mut().unwrap().last_mut().unwrap()[field] = json!("foreign");
-            assert!(validate("caps-while-waiting", "sample", &report, &changed).is_err());
+            assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &changed).is_err());
         }
         let mut missing = origin.clone();
         missing.as_array_mut().unwrap().pop();
-        assert!(validate("caps-while-waiting", "sample", &report, &missing).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &missing).is_err());
         let mut duplicate = origin.clone();
         duplicate
             .as_array_mut()
             .unwrap()
             .push(origin.as_array().unwrap().last().unwrap().clone());
-        assert!(validate("caps-while-waiting", "sample", &report, &duplicate).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &duplicate).is_err());
         let mut premature = origin.clone();
         for entry in premature
             .as_array_mut()
@@ -2418,7 +2514,7 @@ mod tests {
         {
             entry["decoded_prefix_bytes"] = json!(65536);
         }
-        assert!(validate("caps-while-waiting", "sample", &report, &premature).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &premature).is_err());
     }
 
     #[test]
@@ -2427,7 +2523,7 @@ mod tests {
         for at in [302000, 400000] {
             let mut changed = origin.clone();
             changed.as_array_mut().unwrap().last_mut().unwrap()["at_us"] = json!(at);
-            validate("caps-while-waiting", "sample", &report, &changed).unwrap();
+            validate(AXUM, "caps-while-waiting", "sample", &report, &changed).unwrap();
         }
     }
 
@@ -2437,7 +2533,7 @@ mod tests {
         for (index, elapsed) in [(0, 50000), (1, 5000)] {
             let mut changed = report.clone();
             changed["items"][index]["elapsed_us"] = json!(elapsed);
-            assert!(validate("caps-while-waiting", "sample", &changed, &origin).is_err());
+            assert!(validate(AXUM, "caps-while-waiting", "sample", &changed, &origin).is_err());
         }
     }
 
@@ -2453,7 +2549,7 @@ mod tests {
                     .iter_mut()
                     .find(|entry| entry["role"] == role && entry["op"] == "request")
                     .unwrap()["guest_at_us"] = stamp;
-                assert!(validate("caps-while-waiting", "sample", &report, &changed).is_err());
+                assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &changed).is_err());
             }
         }
     }
@@ -2472,7 +2568,7 @@ mod tests {
             changed["events"][1]["duration_us"] = json!(400000);
             changed["items"][0]["elapsed_us"] = json!(elapsed);
             assert_eq!(
-                validate("caps-while-waiting", "sample", &changed, &origin).is_ok(),
+                validate(AXUM, "caps-while-waiting", "sample", &changed, &origin).is_ok(),
                 passes,
                 "elapsed={elapsed}"
             );
@@ -2489,7 +2585,7 @@ mod tests {
                 }
             }
         }
-        validate("caps-while-waiting", "sample", &report, &origin).unwrap();
+        validate(AXUM, "caps-while-waiting", "sample", &report, &origin).unwrap();
     }
 
     #[test]
@@ -2507,7 +2603,7 @@ mod tests {
             }
             let proof = caps_clock_bounds(&report, &changed).unwrap();
             assert_eq!(proof.offset_upper, expected);
-            validate("caps-while-waiting", "sample", &report, &changed).unwrap();
+            validate(AXUM, "caps-while-waiting", "sample", &report, &changed).unwrap();
         }
     }
 
@@ -2515,9 +2611,9 @@ mod tests {
     fn caps_timing_requires_collection_to_precede_the_diagnostic_response() {
         let (mut report, mut origin) = caps_sample();
         report["events"][1]["duration_us"] = json!(400000);
-        assert!(validate("caps-while-waiting", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "caps-while-waiting", "sample", &report, &origin).is_err());
         origin.as_array_mut().unwrap().last_mut().unwrap()["at_us"] = json!(500000);
-        validate("caps-while-waiting", "sample", &report, &origin).unwrap();
+        validate(AXUM, "caps-while-waiting", "sample", &report, &origin).unwrap();
     }
 
     #[test]
@@ -2527,7 +2623,7 @@ mod tests {
             let mut changed = report.clone();
             changed["events"][index]["duration_us"] = json!(u64::MAX);
             let rejected = std::panic::catch_unwind(|| {
-                validate("caps-while-waiting", "sample", &changed, &origin)
+                validate(AXUM, "caps-while-waiting", "sample", &changed, &origin)
             });
             assert!(rejected.expect("malformed timing must not panic").is_err());
         }
@@ -2603,7 +2699,7 @@ mod tests {
                 }
             }
             assert!(
-                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err(),
                 "{role} cannot arrive before its bytes exist under any allowed offset"
             );
         }
@@ -2625,7 +2721,7 @@ mod tests {
                 chunk.as_object_mut().unwrap().remove("write_started_us");
             }
             assert!(
-                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err(),
                 "payload must start after head completion and before its completion"
             );
         }
@@ -2635,7 +2731,7 @@ mod tests {
     fn cpu_stretch_accepts_on_time_or_unresolved_but_never_collection_stamped_b() {
         for delivered in [false, true] {
             let (report, origin) = cpu_sample(delivered);
-            validate("cpu-stretch", "sample", &report, &origin).unwrap();
+            validate(AXUM, "cpu-stretch", "sample", &report, &origin).unwrap();
         }
     }
 
@@ -2658,7 +2754,7 @@ mod tests {
             let (mut report, origin) = cpu_sample(true);
             *report.pointer_mut(path).unwrap() = value;
             assert!(
-                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err(),
                 "{path}"
             );
         }
@@ -2680,11 +2776,11 @@ mod tests {
                 .find(|entry| entry["role"] == "b" && entry["op"] == op)
                 .unwrap();
             entry[field] = json!(at);
-            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+            assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
         }
         let (mut report, origin) = cpu_sample(false);
         report["events"][2]["duration_us"] = json!(100000);
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
     }
 
     #[test]
@@ -2698,7 +2794,7 @@ mod tests {
                     }
                 }
             }
-            validate("cpu-stretch", "sample", &report, &origin).unwrap();
+            validate(AXUM, "cpu-stretch", "sample", &report, &origin).unwrap();
         }
         for field in ["guest_at_us", "write_started_us"] {
             let (report, mut origin) = cpu_sample(false);
@@ -2714,11 +2810,11 @@ mod tests {
                 .find(|entry| entry["role"] == "origin" && entry["op"] == op)
                 .unwrap();
             entry.as_object_mut().unwrap().remove(field);
-            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+            assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
         }
         let (mut report, origin) = cpu_sample(false);
         report["events"][2]["duration_us"] = json!(0);
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
     }
 
     #[test]
@@ -2727,11 +2823,11 @@ mod tests {
         report["events"][1]["at_us"] = json!(39000);
         report["events"][2]["at_us"] = json!(39100);
         report["events"][2]["duration_us"] = json!(61400);
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
         for delivered in [false, true] {
             let (mut report, origin) = cpu_sample(delivered);
             report["items"][0]["elapsed_us"] = json!(499000);
-            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+            assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
         }
     }
 
@@ -2743,7 +2839,7 @@ mod tests {
             report["events"][2]["at_us"] = json!(34000 + duration);
             report["events"][2]["duration_us"] = json!(66500 - duration);
             assert_eq!(
-                validate("cpu-stretch", "sample", &report, &origin).is_ok(),
+                validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_ok(),
                 accepted,
                 "batch invocation duration {duration}"
             );
@@ -2768,7 +2864,7 @@ mod tests {
                 entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":400200,"write_started_us":400150,"bytes":[67]}));
             }
             entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"head","at_us":400100,"write_started_us":400000}));
-            assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+            assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
         }
     }
 
@@ -2786,7 +2882,7 @@ mod tests {
                 entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"chunk","at_us":900200,"write_started_us":900150,"bytes":[67]}));
             }
             entries.insert(index, json!({"token":"sample","case":"cpu-stretch","role":"c","op":"head","at_us":900100,"write_started_us":900000}));
-            validate("cpu-stretch", "sample", &report, &origin).unwrap();
+            validate(AXUM, "cpu-stretch", "sample", &report, &origin).unwrap();
         }
     }
 
@@ -2809,7 +2905,7 @@ mod tests {
                 _ => {}
             }
         }
-        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        validate(AXUM, "cpu-stretch", "sample", &report, &origin).unwrap();
         for (op, field, at) in [
             ("chunk", "at_us", 533501),
             ("head", "write_started_us", 526999),
@@ -2822,7 +2918,7 @@ mod tests {
                 .find(|entry| entry["role"] == "b" && entry["op"] == op)
                 .unwrap();
             entry[field] = json!(at);
-            assert!(validate("cpu-stretch", "sample", &report, &changed).is_err());
+            assert!(validate(AXUM, "cpu-stretch", "sample", &report, &changed).is_err());
         }
     }
 
@@ -2856,14 +2952,14 @@ mod tests {
                 _ => {}
             }
         }
-        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        validate(AXUM, "cpu-stretch", "sample", &report, &origin).unwrap();
         report["items"]
             .as_array_mut()
             .unwrap()
             .push(json!({"index":1,"via":"collect","elapsed_us":500000,
             "outcome":{"status":200,"bytes":[66]}}));
         report["slots"][1] = json!("Resolved");
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
     }
 
     #[test]
@@ -2890,7 +2986,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                validate("cpu-stretch", "sample", &report, &origin).is_err(),
+                validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err(),
                 "mutation {mutation}"
             );
         }
@@ -2909,7 +3005,7 @@ mod tests {
             cpu_clock_bounds(report["events"].as_array().unwrap(), &origin).unwrap(),
             [-1500, 2000]
         );
-        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        validate(AXUM, "cpu-stretch", "sample", &report, &origin).unwrap();
         origin
             .as_array_mut()
             .unwrap()
@@ -2920,15 +3016,15 @@ mod tests {
             cpu_clock_bounds(report["events"].as_array().unwrap(), &origin).unwrap(),
             [-1500, 9000]
         );
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
     }
 
     #[test]
     fn cpu_calibration_finishes_before_the_original_observation_target() {
         let (mut report, mut origin) = cpu_sample(false);
-        validate("cpu-stretch", "sample", &report, &origin).unwrap();
+        validate(AXUM, "cpu-stretch", "sample", &report, &origin).unwrap();
         report["events"][5]["at_us"] = json!(453000);
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
         report["events"][5]["at_us"] = json!(500000);
         report["events"][4]["at_us"] = json!(200000);
         report["events"][4]["duration_us"] = json!(253000);
@@ -2940,7 +3036,7 @@ mod tests {
             .unwrap();
         request["guest_at_us"] = json!(200000);
         request["at_us"] = json!(201000);
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
     }
 
     #[test]
@@ -2952,7 +3048,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry["role"] == "calibration" && entry["op"] == "request")
             .unwrap()["at_us"] = json!(100100);
-        assert!(validate("cpu-stretch", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "cpu-stretch", "sample", &report, &origin).is_err());
     }
 
     fn pending_cutoff_sample(case: &str) -> (Value, Value) {
@@ -2964,7 +3060,7 @@ mod tests {
                     "result":{"state":"Cutoff","first_poll_us":34110,"pending_polls":1}},
                 {"op":"collect","at_us":200200,"duration_us":0,"result":"ok"}
             ],"items":[],"slots":["Unresolved","Unresolved","Unresolved"],"termination":"Cutoff",
-            "error":null,"origin":null,"mediator":null});
+            "error":null,"origin":null,"mediator":null,"native_body":native_pending_sample(case)});
         let mut origin = Vec::new();
         for role in ["a", "b", "c"] {
             origin.push(json!({"op":"request","role":role,"at_us":35000,"guest_at_us":34000}));
@@ -2987,11 +3083,203 @@ mod tests {
         (report, json!(origin))
     }
 
+    fn native_pending_sample(case: &str) -> Value {
+        json!(["a", "b", "c"].map(|role| {
+            let body = case == "pending-body-cutoff";
+            json!({"attachments":1,"preparations":1,"invalid":false,
+                "preparation":{"mode":"Batch","cause":"BatchCutoff","deadline_at_us":200000,
+                    "entered_at_us":34010,"target_uri":format!("http://127.0.0.1:8080/lifetimes/sample/{case}/{role}")},
+                "heads":u64::from(body),"head_at_us":body.then_some(36000),
+                "first_read":body.then(||json!({"started_at_us":36100,"observed_at_us":36101,"pending":true})),
+                "reads":u64::from(body),"ready_reads":0,
+                "source_acquisitions":u64::from(body),"source_releases":u64::from(body),
+                "released_at_us":body.then_some(200100)})
+        }))
+    }
+
+    #[test]
+    fn pending_cutoff_cannot_use_host_heads_as_native_sdk_read_evidence() {
+        let (mut report, origin) = pending_cutoff_sample("pending-body-cutoff");
+        report.as_object_mut().unwrap().remove("native_body");
+        for adapter in ["axum", "cloudflare"] {
+            assert!(
+                validate(
+                    AdapterBoundary {
+                        name: adapter,
+                        ..AXUM
+                    },
+                    "pending-body-cutoff",
+                    "sample",
+                    &report,
+                    &origin
+                )
+                .is_err(),
+                "{adapter} must require actual SDK read evidence"
+            );
+        }
+        for adapter in ["fastly", "spin"] {
+            validate(
+                AdapterBoundary {
+                    name: adapter,
+                    ..AXUM
+                },
+                "pending-body-cutoff",
+                "sample",
+                &report,
+                &origin,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn native_body_cutoff_rejects_missing_reused_ready_late_and_unreleased_witnesses() {
+        let (report, origin) = pending_cutoff_sample("pending-body-cutoff");
+        for adapter in ["axum", "cloudflare"] {
+            validate(
+                AdapterBoundary {
+                    name: adapter,
+                    ..AXUM
+                },
+                "pending-body-cutoff",
+                "sample",
+                &report,
+                &origin,
+            )
+            .unwrap();
+            for (path, value) in [
+                ("/native_body", Value::Null),
+                ("/native_body/0/attachments", json!(0)),
+                ("/native_body/1/preparations", json!(2)),
+                ("/native_body/1/invalid", json!(true)),
+                ("/native_body/1/preparation/mode", json!("Send")),
+                ("/native_body/1/preparation/cause", json!("RequestDeadline")),
+                ("/native_body/1/preparation/deadline_at_us", json!(201000)),
+                ("/native_body/1/preparation/entered_at_us", json!(33999)),
+                (
+                    "/native_body/1/preparation/target_uri",
+                    json!("http://127.0.0.1:8080/lifetimes/foreign/pending-body-cutoff/b"),
+                ),
+                ("/native_body/1/heads", json!(0)),
+                ("/native_body/1/head_at_us", Value::Null),
+                ("/native_body/1/first_read", Value::Null),
+                ("/native_body/1/first_read/pending", json!(false)),
+                ("/native_body/1/first_read/started_at_us", json!(200000)),
+                ("/native_body/1/first_read/observed_at_us", json!(36099)),
+                ("/native_body/1/first_read/observed_at_us", json!(200000)),
+                ("/native_body/1/reads", json!(0)),
+                ("/native_body/1/ready_reads", json!(1)),
+                ("/native_body/1/source_acquisitions", json!(2)),
+                ("/native_body/1/source_releases", json!(0)),
+                ("/native_body/1/source_releases", json!(2)),
+            ] {
+                let mut changed = report.clone();
+                *changed.pointer_mut(path).unwrap() = value;
+                assert!(
+                    validate(
+                        AdapterBoundary {
+                            name: adapter,
+                            ..AXUM
+                        },
+                        "pending-body-cutoff",
+                        "sample",
+                        &changed,
+                        &origin
+                    )
+                    .is_err(),
+                    "{adapter}: {path}"
+                );
+            }
+            for duplicate in [false, true] {
+                let mut changed = report.clone();
+                if duplicate {
+                    changed["native_body"][1] = changed["native_body"][0].clone();
+                } else {
+                    changed["native_body"].as_array_mut().unwrap().pop();
+                }
+                assert!(
+                    validate(
+                        AdapterBoundary {
+                            name: adapter,
+                            ..AXUM
+                        },
+                        "pending-body-cutoff",
+                        "sample",
+                        &changed,
+                        &origin
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_head_cutoff_is_a_zero_head_and_zero_read_control() {
+        let (report, origin) = pending_cutoff_sample("pending-head-cutoff");
+        for adapter in ["axum", "cloudflare"] {
+            validate(
+                AdapterBoundary {
+                    name: adapter,
+                    ..AXUM
+                },
+                "pending-head-cutoff",
+                "sample",
+                &report,
+                &origin,
+            )
+            .unwrap();
+            for field in [
+                "heads",
+                "reads",
+                "ready_reads",
+                "source_acquisitions",
+                "source_releases",
+            ] {
+                let mut changed = report.clone();
+                changed["native_body"][0][field] = json!(1);
+                assert!(
+                    validate(
+                        AdapterBoundary {
+                            name: adapter,
+                            ..AXUM
+                        },
+                        "pending-head-cutoff",
+                        "sample",
+                        &changed,
+                        &origin
+                    )
+                    .is_err(),
+                    "{field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_body_evidence_rejects_early_release_and_same_path_at_another_origin() {
+        let (report, origin) = pending_cutoff_sample("pending-body-cutoff");
+        for (field, value) in [
+            ("/native_body/0/released_at_us", json!(40000)),
+            (
+                "/native_body/0/preparation/target_uri",
+                json!("http://127.0.0.1:8081/lifetimes/sample/pending-body-cutoff/a"),
+            ),
+        ] {
+            let mut changed = report.clone();
+            *changed.pointer_mut(field).unwrap() = value;
+            assert!(
+                validate(AXUM, "pending-body-cutoff", "sample", &changed, &origin).is_err(),
+                "{field}"
+            );
+        }
+    }
+
     #[test]
     fn pending_head_and_body_cutoff_evidence_requires_actual_blocked_exchange() {
         for case in ["pending-head-cutoff", "pending-body-cutoff"] {
             let (report, origin) = pending_cutoff_sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
         }
     }
 
@@ -3016,7 +3304,7 @@ mod tests {
                 let mut changed = report.clone();
                 *changed.pointer_mut(path).unwrap() = value;
                 assert!(
-                    validate(case, "sample", &changed, &origin).is_err(),
+                    validate(AXUM, case, "sample", &changed, &origin).is_err(),
                     "{case}: {path}"
                 );
             }
@@ -3033,7 +3321,7 @@ mod tests {
                 let index = values.iter().position(|entry| entry["op"] == op).unwrap();
                 values.remove(index);
                 assert!(
-                    validate(case, "sample", &report, &changed).is_err(),
+                    validate(AXUM, case, "sample", &report, &changed).is_err(),
                     "{case}: {op}"
                 );
             }
@@ -3045,14 +3333,14 @@ mod tests {
                 .find(|entry| entry["op"] == "release")
                 .unwrap();
             release["at_us"] = json!(36000);
-            assert!(validate(case, "sample", &report, &changed).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &changed).is_err());
             let mut changed = origin.clone();
             changed
                 .as_array_mut()
                 .unwrap()
                 .push(json!({"op":"chunk","role":"a",
                 "token":"sample","case":case,"at_us":50000,"bytes":[65]}));
-            assert!(validate(case, "sample", &report, &changed).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &changed).is_err());
             let mut changed = origin.clone();
             if case == "pending-body-cutoff" {
                 changed
@@ -3066,7 +3354,7 @@ mod tests {
                     .push(json!({"op":"head","role":"a",
                     "token":"sample","case":case,"at_us":36000}));
             }
-            assert!(validate(case, "sample", &report, &changed).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &changed).is_err());
         }
     }
 
@@ -3081,7 +3369,7 @@ mod tests {
                 entry["response_returned_us"] = json!(210000);
             }
         }
-        validate("pending-body-cutoff", "sample", &report, &origin).unwrap();
+        validate(AXUM, "pending-body-cutoff", "sample", &report, &origin).unwrap();
         let entries = origin.as_array_mut().unwrap();
         let index = entries
             .iter()
@@ -3093,7 +3381,7 @@ mod tests {
             .position(|entry| entry["op"] == "waiting")
             .unwrap();
         entries.insert(index, release);
-        assert!(validate("pending-body-cutoff", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "pending-body-cutoff", "sample", &report, &origin).is_err());
     }
 
     #[test]
@@ -3118,7 +3406,7 @@ mod tests {
                             _ => {}
                         }
                     }
-                    assert!(validate(case, "sample", &report, &origin).is_err());
+                    assert!(validate(AXUM, case, "sample", &report, &origin).is_err());
                 }
             }
         }
@@ -3142,12 +3430,12 @@ mod tests {
                     .position(|entry| entry["op"] == "release")
                     .unwrap();
                 origin[release]["response_returned_us"] = boundary;
-                assert!(validate(case, "sample", &report, &origin).is_err());
+                assert!(validate(AXUM, case, "sample", &report, &origin).is_err());
                 origin[release]
                     .as_object_mut()
                     .unwrap()
                     .remove("response_returned_us");
-                assert!(validate(case, "sample", &report, &origin).is_err());
+                assert!(validate(AXUM, case, "sample", &report, &origin).is_err());
             }
         }
     }
@@ -3308,14 +3596,14 @@ mod tests {
     fn progress_evidence_requires_actual_receipts_inside_unobserved_windows() {
         for case in ["begin-progress", "batch-progress"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             let mut late = origin.clone();
             late[0]["at_us"] = json!(999000);
-            assert!(validate(case, "sample", &report, &late).is_err());
-            assert!(validate(case, "sample", &report, &json!([])).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &late).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &json!([])).is_err());
             let mut duplicate = origin.clone();
             duplicate.as_array_mut().unwrap().push(origin[0].clone());
-            assert!(validate(case, "sample", &report, &duplicate).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &duplicate).is_err());
         }
     }
 
@@ -3369,7 +3657,7 @@ mod tests {
     #[test]
     fn timeout_before_cutoff_preserves_siblings_and_per_call_timeout_provenance() {
         let (report, origin) = timeout_sample();
-        validate("timeout-before-cutoff", "sample", &report, &origin).unwrap();
+        validate(AXUM, "timeout-before-cutoff", "sample", &report, &origin).unwrap();
         for (field, value) in [
             ("index", json!(2)),
             ("via", json!("collect")),
@@ -3387,7 +3675,7 @@ mod tests {
             let mut invalid = report.clone();
             invalid["items"][2][field] = value;
             assert!(
-                validate("timeout-before-cutoff", "sample", &invalid, &origin).is_err(),
+                validate(AXUM, "timeout-before-cutoff", "sample", &invalid, &origin).is_err(),
                 "{field}"
             );
         }
@@ -3406,7 +3694,7 @@ mod tests {
         ] {
             let mut invalid = report.clone();
             invalid[field] = value;
-            assert!(validate("timeout-before-cutoff", "sample", &invalid, &origin).is_err());
+            assert!(validate(AXUM, "timeout-before-cutoff", "sample", &invalid, &origin).is_err());
         }
         let mut invalid = origin.clone();
         invalid
@@ -3414,13 +3702,13 @@ mod tests {
             .unwrap()
             .push(json!({"op":"head","role":"d","at_us":200000,
             "token":"sample","case":"timeout-before-cutoff"}));
-        assert!(validate("timeout-before-cutoff", "sample", &report, &invalid).is_err());
+        assert!(validate(AXUM, "timeout-before-cutoff", "sample", &report, &invalid).is_err());
         let mut invalid = origin.clone();
         invalid
             .as_array_mut()
             .unwrap()
             .retain(|entry| entry["role"] != "d");
-        assert!(validate("timeout-before-cutoff", "sample", &report, &invalid).is_err());
+        assert!(validate(AXUM, "timeout-before-cutoff", "sample", &report, &invalid).is_err());
     }
 
     #[test]
@@ -3433,7 +3721,7 @@ mod tests {
             .find(|entry| entry["op"] == "origin-head")
             .unwrap()["duration_us"] = json!(676000);
         validate_timeout_before_cutoff(&report, &origin).unwrap();
-        assert!(validate("timeout-before-cutoff", "sample", &report, &origin).is_err());
+        assert!(validate(AXUM, "timeout-before-cutoff", "sample", &report, &origin).is_err());
         let (mut report, origin) = timeout_sample();
         let check = report["events"]
             .as_array_mut()
@@ -3453,7 +3741,7 @@ mod tests {
             } else {
                 timeout_sample()
             };
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for mutation in 0..4 {
                 let mut changed = origin.clone();
                 let entries = changed.as_array_mut().unwrap();
@@ -3477,7 +3765,7 @@ mod tests {
                     _ => unreachable!(),
                 }
                 assert!(
-                    validate(case, "sample", &report, &changed).is_err(),
+                    validate(AXUM, case, "sample", &report, &changed).is_err(),
                     "{case} mutation {mutation}"
                 );
             }
@@ -3498,7 +3786,7 @@ mod tests {
                 .find(|entry| entry["role"] == "c" && entry["op"] == "closed")
                 .unwrap();
             closed["reason"] = json!("peer_closed_after_cutoff");
-            validate("timeout-before-cutoff", "sample", &report, &origin).unwrap();
+            validate(AXUM, "timeout-before-cutoff", "sample", &report, &origin).unwrap();
             if keep_head {
                 let mut early = origin.clone();
                 early
@@ -3507,14 +3795,16 @@ mod tests {
                     .iter_mut()
                     .find(|entry| entry["role"] == "c" && entry["op"] == "head")
                     .unwrap()["write_started_us"] = json!(800000);
-                assert!(validate("timeout-before-cutoff", "sample", &report, &early).is_err());
+                assert!(
+                    validate(AXUM, "timeout-before-cutoff", "sample", &report, &early).is_err()
+                );
             }
             let entries = origin.as_array_mut().unwrap();
             entries
                 .iter_mut()
                 .find(|entry| entry["role"] == "c" && entry["op"] == "closed")
                 .unwrap()["at_us"] = json!(800000);
-            assert!(validate("timeout-before-cutoff", "sample", &report, &origin).is_err());
+            assert!(validate(AXUM, "timeout-before-cutoff", "sample", &report, &origin).is_err());
         }
     }
 
@@ -3533,7 +3823,7 @@ mod tests {
                 let mut invalid = report.clone();
                 invalid[field] = value;
                 assert!(
-                    validate(case, "sample", &invalid, &origin).is_err(),
+                    validate(AXUM, case, "sample", &invalid, &origin).is_err(),
                     "{case} {field}"
                 );
             }
@@ -3546,7 +3836,7 @@ mod tests {
         ] {
             let mut invalid = report.clone();
             invalid[field] = value;
-            assert!(validate("batch-progress", "sample", &invalid, &origin).is_err());
+            assert!(validate(AXUM, "batch-progress", "sample", &invalid, &origin).is_err());
         }
     }
 
@@ -3554,18 +3844,18 @@ mod tests {
     fn slow_and_fast_origin_reject_collection_time_elapsed_and_renewed_deadlines() {
         for case in ["slow-origin", "fast-origin"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for index in 0..2 {
                 let mut late = report.clone();
                 late["items"][index]["elapsed_us"] = json!(667000);
-                assert!(validate(case, "sample", &late, &origin).is_err());
+                assert!(validate(AXUM, case, "sample", &late, &origin).is_err());
                 let mut wrong = report.clone();
                 wrong["items"][index]["index"] = json!(2);
-                assert!(validate(case, "sample", &wrong, &origin).is_err());
+                assert!(validate(AXUM, case, "sample", &wrong, &origin).is_err());
             }
             let mut states = report.clone();
             states["slots"][0] = json!("Unresolved");
-            assert!(validate(case, "sample", &states, &origin).is_err());
+            assert!(validate(AXUM, case, "sample", &states, &origin).is_err());
         }
         let (report, origin) = sample("fast-origin");
         for (field, value) in [
@@ -3578,7 +3868,7 @@ mod tests {
         ] {
             let mut invalid = report.clone();
             invalid["mediator"][field] = value;
-            assert!(validate("fast-origin", "sample", &invalid, &origin).is_err());
+            assert!(validate(AXUM, "fast-origin", "sample", &invalid, &origin).is_err());
         }
         let mut extended = report;
         extended["events"]
@@ -3587,7 +3877,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry["op"] == "mediator-send")
             .unwrap()["duration_us"] = json!(1000000);
-        assert!(validate("fast-origin", "sample", &extended, &origin).is_err());
+        assert!(validate(AXUM, "fast-origin", "sample", &extended, &origin).is_err());
     }
 
     #[test]
@@ -3609,7 +3899,7 @@ mod tests {
             let verdict = timing_diagnostics(case, &late_guest, &origin).unwrap();
             assert_eq!(verdict["source_timeline"]["status"], "pass");
             assert_eq!(verdict["guest_head_body"]["status"], "fail");
-            assert!(validate(case, "sample", &late_guest, &origin).is_err());
+            assert!(validate(AXUM, case, "sample", &late_guest, &origin).is_err());
             for (stage, expected) in [
                 ("wait", [6000, 0, 0]),
                 ("post-wait", [0, 6000, 0]),
@@ -3648,7 +3938,7 @@ mod tests {
                     ],
                     expected
                 );
-                assert!(validate(case, "sample", &report, &delayed).is_err());
+                assert!(validate(AXUM, case, "sample", &report, &delayed).is_err());
             }
         }
         assert!(timing_diagnostics("caps-while-waiting", &Value::Null, &Value::Null).is_none());
@@ -3658,7 +3948,7 @@ mod tests {
     fn timeline_requires_original_wait_return_between_schedule_and_write() {
         for case in ["slow-origin", "fast-origin"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for role in ["origin", "a", "b", "c"] {
                 for op in ["head", "chunk"] {
                     for mutation in ["missing", "before-schedule", "after-write"] {
@@ -3683,7 +3973,7 @@ mod tests {
                             }
                         }
                         assert!(
-                            validate(case, "sample", &report, &changed).is_err(),
+                            validate(AXUM, case, "sample", &report, &changed).is_err(),
                             "{case}: {role}: {op}: {mutation}"
                         );
                     }
@@ -3696,7 +3986,7 @@ mod tests {
     fn timeline_requires_successful_ordered_terminal_frame_evidence() {
         for case in ["slow-origin", "fast-origin"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for mutation in [
                 "missing",
                 "failed",
@@ -3733,7 +4023,7 @@ mod tests {
                     }
                 }
                 assert!(
-                    validate(case, "sample", &report, &changed).is_err(),
+                    validate(AXUM, case, "sample", &report, &changed).is_err(),
                     "{case}: {mutation}"
                 );
             }
@@ -3744,7 +4034,7 @@ mod tests {
     fn timeline_seal_rejects_missing_recomputed_or_post_write_alignment() {
         for case in ["slow-origin", "fast-origin"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for (field, value) in [
                 ("scenario_anchor_host_offset_us", json!(1001)),
                 ("selected_role", json!("origin")),
@@ -3764,7 +4054,7 @@ mod tests {
                     .find(|e| e["op"] == "alignment")
                     .unwrap()[field] = value;
                 assert!(
-                    validate(case, "sample", &report, &changed).is_err(),
+                    validate(AXUM, case, "sample", &report, &changed).is_err(),
                     "{case}: {field}"
                 );
             }
@@ -3773,7 +4063,7 @@ mod tests {
                 .as_array_mut()
                 .unwrap()
                 .retain(|e| e["op"] != "alignment");
-            assert!(validate(case, "sample", &report, &missing).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &missing).is_err());
             let mut duplicate = origin.clone();
             let seal = duplicate
                 .as_array()
@@ -3783,7 +4073,7 @@ mod tests {
                 .unwrap()
                 .clone();
             duplicate.as_array_mut().unwrap().push(seal);
-            assert!(validate(case, "sample", &report, &duplicate).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &duplicate).is_err());
             let mut delayed_eof = report.clone();
             let body = delayed_eof["events"]
                 .as_array_mut()
@@ -3793,7 +4083,7 @@ mod tests {
                 .unwrap();
             body["duration_us"] = json!(number(body, "duration_us").unwrap() + 5001);
             assert!(
-                validate(case, "sample", &delayed_eof, &origin).is_err(),
+                validate(AXUM, case, "sample", &delayed_eof, &origin).is_err(),
                 "delayed EOF must not be hidden by timely payload writes"
             );
         }
@@ -3803,7 +4093,7 @@ mod tests {
     fn timeline_rejects_early_missing_or_inverted_source_starts() {
         for case in ["slow-origin", "fast-origin"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for role in ["origin", "a", "b", "c"] {
                 for op in ["head", "chunk"] {
                     for mutation in ["early", "missing", "inverted"] {
@@ -3828,7 +4118,7 @@ mod tests {
                             }
                         }
                         assert!(
-                            validate(case, "sample", &report, &changed).is_err(),
+                            validate(AXUM, case, "sample", &report, &changed).is_err(),
                             "{case}: {role}: {op}: {mutation}"
                         );
                     }
@@ -3853,7 +4143,7 @@ mod tests {
                     }
                 }
                 assert!(
-                    validate(case, "sample", &report, &changed).is_err(),
+                    validate(AXUM, case, "sample", &report, &changed).is_err(),
                     "{case}: {role}: payload started before head completion"
                 );
             }
@@ -3891,7 +4181,7 @@ mod tests {
     fn timeline_evidence_cannot_omit_heads_or_replace_actual_times_with_schedules() {
         for case in ["slow-origin", "fast-origin"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for op in ["head", "chunk"] {
                 let mut missing = origin.clone();
                 missing
@@ -3899,7 +4189,7 @@ mod tests {
                     .unwrap()
                     .retain(|entry| entry["op"] != op);
                 assert!(
-                    validate(case, "sample", &report, &missing).is_err(),
+                    validate(AXUM, case, "sample", &report, &missing).is_err(),
                     "missing {op}"
                 );
             }
@@ -3911,7 +4201,7 @@ mod tests {
                 .find(|entry| entry["op"] == "head")
                 .unwrap();
             head["at_us"] = json!(number(head, "scheduled_us").unwrap() + 6000);
-            assert!(validate(case, "sample", &report, &late).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &late).is_err());
             let mut reanchored = origin.clone();
             for entry in reanchored.as_array_mut().unwrap() {
                 if entry.get("scheduled_us").is_some() {
@@ -3919,7 +4209,7 @@ mod tests {
                     entry["scheduled_us"] = json!(number(entry, "scheduled_us").unwrap() + 10_000);
                 }
             }
-            assert!(validate(case, "sample", &report, &reanchored).is_err());
+            assert!(validate(AXUM, case, "sample", &report, &reanchored).is_err());
         }
     }
 
@@ -3927,7 +4217,7 @@ mod tests {
     fn quiet_window_proof_survives_cold_entry_clock_offsets() {
         for case in ["begin-progress", "batch-progress"] {
             let (report, origin) = sample(case);
-            validate(case, "sample", &report, &origin).unwrap();
+            validate(AXUM, case, "sample", &report, &origin).unwrap();
             for offset in [100_000, 1_000_000] {
                 let mut shifted = origin.clone();
                 for entry in shifted.as_array_mut().unwrap() {
@@ -3937,7 +4227,7 @@ mod tests {
                         }
                     }
                 }
-                validate(case, "sample", &report, &shifted).unwrap();
+                validate(AXUM, case, "sample", &report, &shifted).unwrap();
             }
         }
     }
@@ -3960,16 +4250,16 @@ mod tests {
                 let end = number(event(events, "quiet-end").unwrap(), "at_us").unwrap();
                 let mut threshold = shifted.clone();
                 threshold[0]["at_us"] = json!(u64::try_from(lower + i128::from(end)).unwrap());
-                validate(case, "sample", &report, &threshold).unwrap();
+                validate(AXUM, case, "sample", &report, &threshold).unwrap();
                 threshold[0]["at_us"] = json!(number(&threshold[0], "at_us").unwrap() + 1);
-                assert!(validate(case, "sample", &report, &threshold).is_err());
+                assert!(validate(AXUM, case, "sample", &report, &threshold).is_err());
                 let mut invalid = shifted.clone();
                 invalid[0]["token"] = json!("foreign");
-                assert!(validate(case, "sample", &report, &invalid).is_err());
+                assert!(validate(AXUM, case, "sample", &report, &invalid).is_err());
                 if case == "batch-progress" {
                     let mut observed = report.clone();
                     observed["items"][0]["elapsed_us"] = json!(300_000);
-                    assert!(validate(case, "sample", &observed, &shifted).is_err());
+                    assert!(validate(AXUM, case, "sample", &observed, &shifted).is_err());
                 }
                 let mut recorded_late = shifted;
                 let head = recorded_late
@@ -3979,7 +4269,7 @@ mod tests {
                     .find(|entry| entry["op"] == "head")
                     .unwrap();
                 head["at_us"] = json!(number(head, "at_us").unwrap() + 50_000);
-                validate(case, "sample", &report, &recorded_late).unwrap();
+                validate(AXUM, case, "sample", &report, &recorded_late).unwrap();
             }
         }
     }

@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 qualification = ["fixture-core/qualification"]
-progress = ["fixture-core/qualification", "dep:futures"]
+progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-cloudflare/test-utils", "dep:futures"]
 
 [dependencies]
 serde_json.workspace = true

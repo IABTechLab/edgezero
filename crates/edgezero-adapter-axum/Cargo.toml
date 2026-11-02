@@ -31,7 +31,7 @@ cli = [
     "dep:toml",
     "dep:walkdir",
 ]
-test-utils = ["axum"]
+test-utils = ["axum", "edgezero-core/test-utils"]
 
 [dependencies]
 edgezero-adapter = { path = "../edgezero-adapter", optional = true, features = [

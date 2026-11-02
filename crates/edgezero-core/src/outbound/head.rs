@@ -773,6 +773,8 @@ mod tests {
             },
             time: OutboundTime::new(clock, |_, _| Box::pin(pending())),
             mode: OutboundSendMode::Send,
+            #[cfg(feature = "test-utils")]
+            native_body_recorder: None,
             request_method: Method::GET,
             body_policy: ResponseBodyPolicy {
                 max_brotli_window_bits: 24,

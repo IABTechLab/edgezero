@@ -16,6 +16,10 @@ use edgezero_core::error_detail::{
 };
 use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
+#[cfg(feature = "test-utils")]
+use edgezero_core::outbound::test_support::{
+    NativeBodyRecorder, native_body_recorder, observe_sdk_read, own_sdk_source,
+};
 use edgezero_core::outbound::{
     OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest, OutboundExchangeOwner,
     OutboundFuture, OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
@@ -381,14 +385,27 @@ fn response_head(
         copy_headers(response.headers()),
         OutboundHeaderFidelity::AdapterVisibleFields,
     );
-    let encoded = response_stream(response, budget, clock);
-    OutboundHead::new(
+    #[cfg(feature = "test-utils")]
+    let recorder = native_body_recorder(&context);
+    let encoded = response_stream(
+        response,
+        budget,
+        clock,
+        #[cfg(feature = "test-utils")]
+        recorder.clone(),
+    );
+    let head = OutboundHead::new(
         status,
         headers,
         encoded,
         context,
         OutboundExchangeOwner::new(|| {}),
-    )
+    )?;
+    #[cfg(feature = "test-utils")]
+    if let Some(observation) = recorder {
+        observation.head_received();
+    }
+    Ok(head)
 }
 
 fn budget_remaining(budget: DispatchBudget, clock: &MonotonicClock) -> Result<Duration, EdgeError> {
@@ -501,10 +518,18 @@ fn response_stream(
     mut response: reqwest::Response,
     budget: DispatchBudget,
     clock: MonotonicClock,
+    #[cfg(feature = "test-utils")] recorder: Option<NativeBodyRecorder>,
 ) -> BodyStream {
-    stream! {
+    #[cfg(feature = "test-utils")]
+    let ownership = recorder.clone();
+    let source = stream! {
         loop {
-            match response.chunk().await {
+            let read = response.chunk();
+            #[cfg(feature = "test-utils")]
+            let result = observe_sdk_read(read, recorder.as_ref()).await;
+            #[cfg(not(feature = "test-utils"))]
+            let result = read.await;
+            match result {
                 Ok(Some(bytes)) => yield Ok(bytes),
                 Ok(None) => return,
                 Err(error) => {
@@ -522,7 +547,12 @@ fn response_stream(
             }
         }
     }
-    .boxed_local()
+    .boxed_local();
+    #[cfg(feature = "test-utils")]
+    let encoded = own_sdk_source(source, ownership);
+    #[cfg(not(feature = "test-utils"))]
+    let encoded = source;
+    encoded
 }
 
 fn timeout_error(cause: BudgetSource) -> EdgeError {
@@ -1357,7 +1387,13 @@ mod clock_tests {
         );
         let start = MonotonicInstant::now();
         let budget = test_budget(start, Duration::from_secs(1));
-        let mut stream = response_stream(response, budget, MonotonicClock::new(move || start));
+        let mut stream = response_stream(
+            response,
+            budget,
+            MonotonicClock::new(move || start),
+            #[cfg(feature = "test-utils")]
+            None,
+        );
         let mapped = stream
             .next()
             .await

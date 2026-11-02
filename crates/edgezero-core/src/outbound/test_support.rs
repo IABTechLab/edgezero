@@ -1,5 +1,11 @@
 //! Conformance checks over real adapters, enabled only for test consumers.
 
+mod native_body;
+pub use native_body::{
+    NativeBodyPreparation, NativeBodyRead, NativeBodyRecorder, NativeBodySnapshot,
+    NativeBodyWitness, native_body_recorder, observe_sdk_read, observe_sdk_stream, own_sdk_source,
+};
+
 use super::*;
 use crate::error::BudgetSource;
 use futures_util::future::poll_fn;

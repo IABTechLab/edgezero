@@ -1,6 +1,8 @@
 use bytes::Bytes;
 use edgezero_core::context::RequestContext;
 use edgezero_core::http::{HeaderMap, Method, Response, Uri, response_builder};
+#[cfg(feature = "native-body-witness")]
+use edgezero_core::outbound::test_support::{NativeBodySnapshot, NativeBodyWitness};
 use edgezero_core::{
     Body, Deadline, EdgeError, HttpClient, IndependentOutboundProgress, MonotonicClock,
     MonotonicInstant, OutboundBatch, OutboundBatchCheck, OutboundBatchNext, OutboundCollectedSlot,
@@ -38,6 +40,7 @@ struct Report {
     origin: Option<Value>,
     mediator: Option<Value>,
     handoff: Option<Value>,
+    native_body: Option<Value>,
 }
 
 impl Probe {
@@ -192,7 +195,8 @@ impl Report {
     fn json(&self, probe: &Probe, timeline: &Timeline) -> Value {
         json!({"schema":1,"case":probe.case,"token":probe.token,"qualification":false,
             "events":timeline.events,"items":self.items,"slots":self.slots,
-            "termination":self.termination,"error":self.error,"origin":self.origin,"mediator":self.mediator,"handoff":self.handoff})
+            "termination":self.termination,"error":self.error,"origin":self.origin,"mediator":self.mediator,"handoff":self.handoff,
+            "native_body":self.native_body})
     }
 }
 
@@ -559,6 +563,19 @@ async fn pending_cutoff(
         .into_iter()
         .map(|role| probe.request(role, timeline))
         .collect::<Result<Vec<_>, _>>()?;
+    #[cfg(feature = "native-body-witness")]
+    let (requests, witnesses) = {
+        let mut requests = requests;
+        let witnesses = [
+            NativeBodyWitness::new(),
+            NativeBodyWitness::new(),
+            NativeBodyWitness::new(),
+        ];
+        for (request, witness) in requests.iter_mut().zip(&witnesses) {
+            witness.attach(request)?;
+        }
+        (requests, witnesses)
+    };
     let observation_cutoff = timeline.deadline_at(200);
     let at = timeline.clock.now();
     let mut batch = client.start_batch_until(requests, observation_cutoff);
@@ -585,6 +602,16 @@ async fn pending_cutoff(
         .await;
         (result, timeline.clock.now())
     };
+    // Snapshot before collect can release any additional work.
+    #[cfg(feature = "native-body-witness")]
+    {
+        report.native_body = Some(json!(
+            witnesses
+                .iter()
+                .map(|witness| { native_body_report(witness.snapshot(), timeline) })
+                .collect::<Vec<_>>()
+        ));
+    }
     let state = match &result {
         Ok(OutboundBatchNext::Finished(termination)) => format!("{termination:?}"),
         Ok(OutboundBatchNext::Item(_)) => "Item".to_owned(),
@@ -607,6 +634,28 @@ async fn pending_cutoff(
     }
     collect(batch, report, timeline).await;
     Ok(())
+}
+
+#[cfg(feature = "native-body-witness")]
+fn native_body_report(snapshot: NativeBodySnapshot, timeline: &Timeline) -> Value {
+    let at = |instant: MonotonicInstant| {
+        instant
+            .checked_duration_since(timeline.start)
+            .and_then(|duration| u64::try_from(duration.as_micros()).ok())
+    };
+    let preparation = snapshot.preparation.map(|prepared| json!({
+        "mode":format!("{:?}", prepared.mode), "cause":format!("{:?}", prepared.budget.cause),
+        "entered_at_us":at(prepared.entered_at), "deadline_at_us":at(prepared.budget.deadline.instant()),
+        "target_uri":prepared.target.to_string(),
+    }));
+    json!({"attachments":snapshot.attachments,"preparations":snapshot.preparations,
+        "preparation":preparation,"invalid":snapshot.invalid,
+        "heads":snapshot.heads,"head_at_us":snapshot.first_head.and_then(at),
+        "first_read":snapshot.first_read.map(|read| json!({
+            "started_at_us":at(read.started_at),"observed_at_us":at(read.observed_at),"pending":read.pending})),
+        "reads":snapshot.reads,"ready_reads":snapshot.ready_reads,
+        "source_acquisitions":snapshot.source_acquisitions,"source_releases":snapshot.source_releases,
+        "released_at_us":snapshot.first_release.and_then(at)})
 }
 
 fn handoff_prelude(token: &str, cutoff_at_us: u64, dispatch_returned: Option<bool>) -> Value {

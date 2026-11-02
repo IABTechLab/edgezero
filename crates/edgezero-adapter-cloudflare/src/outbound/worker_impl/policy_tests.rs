@@ -1,5 +1,7 @@
 use std::io::Write as _;
 
+#[cfg(feature = "test-utils")]
+use edgezero_core::outbound::test_support::NativeBodyWitness;
 use edgezero_core::{Deadline, ResponseLimitReason};
 use flate2::{Compression, write::GzEncoder};
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -604,4 +606,59 @@ async fn native_reset_content_preserves_original_disposition() {
             }
         }
     }
+}
+
+#[cfg(feature = "test-utils")]
+#[wasm_bindgen_test]
+async fn native_body_witness_observes_the_sdk_reader_and_release_not_outer_pending() {
+    let _timers = NumericTimeoutGuard::install();
+    let raw = Function::new_no_args(
+        "return new Response(new ReadableStream({pull() {}}, {highWaterMark: 0}));",
+    )
+    .call0(&JsValue::UNDEFINED)
+    .expect("pending response")
+    .dyn_into::<web_sys::Response>()
+    .expect("response type");
+    let controller = web_sys::AbortController::new().expect("controller");
+    let signal = controller.signal();
+    let client = testing::fixture_client(native_time(MonotonicClock::default()), move |context| {
+        response_head(
+            WorkerResponse::from(raw),
+            AbortGuard::new(controller),
+            context,
+        )
+    })
+    .expect("client");
+    let witness = NativeBodyWitness::new();
+    let mut request = OutboundRequest::get("https://fixture.invalid/pending").expect("request");
+    witness.attach(&mut request).expect("attach");
+    let mut send = Box::pin(client.send(request));
+    assert_eq!(
+        witness.snapshot().heads,
+        0,
+        "construction is not head receipt"
+    );
+    assert!(witness.snapshot().first_read.is_none());
+    for _ in 0..16_u8 {
+        assert!(send.as_mut().now_or_never().is_none());
+        if witness.snapshot().first_read.is_some() {
+            break;
+        }
+        HostEventYield::new().await.expect("host checkpoint");
+    }
+    let before = witness.snapshot();
+    assert!(!before.invalid);
+    assert_eq!(before.heads, 1);
+    assert!(
+        before
+            .first_read
+            .expect("SDK ByteStream was polled")
+            .pending
+    );
+    assert_eq!(before.source_acquisitions, 1);
+    assert_eq!(before.source_releases, 0);
+    assert!(!signal.aborted());
+    drop(send);
+    assert_eq!(witness.snapshot().source_releases, 1);
+    assert!(signal.aborted());
 }

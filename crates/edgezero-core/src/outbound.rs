@@ -160,6 +160,8 @@ pub struct OutboundResponseContext {
     max_response_header_bytes: Option<u64>,
     max_response_header_count: Option<u64>,
     mode: OutboundSendMode,
+    #[cfg(feature = "test-utils")]
+    native_body_recorder: Option<test_support::NativeBodyRecorder>,
     original_chain_deadline: Option<Deadline>,
     proxy_marker: OutboundProxyMarker,
     request_method: Method,
@@ -317,6 +319,8 @@ pub struct OutboundRequest {
     max_response_header_bytes: Option<u64>,
     max_response_header_count: Option<u64>,
     method: Method,
+    #[cfg(feature = "test-utils")]
+    native_body_witness: Option<test_support::NativeBodyWitness>,
     proxy_marker: OutboundProxyMarker,
     response_decoding: ResponseDecoding,
     response_mode: ResponseMode,
@@ -348,6 +352,8 @@ pub struct OutboundRequestParts {
     pub max_response_header_bytes: Option<u64>,
     pub max_response_header_count: Option<u64>,
     pub method: Method,
+    #[cfg(feature = "test-utils")]
+    native_body_witness: Option<test_support::NativeBodyWitness>,
     pub proxy_marker: OutboundProxyMarker,
     pub response_decoding: ResponseDecoding,
     pub response_mode: ResponseMode,
@@ -1122,6 +1128,8 @@ impl OutboundRequest {
             max_response_header_bytes: parts.max_response_header_bytes,
             max_response_header_count: parts.max_response_header_count,
             method: parts.method,
+            #[cfg(feature = "test-utils")]
+            native_body_witness: parts.native_body_witness,
             proxy_marker: parts.proxy_marker,
             response_decoding: parts.response_decoding,
             response_mode: parts.response_mode,
@@ -1284,6 +1292,8 @@ impl OutboundRequest {
             max_response_header_bytes: self.max_response_header_bytes,
             max_response_header_count: self.max_response_header_count,
             method: self.method,
+            #[cfg(feature = "test-utils")]
+            native_body_witness: self.native_body_witness,
             proxy_marker: self.proxy_marker,
             response_decoding: self.response_decoding,
             response_mode: self.response_mode,
@@ -1507,6 +1517,8 @@ impl OutboundRequest {
             max_response_header_bytes: None,
             max_response_header_count: None,
             method,
+            #[cfg(feature = "test-utils")]
+            native_body_witness: None,
             proxy_marker: OutboundProxyMarker::Inherit,
             response_decoding: ResponseDecoding::Decode,
             response_mode: ResponseMode::Buffered {

@@ -55,6 +55,7 @@ async function serve() {
       "modulesRules",
       "bindings",
       "kvNamespaces",
+      "rootPath",
     ]);
     // Wrangler emits nested empty defaults for bindings that are not configured.
     const isConfigured = (value) =>
@@ -70,6 +71,9 @@ async function serve() {
       Object.keys(mapped.define).length ||
       mapped.externalWorkers.length ||
       populatedExtras ||
+      (mapped.workerOptions.rootPath !== undefined &&
+        (!isAbsolute(options.config) ||
+          mapped.workerOptions.rootPath !== dirname(options.config))) ||
       Object.values(mapped.workerOptions.kvNamespaces).some(
         (value) =>
           !value ||

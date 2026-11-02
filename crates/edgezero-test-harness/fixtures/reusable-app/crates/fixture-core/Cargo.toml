@@ -6,6 +6,7 @@ publish.workspace = true
 
 [features]
 qualification = []
+native-body-witness = ["edgezero-core/test-utils"]
 
 [dependencies]
 edgezero-core.workspace = true

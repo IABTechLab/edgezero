@@ -12,6 +12,70 @@
 
 ## Status and Authority
 
+### Native Pending-Body Witnesses: Axum And Cloudflare (2026-11-01)
+
+Strengthen the existing pending-cutoff fixture without changing production outbound contracts,
+transport, scheduling, clocks, deadlines or byte limits. This checkpoint instruments only
+`test-utils` builds and attaches one explicit, finite witness to each original request. Prepared
+target, mode, budget and entry instant come from the actual shared dispatch context; each recorder
+uses that context's clock, not an ambient probe or a new time source.
+
+- [x] Preserve witness identity through request parts and replay. Reject reuse and backwards
+      samples; do not retain a request context, body bytes, source or waker in the report handle.
+- [x] Record a head only after successful native-head construction. Observe Axum's actual
+      `response.chunk()` future and Cloudflare's SDK ByteStream after the inner poll, before
+      cooperative/deadline wrappers can manufacture Pending. Add no polls, timers or wakeups.
+- [x] Record ownership release time only after dropping the actual inner SDK source. Require
+      cutoff <= release <= return. Snapshot all
+      three witnesses immediately after `next()` returns, before `collect()` can release work.
+- [x] Require exact role/token/full-URI (including the independent controller-selected origin)
+      and prepared-policy bindings for Axum and Cloudflare;
+      reject absent, reused, Ready-first, late, backwards, incomplete, early-released or unreleased witnesses.
+      Retain the zero-head/zero-read pending-head control and every existing host hold/release
+      assertion. Preserve the 34 ms start, 200 ms cutoff and 205 ms return ceiling.
+- [x] Finish feature/target checks, actual local Axum execution, strict lint, complete owning
+      suites, documentation and independent spec/quality reviews.
+- [ ] Complete actual local workerd lifetime execution after the selected SDK's Miniflare 5
+      manifest/module boundary is implemented without losing module rules or KV persistence.
+
+The real TCP Axum regression fails without the observation hook, then passes with native Pending
+and source release before cutoff return. The harness regressions fail when host-written heads
+alone, early release or foreign origins are accepted. Scoped spec review found the latter two
+proof gaps; retaining a release timestamp and the full prepared URI closes them. Subsequent
+spec and independent quality reviews are clear.
+
+All five root Rust gates pass: 2,645 tests across 33 binaries, with one existing ignored test;
+root formatting, strict Clippy, all-adapter feature checks and Spin WASM compilation pass. Core
+passes 1,111 tests, Cloudflare's real SDK WASM library passes 105, Axum's transport contracts pass
+28, and the complete harness passes 438 with two existing ignored tests. Fixture core passes
+59 with and without native witnesses. Tooling passes 200 tests; documentation format/lint/build
+and historical/scoped API identity checks pass. Earlier sandbox-denied TCP/process tests and
+two process-timing failures are retained; the complete serialized, loopback-enabled harness
+passes without changing assertions. Logs use `/private/tmp/pr275-native-body-*`.
+
+Axum's complete local lifetime suite passes all ten cases. Its three actual SDK reads return
+Pending around 36.6 ms, retain their original 200 ms cutoff and release between 201.116 and
+201.124 ms, before `next` returns. The pending-head control has no head, read or source owner.
+Raw records remain under `/private/tmp/pr275-native-body-axum-run` and are working-tree
+characterization, not frozen-candidate evidence.
+
+Cloudflare's two local runtime attempts fail before responder attestation and receive no credit.
+The installed Wrangler 4.131.0 maps an explicit `rootPath`; the existing launcher now accepts it
+only when it equals the owned absolute config directory. Its existing mock regression proves
+exact forwarding, omission/default behavior, and foreign/relative rejection before construction,
+with fixed diagnostics. This repair has its own red/green proof and does not change SDK pins.
+The selected Miniflare 5.20260910.0-alpha then rejects the old constructor shape. A separate local
+diagnostic confirms its official converter refuses `modulesRules` rather than preserving them.
+That SDK manifest/module migration remains open; module rules, persistence, and timed assertions
+are not removed or weakened to manufacture a runtime pass. The failed runs and diagnostics remain
+under `/private/tmp/pr275-native-body-cloudflare-*`.
+
+Spin's WASI read future and Fastly's native body-readiness wait still need their own exact-boundary
+witnesses. Their current records remain `host-head-written-only`, never SDK-read evidence. No new
+CI invocation, acceptance binding, normative digest, runtime pin or capability promotion is added.
+Inventory stays 153 ready/358 planned and unqualified. Native witnesses do not waive strict timing,
+complete scenario ownership, candidate freeze, consumer acceptance or hosted qualification.
+
 ### Fastly Post-Preparation Dispatch Acceptance (2026-11-01)
 
 Bind only EZ-3/acceptance/01 in `unit/fastly` to the existing inventory-guarded WASM library

@@ -433,6 +433,8 @@ fn replay_request(request: &OutboundRequest) -> (OutboundRequest, bool) {
         max_response_header_bytes,
         max_response_header_count,
         method,
+        #[cfg(feature = "test-utils")]
+        native_body_witness,
         proxy_marker,
         response_decoding,
         response_mode,
@@ -462,6 +464,8 @@ fn replay_request(request: &OutboundRequest) -> (OutboundRequest, bool) {
             max_response_header_bytes: *max_response_header_bytes,
             max_response_header_count: *max_response_header_count,
             method: method.clone(),
+            #[cfg(feature = "test-utils")]
+            native_body_witness: native_body_witness.clone(),
             proxy_marker: *proxy_marker,
             response_decoding: *response_decoding,
             response_mode: *response_mode,

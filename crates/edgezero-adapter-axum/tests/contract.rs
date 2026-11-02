@@ -908,6 +908,84 @@ async fn batch_yields_complete_exchanges_in_completion_order() {
         .await;
 }
 
+#[cfg(feature = "test-utils")]
+#[tokio::test(start_paused = true)]
+async fn cutoff_releases_an_observed_pending_sdk_body_read() {
+    use edgezero_core::MonotonicInstant;
+    use edgezero_core::outbound::test_support::NativeBodyWitness;
+    use futures_util::future::poll_fn;
+
+    LocalSet::new()
+        .run_until(async {
+            let origin = start_origin(Router::new().route(
+                "/pending",
+                get(|| async {
+                    Response::builder()
+                        .header(CONTENT_LENGTH, "1")
+                        .body(Body::from_stream(stream::pending::<
+                            Result<Bytes, Infallible>,
+                        >()))
+                        .expect("pending response")
+                }),
+            ))
+            .await;
+            let now = Arc::new(Mutex::new(MonotonicInstant::now()));
+            let sampled = Arc::clone(&now);
+            let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+            let cutoff = clock.deadline_after(Duration::from_millis(200));
+            let advancement = Arc::new(Notify::new());
+            let time = paired_cutoff_time(
+                clock,
+                Arc::clone(&advancement),
+                Arc::new(AtomicUsize::new(0)),
+            );
+            let client =
+                HttpClient::with_client(AxumOutboundClient::try_with_time(time).expect("client"));
+            let mut request = OutboundRequest::get(format!("{origin}/pending")).expect("request");
+            let witness = NativeBodyWitness::new();
+            witness.attach(&mut request).expect("attach");
+            let mut batch = client.start_batch_until(vec![request], cutoff);
+            let containment = Instant::now();
+            let next = batch.next();
+            futures_util::pin_mut!(next);
+            let result = poll_fn(|cx| {
+                assert!(
+                    containment.elapsed() < Duration::from_secs(5),
+                    "missing native body observation"
+                );
+                let result = next.as_mut().poll(cx);
+                if result.is_pending() {
+                    if witness.snapshot().first_read.is_some() {
+                        *now.lock().expect("clock") = cutoff.instant();
+                        advancement.notify_waiters();
+                    }
+                    cx.waker().wake_by_ref();
+                }
+                result
+            })
+            .await
+            .expect("valid batch");
+            assert!(matches!(
+                result,
+                OutboundBatchNext::Finished(OutboundBatchTermination::Cutoff)
+            ));
+            let snapshot = witness.snapshot();
+            assert!(!snapshot.invalid);
+            assert_eq!(snapshot.heads, 1);
+            assert!(snapshot.first_head.expect("SDK head") < cutoff.instant());
+            let read = snapshot.first_read.expect("SDK read");
+            assert!(read.pending);
+            assert!(read.observed_at < cutoff.instant());
+            assert_eq!(snapshot.source_acquisitions, 1);
+            assert_eq!(
+                snapshot.source_releases, 1,
+                "SDK owner released before next returns"
+            );
+            assert!(snapshot.first_release.expect("SDK release") >= cutoff.instant());
+        })
+        .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_none() {
     LocalSet::new()

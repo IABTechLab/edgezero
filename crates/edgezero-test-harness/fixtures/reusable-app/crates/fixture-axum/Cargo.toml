@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 qualification = ["fixture-core/qualification"]
-progress = ["fixture-core/qualification", "dep:reqwest", "dep:tokio"]
+progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-axum/test-utils", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
 fixture-core.workspace = true

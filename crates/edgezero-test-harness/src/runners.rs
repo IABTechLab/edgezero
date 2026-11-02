@@ -2300,6 +2300,7 @@ exports.unstable_getMiniflareWorkerOptions = (config) => {
   if (failure === 'api') throw new Error('private-fixture-token');
   return { main:failure === 'outside-main' ? '/outside/index.js' : '/fixture/staged/build/worker/shim.mjs',
     workerOptions:{compatibilityDate:'2026-04-22',compatibilityFlags:['enable_request_signal'],
+      rootPath:failure === 'omit-root' ? undefined : failure === 'foreign-root' ? '/outside/private-fixture-token' : failure === 'relative-root' ? 'fixture/staged' : '/fixture/staged',
       modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],
       bindings:{fixture_marker:'fixture-only-value',FIXTURE_MODE:'old',EDGEZERO_FIXTURE_LAUNCH_NONCE:'old'},
       kvNamespaces:{fixture_config:failure === 'remote-kv' ? {id:'config-id',remoteProxyConnectionString:'private-fixture-token'} : {id:'config-id'},fixture_kv:{id:'kv-id'}},
@@ -2382,13 +2383,16 @@ exports.Miniflare = class {
             "remote-kv",
             "service",
             "email",
+            "foreign-root",
+            "relative-root",
+            "omit-root",
         ] {
             let options = json!({"config":"/fixture/staged/wrangler.toml","modulesRoot":"/fixture/staged/build",
                 "bindings":{"FIXTURE_MODE":"retained",startup::NONCE:"owned-launch"},
                 "host":"127.0.0.1","port":1234,"persist":"/fixture/persist"});
             let expected = i32::from(!matches!(
                 failure,
-                "none" | "starting" | "waiting" | "stop-event"
+                "none" | "starting" | "waiting" | "stop-event" | "omit-root"
             ));
             let (text, diagnostic) = capture(
                 Command::new(&node)
@@ -2402,22 +2406,34 @@ exports.Miniflare = class {
             let mut lines = text.lines();
             if matches!(
                 failure,
-                "api" | "define" | "external" | "outside-main" | "remote-kv" | "service" | "email"
+                "api"
+                    | "define"
+                    | "external"
+                    | "outside-main"
+                    | "remote-kv"
+                    | "service"
+                    | "email"
+                    | "foreign-root"
+                    | "relative-root"
             ) {
                 assert!(text.is_empty(), "{failure}");
                 assert!(!diagnostic.contains("private-fixture-token"));
                 continue;
             }
-            assert_eq!(
-                serde_json::from_str::<Value>(lines.next().unwrap()).unwrap(),
-                json!({"compatibilityDate":"2026-04-22","compatibilityFlags":["enable_request_signal"],
+            let mut expected_options = json!({"compatibilityDate":"2026-04-22","compatibilityFlags":["enable_request_signal"],"rootPath":"/fixture/staged",
                     "modulesRules":[{"type":"ESModule","include":["**/*.js","**/*.mjs"]},{"type":"CompiledWasm","include":["**/*.wasm"]}],
                     "bindings":{"fixture_marker":"fixture-only-value","FIXTURE_MODE":"retained",startup::NONCE:"owned-launch"},
                     "kvNamespaces":{"fixture_config":{"id":"config-id"},"fixture_kv":{"id":"kv-id"}},
                     "email":{"send_email":[]},
                     "scriptPath":"/fixture/staged/build/worker/shim.mjs","modules":true,"modulesRoot":"/fixture/staged/build",
                     "host":"127.0.0.1","port":1234,"defaultPersistRoot":"/fixture/persist/v3","liveReload":false,
-                    "cf":false,"telemetry":{"enabled":false}})
+                    "cf":false,"telemetry":{"enabled":false}});
+            if failure == "omit-root" {
+                expected_options.as_object_mut().unwrap().remove("rootPath");
+            }
+            assert_eq!(
+                serde_json::from_str::<Value>(lines.next().unwrap()).unwrap(),
+                expected_options,
             );
             assert_eq!(lines.collect::<Vec<_>>(), vec!["disposed"], "{failure}");
             assert!(!diagnostic.contains("private-fixture-token"));

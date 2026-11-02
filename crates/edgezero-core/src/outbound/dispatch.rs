@@ -118,6 +118,10 @@ pub(super) fn prepare(
         max_response_header_bytes: request.max_response_header_bytes,
         max_response_header_count: request.max_response_header_count,
         mode,
+        #[cfg(feature = "test-utils")]
+        native_body_recorder: request.native_body_witness.as_ref().map(|witness| {
+            witness.prepare(time.clock().clone(), mode, budget, entered_at, &request.uri)
+        }),
         original_chain_deadline: bounds.original_chain_deadline.or(request.deadline),
         proxy_marker: request.proxy_marker,
         request_method: request.method.clone(),

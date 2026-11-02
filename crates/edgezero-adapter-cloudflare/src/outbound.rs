@@ -107,6 +107,8 @@ mod worker_impl {
     };
     use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+    #[cfg(feature = "test-utils")]
+    use edgezero_core::outbound::test_support::{native_body_recorder, observe_sdk_stream};
     use edgezero_core::outbound::{
         OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundDispatchRequest,
         OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
@@ -552,20 +554,33 @@ mod worker_impl {
             response_headers(&response)?,
             OutboundHeaderFidelity::ProviderFieldBoundariesUnknown,
         );
+        #[cfg(feature = "test-utils")]
+        let recorder = native_body_recorder(&context);
+        #[cfg(feature = "test-utils")]
+        let read_recorder = recorder.clone();
         let native = stream! {
             if matches!(response.body(), WorkerResponseBody::Empty) { return; }
-            let mut source = response_stream(&mut response)?;
-            while let Some(item) = source.next().await { yield item; }
+            let source = response_stream(&mut response)?;
+            #[cfg(feature = "test-utils")]
+            let mut encoded = observe_sdk_stream(source, read_recorder);
+            #[cfg(not(feature = "test-utils"))]
+            let mut encoded = source;
+            while let Some(item) = encoded.next().await { yield item; }
         }
         .boxed_local();
         let encoded = guarded_response_stream(native, abort_guard);
-        OutboundHead::new(
+        let head = OutboundHead::new(
             status,
             headers,
             encoded,
             context,
             OutboundExchangeOwner::new(|| {}),
-        )
+        )?;
+        #[cfg(feature = "test-utils")]
+        if let Some(observation) = recorder {
+            observation.head_received();
+        }
+        Ok(head)
     }
 
     async fn raw_fetch(

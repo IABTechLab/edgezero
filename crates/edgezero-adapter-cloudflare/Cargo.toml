@@ -22,7 +22,7 @@ cli = [
     "dep:toml_edit",
     "dep:walkdir",
 ]
-test-utils = []
+test-utils = ["edgezero-core/test-utils"]
 
 [dependencies]
 anyhow = { workspace = true }
