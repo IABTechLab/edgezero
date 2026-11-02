@@ -18,6 +18,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   as SDK body-read evidence. Preserve strict timing and leave other-provider and hosted gates open.
   Observe Spin's borrowed WASI read inside the unchanged deadline race and release after dropping
   the complete SDK-owning source, before cooperative wrappers. Keep Fastly readiness distinct.
+- Add Fastly's distinctly labelled native body-readiness wait witness around the existing select
+  call. Bind observations to the actual submitted body owners, preserve selected/other/timeout/error
+  outcomes and record SDK-handle destruction through the shared test-only resource owner. Require
+  a real cutoff-spanning timeout and release before return; add no SDK probes or timing exceptions.
 - Validate Wrangler's optional fixture `rootPath` against the owned config directory before
   constructing its local runtime. Materialize a bounded Rust-owned staged-module inventory using
   the selected SDK's rules and official Miniflare 5 converter, with one native constructor and

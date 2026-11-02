@@ -274,6 +274,10 @@ mod fastly_impl {
     };
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+    #[cfg(feature = "test-utils")]
+    use edgezero_core::outbound::test_support::{
+        NativeBodyOwner, NativeBodyRecorder, native_body_recorder, own_sdk_resource,
+    };
     #[cfg(test)]
     use edgezero_core::outbound::{
         HttpClient, OutboundProxyMarker, ResponseDecoding, ResponseMode, normalize_for_dispatch,
@@ -304,6 +308,10 @@ mod fastly_impl {
     use super::progress::{HeadPoll, Progress, Transport};
     use super::{timeout_error, validate_supported_options};
 
+    #[cfg(feature = "test-utils")]
+    type NativeBody = NativeBodyOwner<BodyHandle>;
+    #[cfg(not(feature = "test-utils"))]
+    type NativeBody = BodyHandle;
     pub(crate) type NativeProgress = Progress<NativeTransport>;
 
     pub(crate) async fn drive_callback<F>(
@@ -347,7 +355,7 @@ mod fastly_impl {
     }
 
     impl Transport for NativeTransport {
-        type Body = BodyHandle;
+        type Body = NativeBody;
         type Head = FastlyResponse;
         type Pending = PendingHead;
 
@@ -362,9 +370,18 @@ mod fastly_impl {
                 reason = "the pinned SDK exposes WASI handle identity only"
             )
         )]
-        fn body_handle(body: &BodyHandle) -> u32 {
+        fn body_handle(body: &NativeBody) -> u32 {
+            #[cfg(feature = "test-utils")]
+            let handle = body.get_ref();
+            #[cfg(not(feature = "test-utils"))]
+            let handle = body;
             // SAFETY: this observes identity only; the slot retains the owning SDK handle.
-            unsafe { body.as_u32() }
+            unsafe { handle.as_u32() }
+        }
+
+        #[cfg(feature = "test-utils")]
+        fn body_recorder(body: &NativeBody) -> Option<NativeBodyRecorder> {
+            body.recorder().cloned()
         }
 
         fn head_handle(pending: &PendingHead) -> Option<u32> {
@@ -409,13 +426,17 @@ mod fastly_impl {
 
         fn read_body(
             &mut self,
-            body: &mut BodyHandle,
+            body: &mut NativeBody,
             maximum: usize,
             budget: DispatchBudget,
             clock: &MonotonicClock,
         ) -> Result<Bytes, EdgeError> {
+            #[cfg(feature = "test-utils")]
+            let handle = body.get_mut();
+            #[cfg(not(feature = "test-utils"))]
+            let handle = body;
             let mut bytes = vec![0; maximum];
-            let count = body.read(&mut bytes).map_err(|error| {
+            let count = handle.read(&mut bytes).map_err(|error| {
                 let classified = if budget.deadline.is_expired_at(clock.now()) {
                     timeout_error(budget.cause)
                 } else {
@@ -1302,20 +1323,32 @@ mod fastly_impl {
             response_headers(&response),
             OutboundHeaderFidelity::AdapterVisibleFields,
         );
-        let encoded = progress.body(response.take_body().into_handle(), context.budget());
+        #[cfg(feature = "test-utils")]
+        let recorder = native_body_recorder(&context);
+        let handle = response.take_body().into_handle();
+        #[cfg(feature = "test-utils")]
+        let native = own_sdk_resource(handle, recorder.clone());
+        #[cfg(not(feature = "test-utils"))]
+        let native = handle;
+        let encoded = progress.body(native, context.budget());
         #[cfg(test)]
         #[expect(
             clippy::shadow_reuse,
             reason = "test-only ownership observation retains the production stream unchanged"
         )]
         let encoded = tests::observe_native_encoded_stream(encoded);
-        OutboundHead::new(
+        let head = OutboundHead::new(
             status,
             headers,
             encoded,
             context,
             OutboundExchangeOwner::new(|| {}),
-        )
+        )?;
+        #[cfg(feature = "test-utils")]
+        if let Some(observation) = recorder {
+            observation.head_received();
+        }
+        Ok(head)
     }
 
     fn response_headers(response: &FastlyResponse) -> HeaderMap {
@@ -1473,8 +1506,13 @@ mod fastly_impl {
             .instant()
             .checked_sub(budget.duration)
             .unwrap_or(budget.deadline.instant());
+        let handle = body.into_handle();
+        #[cfg(feature = "test-utils")]
+        let native = own_sdk_resource(handle, None);
+        #[cfg(not(feature = "test-utils"))]
+        let native = handle;
         NativeProgress::new(NativeTransport, clock, entered, Some(budget.deadline))
-            .body(body.into_handle(), budget)
+            .body(native, budget)
     }
 
     async fn race_deadline<Output>(

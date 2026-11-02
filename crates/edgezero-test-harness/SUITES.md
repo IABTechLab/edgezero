@@ -1486,10 +1486,26 @@ background completion notification. Local Spin 4.1.0 passes the complete pending
 all three reads Pending around 38 ms and release before the unchanged 205 ms ceiling. Its broader
 lifetime suite retains strict timing failures; this is not a whole-suite or hosted qualification.
 
-Fastly still reports `body_phase_evidence: host-head-written-only`. Writing the host's head does
-not prove its SDK consumed it or entered a native readiness wait before cutoff. That witness must
-be distinctly labelled: the existing timed select's entry is not a returned SDK-read Pending.
-No extra `is_ready` probe, blocking read or outer-stream Pending substitutes for this missing proof.
+Fastly instead reports `body_phase_evidence: sdk-readiness-wait`, only after the complete case
+passes. The same request-owned witness records the first actual native wait, first/last successful
+timeouts, and saturating selected/error counters, separately from SDK-read fields. Recorders come
+only from the active body owners that supply submitted handles; a selected head or sibling is
+`OtherReady`, not readiness of every body. One unchanged select call supplies the real entry and
+return observations, with no `is_ready` probe, blocking read fallback or outer-stream substitute.
+
+The controller requires `head <= wait-entry < 200 ms <= timeout-return <= next-return <= 205 ms`.
+An earlier rounded timeout, Selected/Failed result, missing return or late wait entry cannot pass.
+First/last records must describe nonoverlapping calls in order, with enough observed calls for
+their distinct records; a conflicting outcome for one call or an underreported count fails.
+The same SDK body must drop after that timeout and before `next` returns. The generic test-only
+resource owner records release after resource destruction and also backs the existing stream
+observer; it does not add a second release count at outer-stream destruction. The initial local
+Viceroy run without hooks fails for missing head evidence; two instrumented runs pass the
+20-case lifetime/callback inventory on the tracked repair. The final reviewed run passes the
+native-wait case and all callback cases, but only 17 of 20 overall: slow/fast origin heads and
+CPU batch start miss the unchanged +/-5 ms targets. It exits 1; earlier passes do not override
+that failure. This is local characterization, not stock or hosted Viceroy/Fastly qualification
+or a capability promotion.
 These probes do not close the complete scenario 16 acceptance leg or certify host cancellation.
 Release ends the fixture's hold; it is not evidence of provider teardown.
 Report-body reads are capped at 64 bytes; the caps slot has the separate limits above.

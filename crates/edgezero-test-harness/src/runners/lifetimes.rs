@@ -231,7 +231,7 @@ fn checks(
                 .map(|partial|json!({"status":partial.status,"body_bytes":partial.body,"reason":partial.reason})),
             "clock_correlation":clock_correlation,"timeout_contract":timeout_contract,
             "timing_diagnostics":timing_diagnostics(case,&report,&origin),"body_phase_evidence":if case == "pending-body-cutoff" && result.is_ok() {
-                Some(if matches!(adapter, "axum" | "cloudflare" | "spin") { "sdk-read-pending" } else { "host-head-written-only" })
+                Some(if adapter == "fastly" { "sdk-readiness-wait" } else { "sdk-read-pending" })
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
                 "header_ns":reply["header_ns"],"headers":reply["headers"]})),"qualification":false}))?;
@@ -407,9 +407,7 @@ fn validate(
         return validate_handoff(report, events, origin);
     }
     if pending_cutoff(case) {
-        if matches!(boundary.name, "axum" | "cloudflare" | "spin") {
-            validate_native_pending(boundary.origin, case, token, report, events)?;
-        }
+        validate_native_pending(boundary, case, token, report, events)?;
         return validate_pending_cutoff(case, report, events, origin);
     }
     if case == "caps-while-waiting" {
@@ -1462,7 +1460,7 @@ fn validate_cpu_stretch(report: &Value, events: &[Value], origin: &Value) -> Res
 }
 
 fn validate_native_pending(
-    backend_origin: &str,
+    boundary: AdapterBoundary<'_>,
     case: &str,
     token: &str,
     report: &Value,
@@ -1486,13 +1484,17 @@ fn validate_native_pending(
                 && prepared["cause"] == "BatchCutoff"
                 && prepared["deadline_at_us"] == 200_000
                 && prepared["target_uri"]
-                    == format!("{backend_origin}/lifetimes/{token}/{case}/{role}")
+                    == format!("{}/lifetimes/{token}/{case}/{role}", boundary.origin)
                 && entered >= number(batch, "at_us")?
                 && entered <= number(next, "at_us")?
                 && entered < 200_000,
             "native SDK witness is reused, foreign or has different dispatch policies",
         )?;
         if case == "pending-body-cutoff" {
+            if boundary.name == "fastly" {
+                validate_native_body_wait(snapshot, entered, returned)?;
+                continue;
+            }
             let read = &snapshot["first_read"];
             let head = number(snapshot, "head_at_us")?;
             let started = number(read, "started_at_us")?;
@@ -1522,12 +1524,73 @@ fn validate_native_pending(
                     && snapshot["ready_reads"] == 0
                     && snapshot["source_acquisitions"] == 0
                     && snapshot["source_releases"] == 0
-                    && snapshot["released_at_us"].is_null(),
+                    && snapshot["released_at_us"].is_null()
+                    && snapshot["waits"] == 0
+                    && snapshot["ready_waits"] == 0
+                    && snapshot["failed_waits"] == 0
+                    && snapshot["first_wait"].is_null()
+                    && snapshot["first_wait_timeout"].is_null()
+                    && snapshot["last_wait_timeout"].is_null(),
                 "head-only cutoff unexpectedly reached the native body",
             )?;
         }
     }
     Ok(())
+}
+
+fn validate_native_body_wait(snapshot: &Value, entered: u64, returned: u64) -> Result<()> {
+    let first = &snapshot["first_wait"];
+    let first_timeout = &snapshot["first_wait_timeout"];
+    let last_timeout = &snapshot["last_wait_timeout"];
+    let head = number(snapshot, "head_at_us")?;
+    let started = number(first, "started_at_us")?;
+    let observed = number(first, "observed_at_us")?;
+    let initial_start = number(first_timeout, "started_at_us")?;
+    let initial_end = number(first_timeout, "observed_at_us")?;
+    let last_start = number(last_timeout, "started_at_us")?;
+    let last_end = number(last_timeout, "observed_at_us")?;
+    let released = number(snapshot, "released_at_us")?;
+    let waits = number(snapshot, "waits")?;
+    let distinct_timeouts = initial_start != last_start || initial_end != last_end;
+    let minimum_waits =
+        1 + u64::from(first["outcome"] != "TimedOut") + u64::from(distinct_timeouts);
+    let first_call_matches = if first["outcome"] == "TimedOut" {
+        started == initial_start && observed == initial_end
+    } else {
+        observed <= initial_start
+    };
+    let timeout_calls_match = !distinct_timeouts || initial_end <= last_start;
+    require(
+        snapshot["heads"] == 1
+            && snapshot["first_read"].is_null()
+            && snapshot["reads"] == 0
+            && snapshot["ready_reads"] == 0
+            && waits >= minimum_waits
+            && first_call_matches
+            && timeout_calls_match
+            && snapshot["ready_waits"] == 0
+            && snapshot["failed_waits"] == 0
+            && first["kind"] == "BodyReadiness"
+            && matches!(first["outcome"].as_str(), Some("TimedOut" | "OtherReady"))
+            && first_timeout["kind"] == "BodyReadiness"
+            && first_timeout["outcome"] == "TimedOut"
+            && last_timeout["kind"] == "BodyReadiness"
+            && last_timeout["outcome"] == "TimedOut"
+            && entered <= head
+            && head <= started
+            && started <= observed
+            && started <= initial_start
+            && initial_start <= initial_end
+            && observed <= initial_end
+            && initial_start <= last_start
+            && initial_end <= last_end
+            && last_start < 200_000
+            && (200_000..=returned).contains(&last_end)
+            && snapshot["source_acquisitions"] == 1
+            && snapshot["source_releases"] == 1
+            && (last_end..=returned).contains(&released),
+        "native body readiness did not span cutoff or its SDK owner was not released",
+    )
 }
 
 fn validate_pending_cutoff(
@@ -3093,6 +3156,8 @@ mod tests {
                 "first_read":body.then(||json!({"started_at_us":36100,"observed_at_us":36101,"pending":true})),
                 "reads":u64::from(body),"ready_reads":0,
                 "source_acquisitions":u64::from(body),"source_releases":u64::from(body),
+                "waits":0,"ready_waits":0,"failed_waits":0,
+                "first_wait":null,"first_wait_timeout":null,"last_wait_timeout":null,
                 "released_at_us":body.then_some(200100)})
         }))
     }
@@ -3101,7 +3166,7 @@ mod tests {
     fn pending_cutoff_cannot_use_host_heads_as_native_sdk_read_evidence() {
         let (mut report, origin) = pending_cutoff_sample("pending-body-cutoff");
         report.as_object_mut().unwrap().remove("native_body");
-        for adapter in ["axum", "cloudflare", "spin"] {
+        for adapter in ["axum", "cloudflare", "spin", "fastly"] {
             assert!(
                 validate(
                     AdapterBoundary {
@@ -3117,17 +3182,136 @@ mod tests {
                 "{adapter} must require actual SDK read evidence"
             );
         }
+    }
+
+    fn fastly_native_wait_sample(case: &str) -> Value {
+        let body = case == "pending-body-cutoff";
+        let mut snapshots = native_pending_sample(case);
+        for snapshot in snapshots.as_array_mut().unwrap() {
+            snapshot["first_read"] = Value::Null;
+            snapshot["reads"] = json!(0);
+            snapshot["waits"] = json!(u64::from(body));
+            snapshot["ready_waits"] = json!(0);
+            snapshot["failed_waits"] = json!(0);
+            let wait = if body {
+                json!({"kind":"BodyReadiness","outcome":"TimedOut","started_at_us":37000,"observed_at_us":200050})
+            } else {
+                Value::Null
+            };
+            for field in ["first_wait", "first_wait_timeout", "last_wait_timeout"] {
+                snapshot[field] = wait.clone();
+            }
+        }
+        snapshots
+    }
+
+    #[test]
+    fn fastly_native_wait_requires_same_body_timeout_across_original_cutoff() {
+        let (mut report, origin) = pending_cutoff_sample("pending-body-cutoff");
+        report["native_body"] = fastly_native_wait_sample("pending-body-cutoff");
+        let boundary = AdapterBoundary {
+            name: "fastly",
+            ..AXUM
+        };
+        validate(boundary, "pending-body-cutoff", "sample", &report, &origin).unwrap();
+        let mut mixed = report.clone();
+        for snapshot in mixed["native_body"].as_array_mut().unwrap() {
+            snapshot["waits"] = json!(2);
+            snapshot["first_wait"] = json!({"kind":"BodyReadiness","outcome":"OtherReady",
+                "started_at_us":36100,"observed_at_us":36200});
+        }
+        validate(boundary, "pending-body-cutoff", "sample", &mixed, &origin).unwrap();
+        let mut repeated = mixed.clone();
+        for snapshot in repeated["native_body"].as_array_mut().unwrap() {
+            snapshot["waits"] = json!(3);
+            snapshot["first_wait_timeout"]["observed_at_us"] = json!(190000);
+            snapshot["last_wait_timeout"]["started_at_us"] = json!(199900);
+        }
         validate(
-            AdapterBoundary {
-                name: "fastly",
-                ..AXUM
-            },
+            boundary,
             "pending-body-cutoff",
             "sample",
-            &report,
+            &repeated,
             &origin,
         )
         .unwrap();
+        repeated["native_body"][0]["waits"] = json!(2);
+        assert!(
+            validate(
+                boundary,
+                "pending-body-cutoff",
+                "sample",
+                &repeated,
+                &origin
+            )
+            .is_err()
+        );
+        for (field, value) in [
+            ("/native_body", Value::Null),
+            ("/native_body/0/attachments", json!(0)),
+            ("/native_body/0/preparations", json!(2)),
+            ("/native_body/0/invalid", json!(true)),
+            ("/native_body/0/preparation/mode", json!("Send")),
+            ("/native_body/0/preparation/cause", json!("RequestDeadline")),
+            ("/native_body/0/preparation/deadline_at_us", json!(201000)),
+            ("/native_body/0/heads", json!(0)),
+            ("/native_body/0/head_at_us", Value::Null),
+            ("/native_body/0/first_wait", Value::Null),
+            ("/native_body/0/first_wait/outcome", json!("OtherReady")),
+            ("/native_body/0/first_wait/observed_at_us", json!(199999)),
+            ("/native_body/0/last_wait_timeout", Value::Null),
+            (
+                "/native_body/0/first_wait_timeout/kind",
+                json!("HeadReadiness"),
+            ),
+            ("/native_body/0/last_wait_timeout/outcome", json!("Ready")),
+            (
+                "/native_body/0/last_wait_timeout/outcome",
+                json!("OtherReady"),
+            ),
+            ("/native_body/0/last_wait_timeout/outcome", json!("Failed")),
+            (
+                "/native_body/0/last_wait_timeout/observed_at_us",
+                json!(199999),
+            ),
+            (
+                "/native_body/0/last_wait_timeout/started_at_us",
+                json!(200000),
+            ),
+            (
+                "/native_body/0/last_wait_timeout/observed_at_us",
+                json!(201000),
+            ),
+            (
+                "/native_body/0/first_wait_timeout/observed_at_us",
+                json!(200060),
+            ),
+            (
+                "/native_body/0/last_wait_timeout/started_at_us",
+                json!(38000),
+            ),
+            ("/native_body/0/first_wait/started_at_us", json!(35000)),
+            ("/native_body/0/waits", json!(0)),
+            ("/native_body/0/ready_waits", json!(1)),
+            ("/native_body/0/failed_waits", json!(1)),
+            ("/native_body/0/reads", json!(1)),
+            ("/native_body/0/first_read", json!({"pending":true})),
+            ("/native_body/0/released_at_us", json!(199999)),
+            ("/native_body/0/source_acquisitions", json!(2)),
+            ("/native_body/0/source_releases", json!(0)),
+            ("/native_body/0/source_releases", json!(2)),
+            (
+                "/native_body/0/preparation/target_uri",
+                json!("http://127.0.0.1:8081/lifetimes/sample/pending-body-cutoff/a"),
+            ),
+        ] {
+            let mut changed = report.clone();
+            *changed.pointer_mut(field).unwrap() = value;
+            assert!(
+                validate(boundary, "pending-body-cutoff", "sample", &changed, &origin).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
@@ -3215,7 +3399,7 @@ mod tests {
     #[test]
     fn native_head_cutoff_is_a_zero_head_and_zero_read_control() {
         let (report, origin) = pending_cutoff_sample("pending-head-cutoff");
-        for adapter in ["axum", "cloudflare", "spin"] {
+        for adapter in ["axum", "cloudflare", "spin", "fastly"] {
             validate(
                 AdapterBoundary {
                     name: adapter,
@@ -3233,6 +3417,9 @@ mod tests {
                 "ready_reads",
                 "source_acquisitions",
                 "source_releases",
+                "waits",
+                "ready_waits",
+                "failed_waits",
             ] {
                 let mut changed = report.clone();
                 changed["native_body"][0][field] = json!(1);

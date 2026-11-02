@@ -13,6 +13,23 @@ use futures_util::{Stream, StreamExt as _};
 use std::io::Error as IoError;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// The returned outcome of native readiness, not an SDK read poll.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeBodyWaitOutcome {
+    Failed,
+    OtherReady,
+    Ready,
+    TimedOut,
+}
+
+/// An actual SDK resource followed by its observation-only release guard.
+#[derive(Debug)]
+pub struct NativeBodyOwner<Resource> {
+    // Field order ensures resource destruction precedes the release observation.
+    resource: Resource,
+    witness: Option<NativeSourceRelease>,
+}
+
 /// A copy of the immutable policies observed at actual request preparation.
 #[derive(Clone, Debug)]
 pub struct NativeBodyPreparation {
@@ -34,17 +51,31 @@ pub struct NativeBodyRead {
 #[derive(Clone, Debug, Default)]
 pub struct NativeBodySnapshot {
     pub attachments: u64,
+    pub failed_waits: u64,
     pub first_head: Option<MonotonicInstant>,
     pub first_read: Option<NativeBodyRead>,
     pub first_release: Option<MonotonicInstant>,
+    pub first_wait: Option<NativeBodyWait>,
+    pub first_wait_timeout: Option<NativeBodyWait>,
     pub heads: u64,
     pub invalid: bool,
+    pub last_wait_timeout: Option<NativeBodyWait>,
     pub preparation: Option<NativeBodyPreparation>,
     pub preparations: u64,
     pub reads: u64,
     pub ready_reads: u64,
+    pub ready_waits: u64,
     pub source_acquisitions: u64,
     pub source_releases: u64,
+    pub waits: u64,
+}
+
+/// Entry and returned outcome of one native readiness call in the prepared clock.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeBodyWait {
+    pub observed_at: MonotonicInstant,
+    pub outcome: NativeBodyWaitOutcome,
+    pub started_at: MonotonicInstant,
 }
 
 /// Test-only reporting handle, explicitly attached to one outbound request.
@@ -61,8 +92,34 @@ struct ObservationState {
 
 struct NativeSource {
     observe_reads: bool,
+    owner: NativeBodyOwner<BodyStream>,
+}
+
+#[derive(Debug)]
+struct NativeSourceRelease {
     recorder: NativeBodyRecorder,
-    source: Option<BodyStream>,
+}
+
+impl<Resource> NativeBodyOwner<Resource> {
+    /// Borrows the resource without separating it from its release observation.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut Resource {
+        &mut self.resource
+    }
+
+    /// Borrows the resource without transferring ownership.
+    #[must_use]
+    #[inline]
+    pub fn get_ref(&self) -> &Resource {
+        &self.resource
+    }
+
+    /// Returns the recorder bound to this exact resource, if attached.
+    #[must_use]
+    #[inline]
+    pub fn recorder(&self) -> Option<&NativeBodyRecorder> {
+        self.witness.as_ref().map(|guard| &guard.recorder)
+    }
 }
 
 impl ObservationState {
@@ -216,6 +273,40 @@ impl NativeBodyRecorder {
             state.snapshot.invalid = true;
         }
     }
+
+    fn wait_observed(
+        &self,
+        started_at: MonotonicInstant,
+        observed_at: MonotonicInstant,
+        outcome: NativeBodyWaitOutcome,
+    ) {
+        let mut state = self.witness.lock();
+        state.sample(started_at);
+        state.sample(observed_at);
+        if state.snapshot.heads != 1 || state.snapshot.source_acquisitions != 1 {
+            state.snapshot.invalid = true;
+        }
+        let observation = NativeBodyWait {
+            observed_at,
+            outcome,
+            started_at,
+        };
+        state.snapshot.waits = state.snapshot.waits.saturating_add(1);
+        state.snapshot.first_wait.get_or_insert(observation);
+        match outcome {
+            NativeBodyWaitOutcome::Failed => {
+                state.snapshot.failed_waits = state.snapshot.failed_waits.saturating_add(1);
+            }
+            NativeBodyWaitOutcome::OtherReady => {}
+            NativeBodyWaitOutcome::Ready => {
+                state.snapshot.ready_waits = state.snapshot.ready_waits.saturating_add(1);
+            }
+            NativeBodyWaitOutcome::TimedOut => {
+                state.snapshot.first_wait_timeout.get_or_insert(observation);
+                state.snapshot.last_wait_timeout = Some(observation);
+            }
+        }
+    }
 }
 
 impl Stream for NativeSource {
@@ -223,28 +314,28 @@ impl Stream for NativeSource {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let Some(source) = this.source.as_mut() else {
-            return Poll::Ready(None);
-        };
+        let source = &mut this.owner.resource;
         if !this.observe_reads {
             return source.as_mut().poll_next(cx);
         }
-        let started = this.recorder.clock.now();
+        let Some(witness) = &this.owner.witness else {
+            return source.as_mut().poll_next(cx);
+        };
+        let recorder = &witness.recorder;
+        let started = recorder.clock.now();
         let result = source.as_mut().poll_next(cx);
-        this.recorder
-            .read_observed(started, this.recorder.clock.now(), result.is_pending());
+        recorder.read_observed(started, recorder.clock.now(), result.is_pending());
         result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.source.as_ref().map_or((0, Some(0)), Stream::size_hint)
+        self.owner.resource.size_hint()
     }
 }
 
 #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
-impl Drop for NativeSource {
+impl Drop for NativeSourceRelease {
     fn drop(&mut self) {
-        drop(self.source.take());
         self.recorder.source_released();
     }
 }
@@ -276,6 +367,44 @@ where
     .await
 }
 
+/// Observes one existing readiness call and returns its result unchanged.
+/// Submitted indices bind each recorder to the body actually included in that call.
+#[inline]
+pub fn observe_sdk_wait<Classify, Output, Wait>(
+    observations: &[(usize, NativeBodyRecorder)],
+    wait: Wait,
+    classify: Classify,
+) -> Output
+where
+    Classify: Fn(&Output, usize) -> NativeBodyWaitOutcome,
+    Wait: FnOnce() -> Output,
+{
+    let starts = observations
+        .iter()
+        .map(|(_, recorder)| recorder.clock.now())
+        .collect::<Vec<_>>();
+    let result = wait();
+    for ((index, recorder), started) in observations.iter().zip(starts) {
+        let observed = recorder.clock.now();
+        recorder.wait_observed(started, observed, classify(&result, *index));
+    }
+    result
+}
+
+/// Owns the actual SDK resource until its destructor runs before the release observation.
+#[must_use]
+#[inline]
+pub fn own_sdk_resource<Resource>(
+    resource: Resource,
+    observation: Option<NativeBodyRecorder>,
+) -> NativeBodyOwner<Resource> {
+    let witness = observation.map(|recorder| {
+        recorder.source_acquired();
+        NativeSourceRelease { recorder }
+    });
+    NativeBodyOwner { resource, witness }
+}
+
 fn bind_source(
     source: BodyStream,
     observation: Option<NativeBodyRecorder>,
@@ -284,11 +413,9 @@ fn bind_source(
     let Some(recorder) = observation else {
         return source;
     };
-    recorder.source_acquired();
     NativeSource {
         observe_reads,
-        recorder,
-        source: Some(source),
+        owner: own_sdk_resource(source, Some(recorder)),
     }
     .boxed_local()
 }
@@ -516,5 +643,157 @@ mod tests {
         ));
         assert!(block_on(source.next()).is_none());
         assert_eq!(polls.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn native_resource_owner_releases_only_after_the_actual_resource() {
+        let (witness, recorder, _now) = prepared();
+        recorder.head_received();
+        let mut owner = own_sdk_resource(Source(witness.clone()), Some(recorder));
+        assert_eq!(owner.get_ref().0.snapshot().source_acquisitions, 1);
+        assert_eq!(owner.get_mut().0.snapshot().source_releases, 0);
+        assert!(owner.recorder().is_some());
+        drop(owner);
+        let snapshot = witness.snapshot();
+        assert_eq!(snapshot.source_releases, 1);
+        assert!(snapshot.first_release.is_some());
+        assert!(snapshot.first_read.is_none());
+    }
+
+    #[test]
+    fn native_wait_timeout_is_separate_from_read_pending_and_preserves_first_wait() {
+        let (witness, recorder, now) = prepared();
+        recorder.head_received();
+        let _owner = own_sdk_resource(Source(witness.clone()), Some(recorder.clone()));
+        let start = *now.lock().expect("clock");
+        let calls = AtomicUsize::new(0);
+        for (milliseconds, outcome) in [
+            (10, NativeBodyWaitOutcome::OtherReady),
+            (20, NativeBodyWaitOutcome::TimedOut),
+            (200, NativeBodyWaitOutcome::TimedOut),
+        ] {
+            let actual = observe_sdk_wait(
+                &[(4, recorder.clone())],
+                || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    *now.lock().expect("clock") = start
+                        .checked_add(Duration::from_millis(milliseconds))
+                        .expect("return time");
+                    outcome
+                },
+                |returned, index| {
+                    assert_eq!(index, 4);
+                    *returned
+                },
+            );
+            assert_eq!(actual, outcome);
+        }
+        let snapshot = witness.snapshot();
+        assert!(!snapshot.invalid);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(snapshot.waits, 3);
+        assert_eq!(snapshot.ready_waits, 0);
+        assert_eq!(snapshot.failed_waits, 0);
+        assert_eq!(snapshot.first_wait.expect("first wait").started_at, start);
+        assert_eq!(
+            snapshot.first_wait.expect("first wait").outcome,
+            NativeBodyWaitOutcome::OtherReady
+        );
+        assert_eq!(
+            snapshot
+                .first_wait_timeout
+                .expect("first timeout")
+                .observed_at,
+            start.checked_add(Duration::from_millis(20)).expect("first")
+        );
+        let last = snapshot.last_wait_timeout.expect("last timeout");
+        assert_eq!(last.outcome, NativeBodyWaitOutcome::TimedOut);
+        assert_eq!(
+            last.started_at,
+            start.checked_add(Duration::from_millis(20)).expect("start")
+        );
+        assert_eq!(
+            last.observed_at,
+            start.checked_add(Duration::from_millis(200)).expect("end")
+        );
+        assert!(snapshot.first_read.is_none());
+        assert_eq!(snapshot.reads, 0);
+        assert_eq!(snapshot.ready_reads, 0);
+    }
+
+    #[test]
+    fn native_wait_selection_is_attributed_to_only_its_submitted_body() {
+        let (first, first_recorder, _first_clock) = prepared();
+        let (second, second_recorder, _second_clock) = prepared();
+        first_recorder.head_received();
+        second_recorder.head_received();
+        let _first_owner = own_sdk_resource(Source(first.clone()), Some(first_recorder.clone()));
+        let _second_owner = own_sdk_resource(Source(second.clone()), Some(second_recorder.clone()));
+        let selected = observe_sdk_wait(
+            &[(2, first_recorder), (5, second_recorder)],
+            || 5,
+            |returned, index| {
+                if *returned == index {
+                    NativeBodyWaitOutcome::Ready
+                } else {
+                    NativeBodyWaitOutcome::OtherReady
+                }
+            },
+        );
+        assert_eq!(selected, 5);
+        assert_eq!(first.snapshot().ready_waits, 0);
+        assert_eq!(second.snapshot().ready_waits, 1);
+        assert!(first.snapshot().first_wait_timeout.is_none());
+        assert!(second.snapshot().last_wait_timeout.is_none());
+        assert_eq!(
+            first.snapshot().first_wait.expect("first").outcome,
+            NativeBodyWaitOutcome::OtherReady
+        );
+        assert_eq!(
+            second.snapshot().first_wait.expect("second").outcome,
+            NativeBodyWaitOutcome::Ready
+        );
+    }
+
+    #[test]
+    fn failed_and_backwards_native_waits_do_not_supply_valid_evidence() {
+        let (witness, recorder, now) = prepared();
+        recorder.head_received();
+        let _owner = own_sdk_resource(Source(witness.clone()), Some(recorder.clone()));
+        let start = *now.lock().expect("clock");
+        let result = observe_sdk_wait(
+            &[(0, recorder.clone())],
+            || Err::<(), _>("native failure"),
+            |_, _| NativeBodyWaitOutcome::Failed,
+        );
+        assert_eq!(result, Err("native failure"));
+        assert_eq!(witness.snapshot().failed_waits, 1);
+        assert!(witness.snapshot().last_wait_timeout.is_none());
+        observe_sdk_wait(
+            &[(0, recorder)],
+            || {
+                *now.lock().expect("clock") = start
+                    .checked_sub(Duration::from_micros(1))
+                    .expect("backwards");
+            },
+            |(), _| NativeBodyWaitOutcome::TimedOut,
+        );
+        assert!(witness.snapshot().invalid);
+        assert!(witness.snapshot().first_read.is_none());
+    }
+
+    #[test]
+    fn unobserved_native_wait_calls_once_without_sampling_or_classifying() {
+        let calls = AtomicUsize::new(0);
+        let result = observe_sdk_wait(
+            &[],
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>("native failure")
+            },
+            |_, _| panic!("unobserved waits must not be classified"),
+        );
+        assert_eq!(result, Err("native failure"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

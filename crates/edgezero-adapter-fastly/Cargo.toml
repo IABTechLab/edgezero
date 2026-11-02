@@ -20,7 +20,7 @@ cli = [
     "dep:walkdir",
 ]
 fastly = ["dep:fastly", "dep:fastly-shared", "dep:fastly-sys", "dep:log-fastly"]
-test-utils = []
+test-utils = ["edgezero-core/test-utils"]
 
 [dependencies]
 anyhow = { workspace = true }

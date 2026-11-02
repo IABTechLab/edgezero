@@ -12,6 +12,68 @@
 
 ## Status and Authority
 
+### Fastly Native Body-Readiness Witness (2026-11-02)
+
+Complete the distinct Fastly observation permitted by EZ-6 criterion 16 and the existing D6 note.
+This supersedes the earlier missing-wait-witness statements below, not failed evidence or hosted
+qualification gates. Do not relabel native wait entry/timeout as an SDK read returning Pending.
+
+- [x] Keep one request-owned witness and add finite, typed native-wait observations: first wait,
+      first/last successful timeout, and saturating selected/error counts. Use only the prepared
+      clock; retain first observations and sticky backwards-clock invalidation. Hold no resource,
+      source, engine or waker in snapshots or a lock across native work.
+- [x] Share a test-only generic resource owner with the existing stream observer. Its actual SDK
+      resource drops before the private release guard. Fastly wraps the `BodyHandle` itself, so
+      expiry, EOF/error or lease removal records after the handle drops, not at a later outer
+      stream drop. Unattached stream observers still return the original stream unchanged.
+- [x] Derive recorders only from active body owners supplying the actual submitted handle slice.
+      Observe the one existing select invocation and preserve its exact result. Use submitted
+      indices to distinguish this body selected, another handle selected, timeout and failure.
+      Add no SDK `is_ready` call, poll, timer, wakeup, transport or production-policy change.
+- [x] Require the unchanged original policies and full URI plus a positively observed timeout:
+      `head <= wait-entry < 200 ms <= timeout-return <= next-return <= 205 ms`. Require SDK-owner
+      destruction after that timeout and before return. Keep SDK-read fields separate, the
+      zero-head/read/wait control and independent origin hold/release assertions. Missing, stale,
+      unrelated, selected/failed, backwards, Ready-first, early/duplicate or unreleased evidence
+      cannot substitute. The label is `sdk-readiness-wait`, never `sdk-read-pending`.
+- [x] Demonstrate core and harness red/green proofs. The real pre-hook Viceroy run fails only for
+      the pending-body case's missing measured head. The first instrumented run passes its whole
+      20-case lifetime/callback inventory, including both wrapper families. Actual body waits
+      start at 35.513 ms, return timeout at 201.069-201.071 ms, release each owner once at
+      201.106-201.109 ms and return from `next` at 201.238 ms. Mixed head/body selection records
+      `OtherReady` for bodies not selected. Retain the failed pre-hook run.
+- [x] Pass 1,116 core tests including 13 owner/recorder tests, 176 native Fastly tests, 293 actual
+      Fastly WASI library tests and 36 SDK contracts. Strict core, Fastly WASM with/without
+      `test-utils`, harness and fixture lint pass. The 59 qualification/witness fixture tests
+      and Axum's 28 transport contracts pass. Independent spec/ownership and quality reviews
+      are clear.
+- [x] Verify the shared owner on actual Axum, Spin and workerd. Their unchanged ten-case lifetime
+      suites all pass on the new working tree. Preserve all earlier cold/timing failures; a
+      later local pass is not a waiver or a frozen-candidate/hosted result.
+- [x] Reject inconsistent first/last wait records, overlapping native calls and fewer recorded
+      calls than the distinct observations require. Self-review red/green controls cover each;
+      the final harness passes 443 tests with two existing ignored tests. All five root gates
+      pass, including 2,650 tests across 33 binaries with one existing ignored test. Docs
+      lint/format/build, legacy/docs/inventory guards and historical/scoped API identities pass.
+- [x] Execute the final reviewed runtime inventory and retain its failures. The pending-body
+      witness and all eight callback cases pass; the whole inventory passes 17 of 20, exits 1
+      and remains open. Slow/fast origin heads miss their unchanged targets at 705.897 ms
+      versus 700 ms +/- 5 ms and 125.273 ms versus 120 ms +/- 5 ms; CPU batch start is
+      40.513 ms versus 34 ms +/- 5 ms. Earlier instrumented and intermediate runs pass all
+      20 cases, but neither overrides this latest result or supplies candidate qualification.
+- [ ] Complete the exact-candidate timing and qualification gates; do not widen tolerances,
+      hide failed runs or promote a partial case to whole-suite acceptance.
+
+The scope remains `test-utils`; no production API, deadline, B31 policy, decoding/cap rule,
+SDK/runtime pin, CI invocation, normative identity or acceptance binding changes. SDK-handle
+destruction is not proof of provider teardown. Local Fastly execution explicitly uses the tracked
+Viceroy readiness repair, not a stock-runtime or hosted claim. Inventory stays 153 ready/358
+planned and unqualified. Candidate freeze, owner-bound acceptance artifacts, consumer and hosted
+qualification, remaining applicable lifecycle scenarios and provider limitations remain open.
+Logs use `/private/tmp/pr275-fastly-wait-*`. Initial lint rejects unnamed generic parameters
+and one ignored-unit pattern; use named parameters and an explicit unit pattern, without
+suppressions or behavioral changes. No demo/template migration is needed for test-only metadata.
+
 ### Spin Native Pending-Body Witness (2026-11-01)
 
 Extend the existing request-owned witness to Spin without new core APIs, report schemas,

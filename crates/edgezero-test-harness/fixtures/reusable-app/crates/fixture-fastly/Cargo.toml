@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 qualification = ["fixture-core/qualification"]
-progress = ["fixture-core/qualification"]
+progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-fastly/test-utils"]
 readiness = ["dep:fastly-sys"]
 
 [dependencies]

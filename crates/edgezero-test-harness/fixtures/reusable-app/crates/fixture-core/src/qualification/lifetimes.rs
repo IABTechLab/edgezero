@@ -2,7 +2,9 @@ use bytes::Bytes;
 use edgezero_core::context::RequestContext;
 use edgezero_core::http::{HeaderMap, Method, Response, Uri, response_builder};
 #[cfg(feature = "native-body-witness")]
-use edgezero_core::outbound::test_support::{NativeBodySnapshot, NativeBodyWitness};
+use edgezero_core::outbound::test_support::{
+    NativeBodySnapshot, NativeBodyWait, NativeBodyWitness,
+};
 use edgezero_core::{
     Body, Deadline, EdgeError, HttpClient, IndependentOutboundProgress, MonotonicClock,
     MonotonicInstant, OutboundBatch, OutboundBatchCheck, OutboundBatchNext, OutboundCollectedSlot,
@@ -648,12 +650,22 @@ fn native_body_report(snapshot: NativeBodySnapshot, timeline: &Timeline) -> Valu
         "entered_at_us":at(prepared.entered_at), "deadline_at_us":at(prepared.budget.deadline.instant()),
         "target_uri":prepared.target.to_string(),
     }));
+    let wait = |observation: NativeBodyWait| {
+        json!({
+            "kind":"BodyReadiness","outcome":format!("{:?}",observation.outcome),
+            "started_at_us":at(observation.started_at),"observed_at_us":at(observation.observed_at),
+        })
+    };
     json!({"attachments":snapshot.attachments,"preparations":snapshot.preparations,
         "preparation":preparation,"invalid":snapshot.invalid,
         "heads":snapshot.heads,"head_at_us":snapshot.first_head.and_then(at),
         "first_read":snapshot.first_read.map(|read| json!({
             "started_at_us":at(read.started_at),"observed_at_us":at(read.observed_at),"pending":read.pending})),
         "reads":snapshot.reads,"ready_reads":snapshot.ready_reads,
+        "waits":snapshot.waits,"ready_waits":snapshot.ready_waits,"failed_waits":snapshot.failed_waits,
+        "first_wait":snapshot.first_wait.map(wait),
+        "first_wait_timeout":snapshot.first_wait_timeout.map(wait),
+        "last_wait_timeout":snapshot.last_wait_timeout.map(wait),
         "source_acquisitions":snapshot.source_acquisitions,"source_releases":snapshot.source_releases,
         "released_at_us":snapshot.first_release.and_then(at)})
 }

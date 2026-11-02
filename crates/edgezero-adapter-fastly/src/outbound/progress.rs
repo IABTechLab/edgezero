@@ -10,6 +10,10 @@ use std::time::Duration;
 
 use async_stream::stream;
 use bytes::Bytes;
+#[cfg(feature = "test-utils")]
+use edgezero_core::outbound::test_support::{
+    NativeBodyRecorder, NativeBodyWaitOutcome, observe_sdk_wait,
+};
 use edgezero_core::{
     BodyStream, Deadline, DispatchBudget, EdgeError, MonotonicClock, MonotonicInstant,
     OutboundFuture,
@@ -79,6 +83,8 @@ pub(super) trait Transport {
     type Pending;
 
     fn body_handle(body: &Self::Body) -> u32;
+    #[cfg(feature = "test-utils")]
+    fn body_recorder(body: &Self::Body) -> Option<NativeBodyRecorder>;
     fn head_handle(pending: &Self::Pending) -> Option<u32>;
     fn poll_head(
         &mut self,
@@ -548,6 +554,36 @@ impl<T: Transport> State<T> {
             .unwrap_or(u32::MAX)
             .max(1);
         let handles = active.iter().map(|(_, handle)| *handle).collect::<Vec<_>>();
+        #[cfg(feature = "test-utils")]
+        let observations = active
+            .iter()
+            .enumerate()
+            .filter_map(|(submitted, (index, _))| {
+                let slot = self.slots.get(*index)?.as_ref()?;
+                let Phase::Body {
+                    handle: Some(body),
+                    requested: true,
+                    next: None,
+                } = &slot.phase
+                else {
+                    return None;
+                };
+                T::body_recorder(body).map(|recorder| (submitted, recorder))
+            })
+            .collect::<Vec<_>>();
+        #[cfg(feature = "test-utils")]
+        let selection = observe_sdk_wait(
+            &observations,
+            || self.transport.select(&handles, milliseconds),
+            |result, submitted| match result {
+                Err(_) => NativeBodyWaitOutcome::Failed,
+                Ok(None) => NativeBodyWaitOutcome::TimedOut,
+                Ok(Some(selected)) if *selected >= handles.len() => NativeBodyWaitOutcome::Failed,
+                Ok(Some(selected)) if *selected == submitted => NativeBodyWaitOutcome::Ready,
+                Ok(Some(_)) => NativeBodyWaitOutcome::OtherReady,
+            },
+        )?;
+        #[cfg(not(feature = "test-utils"))]
         let selection = self.transport.select(&handles, milliseconds)?;
         let Some(selected) = selection else {
             return Ok(true);
@@ -958,6 +994,10 @@ mod tests {
         type Pending = Handle;
         fn body_handle(body: &Handle) -> u32 {
             body.id
+        }
+        #[cfg(feature = "test-utils")]
+        fn body_recorder(_body: &Handle) -> Option<NativeBodyRecorder> {
+            None
         }
         fn head_handle(pending: &Handle) -> Option<u32> {
             (!pending.opaque).then_some(pending.id)
