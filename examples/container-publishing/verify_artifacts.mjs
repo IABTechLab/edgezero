@@ -253,7 +253,9 @@ export function describe(layout, platform) {
   if ('platform' in descriptor) require(`${descriptor.platform.os}/${descriptor.platform.architecture}` === platform, 'Descriptor/platform mismatch');
   require(Array.isArray(manifest.layers) && manifest.layers.length, 'Runtime image has no layers');
   for (const layer of manifest.layers) blob(layout, layer, LAYERS);
+  if (Object.hasOwn(config, 'variant')) require(typeof config.variant === 'string' && config.variant.trim().length > 0, 'Invalid config variant');
   return { platform, manifest_digest: descriptor.digest, manifest_size: descriptor.size, config_digest: manifest.config.digest,
+    ...(Object.hasOwn(config, 'variant') ? { variant: config.variant } : {}),
     revision_label: config.config?.Labels?.['org.opencontainers.image.revision'] ?? null };
 }
 export function verify_pulled(layout, inspection, platform, reference) {
@@ -324,16 +326,34 @@ export function check_inputs(inputs, revision, runId) {
   require(typeof inputs.toolchain === 'string' && /^rust [0-9]+\.[0-9]+\.[0-9]+$/m.test(inputs.toolchain), 'Toolchain trace missing');
   // The scaffold deliberately follows this runtime tag; all other bases remain pinned.
   require(Array.isArray(inputs.base_images) && inputs.base_images.length && inputs.base_images.every(base => typeof base === 'string' &&
-    (base === 'gcr.io/distroless/cc-debian12:nonroot' || /^[^\s@]+@sha256:[0-9a-f]{64}(?![\s\S])/.test(base))), 'Pinned base trace missing');
+    (TAGGED_RUNTIMES.has(base) || /^[^\s@]+@sha256:[0-9a-f]{64}(?![\s\S])/.test(base))), 'Pinned base trace missing');
+}
+const TAGGED_RUNTIMES = new Set(['gcr.io/distroless/cc-debian12:nonroot', 'gcr.io/distroless/cc-debian13:nonroot']);
+export function resolved_base_images(provenance, inputs, info) {
+  const metadata = provenance.buildkit;
+  require(metadata?.['containerimage.config.digest'] === info.config_digest, 'BuildKit config digest mismatch');
+  const predicate = metadata['buildx.build.provenance'] ?? metadata[`buildx.build.provenance/${info.platform}`];
+  require(Array.isArray(predicate?.materials), 'BuildKit materials missing');
+  const images = predicate.materials.filter(material => typeof material.uri === 'string' && material.uri.startsWith('pkg:docker/'));
+  for (const material of images) {
+    require(typeof material.digest?.sha256 === 'string' && DIGEST.test('sha256:' + material.digest.sha256), 'Invalid BuildKit material digest');
+  }
+  for (const base of inputs.base_images.filter(base => TAGGED_RUNTIMES.has(base))) {
+    const uri = `pkg:docker/${base.replace(':nonroot', '@nonroot')}?platform=${encodeURIComponent(info.platform)}`;
+    require(images.some(material => material.uri === uri), 'Resolved runtime material missing for platform');
+  }
+  return images.map(({ uri, digest }) => ({ uri, digest }));
 }
 export function seal(bundle, revision, runId, platform) {
   require(typeof revision === 'string' && /^[0-9a-f]{40}(?![\s\S])/.test(revision), 'Expected immutable source commit');
   require(typeof runId === 'string' && /^(?:[0-9]+(?:-[0-9]+)?|local)(?![\s\S])/.test(runId), 'Invalid run identity');
   const info = describe(path.join(bundle, 'oci'), platform);
   require(info.revision_label === revision, 'Image/source revision mismatch');
-  check_inputs(load(path.join(bundle, 'inputs.json')), revision, runId);
+  const inputs = load(path.join(bundle, 'inputs.json'));
+  check_inputs(inputs, revision, runId);
   const provenance = load(path.join(bundle, 'provenance.json'));
   require(provenance.subject === info.manifest_digest && provenance.revision === revision, 'Provenance subject/source mismatch');
+  resolved_base_images(provenance, inputs, info);
   const hashes = Object.fromEntries(SIDECARS.map(name => [name, checksum(path.join(bundle, name))]));
   const receipt = { schema: 1, revision, run_id: runId, checks: 'packaging-passed', ...info, archive_sha256: checksum(path.join(bundle, 'image.tar')), sidecars: hashes };
   fs.writeFileSync(path.join(bundle, 'receipt.json'), serialize(receipt));
@@ -353,6 +373,7 @@ export async function verify(bundle, revision, runId, platform, exceptions, { po
     info = describe(layout, platform);
     config = load(path.join(layout, 'blobs/sha256', info.config_digest.slice(7)));
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+  require(Object.hasOwn(receipt, 'variant') === Object.hasOwn(info, 'variant') && receipt.variant === info.variant, 'Receipt variant mismatch');
   require(Object.entries(info).every(([key, value]) => equal(receipt[key], value)), 'Receipt/image mismatch');
   require(info.revision_label === revision, 'Image revision label mismatch');
   require(equal(Object.keys(receipt.sidecars).sort(), [...SIDECARS].sort()), 'Missing sidecar identities');
@@ -363,6 +384,7 @@ export async function verify(bundle, revision, runId, platform, exceptions, { po
   const provenance = load(path.join(bundle, 'provenance.json'));
   require(provenance.subject === info.manifest_digest && provenance.revision === revision, 'Provenance subject/source mismatch');
   require(equal(provenance.inputs, inputs) && provenance.run_id === runId, 'Provenance input/run mismatch');
+  resolved_base_images(provenance, inputs, info);
   const scanner = load(path.join(bundle, 'scanner.json'));
   require(present(scanner.Version) && present(scanner.VulnerabilityDB?.UpdatedAt), 'Scanner/database identity missing');
   require(scanner.SubjectManifestDigest === info.manifest_digest, 'Scanner subject mismatch');
@@ -382,7 +404,7 @@ export function runtime_index(receipts) {
   require(receipts.length === 2 && equal(new Set(receipts.map(receipt => receipt.platform)), PLATFORMS), 'Both unique native variants required');
   require(new Set(receipts.map(receipt => JSON.stringify([receipt.revision, receipt.run_id]))).size === 1, 'Variant source/run mismatch');
   require(new Set(receipts.map(receipt => receipt.sidecars['inputs.json'])).size === 1, 'Variant prepared input mismatch');
-  return { schemaVersion: 2, mediaType: INDEX, manifests: [...receipts].sort((a, b) => a.platform < b.platform ? -1 : 1).map(receipt => ({ mediaType: MANIFEST, digest: receipt.manifest_digest, size: receipt.manifest_size, platform: { os: 'linux', architecture: receipt.platform.split('/')[1] } })) };
+  return { schemaVersion: 2, mediaType: INDEX, manifests: [...receipts].sort((a, b) => a.platform < b.platform ? -1 : 1).map(receipt => ({ mediaType: MANIFEST, digest: receipt.manifest_digest, size: receipt.manifest_size, platform: { os: 'linux', architecture: receipt.platform.split('/')[1], ...(Object.hasOwn(receipt, 'variant') ? { variant: receipt.variant } : {}) } })) };
 }
 export function artifact_ids(metadata, runId, attempt, revision = undefined) {
   const names = new Set(['amd64', 'arm64'].map(arch => `accepted-${arch}-${runId}-${attempt}`));
@@ -430,7 +452,8 @@ export async function release_record(source, bundles, metadata, revision, runId,
     receipts.push(receipt);
     const scanner = load(path.join(bundle, 'scanner.json'));
     const artifact = metadata.artifacts.find(item => item.name === `accepted-${platform.split('/')[1]}-${run}-${attempt}`);
-    children.push({ platform, manifest_digest: receipt.manifest_digest, config_digest: receipt.config_digest, archive_sha256: receipt.archive_sha256, sidecars: receipt.sidecars, actions_artifact: { id: artifact.id, digest: artifact.digest, name: artifact.name }, scanner: { version: scanner.Version, database: scanner.VulnerabilityDB }, tests: 'application-owned checks succeeded in native job' });
+    const resolved = resolved_base_images(load(path.join(bundle, 'provenance.json')), inputs, receipt);
+    children.push({ platform, resolved_base_images: resolved, manifest_digest: receipt.manifest_digest, config_digest: receipt.config_digest, archive_sha256: receipt.archive_sha256, sidecars: receipt.sidecars, actions_artifact: { id: artifact.id, digest: artifact.digest, name: artifact.name }, scanner: { version: scanner.Version, database: scanner.VulnerabilityDB }, tests: 'application-owned checks succeeded in native job' });
   }
   return { version: 1, scope: 'application container acceptance, not framework production certification', source: { revision, ...expected }, run_id: runId, children, index_digest: 'sha256:' + hash(serialize(runtime_index(receipts))), scan_policy: 'High/Critical including unfixed; only independently trusted scoped exceptions', exceptions };
 }

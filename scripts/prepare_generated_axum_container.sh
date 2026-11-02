@@ -19,8 +19,9 @@ APP="$PARENT/container-probe"
 node "$ROOT/scripts/axum_container_helpers.mjs" stage-sources "$ROOT" "$APP"
 (
   cd "$APP"
-  cp "$ROOT/Cargo.lock" Cargo.lock
+  cp vendor/edgezero/Cargo.lock Cargo.lock
   cargo metadata --format-version 1 > /dev/null
+  # Check the reconciled fixture state, not byte-for-byte seed preservation.
   cargo metadata --locked --format-version 1 > "$PARENT/metadata.json"
 )
 node "$ROOT/scripts/axum_container_helpers.mjs" record-inputs "$APP" "$PARENT/metadata.json"

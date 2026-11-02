@@ -47,7 +47,8 @@ trap cleanup EXIT
 
 if [[ "$MODE" == build ]]; then
   docker buildx create --name "$BUILDER" --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" > "$OUTPUT/builder.log"
-  docker buildx build --builder "$BUILDER" --platform "$PLATFORM" --provenance=false --sbom=false \
+  BUILDX_METADATA_PROVENANCE=min docker buildx build --builder "$BUILDER" --platform "$PLATFORM" --pull \
+    --provenance=false --sbom=false --metadata-file "$WORK/build-metadata.json" \
     --label "org.opencontainers.image.revision=$REVISION" \
     --label "org.opencontainers.image.source=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-IABTechLab/edgezero}" \
     --output "type=oci,dest=$OUTPUT/image.tar,name=app" "$INPUT" 2>&1 | tee "$OUTPUT/build.log"
@@ -96,7 +97,15 @@ if [[ "$MODE" == build ]]; then
   rust_pin="$(awk '$1 == "rust" { print $2 }' "$INPUT/.tool-versions")"
   [[ "$rust_pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected exact Rust pin' >&2; exit 1; }
   rustup toolchain install "$rust_pin" --profile minimal
-  RUSTUP_TOOLCHAIN="$rust_pin" cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" \
+  curl --fail --silent --show-error --location \
+    "https://static.crates.io/crates/cargo-audit/cargo-audit-${CARGO_AUDIT_VERSION}.crate" \
+    --output "$WORK/cargo-audit.crate"
+  printf '%s  %s\n' "$CARGO_AUDIT_SHA256" "$WORK/cargo-audit.crate" | sha256sum --check --strict
+  mkdir "$WORK/audit-source"
+  tar -xzf "$WORK/cargo-audit.crate" -C "$WORK/audit-source"
+  [[ -f "$WORK/audit-source/cargo-audit-$CARGO_AUDIT_VERSION/Cargo.lock" ]] \
+    || { echo 'Expected packaged cargo-audit lockfile' >&2; exit 1; }
+  RUSTUP_TOOLCHAIN="$rust_pin" cargo install --path "$WORK/audit-source/cargo-audit-$CARGO_AUDIT_VERSION" \
     --locked --root "$WORK/audit-tools"
   mkdir "$WORK/audit-home"
   (
@@ -118,8 +127,9 @@ if [[ "$MODE" == build ]]; then
     --format cyclonedx --output /work/sbom.json
   jq -n --arg subject "$DIGEST" --arg revision "$REVISION" --arg run_id "$RUN_ID" \
     --arg builder "$BUILDKIT_IMAGE" --slurpfile inputs "$OUTPUT/inputs.json" \
+    --slurpfile buildkit "$WORK/build-metadata.json" \
     '{subject: $subject, revision: $revision, run_id: $run_id, builder: $builder,
-      inputs: $inputs[0], note: "Unsigned build receipt. Trusted publisher authentication is separate."}' \
+      inputs: $inputs[0], buildkit: $buildkit[0], note: "Unsigned build receipt. Trusted publisher authentication is separate."}' \
     > "$OUTPUT/provenance.json"
   jq --arg digest "$DIGEST" '.SubjectManifestDigest = $digest' "$OUTPUT/scanner.json" \
     > "$WORK/scanner.json"

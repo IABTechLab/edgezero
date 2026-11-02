@@ -3,9 +3,60 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { gzipSync } from 'node:zlib';
+import { tarEntry } from './axum_container_tar.mjs';
 import { test } from 'node:test';
 import { auditLock } from '../../examples/container-publishing/audit_lock.mjs';
 import { check_advisories } from '../../examples/container-publishing/verify_artifacts.mjs';
+
+const handoff = fs.readFileSync(new URL('../test_axum_container_handoff.sh', import.meta.url), 'utf8');
+const tools = fs.readFileSync(new URL('../../examples/container-publishing/tools.env', import.meta.url), 'utf8');
+const auditVersion = tools.match(/^CARGO_AUDIT_VERSION=(.+)$/m)[1];
+
+test('cargo-audit source archive has a committed checksum pin', () => {
+  assert.equal(tools.match(/^CARGO_AUDIT_SHA256=(.+)$/m)[1],
+    '700c2b240f7fd330c24b675fe429f73a5b676531fcc6300400b2b67f155ba12a');
+});
+
+for (const scenario of ['success', 'bad checksum', 'missing lock']) {
+  test(`cargo-audit source installation: ${scenario}`, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'axum-audit-install-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const bin = path.join(root, 'bin'), work = path.join(root, 'work');
+    fs.mkdirSync(bin); fs.mkdirSync(work);
+    const entries = [tarEntry(`cargo-audit-${auditVersion}/Cargo.toml`, '[package]\nname="cargo-audit"\n')];
+    if (scenario !== 'missing lock') entries.push(tarEntry(`cargo-audit-${auditVersion}/Cargo.lock`, 'version = 4\n'));
+    const archive = gzipSync(Buffer.concat([...entries, Buffer.alloc(1024)]));
+    const source = path.join(root, 'source.crate'), installed = path.join(root, 'installed.json');
+    const downloaded = path.join(root, 'downloaded.json');
+    fs.writeFileSync(source, archive);
+    fs.writeFileSync(path.join(bin, 'curl'), `#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); fs.writeFileSync(process.env.DOWNLOADED, JSON.stringify(args)); fs.copyFileSync(process.env.ARCHIVE, args[args.indexOf('--output') + 1]);\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'cargo'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.INSTALLED, JSON.stringify({ args: process.argv.slice(2), rust: process.env.RUSTUP_TOOLCHAIN }));\n`, { mode: 0o755 });
+    // Execute the shipping block, but use a tiny local archive and no network or Cargo.
+    const block = handoff.slice(handoff.indexOf('  curl --fail --silent --show-error --location'), handoff.indexOf('  mkdir "$WORK/audit-home"'));
+    assert.ok(block.includes('sha256sum --check --strict'));
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', block], { encoding: 'utf8', env: {
+      ...process.env, PATH: `${bin}:${process.env.PATH}`, WORK: work, rust_pin: '1.95.0',
+      CARGO_AUDIT_VERSION: auditVersion,
+      CARGO_AUDIT_SHA256: scenario === 'bad checksum' ? '0'.repeat(64) : createHash('sha256').update(archive).digest('hex'),
+      ARCHIVE: source, INSTALLED: installed, DOWNLOADED: downloaded,
+    } });
+    assert.ok(JSON.parse(fs.readFileSync(downloaded)).includes(`https://static.crates.io/crates/cargo-audit/cargo-audit-${auditVersion}.crate`));
+    if (scenario === 'success') {
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(fs.readFileSync(installed)), {
+        args: ['install', '--path', `${work}/audit-source/cargo-audit-${auditVersion}`, '--locked', '--root', `${work}/audit-tools`],
+        rust: '1.95.0',
+      });
+    } else {
+      assert.notEqual(result.status, 0);
+      assert.ok(!fs.existsSync(installed));
+      if (scenario === 'bad checksum') assert.ok(!fs.existsSync(path.join(work, 'audit-source')));
+      else assert.match(result.stderr, /Expected packaged cargo-audit lockfile/);
+    }
+  });
+}
 
 function fixture(t, { count = 0, status = Number(count > 0), version = '0.22.2' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'axum-advisories-'));

@@ -16,7 +16,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
-const GENERATED_RUST_VERSION: &str = "1.98.1";
+// Update the reviewed compiler release and multi-architecture builder digest together.
+const GENERATED_RUST_BUILDER: (&str, &str) = (
+    "1.98.1",
+    "sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+);
+const GENERATED_RUST_VERSION: &str = GENERATED_RUST_BUILDER.0;
 
 /// Errors produced by `edgezero new`.
 #[derive(Debug, Error)]
@@ -576,6 +581,10 @@ fn build_base_data(
         "rust_version".into(),
         Value::String(GENERATED_RUST_VERSION.to_owned()),
     );
+    data.insert(
+        "rust_builder_digest".into(),
+        Value::String(GENERATED_RUST_BUILDER.1.to_owned()),
+    );
     data.insert("name".into(), Value::String(layout.name.clone()));
     data.insert("proj_core".into(), Value::String(layout.core_name.clone()));
     data.insert("proj_cli".into(), Value::String(layout.cli_name.clone()));
@@ -1105,7 +1114,8 @@ mod tests {
                 "has_axum": has_axum,
                 "name": layout.name,
                 "proj_axum": format!("{}-adapter-axum", layout.name),
-                "rust_version": "1.95.0",
+                "rust_version": GENERATED_RUST_BUILDER.0,
+                "rust_builder_digest": GENERATED_RUST_BUILDER.1,
             });
             write_root_files(&hbs, &layout, &data).expect("root files");
             for file in ["Dockerfile", ".dockerignore"] {
@@ -1114,7 +1124,12 @@ mod tests {
             if has_axum {
                 let dockerfile =
                     fs::read_to_string(layout.out_dir.join("Dockerfile")).expect("Dockerfile");
-                assert!(dockerfile.contains("ARG RUST_VERSION=1.95.0"));
+                assert!(dockerfile.contains(&format!("ARG RUST_VERSION={GENERATED_RUST_VERSION}")));
+                assert!(dockerfile.contains(&format!(
+                    "FROM rust:${{RUST_VERSION}}-bookworm@{} AS builder",
+                    GENERATED_RUST_BUILDER.1
+                )));
+                assert!(dockerfile.starts_with("# syntax=docker/dockerfile:1.19.0@sha256:"));
                 assert!(dockerfile.contains("-p my-app-adapter-axum --bin my-app-adapter-axum"));
                 assert!(dockerfile.contains("--release --locked"));
                 let runtime = dockerfile
@@ -1122,7 +1137,7 @@ mod tests {
                     .nth(1)
                     .expect("runtime stage");
                 assert!(
-                    dockerfile.contains("FROM gcr.io/distroless/cc-debian12:nonroot AS runtime")
+                    dockerfile.contains("FROM gcr.io/distroless/cc-debian13:nonroot AS runtime")
                 );
                 assert!(!runtime.contains("apt-get"));
                 assert!(
@@ -1131,7 +1146,6 @@ mod tests {
                         .expect("builder tools")
                         < dockerfile.find("COPY . .").expect("source copy")
                 );
-                assert!(!dockerfile.contains("--mount=type=cache"));
                 assert!(runtime.contains("STOPSIGNAL SIGINT\nENTRYPOINT [\"/usr/local/bin/app\"]"));
                 assert!(dockerfile.contains("USER 10001:10001"));
                 assert!(dockerfile.contains("ENTRYPOINT [\"/usr/local/bin/app\"]"));
@@ -1149,6 +1163,27 @@ mod tests {
                 assert!(!layout.out_dir.join("Cargo.lock").exists());
             }
         }
+    }
+
+    #[test]
+    fn container_build_caches_dependencies_and_exports_binary() {
+        let template = include_str!("templates/root/Dockerfile.hbs");
+        for target in [
+            "/usr/local/cargo/registry",
+            "/usr/local/cargo/git",
+            "/build/target",
+        ] {
+            assert!(template.contains(&format!("--mount=type=cache,target={target}")));
+        }
+        let build = template
+            .split("target=/build/target <<'SH'\n")
+            .nth(1)
+            .expect("cached build heredoc")
+            .split("\nSH")
+            .next()
+            .expect("cached build heredoc end");
+        assert!(build.contains("cp \"target/$host/release/"));
+        assert!(build.contains("/out/app"));
     }
 
     #[test]
@@ -1306,6 +1341,10 @@ mod tests {
         assert!(project_dir.join(".dockerignore").exists());
         let dockerfile = fs::read_to_string(project_dir.join("Dockerfile")).expect("Dockerfile");
         assert!(dockerfile.contains(&format!("ARG RUST_VERSION={GENERATED_RUST_VERSION}")));
+        assert!(dockerfile.contains(&format!(
+            "FROM rust:${{RUST_VERSION}}-bookworm@{} AS builder",
+            GENERATED_RUST_BUILDER.1
+        )));
         assert!(build_tool_versions(&[]).contains(GENERATED_RUST_VERSION));
         let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README");
         assert!(

@@ -42,7 +42,7 @@ function pack(layout, archive) {
   walk(layout);
   fs.writeFileSync(archive, tar(entries));
 }
-function fixture(root, arch = 'amd64', revision = REV) {
+function fixture(root, arch = 'amd64', revision = REV, variant = undefined) {
   const layout = path.join(root, 'oci');
   fs.mkdirSync(path.join(layout, 'blobs/sha256'), { recursive: true });
   function store(value, mediaType) {
@@ -53,13 +53,13 @@ function fixture(root, arch = 'amd64', revision = REV) {
   }
   const rawLayer = tar([{ name: 'transport-fixture', data: Buffer.from('layer') }]);
   const diffId = 'sha256:' + sha(rawLayer);
-  const config = store({ os: 'linux', architecture: arch, rootfs: { type: 'layers', diff_ids: [diffId] }, config: { Labels: { 'org.opencontainers.image.revision': revision } } }, v.CONFIG);
+  const config = store({ os: 'linux', architecture: arch, ...(variant === undefined ? {} : { variant }), rootfs: { type: 'layers', diff_ids: [diffId] }, config: { Labels: { 'org.opencontainers.image.revision': revision } } }, v.CONFIG);
   const layer = store(gzipSync(rawLayer, { mtime: 0 }), 'application/vnd.oci.image.layer.v1.tar+gzip');
   const image = store({ schemaVersion: 2, mediaType: v.MANIFEST, config, layers: [layer] }, v.MANIFEST);
   put(path.join(layout, 'oci-layout'), { imageLayoutVersion: '1.0.0' });
   put(path.join(layout, 'index.json'), { schemaVersion: 2, mediaType: v.INDEX, manifests: [image] });
   pack(layout, path.join(root, 'image.tar'));
-  put(path.join(root, 'inputs.json'), { revision, dirty: false, toolchain: 'rust 1.95.0\n', source_sha256: 'a'.repeat(64), context_sha256: 'b'.repeat(64), lock_sha256: 'c'.repeat(64), dockerfile_sha256: 'd'.repeat(64), base_images: ['debian@sha256:' + 'e'.repeat(64)] });
+  put(path.join(root, 'inputs.json'), { revision, dirty: false, toolchain: 'rust 1.95.0\n', source_sha256: 'a'.repeat(64), context_sha256: 'b'.repeat(64), lock_sha256: 'c'.repeat(64), dockerfile_sha256: 'd'.repeat(64), base_images: ['gcr.io/distroless/cc-debian13:nonroot'] });
   put(path.join(root, 'rust-advisories.json'), {
     schema: 1, lock_sha256: 'c'.repeat(64), tool: { name: 'cargo-audit', version: '0.22.2' },
     report: { database: { 'last-commit': 'd'.repeat(40), 'last-updated': '2026-10-28T00:00:00Z' },
@@ -69,7 +69,14 @@ function fixture(root, arch = 'amd64', revision = REV) {
   put(path.join(root, 'scan.json'), { SchemaVersion: 2, Metadata: { ImageID: config.digest, DiffIDs: [diffId], OS: { Family: 'debian' } }, Results: [{ Class: 'os-pkgs', Type: 'debian', Target: 'fixture', Vulnerabilities: [] }] });
   put(path.join(root, 'scanner.json'), { Version: 'test', VulnerabilityDB: { UpdatedAt: '2026-10-07' }, SubjectManifestDigest: image.digest });
   put(path.join(root, 'sbom.json'), { bomFormat: 'CycloneDX', specVersion: '1.6', version: 1, components: [{ type: 'library', name: 'transport-fixture' }], metadata: { component: { type: 'container', name: 'fixture', properties: [{ name: 'aquasecurity:trivy:ImageID', value: config.digest }] } } });
-  put(path.join(root, 'provenance.json'), { revision, subject: image.digest, run_id: '123-1', inputs: v.load(path.join(root, 'inputs.json')) });
+  put(path.join(root, 'provenance.json'), { revision, subject: image.digest, run_id: '123-1', inputs: v.load(path.join(root, 'inputs.json')), buildkit: {
+    'containerimage.config.digest': config.digest,
+    'containerimage.digest': 'sha256:' + '9'.repeat(64), // Exporter may identify an outer index.
+    'buildx.build.provenance': { materials: [{
+      uri: `pkg:docker/gcr.io/distroless/cc-debian13@nonroot?platform=linux%2F${arch}`,
+      digest: { sha256: (arch === 'amd64' ? '1' : '2').repeat(64) },
+    }] },
+  } });
   return image;
 }
 function caseTest(name, fn) {
@@ -80,8 +87,8 @@ function caseTest(name, fn) {
     const seal = () => v.seal(root, REV, '123-1', 'linux/amd64');
     const verify = (revision = REV, run = '123-1', platform = 'linux/amd64') => v.verify(root, revision, run, platform, []);
     const cli = ['verify', root, '--revision', REV, '--run-id', '123-1', '--platform', 'linux/amd64'];
-    const arm = () => {
-      const directory = path.join(root, 'arm'); fs.mkdirSync(directory); fixture(directory, 'arm64');
+    const arm = (variant = undefined) => {
+      const directory = path.join(root, 'arm'); fs.mkdirSync(directory); fixture(directory, 'arm64', REV, variant);
       v.seal(directory, REV, '123-1', 'linux/arm64'); return directory;
     };
     await fn({ t, root, image, seal, verify, cli, arm });
@@ -96,7 +103,91 @@ caseTest('receipt and archive roundtrip', async ({ root, image, seal, verify, cl
   assert.equal(v.describe(path.join(root, 'copy'), 'linux/amd64').manifest_digest, image.digest);
   const result = run(cli); assert.equal(result.status, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), receipt);
 });
-caseTest('arm64', async ({ arm }) => { await v.verify(arm(), REV, '123-1', 'linux/arm64', []); });
+for (const variant of [undefined, 'v8']) {
+  caseTest(`arm64 variant roundtrip ${variant ?? 'absent'}`, async ({ root, seal, arm }) => {
+    seal();
+    const bundle = arm(variant);
+    const info = v.describe(path.join(bundle, 'oci'), 'linux/arm64');
+    const receipt = await v.verify(bundle, REV, '123-1', 'linux/arm64', []);
+    assert.equal(Object.hasOwn(info, 'variant'), variant !== undefined);
+    assert.equal(Object.hasOwn(receipt, 'variant'), variant !== undefined);
+    assert.equal(receipt.variant, variant);
+    const result = run(['index', root, bundle, '--revision', REV, '--run-id', '123-1']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).manifests[1].platform,
+      { os: 'linux', architecture: 'arm64', ...(variant === undefined ? {} : { variant }) });
+    for (const changed of [undefined, 'v7', 'v8'].filter(value => value !== variant)) {
+      const tampered = { ...receipt };
+      if (changed === undefined) delete tampered.variant;
+      else tampered.variant = changed;
+      put(path.join(bundle, 'receipt.json'), tampered);
+      await assert.rejects(v.verify(bundle, REV, '123-1', 'linux/arm64', []), /Receipt variant mismatch/);
+    }
+  });
+}
+caseTest('config variant must be a nonempty string', ({ root }) => {
+  for (const variant of ['', ' ', null, 8]) {
+    fixture(root, 'arm64', REV, variant);
+    assert.throws(() => v.describe(path.join(root, 'oci'), 'linux/arm64'), /Invalid config variant/);
+  }
+});
+test('handoff captures minimal BuildKit metadata without OCI attestations', () => {
+  const script = fs.readFileSync(path.join(ROOT, 'scripts/test_axum_container_handoff.sh'), 'utf8');
+  assert.match(script, /BUILDX_METADATA_PROVENANCE=min docker buildx build[^\n]+--pull/);
+  assert.match(script, /--provenance=false --sbom=false --metadata-file "\$WORK\/build-metadata\.json"/);
+  assert.ok(script.includes('--slurpfile buildkit "$WORK/build-metadata.json"'));
+  assert.ok(script.includes('buildkit: $buildkit[0]'));
+});
+caseTest('BuildKit retains pinned image materials without requiring a runtime tag', async ({ root, seal, verify }) => {
+  const inputs = v.load(path.join(root, 'inputs.json'));
+  inputs.base_images = ['debian@sha256:' + 'e'.repeat(64)];
+  put(path.join(root, 'inputs.json'), inputs);
+  const provenance = v.load(path.join(root, 'provenance.json'));
+  provenance.inputs = inputs;
+  const materials = [{ uri: 'pkg:docker/debian@sha256:' + 'e'.repeat(64) + '?platform=linux%2Famd64', digest: { sha256: 'e'.repeat(64) } }];
+  provenance.buildkit['buildx.build.provenance'].materials = materials;
+  put(path.join(root, 'provenance.json'), provenance);
+  seal(); await verify();
+  assert.deepEqual(v.resolved_base_images(provenance, inputs, v.describe(path.join(root, 'oci'), 'linux/amd64')), materials);
+});
+caseTest('BuildKit accepts exact platform-suffixed provenance metadata', async ({ root, seal, verify }) => {
+  const provenance = v.load(path.join(root, 'provenance.json'));
+  provenance.buildkit['buildx.build.provenance/linux/amd64'] = provenance.buildkit['buildx.build.provenance'];
+  delete provenance.buildkit['buildx.build.provenance'];
+  put(path.join(root, 'provenance.json'), provenance);
+  seal(); await verify();
+});
+caseTest('both supported tagged runtimes require their own resolved material', async ({ root, seal, verify }) => {
+  const inputs = v.load(path.join(root, 'inputs.json'));
+  inputs.base_images = ['gcr.io/distroless/cc-debian12:nonroot'];
+  put(path.join(root, 'inputs.json'), inputs);
+  const provenance = v.load(path.join(root, 'provenance.json'));
+  provenance.inputs = inputs;
+  assert.throws(() => v.resolved_base_images(provenance, inputs, v.describe(path.join(root, 'oci'), 'linux/amd64')), /Resolved runtime material missing/);
+  provenance.buildkit['buildx.build.provenance'].materials[0].uri = provenance.buildkit['buildx.build.provenance'].materials[0].uri.replace('debian13', 'debian12');
+  put(path.join(root, 'provenance.json'), provenance);
+  seal(); await verify();
+});
+for (const [name, mutate, error] of [
+  ['missing metadata', p => { delete p.buildkit; }, /BuildKit config digest mismatch/],
+  ['config digest mismatch', p => { p.buildkit['containerimage.config.digest'] = 'sha256:' + 'f'.repeat(64); }, /BuildKit config digest mismatch/],
+  ['missing predicate', p => { delete p.buildkit['buildx.build.provenance']; }, /BuildKit materials missing/],
+  ['wrong predicate platform', p => { p.buildkit['buildx.build.provenance/linux/arm64'] = p.buildkit['buildx.build.provenance']; delete p.buildkit['buildx.build.provenance']; }, /BuildKit materials missing/],
+  ['missing runtime', p => { p.buildkit['buildx.build.provenance'].materials = []; }, /Resolved runtime material missing/],
+  ['wrong material platform', p => { p.buildkit['buildx.build.provenance'].materials[0].uri = p.buildkit['buildx.build.provenance'].materials[0].uri.replace('amd64', 'arm64'); }, /Resolved runtime material missing/],
+  ['malformed material digest', p => { p.buildkit['buildx.build.provenance'].materials[0].digest.sha256 = 'bad'; }, /Invalid BuildKit material digest/],
+  ['missing material digest', p => { delete p.buildkit['buildx.build.provenance'].materials[0].digest; }, /Invalid BuildKit material digest/],
+]) {
+  caseTest(`BuildKit rejects ${name} even with a matching sidecar checksum`, async ({ root, seal, verify }) => {
+    const receipt = seal(), provenance = v.load(path.join(root, 'provenance.json'));
+    mutate(provenance); put(path.join(root, 'provenance.json'), provenance);
+    assert.throws(seal, error);
+    // Rebind the malformed sidecar so verification must reject its semantics.
+    receipt.sidecars['provenance.json'] = v.checksum(path.join(root, 'provenance.json'));
+    put(path.join(root, 'receipt.json'), receipt);
+    await assert.rejects(verify(), error);
+  });
+}
 caseTest('wrong run source platform and acceptance', async ({ root, seal, verify }) => {
   const receipt = seal();
   for (const args of [['b'.repeat(40)], [REV, '124-1'], [REV, '123-1', 'linux/arm64']]) await assert.rejects(verify(...args));
@@ -155,7 +246,7 @@ caseTest('missing config filesystem identity fails closed', async ({ root, image
   const report = v.load(path.join(root, 'scan.json')); report.Metadata.ImageID = manifest.config.digest; delete report.Metadata.DiffIDs; put(path.join(root, 'scan.json'), report);
   const scanner = v.load(path.join(root, 'scanner.json')); scanner.SubjectManifestDigest = nextImage.digest; put(path.join(root, 'scanner.json'), scanner);
   const bill = v.load(path.join(root, 'sbom.json')); bill.metadata.component.properties[0].value = manifest.config.digest; put(path.join(root, 'sbom.json'), bill);
-  const provenance = v.load(path.join(root, 'provenance.json')); provenance.subject = nextImage.digest; put(path.join(root, 'provenance.json'), provenance);
+  const provenance = v.load(path.join(root, 'provenance.json')); provenance.subject = nextImage.digest; provenance.buildkit['containerimage.config.digest'] = manifest.config.digest; put(path.join(root, 'provenance.json'), provenance);
   pack(layout, path.join(root, 'image.tar')); seal(); await assert.rejects(verify(), /Scan\/filesystem mismatch/);
   const reference = '127.0.0.1/app@' + nextImage.digest;
   assert.throws(() => v.verify_pulled(layout, [{ RepoDigests: [reference], Os: 'linux', Architecture: 'amd64', Config: config.config, RootFS: {} }], 'linux/amd64', reference), /Pulled filesystem identity mismatch/);
@@ -247,7 +338,7 @@ test('registry preflight accepts valid image-name separators and rejects malform
 });
 caseTest('release record recomputes committed source', async ({ root }) => {
   const source = path.join(root, 'source'); fs.mkdirSync(source);
-  const contents = { 'Cargo.lock': '# locked\n', '.tool-versions': 'rust 1.95.0\n', Dockerfile: 'FROM debian@sha256:' + 'e'.repeat(64) + '\n', 'a/b': 'nested', 'a-extra/c': 'ordering', 'unicode/é': 'UTF-8', 'unicode/\ue000': 'BMP scalar', 'unicode/\u{10000}': 'astral scalar' };
+  const contents = { 'Cargo.lock': '# locked\n', '.tool-versions': 'rust 1.95.0\n', Dockerfile: 'FROM gcr.io/distroless/cc-debian13:nonroot\n', 'a/b': 'nested', 'a-extra/c': 'ordering', 'unicode/é': 'UTF-8', 'unicode/\ue000': 'BMP scalar', 'unicode/\u{10000}': 'astral scalar' };
   for (const [name, text] of Object.entries(contents)) { const file = path.join(source, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); }
   function git(...args) { const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', ...args], { cwd: source }); assert.equal(result.status, 0, result.stderr.toString()); return result.stdout; }
   git('init', '-q'); git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture');
@@ -256,7 +347,7 @@ caseTest('release record recomputes committed source', async ({ root }) => {
   for (const name of ['.tool-versions', 'Cargo.lock', 'Dockerfile', 'a-extra/c', 'a/b', 'unicode/é', 'unicode/\ue000', 'unicode/\u{10000}']) context.update(name).update('\0').update(contents[name]).update('\0');
   const contextDigest = context.digest('hex'), bundles = [];
   for (const arch of ['amd64', 'arm64']) {
-    const bundle = path.join(root, 'release-' + arch); fs.mkdirSync(bundle); fixture(bundle, arch, revision);
+    const bundle = path.join(root, 'release-' + arch); fs.mkdirSync(bundle); fixture(bundle, arch, revision, arch === 'arm64' ? 'v8' : undefined);
     const inputs = { ...v.load(path.join(bundle, 'inputs.json')), source_sha256: sha(archive), context_sha256: contextDigest, lock_sha256: v.checksum(path.join(source, 'Cargo.lock')), dockerfile_sha256: v.checksum(path.join(source, 'Dockerfile')) };
     put(path.join(bundle, 'inputs.json'), inputs);
     put(path.join(bundle, 'rust-advisories.json'), { ...v.load(path.join(bundle, 'rust-advisories.json')), lock_sha256: inputs.lock_sha256 });
@@ -269,6 +360,13 @@ caseTest('release record recomputes committed source', async ({ root }) => {
   assert.equal(record.source.lock_sha256, v.checksum(path.join(source, 'Cargo.lock'))); assert.equal(record.children.length, 2);
   const indexResult = run(['index', ...bundles, '--revision', revision, '--run-id', '123-1']); assert.equal(indexResult.status, 0, indexResult.stderr);
   assert.equal(record.index_digest, 'sha256:' + sha(indexResult.stdout));
+  assert.equal(JSON.parse(indexResult.stdout).manifests[1].platform.variant, 'v8');
+  for (const [index, arch] of ['amd64', 'arm64'].entries()) {
+    assert.deepEqual(record.children[index].resolved_base_images, [{
+      uri: `pkg:docker/gcr.io/distroless/cc-debian13@nonroot?platform=linux%2F${arch}`,
+      digest: { sha256: String(index + 1).repeat(64) },
+    }]);
+  }
   // A dirty working tree must not replace the committed source used above.
   fs.writeFileSync(path.join(source, 'Cargo.lock'), 'dirty working tree');
   assert.equal((await v.release_record(source, bundles, data, revision, '123-1', [])).source.lock_sha256, sha(contents['Cargo.lock']));
@@ -462,6 +560,13 @@ test('shared tar reader drains partial payloads and reports links without extrac
   assert.equal(records[0].prefix, 'A'.repeat(20));
   for (const record of records.slice(1, 4)) assert.equal(record.linkname, 'app');
   assert.equal(records.at(-1).prefix, 'end');
+});
+
+test('index serialization adds the observed variant without changing other bytes', () => {
+  const receipts = ['amd64', 'arm64'].map((arch, index) => ({ platform: 'linux/' + arch, revision: REV, run_id: '123-1', sidecars: { 'inputs.json': 'same' }, manifest_digest: 'sha256:' + String(index + 1).repeat(64), manifest_size: 123 + index }));
+  const withoutVariant = v.serialize(v.runtime_index(receipts));
+  receipts[1].variant = 'v8';
+  assert.equal(v.serialize(v.runtime_index(receipts)), withoutVariant.replace('"architecture": "arm64"', '"architecture": "arm64",\n        "variant": "v8"'));
 });
 
 test('index serialization preserves exact escaped and indented bytes', () => {

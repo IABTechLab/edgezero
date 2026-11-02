@@ -56,10 +56,14 @@ npm ci --prefix scripts --ignore-scripts
 The fixture stages framework sources under `vendor/edgezero`, preserves generated
 member dependency features and excludes that nested framework workspace from the
 application workspace. It seeds its test-only lockfile from the framework
-lockfile, lets Cargo reconcile fixture members while preserving compatible
-versions, and rejects local packages outside the application context. Consumers
-still prepare their own lockfiles. This is explicit test preparation, not a new
-scaffold dependency-selection option or consumer release recipe.
+lockfile and lets Cargo reconcile the fixture members. Before recording inputs,
+`recordInputs` requires every derived registry package's name, version and source
+tuple to exist in that seed, and rejects local packages outside the application
+context. The input record marks `lock_mode: framework-seeded-derived-fixture`
+and records `seed_lock_sha256` separately from the derived `lock_sha256`.
+This is a derived fixture lockfile, not a claim that both lockfiles are identical.
+Consumers still prepare their own lockfiles. This is explicit test preparation,
+not a new scaffold dependency-selection option or consumer release recipe.
 
 The build helper uses the existing generated-app HTTP/TLS packaging smoke and the
 no-store Compose check. An application-owned `APP_SMOKE_SCRIPT` can replace those
@@ -103,9 +107,10 @@ Commit the app's portable dependency manifests,
 members. This sample uses a committed repository-root context without source
 symlinks or submodule-only contents. `fixture-inputs.json` is reserved for the
 preparation job. The builder and custom bases must be digest-pinned; the scaffold
-explicitly permits the floating `gcr.io/distroless/cc-debian12:nonroot` runtime.
-This tag may resolve to different base bytes between builds; it is not a
-reproducible-input guarantee. Publication and rollback still use only the exact
+explicitly permits the floating `gcr.io/distroless/cc-debian13:nonroot` runtime,
+which supports the Bookworm-built GNU binary. This tag may resolve to different
+base bytes between builds; it is not a reproducible-input guarantee.
+Publication and rollback still use only the exact
 tested child/index digests, never a rebuild. Private build credentials and generated
 assets need a separate reviewed application-owned extension, never credentials in
 COPY, ARG or ENV.
@@ -132,7 +137,15 @@ Before enabling the workflow, an owner must:
 Build jobs have read-only repository permissions, nonpersistent checkout
 credentials and no registry/OIDC authority. The publisher needs both native jobs
 and protected-environment approval. Only its job has package-write, attestation
-and OIDC permissions. OIDC authority applies to that whole job.
+and OIDC permissions. This recipe deliberately keeps publication and attestation
+in one job and accepts the resulting whole-job signing-authority risk. Any
+compromised action, installed tool or script executing in that approved job can
+request its OIDC token and exercise signing authority. Environment approval,
+trusted-commit checkout, pinned actions and tools, and artifact verification
+mitigate this risk; they do not restrict OIDC authority to the attestation steps.
+Delaying registry login or passing tokens only to selected steps does not create
+a per-step OIDC permission boundary. Application owners must assess and accept
+this boundary before enabling the recipe.
 
 The publisher queries this run's artifact metadata, selects exact immutable IDs
 whose names bind platform/run/attempt, checks source SHA and artifact digests, and
@@ -158,6 +171,15 @@ index digests, scanner version/database metadata and report/SBOM hashes. The
 publisher generates them from verified inputs, never from an artifact-provided
 predicate. They describe the application checks, not a SLSA level or framework
 production certification.
+
+The build helper retains BuildKit metadata, including resolved image materials,
+in `provenance.json`. The verifier checks the metadata's config-digest binding
+and requires the floating runtime's material for the child's platform. The signed
+release record includes these image material URIs and digests in each
+`children.resolved_base_images` entry. This attributes the runtime bytes used by
+that build without making the floating Dockerfile input reproducible. The build
+receipt itself is unsigned. Trusted publisher authentication is separate;
+recording materials alone is not independent build certification.
 
 Consumer verification must constrain repository, signer workflow, source ref,
 source SHA, digest and predicate type. For example, using the recipe's pinned CLI:
@@ -215,9 +237,19 @@ no automatic waiver path. Review the exact existing candidate bytes and an
 explicit approval path before adapting the workflow for an exception. Do not
 rebuild a waived image and assume the old digest exemption still applies.
 
+Exporting `SCAN_EXCEPTIONS` does not enable exceptions in the sample release
+workflow. Its direct Node `verify` and `release-record` calls omit `--exceptions`,
+so both use an empty exception list and strict policy. Although `publish.sh`
+reads `SCAN_EXCEPTIONS`, those earlier checks reject a candidate that requires
+a waiver before registry login or publication. Supporting exceptions in an
+adapted workflow requires a separately reviewed approval path and the same
+trusted list supplied to every verification and the signed release record.
+
 ## Rust dependency advisory inventory
 
-Each native build job runs pinned `cargo-audit` against the prepared application
+Each native build job installs `cargo-audit` 0.22.2 from its checksum-pinned
+source crate at `static.crates.io`, using `cargo install --path --locked` with
+the crate's packaged `Cargo.lock`. It audits the prepared application
 `Cargo.lock` and retains `rust-advisories.json`. The sidecar records the lockfile
 hash, audit tool version, advisory database identity and complete JSON report.
 It is checksummed with the other bundle sidecars and its lockfile binding and

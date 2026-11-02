@@ -3,12 +3,6 @@ name: Deploy actions
 on:
   pull_request:
     paths:
-      - scripts/*axum_container*.sh
-      - scripts/axum_container*.mjs
-      - scripts/tests/*axum_container*.mjs
-      - examples/container-publishing/**
-      - examples/axum-deployment/**
-      - docs/guide/*axum-containers.md
       # ANY workflow or action change must start the repository-wide pin gate (and
       # the smokes) — including a brand-new action directory or an unrelated
       # workflow like test.yml that could introduce a floating ref.
@@ -32,12 +26,6 @@ on:
   push:
     branches: [main]
     paths:
-      - scripts/*axum_container*.sh
-      - scripts/axum_container*.mjs
-      - scripts/tests/*axum_container*.mjs
-      - examples/container-publishing/**
-      - examples/axum-deployment/**
-      - docs/guide/*axum-containers.md
       # ANY workflow or action change must start the repository-wide pin gate (and
       # the smokes) — including a brand-new action directory or an unrelated
       # workflow like test.yml that could introduce a floating ref.
@@ -99,15 +87,13 @@ jobs:
       - name: Actionlint
         run: |
           "$RUNNER_TEMP/tools/bin/actionlint" -shellcheck='shellcheck -S warning'
-          "$RUNNER_TEMP/tools/bin/actionlint" -shellcheck='shellcheck -S warning' examples/container-publishing/release.yml
 
       - name: Third-party action pin gate
         run: |
           .github/actions/deploy-core/tests/check-action-pins.sh
-          .github/actions/deploy-core/tests/check-action-pins.sh examples/container-publishing/release.yml
 
       - name: Zizmor security scan
-        run: '"$RUNNER_TEMP/tools/bin/zizmor" --offline .github examples/container-publishing/release.yml'
+        run: '"$RUNNER_TEMP/tools/bin/zizmor" --offline .github'
 
       - name: ShellCheck action scripts
         run: |
@@ -116,9 +102,7 @@ jobs:
             .github/actions/*/tests/*.sh \
             .github/actions/deploy-core/tests/*.sh \
             scripts/install-actionlint.sh \
-            scripts/install-yq.sh \
-            scripts/*axum_container*.sh \
-            examples/container-publishing/publish.sh
+            scripts/install-yq.sh
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:

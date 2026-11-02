@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -235,11 +235,85 @@ test('container helper CI has one suite owner and derives framework Node pins', 
   assert.doesNotMatch(native, /^\s*-\s+['"]?docs\//m);
   const suite = /\bnode\s+--test\s+scripts\/tests\/test_axum_container\*\.test\.mjs\b/g;
   assert.equal([...native.matchAll(suite)].length, 1);
-  assert.match(native, /AXUM_PREPARED_CONTEXT=/);
+  const owners = readdirSync(new URL('.github/workflows/', root))
+    .filter(name => /\.ya?ml$/.test(name))
+    .flatMap(name => [...readFileSync(new URL(`.github/workflows/${name}`, root), 'utf8').matchAll(suite)]
+      .map(() => name));
+  assert.deepEqual(owners, ['axum-container.yml']);
+  assert.match(native, /AXUM_PREPARED_CONTEXT="\$RUNNER_TEMP\/fixture\/container-probe" \\\n\s+node --test scripts\/tests\/test_axum_container\*\.test\.mjs/);
   assert.doesNotMatch(actions, suite);
   for (const source of [native, actions]) {
     assert.doesNotMatch(source, /^\s*node-version:/m);
     assert.match(source, /node-version-file:\s*['"]?\.tool-versions['"]?(?:\s|$)/);
   }
   assert.match(native, /^\s*-\s+['"]?scripts\/package\*\.json['"]?\s*$/m);
+});
+
+test('Axum static validation moves with its triggers and retains repository-wide gates', () => {
+  const native = readFileSync(new URL('.github/workflows/axum-container.yml', root), 'utf8');
+  const actions = readFileSync(new URL('.github/workflows/deploy-action.yml', root), 'utf8');
+  const axumPaths = [
+    'scripts/*axum_container*.sh', 'scripts/axum_container*.mjs',
+    'scripts/tests/*axum_container*.mjs', 'examples/container-publishing/**',
+    'examples/axum-deployment/**',
+  ];
+  const sharedPaths = [
+    '.github/actions/deploy-core/tests/check-action-pins.sh', '.github/zizmor.yml',
+    'scripts/install-actionlint.sh', 'scripts/install-yq.sh',
+  ];
+  for (const event of ['pull_request', 'push']) {
+    function paths(source) {
+      const triggers = source.slice(0, source.indexOf('\npermissions:'));
+      const block = triggers.split(`  ${event}:\n`)[1]?.split(/^  \w+:/m)[0];
+      assert.ok(block, `missing ${event} trigger`);
+      return [...block.matchAll(/^      - (.+)$/gm)].map(([, path]) => path);
+    }
+    const container = paths(native), deployment = paths(actions);
+    for (const path of [...axumPaths, ...sharedPaths, 'scripts/package*.json']) {
+      assert.ok(container.includes(path), `${event} container trigger must include ${path}`);
+    }
+    for (const path of [...axumPaths, 'docs/guide/*axum-containers.md']) {
+      assert.ok(!deployment.includes(path), `${event} deployment trigger must omit ${path}`);
+    }
+    for (const path of ['.github/workflows/**', '.github/actions/**', ...sharedPaths.slice(1)]) {
+      assert.ok(deployment.includes(path), `${event} global gate must include ${path}`);
+    }
+  }
+
+  const prepare = native.slice(native.indexOf('  prepare:'), native.indexOf('\n  native:'));
+  for (const command of [
+    `"$RUNNER_TEMP/tools/bin/actionlint" -shellcheck='shellcheck -S warning' examples/container-publishing/release.yml`,
+    '.github/actions/deploy-core/tests/check-action-pins.sh examples/container-publishing/release.yml',
+    '"$RUNNER_TEMP/tools/bin/zizmor" --offline examples/container-publishing/release.yml',
+    'shellcheck -e SC1091 scripts/*axum_container*.sh examples/container-publishing/publish.sh',
+  ]) {
+    assert.ok(prepare.includes(command), `prepare must own ${command}`);
+    assert.equal(native.split(command).length - 1, 1, 'static checks must run once');
+    assert.ok(!actions.includes(command), 'Axum-only checks must leave the deployment owner');
+  }
+  assert.ok(prepare.indexOf('Validate the inactive application release recipe') < prepare.indexOf('Prepare one application'));
+  for (const source of [native, actions]) {
+    for (const pin of ['ACTIONLINT_VERSION: 1.7.7', 'YQ_VERSION: 4.53.3', 'ZIZMOR_VERSION: 1.16.3']) {
+      assert.ok(source.includes(pin), `validator pin must remain ${pin}`);
+    }
+    assert.match(source, /INSTALL_DIR="\$bin" scripts\/install-actionlint\.sh "\$ACTIONLINT_VERSION"/);
+    assert.match(source, /INSTALL_DIR="\$bin" scripts\/install-yq\.sh "\$YQ_VERSION"/);
+    assert.match(source, /cargo install zizmor --version "\$ZIZMOR_VERSION" --locked/);
+  }
+  const global = actions.slice(actions.indexOf('  static-checks:'), actions.indexOf('\n  # Exercise source reuse'));
+  assert.match(global, /^          "\$RUNNER_TEMP\/tools\/bin\/actionlint" -shellcheck='shellcheck -S warning'$/m);
+  assert.match(global, /^          \.github\/actions\/deploy-core\/tests\/check-action-pins\.sh$/m);
+  assert.match(global, /"\$RUNNER_TEMP\/tools\/bin\/zizmor" --offline \.github['"]?$/m);
+  assert.doesNotMatch(global, /examples\/container-publishing|scripts\/\*axum_container/);
+  assert.match(global, /\.github\/actions\/\*\/scripts\/\*\.sh/);
+  assert.match(global, /\.github\/actions\/\*\/tests\/\*\.sh/);
+  assert.match(global, /\.github\/actions\/deploy-core\/tests\/\*\.sh/);
+});
+
+test('Axum guides build in the existing docs format job', () => {
+  const source = readFileSync(new URL('.github/workflows/format.yml', root), 'utf8');
+  const docs = source.slice(source.indexOf('  format-docs:'));
+  assert.match(docs, /working-directory: docs/);
+  assert.ok(docs.indexOf('run: npm run build') > docs.indexOf('run: npm run format'));
+  assert.ok(docs.indexOf('run: npm run build') > docs.indexOf('run: npm run lint'));
 });

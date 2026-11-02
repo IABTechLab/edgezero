@@ -9,7 +9,7 @@ import { gzipSync } from 'node:zlib';
 import test from 'node:test';
 import { paxRecord, tarEntry } from './axum_container_tar.mjs';
 import {
-  appName, contextFiles, contextHash, isWithin, parseToml, recordInputs,
+  appName, assertRegistrySubset, contextFiles, contextHash, isWithin, parseToml, recordInputs,
   rewriteManifest, stageSources, validateRuntimeTar,
 } from '../axum_container_helpers.mjs';
 
@@ -48,12 +48,10 @@ for (const [name, check] of [
     const lock = fs.readFileSync(path.join(app, 'Cargo.lock'));
     assert.equal(digest(lock), inputs.lock_sha256);
     assert.ok(!lock.equals(fs.readFileSync(path.join(app, 'vendor/edgezero/Cargo.lock'))));
-    const seeded = readToml(path.join(app, 'vendor/edgezero/Cargo.lock')).package;
-    const resolved = parseToml(lock.toString()).package;
-    for (const pkg of resolved.filter(pkg => pkg.source?.startsWith('registry+'))) {
-      assert.ok(seeded.some(pin => pin.name === pkg.name && pin.version === pkg.version && pin.source === pkg.source),
-        `Fixture changed a framework dependency: ${pkg.name}@${pkg.version}`);
-    }
+    const seed = fs.readFileSync(path.join(app, 'vendor/edgezero/Cargo.lock'));
+    assertRegistrySubset(seed.toString(), lock.toString());
+    assert.equal(inputs.seed_lock_sha256, digest(seed));
+    assert.equal(inputs.lock_mode, 'framework-seeded-derived-fixture');
     for (const pkg of readJson(path.join(app, '..', 'metadata.json')).packages) {
       if (pkg.source === null) assert.ok(isWithin(app, fs.realpathSync(pkg.manifest_path)), pkg.name);
     }
@@ -143,13 +141,38 @@ test('dependency rewrite preserves flags and nested workspace policy, fails clos
   assert.throws(() => rewriteManifest(original.replace('edgezero-core =', '"edgezero-core" ='), vendor), /Cannot stage/);
 });
 
+function lockToml(packages) {
+  return 'version = 4\n' + packages.map(pkg => '\n[[package]]\n' +
+    Object.entries(pkg).map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join('')).join('');
+}
+
+test('derived fixture lock permits pruning and local members, rejects changed registry tuples', () => {
+  const pkg = { name: 'registry', version: '1.0.0', source: 'registry+example' };
+  const seed = lockToml([pkg, { ...pkg, name: 'pruned' }]);
+  assertRegistrySubset(seed, lockToml([pkg, { name: 'generated', version: '0.1.0' }]));
+  for (const changed of [{ ...pkg, name: 'new' }, { ...pkg, version: '2.0.0' }, { ...pkg, source: 'registry+other' }]) {
+    assert.throws(() => assertRegistrySubset(seed, lockToml([changed])), /Fixture changed a framework dependency/);
+  }
+});
+
+test('standalone record-inputs CLI rejects a changed registry tuple without writing a receipt', t => {
+  const { root, app } = sourceFixture(t);
+  stageSources(root, app);
+  put(app, 'Cargo.lock', lockToml([{ name: 'registry', version: '2.0.0', source: 'registry+example' }]));
+  const metadata = put(path.dirname(app), 'metadata.json', JSON.stringify({ packages: [] }));
+  const result = spawnSync(process.execPath, [helper, 'record-inputs', app, metadata], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Fixture changed a framework dependency/);
+  assert.ok(!fs.existsSync(path.join(app, 'fixture-inputs.json')));
+});
+
 function sourceFixture(t) {
   const directory = temporary(t);
   const root = path.join(directory, 'root');
   const app = path.join(directory, 'app');
   put(root, '.gitignore', 'target/\n');
   put(root, 'Cargo.toml', '[workspace]\nmembers=[]\n');
-  put(root, 'Cargo.lock', 'framework lock\n');
+  put(root, 'Cargo.lock', lockToml([{ name: 'registry', version: '1.0.0', source: 'registry+example' }]));
   put(root, '.tool-versions', 'rust 1.95.0\n');
   put(root, 'crates/edgezero-core/Cargo.toml', '[package]\nname="edgezero-core"\n');
   put(root, 'crates/edgezero-core/src/lib.rs', 'pub fn probe() {}\n');
@@ -210,7 +233,7 @@ test('source staging rejects symlinks and missing tracked sources', (t) => {
 test('record-inputs verifies confinement and retains context, lock, Dockerfile and source hash contracts', (t) => {
   const { root, app } = sourceFixture(t);
   stageSources(root, app);
-  put(app, 'Cargo.lock', 'own app lock\n');
+  put(app, 'Cargo.lock', lockToml([{ name: 'registry', version: '1.0.0', source: 'registry+example' }, { name: 'app', version: '0.1.0' }]));
   put(app, '.tool-versions', 'rust 1.95.0\nnodejs 22.0.0\n');
   put(app, 'Dockerfile', 'FROM rust:pin AS builder\nFROM debian:pin\n');
   const metadata = put(path.dirname(app), 'metadata.json', JSON.stringify({ packages: [
@@ -227,6 +250,9 @@ test('record-inputs verifies confinement and retains context, lock, Dockerfile a
   const inputs = readJson(path.join(app, 'fixture-inputs.json'));
   assert.equal(inputs.context_sha256, before);
   assert.equal(inputs.lock_sha256, digest(fs.readFileSync(path.join(app, 'Cargo.lock'))));
+  assert.equal(inputs.seed_lock_sha256, digest(fs.readFileSync(path.join(app, 'vendor/edgezero/Cargo.lock'))));
+  assert.equal(inputs.lock_mode, 'framework-seeded-derived-fixture');
+  assert.equal(inputs.dependency_mode, 'staged-test-sources');
   assert.equal(inputs.dockerfile_sha256, digest(fs.readFileSync(path.join(app, 'Dockerfile'))));
   assert.equal(inputs.toolchain, 'rust 1.95.0\nnodejs 22.0.0\n');
   assert.deepEqual(inputs.base_images, ['rust:pin', 'debian:pin']);

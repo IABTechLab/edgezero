@@ -4,6 +4,10 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - .github/actions/deploy-core/tests/check-action-pins.sh
+      - .github/zizmor.yml
+      - scripts/install-actionlint.sh
+      - scripts/install-yq.sh
       - .github/workflows/axum-container.yml
       - Cargo.toml
       - Cargo.lock
@@ -19,6 +23,10 @@ on:
   push:
     branches: [main]
     paths:
+      - .github/actions/deploy-core/tests/check-action-pins.sh
+      - .github/zizmor.yml
+      - scripts/install-actionlint.sh
+      - scripts/install-yq.sh
       - .github/workflows/axum-container.yml
       - Cargo.toml
       - Cargo.lock
@@ -39,6 +47,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  ACTIONLINT_VERSION: 1.7.7
+  ZIZMOR_VERSION: 1.16.3
+  YQ_VERSION: 4.53.3
+
 jobs:
   prepare:
     runs-on: ubuntu-24.04
@@ -50,6 +63,32 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: .tool-versions
+      - name: Install pinned validation binaries
+        run: |
+          bin="$RUNNER_TEMP/tools/bin"
+          mkdir -p "$bin"
+          INSTALL_DIR="$bin" scripts/install-actionlint.sh "$ACTIONLINT_VERSION"
+          INSTALL_DIR="$bin" scripts/install-yq.sh "$YQ_VERSION"
+          cargo install zizmor --version "$ZIZMOR_VERSION" --locked --root "$RUNNER_TEMP/tools"
+          "$bin/actionlint" -version | grep -qF "$ACTIONLINT_VERSION"
+          "$bin/yq" --version | grep -qF "version v$YQ_VERSION"
+          "$bin/zizmor" --version | grep -qF "$ZIZMOR_VERSION"
+          printf '%s\n' "$bin" >>"$GITHUB_PATH"
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Validate the inactive application release recipe
+        run: |
+          "$RUNNER_TEMP/tools/bin/actionlint" -shellcheck='shellcheck -S warning' examples/container-publishing/release.yml
+          .github/actions/deploy-core/tests/check-action-pins.sh examples/container-publishing/release.yml
+          "$RUNNER_TEMP/tools/bin/zizmor" --offline examples/container-publishing/release.yml
+
+      - name: ShellCheck Axum container scripts
+        run: shellcheck -e SC1091 scripts/*axum_container*.sh examples/container-publishing/publish.sh
+
       - name: Use the declared Rust toolchain
         run: |
           version=$(awk '$1 == "rust" { print $2 }' .tool-versions)

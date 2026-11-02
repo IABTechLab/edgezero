@@ -97,6 +97,15 @@ export function contextHash(app) {
     path.relative(app, file).split(path.sep).join('/'), fs.readFileSync(file),
   ]));
 }
+export function assertRegistrySubset(seed, derived) {
+  const tuple = pkg => JSON.stringify([pkg.name, pkg.version, pkg.source]);
+  const seeded = new Set((parseToml(seed).package ?? []).map(tuple));
+  for (const pkg of parseToml(derived).package ?? []) {
+    if (pkg.source?.startsWith('registry+')) {
+      assert.ok(seeded.has(tuple(pkg)), `Fixture changed a framework dependency: ${pkg.name}@${pkg.version} (${pkg.source})`);
+    }
+  }
+}
 export function recordInputs(app, metadataFile) {
   app = fs.realpathSync(app);
   for (const pkg of json(metadataFile).packages) {
@@ -107,7 +116,12 @@ export function recordInputs(app, metadataFile) {
   const inputs = json(path.join(app, 'fixture-source.json'));
   inputs.package = 'container-probe-adapter-axum';
   inputs.binary = 'container-probe-adapter-axum';
-  inputs.lock_sha256 = sha256(fs.readFileSync(path.join(app, 'Cargo.lock')));
+  const seed = fs.readFileSync(path.join(app, 'vendor/edgezero/Cargo.lock'));
+  const lock = fs.readFileSync(path.join(app, 'Cargo.lock'));
+  assertRegistrySubset(seed.toString('utf8'), lock.toString('utf8'));
+  inputs.lock_mode = 'framework-seeded-derived-fixture';
+  inputs.seed_lock_sha256 = sha256(seed);
+  inputs.lock_sha256 = sha256(lock);
   inputs.toolchain = read(path.join(app, '.tool-versions'));
   inputs.dockerfile_sha256 = sha256(fs.readFileSync(path.join(app, 'Dockerfile')));
   inputs.base_images = [...read(path.join(app, 'Dockerfile')).matchAll(/^FROM (\S+)/gm)].map((match) => match[1]);

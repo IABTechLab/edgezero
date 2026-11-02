@@ -33,9 +33,11 @@ The root `Dockerfile` builds only `{{proj_axum}}`. Prepare the workspace first:
    `cargo metadata --locked --format-version 1`, and commit this application's
    manifests and `Cargo.lock`. Do not copy EdgeZero's lockfile. These preparation
    commands may fetch dependencies; scaffolding itself does not.
-3. Keep the Docker builder's Rust pin aligned with `.tool-versions`. If adding
-   `rust-toolchain.toml`, use a matching exact quoted `[toolchain].channel`.
-   Update both declarations and the reviewed builder image when changing Rust.
+3. When changing Rust, update `.tool-versions`, the Dockerfile's `RUST_VERSION`
+   and the builder image's `sha256` digest together. Resolve and review the digest
+   for the matching `rust:X.Y.Z-bookworm` image; changing only the tag does not
+   replace a digest-pinned image. If adding `rust-toolchain.toml`, use a matching
+   exact quoted `[toolchain].channel`.
 4. Review `.dockerignore` and add your app-specific config, secrets and state
    filenames. Keep required workspace manifests and build-time assets.
 

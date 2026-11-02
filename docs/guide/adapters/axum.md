@@ -223,9 +223,10 @@ server to authenticate against.
 
 `edgezero new` generates a workspace-root `Dockerfile` and `.dockerignore` when
 Axum is registered in the CLI build. The recipe builds only the native Axum
-application binary with `--release --locked`, using a GNU/Linux Rust builder and
-a shell-free GNU-compatible distroless runtime. The Rust builder has a reviewed
-digest pin; the runtime deliberately follows `gcr.io/distroless/cc-debian12:nonroot`.
+application binary with `--release --locked`, using a Bookworm GNU/Linux Rust
+builder and a shell-free Debian 13 distroless runtime compatible with that binary.
+The Rust builder has a reviewed digest pin; the runtime deliberately follows
+`gcr.io/distroless/cc-debian13:nonroot`.
 That floating tag and builder package installation require network access and do
 not provide a byte-reproducible build. Release and rollback use the exact tested
 image digest, not a rebuild from the runtime tag.
@@ -338,7 +339,7 @@ npm ci --prefix scripts --ignore-scripts
 ./scripts/test_generated_axum_container.sh /path/to/container-probe
 ```
 
-See the [smoke script prerequisites](https://github.com/IABTechLab/edgezero/blob/main/scripts/test_generated_axum_container.sh)
+See the [smoke script prerequisites](https://github.com/IABTechLab/edgezero/blob/d7c4ee9e4a9db1d547272b3f13a6177f10098dba/scripts/test_generated_axum_container.sh)
 for the authoritative tool list. CI uses the Node version in `.tool-versions`;
 this is a tested pin, not a different minimum-version requirement. The separate
 handoff helper additionally needs jq, rustup and Cargo for its advisory inventory.
