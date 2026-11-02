@@ -168,17 +168,21 @@ pub fn resolve_resources_with_transport(
         if ids.is_empty() {
             continue;
         }
-        let inventory =
+        let inventory = if kind == ResourceKind::Config {
+            let response = request(transport, "GET", endpoint, None)?;
+            super::parse_store_inventory(kind, &require_success(response)?)
+        } else {
             collect_paginated_store_inventory(kind, &format!("{endpoint}?limit=100"), |path| {
                 let response = request(transport, "GET", path, None)?;
                 require_success(response)
             })
-            .map_err(|_error| {
-                format!(
-                    "unable to resolve complete Fastly {} inventory",
-                    kind.display_name()
-                )
-            })?;
+        }
+        .map_err(|_error| {
+            format!(
+                "unable to resolve complete Fastly {} inventory",
+                kind.display_name()
+            )
+        })?;
         for logical_id in ids {
             let physical_name = environment
                 .store_name_checked(kind.selector_kind(), logical_id)
@@ -222,7 +226,7 @@ fn validate_resource_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_key(key: &str) -> Result<(), String> {
+pub(super) fn validate_key(key: &str) -> Result<(), String> {
     if key.is_empty()
         || !key
             .bytes()
@@ -547,10 +551,7 @@ mod tests {
             ..Default::default()
         };
         let fake = Fake::new(&[
-            (
-                200,
-                r#"{"data":[{"id":"config-1","name":"fictional_config"}],"meta":{"next_cursor":null}}"#,
-            ),
+            (200, r#"[{"id":"config-1","name":"fictional_config"}]"#),
             (
                 200,
                 r#"{"data":[{"id":"kv-1","name":"fictional_kv"}],"meta":{"next_cursor":null}}"#,
@@ -561,6 +562,15 @@ mod tests {
             ),
         ]);
         let resources = resolve_resources_with_transport(&context, &fake).expect("resources");
+        assert_eq!(fake.requests.borrow()[0].1, "/resources/stores/config");
+        assert_eq!(
+            fake.requests.borrow()[1].1,
+            "/resources/stores/kv?limit=100"
+        );
+        assert_eq!(
+            fake.requests.borrow()[2].1,
+            "/resources/stores/secret?limit=100"
+        );
         assert_eq!(resources.service_id, "FictionalService1");
         assert_eq!(resources.stores.len(), 3);
         assert_eq!(resources.stores[0].physical_name, "fictional_config");
@@ -578,6 +588,33 @@ mod tests {
                 .iter()
                 .all(|(method, _, body)| method == "GET" && body.is_none())
         );
+    }
+
+    #[test]
+    fn resource_resolution_rejects_invalid_config_inventories_without_echoing_payloads() {
+        let context = AdapterDeployContext {
+            adapter_manifest_path: Some("fastly.toml".into()),
+            service_id: Some("FictionalService1".to_owned()),
+            stores: DeployStoreIds {
+                config: vec!["fictional_config".to_owned()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for body in [
+            "fictional reflected secret",
+            r#"{"data":[{"id":"config-1","name":"fictional_config"}],"meta":{"next_cursor":null}}"#,
+            r#"[{"id":"config-1","name":"fictional_config"},{"id":"config-2","name":"fictional_config"}]"#,
+        ] {
+            let fake = Fake::new(&[(200, body)]);
+            let error = resolve_resources_with_transport(&context, &fake)
+                .expect_err("invalid Config Store inventory");
+            assert_eq!(
+                error,
+                "unable to resolve complete Fastly Config Store inventory"
+            );
+            assert_eq!(fake.requests.borrow().len(), 1);
+        }
     }
 
     #[cfg(unix)]

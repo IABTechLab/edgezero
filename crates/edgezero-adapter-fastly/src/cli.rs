@@ -34,7 +34,8 @@ use edgezero_adapter::cli_support::{
 };
 use edgezero_adapter::registry::{
     Adapter, AdapterAction, AdapterDeployContext, AdapterPushContext, DeployOwnership,
-    DeployStoreIds, ProvisionStores, ReadConfigEntry, ResolvedStoreId, register_adapter,
+    DeployStoreIds, ProvisionStores, ReadConfigEntry, ResolvedStoreId, TypedSecretEntry,
+    register_adapter,
 };
 use edgezero_adapter::release::{VerifiedApplicationRelease, verify_application_release};
 use edgezero_adapter::scaffold::{
@@ -2017,8 +2018,8 @@ fn owns_managed_deploy(context: &AdapterDeployContext) -> bool {
 // spin requires them (variable-name regex, `[component.*]`
 // discovery, flat-namespace collision). The trait surface is typed
 // generically so any future adapter with similar constraints can
-// override — but fastly has no equivalent platform requirements,
-// so the no-op defaults are correct:
+// override. Fastly inherits the first two defaults but validates explicit
+// native secret names:
 //
 // - `validate_app_config_keys`: Fastly Config Store keys accept
 //   alphanumeric + `-` / `_` / `.` up to 256 chars. Any reasonable
@@ -2027,15 +2028,15 @@ fn owns_managed_deploy(context: &AdapterDeployContext) -> bool {
 //   `fastly compute validate` at validate-time. We keep
 //   `config validate` pure-Rust so it stays fast and
 //   tool-independent.
-// - `validate_typed_secrets`: Fastly's KV / Config / Secret
-//   stores are independent namespaces — no spin-style flat-
-//   namespace collision risk to detect.
+// - `validate_typed_secrets`: explicit native names must use Fastly's secret
+//   name alphabet. Legacy entries retain their existing behavior. The CLI
+//   checks collisions within each selected physical Secret Store.
 //
 // `single_store_kinds` IS overridden below — explicitly returns
 // `&[]` for documentation, matching the inherited default.
 #[expect(
     clippy::missing_trait_methods,
-    reason = "see the explanatory block comment immediately above; fastly's no-op defaults for the three validate_* hooks are intentional and documented. `read_config_entry` and `read_config_entry_local` are both overridden below. `single_store_kinds` IS overridden below (returns `&[]`)."
+    reason = "see the explanatory block comment immediately above; Fastly inherits validate_app_config_keys and validate_adapter_manifest. validate_typed_secrets, read_config_entry, read_config_entry_local and single_store_kinds are overridden below."
 )]
 impl Adapter for FastlyCliAdapter {
     fn deploy(&self, context: &AdapterDeployContext, args: &[String]) -> Result<(), String> {
@@ -2729,6 +2730,20 @@ impl Adapter for FastlyCliAdapter {
         // support multiple distinct platform resources per kind,
         // unlike spin's flat-namespace single-store model.
         &[]
+    }
+
+    fn validate_typed_secrets(&self, entries: &[TypedSecretEntry<'_>]) -> Result<(), String> {
+        for entry in entries {
+            if let Some(name) = entry.native_name.as_deref() {
+                secrets::validate_key(name).map_err(|_error| {
+                    format!(
+                        "invalid native Fastly secret name for `{}`",
+                        entry.field_name
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -6800,6 +6815,37 @@ mod tests {
     // `PathPrepend` (RAII $PATH guard) is the shared helper imported above from
     // `edgezero_core::test_env`; the merge with edition-2024 main replaced our
     // local copy with it (its `set_var` calls are wrapped for 2024's unsafe-env).
+
+    #[test]
+    fn typed_secrets_validate_native_names_without_changing_legacy_mapping() {
+        let entries = [
+            TypedSecretEntry::new("default", "legacy", "legacy/key"),
+            TypedSecretEntry::new("default", "pull", "obsolete/key")
+                .with_native_name("Native-secret_123.name".to_owned()),
+        ];
+        FASTLY_ADAPTER
+            .validate_typed_secrets(&entries)
+            .expect("native names use Fastly's alphabet, not the obsolete key");
+    }
+
+    #[test]
+    fn typed_secrets_reject_invalid_native_names_without_echoing_them() {
+        for name in [
+            "",
+            "invalid/name",
+            "invalid name",
+            "invalid\nname",
+            "invalid:name",
+            "invalid\u{540d}\u{5b57}",
+        ] {
+            let entry = TypedSecretEntry::new("default", "subjects[0]", "ts1_fixture")
+                .with_native_name(name.to_owned());
+            let error = FASTLY_ADAPTER
+                .validate_typed_secrets(&[entry])
+                .expect_err("invalid native name");
+            assert_eq!(error, "invalid native Fastly secret name for `subjects[0]`");
+        }
+    }
 
     // ── Fastly staging lifecycle helpers ──────────────────────────────
 

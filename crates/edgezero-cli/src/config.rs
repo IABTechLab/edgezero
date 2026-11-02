@@ -5595,6 +5595,9 @@ ids = ["default"]
             if self.bad == "native" {
                 return Ok("native-hyphen".to_owned());
             }
+            if self.bad == "native_slash" {
+                return Ok("invalid/native/name".to_owned());
+            }
             let store = environment
                 .store_name_checked("secrets", &lookup.store_id)
                 .map_err(|_error| "invalid secret store selector".to_owned())?;
@@ -5710,6 +5713,43 @@ ids = ["default"]
                 .expect_err("invalid implicit plan rejected before remote reads");
             assert!(!dir.path().join(".edgezero").exists());
         }
+    }
+
+    #[test]
+    fn implicit_fastly_rejects_invalid_native_names_in_all_consumers() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let source = PUSH_MANIFEST
+            .replace("[adapters.axum.", "[adapters.fastly.")
+            .replace(
+                "crate = \"crates/demo-app-adapter-axum\"",
+                "crate = \"crates/demo-app-adapter-fastly\"\nmanifest = \"fastly.toml\"",
+            );
+        let (dir, manifest, config) = setup_project(&source, "bad = \"native_slash\"");
+        fs::write(dir.path().join("fastly.toml"), "name = \"fictional\"\n")
+            .expect("Fastly manifest");
+
+        let mut push = push_args(&manifest, "fastly");
+        push.local = true;
+        push.dry_run = true;
+        let mut diff = implicit_diff_args(&manifest);
+        diff.adapter = "fastly".to_owned();
+        diff.local = true;
+        for error in [
+            run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+                .expect_err("validate rejects invalid native name"),
+            run_config_push_typed::<ImplicitConfig>(&push)
+                .expect_err("push rejects invalid native name"),
+            run_config_diff_typed::<ImplicitConfig>(&diff)
+                .expect_err("diff rejects invalid native name"),
+        ] {
+            assert!(error.contains("invalid native Fastly secret name"));
+            assert!(!error.contains("invalid/native/name"));
+        }
+        assert!(!dir.path().join(".edgezero").exists());
+
+        fs::write(&config, "inactive = true\nbad = \"native_slash\"").expect("inactive credential");
+        run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect("inactive credential is not rendered");
     }
 
     #[test]
