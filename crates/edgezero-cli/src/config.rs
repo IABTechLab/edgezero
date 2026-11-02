@@ -264,8 +264,7 @@ where
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("typed app-config failed validation: {err}"))?;
 
-    typed_secret_checks(&typed, &ctx)?;
-    run_adapter_typed_checks(&typed, &ctx, AdapterValidationScope::All)?;
+    typed_secret_checks(&typed, &ctx, AdapterValidationScope::All)?;
 
     log::info!(
         "[edgezero] config validate (typed): {} + {} OK{}",
@@ -467,8 +466,7 @@ where
     .map_err(|err| format_app_config_error(&err))?;
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("typed app-config failed validation: {err}"))?;
-    typed_secret_checks(&typed, &ctx.validation)?;
-    run_adapter_typed_checks(&typed, &ctx.validation, validation_scope)?;
+    typed_secret_checks(&typed, &ctx.validation, validation_scope)?;
 
     // Resolve adapter paths.
     let (manifest_root, adapter_manifest_path, component_selector, push_ctx) =
@@ -610,9 +608,8 @@ pub fn run_config_diff_typed<C>(args: &ConfigDiffArgs) -> Result<DiffExit, Strin
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
-    // Load + validate (diff runs the same structural
-    // checks as push — validate_excluding_secrets + typed_secret_checks +
-    // adapter_typed_checks; no consent gate, no re-fetch).
+    // Load + validate using the same typed preflight as push;
+    // no consent gate or re-fetch.
     let validate_args = ConfigValidateArgs {
         app_config: args.app_config.clone(),
         manifest: args.manifest.clone(),
@@ -640,8 +637,7 @@ where
     .map_err(|err| format_app_config_error(&err))?;
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("local validation failed: {err}"))?;
-    typed_secret_checks(&typed, &ctx)?;
-    run_adapter_typed_checks(&typed, &ctx, validation_scope)?;
+    typed_secret_checks(&typed, &ctx, validation_scope)?;
 
     // Build the local envelope.
     let local_data: serde_json::Value = serde_json::to_value(&typed)
@@ -1837,12 +1833,9 @@ fn collect_secret_leaves<'raw>(
     Ok(out)
 }
 
-/// Typed-only adapter dispatch: feed each adapter in the requested scope the `#[secret]`
-/// (`KeyInDefault` and `KeyInNamedStore` — `StoreRef` values are
-/// runtime store ids, not flat-namespace candidates) so adapters
-/// whose secret store has a flat-namespace constraint (Spin) can
-/// detect within-secrets collisions.
-fn run_adapter_typed_checks<C>(
+/// Compile and validate implicit lookup metadata once before adapter checks.
+/// Applications that do not opt in retain the legacy leaf and store checks.
+fn typed_secret_checks<C>(
     typed: &C,
     ctx: &ValidationContext,
     adapter_scope: AdapterValidationScope,
@@ -1873,6 +1866,7 @@ where
             }
         };
     }
+    check_legacy_typed_secrets::<C>(ctx)?;
     let default_store_id = ctx
         .manifest()
         .stores
@@ -2022,13 +2016,10 @@ where
     adapter.validate_typed_secrets(&entries)
 }
 
-fn typed_secret_checks<C>(typed: &C, ctx: &ValidationContext) -> Result<(), String>
+fn check_legacy_typed_secrets<C>(ctx: &ValidationContext) -> Result<(), String>
 where
     C: AppConfigMeta,
 {
-    if let Some(lookups) = typed.implicit_secret_lookups()? {
-        return check_implicit_metadata(&lookups, ctx);
-    }
     for field in C::secret_fields() {
         for leaf in collect_secret_leaves(&ctx.raw_config, &field)? {
             let label = leaf.label;
@@ -2229,6 +2220,7 @@ mod tests {
     use edgezero_core::test_env::PathPrepend;
     use serde::{Deserialize, Serialize};
     use std::borrow::Cow;
+    use std::cell::Cell;
 
     use std::fs;
     use tempfile::TempDir;
@@ -3333,7 +3325,7 @@ api_key = ""
     #[test]
     fn validate_typed_rejects_missing_required_nested_leaf_at_deserialize() {
         // A MISSING required nested leaf fails serde DESERIALIZATION
-        // before `typed_secret_checks`/`run_adapter_typed_checks` ever run — so
+        // before `typed_secret_checks` ever runs — so
         // this is deserialize-path coverage, NOT proof of the path-aware
         // collector. The direct collector test below covers that.
         let app_config = r#"
@@ -5455,7 +5447,7 @@ ids = ["default"]
     }
 
     // -------------------------------------------------------------------
-    // diff runs typed_secret_checks + adapter_typed_checks
+    // diff runs the shared typed secret preflight
     // -------------------------------------------------------------------
 
     /// A NESTED `#[secret]` that is present but empty must be caught by the
@@ -5538,6 +5530,8 @@ ids = ["default"]
     #[derive(Debug, Deserialize, Serialize, Validate)]
     #[serde(deny_unknown_fields)]
     struct ImplicitConfig {
+        #[serde(skip)]
+        lookup_compiled: Cell<bool>,
         #[serde(default)]
         inactive: bool,
         #[serde(default)]
@@ -5552,6 +5546,9 @@ ids = ["default"]
         }
 
         fn implicit_secret_lookups(&self) -> Result<Option<Vec<ImplicitSecretLookup>>, String> {
+            if self.lookup_compiled.replace(true) {
+                return Err("implicit secret plan compiled more than once".to_owned());
+            }
             if self.inactive {
                 return Ok(Some(Vec::new()));
             }
@@ -5629,7 +5626,7 @@ ids = ["default"]
     }
 
     #[test]
-    fn implicit_validate_push_diff_defaulted_role_without_reference_leaves() {
+    fn implicit_validate_push_diff_compile_once_without_reference_leaves() {
         let _lock = manifest_guard().lock().expect("manifest guard");
         let (dir, manifest, _) = setup_project(PUSH_MANIFEST, "");
         run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
@@ -5671,6 +5668,7 @@ ids = ["default"]
     #[test]
     fn implicit_fastly_detects_physical_store_alias_collisions() {
         let typed = ImplicitConfig {
+            lookup_compiled: Cell::default(),
             inactive: false,
             subjects: Vec::new(),
             bad: String::new(),
