@@ -162,7 +162,7 @@ DynamoDB rows do not certify Trusted Server's identity backend. Its conditional 
 
 ## Kubernetes profile decisions
 
-The [Kubernetes guide draft](../specs/deploying-axum-kubernetes.md) selects kind and Envoy Gateway with Gateway API for the first credential-free disposable-cluster proof. Plain manifests remain the application deployment format. EKS qualification is separate; ECS/Fargate remains the first managed AWS target.
+The [Kubernetes guide draft](../specs/2026-10-14-deploying-axum-kubernetes.md) selects kind and Envoy Gateway with Gateway API for the first credential-free disposable-cluster proof. Plain manifests remain the application deployment format. EKS qualification is separate; ECS/Fargate remains the first managed AWS target.
 
 The planned AWS Kubernetes profile includes AppConfig Agent, Secrets Manager and DynamoDB from its first delivery, once the providers are accepted and integrated. This does not make DynamoDB mandatory for stateless applications or change the initial no-store Fargate fixture. Local baseline checks do not contact AWS, and real provider/table acceptance still needs separate authorization.
 
@@ -212,7 +212,7 @@ No AWS resources, credentials, publication or runtime tests were used while draf
 ## Related documentation
 
 - [Deploying Axum containers](../../guide/deploying-axum-containers.md).
-- [Deploying Axum on Kubernetes](../specs/deploying-axum-kubernetes.md).
+- [Deploying Axum on Kubernetes](../specs/2026-10-14-deploying-axum-kubernetes.md).
 - [Publishing Axum containers](../../guide/publishing-axum-containers.md).
 - [Axum adapter guide](../../guide/adapters/axum.md).
 - [Production lifecycle/configuration work, #406](https://github.com/IABTechLab/edgezero/pull/406).
