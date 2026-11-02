@@ -14,6 +14,7 @@ enum Case {
     Slow,
     Timeout,
     Fast,
+    BodyReads,
     Begin,
     Batch,
     PendingHead,
@@ -31,6 +32,7 @@ impl Case {
             "slow-origin" => Ok(Self::Slow),
             "timeout-before-cutoff" => Ok(Self::Timeout),
             "fast-origin" => Ok(Self::Fast),
+            "body-read-arrivals" => Ok(Self::BodyReads),
             "begin-progress" => Ok(Self::Begin),
             "batch-progress" => Ok(Self::Batch),
             "pending-head-cutoff" => Ok(Self::PendingHead),
@@ -49,6 +51,7 @@ impl Case {
             Self::Slow => "slow-origin",
             Self::Timeout => "timeout-before-cutoff",
             Self::Fast => "fast-origin",
+            Self::BodyReads => "body-read-arrivals",
             Self::Begin => "begin-progress",
             Self::Batch => "batch-progress",
             Self::PendingHead => "pending-head-cutoff",
@@ -63,7 +66,7 @@ impl Case {
 
     fn permits(self, role: &str) -> bool {
         match self {
-            Self::Slow => matches!(role, "origin" | "a" | "b" | "c"),
+            Self::Slow | Self::BodyReads => matches!(role, "origin" | "a" | "b" | "c"),
             Self::Timeout => matches!(role, "origin" | "a" | "b" | "c" | "d"),
             Self::Cpu => matches!(role, "origin" | "a" | "b" | "c" | "calibration"),
             Self::Fast => matches!(role, "origin" | "a" | "b" | "c" | "mediator"),
@@ -277,7 +280,10 @@ impl Exchange<'_> {
                         } else {
                             "calibrated-causal-midpoint"
                         }
-                    } else if matches!(self.case, Case::Slow | Case::Timeout | Case::Fast) {
+                    } else if matches!(
+                        self.case,
+                        Case::Slow | Case::Timeout | Case::Fast | Case::BodyReads
+                    ) {
                         "initial-receipts-minimum-upper-bound"
                     } else {
                         "origin-receipt-minus-guest-at-us"
@@ -365,10 +371,10 @@ fn seal_timeline(lifetime: &mut Lifetime, token: &str) -> Result<Option<Instant>
     require(
         sealed
             <= anchor
-                + Duration::from_millis(if matches!(lifetime.case, Case::Fast) {
-                    120
-                } else {
-                    180
+                + Duration::from_millis(match lifetime.case {
+                    Case::Fast => 120,
+                    Case::BodyReads => 100,
+                    _ => 180,
                 }),
         "initial receipts missed the first source target",
     )?;
@@ -510,7 +516,7 @@ pub(super) fn serve(
         }
         if matches!(
             lifetime.case,
-            Case::Slow | Case::Timeout | Case::Fast | Case::Cpu
+            Case::Slow | Case::Timeout | Case::Fast | Case::Cpu | Case::BodyReads
         ) && *role == "origin"
         {
             event["alignment"] = json!({
@@ -535,8 +541,10 @@ pub(super) fn serve(
             Ok(false)
         }
     });
-    let expected_close = matches!(exchange.case, Case::Slow | Case::Timeout | Case::Cpu)
-        && exchange.role == "c"
+    let expected_close = matches!(
+        exchange.case,
+        Case::Slow | Case::Timeout | Case::Cpu | Case::BodyReads
+    ) && exchange.role == "c"
         && exchange
             .scenario_anchor
             .is_some_and(|anchor| Instant::now() >= anchor + Duration::from_millis(534))
@@ -601,7 +609,7 @@ pub(super) fn serve(
 fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
     if !matches!(
         exchange.case,
-        Case::Slow | Case::Timeout | Case::Fast | Case::Cpu
+        Case::Slow | Case::Timeout | Case::Fast | Case::Cpu | Case::BodyReads
     ) {
         return Ok(true);
     }
@@ -890,6 +898,10 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
             ],
         ),
         (Case::Fast, "origin") => (absolute(120), vec![(absolute(260), b"O")]),
+        (Case::BodyReads, "origin") => (
+            absolute(100),
+            vec![(absolute(100), b"O"), (absolute(800), b"o")],
+        ),
         (Case::Cpu, "origin") => (absolute(100), vec![(absolute(100), b"O")]),
         (Case::Begin, "origin") => (received(150), vec![(received(150), b"O")]),
         (Case::Batch, "quiet") => (received(300), Vec::new()),
@@ -900,7 +912,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         (case, role @ ("a" | "b" | "c")) => {
             let index = usize::from(role.as_bytes()[0] - b'a');
             let at = match case {
-                Case::Slow | Case::Timeout => absolute([180, 320, 900][index]),
+                Case::Slow | Case::Timeout | Case::BodyReads => absolute([180, 320, 900][index]),
                 Case::Fast => absolute([180, 320, 400][index]),
                 Case::Cpu => absolute([180, 530, 900][index]),
                 Case::Batch => received([20, 40, 60][index]),
@@ -1943,6 +1955,45 @@ mod tests {
             .map(|entry| entry["scenario_scheduled_us"].clone())
             .collect();
         assert_eq!(json!(chunks), json!([700_000, 900_000, 1_300_000]));
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn body_read_arrivals_preserve_two_origin_chunks_and_original_bidder_schedule() {
+        let origins = WireOrigins::start().unwrap();
+        let case = "body-read-arrivals";
+        origins.register_lifetime("body", case).unwrap();
+        origins.mark_lifetime_start("body").unwrap();
+        let origin = connect(&origins, "body", case, "origin", "2000");
+        let bids = ["a", "b", "c"].map(|role| connect(&origins, "body", case, role, "34000"));
+        assert!(read(origin).ends_with(b"1\r\nO\r\n1\r\no\r\n0\r\n\r\n"));
+        for (index, bid) in bids.into_iter().enumerate() {
+            assert_eq!(*read(bid).last().unwrap(), b'A' + index as u8);
+        }
+        let events = origins.take_lifetime_events("body").unwrap();
+        assert!(events.as_array().unwrap().len() <= EVENT_LIMIT);
+        for (role, expected) in [
+            ("origin", 100000),
+            ("a", 180000),
+            ("b", 320000),
+            ("c", 900000),
+        ] {
+            assert_eq!(
+                event(&events, role, "head")["scenario_scheduled_us"],
+                expected
+            );
+        }
+        let chunks = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["role"] == "origin" && entry["op"] == "chunk")
+            .collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0]["scenario_scheduled_us"], 100000);
+        assert_eq!(chunks[1]["scenario_scheduled_us"], 800000);
+        assert_eq!(chunks[1]["terminal_frame"]["status"], "pass");
+        assert_eq!(event(&events, "origin", "closed")["reason"], "complete");
         origins.finish().unwrap();
     }
 

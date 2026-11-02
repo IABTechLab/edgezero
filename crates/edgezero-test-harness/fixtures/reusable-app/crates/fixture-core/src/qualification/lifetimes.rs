@@ -52,6 +52,7 @@ impl Probe {
             "slow-origin"
                 | "timeout-before-cutoff"
                 | "fast-origin"
+                | "body-read-arrivals"
                 | "begin-progress"
                 | "batch-progress"
                 | "pending-head-cutoff"
@@ -419,7 +420,10 @@ async fn run(
         "batch-start",
         at,
         ended,
-        if matches!(probe.case.as_str(), "cpu-stretch" | "caps-while-waiting") {
+        if matches!(
+            probe.case.as_str(),
+            "cpu-stretch" | "caps-while-waiting" | "body-read-arrivals"
+        ) {
             json!({"cutoff_at_us":timeline.elapsed_us(observation_cutoff.instant())})
         } else {
             Value::Null
@@ -456,6 +460,26 @@ async fn run(
         json!(if result.is_ok() { "ok" } else { "error" }),
     );
     let response = result?;
+    if probe.case == "body-read-arrivals" {
+        if !response.body().is_stream() {
+            return Err(invalid());
+        }
+        let at = timeline.clock.now();
+        report.origin = Some(response_report(Ok(response)).await);
+        timeline.event("origin-body", at, timeline.clock.now(), json!("streamed"));
+        for _ in 0..max_checks {
+            match check(&mut batch, report, timeline).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    report.error = Some(error_report(&error));
+                    break;
+                }
+            }
+        }
+        collect(batch, report, timeline).await;
+        return Ok(());
+    }
     if probe.case == "cpu-stretch" {
         let at = timeline.clock.now();
         report.origin = Some(response_report(Ok(response)).await);
@@ -1471,6 +1495,7 @@ mod tests {
         for case in [
             "slow-origin",
             "fast-origin",
+            "body-read-arrivals",
             "begin-progress",
             "batch-progress",
             "pending-head-cutoff",

@@ -22,6 +22,9 @@ their scope when introduced; the current summary supersedes their then-pending A
   call. Bind observations to the actual submitted body owners, preserve selected/other/timeout/error
   outcomes and record SDK-handle destruction through the shared test-only resource owner. Require
   a real cutoff-spanning timeout and release before return; add no SDK probes or timing exceptions.
+- Extend the existing Fastly lifetime fixture with origin-body-only progress: preserve bidder
+  arrival times across the 100/800 ms body reads, original batch cutoff and late collection.
+  Reject premature batch polling and contradictory evidence without another runner or transport.
 - Validate Wrangler's optional fixture `rootPath` against the owned config directory before
   constructing its local runtime. Materialize a bounded Rust-owned staged-module inventory using
   the selected SDK's rules and official Miniflare 5 converter, with one native constructor and

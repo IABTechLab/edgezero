@@ -1327,11 +1327,26 @@ resource retention, single consumption and exactly-once terminal family release.
 Fastly records this criterion as inapplicable and still runs all original nine cases. The suite
 does not yet implement the remaining cleanup and reusable-sandbox acceptance scenarios.
 
+Fastly additionally runs `body-read-arrivals` for EZ-6 criterion 6. The original streamed origin
+is begun at 2 ms; its head and body chunks are scheduled at 100/100/800 ms. A/B/C retain
+180/320/900 ms responses, 34 ms batch start and the absolute 534 ms cutoff. Between origin head
+and EOF the guest consumes only that same body: no batch polling, timer or auxiliary Send drives
+progress. After EOF, checks recover exactly A/B with arrival elapsed 146/286 ms and C remains
+unresolved at Cutoff. Exact operation order, nonoverlapping calls, a successful Begin, streamed
+body mode, both bytes, source schedules and terminal framing are validated. Missing B, observation-
+stamped elapsed, early checks, changed cutoffs and incomplete EOF evidence fail. The original
+sealed clock estimate and +/-5 ms targets remain unchanged; neither this case nor native-wait
+witnesses qualify the other's acceptance leg or hosted behavior.
+The first local run recovers A/B at 148.972/288.603 ms after EOF at 802.816 ms, but the complete
+case fails: head observation/body-read start are 110.546/110.549 ms against 100 ms +/- 5 ms.
+The expanded inventory passes 19 of 21 and exits 1, also retaining a slow-origin elapsed miss.
+No timing target, inventory binding or qualification status changes.
+
 Fastly adds three cleanup cases for the local isolation part of EZ-6 criterion 21:
 `response-cleanup`, `response-cleanup-source-error`, and `response-cleanup-write-deadline`.
 All use the existing cleanup route and helper; a required private `x-fixture-cleanup-mode`
 header selects exactly `complete`, `source-error`, or `write-deadline` without a compatibility
-default. Fastly runs twelve timeline/response-cleanup cases plus the eight callback cases below;
+default. Fastly runs thirteen timeline/response-cleanup cases plus the eight callback cases below;
 the other adapters retain ten including response handoff.
 One real client starts a callback-owned begun request before a response-owned Begin and original
 three-slot batch. Public handles remain outside the streamed response while canonical egress

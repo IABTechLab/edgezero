@@ -12,6 +12,50 @@
 
 ## Status and Authority
 
+### Fastly Body-Read Arrival Acceptance (2026-11-02)
+
+Continue the approved D6 baseline with EZ-6 criterion 6 in the existing local lifetime suite,
+not another transport, scheduler, fixture binary or CI invocation. Prior checkpoint `5950548d`
+has 30 passing reported checks; those checks do not waive its retained strict timing failures.
+
+- [x] Add one Fastly-only `body-read-arrivals` case. Keep origin Begin at 2 ms, batch start at
+      34 ms, cutoff at 534 ms and A/B/C at 180/320/900 ms. The original streamed origin supplies
+      its head and first byte at 100 ms, then its second byte and terminal framing at 800 ms.
+- [x] Read only that original body between head and EOF. After EOF, nonblocking checks recover
+      A/B at 146/286 ms and the original batch collects as Cutoff with C unresolved. Require
+      a streamed body, exact bytes, original cutoff, ordered nonoverlapping operations, source
+      schedules and clean terminal framing. Do not infer arrival from late collection.
+- [x] Demonstrate missing-case red tests in the origin, controller and guest fixture before
+      implementation. Add negative controls for missing/late results, polling during body reads,
+      changed cutoffs or bytes, nonstreamed bodies and absent EOF evidence.
+- [x] Finish all five root gates: 2,650 tests across 33 binaries with one existing ignored test,
+      formatting, strict Clippy, all-adapter feature compilation and Spin WASM compilation.
+      The full harness passes 445 tests with two existing ignored tests; fixture-core passes
+      59 with and without native witnesses. Strict harness, fixture and actual Fastly WASM
+      fixture lint, docs lint/format/build, legacy/inventory guards and frozen identities pass.
+      Independent specification and quality reviews are clear.
+- [x] Execute the complete local Fastly inventory once after compilation. It passes 19 of 21
+      and exits 1. All eight callback cases, three cleanup cases and their log tails pass.
+      The new case recovers A/B at 148.972/288.603 ms after origin EOF at 802.816 ms, but its
+      head is observed at 110.546 ms and body reading starts at 110.549 ms against 100 ms
+      +/- 5 ms. The slow-origin case also fails A's elapsed time at 151.378 ms against
+      146 ms +/- 5 ms. Neither the recovered results nor earlier passes override these failures.
+- [ ] Close criterion 6's complete timing acceptance and the remaining exact-candidate/hosted
+      qualification gates. Scenarios 7/8 and other missing local acceptance remain open.
+
+The previous three timing misses remain failures. Read-only comparison finds no proven production
+engine defect: the origin writes complete near schedule, guest observation is later, and CPU batch
+entry is already 6.513 ms late before the measured 0.400 ms dispatch call. Unproven clock alignment
+and absent per-turn engine timings prevent attributing those gaps to provider or adapter latency.
+Do not backdate observations, add retries or widen the original tolerances. Logs use
+`/private/tmp/pr275-body-read-arrivals-*`. No production API, policy, SDK/runtime pin, capability,
+normative identity or acceptance binding changes; inventory stays 153 ready/358 planned,
+unqualified. Demo/templates require no migration for this test-only case.
+An accidentally unfiltered, sandboxed nonzero-guard command runs the full harness and fails
+120 socket/process checks. Retain that log; the correctly scoped sentinel and socket-enabled,
+serialized full suite pass without changed assertions. An initial byte-array inference error
+is corrected with an explicit slice, not a lint suppression or behavioral workaround.
+
 ### Fastly Native Body-Readiness Witness (2026-11-02)
 
 Complete the distinct Fastly observation permitted by EZ-6 criterion 16 and the existing D6 note.

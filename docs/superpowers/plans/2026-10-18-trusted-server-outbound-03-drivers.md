@@ -490,6 +490,13 @@ fixture. Fix only the corresponding adapter implementation when a parity case fa
 
 ## Task D6: Lifetime and Late-Collection Qualification
 
+The [body-read arrival checkpoint](2026-10-18-trusted-server-outbound-implementation.md#fastly-body-read-arrival-acceptance-2026-11-02)
+adds criterion 6 to the same Fastly lifetime suite: read the original streamed origin's 100/800 ms
+body before observing the original batch, preserving A/B arrival times and the 534 ms cutoff.
+Its first local run recovers both results but fails the unchanged origin-head timing target;
+the complete 21-case inventory remains exit 1. Scenario 6 qualification, scenarios 7/8 and other
+remaining local/hosted acceptance are not closed by this test-only addition.
+
 The [fourth-slot timeout checkpoint](2026-10-18-trusted-server-outbound-implementation.md#d6-fourth-slot-timeout-acceptance-checkpoint-2026-10-28)
 adds criterion 14 to the existing eight-case local suite. Its all-target timeout diagnostics pass,
 but strict source timing and full lifetime/hosted qualification remain open; no parent task or

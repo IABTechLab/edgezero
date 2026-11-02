@@ -122,6 +122,7 @@ fn checks(
     let mut executed = 0;
     for case in CASES
         .into_iter()
+        .chain((adapter == "fastly").then_some("body-read-arrivals"))
         .chain(handoff.then_some("response-handoff"))
     {
         executed += 1;
@@ -388,7 +389,7 @@ fn validate(
         .collect::<std::result::Result<_, _>>()?;
     roles.sort_unstable();
     let expected: &[&str] = match case {
-        "slow-origin" => &["a", "b", "c", "origin"],
+        "slow-origin" | "body-read-arrivals" => &["a", "b", "c", "origin"],
         "timeout-before-cutoff" => &["a", "b", "c", "d", "origin"],
         "cpu-stretch" => &["a", "b", "c", "calibration", "origin"],
         "fast-origin" => &["a", "b", "c", "mediator", "origin"],
@@ -403,6 +404,13 @@ fn validate(
         roles == expected,
         "missing, duplicate or foreign origin receipt",
     )?;
+    if case == "body-read-arrivals" {
+        require(
+            boundary.name == "fastly",
+            "body-read arrival case requires Fastly",
+        )?;
+        return validate_body_read_arrivals(report, events, origin);
+    }
     if case == "response-handoff" {
         return validate_handoff(report, events, origin);
     }
@@ -1159,10 +1167,10 @@ fn timeline_epoch(origin: &[Value], case: &str) -> Result<i128> {
             && seal.get("transit_uncertainty_us") == Some(&Value::Null)
             && i128::from(sealed)
                 <= i128::from(aligned)
-                    + if case == "fast-origin" {
-                        120000
-                    } else {
-                        180000
+                    + match case {
+                        "fast-origin" => 120000,
+                        "body-read-arrivals" => 100000,
+                        _ => 180000,
                     },
         "invalid or late sealed timeline epoch",
     )?;
@@ -1855,6 +1863,86 @@ fn validate_late_c(origin: &[Value], aligned: i128) -> Result<()> {
     Ok(())
 }
 
+fn validate_body_read_arrivals(report: &Value, events: &[Value], origin: &Value) -> Result<()> {
+    require(
+        events
+            .iter()
+            .map(|entry| entry["op"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>()
+            == [
+                "begin",
+                "batch-start",
+                "origin-head",
+                "origin-body",
+                "check",
+                "check",
+                "check",
+                "collect",
+            ],
+        "body-read arrival probe observed the batch before origin EOF or performed extra work",
+    )?;
+    let ended = |entry: &Value| -> Result<u64> {
+        number(entry, "at_us")?
+            .checked_add(number(entry, "duration_us")?)
+            .ok_or_else(|| "invalid event duration".into())
+    };
+    for pair in events.windows(2) {
+        require(
+            ended(&pair[0])? <= number(&pair[1], "at_us")?,
+            "body-read arrival probe operations overlap",
+        )?;
+    }
+    let begin = event(events, "begin")?;
+    require(begin["result"] == "scheduled", "origin begin failed")?;
+    within(number(begin, "at_us")?, 2000, "origin begin missed 2 ms")?;
+    let batch = event(events, "batch-start")?;
+    within(number(batch, "at_us")?, 34000, "batch start missed 34 ms")?;
+    let head = event(events, "origin-head")?;
+    let body = event(events, "origin-body")?;
+    let body_start = number(body, "at_us")?;
+    let body_end = ended(body)?;
+    within(
+        body_start,
+        100000,
+        "origin body read did not start at its head",
+    )?;
+    require(
+        batch["result"]["cutoff_at_us"] == 534000
+            && ended(batch)? <= number(head, "at_us")?
+            && head["result"] == "ok"
+            && ended(head)? <= body_start
+            && body["result"] == "streamed"
+            && report["origin"] == json!({"status":200,"bytes":[79,111]})
+            && report["mediator"].is_null(),
+        "body-read arrival probe changed its original exchange, cutoff or source bytes",
+    )?;
+    for (entry, result) in events
+        .iter()
+        .filter(|entry| entry["op"] == "check")
+        .zip(["Item", "Item", "Finished"])
+    {
+        require(
+            number(entry, "at_us")? >= body_end && entry["result"] == result,
+            "batch check preceded origin EOF or changed terminal order",
+        )?;
+    }
+    let collected = event(events, "collect")?;
+    require(
+        number(collected, "at_us")? >= body_end
+            && number(collected, "duration_us")? < 5000
+            && collected["result"] == "ok",
+        "late body-read collection blocked or failed",
+    )?;
+    validate_timeline("body-read-arrivals", events, origin)?;
+    validate_items(
+        report,
+        &[146000, 286000],
+        &["check", "check"],
+        &["AlreadyDelivered", "AlreadyDelivered", "Unresolved"],
+        "Cutoff",
+    )
+}
+
 fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()> {
     validate_guest_timeline(case, events)?;
     validate_source_timeline(case, origin)
@@ -1862,22 +1950,36 @@ fn validate_timeline(case: &str, events: &[Value], origin: &Value) -> Result<()>
 
 fn validate_guest_timeline(case: &str, events: &[Value]) -> Result<()> {
     let slow = matches!(case, "slow-origin" | "timeout-before-cutoff");
+    let body_reads = case == "body-read-arrivals";
     let head = event(events, "origin-head")?;
     within(
         number(head, "at_us")? + number(head, "duration_us")?,
-        if slow { 700_000 } else { 120_000 },
+        if slow {
+            700_000
+        } else if body_reads {
+            100_000
+        } else {
+            120_000
+        },
         "origin head missed scenario time",
     )?;
     let body = event(events, "origin-body")?;
     within(
         number(body, "at_us")? + number(body, "duration_us")?,
-        if slow { 1_300_000 } else { 260_000 },
+        if slow {
+            1_300_000
+        } else if body_reads {
+            800_000
+        } else {
+            260_000
+        },
         "origin EOF missed scenario time",
     )
 }
 
 fn validate_source_timeline(case: &str, origin: &Value) -> Result<()> {
     let slow = matches!(case, "slow-origin" | "timeout-before-cutoff");
+    let body_reads = case == "body-read-arrivals";
     let origin = origin.as_array().ok_or("missing source timeline")?;
     let request = origin
         .iter()
@@ -1906,19 +2008,33 @@ fn validate_source_timeline(case: &str, origin: &Value) -> Result<()> {
     for (role, head_at, chunk_times, bytes) in [
         (
             "origin",
-            if slow { 700_000 } else { 120_000 },
+            if slow {
+                700_000
+            } else if body_reads {
+                100_000
+            } else {
+                120_000
+            },
             if slow {
                 vec![700_000, 900_000, 1_300_000]
+            } else if body_reads {
+                vec![100_000, 800_000]
             } else {
                 vec![260_000]
             },
-            if slow { b"Oo!".as_slice() } else { b"O" },
+            if slow {
+                b"Oo!".as_slice()
+            } else if body_reads {
+                b"Oo".as_slice()
+            } else {
+                b"O"
+            },
         ),
         ("a", 180_000, vec![180_000], b"A"),
         ("b", 320_000, vec![320_000], b"B"),
     ]
     .into_iter()
-    .chain((!slow).then_some(("c", 400_000, vec![400_000], b"C".as_slice())))
+    .chain((!slow && !body_reads).then_some(("c", 400_000, vec![400_000], b"C".as_slice())))
     {
         let heads: Vec<_> = origin
             .iter()
@@ -1984,7 +2100,7 @@ fn validate_source_timeline(case: &str, origin: &Value) -> Result<()> {
             )?;
         }
     }
-    if slow {
+    if slow || body_reads {
         validate_late_c(origin, aligned)?;
     }
     Ok(())
@@ -1993,7 +2109,7 @@ fn validate_source_timeline(case: &str, origin: &Value) -> Result<()> {
 fn timing_diagnostics(case: &str, report: &Value, origin: &Value) -> Option<Value> {
     if !matches!(
         case,
-        "slow-origin" | "timeout-before-cutoff" | "fast-origin"
+        "slow-origin" | "timeout-before-cutoff" | "fast-origin" | "body-read-arrivals"
     ) {
         return None;
     }
@@ -3787,6 +3903,120 @@ mod tests {
             entry["case"] = json!(case);
         }
         (report, origin)
+    }
+
+    fn body_read_arrivals_sample() -> (Value, Value) {
+        let (mut report, mut origin) = sample("slow-origin");
+        report["case"] = json!("body-read-arrivals");
+        report["origin"] = json!({"status":200,"bytes":[79,111]});
+        report["events"] = json!([
+            {"op":"begin","at_us":2000,"duration_us":100,"result":"scheduled"},
+            {"op":"batch-start","at_us":34000,"duration_us":100,"result":{"cutoff_at_us":534000}},
+            {"op":"origin-head","at_us":34100,"duration_us":65900,"result":"ok"},
+            {"op":"origin-body","at_us":100000,"duration_us":700000,"result":"streamed"},
+            {"op":"check","at_us":800000,"duration_us":10,"result":"Item"},
+            {"op":"check","at_us":800010,"duration_us":10,"result":"Item"},
+            {"op":"check","at_us":800020,"duration_us":10,"result":"Finished"},
+            {"op":"collect","at_us":800030,"duration_us":10,"result":"ok"}
+        ]);
+        origin.as_array_mut().unwrap().retain(|entry| {
+            !(entry["role"] == "origin"
+                && entry["op"] == "chunk"
+                && entry["scenario_scheduled_us"] == 1300000)
+        });
+        for entry in origin.as_array_mut().unwrap() {
+            entry["case"] = json!("body-read-arrivals");
+            if entry["role"] != "origin" || entry["op"] == "request" {
+                continue;
+            }
+            if entry["op"] == "closed" {
+                entry["at_us"] = json!(801001);
+                continue;
+            }
+            let target = if entry["scenario_scheduled_us"] == 700000 {
+                100000
+            } else {
+                800000
+            };
+            entry["scenario_scheduled_us"] = json!(target);
+            for field in [
+                "at_us",
+                "write_started_us",
+                "wait_returned_us",
+                "scheduled_us",
+            ] {
+                entry[field] = json!(target + 1000);
+            }
+            if target == 800000 {
+                entry["terminal_frame"] = json!({"write_started_us":801000,"completed_us":801000,"status":"pass","error":null});
+            }
+        }
+        (report, origin)
+    }
+
+    #[test]
+    fn body_read_arrivals_require_original_elapsed_without_batch_observation_during_reads() {
+        let boundary = AdapterBoundary {
+            name: "fastly",
+            ..AXUM
+        };
+        let (report, origin) = body_read_arrivals_sample();
+        validate(boundary, "body-read-arrivals", "sample", &report, &origin).unwrap();
+        for (path, value) in [
+            ("/events/0/result", json!("error")),
+            ("/events/0/duration_us", json!(40000)),
+            ("/events/4/duration_us", json!(4000)),
+            ("/items/1/elapsed_us", json!(766000)),
+            ("/items/1/elapsed_us", json!(500000)),
+            ("/items/1/index", json!(2)),
+            ("/slots/2", json!("Resolved")),
+            ("/termination", json!("Completed")),
+            ("/origin/bytes", json!([79])),
+            ("/events/1/result/cutoff_at_us", json!(1034000)),
+            ("/events/3/result", json!("buffered")),
+            ("/events/3/at_us", json!(400000)),
+            ("/events/3/duration_us", json!(100000)),
+            ("/events/4/at_us", json!(320000)),
+            ("/events/4/op", json!("next")),
+        ] {
+            let mut changed = report.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(
+                validate(boundary, "body-read-arrivals", "sample", &changed, &origin).is_err(),
+                "{path}"
+            );
+        }
+        let mut missing = report.clone();
+        missing["items"].as_array_mut().unwrap().pop();
+        assert!(validate(boundary, "body-read-arrivals", "sample", &missing, &origin).is_err());
+        let mut polled = report.clone();
+        polled["events"].as_array_mut().unwrap().insert(
+            3,
+            json!({"op":"check","at_us":100000,"duration_us":0,"result":"Pending"}),
+        );
+        assert!(validate(boundary, "body-read-arrivals", "sample", &polled, &origin).is_err());
+        for (field, value) in [
+            ("scenario_scheduled_us", json!(600000)),
+            ("bytes", json!([0])),
+            ("terminal_frame", Value::Null),
+        ] {
+            let mut changed = origin.clone();
+            let entry = changed
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| {
+                    entry["role"] == "origin"
+                        && entry["op"] == "chunk"
+                        && entry["scenario_scheduled_us"] == 800000
+                })
+                .unwrap();
+            entry[field] = value;
+            assert!(
+                validate(boundary, "body-read-arrivals", "sample", &report, &changed).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
