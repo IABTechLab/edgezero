@@ -8,7 +8,22 @@ pub(super) struct LogCursor {
     observed: std::cell::Cell<u64>,
 }
 
+#[cfg(test)]
 pub(super) fn parse(prefix: &[u8], bytes: &[u8], expected: &[Value]) -> Result<Vec<Value>> {
+    parse_validated(prefix, bytes, expected.len(), &|index, record| {
+        require(
+            record == &expected[index],
+            "invalid or reordered canonical cleanup record",
+        )
+    })
+}
+
+fn parse_validated(
+    prefix: &[u8],
+    bytes: &[u8],
+    count: usize,
+    validate: &dyn Fn(usize, &Value) -> Result<()>,
+) -> Result<Vec<Value>> {
     require(
         bytes.len() <= LOG_LIMIT,
         "cleanup runtime log exceeds bound",
@@ -17,9 +32,7 @@ pub(super) fn parse(prefix: &[u8], bytes: &[u8], expected: &[Value]) -> Result<V
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         if !line.starts_with(prefix) {
             require(
-                line.ends_with(b"\n")
-                    || records.len() < expected.len()
-                    || !prefix.starts_with(line),
+                line.ends_with(b"\n") || records.len() < count || !prefix.starts_with(line),
                 "incomplete extra cleanup protocol prefix",
             )?;
             continue;
@@ -30,19 +43,19 @@ pub(super) fn parse(prefix: &[u8], bytes: &[u8], expected: &[Value]) -> Result<V
         )?;
         if !line.ends_with(b"\n") {
             require(
-                records.len() < expected.len(),
+                records.len() < count,
                 "incomplete extra cleanup protocol record",
             )?;
             break;
         }
-        let record = expected
-            .get(records.len())
-            .ok_or("extra cleanup protocol record")?;
+        require(records.len() < count, "extra cleanup protocol record")?;
+        let record: Value = serde_json::from_slice(&line[prefix.len()..line.len() - 1])?;
         require(
-            line[prefix.len()..line.len() - 1] == serde_json::to_vec(record)?,
+            line[prefix.len()..line.len() - 1] == serde_json::to_vec(&record)?,
             "invalid or reordered canonical cleanup record",
         )?;
-        records.push(record.clone());
+        validate(records.len(), &record)?;
+        records.push(record);
     }
     Ok(records)
 }
@@ -77,6 +90,7 @@ fn read_bytes(log: &Path, cursor: &LogCursor) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub(super) fn read(
     log: &Path,
     cursor: &LogCursor,
@@ -99,16 +113,85 @@ pub(super) fn wait(
     expected: &[Value],
     count: usize,
 ) -> Result<(Vec<Value>, u64)> {
+    wait_validated(
+        log,
+        cursor,
+        prefix,
+        expected.len(),
+        count,
+        &|index, record| {
+            require(
+                record == &expected[index],
+                "invalid or reordered canonical cleanup record",
+            )
+        },
+    )
+}
+
+pub(super) fn wait_validated(
+    log: &Path,
+    cursor: &LogCursor,
+    prefix: &[u8],
+    maximum: usize,
+    count: usize,
+    validate: &dyn Fn(usize, &Value) -> Result<()>,
+) -> Result<(Vec<Value>, u64)> {
+    require(count <= maximum, "invalid cleanup protocol count")?;
     let started = Instant::now();
     loop {
-        let (records, end) = read(log, cursor, prefix, expected)?;
+        let bytes = read_bytes(log, cursor)?;
+        let records = parse_validated(prefix, &bytes, maximum, validate)?;
         if records.len() >= count {
-            return Ok((records, end));
+            let complete = bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |index| index + 1);
+            return Ok((records, cursor.offset + complete as u64));
         }
         require(
             started.elapsed() < Duration::from_secs(2),
             "cleanup terminal evidence timed out",
         )?;
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_validation_preserves_canonical_bounds_and_duplicate_tail_rejection() {
+        let prefix = b"record ";
+        let encode = |value: &Value| {
+            let mut bytes = prefix.to_vec();
+            bytes.extend(serde_json::to_vec(value).unwrap());
+            bytes.push(b'\n');
+            bytes
+        };
+        let valid = encode(&json!({"measured":100}));
+        let validate = |index, record: &Value| {
+            require(
+                index == 0 && record["measured"] == 100,
+                "invalid measurement",
+            )
+        };
+        assert_eq!(
+            parse_validated(prefix, &valid, 1, &validate).unwrap().len(),
+            1
+        );
+        assert!(parse_validated(prefix, &encode(&json!({"measured":200})), 1, &validate).is_err());
+        let mut duplicate = valid.clone();
+        duplicate.extend(&valid);
+        assert!(parse_validated(prefix, &duplicate, 1, &validate).is_err());
+        for extra in [b"rec".as_slice(), b"record {", b"record {}\n"] {
+            let mut tail = valid.clone();
+            tail.extend(extra);
+            assert!(parse_validated(prefix, &tail, 1, &validate).is_err());
+        }
+        assert!(parse_validated(prefix, &vec![b'x'; LOG_LIMIT + 1], 1, &validate).is_err());
+        let oversized = encode(&json!({"measured":"x".repeat(2048)}));
+        assert!(parse_validated(prefix, &oversized, 1, &|_, _| Ok(())).is_err());
+        assert!(parse_validated(prefix, b"record {\"measured\": 100}\n", 1, &validate).is_err());
     }
 }

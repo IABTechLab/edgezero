@@ -2,6 +2,7 @@ use super::*;
 use crate::net::WireOrigins;
 mod callback;
 mod cleanup;
+mod post_delivery;
 mod protocol;
 
 #[derive(Clone, Copy)]
@@ -248,6 +249,10 @@ fn checks(
             if let Err(error) = cleanup::check(mode, port, origins, log, cursor, records) {
                 failures.push(format!("{}: {error}", mode.name()));
             }
+        }
+        executed += 1;
+        if let Err(error) = post_delivery::check(port, origins, log, cursor, records) {
+            failures.push(format!("post-delivery-batch: {error}"));
         }
     }
     require(failures.is_empty(), failures.join("; "))?;

@@ -1369,11 +1369,32 @@ elapsed 146.516/286.371 ms. The complete expanded inventory is still 21/23, exit
 slow-origin EOF and fourth-slot B elapsed timing failures. No hosted or candidate qualification
 or acceptance-inventory promotion follows from these local passes.
 
+`post-delivery-batch` adds EZ-6 criterion 19 to that same Fastly binary. A bounded buffered
+response completes canonical adapter handoff before a callback-owned three-slot batch starts
+at 34 ms with cutoff 534 ms and one-second per-call timeouts. The same retained client uses
+the existing `batch-progress` origin's 20/40/60 ms receipt-relative replies. Its paired timer
+runs through the existing provider-backed scope until 450 ms, without collecting the batch.
+Three request-bound native witnesses must show exactly one SDK body release each before
+collection, while all original buffered outcomes remain retained. Original elapsed values
+must agree with those release times within 5 ms, not with late collection. Causal source-write
+durations reject jointly falsified early elapsed/release timestamps without assuming synchronized
+host/guest epochs. The callback collects three exact payloads as Completed, then returns.
+One canonical record after return confirms the original scope closed and release counts remain
+one. It shares cleanup's 2 KiB record cap, 1 MiB total cursor and post-shutdown tail check;
+old fixed records retain exact canonical validation through the same parser/wait loop.
+This proves SDK body-handle release, not universal provider teardown or confirmed client delivery.
+No hosted or acceptance-inventory qualification is promoted by executable coverage alone.
+The first expanded repaired-Viceroy run passes all 24 cases and final protocol tails. Handoff
+finishes at 0.115 ms, batch entry is 35.198 ms, SDK bodies release by 96.181 ms, and collection
+at 451.266 ms preserves elapsed 21.146/40.970/60.992 ms. The cutoff remains 534 ms and each
+release count is still one after callback return. Earlier timing failures remain historical
+failures, not erased evidence; exact-candidate and hosted qualification are still separate.
+
 Fastly adds three cleanup cases for the local isolation part of EZ-6 criterion 21:
 `response-cleanup`, `response-cleanup-source-error`, and `response-cleanup-write-deadline`.
 All use the existing cleanup route and helper; a required private `x-fixture-cleanup-mode`
 header selects exactly `complete`, `source-error`, or `write-deadline` without a compatibility
-default. Fastly runs fifteen timeline/response-cleanup cases plus the eight callback cases below;
+default. Fastly runs sixteen timeline/response-cleanup cases plus the eight callback cases below;
 the other adapters retain ten including response handoff.
 One real client starts a callback-owned begun request before a response-owned Begin and original
 three-slot batch. Public handles remain outside the streamed response while canonical egress

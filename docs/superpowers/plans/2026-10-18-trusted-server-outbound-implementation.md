@@ -12,6 +12,56 @@
 
 ## Status and Authority
 
+### Fastly Post-Delivery Batch Coverage (2026-11-02)
+
+Continue approved D6 criterion 19 in the existing Fastly lifetime binary and suite. No second
+transport, executor, origin, public API or CI invocation is added. Two independent investigations
+confirm that the earlier single Send after delivery and pre-delivery cleanup batches do not
+cover this criterion. Both proposals favor a private case over expanding cleanup fault modes.
+
+- [x] Complete a bounded buffered response through canonical FastlyService/run_custom before
+      starting the same retained client's callback-owned three-slot batch. Use the actual
+      egress report's request-start epoch, batch entry at 34 ms, absolute cutoff 534 ms and
+      one-second per-call timeouts. Reuse the existing 20/40/60 ms receipt-relative source.
+- [x] Wait until 450 ms through the existing paired-time/provider-backed scope, then collect
+      the original batch. Snapshot three actual SDK body witnesses before collection, while
+      their buffered outcomes are still retained. Require single releases, Completed, exact
+      payloads and original elapsed values within 5 ms of release-relative arrival times.
+      After callback return, verify scope closure and unchanged release counts.
+- [x] Retain one bounded canonical record through the existing 2 KiB/1 MiB cleanup protocol,
+      cursor and final-tail check. Consolidate dynamic/fixed validation in the same parser and
+      wait loop; preserve old exact canonical assertions. Reproduce collection-stamped and
+      coordinated early elapsed/release false acceptance as red tests, then reject both.
+      Cross-bind each slot to its actual source-write delay without assuming synchronized epochs.
+- [x] Pass all five root gates: 2,650 tests across 33 binaries with one existing ignored test,
+      formatting, strict workspace Clippy, all-adapter feature check and Spin WASM compilation.
+      The full serialized harness passes 454 tests with two existing ignored helpers. Fixture-core
+      passes 61; strict harness/actual Fastly WASM fixture lint, docs lint/format/build,
+      legacy/docs/inventory guards and frozen identity reproduction pass.
+- [x] Run the expanded local inventory once after compilation: all 24 cases pass, including
+      eight callback-wrapper cases and all log tails. New-case handoff finishes at 0.115 ms,
+      the original batch enters at 35.198 ms and SDK body releases occur at
+      56.330/76.150/96.181 ms. Collection at 451.266 ms retains arrival elapsed
+      21.146/40.970/60.992 ms and completes at 451.302 ms with three exact payloads. Original
+      cutoff stays 534 ms, callback closure is observed, and release counts remain one.
+- [ ] Close remaining exact-candidate, runtime timing and hosted qualification. Executable
+      coverage alone does not complete D6 or certify provider teardown/client delivery.
+
+Specification and guest ownership reviews are clear after the causal timestamp-binding fix.
+Historical strict timing failures remain recorded; this successful local run does not certify
+other missing acceptance or hosted behavior. Inventory remains 255 criteria/511 legs, 153 ready/358 planned and
+unqualified. No normative identity, SDK/runtime pin, capability or acceptance binding changes.
+Demo/templates need no migration for this test-only case. Logs use
+`/private/tmp/pr275-post-delivery-*`. GitHub created no Actions runs for the previous `f0ce2b38`
+push despite eligible workflows and a mergeable PR; the triggering cause is not established.
+Do not describe that head as green or merely running.
+Initial development checks also retain the missing batch accessor and Deadline equality compile
+errors, both corrected by inspecting the existing request-bound preparation witness; no API was
+added. A broad sandboxed controller filter additionally hits an unrelated TCP-permission failure;
+the correctly scoped negative tests and final authorized TCP/full harness runs are recorded
+separately. The coordinated timestamp false-acceptance test fails before its causal guard and
+passes afterward. No tolerance, resource cap or cancellation bound is weakened.
+
 ### Fastly Trickling-Slot And Live-Send Coverage (2026-11-02)
 
 Continue approved D6 criteria 7/8 in the same fixture, bounded origin and runtime inventory.

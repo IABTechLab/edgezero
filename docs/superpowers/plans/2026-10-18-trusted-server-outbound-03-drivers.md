@@ -490,6 +490,14 @@ fixture. Fix only the corresponding adapter implementation when a parity case fa
 
 ## Task D6: Lifetime and Late-Collection Qualification
 
+The [post-delivery batch checkpoint](2026-10-18-trusted-server-outbound-implementation.md#fastly-post-delivery-batch-coverage-2026-11-02)
+adds criterion 19 to the same Fastly lifetime binary: canonical handoff precedes the retained
+client's three-slot batch, SDK body releases precede delayed collection, and callback return
+closes the original scope without duplicate release. Preserve the 34/534 ms timeline, one-second
+per-call timeouts and arrival-based elapsed values. Reuse the bounded origin and canonical log
+reader, with coordinated false-evidence controls. Runtime results and remaining qualification
+are tracked in that checkpoint; no inventory leg or parent D6 task is promoted by coverage alone.
+
 The [trickling-slot/live-Send checkpoint](2026-10-18-trusted-server-outbound-implementation.md#fastly-trickling-slot-and-live-send-coverage-2026-11-02)
 adds criteria 7/8 to the same Fastly lifetime suite. B's body remains pending while measured
 origin bytes continue every 50 ms and a waiting Next reaches the original cutoff; a separate

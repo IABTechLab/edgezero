@@ -28,6 +28,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Cover trickling bidder bodies and Send during a live batch in that same Fastly fixture.
   Bound and validate actual byte/Next-return observations, preserving stream progress, the
   original cutoff and per-slot arrival times without new transport or compatibility APIs.
+- Exercise three-slot batch execution after canonical Fastly response handoff with the same
+  retained client. Delay collection to distinguish arrival timing, and verify actual SDK body
+  releases before collection and after callback return through the existing bounded protocol.
 - Validate Wrangler's optional fixture `rootPath` against the owned config directory before
   constructing its local runtime. Materialize a bounded Rust-owned staged-module inventory using
   the selected SDK's rules and official Miniflare 5 converter, with one native constructor and

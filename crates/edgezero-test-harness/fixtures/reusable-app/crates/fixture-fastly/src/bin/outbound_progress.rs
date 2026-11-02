@@ -10,6 +10,8 @@ use std::{
 
 #[path = "outbound_progress/cleanup.rs"]
 mod cleanup;
+#[path = "outbound_progress/post_delivery.rs"]
+mod post_delivery;
 
 struct Runtime;
 
@@ -74,6 +76,9 @@ fn main() -> Result<(), fastly::Error> {
     let mut request = fastly::Request::from_client();
     if request.get_path() == "/progress/lifetimes/response-cleanup" {
         return cleanup::run(request);
+    }
+    if request.get_path() == "/progress/lifetimes/post-delivery-batch" {
+        return post_delivery::run(request);
     }
     if let Some(case) = request.get_path().strip_prefix("/progress/reference/") {
         let source = fixture_core::qualification::framing::source(case)?;
