@@ -70,6 +70,11 @@ That SDK manifest/module migration remains open; module rules, persistence, and 
 are not removed or weakened to manufacture a runtime pass. The failed runs and diagnostics remain
 under `/private/tmp/pr275-native-body-cloudflare-*`.
 
+Hosted CI initially stops at the legacy-API guard because the new Axum regression used the retired
+short variable spelling. Rename it to the canonical `observation_cutoff` without changing behavior
+or weakening the guard. Retain the local guard red/green logs and rerun the Axum contracts, strict
+lint and formatting for this follow-up.
+
 Spin's WASI read future and Fastly's native body-readiness wait still need their own exact-boundary
 witnesses. Their current records remain `host-head-written-only`, never SDK-read evidence. No new
 CI invocation, acceptance binding, normative digest, runtime pin or capability promotion is added.

@@ -932,7 +932,7 @@ async fn cutoff_releases_an_observed_pending_sdk_body_read() {
             let now = Arc::new(Mutex::new(MonotonicInstant::now()));
             let sampled = Arc::clone(&now);
             let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
-            let cutoff = clock.deadline_after(Duration::from_millis(200));
+            let observation_cutoff = clock.deadline_after(Duration::from_millis(200));
             let advancement = Arc::new(Notify::new());
             let time = paired_cutoff_time(
                 clock,
@@ -944,7 +944,7 @@ async fn cutoff_releases_an_observed_pending_sdk_body_read() {
             let mut request = OutboundRequest::get(format!("{origin}/pending")).expect("request");
             let witness = NativeBodyWitness::new();
             witness.attach(&mut request).expect("attach");
-            let mut batch = client.start_batch_until(vec![request], cutoff);
+            let mut batch = client.start_batch_until(vec![request], observation_cutoff);
             let containment = Instant::now();
             let next = batch.next();
             futures_util::pin_mut!(next);
@@ -956,7 +956,7 @@ async fn cutoff_releases_an_observed_pending_sdk_body_read() {
                 let result = next.as_mut().poll(cx);
                 if result.is_pending() {
                     if witness.snapshot().first_read.is_some() {
-                        *now.lock().expect("clock") = cutoff.instant();
+                        *now.lock().expect("clock") = observation_cutoff.instant();
                         advancement.notify_waiters();
                     }
                     cx.waker().wake_by_ref();
@@ -972,16 +972,16 @@ async fn cutoff_releases_an_observed_pending_sdk_body_read() {
             let snapshot = witness.snapshot();
             assert!(!snapshot.invalid);
             assert_eq!(snapshot.heads, 1);
-            assert!(snapshot.first_head.expect("SDK head") < cutoff.instant());
+            assert!(snapshot.first_head.expect("SDK head") < observation_cutoff.instant());
             let read = snapshot.first_read.expect("SDK read");
             assert!(read.pending);
-            assert!(read.observed_at < cutoff.instant());
+            assert!(read.observed_at < observation_cutoff.instant());
             assert_eq!(snapshot.source_acquisitions, 1);
             assert_eq!(
                 snapshot.source_releases, 1,
                 "SDK owner released before next returns"
             );
-            assert!(snapshot.first_release.expect("SDK release") >= cutoff.instant());
+            assert!(snapshot.first_release.expect("SDK release") >= observation_cutoff.instant());
         })
         .await;
 }
