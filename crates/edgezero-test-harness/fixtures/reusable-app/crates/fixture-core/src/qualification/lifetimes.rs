@@ -14,6 +14,7 @@ use edgezero_core::{
 use futures::StreamExt as _;
 use serde_json::{Value, json};
 use std::{
+    cell::RefCell,
     rc::Rc,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -53,6 +54,8 @@ impl Probe {
                 | "timeout-before-cutoff"
                 | "fast-origin"
                 | "body-read-arrivals"
+                | "trickling-slot"
+                | "send-during-batch"
                 | "begin-progress"
                 | "batch-progress"
                 | "pending-head-cutoff"
@@ -227,6 +230,98 @@ async fn response_report(response: Result<OutboundResponse, EdgeError>) -> Value
     outcome.unwrap_or_else(|error| json!({"error":error_report(&error)}))
 }
 
+async fn read_trickle(
+    response: OutboundResponse,
+    timeline: &Timeline,
+    observations: &Rc<RefCell<Vec<Value>>>,
+) -> Value {
+    let status = response.status().as_u16();
+    let Ok(mut source) = response.into_body().into_stream() else {
+        return json!({"error":error_report(&invalid())});
+    };
+    let mut bytes = Vec::new();
+    for _ in 0..64 {
+        let at = timeline.clock.now();
+        let result = source.next().await;
+        let ended = timeline.clock.now();
+        let detail = match &result {
+            Some(Ok(chunk)) if bytes.len().saturating_add(chunk.len()) <= 64 => {
+                json!(chunk.as_ref())
+            }
+            Some(Ok(_)) => json!({"error":error_report(&invalid())}),
+            Some(Err(error)) => json!({"error":error_report(error)}),
+            None => Value::Null,
+        };
+        observations.borrow_mut().push(json!({"op":"read","started_at_us":timeline.elapsed_us(at),"at_us":timeline.elapsed_us(ended),"result":detail}));
+        match result {
+            Some(Ok(chunk)) if bytes.len().saturating_add(chunk.len()) <= 64 => {
+                bytes.extend_from_slice(&chunk)
+            }
+            Some(Ok(_)) => return json!({"error":error_report(&invalid())}),
+            Some(Err(error)) => return json!({"error":error_report(&error)}),
+            None => return json!({"status":status,"bytes":bytes}),
+        }
+    }
+    json!({"error":error_report(&invalid())})
+}
+
+async fn trickling_slot(
+    response: OutboundResponse,
+    mut batch: OutboundBatch,
+    report: &mut Report,
+    timeline: &mut Timeline,
+) {
+    let observations = Rc::new(RefCell::new(Vec::new()));
+    let at = timeline.clock.now();
+    let returned = async {
+        let mut results = Vec::new();
+        for _ in 0..4 {
+            let started = timeline.clock.now();
+            let result = batch.next().await;
+            let ended = timeline.clock.now();
+            let mut record = json!({"op":"next","started_at_us":timeline.elapsed_us(started),"at_us":timeline.elapsed_us(ended)});
+            match &result {
+                Ok(OutboundBatchNext::Item(item)) => {
+                    record["result"] = json!("Item");
+                    record["index"] = json!(item.index());
+                }
+                Ok(OutboundBatchNext::Finished(termination)) => {
+                    record["result"] = json!("Finished");
+                    record["termination"] = json!(format!("{termination:?}"));
+                }
+                Err(error) => {
+                    record["result"] = json!("error");
+                    record["error"] = error_report(error);
+                }
+            }
+            observations.borrow_mut().push(record);
+            let finished = !matches!(result, Ok(OutboundBatchNext::Item(_)));
+            results.push(result);
+            if finished {
+                break;
+            }
+        }
+        results
+    };
+    let (origin, results) =
+        futures::future::join(read_trickle(response, timeline, &observations), returned).await;
+    let ended = timeline.clock.now();
+    let log = std::mem::take(&mut *observations.borrow_mut());
+    timeline.event("trickle", at, ended, json!({"observations":log}));
+    report.origin = Some(origin);
+    for result in results {
+        match result {
+            Ok(OutboundBatchNext::Item(item)) => {
+                let (index, slot) = item.into_parts();
+                record_item(report, index, slot, "next").await;
+            }
+            Ok(OutboundBatchNext::Finished(_)) => {}
+            Err(error) => report.error = Some(error_report(&error)),
+        }
+    }
+    collect(batch, report, timeline).await;
+}
+
 async fn record_item(report: &mut Report, index: usize, slot: OutboundSlotResult, via: &str) {
     let slot_error = slot.outcome.is_err();
     report.items.push(
@@ -370,7 +465,10 @@ async fn run(
     ) {
         return pending_cutoff(ctx, probe, client, report, timeline).await;
     }
-    let origin = if matches!(probe.case.as_str(), "batch-progress" | "caps-while-waiting") {
+    let origin = if matches!(
+        probe.case.as_str(),
+        "batch-progress" | "caps-while-waiting" | "send-during-batch"
+    ) {
         None
     } else {
         timeline.wait_until(ctx, 2).await?;
@@ -422,7 +520,11 @@ async fn run(
         ended,
         if matches!(
             probe.case.as_str(),
-            "cpu-stretch" | "caps-while-waiting" | "body-read-arrivals"
+            "cpu-stretch"
+                | "caps-while-waiting"
+                | "body-read-arrivals"
+                | "trickling-slot"
+                | "send-during-batch"
         ) {
             json!({"cutoff_at_us":timeline.elapsed_us(observation_cutoff.instant())})
         } else {
@@ -451,15 +553,27 @@ async fn run(
     }
 
     let at = timeline.clock.now();
-    let result = origin.ok_or_else(invalid)?.collect().await;
+    let result = if probe.case == "send-during-batch" {
+        client.send(probe.request("origin", timeline)?).await
+    } else {
+        origin.ok_or_else(invalid)?.collect().await
+    };
     let ended = timeline.clock.now();
     timeline.event(
-        "origin-head",
+        if probe.case == "send-during-batch" {
+            "origin-send"
+        } else {
+            "origin-head"
+        },
         at,
         ended,
         json!(if result.is_ok() { "ok" } else { "error" }),
     );
     let response = result?;
+    if probe.case == "trickling-slot" {
+        trickling_slot(response, batch, report, timeline).await;
+        return Ok(());
+    }
     if probe.case == "body-read-arrivals" {
         if !response.body().is_stream() {
             return Err(invalid());
@@ -521,7 +635,10 @@ async fn run(
         collect(batch, report, timeline).await;
         return Ok(());
     }
-    if matches!(probe.case.as_str(), "slow-origin" | "timeout-before-cutoff") {
+    if matches!(
+        probe.case.as_str(),
+        "slow-origin" | "timeout-before-cutoff" | "send-during-batch"
+    ) {
         timeline.wait_until(ctx, 701).await?;
         // One check per slot plus terminal observation; never spin on Pending.
         for _ in 0..max_checks {
@@ -1488,6 +1605,62 @@ mod tests {
     }
 
     #[test]
+    fn trickle_reader_records_real_receipts_and_eof_in_the_original_clock() {
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let timeline = Timeline::new(time.clock(), start);
+        time.advance_to(start + Duration::from_millis(100));
+        let source_time = time.clone();
+        let source = futures::stream::iter(0..11).map(move |index| {
+            source_time.advance_to(start + Duration::from_millis(100 + index * 50));
+            Ok(Bytes::from(vec![48 + index as u8]))
+        });
+        let observations = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let outcome = block_on(read_trickle(
+            response(Body::from_stream(source)),
+            &timeline,
+            &observations,
+        ));
+        assert_eq!(outcome, json!({"status":200,"bytes":b"0123456789:"}));
+        let log = observations.borrow();
+        assert_eq!(log.len(), 12);
+        for (index, entry) in log[..11].iter().enumerate() {
+            assert_eq!(entry["op"], "read");
+            assert_eq!(entry["at_us"], 100000 + index as u64 * 50000);
+            assert_eq!(entry["result"], json!([48 + index]));
+        }
+        assert_eq!(log[11]["at_us"], 600000);
+        assert!(log[11]["result"].is_null());
+    }
+
+    #[test]
+    fn trickle_reader_bounds_empty_reads_and_payload_before_copying() {
+        for bytes in [Bytes::new(), Bytes::from(vec![0; 65])] {
+            let time = TestTime::default();
+            let timeline = Timeline::new(time.clock(), time.clock().now());
+            let polls = Rc::new(Cell::new(0));
+            let observed = Rc::clone(&polls);
+            let oversized = !bytes.is_empty();
+            let source = futures::stream::repeat_with(move || {
+                observed.set(observed.get() + 1);
+                Ok(bytes.clone())
+            });
+            let log = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let outcome = block_on(read_trickle(
+                response(Body::from_stream(source)),
+                &timeline,
+                &log,
+            ));
+            assert!(outcome.get("error").is_some());
+            assert_eq!(polls.get(), if oversized { 1 } else { 64 });
+            assert_eq!(log.borrow().len(), polls.get());
+            if oversized {
+                assert!(log.borrow()[0]["result"].get("error").is_some());
+            }
+        }
+    }
+
+    #[test]
     fn requests_use_actual_guest_elapsed_and_original_limits() {
         let time = TestTime::default();
         let start = time.clock().now();
@@ -1496,6 +1669,8 @@ mod tests {
             "slow-origin",
             "fast-origin",
             "body-read-arrivals",
+            "trickling-slot",
+            "send-during-batch",
             "begin-progress",
             "batch-progress",
             "pending-head-cutoff",

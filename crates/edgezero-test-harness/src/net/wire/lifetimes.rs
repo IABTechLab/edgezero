@@ -15,6 +15,8 @@ enum Case {
     Timeout,
     Fast,
     BodyReads,
+    Trickle,
+    Send,
     Begin,
     Batch,
     PendingHead,
@@ -33,6 +35,8 @@ impl Case {
             "timeout-before-cutoff" => Ok(Self::Timeout),
             "fast-origin" => Ok(Self::Fast),
             "body-read-arrivals" => Ok(Self::BodyReads),
+            "trickling-slot" => Ok(Self::Trickle),
+            "send-during-batch" => Ok(Self::Send),
             "begin-progress" => Ok(Self::Begin),
             "batch-progress" => Ok(Self::Batch),
             "pending-head-cutoff" => Ok(Self::PendingHead),
@@ -52,6 +56,8 @@ impl Case {
             Self::Timeout => "timeout-before-cutoff",
             Self::Fast => "fast-origin",
             Self::BodyReads => "body-read-arrivals",
+            Self::Trickle => "trickling-slot",
+            Self::Send => "send-during-batch",
             Self::Begin => "begin-progress",
             Self::Batch => "batch-progress",
             Self::PendingHead => "pending-head-cutoff",
@@ -66,7 +72,9 @@ impl Case {
 
     fn permits(self, role: &str) -> bool {
         match self {
-            Self::Slow | Self::BodyReads => matches!(role, "origin" | "a" | "b" | "c"),
+            Self::Slow | Self::BodyReads | Self::Trickle | Self::Send => {
+                matches!(role, "origin" | "a" | "b" | "c")
+            }
             Self::Timeout => matches!(role, "origin" | "a" | "b" | "c" | "d"),
             Self::Cpu => matches!(role, "origin" | "a" | "b" | "c" | "calibration"),
             Self::Fast => matches!(role, "origin" | "a" | "b" | "c" | "mediator"),
@@ -282,7 +290,12 @@ impl Exchange<'_> {
                         }
                     } else if matches!(
                         self.case,
-                        Case::Slow | Case::Timeout | Case::Fast | Case::BodyReads
+                        Case::Slow
+                            | Case::Timeout
+                            | Case::Fast
+                            | Case::BodyReads
+                            | Case::Trickle
+                            | Case::Send
                     ) {
                         "initial-receipts-minimum-upper-bound"
                     } else {
@@ -373,7 +386,7 @@ fn seal_timeline(lifetime: &mut Lifetime, token: &str) -> Result<Option<Instant>
             <= anchor
                 + Duration::from_millis(match lifetime.case {
                     Case::Fast => 120,
-                    Case::BodyReads => 100,
+                    Case::BodyReads | Case::Trickle => 100,
                     _ => 180,
                 }),
         "initial receipts missed the first source target",
@@ -516,7 +529,13 @@ pub(super) fn serve(
         }
         if matches!(
             lifetime.case,
-            Case::Slow | Case::Timeout | Case::Fast | Case::Cpu | Case::BodyReads
+            Case::Slow
+                | Case::Timeout
+                | Case::Fast
+                | Case::Cpu
+                | Case::BodyReads
+                | Case::Trickle
+                | Case::Send
         ) && *role == "origin"
         {
             event["alignment"] = json!({
@@ -541,10 +560,12 @@ pub(super) fn serve(
             Ok(false)
         }
     });
-    let expected_close = matches!(
+    let cutoff_bound = (matches!(
         exchange.case,
-        Case::Slow | Case::Timeout | Case::Cpu | Case::BodyReads
-    ) && exchange.role == "c"
+        Case::Slow | Case::Timeout | Case::Cpu | Case::BodyReads | Case::Trickle | Case::Send
+    ) && exchange.role == "c")
+        || (matches!(exchange.case, Case::Trickle) && exchange.role == "b");
+    let expected_close = cutoff_bound
         && exchange
             .scenario_anchor
             .is_some_and(|anchor| Instant::now() >= anchor + Duration::from_millis(534))
@@ -609,7 +630,13 @@ pub(super) fn serve(
 fn align(shared: &Shared, exchange: &mut Exchange<'_>) -> Result<bool> {
     if !matches!(
         exchange.case,
-        Case::Slow | Case::Timeout | Case::Fast | Case::Cpu | Case::BodyReads
+        Case::Slow
+            | Case::Timeout
+            | Case::Fast
+            | Case::Cpu
+            | Case::BodyReads
+            | Case::Trickle
+            | Case::Send
     ) {
         return Ok(true);
     }
@@ -889,7 +916,7 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
             };
             (at, vec![(at, bytes)])
         }
-        (Case::Slow | Case::Timeout, "origin") => (
+        (Case::Slow | Case::Timeout | Case::Send, "origin") => (
             absolute(700),
             vec![
                 (absolute(700), b"O"),
@@ -902,6 +929,15 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
             absolute(100),
             vec![(absolute(100), b"O"), (absolute(800), b"o")],
         ),
+        (Case::Trickle, "origin") => (
+            absolute(100),
+            b"0123456789:"
+                .chunks(1)
+                .enumerate()
+                .map(|(index, bytes)| (absolute(100 + index as u64 * 50), bytes))
+                .collect(),
+        ),
+        (Case::Trickle, "b") => (absolute(100), vec![(absolute(600), b"B")]),
         (Case::Cpu, "origin") => (absolute(100), vec![(absolute(100), b"O")]),
         (Case::Begin, "origin") => (received(150), vec![(received(150), b"O")]),
         (Case::Batch, "quiet") => (received(300), Vec::new()),
@@ -912,7 +948,9 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
         (case, role @ ("a" | "b" | "c")) => {
             let index = usize::from(role.as_bytes()[0] - b'a');
             let at = match case {
-                Case::Slow | Case::Timeout | Case::BodyReads => absolute([180, 320, 900][index]),
+                Case::Slow | Case::Timeout | Case::BodyReads | Case::Trickle | Case::Send => {
+                    absolute([180, 320, 900][index])
+                }
                 Case::Fast => absolute([180, 320, 400][index]),
                 Case::Cpu => absolute([180, 530, 900][index]),
                 Case::Batch => received([20, 40, 60][index]),
@@ -952,6 +990,9 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
     );
     event["write_started_us"] = json!(offset(write_started, exchange.anchor));
     event["wait_returned_us"] = json!(offset(wait_returned, exchange.anchor));
+    if matches!(exchange.case, Case::Trickle) && exchange.role == "b" {
+        event["body_scheduled_us"] = json!(offset(absolute(600), exchange.anchor));
+    }
     record(shared, exchange, event)?;
     let chunk_count = chunks.len();
     for (index, (at, bytes)) in chunks.into_iter().enumerate() {
@@ -1995,6 +2036,63 @@ mod tests {
         assert_eq!(chunks[1]["terminal_frame"]["status"], "pass");
         assert_eq!(event(&events, "origin", "closed")["reason"], "complete");
         origins.finish().unwrap();
+    }
+
+    #[test]
+    fn fastly_live_batch_sources_preserve_trickling_and_send_schedules() {
+        for case in ["trickling-slot", "send-during-batch"] {
+            let origins = WireOrigins::start().unwrap();
+            origins.register_lifetime("progress", case).unwrap();
+            origins.mark_lifetime_start("progress").unwrap();
+            let bids =
+                ["a", "b", "c"].map(|role| connect(&origins, "progress", case, role, "34000"));
+            let origin = connect(
+                &origins,
+                "progress",
+                case,
+                "origin",
+                if case == "trickling-slot" {
+                    "2000"
+                } else {
+                    "35100"
+                },
+            );
+            assert!(!read(origin).is_empty());
+            for (index, bid) in bids.into_iter().enumerate() {
+                assert_eq!(*read(bid).last().unwrap(), b'A' + index as u8);
+            }
+            let events = origins.take_lifetime_events("progress").unwrap();
+            assert!(events.as_array().unwrap().len() <= EVENT_LIMIT);
+            let trickle = case == "trickling-slot";
+            assert_eq!(
+                event(&events, "b", "head")["scenario_scheduled_us"],
+                if trickle { 100000 } else { 320000 }
+            );
+            assert_eq!(
+                event(&events, "b", "chunk")["scenario_scheduled_us"],
+                if trickle { 600000 } else { 320000 }
+            );
+            let chunks = events
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["role"] == "origin" && entry["op"] == "chunk")
+                .collect::<Vec<_>>();
+            let times = chunks
+                .iter()
+                .map(|entry| entry["scenario_scheduled_us"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                times,
+                if trickle {
+                    (0..11).map(|index| 100000 + index * 50000).collect()
+                } else {
+                    vec![700000, 900000, 1300000]
+                }
+            );
+            assert_eq!(chunks.last().unwrap()["terminal_frame"]["status"], "pass");
+            origins.finish().unwrap();
+        }
     }
 
     #[test]

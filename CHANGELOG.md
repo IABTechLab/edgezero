@@ -25,6 +25,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Extend the existing Fastly lifetime fixture with origin-body-only progress: preserve bidder
   arrival times across the 100/800 ms body reads, original batch cutoff and late collection.
   Reject premature batch polling and contradictory evidence without another runner or transport.
+- Cover trickling bidder bodies and Send during a live batch in that same Fastly fixture.
+  Bound and validate actual byte/Next-return observations, preserving stream progress, the
+  original cutoff and per-slot arrival times without new transport or compatibility APIs.
 - Validate Wrangler's optional fixture `rootPath` against the owned config directory before
   constructing its local runtime. Materialize a bounded Rust-owned staged-module inventory using
   the selected SDK's rules and official Miniflare 5 converter, with one native constructor and

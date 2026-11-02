@@ -1342,11 +1342,38 @@ case fails: head observation/body-read start are 110.546/110.549 ms against 100 
 The expanded inventory passes 19 of 21 and exits 1, also retaining a slow-origin elapsed miss.
 No timing target, inventory binding or qualification status changes.
 
+Two further Fastly-only cases cover EZ-6 criteria 7/8. `trickling-slot` keeps B's head at
+100 ms/body at 600 ms while the original origin yields bytes every 50 ms from 100 through
+600 ms. One join retains both original operations: body consumption and the bounded batch
+Next loop. Each return is recorded immediately in one ordered log. Validation requires actual
+application byte receipts during the terminal Next's wait, Cutoff at 534..539 ms, B/C unresolved,
+and origin progress after cutoff. Head arrival alone cannot complete B; waiting until its body
+at 600 ms fails. A still reports its original 146 ms elapsed, not join/collection time.
+
+The log holds at most 64 completed reads and four Next returns. The body retains at most
+64 bytes. Empty reads consume observation budget, split/coalesced reads use one actual timestamp
+for every newly returned byte, and missing `result` cannot masquerade as explicit EOF. Source
+framing and the independently scheduled writes remain mandatory. B's source may observe a late
+peer close instead of completing its body; its head declares the original body schedule, and
+only the exact request/head/closed sequence at or after that schedule is accepted in that case.
+These are public-stream receipts, not additional raw SDK-Pending witnesses or host-teardown proof.
+
+`send-during-batch` starts the same 34 ms batch before calling Send for the original streamed
+origin, never Begin. It preserves the 534 ms cutoff, origin head/chunks at 700/700/900/1300 ms,
+checks at 701 ms and A/B arrival elapsed 146/286 ms. C remains unresolved at Cutoff. Request
+preparation and ordered operations must demonstrate Send happened after batch creation; the
+shared slow-source timeline, header/body policy and resource limits are unchanged.
+The first local repaired-Viceroy run passes both cases: the terminal wait returns Cutoff at
+534.902 ms while origin receipts continue through EOF at 601.573 ms, and Send preserves A/B
+elapsed 146.516/286.371 ms. The complete expanded inventory is still 21/23, exit 1, retaining
+slow-origin EOF and fourth-slot B elapsed timing failures. No hosted or candidate qualification
+or acceptance-inventory promotion follows from these local passes.
+
 Fastly adds three cleanup cases for the local isolation part of EZ-6 criterion 21:
 `response-cleanup`, `response-cleanup-source-error`, and `response-cleanup-write-deadline`.
 All use the existing cleanup route and helper; a required private `x-fixture-cleanup-mode`
 header selects exactly `complete`, `source-error`, or `write-deadline` without a compatibility
-default. Fastly runs thirteen timeline/response-cleanup cases plus the eight callback cases below;
+default. Fastly runs fifteen timeline/response-cleanup cases plus the eight callback cases below;
 the other adapters retain ten including response handoff.
 One real client starts a callback-owned begun request before a response-owned Begin and original
 three-slot batch. Public handles remain outside the streamed response while canonical egress

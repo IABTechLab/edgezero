@@ -12,6 +12,63 @@
 
 ## Status and Authority
 
+### Fastly Trickling-Slot And Live-Send Coverage (2026-11-02)
+
+Continue approved D6 criteria 7/8 in the same fixture, bounded origin and runtime inventory.
+The prior `eb8ac5df` head has all 30 reported checks passing; its strict timing failures remain
+recorded and are not waived by CI success or these new executables.
+
+- [x] Add Fastly-only `trickling-slot`: retain origin Begin at 2 ms, batch at 34 ms and cutoff
+      534 ms. B sends its head at 100 ms and body at 600 ms; A/C retain 180/900 ms. The original
+      origin streams one byte every 50 ms from 100 through 600 ms.
+- [x] Join consumption of that original origin body with the original batch's bounded `next`
+      loop. Record every read/Next return immediately in one ordered, request-local log, never
+      sorted or stamped after join. Retain actual byte-receipt times, explicit EOF and the
+      terminal Next's original 534..539 ms bound with B/C unresolved. Require intermediate
+      receipts inside that terminal wait and continued origin progress afterward.
+- [x] Bound observations independently from SDK chunk boundaries: at most 64 completed reads,
+      64 copied payload bytes and four Next returns, for 68 records. Empty reads spend budget
+      without progressing the prefix. Split/coalesced reads use their actual receipt time for
+      each new byte, not interpolated or backdated times. Preserve source EOF/framing and the
+      existing 32-event/eight-active/128-cumulative origin limits.
+- [x] Add Fastly-only `send-during-batch`: start the original batch first, then Send the original
+      streamed origin without Begin. Preserve source head at 700 ms, chunks at 700/900/1300 ms,
+      checks at 701 ms, A/B elapsed 146/286 ms and C unresolved at Cutoff. Correlate request
+      preparation and the `origin-send` operation with that already-live batch.
+- [x] Demonstrate fail-first fixture/origin/controller tests. Two independent reviews identify
+      missing-result-as-EOF and a late terminal-wait false acceptance; reproduce both as red
+      tests, then require explicit result presence and actual intermediate-read/wait overlap.
+      Scoped controls pass, including bounded empty/oversize reads and B's late peer-close path.
+- [x] Pass all five root gates: 2,650 tests across 33 binaries with one existing ignored test,
+      formatting, strict workspace Clippy, all-adapter feature compilation and Spin WASM check.
+      The final serialized harness passes 449 tests with two existing ignored tests; fixture-core
+      passes 61 with/without native witnesses. Strict harness, fixture and actual Fastly WASM
+      fixture lint, docs lint/format/build, legacy/inventory guards and frozen identities pass.
+      Independent specification and code-quality reviews are clear after the two guard fixes.
+- [x] Run the complete expanded 23-case local Fastly inventory once after compilation. Both
+      new cases pass. Trickle's terminal Next spans 185.055..534.902 ms; application receipts
+      continue at 201.847..501.724 ms inside it and at 551.722/601.538 ms afterward, with EOF
+      at 601.573 ms. A's elapsed is 150.059 ms, B/C remain unresolved, and cutoff is unchanged.
+      Send-after-batch recovers A/B at 146.516/286.371 ms after observing the origin head at
+      704.132 ms, while C remains unresolved.
+- [ ] Close full timing and qualification acceptance. The inventory passes 21 of 23 and exits 1:
+      slow-origin EOF is 1306.260 ms against 1300 ms +/- 5 ms; the fourth-slot case's B elapsed
+      is 294.511 ms against 286 ms +/- 5 ms. All eight callback cases, three cleanup cases and
+      log tails pass. New-case successes do not waive these failures, historical failures or
+      hosted, exact-candidate and other remaining local acceptance.
+
+No production API, transport, scheduler, SDK/runtime pin, timing tolerance, capability, CI
+invocation, normative identity or acceptance binding changes. Inventory remains 153 ready/358
+planned and unqualified. Demo/templates need no migration for test-only cases. Logs use
+`/private/tmp/pr275-live-batch-*`; the two initial controller compile errors and duplicate-check
+lookup failure are retained separately from successful tests, without weakened assertions.
+The initial full harness run during concurrent builds passes 446, fails two unchanged process
+tests and ignores two: direct-TERM cancellation is not observed within its existing bound, and
+the nested-cancellation signal helper times out. The unchanged final serialized run passes all
+449 with two ignored. Preserve both logs; no process timeout or cancellation assertion changes.
+The legacy guard initially rejects the local name `cutoff`; use `observation_returned_at` for
+the measured return timestamp without changing any deadline or allowing a compatibility name.
+
 ### Fastly Body-Read Arrival Acceptance (2026-11-02)
 
 Continue the approved D6 baseline with EZ-6 criterion 6 in the existing local lifetime suite,

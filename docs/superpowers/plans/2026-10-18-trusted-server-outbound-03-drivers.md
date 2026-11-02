@@ -490,6 +490,16 @@ fixture. Fix only the corresponding adapter implementation when a parity case fa
 
 ## Task D6: Lifetime and Late-Collection Qualification
 
+The [trickling-slot/live-Send checkpoint](2026-10-18-trusted-server-outbound-implementation.md#fastly-trickling-slot-and-live-send-coverage-2026-11-02)
+adds criteria 7/8 to the same Fastly lifetime suite. B's body remains pending while measured
+origin bytes continue every 50 ms and a waiting Next reaches the original cutoff; a separate
+case Sends the origin only after starting the batch. Bound actual read/Next observations,
+preserve receipt-time attribution and keep runtime/hosted acceptance separate from executable
+coverage. No requirement, transport, SDK pin or timing tolerance changes.
+Both new cases pass the first local repaired-Viceroy run; the full 23-case inventory remains
+exit 1 for two retained timing failures. See the master checkpoint for measurements and the
+unchanged qualification boundaries; these passes do not complete D6.
+
 The [body-read arrival checkpoint](2026-10-18-trusted-server-outbound-implementation.md#fastly-body-read-arrival-acceptance-2026-11-02)
 adds criterion 6 to the same Fastly lifetime suite: read the original streamed origin's 100/800 ms
 body before observing the original batch, preserving A/B arrival times and the 534 ms cutoff.
