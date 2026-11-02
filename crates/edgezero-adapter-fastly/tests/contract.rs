@@ -28,6 +28,9 @@ mod tests {
     use edgezero_core::body::Body;
     use edgezero_core::config_store::{ConfigStore, ConfigStoreError, ConfigStoreHandle};
     use edgezero_core::context::RequestContext;
+    use edgezero_core::delivery_compression::{
+        DeliveryCompressionIntent, DeliveryCompressionSupport,
+    };
     use edgezero_core::error::EdgeError;
     use edgezero_core::http::{Method, Response, StatusCode, response_builder};
     use edgezero_core::router::RouterService;
@@ -127,6 +130,10 @@ mod tests {
 
         let core_request = into_core_request(req).expect("core request");
 
+        assert_eq!(
+            DeliveryCompressionSupport::from_request(&core_request),
+            DeliveryCompressionSupport::GzipBrotli
+        );
         assert_eq!(core_request.method(), &Method::POST);
         assert_eq!(core_request.uri().path(), "/mirror");
         assert_eq!(core_request.uri().query(), Some("foo=bar"));
@@ -167,6 +174,10 @@ mod tests {
             },
         )
         .expect("registry-aware conversion");
+        assert_eq!(
+            DeliveryCompressionSupport::from_request(&core),
+            DeliveryCompressionSupport::GzipBrotli
+        );
         assert!(core.extensions().get::<SecretRegistry>().is_some());
         assert_eq!(
             core.extensions().get::<String>().unwrap(),
@@ -193,6 +204,183 @@ mod tests {
         assert_eq!(fastly_response.get_status(), FastlyStatus::CREATED);
         assert!(fastly_response.get_header("x-edgezero-res").is_some());
         assert_eq!(fastly_response.take_body_bytes(), b"hello world");
+    }
+
+    #[test]
+    fn delivery_compression_standard_converter_finalizes_once_and_stream() {
+        for streaming in [false, true] {
+            let body = if streaming {
+                Body::stream(stream::iter(vec![
+                    Bytes::from_static(b"identity "),
+                    Bytes::from_static(b"output"),
+                ]))
+            } else {
+                Body::text("identity output")
+            };
+            let mut response = response_builder()
+                .status(StatusCode::CREATED)
+                .header("set-cookie", "a=1")
+                .header("set-cookie", "b=2")
+                .header("cache-control", "private, no-store")
+                .header("etag", "\"keep\"")
+                .header("vary", "Origin")
+                .body(body)
+                .unwrap();
+            DeliveryCompressionSupport::GzipBrotli
+                .mark_identity_response(&mut response)
+                .unwrap();
+            // Late header effects do not change the identity-producing body.
+            response
+                .headers_mut()
+                .insert("content-encoding", "gzip".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("content-length", "9999".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("x-compress-hint", "off".parse().unwrap());
+            let mut native = from_core_response(response).unwrap();
+            assert_eq!(native.get_status(), FastlyStatus::CREATED);
+            assert_eq!(native.get_header_str("x-compress-hint"), Some("on"));
+            assert!(native.get_header("content-encoding").is_none());
+            assert!(native.get_header("content-length").is_none());
+            assert_eq!(
+                native.get_header_str("cache-control"),
+                Some("private, no-store")
+            );
+            assert_eq!(native.get_header_str("etag"), Some("\"keep\""));
+            assert_eq!(
+                native
+                    .get_header_all("set-cookie")
+                    .map(|value| value.to_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["a=1", "b=2"]
+            );
+            assert_eq!(
+                native
+                    .get_header_all("vary")
+                    .map(|value| value.to_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["Origin", "Accept-Encoding"]
+            );
+            assert_eq!(native.take_body_bytes(), b"identity output");
+        }
+    }
+
+    #[test]
+    fn delivery_compression_unmarked_gzip_survives_standard_conversion() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write as _;
+        let mut compressor = GzEncoder::new(Vec::new(), Compression::default());
+        compressor.write_all(b"encoded output").unwrap();
+        let encoded = compressor.finish().unwrap();
+        for streaming in [false, true] {
+            let body = if streaming {
+                Body::stream(stream::iter(vec![Bytes::from(encoded.clone())]))
+            } else {
+                Body::from(encoded.clone())
+            };
+            let response = response_builder()
+                .header("content-encoding", "gzip")
+                .header("content-length", encoded.len())
+                .header("vary", "Origin")
+                .body(body)
+                .unwrap();
+            let mut native = from_core_response(response).unwrap();
+            assert_eq!(native.get_header_str("content-encoding"), Some("gzip"));
+            assert_eq!(
+                native.get_header_str("content-length"),
+                Some(encoded.len().to_string().as_str())
+            );
+            assert_eq!(native.get_header_str("vary"), Some("Origin"));
+            assert!(native.get_header("x-compress-hint").is_none());
+            assert_eq!(native.take_body_bytes(), encoded);
+        }
+    }
+
+    #[test]
+    fn delivery_compression_stream_errors_keep_existing_propagation() {
+        use std::io::Error as IoError;
+        let body = Body::from_stream(stream::iter(vec![Err::<Bytes, _>(IoError::other(
+            "delivery source failed",
+        ))]));
+        let mut response = Response::new(body);
+        DeliveryCompressionSupport::GzipBrotli
+            .mark_identity_response(&mut response)
+            .unwrap();
+        let error = from_core_response(response).expect_err("source failure must propagate");
+        assert!(error.to_string().contains("delivery source failed"));
+    }
+
+    #[test]
+    fn delivery_compression_dispatch_exposes_support_before_output_selection() {
+        use edgezero_adapter_fastly::request::dispatch_with_registries;
+        use edgezero_core::app::StoresMetadata;
+
+        #[edgezero_core::action]
+        async fn deliver(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let support = DeliveryCompressionSupport::from_request(ctx.request());
+            assert_eq!(support, DeliveryCompressionSupport::GzipBrotli);
+            let mut response = Response::new(Body::text("identity output"));
+            support.mark_identity_response(&mut response)?;
+            Ok(response)
+        }
+        let app = App::new(RouterService::builder().get("/delivery", deliver).build());
+        let mut service_response = FastlyService::new(&app)
+            .dispatch(fastly_request(FastlyMethod::GET, "/delivery", None))
+            .unwrap();
+        assert_eq!(
+            service_response.get_header_str("x-compress-hint"),
+            Some("on")
+        );
+        assert_eq!(service_response.take_body_bytes(), b"identity output");
+        let mut registry_response = dispatch_with_registries(
+            &app,
+            fastly_request(FastlyMethod::GET, "/delivery", None),
+            StoresMetadata::default(),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            registry_response.get_header_str("x-compress-hint"),
+            Some("on")
+        );
+        assert_eq!(registry_response.take_body_bytes(), b"identity output");
+    }
+
+    #[test]
+    fn delivery_compression_custom_finalizer_does_not_poll_before_parts_split() {
+        use edgezero_adapter_fastly::delivery_compression::finalize_response;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::task::Poll;
+        let request =
+            into_core_request(fastly_request(FastlyMethod::GET, "/delivery", None)).unwrap();
+        let support = DeliveryCompressionSupport::from_request(&request);
+        assert_eq!(support, DeliveryCompressionSupport::GzipBrotli);
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&polls);
+        let body = Body::stream(stream::poll_fn(move |_| {
+            observed.set(observed.get() + 1);
+            Poll::<Option<Bytes>>::Pending
+        }));
+        let mut response = Response::new(body);
+        support.mark_identity_response(&mut response).unwrap();
+        response
+            .headers_mut()
+            .insert("content-length", "9999".parse().unwrap());
+        finalize_response(&mut response);
+        assert_eq!(polls.get(), 0);
+        let (parts, output_body) = response.into_parts();
+        assert!(
+            parts
+                .extensions
+                .get::<DeliveryCompressionIntent>()
+                .is_some()
+        );
+        assert_eq!(parts.headers["x-compress-hint"], "on");
+        assert!(!parts.headers.contains_key("content-length"));
+        assert!(output_body.is_stream());
     }
 
     #[test]

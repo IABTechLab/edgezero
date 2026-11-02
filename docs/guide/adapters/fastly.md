@@ -175,6 +175,60 @@ edgezero_core::app!("edgezero.toml", owns_logging = true);
 or on a hand-written `Hooks` impl (`fn owns_logging() -> bool { true }`). Every
 adapter's `run_app` honors it, so the app is responsible for logger setup.
 
+## Delivery compression
+
+The Fastly request converter advertises
+`edgezero_core::delivery_compression::DeliveryCompressionSupport::GzipBrotli`
+through a typed request extension. Read it with
+`DeliveryCompressionSupport::from_request(&request)` before choosing an output
+encoder. Missing support defaults to `Unavailable`; the other adapters do not
+advertise this facility.
+
+An application that has selected compatible adapter delivery can install identity
+bytes or its final identity-producing stream, then mark that response:
+
+```rust
+use edgezero_core::delivery_compression::DeliveryCompressionSupport;
+
+let support = DeliveryCompressionSupport::from_request(&request);
+// Consult support and the reader's preferences before choosing your encoder.
+// Only after installing the selected identity output:
+support.mark_identity_response(&mut response)?;
+```
+
+Marking does not decode or inspect the body. It rejects unavailable support and
+non-identity, stacked, repeated, or malformed `Content-Encoding` fields without
+changing the response. A later component that re-encodes the body must first
+remove `DeliveryCompressionIntent` from the response extensions.
+
+Standard Fastly response conversion honors the intent automatically. It sets
+`X-Compress-Hint: on`, removes stale encoding/length headers, and preserves existing
+Vary fields while covering `Accept-Encoding`. Fastly negotiates gzip or Brotli
+with the original reader request. Applications retain their eligibility,
+negotiation/fallback, privacy, and cache policy. Deflate is not supported by this
+delivery facility. Unmarked responses keep their existing behavior.
+
+Custom senders must use the same finalizer after their last response-header
+mutations and before splitting the response or committing headers:
+
+```rust
+edgezero_adapter_fastly::delivery_compression::finalize_response(&mut response);
+let (parts, body) = response.into_parts();
+// Continue with the application's existing buffered or streaming sender.
+```
+
+This finalizer does not poll or collect the body and can be called repeatedly.
+The standard `from_core_response` converter still collects streamed core bodies
+before returning a native response; this feature does not change that transport
+behavior. Custom progressive senders should call the finalizer directly rather
+than switch to that collecting converter.
+
+Viceroy tests establish guest-body and header behavior, not actual CDN compression
+or performance. Verify delivery encoding, reader negotiation, and transfer/vCPU
+measurements on real Fastly before making those claims. With shielding or service
+chaining, the matching client may itself be Fastly; final-hop policy remains with
+the application.
+
 ## Building
 
 Build for Fastly's Wasm target:
