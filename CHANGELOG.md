@@ -17,7 +17,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   Require them in the existing pending-cutoff fixture instead of treating origin-written headers
   as SDK body-read evidence. Preserve strict timing and leave other-provider and hosted gates open.
 - Validate Wrangler's optional fixture `rootPath` against the owned config directory before
-  constructing its local runtime. Retain the separate Miniflare 5 module-migration verification gap.
+  constructing its local runtime. Materialize a bounded Rust-owned staged-module inventory using
+  the selected SDK's rules and official Miniflare 5 converter, with one native constructor and
+  no legacy fallback. Preserve KV IDs and local persistence; verify smoke and process-restart
+  visibility while retaining the separate cold-case lifetime timing failures and hosted gates.
 - Bind Fastly's post-preparation dispatch acceptance to its existing SDK-pending proof and
   expiry/clock guards, without changing production behavior or adding CI invocations.
 - Bind numeric and compiler focus acceptance to the existing grouped Rust check, reusing its

@@ -29,6 +29,31 @@ Headerless canonical Fastly assembly-error responses cannot currently establish 
 identity; those modes remain unverified and do not receive case-evidence credit.
 This does not weaken their functional assertions or replace the standard entrypoints.
 
+### Cloudflare Native Module Loading
+
+The existing `serve.cjs` launches one direct Miniflare/workerd listener through the selected
+Wrangler installation. Rust supplies a mandatory, sorted inventory of owned staged files,
+bounded to 128 total file/directory entries, 64 MiB aggregate file bytes and eight directory
+levels below the root. Empty/missing trees, symlinks, non-files and non-UTF-8 paths fail before
+SDK materialization. These are fixture staging bounds, not provider memory guarantees or
+protection against concurrent hostile filesystem mutation.
+
+The launcher confines canonical file paths, uses the SDK's rule compiler/matcher, moves the
+ESModule entrypoint first and converts explicit module definitions through the official SDK
+converter. It does not discard module rules or retain a legacy constructor fallback. Module
+contents stay out of process arguments. KV namespace IDs remain unchanged, with native
+`resourcePersistencePath` rooted at `persist/v3` to match Wrangler's seed layout. Existing
+startup attestation, sanitized diagnostics and memoized disposal remain required.
+
+Local verification uses Wrangler 4.131.0, Miniflare 5.20260910.0-alpha and workerd 2026-09-10,
+with compatibility date `2026-04-22` and `enable_request_signal`. Both smoke modes pass,
+including seeded config visibility and the declared-KV matrix. A separate diagnostic writes
+namespace `...02`, stops the runtime and reads it in a fresh process before another write;
+this is not an additional CI phase or hosted evidence. The complete lifetime suite still
+fails its cold first case in two local runs, although each passes the other nine cases and
+the complete SDK pending-body witness case. Keep these strict timing failures and qualification
+gates open; loading a valid native manifest does not establish a timing or capability guarantee.
+
 ## Outbound Cutover Gates
 
 ### Dispatch-Slack Retirement (2026-10-27)

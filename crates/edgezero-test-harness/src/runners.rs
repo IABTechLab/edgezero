@@ -9,6 +9,56 @@ mod progress;
 mod readiness;
 mod response_headers;
 mod wire;
+
+const CLOUDFLARE_MODULE_ENTRIES: usize = 128;
+const CLOUDFLARE_MODULE_BYTES: u64 = 64 * 1024 * 1024;
+const CLOUDFLARE_MODULE_DEPTH: usize = 8;
+
+fn cloudflare_module_files(root: &Path) -> Result<Vec<String>> {
+    let metadata = fs::symlink_metadata(root)?;
+    require(
+        metadata.is_dir() && !metadata.is_symlink(),
+        "invalid module root",
+    )?;
+    let canonical = fs::canonicalize(root)?;
+    let mut directories = vec![(canonical, 0_usize)];
+    let mut files = Vec::new();
+    let mut entries = 0_usize;
+    let mut bytes = 0_u64;
+    while let Some((directory, depth)) = directories.pop() {
+        require(depth <= CLOUDFLARE_MODULE_DEPTH, "module tree is too deep")?;
+        for entry in fs::read_dir(directory)? {
+            entries += 1;
+            require(
+                entries <= CLOUDFLARE_MODULE_ENTRIES,
+                "module inventory is too large",
+            )?;
+            let path = entry?.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            require(
+                !metadata.is_symlink(),
+                "module inventory contains a symlink",
+            )?;
+            if metadata.is_dir() {
+                directories.push((path, depth + 1));
+            } else {
+                require(metadata.is_file(), "module inventory contains a non-file")?;
+                bytes = bytes
+                    .checked_add(metadata.len())
+                    .ok_or("module byte overflow")?;
+                require(
+                    bytes <= CLOUDFLARE_MODULE_BYTES,
+                    "module bytes exceed fixture bound",
+                )?;
+                files.push(path.to_str().ok_or("module path is not UTF-8")?.to_owned());
+            }
+        }
+    }
+    require(!files.is_empty(), "module inventory is empty")?;
+    files.sort_unstable();
+    Ok(files)
+}
+
 fn cargo_build() -> Result<Command> {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -1426,6 +1476,7 @@ fn provider_command(
         command.arg(serde_json::to_string(&json!({
             "config":run.join("wrangler.toml"),
             "modulesRoot":staged,
+            "moduleFiles":cloudflare_module_files(staged)?,
             "bindings":{
                 "FIXTURE_MODE":mode,
                 startup::NONCE:nonce,
@@ -2243,15 +2294,98 @@ mod tests {
     }
 
     #[test]
+    fn cloudflare_module_inventory_is_complete_confined_and_deterministic() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("worker")).unwrap();
+        fs::write(
+            root.path().join("worker/shim.mjs"),
+            b"export * from '../index.js';",
+        )
+        .unwrap();
+        fs::write(root.path().join("index.js"), b"export default {};").unwrap();
+        fs::write(root.path().join("index_bg.wasm"), b"\0asm").unwrap();
+        let canonical = fs::canonicalize(root.path()).unwrap();
+        let expected = ["index.js", "index_bg.wasm", "worker/shim.mjs"]
+            .map(|name| canonical.join(name).to_str().unwrap().to_owned());
+        assert_eq!(cloudflare_module_files(root.path()).unwrap(), expected);
+        assert_eq!(cloudflare_module_files(root.path()).unwrap(), expected);
+    }
+
+    #[test]
+    fn cloudflare_module_inventory_enforces_exact_byte_and_entry_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("module.wasm");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(CLOUDFLARE_MODULE_BYTES).unwrap();
+        assert_eq!(cloudflare_module_files(root.path()).unwrap().len(), 1);
+        file.set_len(CLOUDFLARE_MODULE_BYTES + 1).unwrap();
+        assert!(cloudflare_module_files(root.path()).is_err());
+        file.set_len(CLOUDFLARE_MODULE_BYTES).unwrap();
+        fs::write(root.path().join("extra.js"), b"x").unwrap();
+        assert!(cloudflare_module_files(root.path()).is_err());
+        fs::remove_file(path).unwrap();
+        fs::remove_file(root.path().join("extra.js")).unwrap();
+        for index in 0..CLOUDFLARE_MODULE_ENTRIES {
+            fs::write(root.path().join(format!("{index}.js")), []).unwrap();
+        }
+        assert_eq!(
+            cloudflare_module_files(root.path()).unwrap().len(),
+            CLOUDFLARE_MODULE_ENTRIES
+        );
+        fs::write(root.path().join("overflow.js"), []).unwrap();
+        assert!(cloudflare_module_files(root.path()).is_err());
+    }
+
+    #[test]
+    fn cloudflare_module_inventory_rejects_empty_missing_and_deep_trees() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(cloudflare_module_files(root.path()).is_err());
+        assert!(cloudflare_module_files(&root.path().join("absent")).is_err());
+        let mut directory = root.path().to_path_buf();
+        for _ in 0..=CLOUDFLARE_MODULE_DEPTH {
+            directory.push("nested");
+            fs::create_dir(&directory).unwrap();
+        }
+        fs::write(directory.join("module.js"), b"x").unwrap();
+        assert!(cloudflare_module_files(root.path()).is_err());
+        fs::remove_file(directory.join("module.js")).unwrap();
+        fs::remove_dir(&directory).unwrap();
+        fs::write(directory.parent().unwrap().join("module.js"), b"x").unwrap();
+        assert_eq!(cloudflare_module_files(root.path()).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cloudflare_module_inventory_rejects_source_and_root_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("private.js"), b"private-fixture-token").unwrap();
+        symlink(
+            outside.path().join("private.js"),
+            root.path().join("escape.js"),
+        )
+        .unwrap();
+        assert!(cloudflare_module_files(root.path()).is_err());
+        fs::remove_file(root.path().join("escape.js")).unwrap();
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+        assert!(cloudflare_module_files(root.path()).is_err());
+        assert!(cloudflare_module_files(&root.path().join("escape")).is_err());
+    }
+
+    #[test]
     fn cloudflare_runtime_command_preserves_native_listener_and_bindings() {
         let run = tempfile::tempdir().unwrap();
+        let staged = run.path().join("build");
+        fs::create_dir_all(staged.join("worker")).unwrap();
+        fs::write(staged.join("worker/shim.mjs"), b"export default {};").unwrap();
         let package = fixture_root().join("crates/fixture-cloudflare");
         let cli = Path::new("/usr/bin/true");
         let command = provider_command(
             "cloudflare",
             "retained",
             cli,
-            run.path(),
+            &staged,
             &package,
             run.path(),
             1234,
@@ -2263,7 +2397,11 @@ mod tests {
         assert_eq!(arguments[1], cli);
         let options: Value = serde_json::from_str(arguments[2].to_str().unwrap()).unwrap();
         assert_eq!(options["config"], json!(run.path().join("wrangler.toml")));
-        assert_eq!(options["modulesRoot"], json!(run.path()));
+        assert_eq!(options["modulesRoot"], json!(staged));
+        assert_eq!(
+            options["moduleFiles"],
+            json!(cloudflare_module_files(&staged).unwrap())
+        );
         assert_eq!(options["host"], "127.0.0.1");
         assert_eq!(options["port"], 1234);
         assert_eq!(
@@ -2285,6 +2423,20 @@ mod tests {
     #[test]
     fn native_workerd_bootstrap_preserves_options_and_owned_shutdown() {
         let root = tempfile::tempdir().unwrap();
+        let staged = root.path().join("staged");
+        let modules = staged.join("build");
+        fs::create_dir_all(modules.join("worker")).unwrap();
+        fs::write(
+            modules.join("worker/shim.mjs"),
+            b"export * from '../index.js';",
+        )
+        .unwrap();
+        fs::write(modules.join("index.js"), b"export default {};").unwrap();
+        fs::write(modules.join("index_bg.wasm"), b"\0asm").unwrap();
+        let staged = fs::canonicalize(staged).unwrap();
+        let modules = staged.join("build");
+        let module_files = cloudflare_module_files(&modules).unwrap();
+        fs::write(staged.join("outside.js"), b"private-fixture-token").unwrap();
         let package = root.path().join("node_modules/wrangler");
         fs::create_dir_all(package.join("bin")).unwrap();
         fs::write(
@@ -2295,12 +2447,12 @@ mod tests {
         fs::write(package.join("bin/wrangler.js"), "// fixture CLI").unwrap();
         fs::write(package.join("index.cjs"), r#"
 exports.unstable_getMiniflareWorkerOptions = (config) => {
-  if (config !== '/fixture/staged/wrangler.toml') throw new Error('wrong config');
+  const root = require('node:path').dirname(config);
   const failure = process.env.EDGEZERO_FIXTURE_LAUNCH_FAILURE;
   if (failure === 'api') throw new Error('private-fixture-token');
-  return { main:failure === 'outside-main' ? '/outside/index.js' : '/fixture/staged/build/worker/shim.mjs',
+  return { main:failure === 'outside-main' ? '/outside/index.js' : root + '/build/worker/shim.mjs',
     workerOptions:{compatibilityDate:'2026-04-22',compatibilityFlags:['enable_request_signal'],
-      rootPath:failure === 'omit-root' ? undefined : failure === 'foreign-root' ? '/outside/private-fixture-token' : failure === 'relative-root' ? 'fixture/staged' : '/fixture/staged',
+      rootPath:failure === 'omit-root' ? undefined : failure === 'foreign-root' ? '/outside/private-fixture-token' : failure === 'relative-root' ? 'fixture/staged' : root,
       modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],
       bindings:{fixture_marker:'fixture-only-value',FIXTURE_MODE:'old',EDGEZERO_FIXTURE_LAUNCH_NONCE:'old'},
       kvNamespaces:{fixture_config:failure === 'remote-kv' ? {id:'config-id',remoteProxyConnectionString:'private-fixture-token'} : {id:'config-id'},fixture_kv:{id:'kv-id'}},
@@ -2322,10 +2474,29 @@ class MiniflareCoreError extends Error { constructor(code,message) { super(messa
 exports.MiniflareCoreError = MiniflareCoreError;
 exports.Log = Log;
 exports.LogLevel = {WARN:2};
+const converted = new WeakMap();
+exports.compileModuleRules = (rules) => {
+  require('node:assert/strict').deepEqual(rules, [
+    {type:'ESModule',include:['**/*.js','**/*.mjs']},
+    {type:'CompiledWasm',include:['**/*.wasm']},
+  ]);
+  return [{type:'ESModule',include:/\.(?:js|mjs)$/},{type:process.env.EDGEZERO_FIXTURE_LAUNCH_FAILURE === 'unknown-type' ? 'Unknown' : 'CompiledWasm',include:/\.wasm$/}];
+};
+exports.testRegExps = (matcher, name) => matcher.test(name);
+exports.convertV4MiniflareOptions = (options) => {
+  if (process.env.EDGEZERO_FIXTURE_LAUNCH_FAILURE === 'convert') throw new Error('private-fixture-token');
+  if (options.modulesRules !== undefined || options.scriptPath !== undefined || options.defaultPersistRoot !== undefined || !Array.isArray(options.modules)) throw new Error('legacy source options');
+  if (options.modules.some(module => module.type === 'Unknown')) throw new Error('private-fixture-token');
+  const native = {workers:[{config:{type:'worker',name:''}}],log:options.log,handleStructuredLogs:options.handleStructuredLogs};
+  converted.set(native, options);
+  return native;
+};
+if (process.env.EDGEZERO_FIXTURE_LAUNCH_FAILURE === 'missing-converter') delete exports.convertV4MiniflareOptions;
 exports.Miniflare = class {
   constructor(options) {
+    if (!converted.has(options) || options.workers.length !== 1) throw new Error('legacy constructor');
     if (!(options.log instanceof Log) || typeof options.handleStructuredLogs !== 'function') throw new Error('missing logger');
-    const {log,...serialized} = options;
+    const {log,...serialized} = converted.get(options);
     console.log(JSON.stringify(serialized));
     const failure = process.env.EDGEZERO_FIXTURE_LAUNCH_FAILURE;
     const live = setInterval(() => {}, 60000);
@@ -2386,10 +2557,52 @@ exports.Miniflare = class {
             "foreign-root",
             "relative-root",
             "omit-root",
+            "missing-converter",
+            "convert",
+            "missing-inventory",
+            "missing-main",
+            "duplicate-module",
+            "foreign-module",
+            "empty-inventory",
+            "oversized-inventory",
+            "noncanonical-module",
+            "unknown-type",
+            "directory-module",
         ] {
-            let options = json!({"config":"/fixture/staged/wrangler.toml","modulesRoot":"/fixture/staged/build",
+            let mut options = json!({"config":staged.join("wrangler.toml"),"modulesRoot":modules,"moduleFiles":module_files,
                 "bindings":{"FIXTURE_MODE":"retained",startup::NONCE:"owned-launch"},
                 "host":"127.0.0.1","port":1234,"persist":"/fixture/persist"});
+            match failure {
+                "missing-inventory" => {
+                    options.as_object_mut().unwrap().remove("moduleFiles");
+                }
+                "missing-main" => {
+                    options["moduleFiles"].as_array_mut().unwrap().pop();
+                }
+                "duplicate-module" => {
+                    options["moduleFiles"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!(module_files[0]));
+                }
+                "foreign-module" => {
+                    options["moduleFiles"][0] = json!(staged.join("outside.js"));
+                }
+                "empty-inventory" => {
+                    options["moduleFiles"] = json!([]);
+                }
+                "oversized-inventory" => {
+                    options["moduleFiles"] =
+                        json!(vec![&module_files[0]; CLOUDFLARE_MODULE_ENTRIES + 1]);
+                }
+                "noncanonical-module" => {
+                    options["moduleFiles"][0] = json!(modules.join("worker/../index.js"));
+                }
+                "directory-module" => {
+                    options["moduleFiles"][0] = json!(modules.join("worker"));
+                }
+                _ => {}
+            }
             let expected = i32::from(!matches!(
                 failure,
                 "none" | "starting" | "waiting" | "stop-event" | "omit-root"
@@ -2415,18 +2628,29 @@ exports.Miniflare = class {
                     | "email"
                     | "foreign-root"
                     | "relative-root"
+                    | "missing-converter"
+                    | "convert"
+                    | "missing-inventory"
+                    | "missing-main"
+                    | "duplicate-module"
+                    | "foreign-module"
+                    | "empty-inventory"
+                    | "oversized-inventory"
+                    | "noncanonical-module"
+                    | "unknown-type"
+                    | "directory-module"
             ) {
                 assert!(text.is_empty(), "{failure}");
                 assert!(!diagnostic.contains("private-fixture-token"));
                 continue;
             }
-            let mut expected_options = json!({"compatibilityDate":"2026-04-22","compatibilityFlags":["enable_request_signal"],"rootPath":"/fixture/staged",
-                    "modulesRules":[{"type":"ESModule","include":["**/*.js","**/*.mjs"]},{"type":"CompiledWasm","include":["**/*.wasm"]}],
+            let mut expected_options = json!({"compatibilityDate":"2026-04-22","compatibilityFlags":["enable_request_signal"],"rootPath":staged,
+                    "modules":[{"type":"ESModule","path":modules.join("worker/shim.mjs")},{"type":"ESModule","path":modules.join("index.js")},{"type":"CompiledWasm","path":modules.join("index_bg.wasm")}],
                     "bindings":{"fixture_marker":"fixture-only-value","FIXTURE_MODE":"retained",startup::NONCE:"owned-launch"},
                     "kvNamespaces":{"fixture_config":{"id":"config-id"},"fixture_kv":{"id":"kv-id"}},
                     "email":{"send_email":[]},
-                    "scriptPath":"/fixture/staged/build/worker/shim.mjs","modules":true,"modulesRoot":"/fixture/staged/build",
-                    "host":"127.0.0.1","port":1234,"defaultPersistRoot":"/fixture/persist/v3","liveReload":false,
+                    "modulesRoot":modules,
+                    "host":"127.0.0.1","port":1234,"resourcePersistencePath":"/fixture/persist/v3",
                     "cf":false,"telemetry":{"enabled":false}});
             if failure == "omit-root" {
                 expected_options.as_object_mut().unwrap().remove("rootPath");

@@ -12,6 +12,55 @@
 
 ## Status and Authority
 
+### Cloudflare Native Module Manifest (2026-11-01)
+
+Repair the existing local launcher for the selected Wrangler 4.131.0 / Miniflare
+5.20260910.0-alpha / workerd 2026-09-10 combination. This supersedes the unresolved constructor
+boundary below, not its failed observations or the separate lifetime/hosted qualification gates.
+No production adapter, interface, SDK/runtime pin, CI invocation or acceptance binding changes.
+
+- [x] Enumerate staged files in Rust with a mandatory sorted inventory: at most 128 total
+      directory/file entries, 64 MiB aggregate regular-file bytes and eight directory levels
+      below the root. Reject empty/missing trees, symlinks, non-files and non-UTF-8 paths before
+      passing paths, never module contents, in the existing launcher arguments.
+- [x] Apply the selected SDK's rule compiler and matcher to that inventory, preserve rule
+      precedence and put the verified ESModule main first. Convert explicit modules through the
+      SDK's official converter and construct one native runtime. Delete the lossy legacy
+      constructor shape; add no version fallback or parallel filesystem walker.
+- [x] Preserve exact KV namespace IDs and use `resourcePersistencePath = persist/v3`, matching
+      Wrangler's local seed layout. Preserve confined startup, private diagnostics, attestation,
+      signal races and exactly-once memoized disposal. The inventory assumes owned staged files,
+      not hostile concurrent filesystem mutation or a provider allocation guarantee.
+- [x] Demonstrate red/green inventory and launcher tests, then pass all 442 harness tests with
+      two existing ignored tests, strict harness Clippy, formatting and independent spec/security
+      and quality reviews. Local smoke passes both assembly modes, seeded config visibility,
+      declared-KV assertions and the existing outbound-progress sequence.
+- [x] Run a separate bounded, local restart diagnostic through the unchanged launcher and
+      existing linked-KV routes. Seed config once; write/read namespace `...02`, terminate,
+      start a fresh process and read before another write. Both requested process terminations
+      complete within five seconds. This is working-tree characterization, not a new CI suite,
+      config-persistence-without-reseed qualification or hosted lifecycle proof.
+- [ ] Pass the complete unchanged Cloudflare lifetime suite. Both local attempts run all ten
+      cases; nine pass, including native SDK Pending/release witnesses, and the cold first case
+      fails. First: begin at 8 ms versus 2 ms +/- 5 ms. Second: slot elapsed 153 ms versus
+      146 ms +/- 5 ms. Retain both failures without retries that manufacture qualification,
+      wider tolerances, partial-case acceptance or an inventory promotion.
+
+The first pending-body case observes all three SDK reads Pending at 36 ms and exactly one source
+release per slot at 202-203 ms, before `next` returns, retaining the original 200 ms cutoff.
+The second attempt also passes that complete case. These results do not override either
+whole-suite failure. Logs and raw records are under `/private/tmp/pr275-cf-manifest-*`, including
+`smoke`, `lifetimes`, `lifetimes-recheck` and `persistence-recheck`; the initial ad hoc persistence
+probe's incorrect fixture route/exit assertion is retained separately and receives no credit.
+Compatibility remains `2026-04-22` with `enable_request_signal`. Inventory stays 153 ready/358
+planned and unqualified; Spin/Fastly native-read witnesses, candidate freeze and hosted evidence
+remain open.
+
+The existing consolidated dependency/forwarding/focus compiler checks, 200 Node tooling tests,
+legacy/docs/inventory guards, historical API identities and documentation format/lint/build pass.
+Root Rust sources and CI configuration are unchanged; the prior root-gate counts below are not
+relabelled as fresh execution for this fixture-only checkpoint.
+
 ### Native Pending-Body Witnesses: Axum And Cloudflare (2026-11-01)
 
 Strengthen the existing pending-cutoff fixture without changing production outbound contracts,

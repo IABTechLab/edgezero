@@ -1,4 +1,4 @@
-const { realpathSync } = require("node:fs");
+const { lstatSync, realpathSync } = require("node:fs");
 const { createRequire } = require("node:module");
 const { dirname, isAbsolute, join, relative, sep } = require("node:path");
 
@@ -17,9 +17,15 @@ async function serve() {
     throw new Error("selected executable is outside the Wrangler package");
   }
   const wrangler = selected("wrangler");
-  const { Miniflare, MiniflareCoreError, Log, LogLevel } = createRequire(
-    selected.resolve("wrangler"),
-  )("miniflare");
+  const {
+    Miniflare,
+    MiniflareCoreError,
+    Log,
+    LogLevel,
+    compileModuleRules,
+    convertV4MiniflareOptions,
+    testRegExps,
+  } = createRequire(selected.resolve("wrangler"))("miniflare");
   const options = JSON.parse(serialized);
   let worker;
   let stopping = false;
@@ -97,25 +103,64 @@ async function serve() {
         "fixture requires bundled source and no external workers",
       );
     }
-    worker = new Miniflare({
-      ...mapped.workerOptions,
-      scriptPath: mapped.main,
-      modules: true,
-      modulesRoot: options.modulesRoot,
-      modulesRules: [
-        { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
-        ...mapped.workerOptions.modulesRules,
-      ],
+    const root = realpathSync(options.modulesRoot);
+    if (
+      !Array.isArray(options.moduleFiles) ||
+      !options.moduleFiles.length ||
+      options.moduleFiles.length > 128
+    ) {
+      throw new Error("fixture requires a bounded module inventory");
+    }
+    const rules = compileModuleRules([
+      { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+      ...mapped.workerOptions.modulesRules,
+    ]);
+    const names = new Set();
+    const modules = [];
+    for (const path of options.moduleFiles) {
+      const name = relative(root, path);
+      if (
+        !isAbsolute(path) ||
+        isAbsolute(name) ||
+        name === ".." ||
+        name.startsWith(`..${sep}`) ||
+        !lstatSync(path).isFile() ||
+        realpathSync(path) !== path ||
+        names.has(name)
+      ) {
+        throw new Error(
+          "fixture module is duplicate or outside its staged root",
+        );
+      }
+      names.add(name);
+      const rule = rules.find((candidate) =>
+        testRegExps(candidate.include, name.split(sep).join("/")),
+      );
+      if (rule) modules.push({ type: rule.type, path });
+    }
+    const main = realpathSync(mapped.main);
+    const first = modules.findIndex((module) => module.path === main);
+    if (first < 0 || modules[first].type !== "ESModule") {
+      throw new Error("fixture entrypoint is absent from its module inventory");
+    }
+    modules.unshift(...modules.splice(first, 1));
+    // Resolve rules before conversion; the SDK intentionally refuses lossy rule conversion.
+    const settings = { ...mapped.workerOptions };
+    delete settings.modulesRules;
+    const native = convertV4MiniflareOptions({
+      ...settings,
+      modules,
+      modulesRoot: root,
       bindings: { ...mapped.workerOptions.bindings, ...options.bindings },
       host: options.host,
       port: options.port,
-      defaultPersistRoot: join(options.persist, "v3"),
-      liveReload: false,
+      resourcePersistencePath: join(options.persist, "v3"),
       cf: false,
       telemetry: { enabled: false },
       log: new RuntimeLog(LogLevel.WARN),
       handleStructuredLogs: ({ message }) => console.log(message),
     });
+    worker = new Miniflare(native);
     if (stopping) {
       await dispose();
       return;
