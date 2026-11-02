@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 qualification = ["fixture-core/qualification"]
-progress = ["fixture-core/qualification", "dep:fixture-spin-support", "dep:futures", "dep:http-body", "edgezero-adapter-spin/test-utils"]
+progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "dep:fixture-spin-support", "dep:futures", "dep:http-body", "edgezero-adapter-spin/test-utils"]
 
 [dependencies]
 fixture-spin-support = { workspace = true, optional = true }

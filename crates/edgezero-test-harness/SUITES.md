@@ -1462,11 +1462,12 @@ the host's complete guest-response return before explicitly releasing origins. E
 head write and waiting phase must precede that boundary, and closure must follow release.
 Equal timestamps do not override the required event-index ordering.
 
-Axum and Cloudflare's pending-cutoff fixtures additionally attach three request-owned,
+Axum, Cloudflare and Spin's pending-cutoff fixtures additionally attach three request-owned,
 `test-utils` native SDK witnesses. Preparation records the actual target, mode, governing
 budget and clock. A head counts only after successful native-head construction. Axum observes
-the `response.chunk()` future; Cloudflare observes the SDK ByteStream, before cooperative or
-deadline wrappers. The first inner poll result is retained, not replaced by a later Pending.
+the `response.chunk()` future; Cloudflare observes the SDK ByteStream; Spin observes the borrowed
+WASI `body_reader.read()` future inside the unchanged deadline race. Cooperative or timer Pending
+cannot supply this evidence. The first inner poll result is retained, not replaced by a later Pending.
 Source release counts only after the underlying SDK owner drops. No additional read, poll,
 timer, wakeup or body copy is introduced, and unattached requests add no observer clock samples.
 
@@ -1476,11 +1477,19 @@ Batch/BatchCutoff and the original deadline,
 one head and a real SDK read returning Pending before 200 ms, and exactly one source release
 between cutoff and return. Early release also fails. Missing, reused, Ready-first, late,
 backwards and incomplete evidence fails.
-The pending-head case is a zero-head/zero-read control. Only a completely passing Axum/Cloudflare
+The pending-head case is a zero-head/zero-read control. Only a completely passing Axum/Cloudflare/Spin
 case reports `body_phase_evidence: sdk-read-pending`; a failed case gains no phase credit.
 
-Spin and Fastly still report `body_phase_evidence: host-head-written-only`. Writing the host's
-head does not prove those SDKs consumed it or entered a body read/readiness wait before cutoff.
+Spin's full source owns its reader, trailers and completion writer; the release observation is
+after their synchronous guest destruction, not completion of host teardown or any SDK-initiated
+background completion notification. Local Spin 4.1.0 passes the complete pending-body case with
+all three reads Pending around 38 ms and release before the unchanged 205 ms ceiling. Its broader
+lifetime suite retains strict timing failures; this is not a whole-suite or hosted qualification.
+
+Fastly still reports `body_phase_evidence: host-head-written-only`. Writing the host's head does
+not prove its SDK consumed it or entered a native readiness wait before cutoff. That witness must
+be distinctly labelled: the existing timed select's entry is not a returned SDK-read Pending.
+No extra `is_ready` probe, blocking read or outer-stream Pending substitutes for this missing proof.
 These probes do not close the complete scenario 16 acceptance leg or certify host cancellation.
 Release ends the fixture's hold; it is not evidence of provider teardown.
 Report-body reads are capped at 64 bytes; the caps slot has the separate limits above.

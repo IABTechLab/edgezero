@@ -13,7 +13,7 @@ workspace = true
 [features]
 default = []
 spin = ["dep:spin-sdk"]
-test-utils = []
+test-utils = ["edgezero-core/test-utils"]
 cli = ["dep:edgezero-adapter", "edgezero-adapter/cli", "dep:ctor", "dep:rusqlite", "dep:toml", "dep:toml_edit", "dep:walkdir"]
 
 [dependencies]

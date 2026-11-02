@@ -13,9 +13,11 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
-- Add request-owned, test-only native SDK head/read/release witnesses for Axum and Cloudflare.
+- Add request-owned, test-only native SDK head/read/release witnesses for Axum, Cloudflare and Spin.
   Require them in the existing pending-cutoff fixture instead of treating origin-written headers
   as SDK body-read evidence. Preserve strict timing and leave other-provider and hosted gates open.
+  Observe Spin's borrowed WASI read inside the unchanged deadline race and release after dropping
+  the complete SDK-owning source, before cooperative wrappers. Keep Fastly readiness distinct.
 - Validate Wrangler's optional fixture `rootPath` against the owned config directory before
   constructing its local runtime. Materialize a bounded Rust-owned staged-module inventory using
   the selected SDK's rules and official Miniflare 5 converter, with one native constructor and

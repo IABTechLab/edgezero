@@ -584,6 +584,10 @@ mod spin_impl {
     };
     use edgezero_core::http::header::ACCEPT_ENCODING;
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+    #[cfg(feature = "test-utils")]
+    use edgezero_core::outbound::test_support::{
+        NativeBodyRecorder, native_body_recorder, observe_sdk_read, own_sdk_source,
+    };
     use edgezero_core::outbound::{
         IndependentOutboundProgress, OutboundBatch, OutboundBatchDriverEvent,
         OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
@@ -1141,13 +1145,27 @@ mod spin_impl {
             )
         })?;
         let native_headers = response_headers(&response)?;
+        #[cfg(feature = "test-utils")]
+        let recorder = native_body_recorder(&context);
         // The encoded stream alone owns the WASI reader, trailers and completion writer.
-        let native_encoded = super::cooperative_stream(response_stream(response, budget, time));
+        let source = response_stream(
+            response,
+            budget,
+            time,
+            #[cfg(feature = "test-utils")]
+            recorder.clone(),
+        );
+        let native_encoded = super::cooperative_stream(source);
         #[cfg(feature = "test-utils")]
         let encoded = super::response_probe::observe_response_head(native_encoded);
         #[cfg(not(feature = "test-utils"))]
         let encoded = native_encoded;
-        super::head::response_head(status, native_headers, encoded, context)
+        let head = super::head::response_head(status, native_headers, encoded, context)?;
+        #[cfg(feature = "test-utils")]
+        if let Some(observation) = recorder {
+            observation.head_received();
+        }
+        Ok(head)
     }
 
     fn response_headers(response: &Response) -> Result<HeaderMap, EdgeError> {
@@ -1181,14 +1199,21 @@ mod spin_impl {
         response: Response,
         budget: DispatchBudget,
         time: OutboundTime,
+        #[cfg(feature = "test-utils")] recorder: Option<NativeBodyRecorder>,
     ) -> BodyStream {
         let (completion_writer, result_reader) = wit_future::new(default_response_result);
         let (mut body_reader, trailer_reader) = Response::consume_body(response, result_reader);
-        stream! {
+        #[cfg(feature = "test-utils")]
+        let ownership = recorder.clone();
+        let source = stream! {
             let mut ready_reads = 0_usize;
             let mut previous = time.clock().now();
             loop {
-                let read = body_reader.read(Vec::with_capacity(RESPONSE_READ_BYTES));
+                let native_read = body_reader.read(Vec::with_capacity(RESPONSE_READ_BYTES));
+                #[cfg(feature = "test-utils")]
+                let read = observe_sdk_read(native_read, recorder.as_ref());
+                #[cfg(not(feature = "test-utils"))]
+                let read = native_read;
                 let (result, chunk) = match race_deadline(read, budget, &time, &mut previous, |_result| None).await {
                     Ok(value) => value,
                     Err(error) => {
@@ -1257,7 +1282,12 @@ mod spin_impl {
                 }
             }
         }
-        .boxed_local()
+        .boxed_local();
+        #[cfg(feature = "test-utils")]
+        let encoded = own_sdk_source(source, ownership);
+        #[cfg(not(feature = "test-utils"))]
+        let encoded = source;
+        encoded
     }
 
     fn budget_remaining(

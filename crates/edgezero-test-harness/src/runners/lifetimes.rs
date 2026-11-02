@@ -231,7 +231,7 @@ fn checks(
                 .map(|partial|json!({"status":partial.status,"body_bytes":partial.body,"reason":partial.reason})),
             "clock_correlation":clock_correlation,"timeout_contract":timeout_contract,
             "timing_diagnostics":timing_diagnostics(case,&report,&origin),"body_phase_evidence":if case == "pending-body-cutoff" && result.is_ok() {
-                Some(if matches!(adapter, "axum" | "cloudflare") { "sdk-read-pending" } else { "host-head-written-only" })
+                Some(if matches!(adapter, "axum" | "cloudflare" | "spin") { "sdk-read-pending" } else { "host-head-written-only" })
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
                 "header_ns":reply["header_ns"],"headers":reply["headers"]})),"qualification":false}))?;
@@ -407,7 +407,7 @@ fn validate(
         return validate_handoff(report, events, origin);
     }
     if pending_cutoff(case) {
-        if matches!(boundary.name, "axum" | "cloudflare") {
+        if matches!(boundary.name, "axum" | "cloudflare" | "spin") {
             validate_native_pending(boundary.origin, case, token, report, events)?;
         }
         return validate_pending_cutoff(case, report, events, origin);
@@ -3101,7 +3101,7 @@ mod tests {
     fn pending_cutoff_cannot_use_host_heads_as_native_sdk_read_evidence() {
         let (mut report, origin) = pending_cutoff_sample("pending-body-cutoff");
         report.as_object_mut().unwrap().remove("native_body");
-        for adapter in ["axum", "cloudflare"] {
+        for adapter in ["axum", "cloudflare", "spin"] {
             assert!(
                 validate(
                     AdapterBoundary {
@@ -3117,25 +3117,23 @@ mod tests {
                 "{adapter} must require actual SDK read evidence"
             );
         }
-        for adapter in ["fastly", "spin"] {
-            validate(
-                AdapterBoundary {
-                    name: adapter,
-                    ..AXUM
-                },
-                "pending-body-cutoff",
-                "sample",
-                &report,
-                &origin,
-            )
-            .unwrap();
-        }
+        validate(
+            AdapterBoundary {
+                name: "fastly",
+                ..AXUM
+            },
+            "pending-body-cutoff",
+            "sample",
+            &report,
+            &origin,
+        )
+        .unwrap();
     }
 
     #[test]
     fn native_body_cutoff_rejects_missing_reused_ready_late_and_unreleased_witnesses() {
         let (report, origin) = pending_cutoff_sample("pending-body-cutoff");
-        for adapter in ["axum", "cloudflare"] {
+        for adapter in ["axum", "cloudflare", "spin"] {
             validate(
                 AdapterBoundary {
                     name: adapter,
@@ -3217,7 +3215,7 @@ mod tests {
     #[test]
     fn native_head_cutoff_is_a_zero_head_and_zero_read_control() {
         let (report, origin) = pending_cutoff_sample("pending-head-cutoff");
-        for adapter in ["axum", "cloudflare"] {
+        for adapter in ["axum", "cloudflare", "spin"] {
             validate(
                 AdapterBoundary {
                     name: adapter,
@@ -3259,19 +3257,31 @@ mod tests {
     #[test]
     fn native_body_evidence_rejects_early_release_and_same_path_at_another_origin() {
         let (report, origin) = pending_cutoff_sample("pending-body-cutoff");
-        for (field, value) in [
-            ("/native_body/0/released_at_us", json!(40000)),
-            (
-                "/native_body/0/preparation/target_uri",
-                json!("http://127.0.0.1:8081/lifetimes/sample/pending-body-cutoff/a"),
-            ),
-        ] {
-            let mut changed = report.clone();
-            *changed.pointer_mut(field).unwrap() = value;
-            assert!(
-                validate(AXUM, "pending-body-cutoff", "sample", &changed, &origin).is_err(),
-                "{field}"
-            );
+        for adapter in ["axum", "cloudflare", "spin"] {
+            for (field, value) in [
+                ("/native_body/0/released_at_us", json!(40000)),
+                (
+                    "/native_body/0/preparation/target_uri",
+                    json!("http://127.0.0.1:8081/lifetimes/sample/pending-body-cutoff/a"),
+                ),
+            ] {
+                let mut changed = report.clone();
+                *changed.pointer_mut(field).unwrap() = value;
+                assert!(
+                    validate(
+                        AdapterBoundary {
+                            name: adapter,
+                            ..AXUM
+                        },
+                        "pending-body-cutoff",
+                        "sample",
+                        &changed,
+                        &origin
+                    )
+                    .is_err(),
+                    "{adapter}: {field}"
+                );
+            }
         }
     }
 

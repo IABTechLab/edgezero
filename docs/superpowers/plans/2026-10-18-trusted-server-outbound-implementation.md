@@ -12,6 +12,63 @@
 
 ## Status and Authority
 
+### Spin Native Pending-Body Witness (2026-11-01)
+
+Extend the existing request-owned witness to Spin without new core APIs, report schemas,
+observer types, schedulers, SDK calls, timers, wakeups or production policy changes. Read-only Spin
+and Fastly investigations independently recommend this scope: Spin can use the existing proof;
+Fastly needs a distinctly labelled native-wait witness, not an inferred SDK-read Pending.
+
+- [x] Forward Spin's `test-utils` feature to core and enable the existing fixture witness feature.
+      Capture the recorder from the prepared context, mark the head only after successful shared
+      construction, observe the raw borrowed WASI read future inside the unchanged deadline race,
+      and track destruction of the complete SDK-owning stream before cooperative wrapping.
+- [x] Require Spin's three witnesses in the existing pending-head/body cases and extend all
+      existing negative controls: missing/reused/Ready-first/late/backwards evidence, foreign
+      origin, early release and missing/duplicate ownership. Preserve the 34/200/205 ms bounds,
+      prepared metadata, original clock and zero-head/read control. Add no CI invocation.
+- [x] Demonstrate the harness red/green failure for accepting only host heads. The real local
+      Spin run before instrumentation fails the pending-body case with missing `head_at_us`;
+      its prepared witnesses correctly report zero heads, reads and owners. Retain that failure.
+- [x] Run actual Spin 4.1.0 after instrumentation. The complete pending-body case passes in both
+      runs, with no fake transport or extra request. The final code records first Pending at
+      38.238-38.321 ms and exactly one source release per slot at 203.806-203.845 ms, before
+      `next` returns. The pending-head control remains head/read/owner-free.
+- [ ] Complete every lifetime timing assertion. The intermediate suite passes eight of ten;
+      the final suite passes nine of ten, retaining the cold first-case arrival mismatch:
+      163.147 ms versus 146 ms +/- 5 ms. Neither partial result closes the full suite or scenario.
+- [x] Finish final native/WASI lint, owning tests, root gates, docs and independent review before
+      committing this checkpoint.
+
+Guest source destruction does not certify completed host teardown: the SDK completion-writer
+drop can initiate its existing background notification. Do not claim otherwise. No Fastly
+instrumentation is added: its timed native select returning at cutoff cannot be backdated to
+a pre-cutoff Pending return, and outer progress Pending is not an SDK-read observation. Keep
+the separately labelled native-wait proof open without changing the requirement or adding a probe.
+
+Local records use `/private/tmp/pr275-spin-witness-*`, including `runtime-red`, `runtime-green`
+and `runtime-final`. Initial WASM lint rejects two shadowed bindings; rename them without
+suppressions and check both `test-utils` and production-only WASM builds. A PATH-selected
+Wasmtime 45.0.0 SDK run fails the required 0.3.2 ABI; use the verified existing 48.0.2 pin for
+acceptance and retain the mismatch as failed setup evidence, not a provider failure. No runtime
+pin, capability, acceptance binding or normative digest changes. Inventory stays 153 ready/358
+planned and unqualified; Cloudflare's complete timing gate, Fastly native-wait evidence,
+candidate freeze and hosted qualification remain open.
+
+All five root gates pass: 2,645 tests across 33 binaries, one existing ignored, root formatting,
+strict workspace Clippy, all-adapter feature compilation and Spin WASM compilation. Spin's native
+suite passes 114 tests; its actual SDK contract/resource binaries pass 55 with verified Wasmtime
+48.0.2. Strict WASM Clippy passes with and without `test-utils`; harness Clippy, format, docs
+lint/format/build, legacy/docs/inventory guards and historical/scoped API identities pass.
+Independent specification/ownership and code-quality reviews are clear.
+
+The complete harness initially reports 440 passed, two failed and two ignored: the unchanged
+process-group signal-helper timeout and three-second nested-cancellation bound fail during
+concurrent builds. After the broad builds, its unchanged serialized rerun passes 442 with two
+existing ignored tests in 157.55 seconds. Retain both logs, without extending timeouts, filtering
+tests or relabelling the failed run. No demo/template or other-adapter edit is required for this
+test-only integration; no compatibility path or extra CI job is added.
+
 ### Cloudflare Native Module Manifest (2026-11-01)
 
 Repair the existing local launcher for the selected Wrangler 4.131.0 / Miniflare
