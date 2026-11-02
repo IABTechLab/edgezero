@@ -47,12 +47,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Retrieve Node version
-        id: node-version
-        run: echo "node-version=$(awk '$1 == "nodejs" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: ${{ steps.node-version.outputs.node-version }}
+          node-version-file: .tool-versions
       - name: Use the declared Rust toolchain
         run: |
           version=$(awk '$1 == "rust" { print $2 }' .tool-versions)
@@ -92,12 +89,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Retrieve Node version
-        id: node-version
-        run: echo "node-version=$(awk '$1 == "nodejs" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: ${{ steps.node-version.outputs.node-version }}
+          node-version-file: .tool-versions
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: axum-context-${{ github.run_id }}-${{ github.run_attempt }}
@@ -162,18 +156,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Retrieve Node version
-        id: node-version
-        run: echo "node-version=$(awk '$1 == "nodejs" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: ${{ steps.node-version.outputs.node-version }}
+          node-version-file: .tool-versions
       - name: Select exact immutable artifacts from this run and attempt
         id: artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/artifacts.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            | jq '{artifacts: [.[].artifacts[]]}' > "$RUNNER_TEMP/artifacts.json"
           ids=$(node examples/container-publishing/verify_artifacts.mjs artifact-ids \
             "$RUNNER_TEMP/artifacts.json" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT")
           echo "ids=$ids" >> "$GITHUB_OUTPUT"
@@ -197,6 +189,7 @@ jobs:
           docker run -d --name "$registry" -p 127.0.0.1::5000 "$REGISTRY_IMAGE"
           port=$(docker port "$registry" 5000/tcp | awk -F: '{print $NF}')
           for _ in $(seq 1 30); do curl --fail --silent "http://127.0.0.1:$port/v2/" && break; sleep 1; done
+          curl --fail --silent "http://127.0.0.1:$port/v2/" >/dev/null
           ./examples/container-publishing/publish.sh "127.0.0.1:$port/fixture" fixture \
             "$RUNNER_TEMP/bundles/accepted-amd64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             "$RUNNER_TEMP/bundles/accepted-arm64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \

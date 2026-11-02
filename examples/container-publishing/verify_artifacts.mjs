@@ -467,8 +467,8 @@ export async function check_tag(repository, tag, digest, authFile = undefined) {
   const headers = { Accept: [INDEX, MANIFEST, 'application/vnd.docker.distribution.manifest.list.v2+json', 'application/vnd.docker.distribution.manifest.v2+json'].join(', ') };
   if (host === 'ghcr.io') {
     require(authFile !== undefined, 'GHCR auth file required');
-    const auth = load(authFile).auths['ghcr.io'].auth;
-    require(typeof auth === 'string' && auth, 'Registry credentials missing');
+    const auth = load(authFile).auths?.['ghcr.io']?.auth;
+    require(typeof auth === 'string' && auth, 'GHCR requires inline auths["ghcr.io"].auth; Docker credential helpers are not supported');
     const query = new URLSearchParams({ service: host, scope: `repository:${name}:pull` });
     const response = await request(`https://${host}/token?${query}`, { Authorization: 'Basic ' + auth }, 1000000);
     require(response.status === 200, `Registry token check failed: HTTP ${response.status}`);

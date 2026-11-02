@@ -95,7 +95,7 @@ runs only from `workflow_dispatch` on `refs/heads/main`. Copy it as
 - `examples/container-publishing/publish.sh`
 - `scripts/test_axum_container_handoff.sh`
 
-Keep those relative locations. The helpers require Node.js 24.12.0 and jq, and the
+Keep those relative locations. The helpers require Node.js 24.20.0 and jq, and the
 workflow installs the declared Node.js version. No npm dependencies are needed.
 Commit the app's portable dependency manifests,
 `Cargo.lock`, `.tool-versions`, Dockerfile and executable

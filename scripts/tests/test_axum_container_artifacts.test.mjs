@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import http from 'node:http';
+import https from 'node:https';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -195,6 +196,37 @@ test('registry tag preflight fails closed using real HTTP', async t => {
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   await assert.rejects(v.check_tag(repository, 'fixture', expected));
 });
+test('GHCR preflight explains missing inline credentials without contacting the registry', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-auth-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const authFile = path.join(root, 'config.json');
+  const network = t.mock.method(https, 'get', () => assert.fail('invalid credentials must not reach the registry'));
+  for (const config of [{}, { auths: {} }, { auths: { 'ghcr.io': {} } },
+    { auths: { 'ghcr.io': { auth: '' } } }, { credsStore: 'fixture' },
+    { auths: {}, credHelpers: { 'ghcr.io': 'fixture' } }]) {
+    put(authFile, config);
+    await assert.rejects(v.check_tag('ghcr.io/owner/app', 'v1.0.0', 'sha256:' + 'a'.repeat(64), authFile),
+      error => error.name === 'Error' && /inline.*credential helpers.*not supported/.test(error.message));
+  }
+  assert.equal(network.mock.callCount(), 0);
+});
+
+test('GHCR preflight still uses inline credentials for its token request', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-auth-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const authFile = path.join(root, 'config.json');
+  const auth = Buffer.from('fixture:synthetic-token').toString('base64');
+  put(authFile, { auths: { 'ghcr.io': { auth } } });
+  const network = t.mock.method(https, 'get', (url, options) => {
+    assert.equal(new URL(url).origin, 'https://ghcr.io');
+    assert.equal(options.headers.Authorization, 'Basic ' + auth);
+    throw new Error('test stopped before network access');
+  });
+  await assert.rejects(v.check_tag('ghcr.io/owner/app', 'v1.0.0', 'sha256:' + 'a'.repeat(64), authFile),
+    /test stopped before network access/);
+  assert.equal(network.mock.callCount(), 1);
+});
+
 test('registry preflight accepts valid image-name separators and rejects malformed paths', async t => {
   const body = Buffer.from('index'), expected = 'sha256:' + sha(body), requests = [];
   const server = http.createServer((request, response) => { requests.push(request.url); response.end(body); });

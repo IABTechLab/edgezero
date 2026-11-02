@@ -145,16 +145,101 @@ test('Buildx setup reuses the daemon and the handoff alone creates the pinned bu
   assert.match(handoff, /docker buildx build --builder "\$BUILDER"/);
 });
 
+for (const [label, source] of [
+  ['framework', readFileSync(new URL('.github/workflows/axum-container.yml', root), 'utf8')],
+  ['application', workflow],
+]) {
+  test(`${label} artifact selection includes later pages and rejects cross-page duplicates`, t => {
+    const directory = scratch(t);
+    const first = { artifacts: Array.from({ length: 100 }, (_, index) => ({ name: `unrelated-${index}` })) };
+    const accepted = ['amd64', 'arm64'].map((arch, index) => ({
+      id: index + 1, name: `accepted-${arch}-123-1`, expired: false,
+      digest: 'sha256:' + String(index + 1).repeat(64),
+      workflow_run: { id: 123, head_sha: 'a'.repeat(40) },
+    }));
+    const pages = join(directory, 'pages.json'), firstPage = join(directory, 'first.json');
+    writeFileSync(firstPage, JSON.stringify(first));
+    const step = source.slice(source.indexOf('        id: artifacts\n'));
+    const selection = step.slice(step.indexOf('        run: |\n') + '        run: |\n'.length,
+      step.indexOf('      - uses: actions/download-artifact@'));
+    const script = selection.replace(/^          /gm, '');
+    assert.match(script, /artifact-ids/);
+    function select(duplicate = false, apiFailure = false) {
+      writeFileSync(pages, JSON.stringify([first, { artifacts: [accepted[0]] },
+        { artifacts: [accepted[1], ...(duplicate ? [{ ...accepted[0], id: 3 }] : [])] }]));
+      writeFileSync(join(directory, 'output'), '');
+      return spawnSync('bash', ['-euo', 'pipefail', '-c', `
+        gh() {
+          if [[ " $* " == *' --paginate '* && " $* " == *' --slurp '* ]]; then
+            cat "$PAGES"
+          else
+            cat "$FIRST_PAGE"
+          fi
+          if [[ "$API_FAILURE" == true ]]; then return 1; fi
+        }
+        ${script}
+      `], {
+        cwd: root, encoding: 'utf8', timeout: 5000,
+        env: { ...process.env, PAGES: pages, FIRST_PAGE: firstPage, API_FAILURE: String(apiFailure), RUNNER_TEMP: directory,
+          GITHUB_REPOSITORY: 'owner/app', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1',
+          GITHUB_SHA: 'a'.repeat(40), GITHUB_OUTPUT: join(directory, 'output') },
+      });
+    }
+    const result = select();
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(directory, 'output'), 'utf8'), 'ids=1,2\n');
+    assert.equal(JSON.parse(readFileSync(join(directory, 'artifacts.json'))).artifacts.length, 102);
+    const duplicate = select(true);
+    assert.ifError(duplicate.error);
+    assert.notEqual(duplicate.status, 0);
+    assert.match(duplicate.stderr, /Accepted artifacts missing or duplicated/);
+    assert.equal(readFileSync(join(directory, 'output'), 'utf8'), '');
+    const failedApi = select(false, true);
+    assert.ifError(failedApi.error);
+    assert.notEqual(failedApi.status, 0);
+    assert.equal(readFileSync(join(directory, 'output'), 'utf8'), '');
+  });
+}
+
+test('localhost index publication requires registry readiness', () => {
+  const source = readFileSync(new URL('.github/workflows/axum-container.yml', root), 'utf8');
+  const readiness = source.slice(source.indexOf('          for _ in $(seq 1 30);'),
+    source.indexOf('          ./examples/container-publishing/publish.sh'));
+  assert.match(readiness, /curl/);
+  for (const [failures, ready, calls] of [[0, true, 2], [3, true, 5], [99, false, 31]]) {
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', `
+      port=12345
+      calls=0
+      curl() { calls=$((calls + 1)); [[ "$calls" -gt ${failures} ]]; }
+      sleep() { :; }
+      ${readiness}
+      printf 'publish-ready %s\\n' "$calls"
+    `], { encoding: 'utf8', timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status === 0, ready, result.stderr);
+    assert.equal(result.stdout, ready ? `publish-ready ${calls}\n` : '');
+  }
+});
+
+test('application release uses the validated standalone Node version', () => {
+  const version = readFileSync(new URL('.tool-versions', root), 'utf8').match(/^nodejs\s+(\S+)/m)[1];
+  const pins = [...workflow.matchAll(/^\s*node-version:\s*['"]?([0-9.]+)['"]?\s*$/gm)];
+  assert.ok(pins.length > 0, 'the standalone recipe must declare its Node version');
+  for (const [, pin] of pins) assert.equal(pin, version);
+});
+
 test('container helper CI has one suite owner and derives framework Node pins', () => {
   const native = readFileSync(new URL('.github/workflows/axum-container.yml', root), 'utf8');
   const actions = readFileSync(new URL('.github/workflows/deploy-action.yml', root), 'utf8');
-  assert.doesNotMatch(native, /- docs\//);
-  assert.equal(native.split('node --test scripts/tests/test_axum_container*.test.mjs').length - 1, 1);
-  assert.ok(native.includes('AXUM_PREPARED_CONTEXT='));
-  assert.ok(!actions.includes('node --test scripts/tests/test_axum_container*.test.mjs'));
+  assert.doesNotMatch(native, /^\s*-\s+['"]?docs\//m);
+  const suite = /\bnode\s+--test\s+scripts\/tests\/test_axum_container\*\.test\.mjs\b/g;
+  assert.equal([...native.matchAll(suite)].length, 1);
+  assert.match(native, /AXUM_PREPARED_CONTEXT=/);
+  assert.doesNotMatch(actions, suite);
   for (const source of [native, actions]) {
-    assert.ok(!source.includes('node-version: "24.12.0"'));
-    assert.ok(source.includes('steps.node-version.outputs.node-version'));
+    assert.doesNotMatch(source, /^\s*node-version:/m);
+    assert.match(source, /node-version-file:\s*['"]?\.tool-versions['"]?(?:\s|$)/);
   }
-  assert.equal(native.split('- scripts/package*.json').length - 1, 2);
+  assert.match(native, /^\s*-\s+['"]?scripts\/package\*\.json['"]?\s*$/m);
 });

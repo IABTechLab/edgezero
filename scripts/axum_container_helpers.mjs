@@ -135,8 +135,8 @@ export async function validateRuntimeTar(file, platform) {
   }
   try {
     await readTar(stream, async (member, chunks) => {
-      const name = member.name.replace(/^[./]+/, '');
-      assert.ok(!forbidden.some((prefix) => name.startsWith(prefix)) && !name.includes('/.git/') &&
+      const name = member.name.replace(/^(?:\.\/|\/)+/, '');
+      assert.ok(!forbidden.some((prefix) => name.startsWith(prefix)) && !name.split('/').includes('.git') &&
         !name.endsWith('container-sentinel') && !tools.has(name), `Forbidden runtime path: ${name}`);
       assert.notEqual(member.type, 'S', 'Sparse runtime tar members are unsupported');
       paths.add(name);

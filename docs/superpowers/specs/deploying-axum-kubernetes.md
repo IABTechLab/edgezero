@@ -1,10 +1,11 @@
 # Deploying Axum applications on Kubernetes
 
-::: warning Draft, not deployment acceptance
-This guide defines the Kubernetes recipe for [#400](https://github.com/IABTechLab/edgezero/issues/400). Runnable manifests, controller/image pins and disposable-cluster execution are not delivered yet. The YAML fragments below are design examples, not a complete deployment. Do not treat them as production verification.
-
-Production entrypoints, probes, startup validation and shutdown must use the accepted runtime contracts. The current container packaging response at `/` is not readiness.
-:::
+> [!WARNING]
+> **Draft, not deployment acceptance**
+>
+> This guide defines the Kubernetes recipe for [#400](https://github.com/IABTechLab/edgezero/issues/400). Runnable manifests, controller/image pins and disposable-cluster execution are not delivered yet. The YAML fragments below are design examples, not a complete deployment. Do not treat them as production verification.
+>
+> Production entrypoints, probes, startup validation and shutdown must use the accepted runtime contracts. The current container packaging response at `/` is not readiness.
 
 ## Deployment scope
 

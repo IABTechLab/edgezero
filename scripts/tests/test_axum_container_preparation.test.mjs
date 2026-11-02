@@ -298,6 +298,17 @@ test('runtime tar rejects build inputs, tools and secret sentinels, including PA
   }
 });
 
+test('runtime tar rejects Git metadata at the root and in nested directories', async t => {
+  for (const name of ['.git', '.git/config', './.git/config', '/.git/config', '././.git/config',
+    'nested/.git', 'nested/.git/config']) {
+    const file = runtimeTar(t, [tarEntry('usr/local/bin/app', elf()), tarEntry(name, 'forbidden')]);
+    await assert.rejects(validateRuntimeTar(file, 'linux/amd64'), /Forbidden runtime path/, name);
+  }
+  const file = runtimeTar(t, [tarEntry('usr/local/bin/app', elf()),
+    tarEntry('.gitignore', 'allowed'), tarEntry('app/.gitkeep', 'allowed')]);
+  assert.match(await validateRuntimeTar(file, 'linux/amd64'), /machine 62/);
+});
+
 test('runtime tar rejects missing, truncated, malformed or wrong-platform executables', async (t) => {
   const bigEndian = elf();
   bigEndian[5] = 2;

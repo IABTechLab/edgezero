@@ -31,9 +31,9 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: "24.12.0"
+          node-version: "24.20.0"
       - name: Prepare the committed application context without rewriting dependencies
         env:
           VERSION_TAG: ${{ inputs.version }}
@@ -71,9 +71,9 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: "24.12.0"
+          node-version: "24.20.0"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: application-context-${{ github.run_id }}-${{ github.run_attempt }}
@@ -125,9 +125,9 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: "24.12.0"
+          node-version: "24.20.0"
       - name: Pin the publisher verifier
         run: |
           source examples/container-publishing/tools.env
@@ -159,7 +159,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/artifacts.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            | jq '{artifacts: [.[].artifacts[]]}' > "$RUNNER_TEMP/artifacts.json"
           ids=$(node examples/container-publishing/verify_artifacts.mjs artifact-ids \
             "$RUNNER_TEMP/artifacts.json" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --revision "$GITHUB_SHA")
           echo "ids=$ids" >> "$GITHUB_OUTPUT"
