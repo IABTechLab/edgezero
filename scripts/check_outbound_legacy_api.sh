@@ -968,9 +968,13 @@ assert_active_surface_fixture_rejected() {
 failed=0
 
 scan \
-  'Proxy(Client|Handle|Request|Response|Service)|proxy_handle|edgezero_core::proxy|crate::proxy|pub mod proxy' \
+  'Proxy(Client|Handle|Request|Response|Service)|proxy_handle|edgezero_core::proxy' \
   crates examples/app-demo tests/fixtures/reusable-app docs/guide README.md CLAUDE.md TODO.md Cargo.toml \
   .claude/agents/code-architect.md || failed=1
+
+# Crate-local proxy paths identify the retired outbound module only in core.
+# Axum's independent proxy module handles incoming proxy assertions.
+scan 'crate::proxy|pub mod proxy' crates/edgezero-core || failed=1
 
 # Downstream response delivery is now adapter-owned. Keep the outbound-fetch
 # buffering helpers: they implement ResponseMode::Buffered and are unrelated to

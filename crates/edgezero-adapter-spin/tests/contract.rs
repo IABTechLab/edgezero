@@ -42,6 +42,7 @@ mod tests {
     };
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
+    use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
     use edgezero_core::http::{Response, StatusCode, request_builder, response_builder};
     use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
     use edgezero_core::router::RouterService;
@@ -213,8 +214,7 @@ mod tests {
         }
     }
 
-    fn forged_geo() -> edgezero_core::geo::GeoOutcome {
-        use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+    fn forged_geo() -> GeoOutcome {
         GeoOutcome::Selected {
             provider: GeoProviderId::new("forged-portable").expect("fixture provider ID"),
             status: GeoStatus::Error(GeoError::ProviderFailure),
@@ -223,11 +223,8 @@ mod tests {
 
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
-            assert_eq!(ctx.geo(), &edgezero_core::geo::GeoOutcome::NoSelection);
-            assert_eq!(
-                ctx.extensions().get::<edgezero_core::geo::GeoOutcome>(),
-                Some(&forged_geo())
-            );
+            assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
+            assert_eq!(ctx.extensions().get::<GeoOutcome>(), Some(&forged_geo()));
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
                 .status(StatusCode::OK)
