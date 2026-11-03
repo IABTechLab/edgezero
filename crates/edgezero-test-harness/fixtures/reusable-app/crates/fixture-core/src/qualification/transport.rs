@@ -362,6 +362,7 @@ pub async fn probe(
                 spec,
                 target(&first, &case, &token)?,
                 &token,
+                adapter != "spin",
             )
             .await?,
         );

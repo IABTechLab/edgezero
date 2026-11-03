@@ -3,7 +3,7 @@
 ## Status
 
 Current implementation and coverage authority is the
-[required-local closeout](../superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md#required-local-acceptance-closeout-2026-11-02).
+[required-local closeout](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md#required-local-acceptance-closeout-2026-11-02).
 All 217 required-local legs now have executable bindings; this is not passing execution or
 qualification. The dated gate checkpoints below retain their original decisions and negative
 observations, not blanket implementation stops after later scoped approvals. Frozen-candidate,

@@ -13,6 +13,14 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Observe a cached Workers writer-closed promise while response production is pending. Preserve
+  deadline/abort precedence, accepted bytes and exactly-once cleanup without classifying every
+  transport rejection as client disconnect. Guest SDK cancellation tests do not qualify hosted delivery.
+- Measure the unobserved batch interval with its paired timer, separately from completion of the
+  same unrelated HTTP Send. Preserve the original timing window and causal origin-clock checks.
+- Correct single-exchange parity-origin connection framing and exact-cap accounting, preserving
+  Spin's provider-hidden Connection boundary. Keep production pooling/retries and limits unchanged.
+  Align new fixture names with observation-cutoff terminology and fix the published audit's source link.
 - Derive acceptance coverage from the reviewed inventory, separating required local and external
   proofs, pending conditions and unpromoted follow-ups. Enforce local binding completeness in
   the existing evidence CI owner; binding readiness never implies passing qualification or approval.

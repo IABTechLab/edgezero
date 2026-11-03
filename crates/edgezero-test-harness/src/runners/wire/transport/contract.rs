@@ -484,7 +484,7 @@ pub(super) mod tests {
             } else {
                 Vec::new()
             };
-        json!({"outcome":outcome,"request":oracle::request_spec(case,token),"client_marker":case.client_marker(),
+        json!({"outcome":outcome,"request":oracle::request_spec(case,adapter,token),"client_marker":case.client_marker(),
             "head":head,"head_us":if failure.is_some()&&!body_error {None} else {Some(1000_u64)},
             "terminal_us":if matches!(case.kind,vectors::Kind::Delay{..}) {150_000_u64} else if case.kind==vectors::Kind::StreamLive {250_000} else {1000},
             "reads_at_head":if failure.is_some()&&!body_error {None} else {Some(0_u64)},"streamed":streamed,

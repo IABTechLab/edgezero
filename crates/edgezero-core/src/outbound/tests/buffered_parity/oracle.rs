@@ -149,7 +149,7 @@ pub fn body_error(case: Case) -> bool {
         )
 }
 
-pub fn request_spec(case: Case, token: &str) -> Value {
+pub fn request_spec(case: Case, adapter: &str, token: &str) -> Value {
     let timeout: u64 = match case.kind {
         Kind::Delay {
             deadline: false, ..
@@ -197,6 +197,7 @@ pub fn request_spec(case: Case, token: &str) -> Value {
             case.reply(token)
                 .fields
                 .iter()
+                .filter(|(name, _)| adapter != "spin" || *name != "connection")
                 .map(|(name, value)| {
                     u64::try_from(name.len().saturating_add(value.len()))
                         .expect("bounded fixture field")
@@ -208,8 +209,10 @@ pub fn request_spec(case: Case, token: &str) -> Value {
     };
     let header_count = match case.kind {
         Kind::Header(HeaderCase::Count | HeaderCase::Tie) => Some(0_u64),
-        Kind::Header(HeaderCase::MarkerCountOff | HeaderCase::MarkerCountOn) => Some(5),
-        Kind::Marker(MarkerCase::Off) => Some(6),
+        Kind::Header(HeaderCase::MarkerCountOff | HeaderCase::MarkerCountOn) => {
+            Some(if adapter == "spin" { 5 } else { 6 })
+        }
+        Kind::Marker(MarkerCase::Off) => Some(if adapter == "spin" { 6 } else { 7 }),
         _ => None,
     };
     let upload: u64 = if let Kind::Upload { cap } = case.kind {
@@ -265,7 +268,7 @@ pub fn validate(case: Case, adapter: &str, token: &str, capture: &Value) -> Resu
     let outcome = &capture["outcome"];
     let request = &capture["request"];
     ensure(
-        request == &request_spec(case, token),
+        request == &request_spec(case, adapter, token),
         "paired effective request readback differs",
     )?;
     ensure(

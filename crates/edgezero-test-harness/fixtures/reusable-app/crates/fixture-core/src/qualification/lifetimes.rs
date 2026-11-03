@@ -471,6 +471,7 @@ async fn run(
     client: &HttpClient,
     report: &mut Report,
     timeline: &mut Timeline,
+    quiet_runtime: Option<(edgezero_core::OutboundTime, OutboundScope)>,
 ) -> Result<(), EdgeError> {
     if matches!(
         probe.case.as_str(),
@@ -551,16 +552,46 @@ async fn run(
     }
 
     if probe.case == "batch-progress" {
+        let (time, scope) = quiet_runtime.ok_or_else(invalid)?;
         let request = probe.request("quiet", timeline)?;
         let at = timeline.clock.now();
-        timeline.event("quiet-start", at, at, Value::Null);
-        let result = client.send(request).await;
-        let at = timeline.clock.now();
-        timeline.event("quiet-end", at, at, Value::Null);
+        let timer_at = at + Duration::from_millis(300);
+        timeline.event(
+            "quiet-start",
+            at,
+            at,
+            json!({"timer_at_us":timeline.elapsed_us(timer_at)}),
+        );
+        // The timer measures non-observation; the same HTTP Send still runs to completion.
+        let mut paired = Box::pin(futures::future::join(
+            async {
+                let result = time.wait_until(Deadline::at_instant(timer_at)).await;
+                (result, time.clock().now())
+            },
+            async {
+                let result = client.send(request).await;
+                (result, time.clock().now())
+            },
+        ));
+        let ((timer, timer_ended), (result, operation_ended)) =
+            std::future::poll_fn(|cx| scope.poll(&time, at, cx, paired.as_mut())).await?;
         let quiet = response_report(result).await;
+        let mut completions = [
+            (
+                "quiet-end",
+                timer_ended,
+                json!(if timer.is_ok() { "ok" } else { "error" }),
+            ),
+            ("quiet-operation-end", operation_ended, quiet.clone()),
+        ];
+        completions.sort_by_key(|(_, at, _)| *at);
+        for (op, at, result) in completions {
+            timeline.event(op, at, at, result);
+        }
         if let Some(error) = quiet.get("error") {
             report.error = Some(error.clone());
         }
+        timer?;
         collect(batch, report, timeline).await;
         return Ok(());
     }
@@ -1024,7 +1055,7 @@ fn batch_native_complete(snapshots: &[NativeBodySnapshot; 3], cancel: bool) -> b
 async fn wait_for_batch_native(
     scope: &OutboundScope,
     time: &edgezero_core::OutboundTime,
-    cutoff: Deadline,
+    observation_cutoff: Deadline,
     turns: &mut usize,
     mut observe: impl FnMut() -> Result<bool, EdgeError>,
 ) -> Result<(), EdgeError> {
@@ -1033,12 +1064,12 @@ async fn wait_for_batch_native(
     loop {
         scope.check()?;
         let now = time.clock().now();
-        if now < previous || cutoff.is_expired_at(now) {
+        if now < previous || observation_cutoff.is_expired_at(now) {
             return Err(invalid());
         }
         let complete = observe()?;
         let observed = time.clock().now();
-        if observed < now || cutoff.is_expired_at(observed) {
+        if observed < now || observation_cutoff.is_expired_at(observed) {
             return Err(invalid());
         }
         if complete {
@@ -1053,7 +1084,7 @@ async fn wait_for_batch_native(
         let next = observed
             .checked_add(Duration::from_millis(1))
             .ok_or_else(invalid)?
-            .min(cutoff.instant());
+            .min(observation_cutoff.instant());
         let mut timer = time.wait_until(Deadline::at_instant(next));
         std::future::poll_fn(|cx| scope.poll(time, entered, cx, timer.as_mut())).await??;
     }
@@ -1414,11 +1445,22 @@ pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
     ) {
         return batch_runtime(&ctx, probe, timeline).await;
     }
-    let client = ctx.http_client().ok_or_else(|| {
-        EdgeError::internal(std::io::Error::other(
-            "lifetime probe has no injected client",
-        ))
-    })?;
+    let (client, quiet_runtime) = if probe.case == "batch-progress" {
+        let native = super::progress::outbound_client(&ctx)?;
+        let time = native.time();
+        timeline.clock = time.clock().clone();
+        let scope = OutboundScope::capture(native.progress());
+        (HttpClient::new(native), Some((time, scope)))
+    } else {
+        (
+            ctx.http_client().ok_or_else(|| {
+                EdgeError::internal(std::io::Error::other(
+                    "lifetime probe has no injected client",
+                ))
+            })?,
+            None,
+        )
+    };
     if probe.case == "begin-upload-rules" {
         return upload_rules(ctx, probe, client).await;
     }
@@ -1426,7 +1468,15 @@ pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
         return response_handoff(&ctx, probe, client, timeline).await;
     }
     let mut report = Report::default();
-    if let Err(error) = run(&ctx, &probe, &client, &mut report, &mut timeline).await
+    if let Err(error) = run(
+        &ctx,
+        &probe,
+        &client,
+        &mut report,
+        &mut timeline,
+        quiet_runtime,
+    )
+    .await
         && report.error.is_none()
     {
         report.error = Some(error_report(&error));
@@ -1509,6 +1559,7 @@ mod tests {
     #[derive(Clone)]
     struct HandoffClient {
         time: TestTime,
+        quiet_timing: Option<(Duration, Duration)>, // Blocking poll lead and HTTP duration.
         jobs: Arc<
             std::sync::Mutex<
                 std::collections::BTreeMap<String, futures::channel::oneshot::Sender<()>>,
@@ -1661,6 +1712,34 @@ mod tests {
             &self,
             request: edgezero_core::OutboundDispatchRequest,
         ) -> edgezero_core::OutboundFuture<edgezero_core::OutboundHead> {
+            if request
+                .request()
+                .uri()
+                .path()
+                .ends_with("/batch-progress/quiet")
+            {
+                let (_, context) = request.into_parts();
+                let time = self.time.clone();
+                let (blocking_lead, duration) = self.quiet_timing.unwrap();
+                let ended = time.clock().now() + duration;
+                return Box::pin(async move {
+                    time.pair()
+                        .wait_until(Deadline::at_instant(ended - blocking_lead))
+                        .await?;
+                    time.advance_to(ended);
+                    edgezero_core::OutboundHead::new(
+                        StatusCode::OK,
+                        edgezero_core::OutboundHeaderInput::new(
+                            "unit",
+                            HeaderMap::new(),
+                            edgezero_core::OutboundHeaderFidelity::AdapterVisibleFields,
+                        ),
+                        futures::stream::empty().boxed_local(),
+                        context,
+                        edgezero_core::OutboundExchangeOwner::new(|| {}),
+                    )
+                });
+            }
             if request.request().uri().path().ends_with("/ready")
                 && !request
                     .request()
@@ -1862,6 +1941,7 @@ mod tests {
         let start = time.clock().now();
         let client = HandoffClient {
             time: time.clone(),
+            quiet_timing: None,
             jobs: Arc::new(Mutex::new(BTreeMap::new())),
             resources: Arc::new(AtomicUsize::new(0)),
             cancelled: Arc::new(AtomicUsize::new(0)),
@@ -2371,13 +2451,13 @@ mod tests {
         });
         let owner = OutboundScopeOwner::response_body();
         let scope = owner.scope();
-        let cutoff = Deadline::at_instant(start + Duration::from_millis(534));
+        let observation_cutoff = Deadline::at_instant(start + Duration::from_millis(534));
         let mut turns = 127;
         let mut observations = 0;
         block_on(wait_for_batch_native(
             &scope,
             &pair,
-            cutoff,
+            observation_cutoff,
             &mut turns,
             || {
                 observations += 1;
@@ -2390,7 +2470,7 @@ mod tests {
             block_on(wait_for_batch_native(
                 &scope,
                 &pair,
-                cutoff,
+                observation_cutoff,
                 &mut turns,
                 || Ok(false)
             ))
@@ -2429,24 +2509,28 @@ mod tests {
     fn cancel_barrier_rejects_closed_scope_missing_witness_and_cutoff_equality() {
         let time = TestTime::default();
         let pair = time.pair();
-        let cutoff = pair.clock().deadline_after(Duration::from_millis(534));
+        let observation_cutoff = pair.clock().deadline_after(Duration::from_millis(534));
         let owner = OutboundScopeOwner::response_body();
         let scope = owner.scope();
         assert!(
             block_on(wait_for_batch_native(
                 &scope,
                 &pair,
-                cutoff,
+                observation_cutoff,
                 &mut 0,
                 || Err(invalid())
             ))
             .is_err()
         );
-        time.advance_to(cutoff.instant());
+        time.advance_to(observation_cutoff.instant());
         assert!(
-            block_on(wait_for_batch_native(&scope, &pair, cutoff, &mut 0, || Ok(
-                buffered_a_complete(&buffered_a_snapshot(1))
-            )))
+            block_on(wait_for_batch_native(
+                &scope,
+                &pair,
+                observation_cutoff,
+                &mut 0,
+                || Ok(buffered_a_complete(&buffered_a_snapshot(1))),
+            ))
             .is_err()
         );
         let later = pair.clock().deadline_after(Duration::from_millis(1));
@@ -2515,6 +2599,152 @@ mod tests {
     }
 
     #[test]
+    fn batch_quiet_route_pairs_native_timer_without_shortening_http_send() {
+        for (timer_lag_us, operation_us) in [(0, 313_434), (4_000, 301_000)] {
+            batch_quiet_route(timer_lag_us, operation_us);
+        }
+    }
+
+    fn batch_quiet_route(timer_lag_us: u64, operation_us: u64) {
+        use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
+        use edgezero_core::{
+            IngressDispatchOutcome, IngressFraming, IngressHeadAccounting, app::App,
+        };
+        use std::{
+            future::Future as _,
+            sync::{Mutex, atomic::AtomicUsize},
+            task::Context,
+        };
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let client = HandoffClient {
+            time: time.clone(),
+            quiet_timing: Some((
+                Duration::from_millis(if timer_lag_us == 0 { 0 } else { 2 }),
+                Duration::from_micros(operation_us),
+            )),
+            jobs: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            resources: Arc::default(),
+            cancelled: Arc::default(),
+            family: Arc::default(),
+            groups: Arc::default(),
+            calls: Arc::default(),
+            polls: Arc::default(),
+        };
+        let factories = Arc::new(AtomicUsize::new(0));
+        let mut app = App::new(super::super::progress::router(
+            Arc::new(HandoffRuntime(
+                time.clone(),
+                Some(client.clone()),
+                Arc::clone(&factories),
+            )),
+            Value::Null,
+            None,
+        ));
+        app.set_monotonic_clock(time.clock());
+        install_batch_admission(&mut app);
+        let mut request = request_builder()
+            .uri("/progress/lifetimes/batch-progress")
+            .body(Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers("batch-progress");
+        let callback = OutboundScopeOwner::callback();
+        let mut dispatch = Box::pin(callback.run(app.dispatch_ingress(
+            request,
+            start,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        )));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(dispatch.as_mut().poll(&mut cx).is_pending());
+        for (role, at) in [("a", 54_000), ("b", 74_000), ("c", 94_000)] {
+            time.advance_to(start + Duration::from_micros(at));
+            client
+                .jobs
+                .lock()
+                .unwrap()
+                .remove(role)
+                .unwrap()
+                .send(())
+                .unwrap();
+            assert!(dispatch.as_mut().poll(&mut cx).is_pending());
+        }
+        let timer_end = 334_000 + timer_lag_us;
+        let operation_end = 34_000 + operation_us;
+        let completed = timer_end.max(operation_end);
+        // A blocking HTTP poll can cross the timer deadline before the next timer poll.
+        let first_poll = if operation_end < timer_end {
+            operation_end - 2_000
+        } else {
+            timer_end
+        };
+        time.advance_to(start + Duration::from_micros(first_poll));
+        assert!(
+            dispatch.as_mut().poll(&mut cx).is_pending(),
+            "neither completion may bypass the other"
+        );
+        time.advance_to(start + Duration::from_micros(completed));
+        let IngressDispatchOutcome::Response(envelope) = block_on(dispatch).unwrap() else {
+            panic!("quiet response")
+        };
+        let (prepared, _, _, _) = envelope
+            .begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            .unwrap_or_else(|_| panic!("quiet envelope"));
+        callback.close();
+        let bytes = block_on(
+            prepared
+                .into_response()
+                .into_body()
+                .into_bytes_bounded(16384),
+        )
+        .unwrap();
+        let report: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(factories.load(Ordering::SeqCst), 1);
+        assert_eq!(report["error"], Value::Null);
+        let events = report["events"].as_array().unwrap();
+        let mut expected = [
+            "batch-start",
+            "quiet-start",
+            "quiet-end",
+            "quiet-operation-end",
+            "collect",
+        ];
+        if operation_end < timer_end {
+            expected.swap(2, 3);
+        }
+        assert_eq!(
+            events
+                .iter()
+                .map(|entry| entry["op"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(events[1]["at_us"], 34000);
+        assert_eq!(events[1]["result"], json!({"timer_at_us":334000}));
+        let timer = events
+            .iter()
+            .find(|entry| entry["op"] == "quiet-end")
+            .unwrap();
+        let operation = events
+            .iter()
+            .find(|entry| entry["op"] == "quiet-operation-end")
+            .unwrap();
+        assert_eq!(timer["at_us"], timer_end);
+        assert_eq!(timer["result"], "ok");
+        assert_eq!(operation["at_us"], operation_end);
+        assert_eq!(operation["result"], json!({"status":200,"bytes":[]}));
+        assert_eq!(events[4]["at_us"], completed);
+        assert_eq!(report["slots"], json!(["Resolved", "Resolved", "Resolved"]));
+        assert_eq!(report["termination"], "Completed");
+        for item in report["items"].as_array().unwrap() {
+            assert_eq!(item["via"], "collect");
+            assert!(item["elapsed_us"].as_u64().unwrap() < 300_000);
+        }
+        assert!(client.jobs.lock().unwrap().is_empty());
+        assert_eq!(client.groups.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn runtime_batch_routes_preserve_delivered_and_unobserved_slots_through_body_work() {
         for case in [
             "batch-cancel",
@@ -2538,6 +2768,7 @@ mod tests {
         let start = time.clock().now();
         let client = HandoffClient {
             time: time.clone(),
+            quiet_timing: None,
             jobs: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             resources: Arc::new(AtomicUsize::new(0)),
             cancelled: Arc::new(AtomicUsize::new(0)),

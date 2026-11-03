@@ -537,6 +537,37 @@ fn validate(
             (budget..=budget + 5_000).contains(&end.saturating_sub(start)),
             "unobserved quiet window changed its original duration",
         )?;
+        let observation_start = if case == "batch-progress" {
+            require(
+                events.len() == 5
+                    && events[0]["op"] == "batch-start"
+                    && events[1]["op"] == "quiet-start"
+                    && events[4]["op"] == "collect"
+                    && matches!(
+                        (events[2]["op"].as_str(), events[3]["op"].as_str()),
+                        (Some("quiet-end"), Some("quiet-operation-end"))
+                            | (Some("quiet-operation-end"), Some("quiet-end"))
+                    ),
+                "batch quiet timer/operation sequence changed",
+            )?;
+            let started = event(events, "quiet-start")?;
+            let timer = event(events, "quiet-end")?;
+            let operation = event(events, "quiet-operation-end")?;
+            let operation_end = number(operation, "at_us")?;
+            require(
+                started["result"] == json!({"timer_at_us":start + 300_000})
+                    && timer["result"] == "ok"
+                    && operation["result"] == json!({"status":200,"bytes":[]})
+                    && [started, timer, operation]
+                        .iter()
+                        .all(|entry| entry["duration_us"].as_u64() == Some(0))
+                    && operation_end >= start + 300_000,
+                "batch quiet timer/operation evidence changed",
+            )?;
+            operation_end.max(end)
+        } else {
+            end
+        };
         let lower = clock_offset_lower(case, events, origin)?;
         for receipt in &receipts {
             require(
@@ -549,8 +580,8 @@ fn validate(
             .filter(|event| matches!(event["op"].as_str(), Some("check" | "next" | "collect")))
         {
             require(
-                number(observation, "at_us")? >= end,
-                "batch was observed during quiet window",
+                number(observation, "at_us")? >= observation_start,
+                "batch was observed before quiet operation completed",
             )?;
         }
         if case == "begin-progress" {
@@ -1838,7 +1869,10 @@ fn clock_offset_lower(case: &str, events: &[Value], origin: &Value) -> Result<i1
             number(head, "at_us")? + number(head, "duration_us")?,
         )
     } else {
-        ("quiet", number(event(events, "quiet-end")?, "at_us")?)
+        (
+            "quiet",
+            number(event(events, "quiet-operation-end")?, "at_us")?,
+        )
     };
     let heads: Vec<_> = origin
         .as_array()
@@ -4150,8 +4184,12 @@ mod tests {
         } else if case == "batch-progress" {
             report["events"] = json!([
                 {"op":"batch-start","at_us":34000,"duration_us":100},
-                {"op":"quiet-start","at_us":34100,"duration_us":0},
-                {"op":"quiet-end","at_us":335000,"duration_us":0}
+                {"op":"quiet-start","at_us":34100,"duration_us":0,
+                    "result":{"timer_at_us":334100}},
+                {"op":"quiet-end","at_us":335000,"duration_us":0,"result":"ok"},
+                {"op":"quiet-operation-end","at_us":344100,"duration_us":0,
+                    "result":{"status":200,"bytes":[]}},
+                {"op":"collect","at_us":344100,"duration_us":1}
             ]);
             report["slots"] = json!(["Resolved", "Resolved", "Resolved"]);
             report["termination"] = json!("Completed");
@@ -5258,6 +5296,128 @@ mod tests {
                 }
             }
             assert!(validate(AXUM, case, "sample", &report, &reanchored).is_err());
+        }
+    }
+
+    #[test]
+    fn batch_quiet_completions_allow_either_actual_order_but_no_early_observation() {
+        for (timer_us, operation_us) in [
+            (300_000, 313_434),
+            (304_000, 301_000),
+            (305_000, 300_000),
+            (300_000, 300_000),
+        ] {
+            let (mut report, origin) = sample("batch-progress");
+            report["events"][2]["at_us"] = json!(34_100 + timer_us);
+            report["events"][3]["at_us"] = json!(34_100 + operation_us);
+            report["events"][4]["at_us"] = json!(34_100 + timer_us.max(operation_us));
+            report["events"]
+                .as_array_mut()
+                .unwrap()
+                .sort_by_key(|entry| entry["at_us"].as_u64());
+            validate(AXUM, "batch-progress", "sample", &report, &origin).unwrap();
+            let timer_index = report["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|entry| entry["op"] == "quiet-end")
+                .unwrap();
+            let operation_index = report["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|entry| entry["op"] == "quiet-operation-end")
+                .unwrap();
+            for (index, at) in [
+                (timer_index, 34_100 + 305_001),
+                (operation_index, 34_100 + 299_999),
+                (4, 34_100 + timer_us.max(operation_us) - 1),
+            ] {
+                let mut changed = report.clone();
+                changed["events"][index]["at_us"] = json!(at);
+                assert!(validate(AXUM, "batch-progress", "sample", &changed, &origin).is_err());
+            }
+            if timer_us != operation_us {
+                let mut reordered = report.clone();
+                reordered["events"].as_array_mut().unwrap().swap(2, 3);
+                assert!(validate(AXUM, "batch-progress", "sample", &reordered, &origin).is_err());
+            }
+            for duplicate in ["quiet-end", "quiet-operation-end"] {
+                let mut changed = report.clone();
+                changed["events"][2]["op"] = json!(duplicate);
+                changed["events"][3]["op"] = json!(duplicate);
+                assert!(validate(AXUM, "batch-progress", "sample", &changed, &origin).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn batch_quiet_timer_is_distinct_from_whole_send_completion() {
+        for whole_send_us in [313_434, 310_000] {
+            let (mut report, origin) = sample("batch-progress");
+            report["events"] = json!([
+                {"op":"batch-start","at_us":34000,"duration_us":100},
+                {"op":"quiet-start","at_us":34100,"duration_us":0,
+                    "result":{"timer_at_us":334100}},
+                {"op":"quiet-end","at_us":334100,"duration_us":0,"result":"ok"},
+                {"op":"quiet-operation-end","at_us":34100+whole_send_us,"duration_us":0,
+                    "result":{"status":200,"bytes":[]}},
+                {"op":"collect","at_us":34100+whole_send_us,"duration_us":1}
+            ]);
+            validate(AXUM, "batch-progress", "sample", &report, &origin).unwrap();
+            assert_eq!(
+                clock_offset_lower(
+                    "batch-progress",
+                    report["events"].as_array().unwrap(),
+                    &origin
+                )
+                .unwrap(),
+                336_000 - i128::from(34_100 + whole_send_us) - 5_000,
+                "HTTP completion, not the independent timer, calibrates the source clock",
+            );
+            let mut old_measurement = report.clone();
+            old_measurement["events"][2]["at_us"] = json!(34100 + whole_send_us);
+            assert!(validate(AXUM, "batch-progress", "sample", &old_measurement, &origin).is_err());
+
+            for missing in [1, 2, 3, 4] {
+                let mut changed = report.clone();
+                changed["events"].as_array_mut().unwrap().remove(missing);
+                assert!(
+                    validate(AXUM, "batch-progress", "sample", &changed, &origin).is_err(),
+                    "missing event {missing}"
+                );
+            }
+            for (index, field, value) in [
+                (1, "result", json!({"timer_at_us":334101})),
+                (2, "result", json!("error")),
+                (2, "duration_us", json!(1)),
+                (2, "at_us", json!(334099)),
+                (2, "at_us", json!(339101)),
+                (3, "at_us", json!(334099)),
+                (3, "result", json!({"status":200,"bytes":[81]})),
+                (4, "at_us", json!(34100 + whole_send_us - 1)),
+            ] {
+                let mut changed = report.clone();
+                changed["events"][index][field] = value;
+                assert!(
+                    validate(AXUM, "batch-progress", "sample", &changed, &origin).is_err(),
+                    "forged event {index} {field}"
+                );
+            }
+            let mut reordered = report.clone();
+            reordered["events"].as_array_mut().unwrap().swap(2, 3);
+            assert!(validate(AXUM, "batch-progress", "sample", &reordered, &origin).is_err());
+            let mut observed = report.clone();
+            observed["events"]
+                .as_array_mut()
+                .unwrap()
+                .insert(3, json!({"op":"check","at_us":334100,"duration_us":0}));
+            assert!(validate(AXUM, "batch-progress", "sample", &observed, &origin).is_err());
+            for value in [Value::Null, json!(336001)] {
+                let mut forged = origin.clone();
+                forged[4]["write_started_us"] = value;
+                assert!(validate(AXUM, "batch-progress", "sample", &report, &forged).is_err());
+            }
         }
     }
 

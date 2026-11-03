@@ -20,6 +20,7 @@ async fn capture(
     uri: Uri,
     token: &str,
     begin: bool,
+    connection_visible: bool,
 ) -> Result<Value, EdgeError> {
     let time = native.time();
     let clock = time.clock();
@@ -30,6 +31,7 @@ async fn capture(
         token,
         if begin { "begin" } else { "send" },
         entered,
+        connection_visible,
     )?;
     let parts = outgoing.into_parts();
     let settings = requests::settings(&parts);
@@ -60,9 +62,19 @@ pub(super) async fn run(
     case: vectors::Case,
     uri: Uri,
     token: &str,
+    connection_visible: bool,
 ) -> Result<Value, EdgeError> {
-    let sent = capture(client, native, case, uri.clone(), token, false).await?;
-    let begun = capture(client, native, case, uri, token, true).await?;
+    let sent = capture(
+        client,
+        native,
+        case,
+        uri.clone(),
+        token,
+        false,
+        connection_visible,
+    )
+    .await?;
+    let begun = capture(client, native, case, uri, token, true, connection_visible).await?;
     Ok(json!({"step":"paired-contract","schema":1,"send":sent,"begin":begun}))
 }
 #[path = "../../../../../../../../edgezero-core/src/outbound/tests/buffered_parity/capture.rs"]

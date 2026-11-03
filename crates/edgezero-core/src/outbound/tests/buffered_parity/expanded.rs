@@ -167,6 +167,7 @@ async fn operation(
         "core-token",
         if begin { "begin" } else { "send" },
         entered,
+        true,
     )
     .expect("contract request");
     let parts = request.into_parts();

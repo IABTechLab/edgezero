@@ -899,6 +899,15 @@ impl Case {
                 .fields
                 .push(("content-encoding", coding_name(choice).to_owned()));
         }
+        if let Some((_, connection)) = reply
+            .fields
+            .iter_mut()
+            .find(|(name, _)| *name == "connection")
+        {
+            connection.push_str(", close");
+        } else {
+            reply.fields.push(("connection", "close".to_owned()));
+        }
         reply
     }
 

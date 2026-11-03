@@ -12,6 +12,70 @@
 
 ## Status and Authority
 
+### CI Follow-Up (2026-11-02)
+
+GitHub checks at `f8f2dc56` are not green. Workspace fails the legacy-name guard, docs/static
+checks fail a newly added link to an unpublished internal plan, and Axum's wire phase lacks its
+second receipt for `pair-original-absent-declared-s`. WASM tests and adapter lint checks pass.
+The earlier local reports below do not replace these hosted CI results.
+
+The minimal repair preserves the guard and deadlines: rename new Rust batch variables to
+`observation_cutoff`, link the plan's repository source, and make the one-response paired origin's
+connection lifetime explicit. A deterministic raw-TCP regression fails before the latter repair;
+the full Axum CI owner then passes. Production retries and pooling are unchanged. Exact-header
+fixtures charge the additional closing field where visible; Spin's documented hidden Connection
+field retains its original adapter-visible boundary. Marker-on must still exceed the exact cap,
+marker-off must still fit, and byte limits charge every visible field. Case/receipt identities,
+production limits and acceptance tolerances are unchanged. All four full wire suites now pass,
+including all 97 paired Send/Begin vectors per adapter. Axum's complete CI owner also passes its
+native tests and fixture check. These runs are local working-tree evidence, not new hosted CI
+results or frozen-candidate qualification.
+
+The pending-source cancellation failures also have a diagnostic confound: the survivor's original
+one-second `ack` request times out before the controller's two-second coordination bound. Its
+terminal record ends ordered observation early. This explains the parser error, not the victim's
+missing cancellation proof. Retain both original failures; they are not complete two-second
+observations or evidence that the providers cannot expose cancellation. Preserve the survivor
+budget and all protocol validation. The scoped Cloudflare repair now observes one cached
+writer-closed promise during source waits, retaining abort/deadline precedence and byte accounting.
+Its regression first reports DeadlineExceeded instead of TransportError, then passes with 111 WASM
+SDK and 43 host tests, strict WASM Clippy and independent ownership review. The FixedLengthStream
+test explicitly uses a guest shim; raw HTTP and hosted propagation stay open.
+
+The unpolled-batch probe additionally separates its actual paired 300 ms timer from completion of
+the unchanged auxiliary HTTP Send. The previous whole-call measurements include transport and
+resumption overhead. The timer keeps its 300-305 ms interval; the Send keeps its original request
+budget, source receipts and causal clock-calibration role. No batch observation occurs until both
+complete. Other injected-client probes remain unchanged, and the native client, timer and provider
+progress come from one existing private factory, without another public accessor or executor.
+
+Fresh verification passes all five root gates (2,666 tests across 33 binaries, zero failures and
+one existing ignored test), 576 serialized harness tests (two existing ignored helpers), 84
+qualification-fixture tests, strict harness/fixture Clippy, all three workspace format checks,
+131 evidence-checker tests, 34 workflow guards, the legacy-name guard and docs build/lint/format.
+Independent review covers source ownership, header-cap calibration and completion ordering; the
+HTTP-before-timer false-negative is fixed with mutation tests for both chronological orders.
+All four runtime quiet-window cases pass without relaxing their original 300-305 ms timer bound
+or replacing the unrelated HTTP Send. The new local captures are retained under
+`/private/tmp/pr275-ci-repair-{adapter}-{wire,lifetimes}-final/`; Axum's full CI capture is
+`/private/tmp/pr275-ci-repair-axum-ci-final/`. Earlier failures remain retained unchanged.
+
+| Lifecycle Run | Result | Remaining Observation |
+| --- | --- | --- |
+| Axum | 19 pass, exit 0 | All cleanup and timing cases pass in this run. |
+| Repaired Viceroy | 33 pass, 1 recorded row, exit 0 | Budget, callback, cleanup and protocol-tail checks pass. The recorded batch-write row is not another passing runtime case. |
+| Spin | 18 pass, 1 fail, 1 unverified, exit 1 | Pending-source client cancellation lacks the required terminal/source proof; silent-connect qualification requires Linux. |
+| Workers | 14 pass, 5 fail, exit 1 | Cold Begin is 10 ms against 2 +/- 5 ms; cutoff returns are 206/228 ms against 205 ms; batch entry is 40 ms against 34-39 ms. Pending-source cancellation still lacks terminal/source proof. |
+
+The cached writer-closed repair closes the SDK-level observation gap, not the remaining HTTP
+propagation proof. Both pending-source cancellation runs still fail the original protocol and
+retain their tail failures; the survivor timeout confound above remains relevant. All observed
+native operations and bodies in the Workers cutoff cases release once before collection, but
+late release/return samples still fail their unchanged timing checks. No provider impossibility,
+capability promotion, deployment, candidate freeze or release qualification is inferred. All 217
+required-local bindings remain executable with `qualified: false`; external and conditional
+evidence stays open. New GitHub checks must be evaluated at the pushed repair commit.
+
 ### Required Local Acceptance Closeout (2026-11-02)
 
 The requester approved completing required local acceptance coverage and inventory reconciliation

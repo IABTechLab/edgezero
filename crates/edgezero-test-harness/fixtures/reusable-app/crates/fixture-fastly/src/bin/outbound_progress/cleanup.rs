@@ -195,7 +195,7 @@ fn check_unchanged(
     )
 }
 
-fn wait_native_pending(probe: &Probe, cutoff: Deadline) -> Result<(), EdgeError> {
+fn wait_native_pending(probe: &Probe, observation_cutoff: Deadline) -> Result<(), EdgeError> {
     let scope =
         OutboundScope::capture(FastlyOutboundClient::with_time(probe.time.clone()).progress());
     loop {
@@ -207,7 +207,7 @@ fn wait_native_pending(probe: &Probe, cutoff: Deadline) -> Result<(), EdgeError>
             return Ok(());
         }
         let now = probe.clock.now();
-        let mut remaining = cutoff.remaining_at(now).ok_or_else(failed)?;
+        let mut remaining = observation_cutoff.remaining_at(now).ok_or_else(failed)?;
         for snapshot in snapshots {
             check(
                 !snapshot.invalid

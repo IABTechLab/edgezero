@@ -176,7 +176,7 @@ struct Saved {
     client: HttpClient,
     scope: OutboundScope,
     time: OutboundTime,
-    cutoff: Deadline,
+    observation_cutoff: Deadline,
     witness: Arc<Witness>,
     reports: Arc<AtomicUsize>,
     send: OutboundFuture<OutboundResponse>,
@@ -353,15 +353,15 @@ fn callback(
         .map(|role| probe.observed_request(role, &mut native_operations))
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let cutoff = probe.clock.deadline_after(Duration::from_secs(3));
-    let batch = client.start_batch_until(requests, cutoff);
+    let observation_cutoff = probe.clock.deadline_after(Duration::from_secs(3));
+    let batch = client.start_batch_until(requests, observation_cutoff);
     let reports = Arc::new(AtomicUsize::new(0));
     *saved = Some(Saved {
         probe,
         client,
         scope,
         time,
-        cutoff,
+        observation_cutoff,
         witness,
         reports,
         send,
@@ -442,7 +442,10 @@ fn wait_native_pending(saved: &Saved) -> Result<(), EdgeError> {
             return Ok(());
         }
         let now = saved.probe.clock.now();
-        let mut remaining = saved.cutoff.remaining_at(now).ok_or_else(failed)?;
+        let mut remaining = saved
+            .observation_cutoff
+            .remaining_at(now)
+            .ok_or_else(failed)?;
         for snapshot in snapshots {
             check(
                 !snapshot.invalid
@@ -529,7 +532,7 @@ fn verify(saved: Saved) -> Result<(), EdgeError> {
         client: _client,
         scope,
         time: _time,
-        cutoff: _cutoff,
+        observation_cutoff: _,
         witness,
         reports,
         send,

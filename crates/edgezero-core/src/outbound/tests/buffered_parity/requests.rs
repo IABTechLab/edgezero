@@ -19,6 +19,7 @@ pub fn make(
     token: &str,
     step: &str,
     entered: MonotonicInstant,
+    connection_visible: bool,
 ) -> Result<OutboundRequest, EdgeError> {
     let mut request = OutboundRequest::new(
         if case.request_method() == "POST" {
@@ -100,13 +101,14 @@ pub fn make(
             .max_response_header_bytes(0)
             .max_response_header_count(0),
         Kind::Header(HeaderCase::MarkerCountOff | HeaderCase::MarkerCountOn) => {
-            request.max_response_header_count(5)
+            request.max_response_header_count(if connection_visible { 6 } else { 5 })
         }
         Kind::Header(HeaderCase::MarkerBytesOff | HeaderCase::MarkerBytesOn) => {
             let reply = case.reply(token);
             let raw_bytes = reply
                 .fields
                 .iter()
+                .filter(|(name, _)| connection_visible || *name != "connection")
                 .map(|(name, value)| name.len().saturating_add(value.len()))
                 .sum::<usize>()
                 .saturating_add("content-length".len())
@@ -116,7 +118,7 @@ pub fn make(
         }
         Kind::Marker(MarkerCase::Off) => request
             .proxy_marker(OutboundProxyMarker::Off)
-            .max_response_header_count(6),
+            .max_response_header_count(if connection_visible { 7 } else { 6 }),
         Kind::Marker(MarkerCase::On) => request.proxy_marker(OutboundProxyMarker::On),
         Kind::Upload { cap } => request.max_request_body_bytes(cap),
         Kind::Authority => request.host_authority_override("virtual.example:8443")?,
@@ -153,4 +155,76 @@ pub fn settings(parts: &OutboundRequestParts) -> Value {
         "mode":format!("{:?}",parts.response_mode),"proxy":format!("{:?}",parts.proxy_marker),
         "response_cap":match parts.response_mode {api::ResponseMode::Buffered{max_bytes}=>Some(max_bytes),api::ResponseMode::Streamed=>None},
         "timeout_ms":parts.timeout.map(|value|value.as_millis()),"upload_cap":parts.max_request_body_bytes,"window_bits":parts.max_brotli_window_bits})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_marker_caps_charge_every_provider_visible_field() {
+        for connection_visible in [false, true] {
+            for name in [
+                "pair-marker-count-off",
+                "pair-marker-count-on",
+                "pair-marker-bytes-off",
+                "pair-marker-bytes-on",
+                "pair-marker-explicit-off",
+            ] {
+                let case = super::super::vectors::find(name).expect("marker case");
+                let reply = case.reply("marker-cap");
+                let fields = reply
+                    .fields
+                    .iter()
+                    .filter(|(field, _)| connection_visible || *field != "connection")
+                    .collect::<Vec<_>>();
+                let count = u64::try_from(fields.len() + 1).expect("bounded field count");
+                let bytes = u64::try_from(
+                    fields
+                        .iter()
+                        .map(|(field, value)| field.len() + value.len())
+                        .sum::<usize>()
+                        + "content-length".len()
+                        + reply
+                            .declared
+                            .expect("declared marker body")
+                            .to_string()
+                            .len(),
+                )
+                .expect("bounded field bytes");
+                let request = make(
+                    case,
+                    "http://127.0.0.1/marker".parse().expect("URI"),
+                    "marker-cap",
+                    "send",
+                    MonotonicInstant::now(),
+                    connection_visible,
+                )
+                .expect("marker request")
+                .into_parts();
+                if name.contains("bytes") {
+                    assert_eq!(request.max_response_header_bytes, Some(bytes));
+                    assert!(
+                        bytes + u64::try_from("x-edgezero-proxy:test".len()).unwrap()
+                            > request.max_response_header_bytes.unwrap()
+                    );
+                } else {
+                    assert_eq!(request.max_response_header_count, Some(count));
+                    assert!(count + 1 > request.max_response_header_count.unwrap());
+                }
+                assert_eq!(
+                    case.client_marker(),
+                    !matches!(name, "pair-marker-count-off" | "pair-marker-bytes-off")
+                );
+                assert_eq!(
+                    request.proxy_marker,
+                    if name == "pair-marker-explicit-off" {
+                        OutboundProxyMarker::Off
+                    } else {
+                        OutboundProxyMarker::Inherit
+                    }
+                );
+            }
+        }
+    }
 }

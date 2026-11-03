@@ -100,3 +100,47 @@ pub(super) fn serve(
     shared.wake.notify_all();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::net::{WireOrigins, header_request};
+
+    #[test]
+    fn paired_origin_advertises_its_single_exchange_connection_lifetime() {
+        let origins = WireOrigins::start().unwrap();
+        for case in ["pair-original-absent-declared-s", "pair-normalize-b"] {
+            let reply = header_request(
+                origins.port(0),
+                &format!("/transport/{case}/closure"),
+                "closure",
+                &[("x-transport-step", "send")],
+                None,
+            )
+            .unwrap();
+            let connection = reply["headers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|field| {
+                    field[0]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("connection"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(connection.len(), 1, "{case}: missing closure policy");
+            let tokens = connection[0][1]
+                .as_str()
+                .unwrap()
+                .split(',')
+                .map(str::trim)
+                .collect::<Vec<_>>();
+            assert_eq!(tokens.iter().filter(|token| **token == "close").count(), 1);
+            if case == "pair-normalize-b" {
+                assert!(tokens.contains(&"x-private"));
+                assert!(tokens.contains(&"x-edgezero-proxy"));
+            }
+            assert_eq!(origins.take_wire().unwrap()["token"], "closure");
+        }
+        assert_eq!(origins.finish_counted().unwrap(), 2);
+    }
+}

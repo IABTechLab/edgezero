@@ -448,12 +448,14 @@ mod platform {
         manual_response_encoding, start_fallback, start_prepared,
     };
     use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context as TaskContext, Poll};
 
     use edgezero_core::response_egress::{ResponseEgressAttempt, ResponseEgressEnvelope};
     use futures_util::FutureExt as _;
     use futures_util::StreamExt as _;
-    use futures_util::future::{Either, select};
+    use futures_util::future::poll_fn;
     use worker::js_sys::{BigInt, Uint8Array};
     use worker::wasm_bindgen_futures::JsFuture;
     use worker::worker_sys::FixedLengthStream;
@@ -525,6 +527,7 @@ mod platform {
                     WorkersEgressIo {
                         signal: self.signal.clone(),
                         writer: None,
+                        closed: None,
                     },
                 ));
             }
@@ -548,6 +551,7 @@ mod platform {
                 builder.stream(readable),
                 WorkersEgressIo {
                     signal: self.signal.clone(),
+                    closed: Some(WriterClosed::Watching(JsFuture::from(writer.closed()))),
                     writer: Some(writer),
                 },
             ))
@@ -561,6 +565,28 @@ mod platform {
     struct WorkersEgressIo {
         signal: AbortSignal,
         writer: Option<web_sys::WritableStreamDefaultWriter>,
+        closed: Option<WriterClosed>,
+    }
+
+    enum WriterClosed {
+        Watching(JsFuture),
+        Resolved,
+        Failed,
+    }
+
+    impl WriterClosed {
+        fn poll_failed(&mut self, context: &mut TaskContext<'_>) -> bool {
+            if let Self::Watching(future) = self
+                && let Poll::Ready(result) = Pin::new(future).poll(context)
+            {
+                *self = if result.is_err() {
+                    Self::Failed
+                } else {
+                    Self::Resolved
+                };
+            }
+            matches!(self, Self::Failed)
+        }
     }
 
     #[expect(
@@ -576,6 +602,7 @@ mod platform {
     enum RaceEvent<Output> {
         Cancelled,
         Deadline,
+        WriterFailed,
         Operation {
             output: Output,
             terminal: Option<IoFailureKind>,
@@ -593,6 +620,7 @@ mod platform {
         deadline: Deadline,
         clock: &MonotonicClock,
         signal: &AbortSignal,
+        mut closed: Option<&mut WriterClosed>,
     ) -> RaceEvent<Operation::Output>
     where
         OperationFactory: FnOnce() -> Operation,
@@ -606,35 +634,58 @@ mod platform {
         };
         let cancellation = wait_for_abort(signal.clone());
         let timer = Delay::from(remaining);
-        let guard = async move {
-            futures_util::pin_mut!(cancellation, timer);
-            match select(cancellation, timer).await {
-                Either::Left(((), _timer)) => RaceEvent::Cancelled,
-                Either::Right(((), _cancellation)) => RaceEvent::Deadline,
-            }
-        };
         let operation_future = operation();
-        futures_util::pin_mut!(guard, operation_future);
-        match select(guard, operation_future).await {
-            Either::Left((event, _operation)) => event,
-            Either::Right((output, _guard)) => {
-                let terminal = if signal.aborted() {
-                    Some(IoFailureKind::Cancelled)
-                } else if deadline.is_expired_at(clock.now()) {
-                    Some(IoFailureKind::Deadline)
-                } else {
-                    None
-                };
-                RaceEvent::Operation { output, terminal }
+        futures_util::pin_mut!(cancellation, timer, operation_future);
+        poll_fn(|context| {
+            if cancellation.as_mut().poll(context).is_ready() {
+                return Poll::Ready(RaceEvent::Cancelled);
             }
-        }
+            if timer.as_mut().poll(context).is_ready() {
+                return Poll::Ready(RaceEvent::Deadline);
+            }
+            if closed
+                .as_deref_mut()
+                .is_some_and(|watch| watch.poll_failed(context))
+            {
+                return Poll::Ready(if signal.aborted() {
+                    RaceEvent::Cancelled
+                } else if deadline.is_expired_at(clock.now()) {
+                    RaceEvent::Deadline
+                } else {
+                    RaceEvent::WriterFailed
+                });
+            }
+            let Poll::Ready(output) = operation_future.as_mut().poll(context) else {
+                return Poll::Pending;
+            };
+            let terminal = if signal.aborted() {
+                Some(IoFailureKind::Cancelled)
+            } else if deadline.is_expired_at(clock.now()) {
+                Some(IoFailureKind::Deadline)
+            } else if closed
+                .as_deref_mut()
+                .is_some_and(|watch| watch.poll_failed(context))
+            {
+                Some(IoFailureKind::Transport)
+            } else {
+                None
+            };
+            Poll::Ready(RaceEvent::Operation { output, terminal })
+        })
+        .await
     }
 
     #[async_trait::async_trait(?Send)]
     impl CloudflareEgressIo for WorkersEgressIo {
         fn abort(&mut self) {
+            let settled = matches!(
+                self.closed.take(),
+                Some(WriterClosed::Resolved | WriterClosed::Failed)
+            );
             if let Some(writer) = self.writer.take() {
-                drop(writer.abort());
+                if !settled {
+                    drop(JsFuture::from(writer.abort()));
+                }
                 writer.release_lock();
             }
         }
@@ -652,11 +703,13 @@ mod platform {
                 deadline,
                 clock,
                 &self.signal,
+                None,
             )
             .await;
             let result = match event {
                 RaceEvent::Cancelled => Err(IoFailureKind::Cancelled),
                 RaceEvent::Deadline => Err(IoFailureKind::Deadline),
+                RaceEvent::WriterFailed => Err(IoFailureKind::Transport),
                 RaceEvent::Operation {
                     terminal: Some(kind),
                     ..
@@ -670,10 +723,11 @@ mod platform {
                     terminal: None,
                 } => Err(IoFailureKind::Transport),
             };
-            if result.is_ok()
-                && let Some(finished_writer) = self.writer.take()
-            {
-                finished_writer.release_lock();
+            if result.is_ok() {
+                self.closed = None;
+                if let Some(finished_writer) = self.writer.take() {
+                    finished_writer.release_lock();
+                }
             }
             result
         }
@@ -697,11 +751,13 @@ mod platform {
                 deadline,
                 clock,
                 &self.signal,
+                self.closed.as_mut(),
             )
             .await
             {
                 RaceEvent::Cancelled => Err(IoFailureKind::Cancelled),
                 RaceEvent::Deadline => Err(IoFailureKind::Deadline),
+                RaceEvent::WriterFailed => Err(IoFailureKind::Transport),
                 RaceEvent::Operation {
                     terminal: Some(kind),
                     ..
@@ -744,6 +800,7 @@ mod platform {
                 deadline,
                 clock,
                 &self.signal,
+                None,
             )
             .await;
             match event {
@@ -754,6 +811,10 @@ mod platform {
                 RaceEvent::Deadline => Err(IoFailure {
                     accepted: 0,
                     kind: IoFailureKind::Deadline,
+                }),
+                RaceEvent::WriterFailed => Err(IoFailure {
+                    accepted: 0,
+                    kind: IoFailureKind::Transport,
                 }),
                 RaceEvent::Operation {
                     output: Ok(_value),
@@ -825,7 +886,7 @@ mod platform {
     #[cfg(test)]
     mod race_tests {
         use std::cell::Cell;
-        use std::rc::{Rc, Weak};
+        use std::rc::Rc;
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -834,7 +895,8 @@ mod platform {
         use edgezero_core::error_detail::{
             CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase,
         };
-        use edgezero_core::http::{Method, Version, response_builder};
+        use edgezero_core::http::{Method, Response, Version, response_builder};
+        use edgezero_core::outbound::OutboundScopeOwner;
         use edgezero_core::response_egress::{
             ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressFallbackDisposition,
             ResponseEgressHead, ResponseEgressObserver as _, ResponseEgressObserverHandle,
@@ -842,6 +904,7 @@ mod platform {
         };
         use edgezero_core::response_egress_framing::PreparedResponseEgress;
         use edgezero_core::time::MonotonicInstant;
+        use futures::channel::oneshot;
         use futures_util::{future, stream};
         use wasm_bindgen_test::wasm_bindgen_test;
         use worker::js_sys::{Array, Function, Promise};
@@ -858,34 +921,15 @@ mod platform {
             completed: RecordingObserver,
             observed: RecordingObserver,
             policy: ResponseEgressPolicy,
-            polls: Rc<Cell<usize>>,
             prepared: PreparedResponseEgress,
-            source: Weak<()>,
         }
 
-        fn status_fixture(status: u16, streamed: bool, method: &Method) -> StatusFixture {
-            let now = MonotonicInstant::now();
+        fn status_fixture(response: Response, method: &Method) -> StatusFixture {
+            let clock = MonotonicClock::default();
+            let now = clock.now();
             let deadline = now.checked_add(Duration::from_secs(10)).expect("deadline");
-            let clock = MonotonicClock::new(move || now);
             let completed = RecordingObserver::default();
             let observed = RecordingObserver::default();
-            let polls = Rc::new(Cell::new(0_usize));
-            let counted = Rc::clone(&polls);
-            let source = Rc::new(());
-            let retained = Rc::downgrade(&source);
-            let body = if streamed {
-                Body::from_stream(stream::once(async move {
-                    counted.set(counted.get().checked_add(1).expect("source poll count"));
-                    drop(source);
-                    Ok(Bytes::from_static(b"application body"))
-                }))
-            } else {
-                Body::from("application body")
-            };
-            let response = response_builder()
-                .status(status)
-                .body(body)
-                .expect("response");
             let head = ResponseEgressHead::new(
                 response.status(),
                 response.version(),
@@ -917,17 +961,11 @@ mod platform {
                 policy: ResponseEgressPolicy {
                     write_deadline: Deadline::at_instant(deadline),
                 },
-                polls,
                 prepared,
-                source: retained,
             }
         }
 
-        async fn assert_status_handoff(status: u16, streamed: bool, method: &Method) {
-            let _timers = NumericTimeoutGuard::install();
-            Function::new_no_args(include_str!("../tests/worker_runtime.js"))
-                .call0(&JsValue::UNDEFINED)
-                .expect("guest Workers stream fixture");
+        fn sdk_committer(signal: web_sys::AbortSignal) -> (WorkersCommitter, Array) {
             let pending = Array::new();
             let context = Function::new_with_args(
                 "tasks",
@@ -935,12 +973,57 @@ mod platform {
             )
             .call1(&JsValue::UNDEFINED, &pending)
             .expect("guest waitUntil");
-            let controller = web_sys::AbortController::new().expect("controller");
-            let mut committer = WorkersCommitter {
-                context: Arc::new(Context::new(context.unchecked_into())),
-                signal: controller.signal().into(),
+            (
+                WorkersCommitter {
+                    context: Arc::new(Context::new(context.unchecked_into())),
+                    signal: signal.into(),
+                },
+                pending,
+            )
+        }
+
+        fn sdk_io(signal: web_sys::AbortSignal) -> (WorkersEgressIo, wasm_streams::ReadableStream) {
+            let (mut committer, _) = sdk_committer(signal);
+            let (response, io) = committer
+                .prepare(StatusCode::OK, &HeaderMap::new(), None, true)
+                .expect("SDK response");
+            let Ok(raw) = worker::IntoResponse::into_raw(response) else {
+                panic!("SDK response");
             };
-            let fixture = status_fixture(status, streamed, method);
+            (
+                io,
+                wasm_streams::ReadableStream::from_raw(raw.body().expect("body")),
+            )
+        }
+
+        async fn assert_status_handoff(status: u16, streamed: bool, method: &Method) {
+            let _timers = NumericTimeoutGuard::install();
+            Function::new_no_args(include_str!("../tests/worker_runtime.js"))
+                .call0(&JsValue::UNDEFINED)
+                .expect("guest Workers stream fixture");
+            let controller = web_sys::AbortController::new().expect("controller");
+            let (mut committer, pending) = sdk_committer(controller.signal());
+            let polls = Rc::new(Cell::new(0_usize));
+            let counted = Rc::clone(&polls);
+            let source = Rc::new(());
+            let retained = Rc::downgrade(&source);
+            let body = if streamed {
+                Body::from_stream(stream::once(async move {
+                    counted.set(counted.get().checked_add(1).expect("source poll count"));
+                    drop(source);
+                    Ok(Bytes::from_static(b"application body"))
+                }))
+            } else {
+                drop(source);
+                Body::from("application body")
+            };
+            let fixture = status_fixture(
+                response_builder()
+                    .status(status)
+                    .body(body)
+                    .expect("response"),
+                method,
+            );
             let response = match start_prepared(
                 fixture.prepared,
                 fixture.policy,
@@ -952,8 +1035,8 @@ mod platform {
                 StartOutcome::Started(response) => response,
                 StartOutcome::Precommit { attempt, cause } => {
                     assert_eq!(cause, ResponseEgressOutcome::ConversionError);
-                    assert_eq!(fixture.polls.get(), 0);
-                    assert!(fixture.source.upgrade().is_none());
+                    assert_eq!(polls.get(), 0);
+                    assert!(retained.upgrade().is_none());
                     assert!(fixture.completed.reports().is_empty());
                     assert!(fixture.observed.reports().is_empty());
                     start_fallback(method, cause, *attempt, &fixture.clock, &mut committer)
@@ -983,10 +1066,10 @@ mod platform {
             };
             assert_eq!(bytes, expected_body);
             assert_eq!(
-                fixture.polls.get(),
+                polls.get(),
                 usize::from(streamed && !rejected && *method != Method::HEAD)
             );
-            assert!(fixture.source.upgrade().is_none());
+            assert!(retained.upgrade().is_none());
             assert_status_report(
                 &fixture.completed,
                 &fixture.observed,
@@ -1030,6 +1113,270 @@ mod platform {
             );
             assert_eq!(reports[0].framing_failures.application(), None);
             assert_eq!(reports[0].framing_failures.fallback(), None);
+        }
+
+        #[wasm_bindgen_test]
+        async fn writer_closed_sdk_controls_reject_readable_cancellation_without_request_abort() {
+            Function::new_no_args(include_str!("../tests/worker_runtime.js"))
+                .call0(&JsValue::UNDEFINED)
+                .expect("guest-only FixedLengthStream shim");
+            for declared_length in [None, Some(7)] {
+                let (raw_readable, writable) = if let Some(length) = declared_length {
+                    let fixed = FixedLengthStream::new(length).expect("fixed stream");
+                    (fixed.readable(), fixed.writable())
+                } else {
+                    let transform = web_sys::TransformStream::new().expect("transform stream");
+                    (transform.readable(), transform.writable())
+                };
+                let controller = web_sys::AbortController::new().expect("controller");
+                let writer = writable.get_writer().expect("writer");
+                let closed = JsFuture::from(writer.closed());
+                let prefix = Uint8Array::from(b"prefix".as_slice());
+                let written = JsFuture::from(writer.write_with_chunk(&prefix.into()));
+                let mut readable = wasm_streams::ReadableStream::from_raw(raw_readable);
+                let mut reader = readable.get_reader();
+                let value = reader.read().await.expect("prefix read").expect("prefix");
+                assert_eq!(Uint8Array::new(&value).to_vec(), b"prefix");
+                written.await.expect("accepted prefix");
+                assert!(!controller.signal().aborted());
+                reader.cancel().await.expect("cancel readable");
+                assert!(
+                    closed.await.is_err(),
+                    "readable cancellation rejects closed"
+                );
+                assert!(!controller.signal().aborted());
+                writer.release_lock();
+            }
+        }
+
+        struct DropCounter(Rc<Cell<usize>>);
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.set(self.0.get().checked_add(1).expect("drop count"));
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn writer_closed_releases_pending_source_and_owner_before_original_deadline() {
+            let _timers = NumericTimeoutGuard::install();
+            Function::new_no_args(include_str!("../tests/worker_runtime.js"))
+                .call0(&JsValue::UNDEFINED)
+                .expect("guest-only FixedLengthStream shim");
+            for length in [None, Some(7)] {
+                assert_pending_source_cancelled(length).await;
+            }
+        }
+
+        async fn assert_pending_source_cancelled(length: Option<u32>) {
+            let source_drops = Rc::new(Cell::new(0));
+            let lease = DropCounter(Rc::clone(&source_drops));
+            let (notify_pending, entered_pending) = oneshot::channel();
+            let source = stream::once(future::ready(Ok(Bytes::from_static(b"prefix")))).chain(
+                stream::once(async move {
+                    let _lease = lease;
+                    let mut notification = Some(notify_pending);
+                    future::poll_fn(move |_| {
+                        if let Some(sender) = notification.take() {
+                            sender.send(()).expect("pending observer");
+                        }
+                        Poll::<Result<Bytes, EdgeError>>::Pending
+                    })
+                    .await
+                }),
+            );
+            let owner = OutboundScopeOwner::response_body();
+            let scope = owner.scope();
+            let owner_drops = Rc::new(Cell::new(0));
+            let resource = scope
+                .provider_state(|| DropCounter(Rc::clone(&owner_drops)))
+                .expect("owned resource");
+            let retained = Rc::downgrade(&resource);
+            drop(resource);
+            let mut application = response_builder()
+                .body(Body::from_stream(source))
+                .expect("response");
+            if let Some(declared_length) = length {
+                application.headers_mut().insert(
+                    "content-length",
+                    declared_length.to_string().parse().expect("length header"),
+                );
+            }
+            let owned_response = owner.attach(application).expect("attached owner");
+            let mut fixture = status_fixture(owned_response, &Method::GET);
+            fixture.policy.write_deadline =
+                fixture.clock.deadline_after(Duration::from_millis(500));
+            let deadline = fixture.policy.write_deadline;
+            let controller = web_sys::AbortController::new().expect("controller");
+            let (mut committer, tasks) = sdk_committer(controller.signal());
+            let native_response = match start_prepared(
+                fixture.prepared,
+                fixture.policy,
+                fixture.attempt,
+                fixture.clock.clone(),
+                EgressKind::Application,
+                &mut committer,
+            ) {
+                StartOutcome::Started(delivering) => delivering,
+                StartOutcome::Precommit { .. } => panic!("no fallback before commit"),
+            };
+            let Ok(raw) = worker::IntoResponse::into_raw(native_response) else {
+                panic!("SDK response");
+            };
+            let mut readable = wasm_streams::ReadableStream::from_raw(raw.body().expect("body"));
+            let mut reader = readable.get_reader();
+            let value = reader.read().await.expect("prefix read").expect("prefix");
+            assert_eq!(Uint8Array::new(&value).to_vec(), b"prefix");
+            entered_pending
+                .await
+                .expect("source actually returned Pending");
+            assert!(fixture.observed.reports().is_empty());
+            assert_eq!(source_drops.get(), 0);
+            assert_eq!(owner_drops.get(), 0);
+            assert!(!controller.signal().aborted());
+            reader.cancel().await.expect("cancel readable");
+            JsFuture::from(Promise::all(&tasks))
+                .await
+                .expect("egress task");
+            let reports = fixture.observed.reports();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(fixture.completed.reports(), reports);
+            assert_eq!(reports[0].outcome, ResponseEgressOutcome::TransportError);
+            assert!(!deadline.is_expired_at(fixture.clock.now()));
+            assert_eq!(reports[0].bytes_written, 6);
+            assert_eq!(reports[0].body_kind, ResponseEgressBodyKind::Application);
+            assert_eq!(reports[0].fallback_disposition, None);
+            assert_eq!(source_drops.get(), 1);
+            assert_eq!(owner_drops.get(), 1);
+            assert!(retained.upgrade().is_none());
+            assert!(scope.check().is_err());
+            assert!(!controller.signal().aborted());
+            drop(reader);
+            drop(raw);
+            assert_eq!(fixture.observed.reports(), reports);
+        }
+
+        #[wasm_bindgen_test]
+        async fn writer_closed_already_rejected_preserves_abort_and_deadline_precedence() {
+            let _timers = NumericTimeoutGuard::install();
+            for expected in [
+                IoFailureKind::Transport,
+                IoFailureKind::Cancelled,
+                IoFailureKind::Deadline,
+            ] {
+                let controller = web_sys::AbortController::new().expect("controller");
+                let (mut io, mut readable) = sdk_io(controller.signal());
+                readable.cancel().await.expect("cancel readable");
+                let mut fixture = status_fixture(
+                    response_builder().body(Body::empty()).expect("response"),
+                    &Method::GET,
+                );
+                let deadline = if expected == IoFailureKind::Deadline {
+                    Deadline::at_instant(fixture.clock.now())
+                } else {
+                    fixture.clock.deadline_after(Duration::from_millis(500))
+                };
+                if expected == IoFailureKind::Cancelled {
+                    controller.abort();
+                }
+                let polls = Rc::new(Cell::new(0_usize));
+                let counted = Rc::clone(&polls);
+                let mut source = stream::poll_fn(move |_| {
+                    counted.set(counted.get().checked_add(1).expect("poll count"));
+                    Poll::Ready(None)
+                })
+                .boxed_local();
+                let error = io
+                    .next_body(&mut source, deadline, &fixture.clock, &mut fixture.attempt)
+                    .await
+                    .expect_err("guard precedes ready source");
+                assert_eq!(error, expected);
+                assert_eq!(polls.get(), 0);
+                if expected == IoFailureKind::Transport {
+                    assert!(matches!(io.closed, Some(WriterClosed::Failed)));
+                    assert_eq!(
+                        io.next_body(&mut source, deadline, &fixture.clock, &mut fixture.attempt)
+                            .await
+                            .expect_err("latched rejection"),
+                        IoFailureKind::Transport
+                    );
+                    assert_eq!(polls.get(), 0);
+                }
+                io.abort();
+                io.abort();
+                assert!(io.closed.is_none());
+                assert!(io.writer.is_none());
+                Delay::from(Duration::ZERO).await;
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn writer_closed_success_is_not_eof_and_is_not_repolled() {
+            let _timers = NumericTimeoutGuard::install();
+            let controller = web_sys::AbortController::new().expect("controller");
+            let (mut io, mut readable) = sdk_io(controller.signal());
+            let close = JsFuture::from(io.writer.as_ref().expect("writer").close());
+            let mut reader = readable.get_reader();
+            assert!(reader.read().await.expect("closed readable").is_none());
+            close.await.expect("successful SDK close");
+            let mut fixture = status_fixture(
+                response_builder().body(Body::empty()).expect("response"),
+                &Method::GET,
+            );
+            let mut source = stream::iter([
+                Ok(Bytes::from_static(b"first")),
+                Ok(Bytes::from_static(b"second")),
+            ])
+            .boxed_local();
+            for expected in [b"first".as_slice(), b"second".as_slice()] {
+                let item = io
+                    .next_body(
+                        &mut source,
+                        fixture.policy.write_deadline,
+                        &fixture.clock,
+                        &mut fixture.attempt,
+                    )
+                    .await
+                    .expect("source read")
+                    .expect("source item")
+                    .expect("source bytes");
+                assert_eq!(item.as_ref(), expected);
+                assert!(matches!(io.closed, Some(WriterClosed::Resolved)));
+            }
+            assert!(
+                io.next_body(
+                    &mut source,
+                    fixture.policy.write_deadline,
+                    &fixture.clock,
+                    &mut fixture.attempt,
+                )
+                .await
+                .expect("source EOF")
+                .is_none()
+            );
+            io.abort();
+            io.abort();
+            assert!(io.closed.is_none());
+            assert!(io.writer.is_none());
+        }
+
+        #[wasm_bindgen_test]
+        async fn writer_closed_finish_clears_watch_and_writer_before_idempotent_abort() {
+            let _timers = NumericTimeoutGuard::install();
+            let controller = web_sys::AbortController::new().expect("controller");
+            let (mut io, mut readable) = sdk_io(controller.signal());
+            let clock = MonotonicClock::default();
+            let deadline = clock.deadline_after(Duration::from_millis(500));
+            let mut reader = readable.get_reader();
+            let (finished, read) = future::join(io.finish(deadline, &clock), reader.read()).await;
+            finished.expect("successful finish");
+            assert!(read.expect("finished readable").is_none());
+            assert!(io.closed.is_none());
+            assert!(io.writer.is_none());
+            io.abort();
+            io.abort();
+            Delay::from(Duration::ZERO).await;
         }
 
         #[wasm_bindgen_test]
@@ -1165,6 +1512,7 @@ mod platform {
             let mut io = WorkersEgressIo {
                 signal: controller.signal().into(),
                 writer: None,
+                closed: None,
             };
             let timers = NumericTimeoutGuard::install();
             let result = io
@@ -1256,6 +1604,7 @@ mod platform {
                 deadline,
                 &clock,
                 &signal,
+                None,
             )
             .await;
 

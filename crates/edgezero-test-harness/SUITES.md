@@ -252,6 +252,16 @@ libtest output proves the assertions, while focused `--nocapture` runs retain nu
 These measurements use complete framed responses, not later connection cleanup. Hosted and
 consumer criteria and the unrelated strict lifetime probes remain separate gates.
 
+The paired origin serves one exchange per connection and explicitly advertises `Connection: close`.
+The shared reply model also supplies this field to header accounting; it is not a renderer-only
+addition. Normalization controls append `close` without losing their named-hop nominations or
+adding a duplicate Connection field. Exact marker-count and byte boundaries use adapter-visible
+fields, including the close field where exposed. Spin hides Connection in its WASI response, so
+its original five-field count boundary remains unchanged. Marker-off must fit exactly and adding
+the synthetic marker must still overflow; no field is exempt from actual adapter accounting.
+This fixes the test origin's connection lifetime, not production pooling/retry policy or provider
+raw-header fidelity. Retain failed CI artifacts and both visibility controls.
+
 The pinned inspector's [network preview](https://github.com/cloudflare/workerd/blob/v1.20260415.1/src/workerd/io/worker.c%2B%2B#L4389)
 decompresses bodies independently of the application's manual-fetch policy. Enabling only CDP
 `Network.enable` reproduces its fatal malformed-gzip error. Keep inspection disabled for these
@@ -1640,6 +1650,16 @@ case, close its acceptance leg or prove prompt native timer wakeup.
 For quiet-window proofs, a head-write-start/guest-head-observation causal bound
 conservatively compares receipts without pretending the clocks are synchronized. The 5 ms
 measurement guard makes that proof stricter, and is not an extra deadline allowance.
+
+`batch-progress` measures its 300-305 ms non-observation interval with the existing native
+client's paired timer, independently of the unchanged auxiliary HTTP Send's completion.
+The same private client factory supplies the client, clock and provider progress scope; no
+public context accessor or second executor is introduced. Both operations must finish before
+collection. Their actual completion timestamps determine record order, including an HTTP
+completion before the timer is polled. The HTTP operation must still span at least 300 ms,
+retain its original request budget and complete with the exact empty 200 response. Only its
+actual completion calibrates the source-clock bound. Late timers, early or reordered
+observations, altered receipts and whole-Send measurements substituted for the timer fail.
 
 Scheduled lifecycle-source writes share one stop-aware condition-variable loop with waits capped
 at 1 ms against the original absolute target. This avoids long timeout coalescing without a
