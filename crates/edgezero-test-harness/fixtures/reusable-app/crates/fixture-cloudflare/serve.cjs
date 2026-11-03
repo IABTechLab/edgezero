@@ -2,7 +2,7 @@ const { lstatSync, realpathSync } = require("node:fs");
 const { createRequire } = require("node:module");
 const { dirname, isAbsolute, join, relative, sep } = require("node:path");
 
-// Rust owns supervision and assertions; this starts one native workerd listener.
+// Rust owns supervision and assertions; clients enter the native application socket.
 async function serve() {
   const [executable, serialized] = process.argv.slice(2);
   const canonical = realpathSync(executable);
@@ -153,7 +153,13 @@ async function serve() {
       modulesRoot: root,
       bindings: { ...mapped.workerOptions.bindings, ...options.bindings },
       host: options.host,
-      port: options.port,
+      port: 0,
+      unsafeDirectSockets: [{
+        host: options.host,
+        port: options.port,
+        entrypoint: "default",
+        proxy: false,
+      }],
       resourcePersistencePath: join(options.persist, "v3"),
       cf: false,
       telemetry: { enabled: false },
@@ -165,7 +171,19 @@ async function serve() {
       await dispose();
       return;
     }
-    const listener = await worker.ready;
+    const entry = await worker.ready;
+    if (
+      entry.protocol !== "http:" ||
+      entry.hostname !== options.host ||
+      !Number.isInteger(Number(entry.port)) ||
+      Number(entry.port) < 1 ||
+      Number(entry.port) > 65535 ||
+      Number(entry.port) === options.port
+    ) {
+      throw new Error("fixture control listener is not distinct loopback HTTP");
+    }
+    // Bypass entry forwarding so this socket uses the guest's compatibility flags.
+    const listener = await worker.unsafeGetDirectURL(undefined, "default");
     if (
       listener.protocol !== "http:" ||
       listener.hostname !== options.host ||

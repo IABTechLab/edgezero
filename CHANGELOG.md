@@ -13,6 +13,12 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Direct the existing Workers test launcher to the native application socket with its real
+  compatibility flags, bypassing Miniflare entry forwarding. Retain one bounded ephemeral SDK
+  control listener, strict address verification and owned shutdown, with no fallback path.
+- Preserve failed pending-source cancellation evidence through the original coordination deadline,
+  keeping strict errors and proof credit unchanged. Bound and label the separate diagnostic capture
+  rather than letting an unrelated survivor timeout end observation early.
 - Observe a cached Workers writer-closed promise while response production is pending. Preserve
   deadline/abort precedence, accepted bytes and exactly-once cleanup without classifying every
   transport rejection as client disconnect. Guest SDK cancellation tests do not qualify hosted delivery.

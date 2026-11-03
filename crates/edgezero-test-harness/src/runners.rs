@@ -2500,7 +2500,16 @@ exports.Miniflare = class {
     console.log(JSON.stringify(serialized));
     const failure = process.env.EDGEZERO_FIXTURE_LAUNCH_FAILURE;
     const live = setInterval(() => {}, 60000);
-    this.ready = failure === 'ready' ? Promise.reject(new Error('private-fixture-token')) : Promise.resolve(new URL('http://127.0.0.1:' + (failure === 'wrong-port' ? '1235' : '1234')));
+    this.ready = failure === 'ready' ? Promise.reject(new Error('private-fixture-token')) : Promise.resolve(new URL('http://' + (failure === 'wrong-entry-host' ? '0.0.0.0' : '127.0.0.1') + ':' + (failure === 'entry-collision' ? '1234' : '4321')));
+    this.unsafeGetDirectURL = async (worker, entrypoint) => {
+      require('node:assert/strict').equal(worker, undefined);
+      require('node:assert/strict').equal(entrypoint, 'default');
+      await this.ready;
+      if (failure === 'direct-reject') throw new Error('private-fixture-token');
+      if (failure === 'entry-as-direct') return this.ready;
+      return new URL((failure === 'wrong-protocol' ? 'https:' : 'http:') + '//' + (failure === 'wrong-host' ? '127.0.0.2' : '127.0.0.1') + ':' + (failure === 'wrong-port' ? '1235' : '1234'));
+    };
+    if (failure === 'missing-direct') delete this.unsafeGetDirectURL;
     let rejectReady;
     this.dispose = async () => { clearInterval(live); console.log('disposed'); if (failure.startsWith('waiting')) rejectReady(failure === 'waiting-failure' ? new Error('private-fixture-token') : new MiniflareCoreError('ERR_DISPOSED','private-fixture-token')); if (failure === 'stop-event') options.log.error(new MiniflareCoreError('ERR_DISPOSED','private-fixture-token')); if (failure === 'stop-runtime') options.log.error(new Error('private-fixture-token')); await new Promise(resolve => setTimeout(resolve,10)); if (['dispose','waiting-dispose'].includes(failure)) throw new Error('private-fixture-token'); };
     const stop = () => { process.kill(process.pid, 'SIGTERM'); setImmediate(() => process.kill(process.pid, 'SIGINT')); };
@@ -2550,6 +2559,13 @@ exports.Miniflare = class {
             "define",
             "external",
             "wrong-port",
+            "wrong-host",
+            "wrong-protocol",
+            "missing-direct",
+            "direct-reject",
+            "entry-as-direct",
+            "wrong-entry-host",
+            "entry-collision",
             "outside-main",
             "remote-kv",
             "service",
@@ -2650,7 +2666,8 @@ exports.Miniflare = class {
                     "kvNamespaces":{"fixture_config":{"id":"config-id"},"fixture_kv":{"id":"kv-id"}},
                     "email":{"send_email":[]},
                     "modulesRoot":modules,
-                    "host":"127.0.0.1","port":1234,"resourcePersistencePath":"/fixture/persist/v3",
+                    "host":"127.0.0.1","port":0,"resourcePersistencePath":"/fixture/persist/v3",
+                    "unsafeDirectSockets":[{"host":"127.0.0.1","port":1234,"entrypoint":"default","proxy":false}],
                     "cf":false,"telemetry":{"enabled":false}});
             if failure == "omit-root" {
                 expected_options.as_object_mut().unwrap().remove("rootPath");

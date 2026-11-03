@@ -31,8 +31,9 @@ This does not weaken their functional assertions or replace the standard entrypo
 
 ### Cloudflare Native Module Loading
 
-The existing `serve.cjs` launches one direct Miniflare/workerd listener through the selected
-Wrangler installation. Rust supplies a mandatory, sorted inventory of owned staged files,
+The existing `serve.cjs` designates one native user-worker socket through the selected
+Wrangler/Miniflare installation. The SDK's separate entry/control listener remains on a distinct
+ephemeral loopback port and receives no harness traffic. Rust supplies a mandatory, sorted inventory of owned staged files,
 bounded to 128 total file/directory entries, 64 MiB aggregate file bytes and eight directory
 levels below the root. Empty/missing trees, symlinks, non-files and non-UTF-8 paths fail before
 SDK materialization. These are fixture staging bounds, not provider memory guarantees or
@@ -203,7 +204,12 @@ The Rust controller resolves Node and the selected `WRANGLER_BIN` npm executable
 the small `fixture-cloudflare/serve.cjs` bootstrap. Wrangler must resolve from that exact
 installation; shell/version-manager wrappers cannot silently fall back to another package.
 The bootstrap now uses public `unstable_getMiniflareWorkerOptions` and Wrangler's selected
-Miniflare dependency to start one direct workerd HTTP listener. The previous dev-proxy launcher
+Miniflare dependency to start the designated HTTP socket directly at the user worker's default
+entrypoint (`unsafeDirectSockets`, `proxy:false`). `unsafeGetDirectURL` must identify that exact
+loopback address; there is no fallback to Miniflare's entry URL. The entry/control listener remains
+on a distinct ephemeral loopback port, not another application transport. Previous captures that
+used `worker.ready` traversed Miniflare's entry worker, whose flags differ from the guest's; they
+do not establish an end-to-end request-abort signal chain. The previous dev-proxy launcher
 is removed, not retained as an alternate path. Compatibility date/flags, module rules, staged
 module root, variable overrides and KV namespace IDs are preserved; `<persist>/v3` matches the
 existing CLI seed. Unsupported defines, external workers, remote bindings and service/proxy
@@ -878,8 +884,8 @@ two already accepted socket budgets may remain. This is a finite observation, no
 provider work can never resume. Client captures are bounded to 4 KiB and reads to six seconds.
 First-byte timing is explicitly unmeasured; header/completion times use the client clock.
 
-The canonical local matrix passes all eleven cases on each of Axum, repaired Viceroy, Spin and
-the direct Miniflare/workerd listener. The unchanged Cloudflare sequence recovers immediately
+The earlier canonical local matrix passes all eleven cases on each of Axum, repaired Viceroy,
+Spin and Miniflare's entry listener. The unchanged Cloudflare sequence recovers immediately
 from ingress overflow to the following valid upload, without retries, recovery sleeps or drains.
 Runtime cleanup is checked explicitly. After settlement, the bounded persisted JSONL reader
 revalidates all eleven ordered cases, unique request tokens, response bytes/status/headers,
@@ -1322,6 +1328,16 @@ Workers deadline/source-error cases may retain the observed clean HTTP ending wi
 prefix, but still require their error terminal, original budgets, exactly-once SDK/source release,
 stable polling and survivor isolation. Such a wire observation does not prove transport abort.
 Pending-source cancellation without a terminal report remains failed/unverified, not model-proven.
+
+After an intentionally issued pending-source cancellation fails strict validation, the controller
+continues diagnostic log observation until the same original two-second deadline before releasing
+held origins. This prevents the survivor's independent one-second acknowledgment timeout from
+ending observation early. The first strict error, validated protocol, cursor and native-proof
+credit remain unchanged. Separate uncredited diagnostics retain canonical rows in arrival order,
+including foreign and duplicate stages, under the existing row, 2 KiB record and 1 MiB log bounds.
+Malformed or oversized rows, incomplete tails, truncation, failed reads and reads finishing after
+the deadline have explicit flags. Invalid evidence never becomes a pass or proof of absence.
+Successful cases and all source/request budgets are unchanged; no extra request or executor is used.
 
 Spin's additional silent-connect case requires the [Linux ownership prerequisites](README.md#run-integration-tests).
 Other operating systems cannot substitute an immediate refusal for that proof. Use the generated

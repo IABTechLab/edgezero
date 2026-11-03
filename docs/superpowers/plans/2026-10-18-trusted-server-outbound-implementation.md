@@ -12,6 +12,71 @@
 
 ## Status and Authority
 
+### Runtime Boundary Investigation (2026-11-03)
+
+All 30 GitHub checks pass at `22c6386c`. The following changes and executions are subsequent
+working-tree characterization, not frozen-candidate or hosted qualification. Outbound API,
+provider pins, deadlines, caps, accepted identities and capability classifications are unchanged.
+
+The cancellation controller previously stopped its ordered scan when the survivor's independent
+one-second acknowledgment request timed out, releasing held sources around 1.01 seconds instead
+of observing the remaining original two-second coordination window. A failure-only observer now
+keeps the strict error, validated cursor and native-proof credit unchanged while collecting a
+separate bounded canonical trace until that same deadline. It reuses the existing parser and
+1 MiB log/2 KiB record limits, retains arrival order and duplicates under the original row cap,
+and flags malformed/incomplete/truncated/late or failed reads. It runs only after an intentional
+prefix-bound cancellation has actually unwound the client exchange, before source release.
+Successful cases and all request/source budgets are unchanged. Fail-first and mutation tests
+pass; final serialized harness verification passes 583 tests with two existing ignored helpers.
+
+Miniflare's entry worker has different compatibility flags from the application worker and forwards
+through a service binding. The existing fixture launcher now selects the supported native default
+user-worker socket directly, without an entry-listener fallback, preserving guest flags, modules,
+bindings, persistence and disposal. Miniflare's fixed additional entry/control listener remains
+on a distinct ephemeral loopback port, unused by the client. The existing Rust-controlled launcher
+test first fails against entry readiness, then passes direct selection, address/API rejection and
+shutdown controls. This corrects a test boundary; it is not proof that entry forwarding caused the
+cancellation failure. Wrangler serve/deploy paths and production adapter code are unchanged.
+Fresh and retained Workers smoke modes also pass with KV-backed fixture behavior. Axum's
+unchanged lifecycle suite passes all 19 cases; all five cleanup paths retain native proof and
+leave the new diagnostic field empty, so successful observation does not enter the failure drain.
+
+Actual Workers direct-socket execution passes the complete wire suite, including all 97 paired
+Send/Begin vectors, and all ingress-overflow/recovery controls. Its lifecycle run passes 15 cases
+and fails four: cold Begin is 10 ms against 2 +/- 5 ms, response-handoff batch entry is 58 ms
+against 34-39 ms, batch-write entry misses that same original window, and pending-source client
+cancellation lacks terminal/source proof. Head/body cutoff controls pass at 204/205 ms in this
+run; that does not erase earlier misses or establish their cause. Spin on macOS passes 18 cases,
+retains the cancellation failure and reports the Linux-only connect case unverified.
+
+Both cancellation captures now retain eleven canonical records through the original deadline
+with all diagnostic-error flags false. They show eight valid setup/Pending stages, followed by
+the survivor's three failure stages, but no victim cleanup. Controller source release occurs at
+about 2.000 seconds, not 1.01 seconds. That release is not SDK release or a guest source-drop
+observation. The negative is now better bounded, but does not establish provider impossibility
+or a missed EdgeZero race. The client uses its default socket-close policy, not an explicit TCP
+reset; any discriminating reset control must remain separately labelled without replacing this
+original failing gate. Raw captures remain under `/private/tmp/pr275-direct-guest-cancellation-v1/`
+and `/private/tmp/pr275-cancel-diagnostics-spin-v1/`.
+
+The [retained Linux connect record](../../audits/evidence/2026-11-03-spin-silent-connect-local.json)
+closes the previously unavailable local execution observation for existing `EZ-4/acceptance/06`
+on Spin. Linux/aarch64, Rust 1.98.1 and checksum-verified Spin 4.1.0 execute SDK 7.0.0 at the
+unchanged pinned revision. The controlled saturated backlog yields 26 exact Spin-owned
+`SYN_SENT` observations for PID 3321/inode 4448928, then typed `ConnectTimeout`/504 at 202,813 us
+under the unchanged 200 ms connect and 2 s aggregate settings. Operation acquisition/release is
+1/1 with three polls and zero heads/sources; same-client recovery returns 200/`ok`. It proves the
+phase-timeout branch, not aggregate expiry. The complete Linux suite remains 9 pass/11 fail,
+exit 1; all timing/protocol failures are preserved. No new case, leg, selector or CI job is added.
+Container/runtime cleanup completes. The source build identity is working-tree, not candidate.
+
+All five root gates pass, including 2,666 tests across 33 binaries (one existing ignored test).
+An initial sandboxed run fails local socket permission checks; the unchanged unrestricted run
+passes, and both logs are retained. Strict harness lint and formatting pass. All 217 required-local
+bindings remain executable with `qualified: false`; hosted execution, candidate freeze and
+capability promotion remain outside this work. Cancellation and remaining strict timing proof
+are still open; the diagnostic and direct-socket corrections do not waive those requirements.
+
 ### CI Follow-Up (2026-11-02)
 
 GitHub checks at `f8f2dc56` are not green. Workspace fails the legacy-name guard, docs/static

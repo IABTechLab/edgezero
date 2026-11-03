@@ -634,6 +634,7 @@ pub(super) fn check(
     let mut native_proof_complete = false;
     let mut victim_wire = Value::Null;
     let mut survivor_wire = Value::Null;
+    let mut failure_diagnostics = Value::Null;
     let survivor_prefix_seen = std::sync::atomic::AtomicBool::new(false);
     let coordination_deadline = Instant::now() + Duration::from_secs(2);
     let result = thread::scope(|scope| -> Result<()> {
@@ -773,6 +774,18 @@ pub(super) fn check(
                 },
             )
         })();
+        if checked.is_err()
+            && case == "response-owned-cleanup-cancel"
+            && victim_wire["controller_abort_issued"] == true
+        {
+            failure_diagnostics = protocol::diagnose_until(
+                log,
+                cursor,
+                PREFIX,
+                expected.len(),
+                coordination_deadline,
+            );
+        }
         let now = Instant::now();
         let first = origins.release_lifetime(&victim, now);
         let second = origins.release_lifetime(&survivor, now);
@@ -799,6 +812,7 @@ pub(super) fn check(
     records.push(json!({"event":"response-cleanup-case","adapter":adapter,"case":case,"token":victim,
         "survivor_token":survivor,"status":if result.is_ok(){"pass"}else{"fail"},"error":result.as_ref().err().map(ToString::to_string),
         "protocol":captured.into_inner(),"native_proof_complete":native_proof_complete,
+        "failure_diagnostics":failure_diagnostics,
         "origin":victim_source.as_ref().ok(),"survivor_origin":survivor_source.as_ref().ok(),
         "wire":victim_wire,"survivor_wire":survivor_wire,
         "coverage":"native-response-owned-cleanup","host_cancellation_proven":false,"qualification":false}))?;
