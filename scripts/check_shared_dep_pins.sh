@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_shared_dep_pins.sh — keep every `validator` pin on one major.
+# check_shared_dep_pins.sh — keep shared manifest and fixture SDK pins in sync.
 #
 # `edgezero-core` re-exports the `Validate` derive, so any crate that
 # derives `AppConfig` links against the exact `validator` the core crate
@@ -22,21 +22,44 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Extract validator's version from a file. Accepts the table form with
+# Extract a shared package's version from a file. Accepts the table form with
 # `version` in any key position (`validator = { features = [..], version
 # = "X" }`), the bare form (`validator = "X"`), and the escaped spelling
 # the scaffold seeds it as. Anchored to an assignment at line start so a
-# commented-out or prose mention cannot shadow the real pin, and kept
-# deliberately in step with `extract_version` in
-# crates/edgezero-cli/src/generator.rs -- the two parsers describe the
-# same grammar, and a difference between them shows up as this gate
-# reporting a missing pin for one that is merely reformatted.
-# Prints nothing when there is no match; callers treat empty as missing.
+# commented-out or prose mention cannot shadow the real pin.
+# Require exactly one declaration and read its version value, independently
+# of numeric feature names. Missing or duplicate declarations print nothing.
+shared_version_in() {
+  [[ -f "$1" ]] || return 0
+  awk -v package="$2" '
+    {
+      gsub(/\\/, "")
+      sub(/^[[:space:]]*"/, "")
+      sub(/[[:space:]]*#.*/, "")
+    }
+    $0 ~ "^[[:space:]]*" package "[[:space:]]*=" {
+      count++
+      sub(/^[^=]*=[[:space:]]*/, "")
+      if ($0 ~ /^\{/) {
+        if (!match($0, /[,{][[:space:]]*version[[:space:]]*=[[:space:]]*"[^"]+"/)) next
+        value=substr($0, RSTART, RLENGTH)
+        sub(/^[^"]*"/, "", value)
+      } else {
+        if ($0 !~ /^"/) next
+        value=substr($0, 2)
+      }
+      sub(/".*/, "", value)
+      if (match(value, /^[~^=[:space:]]*[0-9]+(\.[0-9]+)*/)) {
+        found=substr(value, RSTART, RLENGTH)
+        sub(/^[~^=[:space:]]*/, "", found)
+      }
+    }
+    END { if (count == 1) print found }
+  ' "$1"
+}
+
 pin_in() {
-  grep -hoE '^[[:space:]]*(\\?")?validator[[:space:]]*=[^#]*' "$1" 2>/dev/null |
-    head -1 |
-    grep -oE '[0-9]+(\.[0-9]+)*' |
-    head -1 || true
+  shared_version_in "$1" validator
 }
 
 WANT="$(pin_in Cargo.toml)"
@@ -74,16 +97,16 @@ elif [[ "$got" != "$WANT" ]]; then
   VIOLATIONS=$((VIOLATIONS + 1))
 fi
 
-# `spin-sdk` is pinned in four places and shares no lockfile across them.
+# `spin-sdk` pins span isolated workspaces and the scaffold; they do not
+# share one lockfile.
 # A mismatch does not fail at the pin: the fixture resolves a second copy
 # of the SDK and the build dies on `expected IncomingBody<Request>, found
 # a different IncomingBody<Request>`, naming neither crate nor version.
 # Only the major is comparable -- the root spells it `~7.0`, the seeds `7`.
 spin_major_in() {
-  grep -hoE '^[[:space:]]*(\\?")?spin-sdk[[:space:]]*=[^#]*' "$1" 2>/dev/null |
-    head -1 |
-    grep -oE '[0-9]+' |
-    head -1 || true
+  local version
+  version="$(shared_version_in "$1" spin-sdk)"
+  printf '%s' "${version%%.*}"
 }
 
 SPIN_WANT="$(spin_major_in Cargo.toml)"
@@ -95,6 +118,7 @@ fi
 for file in \
   examples/app-demo/Cargo.toml \
   tests/fixtures/reusable-app/crates/fixture-spin/Cargo.toml \
+  tests/fixtures/request-fidelity/Cargo.toml \
   crates/edgezero-cli/src/generator.rs; do
   got="$(spin_major_in "$file")"
   if [[ -z "$got" ]]; then
@@ -106,8 +130,67 @@ for file in \
   fi
 done
 
+# Fixture SDKs must use the same resolved packages as the workspace. Check
+# both the exact manifest pins and the isolated lockfile, not just SDK majors.
+# SDK pins intentionally accept only spaced inline tables (`name = { ... }`);
+# other Cargo spellings fail closed rather than bypassing this guard.
+locked_version_in() {
+  awk -v package="$2" '
+    $0 == "[[package]]" { name=""; next }
+    $1 == "name" { name=$3; gsub(/"/, "", name) }
+    name == package && $1 == "version" {
+      version=$3; gsub(/"/, "", version); count++; found=version
+    }
+    END { if (count == 1) print found }
+  ' "$1"
+}
+
+fixture_manifest="tests/fixtures/request-fidelity/Cargo.toml"
+fixture_lock="tests/fixtures/request-fidelity/Cargo.lock"
+for package in fastly worker wasm-bindgen spin-sdk; do
+  want="$(locked_version_in Cargo.lock "$package")"
+  pin="$(awk -v package="$package" '
+    { sub(/[[:space:]]*#.*/, "") }
+    /^\[/ { in_deps=($0 == "[dependencies]") }
+    in_deps && $1 == package && $2 == "=" {
+      count++
+      if (match($0, /[,{][[:space:]]*version[[:space:]]*=[[:space:]]*"=[^"]+"/)) {
+        version=substr($0, RSTART, RLENGTH)
+        sub(/^[^"]*"=/, "", version); sub(/"$/, "", version)
+        sub(/^[[:space:]]+/, "", version)
+        found=version
+      }
+    }
+    END { if (count == 1) print found }
+  ' "$fixture_manifest")"
+  locked="$(locked_version_in "$fixture_lock" "$package")"
+  if [[ -z "$want" || -z "$pin" || -z "$locked" ]]; then
+    echo "$fixture_manifest / $fixture_lock: violation: $package requires one exact pin and one resolved version in each lock"
+    VIOLATIONS=$((VIOLATIONS + 1))
+  elif [[ "$pin" != "$want" || "$locked" != "$want" ]]; then
+    echo "$fixture_manifest / $fixture_lock: violation: $package pin=$pin lock=$locked, workspace lock has $want"
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+done
+
+# worker-build's release must match the fixture's Worker SDK, but its pin is
+# declared once in metadata and consumed by CI and the native runner.
+worker_build="$(awk '
+  { sub(/[[:space:]]*#.*/, "") }
+  /^\[/ { in_pins=($0 == "[package.metadata.request-fidelity]") }
+  in_pins && $1 == "worker-build" && $2 == "=" {
+    value=$3; gsub(/"/, "", value); count++; found=value
+  }
+  END { if (count == 1) print found }
+' "$fixture_manifest")"
+worker_version="$(locked_version_in Cargo.lock worker)"
+if [[ -z "$worker_build" || "$worker_build" != "$worker_version" ]]; then
+  echo "$fixture_manifest: violation: worker-build $worker_build, workspace worker is $worker_version"
+  VIOLATIONS=$((VIOLATIONS + 1))
+fi
+
 if ((VIOLATIONS > 0)); then
   echo "check_shared_dep_pins: $VIOLATIONS pin(s) out of sync" >&2
   exit 1
 fi
-echo "check_shared_dep_pins: validator pins agree ($WANT); spin-sdk majors agree ($SPIN_WANT)"
+echo "check_shared_dep_pins: validator pins agree ($WANT); spin-sdk majors agree ($SPIN_WANT); fixture SDK locks and worker-build agree"

@@ -148,8 +148,9 @@ logger fails on its second installation.
 
 ## Runtime and measurement limits
 
-Raising `--max-requests` cannot extend the pinned Viceroy's per-guest request
-ceiling (see the Fastly guide). Verify deployed eviction and long-lived memory
+Local request ceilings depend on the Viceroy version; check them when pins change
+(see the [Fastly guide](../../../docs/guide/adapters/fastly.md#reusing-a-sandbox-and-retaining-an-app)).
+Verify deployed eviction and long-lived memory
 behavior separately. The runner checks the Viceroy version against
 `.tool-versions` and reports a mismatch as unverified.
 

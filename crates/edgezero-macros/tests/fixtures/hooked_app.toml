@@ -1,0 +1,19 @@
+[app]
+name = "hooked-manifest-app"
+middleware = ["crate::tests::MarkMiddleware"]
+
+[[triggers.http]]
+path = "/ordinary"
+methods = ["GET"]
+handler = "crate::tests::ordinary"
+
+[stores.kv]
+ids = ["sessions"]
+[stores.config]
+ids = ["settings"]
+[stores.secrets]
+ids = ["tokens"]
+
+[adapters.fastly.logging]
+endpoint = "fixture_logs"
+level = "debug"
