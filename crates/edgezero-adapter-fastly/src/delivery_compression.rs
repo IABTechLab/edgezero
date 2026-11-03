@@ -177,14 +177,26 @@ mod tests {
 
     #[test]
     fn vary_preserves_fields_and_avoids_duplicate_or_wildcard_variation() {
-        for values in [
-            vec![],
-            vec!["Origin"],
-            vec!["Origin", "Accept-Language"],
-            vec!["Origin, AcCePt-EnCoDiNg"],
-            vec!["Origin", " accept-encoding \t"],
-            vec!["*"],
-            vec!["Origin", "Accept-Language, *"],
+        for (values, expected) in [
+            (vec![], vec!["Accept-Encoding"]),
+            (vec!["Origin"], vec!["Origin", "Accept-Encoding"]),
+            (
+                vec!["Origin", "Accept-Language"],
+                vec!["Origin", "Accept-Language", "Accept-Encoding"],
+            ),
+            (
+                vec!["Origin, AcCePt-EnCoDiNg"],
+                vec!["Origin, AcCePt-EnCoDiNg"],
+            ),
+            (
+                vec!["Origin", " accept-encoding \t"],
+                vec!["Origin", " accept-encoding \t"],
+            ),
+            (vec!["*"], vec!["*"]),
+            (
+                vec!["Origin", "Accept-Language, *"],
+                vec!["Origin", "Accept-Language, *"],
+            ),
         ] {
             let mut response = Response::new(Body::empty());
             for value in &values {
@@ -196,14 +208,6 @@ mod tests {
                 .mark_identity_response(&mut response)
                 .unwrap();
             finalize_response(&mut response);
-            let mut expected = values.clone();
-            if !values.iter().any(|value| {
-                value.split(',').any(|token| {
-                    token.trim() == "*" || token.trim().eq_ignore_ascii_case("accept-encoding")
-                })
-            }) {
-                expected.push("Accept-Encoding");
-            }
             let actual = response
                 .headers()
                 .get_all(header::VARY)
